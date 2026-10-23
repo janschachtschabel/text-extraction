@@ -456,3 +456,39 @@ def test_accept_encoding_offers_only_what_the_fetcher_can_inflate(
 def test_zero_timeout_is_rejected_not_replaced_by_the_default() -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         fetch("http://127.0.0.1:1/", timeout_seconds=0)
+
+
+def test_unsendable_validators_are_left_out(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/page").respond_with_data("fresh")
+
+    result = fetch(
+        httpserver.url_for("/page"),
+        validators=Validators(etag='"café"', last_modified="Mon\r\nX-Injected: 1"),
+    )
+
+    assert result.status == 200
+    (request, _) = httpserver.log[-1]
+    assert "If-None-Match" not in request.headers
+    assert "If-Modified-Since" not in request.headers
+    assert "X-Injected" not in request.headers
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        ('"v1"', True),
+        ('W/"a b"', True),
+        ("Mon, 05 Oct 2026 10:00:00 GMT", True),
+        ('"café"', False),
+        ("a\tb", False),
+        ("a\x7fb", False),
+        ("x" * 1025, False),
+        ("", False),
+    ],
+    ids=["etag", "weak-etag", "date", "non-ascii", "tab", "del", "too-long", "empty"],
+)
+def test_validators_from_headers_keep_only_sendable_values(value: str, kept: bool) -> None:
+    validators = Validators.from_headers({"etag": value, "last-modified": value})
+
+    expected = value if kept else None
+    assert validators == Validators(etag=expected, last_modified=expected)

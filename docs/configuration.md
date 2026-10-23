@@ -41,12 +41,16 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `RESULT_CACHE_TTL_SECONDS` | `3600` | How long a stored extraction result counts as fresh and is served without asking the site, measured from the time it was produced. 0 means a stored result is never served unchecked; it can still be revalidated. |
 | `RESULT_STORE_TTL_SECONDS` | `86400` | How long a result stays in Valkey so a stale one can be revalidated with ETag/Last-Modified or the raw-content hash instead of being extracted again. 0 stores no results. Results over 2 MB as JSON are never stored. |
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
-| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Must be greater than 0. The fetch gets at most the time that is left (and never more than `FETCH_TIMEOUT_SECONDS`). Running out answers `status: failed` with `timeout` (retryable). |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Must be greater than 0. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS`. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (40) with it. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
 taken over the normalised URL: lower-case scheme and host, no fragment, no default port (80 for
 `http`, 443 for `https`); the path and the query are kept exactly as given. For results it also
-covers the extraction options, in sorted key order. A Valkey outage turns the cache and the change
+covers the extraction options, in sorted key order (`mode`, `format`, `metadata`, `links` and the
+compliance mode that applied). Fingerprints are kept per URL and output format, since Markdown,
+text and HTML of one page are different texts; a revalidated result renews its fingerprint's TTL.
+Validators (`ETag`, `Last-Modified`) are only stored and sent back when they are printable ASCII
+of at most 1 KB. A Valkey outage turns the cache and the change
 detection off for the affected requests (logged without the URL) and never fails them.
 
 The fetcher identifies itself on every outbound request with a fixed, honest user agent,
@@ -91,7 +95,9 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
 `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
 few milliseconds. Work that takes longer than about 30 s will run as a job in a later package. On
-SIGTERM the server stops accepting connections and gives requests in flight 30 s to finish.
+SIGTERM the server stops accepting connections and gives requests in flight
+`max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the Helm chart's
+`terminationGracePeriodSeconds` (40) must stay above that.
 
 ## Headers
 

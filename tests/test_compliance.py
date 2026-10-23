@@ -861,3 +861,38 @@ def test_invalid_compliance_settings_are_rejected(
 
     with pytest.raises(ValueError, match=name.lower()):
         Settings(auth_mode="none")
+
+
+def test_with_page_findings_carries_the_stored_pages_statements() -> None:
+    fresh = ComplianceReport(mode="report", robots="allowed", ai_txt="absent")
+    previous = ComplianceReport(
+        mode="report",
+        decision="reported",
+        robots="disallowed",  # an old origin-file finding: never carried
+        tdm_reserved=True,
+        tdm_policy="https://example.org/policy",
+        tdm_source="meta",
+        noai=True,
+    )
+
+    merged = compliance.with_page_findings(fresh, previous)
+
+    assert merged.robots == "allowed"
+    assert merged.tdm_reserved is True
+    assert merged.tdm_policy == "https://example.org/policy"
+    assert merged.tdm_source == "meta"
+    assert merged.noai is True
+    assert merged.decision == "reported"
+    assert len(merged.reasons) == 2
+
+
+def test_with_page_findings_keeps_origin_reservations_and_ignores_tdmrep() -> None:
+    fresh = ComplianceReport(
+        mode="enforce", robots="allowed", tdm_reserved=True, tdm_source="tdmrep.json"
+    )
+    previous = ComplianceReport(mode="enforce", tdm_reserved=False, tdm_source="meta")
+    assert compliance.with_page_findings(fresh, previous) == fresh
+
+    stale_origin = ComplianceReport(mode="enforce", tdm_reserved=True, tdm_source="tdmrep.json")
+    plain = ComplianceReport(mode="enforce", robots="allowed")
+    assert compliance.with_page_findings(plain, stale_origin) == plain

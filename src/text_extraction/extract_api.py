@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, Request
 
 from text_extraction.auth import Principal, require_role
 from text_extraction.envelope import Envelope
-from text_extraction.pipeline import ExtractRequest, ExtractResult, Pipeline
+from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.pipeline import Pipeline
 from text_extraction.ratelimit import rate_limited
 
 router = APIRouter()

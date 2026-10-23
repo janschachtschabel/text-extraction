@@ -13,6 +13,11 @@ imagePullSecrets: []
 
 replicaCount: 2
 
+# Seconds Kubernetes waits after SIGTERM before it kills a pod. The server lets requests in
+# flight finish for max(30, EXTRACT_TIMEOUT_SECONDS + 5) seconds (30 by default) and then closes
+# its connections, so keep this above that: raise it when you raise EXTRACT_TIMEOUT_SECONDS.
+terminationGracePeriodSeconds: 40
+
 # Non-secret settings. Each key becomes an environment variable of the same name
 # (rendered into a ConfigMap and passed with envFrom). Values are quoted strings.
 # PUBLIC_PORT (8080) and INTERNAL_PORT (9090) are fixed by the chart.

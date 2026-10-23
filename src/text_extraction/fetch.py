@@ -16,10 +16,11 @@ pipeline decides what it means.
 import asyncio
 import contextlib
 import hashlib
+import re
 import socket
 import time
 import zlib
-from collections.abc import AsyncGenerator, Iterator
+from collections.abc import AsyncGenerator, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import urljoin, urlsplit
@@ -57,12 +58,32 @@ _REQUEST_HEADERS = {
 }
 
 
+# A validator is sent back only if it is printable ASCII (no control characters) and this short:
+# httpx encodes header values as ASCII, and the value comes from the target site.
+_MAX_VALIDATOR_CHARS = 1024
+_SENDABLE_VALUE = re.compile(rf"[\x20-\x7e]{{1,{_MAX_VALIDATOR_CHARS}}}")
+
+
+def _sendable(value: str | None) -> str | None:
+    """``value`` if it can go out as a header value unchanged, else None."""
+    return value if value is not None and _SENDABLE_VALUE.fullmatch(value) else None
+
+
 @dataclass(frozen=True)
 class Validators:
     """Cache validators of an earlier response, sent back as a conditional request."""
 
     etag: str | None = None
     last_modified: str | None = None
+
+    @classmethod
+    def from_headers(cls, headers: Mapping[str, str]) -> "Validators":
+        """The ``ETag`` and ``Last-Modified`` of a response (lower-case names) that can be sent
+        back; a value with non-ASCII or control characters, or over 1 KB, is left out."""
+        return cls(
+            etag=_sendable(headers.get("etag")),
+            last_modified=_sendable(headers.get("last-modified")),
+        )
 
 
 @dataclass(frozen=True)
@@ -272,10 +293,12 @@ class Fetcher:
         started: float,
     ) -> FetchResult:
         headers = dict(_REQUEST_HEADERS)
-        if validators is not None and validators.etag:
-            headers["If-None-Match"] = validators.etag
-        if validators is not None and validators.last_modified:
-            headers["If-Modified-Since"] = validators.last_modified
+        # Validators come from an earlier answer of the target (possibly from the cache): only a
+        # value that can be sent unchanged goes out, so no header value can make the request fail.
+        if validators is not None and (etag := _sendable(validators.etag)):
+            headers["If-None-Match"] = etag
+        if validators is not None and (last_modified := _sendable(validators.last_modified)):
+            headers["If-Modified-Since"] = last_modified
 
         current = url
         redirects: list[str] = []

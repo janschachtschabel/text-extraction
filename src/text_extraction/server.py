@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import math
 import signal
 import sys
 from collections.abc import Iterator
@@ -17,7 +18,11 @@ from text_extraction.settings import ConfigError, Settings, load_settings
 from text_extraction.valkey import create_valkey
 
 EXIT_CONFIG_ERROR = 2
-GRACEFUL_SHUTDOWN_SECONDS = 30
+# Requests in flight get at least this long after SIGTERM, and always the extract timeout plus
+# a margin (`graceful_shutdown_seconds`). The Helm chart's terminationGracePeriodSeconds (40)
+# must stay above it: raise both together when EXTRACT_TIMEOUT_SECONDS goes above 30.
+MIN_GRACEFUL_SHUTDOWN_SECONDS = 30
+_SHUTDOWN_MARGIN_SECONDS = 5
 
 _HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -36,12 +41,25 @@ class _Server(uvicorn.Server):
         yield
 
 
-def _server(app: FastAPI, host: str, port: int) -> _Server:
+def graceful_shutdown_seconds(settings: Settings) -> int:
+    """How long requests in flight may finish after SIGTERM: an extraction that has just started
+    can still end within its own deadline."""
+    return max(
+        MIN_GRACEFUL_SHUTDOWN_SECONDS,
+        math.ceil(settings.extract_timeout_seconds + _SHUTDOWN_MARGIN_SECONDS),
+    )
+
+
+def _server(
+    app: FastAPI,
+    host: str,
+    port: int,
+    graceful_seconds: int = MIN_GRACEFUL_SHUTDOWN_SECONDS,
+) -> _Server:
     # `log_config=None` keeps uvicorn from installing its own plain-text handlers;
     # `TraceMiddleware` writes the access line.
     # `server_header=False`: no `server: uvicorn` response header (ops guide: no default headers).
-    # `timeout_graceful_shutdown`: requests in flight get this long after SIGTERM; an extraction
-    # takes at most EXTRACT_TIMEOUT_SECONDS (25 s by default).
+    # `timeout_graceful_shutdown`: requests in flight get this long after SIGTERM.
     return _Server(
         uvicorn.Config(
             app,
@@ -50,7 +68,7 @@ def _server(app: FastAPI, host: str, port: int) -> _Server:
             log_config=None,
             access_log=False,
             server_header=False,
-            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
+            timeout_graceful_shutdown=graceful_seconds,
         )
     )
 
@@ -74,11 +92,15 @@ async def _serve(servers: list[_Server]) -> None:
 
 async def _run(settings: Settings) -> None:
     valkey = create_valkey(settings.valkey_url)
+    graceful = graceful_shutdown_seconds(settings)
     public = _server(
-        create_public_app(settings, valkey), settings.public_host, settings.public_port
+        create_public_app(settings, valkey), settings.public_host, settings.public_port, graceful
     )
     internal = _server(
-        create_internal_app(settings, valkey), settings.internal_host, settings.internal_port
+        create_internal_app(settings, valkey),
+        settings.internal_host,
+        settings.internal_port,
+        graceful,
     )
     try:
         await _serve([public, internal])

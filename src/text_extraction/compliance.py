@@ -137,6 +137,39 @@ def blocking_code(report: ComplianceReport) -> ErrorCode | None:
     return _violation(report) if report.mode == "enforce" else None
 
 
+def with_page_findings(report: ComplianceReport, previous: ComplianceReport) -> ComplianceReport:
+    """``report`` plus the TDM statement and ``noai`` that a stored copy of the page carried.
+
+    For a 304 answer: it has no body and often leaves out headers, but it says the page is the
+    stored one, so what that page said about itself (``tdm-reservation`` header or meta tag,
+    ``noai``) still holds. Findings of the origin files (robots.txt, tdmrep.json, ai.txt) are not
+    carried; ``report`` has fresh ones. Pass the result to ``after_fetch`` with the 304 so its own
+    headers count too. Returns ``report`` itself when there is nothing to carry.
+    """
+    update: dict[str, object] = {}
+    reasons = list(report.reasons)
+    source = previous.tdm_source
+    carry_tdm = (
+        source in ("header", "meta")
+        and previous.tdm_reserved is not None
+        and report.tdm_reserved is not True
+        and (previous.tdm_reserved or report.tdm_reserved is None)
+    )
+    if carry_tdm:
+        update.update(
+            tdm_reserved=previous.tdm_reserved, tdm_policy=previous.tdm_policy, tdm_source=source
+        )
+        if previous.tdm_reserved:
+            reasons.append(f"The page reserves text and data mining rights ({source}).")
+    if previous.noai and not report.noai:
+        update["noai"] = True
+        reasons.append("The page asks not to be used for AI (noai or noml).")
+    if not update:
+        return report
+    update["reasons"] = reasons
+    return _decided(report.model_copy(update=update))
+
+
 def _decided(report: ComplianceReport) -> ComplianceReport:
     """The report with ``decision`` set from its findings and mode."""
     if report.mode == "ignore":

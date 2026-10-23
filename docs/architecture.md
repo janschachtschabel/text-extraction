@@ -41,8 +41,9 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
    `quality.py` reports `js_heavy`, `bot_challenge`, `soft_404` and `login_wall`; a bot
    challenge, soft-404, login wall or empty content ends `failed` (`bot_protection`,
    `likely_error_page`, `login_required`, `empty_content`), fewer than `QUALITY_MIN_WORDS`
-   words ends `partial` (`content_too_short`). Until the browser package, `auto` only reports
-   `quality.browser_recommended`.
+   words ends `partial` (`content_too_short`). `quality.browser_recommended` is reported in
+   both modes; only `auto` will act on it (escalation arrives with the browser package), which
+   is why `mode` is already part of the result cache key.
 5. **Convert:** HTML → Trafilatura (keep link-only lists of linked files, domain
    boilerplate rules, MathML → LaTeX). Office/EPUB and PDFs with a good text layer →
    MarkItDown. Scans, table-heavy PDFs, images → Docling. Vision LLM opt-in.
@@ -77,7 +78,7 @@ also on failure, as far as the request got. `partial` keeps the content and name
 `login_required`, `empty_content`) keeps it too, a compliance block or a target error has none.
 `data.cache` is `miss`, `hit` (fresh stored result, no fetch), `revalidated` (stale stored
 result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no read, no write).
-Only `success` and `partial` results are cached and fingerprinted. `attempts` counts fetches of
+Only `success` and `partial` results are cached and fingerprinted (per URL and output format). `attempts` counts fetches of
 the target in this request (0 for a cache hit or a refusal before the fetch). The outbound gate
 refusing a turn gives `rate_limited` (busy) or `connection_error` (host paused), both retryable.
 

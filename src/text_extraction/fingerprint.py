@@ -14,9 +14,11 @@ scheme="affine32")``: SHA-1 (first four bytes, little-endian) of each shingle, p
 minimum per permutation. Near-duplicate search with
 datasketch's LSH can read the stored values later.
 
-Valkey keys: ``fp:{<sha256 of the normalised URL>}`` (the braces are a literal cluster hash tag).
-The URL is normalised by ``normalize_url``: lower-case scheme and host, no fragment, no default
-port; path and query stay as they are.
+Valkey keys: ``fp:{<sha256>}`` (the braces are a literal cluster hash tag). The hash is taken over
+the normalised URL and, when given, a variant (the pipeline passes the output format, since
+Markdown, text and HTML of one page normalise to different texts): ``sha256(url)`` without a
+variant, ``sha256(url + NUL + variant)`` with one. The URL is normalised by ``normalize_url``:
+lower-case scheme and host, no fragment, no default port; path and query stay as they are.
 """
 
 import base64
@@ -215,8 +217,11 @@ class FingerprintStore:
         self._valkey = valkey
         self._ttl = settings.fingerprint_ttl_seconds
 
-    async def compare_and_save(self, url: str, fp: Fingerprint) -> Fingerprint:
-        """Store ``fp`` for ``url`` and return it with ``changed`` and ``similarity_to_previous``.
+    async def compare_and_save(
+        self, url: str, fp: Fingerprint, *, variant: str = ""
+    ) -> Fingerprint:
+        """Store ``fp`` for ``url`` and ``variant`` and return it with ``changed`` and
+        ``similarity_to_previous``. Each variant keeps its own previous fingerprint.
 
         Both stay ``None`` when there is no usable previous fingerprint: first sight, expired,
         unreadable, or Valkey unavailable (that is logged and never raised). With
@@ -226,7 +231,7 @@ class FingerprintStore:
         if self._ttl <= 0:
             return fp
         stored = fp.model_copy(update={"similarity_to_previous": None, "changed": None})
-        key = f"fp:{{{url_hash(url)}}}"
+        key = _store_key(url, variant)
         try:
             previous_raw = await self._valkey.set(
                 key, stored.model_dump_json(), ex=self._ttl, get=True
@@ -247,6 +252,23 @@ class FingerprintStore:
                 "changed": previous.text_sha256 != fp.text_sha256,
             }
         )
+
+    async def touch(self, url: str, *, variant: str = "") -> None:
+        """Renew the TTL of the stored fingerprint, if there is one: a page that is only ever
+        revalidated (and so never compared again) keeps its baseline. Never raises."""
+        if self._ttl <= 0:
+            return
+        try:
+            await self._valkey.expire(_store_key(url, variant), self._ttl)
+        except (RedisError, OSError) as error:
+            _log.warning("fingerprint_store_unavailable", error=type(error).__name__)
+
+
+def _store_key(url: str, variant: str) -> str:
+    if not variant:
+        return f"fp:{{{url_hash(url)}}}"
+    digest = hashlib.sha256(f"{normalize_url(url)}\0{variant}".encode()).hexdigest()
+    return f"fp:{{{digest}}}"
 
 
 def _parse(raw: bytes | str | None) -> Fingerprint | None:

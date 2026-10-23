@@ -211,3 +211,11 @@ def test_servers_wait_30_seconds_for_requests_in_flight() -> None:
     config = _server(FastAPI(), "127.0.0.1", 8080).config
 
     assert config.timeout_graceful_shutdown == 30
+
+
+def test_graceful_shutdown_outlasts_the_extract_timeout() -> None:
+    from text_extraction.server import graceful_shutdown_seconds
+
+    assert graceful_shutdown_seconds(Settings(auth_mode="none")) == 30
+    assert graceful_shutdown_seconds(Settings(auth_mode="none", extract_timeout_seconds=60)) == 65
+    assert graceful_shutdown_seconds(Settings(auth_mode="none", extract_timeout_seconds=40.2)) == 46

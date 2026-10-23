@@ -9,7 +9,7 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 5. The fetch, inside the host's ``DomainGate`` slot, and its outcome reported to the gate. A
    stale cache entry's validators are sent; a 304 or unchanged bytes reuse the stored result
    (``cache: revalidated``).
-6. An answer >= 400 ends as ``target_http_error``.
+6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
 7. HTML and XHTML: decode, compliance after the fetch (headers, meta tags, ``noai``; may block),
    convert, strip domain boilerplate. ``text/plain``: decode, header checks, ``convert_plain``.
    Anything else: ``unsupported_content_type``.
@@ -38,7 +38,7 @@ from weakref import WeakKeyDictionary
 
 import structlog
 from prometheus_client import CollectorRegistry, Counter, Histogram
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -50,21 +50,16 @@ from text_extraction.compliance import (
     ComplianceReport,
     blocking_code,
     resolve_mode,
+    with_page_findings,
 )
-from text_extraction.convert import (
-    Link,
-    OutputFormat,
-    convert_html,
-    convert_plain,
-    decode_html,
-    page_links,
-)
+from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
+from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
-from text_extraction.netguard import MAX_URL_LENGTH, InvalidUrlError, validate_url
+from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy, parse_retry_after
 from text_extraction.quality import Quality, assess, quality_error
 from text_extraction.result_cache import CachedEntry, ResultCache, cache_key
@@ -72,8 +67,6 @@ from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
 
 _log = structlog.get_logger(__name__)
-
-CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
 # Media types the fast mode converts, and how.
 _KINDS: dict[str, Literal["html", "text"]] = {
@@ -88,7 +81,11 @@ _RETRYABLE_STATUSES = frozenset({408, 425, 429})
 # The fetch gets the time left before the deadline minus this, so it times out first and the
 # timeout is recorded for the host.
 _FETCH_MARGIN_SECONDS = 0.25
-_MIN_FETCH_SECONDS = 0.01
+# With less time than this left when its turn comes, the target is not fetched at all.
+_MIN_FETCH_SECONDS = 1.0
+# A fetch timeout counts against the host only if the fetch had this share of
+# FETCH_TIMEOUT_SECONDS.
+_FAIR_BUDGET_SHARE = 0.5
 # Only the start of a page is searched for the <html lang> attribute.
 _LANG_SCAN_CHARS = 65_536
 _MAX_TAG_CHARS = 4096
@@ -105,61 +102,6 @@ _QUALITY_MESSAGES = {
     ErrorCode.LOGIN_REQUIRED: "The page asks for a login.",
     ErrorCode.EMPTY_CONTENT: "No text could be extracted from the page.",
 }
-
-
-class ExtractRequest(BaseModel, extra="forbid"):
-    """Body of ``POST /v1/extract``."""
-
-    url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to extract.")
-    mode: Literal["fast", "auto"] = Field(
-        default="auto",
-        description="`fast`: HTTP only. `auto`: also reports whether a browser could do better "
-        "(`quality.browser_recommended`); the browser itself arrives in a later release.",
-    )
-    format: OutputFormat = Field(default="markdown", description="Format of `content`.")
-    metadata: bool = Field(default=True, description="Include the page's DOM metadata.")
-    links: bool = Field(default=False, description="Include the page's links.")
-    compliance: ComplianceMode | None = Field(
-        default=None,
-        description="`enforce`, `report` or `ignore` (admins only); default: the operator's.",
-    )
-    cache: bool = Field(
-        default=True, description="Use the result cache; `false` neither reads nor stores."
-    )
-
-
-class Timings(BaseModel):
-    """Milliseconds spent in this request. ``fetch_ms`` includes the wait for the host's turn;
-    ``convert_ms`` covers decoding, conversion and the steps after it."""
-
-    total_ms: int
-    compliance_ms: int
-    fetch_ms: int
-    convert_ms: int
-
-
-class ExtractResult(BaseModel):
-    """What one extraction produced; on failure as much of it as was known."""
-
-    url: str
-    final_url: str | None
-    upstream_status: int | None  # of the response the content came from
-    content_type: str | None
-    mode_used: Literal["fast"]
-    attempts: int  # fetches of the target in this request
-    language: str | None
-    word_count: int
-    title: str | None
-    format: OutputFormat
-    content: str | None
-    quality: Quality | None
-    timings: Timings
-    compliance: ComplianceReport
-    metadata: PageMetadata | None
-    links: list[Link] | None
-    fingerprint: Fingerprint | None
-    cache: CacheState
-    warnings: list[str]
 
 
 @dataclass(frozen=True)
@@ -416,12 +358,12 @@ class Pipeline:
                 )
             # No body: the page is the stored one, so its own statements still hold.
             run.report = self._checker.after_fetch(
-                _with_page_findings(report, stored.result.compliance), fetched, None
+                with_page_findings(report, stored.result.compliance), fetched, None
             )
             if (code := blocking_code(run.report)) is not None:
                 return run.failed(code, _BLOCK_MESSAGES[code])
             return await self._revalidated(run, stored, fetched)
-        if fetched.status >= 400:
+        if not 200 <= fetched.status < 300:  # also a 3xx the fetcher could not follow
             return run.failed(
                 ErrorCode.TARGET_HTTP_ERROR,
                 f"The target answered with HTTP status {fetched.status}.",
@@ -457,13 +399,21 @@ class Pipeline:
         started = time.perf_counter()
         try:
             async with self._gate.slot(host, run.report.crawl_delay):
+                budget = self._fetch_budget(run)
+                if budget < _MIN_FETCH_SECONDS:
+                    # Not the host's fault: the turn came too late. Nothing is fetched or recorded.
+                    raise FetchError(
+                        ErrorCode.TIMEOUT,
+                        "Too little time was left to fetch the target.",
+                        retryable=True,
+                    )
                 run.attempts += 1
                 try:
                     fetched = await self._fetcher.fetch(
-                        run.req.url, validators=validators, timeout_seconds=self._fetch_budget(run)
+                        run.req.url, validators=validators, timeout_seconds=budget
                     )
                 except FetchError as error:
-                    await self._record_failure(host, error)
+                    await self._record_failure(host, error, budget)
                     raise
                 # Recorded while the turn is held, so a 429 pauses the host before the next turn.
                 await self._gate.record(
@@ -481,24 +431,29 @@ class Pipeline:
         return fetched
 
     def _fetch_budget(self, run: _Run) -> float:
+        """Seconds the fetch may take: ``FETCH_TIMEOUT_SECONDS``, or less when the deadline is
+        nearer (minus a margin, so the fetch times out first and the outcome is recorded)."""
         budget = self._settings.fetch_timeout_seconds
         when = run.deadline.when() if run.deadline is not None else None
         if when is not None:
             left = when - asyncio.get_running_loop().time() - _FETCH_MARGIN_SECONDS
             budget = min(budget, left)
-        return max(budget, _MIN_FETCH_SECONDS)
+        return budget
 
-    async def _record_failure(self, host: str, error: FetchError) -> None:
+    async def _record_failure(self, host: str, error: FetchError, budget: float) -> None:
         """Report a failed fetch to the gate.
 
         An error with a status (too large, too many redirects) still got an answer: that status
-        counts. DNS, connection and timeout errors count as failures of the host. Errors that say
-        nothing about the host's health (a redirect to a blocked or invalid URL, an unsupported
-        encoding) are not reported.
+        counts. DNS and connection errors count as failures of the host. A timeout counts only
+        when the fetch had at least half of ``FETCH_TIMEOUT_SECONDS``: one cut short by the
+        request's own deadline says little about the host. Errors that say nothing about the
+        host's health (a redirect to a blocked or invalid URL, an unsupported encoding) are not
+        reported.
         """
+        fair_budget = budget >= self._settings.fetch_timeout_seconds * _FAIR_BUDGET_SHARE
         if error.upstream_status is not None:
             await self._gate.record(host, status=error.upstream_status, retry_after=None)
-        elif error.code in _HOST_FAILURES:
+        elif error.code in _HOST_FAILURES and (error.code != ErrorCode.TIMEOUT or fair_budget):
             await self._gate.record(host, status=None, retry_after=None)
 
     async def _revalidated(
@@ -520,7 +475,9 @@ class Pipeline:
                 "cache": "revalidated",
             }
         )
-        fresh = _validators(fetched)
+        # Not compared again, so renew the baseline the next real extraction compares with.
+        await self._fingerprints.touch(run.req.url, variant=run.req.format)
+        fresh = Validators.from_headers(fetched.headers)
         validators = Validators(
             etag=fresh.etag or stored.entry.validators.etag,
             last_modified=fresh.last_modified or stored.entry.validators.last_modified,
@@ -548,13 +505,18 @@ class Pipeline:
         try:
             processed = await asyncio.to_thread(self._process, run.req, fetched, kind, text)
         except Exception as error:  # a page that breaks a converter fails alone
-            _log.error("conversion_failed", host=run.host, error_type=type(error).__name__)
+            # Traceback without locals (see logging.py); the host only, never the URL.
+            _log.error(
+                "conversion_failed", host=run.host, error_type=type(error).__name__, exc_info=True
+            )
             return run.failed(ErrorCode.CONVERSION_FAILED, "The page could not be converted.")
         finally:
             run.convert_ms += _ms(started)
         fingerprint = processed.fingerprint
         if fingerprint is not None:
-            fingerprint = await self._fingerprints.compare_and_save(run.req.url, fingerprint)
+            fingerprint = await self._fingerprints.compare_and_save(
+                run.req.url, fingerprint, variant=run.req.format
+            )
         result = run.result(
             language=processed.language,
             word_count=processed.quality.word_count,
@@ -574,7 +536,7 @@ class Pipeline:
                 key,
                 CachedEntry(
                     stored_at=time.time(),
-                    validators=_validators(fetched),
+                    validators=Validators.from_headers(fetched.headers),
                     raw_sha256=fetched.raw_sha256,
                     result=result.model_dump(mode="json"),
                 ),
@@ -671,7 +633,12 @@ def create_pipeline(
 
 
 def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
-    """Every request option that changes the result; the cache key covers them."""
+    """Every request option that changes the result; the cache key covers them.
+
+    ``mode`` gives the same result in both modes today (``quality.browser_recommended`` is
+    reported in both, and nothing escalates), but ``auto`` will escalate to the browser in
+    package 4, so its results are kept apart already.
+    """
     return {
         "mode": req.mode,
         "format": req.format,
@@ -679,43 +646,6 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
         "links": req.links,
         "compliance": mode,
     }
-
-
-def _validators(fetched: FetchResult) -> Validators:
-    return Validators(
-        etag=fetched.headers.get("etag"), last_modified=fetched.headers.get("last-modified")
-    )
-
-
-def _with_page_findings(report: ComplianceReport, previous: ComplianceReport) -> ComplianceReport:
-    """``report`` plus the TDM statement and ``noai`` the stored page carried.
-
-    A 304 has no body and often leaves out headers, but it says the page is the stored one, so
-    what that page said about itself still holds. ``after_fetch`` then adds the 304's own
-    headers and decides again.
-    """
-    update: dict[str, object] = {}
-    reasons = list(report.reasons)
-    source = previous.tdm_source
-    carry_tdm = (
-        source in ("header", "meta")
-        and previous.tdm_reserved is not None
-        and report.tdm_reserved is not True
-        and (previous.tdm_reserved or report.tdm_reserved is None)
-    )
-    if carry_tdm:
-        update.update(
-            tdm_reserved=previous.tdm_reserved, tdm_policy=previous.tdm_policy, tdm_source=source
-        )
-        if previous.tdm_reserved:
-            reasons.append(f"The page reserves text and data mining rights ({source}).")
-    if previous.noai and not report.noai:
-        update["noai"] = True
-        reasons.append("The page asks not to be used for AI (noai or noml).")
-    if not update:
-        return report
-    update["reasons"] = reasons
-    return report.model_copy(update=update)
 
 
 def _html_lang(html: str) -> str | None:

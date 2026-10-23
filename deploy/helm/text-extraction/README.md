@@ -64,6 +64,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
 | `replicaCount` | `2` | Ignored when `autoscaling.enabled`. |
+| `terminationGracePeriodSeconds` | `40` | Time between SIGTERM and kill. Must exceed the server's graceful shutdown, `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds; raise it with `EXTRACT_TIMEOUT_SECONDS`. |
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |

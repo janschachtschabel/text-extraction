@@ -310,3 +310,60 @@ def test_store_survives_valkey_errors() -> None:
     assert warning["event"] == "fingerprint_store_unavailable"
     assert "example.org" not in repr(logs)
     assert "token" not in repr(logs)
+
+
+def test_store_keeps_one_baseline_per_variant() -> None:
+    url = "https://example.org/a"
+
+    async def scenario() -> tuple[list[Fingerprint], int]:
+        valkey = FakeAsyncRedis()
+        store = store_for(valkey)
+        markdown = compute_fingerprint(RAW, f"# Title\n\n{ARTICLE}")
+        html = compute_fingerprint(RAW, f"<h1>Title</h1><p>{ARTICLE}</p>")
+        results = [
+            await store.compare_and_save(url, markdown, variant="markdown"),
+            await store.compare_and_save(url, html, variant="html"),
+            await store.compare_and_save(url, markdown, variant="markdown"),
+            await store.compare_and_save(url, html, variant="html"),
+        ]
+        return results, len(await valkey.keys("fp:*"))
+
+    results, key_count = asyncio.run(scenario())
+    assert [fp.changed for fp in results] == [None, None, False, False]
+    assert key_count == 2
+
+
+def test_default_variant_keeps_the_url_only_key() -> None:
+    async def scenario() -> list[bytes | str]:
+        valkey = FakeAsyncRedis()
+        await store_for(valkey).compare_and_save(
+            "https://example.org/a", compute_fingerprint(RAW, ARTICLE)
+        )
+        return list(await valkey.keys("*"))
+
+    (key,) = asyncio.run(scenario())
+    assert key == f"fp:{{{fingerprint.url_hash('https://example.org/a')}}}".encode()
+
+
+def test_touch_renews_the_baseline_ttl() -> None:
+    url = "https://example.org/a"
+
+    async def scenario() -> tuple[int, int]:
+        valkey = FakeAsyncRedis()
+        store = store_for(valkey, fingerprint_ttl_seconds=1000)
+        await store.compare_and_save(url, compute_fingerprint(RAW, ARTICLE), variant="text")
+        (key,) = await valkey.keys("fp:*")
+        await valkey.expire(key, 5)
+        await store.touch(url, variant="text")
+        await store.touch("https://example.org/never-seen", variant="text")
+        return int(await valkey.ttl(key)), len(await valkey.keys("fp:*"))
+
+    ttl, key_count = asyncio.run(scenario())
+    assert ttl > 900
+    assert key_count == 1  # touching an unknown URL creates nothing
+
+
+def test_touch_survives_valkey_errors() -> None:
+    store = store_for(FakeAsyncRedis(connected=False))
+
+    asyncio.run(store.touch("https://example.org/a", variant="text"))

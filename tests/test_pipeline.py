@@ -1,123 +1,43 @@
 import asyncio
-import hashlib
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
+from pytest_httpserver import HTTPServer
 from structlog.testing import capture_logs
 
+from tests.fakes import (
+    ARTICLE,
+    ORIGIN,
+    PAGE,
+    PARAGRAPH,
+    ROBOTS,
+    Answer,
+    FakeFetcher,
+    RefusingGate,
+    fetched,
+)
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
+from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
-from text_extraction.pipeline import ExtractRequest, ExtractResult, Pipeline, create_pipeline
+from text_extraction.pipeline import Pipeline, create_pipeline
 from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
 
-ORIGIN = "https://example.org"
-PAGE = f"{ORIGIN}/learn/photosynthesis.html?session=secret-token"
-ROBOTS = f"{ORIGIN}/robots.txt"
-
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 
-PARAGRAPH = (
-    "Photosynthesis is the process by which green plants and some other organisms use "
-    "sunlight to synthesize foods from carbon dioxide and water. It generally involves the "
-    "green pigment chlorophyll and generates oxygen as a byproduct of the reaction. "
-)
-ARTICLE = f"""<!doctype html>
-<html lang="en">
-<head>
-<title>Photosynthesis explained</title>
-<meta name="description" content="How plants turn light into food.">
-<link rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/">
-</head>
-<body>
-<nav><a href="/">Home</a></nav>
-<article>
-<h1>Photosynthesis explained</h1>
-<p>{PARAGRAPH * 3}</p>
-<p>{PARAGRAPH * 2} Read <a href="/learn/respiration.html">respiration</a>,
-the <a href="https://other.example/plants">plant atlas</a> and the
-<a href="/files/worksheet.pdf">worksheet</a>.</p>
-</article>
-</body>
-</html>
-"""
 SHORT_PAGE = """<!doctype html><html lang="en"><head><title>Short</title></head>
 <body><article><h1>Short</h1><p>Only a few words of text are on this page today.</p>
 </article></body></html>"""
 CHALLENGE_PAGE = """<!doctype html><html><head><title>Just a moment...</title></head>
 <body><p>Checking your browser before accessing the site.</p></body></html>"""
-
-
-def fetched(
-    url: str = PAGE,
-    body: str | bytes = ARTICLE,
-    *,
-    status: int = 200,
-    content_type: str | None = "text/html",
-    headers: dict[str, str] | None = None,
-) -> FetchResult:
-    content = body.encode() if isinstance(body, str) else body
-    return FetchResult(
-        url=url,
-        final_url=url,
-        status=status,
-        headers=headers or {},
-        content=content,
-        content_type=content_type,
-        charset="utf-8" if content_type else None,
-        elapsed_ms=3,
-        redirects=[],
-        not_modified=status == 304,
-        raw_sha256=hashlib.sha256(content).hexdigest(),
-    )
-
-
-Answer = FetchResult | FetchError | Callable[[Validators | None], Awaitable[FetchResult]]
-
-
-class FakeFetcher:
-    """Canned answers by URL; anything else (robots.txt, tdmrep.json, ai.txt) is a 404."""
-
-    def __init__(self, answers: dict[str, Answer]) -> None:
-        self.answers = answers
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-
-    async def fetch(self, url: str, **options: Any) -> FetchResult:
-        self.calls.append((url, options))
-        answer = self.answers.get(url, fetched(url, "Not found", status=404))
-        if isinstance(answer, FetchError):
-            raise answer
-        if isinstance(answer, FetchResult):
-            return answer
-        return await answer(options.get("validators"))
-
-    def page_calls(self) -> list[dict[str, Any]]:
-        return [options for url, options in self.calls if url == PAGE]
-
-
-class RefusingGate:
-    """A domain gate that refuses every slot with ``error``."""
-
-    def __init__(self, error: Exception) -> None:
-        self.error = error
-
-    @asynccontextmanager
-    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
-        raise self.error
-        yield  # pragma: no cover - makes this a generator
-
-    async def record(self, host: str, *, status: int | None, retry_after: float | None) -> None:
-        raise AssertionError("nothing was fetched")
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -163,6 +83,24 @@ class Harness:
             return await self.run(**(first or {})), await self.run(**(second or {}))
 
         return asyncio.run(both())
+
+    def run_all(self, *requests: dict[str, Any]) -> list[Envelope[ExtractResult]]:
+        async def all_of() -> list[Envelope[ExtractResult]]:
+            return [await self.run(**request) for request in requests]
+
+        return asyncio.run(all_of())
+
+    def ttl(self, key: bytes) -> int:
+        async def read() -> int:
+            return int(await self.valkey.ttl(key))
+
+        return asyncio.run(read())
+
+    def expire(self, key: bytes, seconds: int) -> None:
+        async def shorten() -> None:
+            await self.valkey.expire(key, seconds)
+
+        asyncio.run(shorten())
 
     def keys(self, pattern: str) -> list[bytes]:
         async def scan() -> list[bytes]:
@@ -353,10 +291,26 @@ def test_cache_hit_serves_the_stored_result() -> None:
 def test_cache_key_covers_the_options() -> None:
     harness = Harness({PAGE: fetched()})
 
-    _, second = harness.run_twice({"format": "markdown"}, {"format": "text"})
+    _, second, third = harness.run_all(
+        {"format": "markdown"}, {"format": "text"}, {"format": "text", "mode": "fast"}
+    )
 
     assert data_of(second).cache == "miss"
-    assert len(harness.fetcher.page_calls()) == 2
+    assert data_of(third).cache == "miss"
+    assert len(harness.fetcher.page_calls()) == 3
+
+
+def test_browser_recommendation_is_reported_in_both_modes() -> None:
+    shell = '<html><body><div id="root"></div><script src="/app.js"></script></body></html>'
+    harness = Harness({PAGE: fetched(body=shell)})
+
+    fast, auto = harness.run_all({"mode": "fast"}, {"mode": "auto"})
+
+    for envelope in (fast, auto):
+        quality = data_of(envelope).quality
+        assert quality is not None
+        assert quality.browser_recommended is True
+        assert data_of(envelope).mode_used == "fast"
 
 
 def test_revalidated_by_304() -> None:
@@ -448,7 +402,7 @@ def test_timeout() -> None:
         await asyncio.sleep(5)
         raise AssertionError("not reached")
 
-    harness = Harness({PAGE: slow}, extract_timeout_seconds=0.2)
+    harness = Harness({PAGE: slow}, extract_timeout_seconds=1.6)
 
     envelope = harness.run_once()
 
@@ -457,6 +411,42 @@ def test_timeout() -> None:
     assert envelope.error.code == ErrorCode.TIMEOUT
     assert envelope.error.retryable is True
     assert data_of(envelope).compliance.robots == "allowed"
+    assert data_of(envelope).attempts == 1
+    assert harness.keys("out:inflight:*") == []  # the lease was released on cancellation
+    assert harness.keys("out:fail:*") == []  # our deadline, not the host's fault
+
+
+def test_too_little_time_left_fails_without_fetching() -> None:
+    harness = Harness({PAGE: fetched()}, extract_timeout_seconds=1.0)
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert envelope.error.retryable is True
+    assert data_of(envelope).attempts == 0
+    assert harness.fetcher.page_calls() == []
+    assert harness.keys("out:fail:*") == []
+
+
+def test_timeout_on_a_short_budget_is_not_the_hosts_fault() -> None:
+    error = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    harness = Harness({PAGE: error}, extract_timeout_seconds=3, fetch_timeout_seconds=20)
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert harness.keys("out:fail:*") == []
+
+
+def test_timeout_on_a_full_budget_counts_against_the_host() -> None:
+    error = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    harness = Harness({PAGE: error}, fetch_timeout_seconds=2)
+
+    harness.run_once()
+
+    assert harness.keys("out:fail:*") == [b"out:fail:{example.org}"]
 
 
 def test_fetch_gets_at_most_the_time_left() -> None:
@@ -588,8 +578,19 @@ def test_metrics_and_log_line_without_the_url() -> None:
 def test_two_pipelines_share_one_registry() -> None:
     registry = CollectorRegistry()
     settings = make_settings()
-    for _ in range(2):
+    pipelines = [
         create_pipeline(settings, FakeAsyncRedis(), cast(Fetcher, FakeFetcher({})), registry)
+        for _ in range(2)
+    ]
+
+    async def run_each() -> None:
+        for pipeline in pipelines:
+            await pipeline.run(ExtractRequest(url="ftp://example.org/"), USER)
+
+    asyncio.run(run_each())
+
+    labels = {"mode": "auto", "outcome": "invalid_url"}
+    assert registry.get_sample_value("text_extraction_extract_total", labels) == 2
 
 
 def test_redirect_target_is_the_final_url() -> None:
@@ -599,3 +600,120 @@ def test_redirect_target_is_the_final_url() -> None:
     envelope = harness.run_once()
 
     assert data_of(envelope).final_url == final
+
+
+def test_304_with_its_own_tdm_reservation_header_blocks() -> None:
+    async def answer(validators: Validators | None) -> FetchResult:
+        if validators is not None:
+            return fetched(body=b"", status=304, headers={"tdm-reservation": "1"})
+        return fetched(headers={"etag": '"v1"'})
+
+    harness = Harness({PAGE: answer}, result_cache_ttl_seconds=0)
+
+    _, second = harness.run_twice()
+
+    assert second.status == "failed"
+    assert second.error is not None
+    assert second.error.code == ErrorCode.TDM_RESERVED
+    assert data_of(second).compliance.tdm_source == "header"
+    assert data_of(second).content is None
+
+
+@pytest.mark.parametrize("status", [300, 302, 305])
+def test_a_final_status_other_than_2xx_or_304_is_target_http_error(status: int) -> None:
+    harness = Harness({PAGE: fetched(status=status)})
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TARGET_HTTP_ERROR
+    assert envelope.error.retryable is False
+    assert data_of(envelope).upstream_status == status
+    assert data_of(envelope).content is None
+
+
+def test_switching_format_does_not_report_a_change() -> None:
+    harness = Harness({PAGE: fetched()})
+
+    first, second, third, fourth = harness.run_all(
+        {"cache": False, "format": "markdown"},
+        {"cache": False, "format": "html"},
+        {"cache": False, "format": "markdown"},
+        {"cache": False, "format": "html"},
+    )
+
+    fingerprints = [data_of(envelope).fingerprint for envelope in (first, second, third, fourth)]
+    assert [fp.changed if fp else "missing" for fp in fingerprints] == [None, None, False, False]
+
+
+def test_revalidation_keeps_the_fingerprint_baseline_alive() -> None:
+    harness = Harness({PAGE: fetched()}, result_cache_ttl_seconds=0, fingerprint_ttl_seconds=1000)
+    harness.run_once()
+    (key,) = harness.keys("fp:*")
+    harness.expire(key, 5)
+
+    envelope = harness.run_once()
+
+    assert data_of(envelope).cache == "revalidated"
+    assert harness.ttl(key) > 900
+
+
+def test_gate_keys_use_the_normalised_host() -> None:
+    url = "https://B\u00fccher.Example./learn"
+    harness = Harness({url: fetched(url, status=429)})
+
+    harness.run_once(url=url)
+
+    assert harness.keys("out:cooldown:*") == [b"out:cooldown:{xn--bcher-kva.example}"]
+
+
+def test_conversion_failure_is_logged_with_traceback_and_without_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(html: str, url: str, fmt: str) -> None:
+        raise RuntimeError("converter broke")
+
+    monkeypatch.setattr("text_extraction.pipeline.convert_html", broken)
+    harness = Harness({PAGE: fetched()})
+
+    with capture_logs() as logs:
+        envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.CONVERSION_FAILED
+    (line,) = [entry for entry in logs if entry["event"] == "conversion_failed"]
+    assert line["exc_info"] is True
+    assert line["host"] == "example.org"
+    assert "secret-token" not in repr(line)
+
+
+def test_non_ascii_validators_are_not_sent_back(httpserver: HTTPServer) -> None:
+    body = ARTICLE.encode()
+    for path in ("/robots.txt", "/ai.txt", "/.well-known/tdmrep.json"):
+        httpserver.expect_request(path).respond_with_data("", status=404)
+    httpserver.expect_request("/page").respond_with_data(
+        body,
+        content_type="text/html; charset=utf-8",
+        headers={"ETag": '"caf\u00e9"', "Last-Modified": "Mon, 05 Oct 2026 \u00e9"},
+    )
+    settings = make_settings(fetch_allow_private_networks=True, result_cache_ttl_seconds=0)
+
+    async def scenario() -> list[Envelope[ExtractResult]]:
+        fetcher = Fetcher(settings)
+        pipeline = create_pipeline(settings, FakeAsyncRedis(), fetcher, CollectorRegistry())
+        try:
+            request = ExtractRequest(url=httpserver.url_for("/page"))
+            return [await pipeline.run(request, USER), await pipeline.run(request, USER)]
+        finally:
+            await fetcher.aclose()
+
+    first, second = asyncio.run(scenario())
+
+    assert first.status == "success"
+    assert second.status == "success"
+    assert data_of(second).cache == "revalidated"  # same bytes, not a stored bad validator
+    page_requests = [request for request, _ in httpserver.log if request.path == "/page"]
+    assert len(page_requests) == 2
+    assert "If-None-Match" not in page_requests[1].headers
+    assert "If-Modified-Since" not in page_requests[1].headers

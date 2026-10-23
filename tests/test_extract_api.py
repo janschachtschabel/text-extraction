@@ -8,7 +8,7 @@ from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
-from tests.test_pipeline import ARTICLE, PAGE, FakeFetcher, fetched
+from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from text_extraction.app import create_public_app
 from text_extraction.fetch import Fetcher
 from text_extraction.pipeline import create_pipeline
