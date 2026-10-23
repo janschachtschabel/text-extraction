@@ -94,6 +94,7 @@ class TraceMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
+            principal = state.get("principal")
             _access_log.info(
                 "request",
                 method=scope["method"],
@@ -102,5 +103,7 @@ class TraceMiddleware:
                 duration_ms=round((time.perf_counter() - started) * 1000, 3),
                 trace_id=trace_id,
                 **b3_fields,
+                **({"principal": principal} if isinstance(principal, str) else {}),
             )
             structlog.contextvars.reset_contextvars(**tokens)
+            structlog.contextvars.unbind_contextvars("principal")  # bound by `authenticate`
