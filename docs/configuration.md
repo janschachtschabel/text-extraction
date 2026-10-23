@@ -21,7 +21,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) used for the rate-limit counters and the per-host outbound state. A secret when it carries a password, see below. |
+| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints. A secret when it carries a password, see below. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Must be greater than 0. |
 | `FETCH_MAX_BYTES` | `20000000` | Largest response body the fetcher accepts, in bytes. Minimum 1024. |
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
@@ -41,6 +41,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `RESULT_CACHE_TTL_SECONDS` | `3600` | How long a stored extraction result counts as fresh and is served without asking the site, measured from the time it was produced. 0 means a stored result is never served unchecked; it can still be revalidated. |
 | `RESULT_STORE_TTL_SECONDS` | `86400` | How long a result stays in Valkey so a stale one can be revalidated with ETag/Last-Modified or the raw-content hash instead of being extracted again. 0 stores no results. Results over 2 MB as JSON are never stored. |
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Must be greater than 0. The fetch gets at most the time that is left (and never more than `FETCH_TIMEOUT_SECONDS`). Running out answers `status: failed` with `timeout` (retryable). |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
 taken over the normalised URL: lower-case scheme and host, no fragment, no default port (80 for
@@ -88,7 +89,9 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 ## Response times
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
-Work that takes longer than about 30 s will run as a job in a later package.
+`POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
+few milliseconds. Work that takes longer than about 30 s will run as a job in a later package. On
+SIGTERM the server stops accepting connections and gives requests in flight 30 s to finish.
 
 ## Headers
 

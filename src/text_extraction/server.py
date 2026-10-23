@@ -17,6 +17,7 @@ from text_extraction.settings import ConfigError, Settings, load_settings
 from text_extraction.valkey import create_valkey
 
 EXIT_CONFIG_ERROR = 2
+GRACEFUL_SHUTDOWN_SECONDS = 30
 
 _HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -39,9 +40,17 @@ def _server(app: FastAPI, host: str, port: int) -> _Server:
     # `log_config=None` keeps uvicorn from installing its own plain-text handlers;
     # `TraceMiddleware` writes the access line.
     # `server_header=False`: no `server: uvicorn` response header (ops guide: no default headers).
+    # `timeout_graceful_shutdown`: requests in flight get this long after SIGTERM; an extraction
+    # takes at most EXTRACT_TIMEOUT_SECONDS (25 s by default).
     return _Server(
         uvicorn.Config(
-            app, host=host, port=port, log_config=None, access_log=False, server_header=False
+            app,
+            host=host,
+            port=port,
+            log_config=None,
+            access_log=False,
+            server_header=False,
+            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
         )
     )
 

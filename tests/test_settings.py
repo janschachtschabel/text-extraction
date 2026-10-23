@@ -480,3 +480,15 @@ def test_result_cache_and_fingerprint_settings(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("FINGERPRINT_TTL_SECONDS", "-1")
     with pytest.raises(ConfigError, match="fingerprint_ttl_seconds"):
         load_settings()
+
+
+def test_extract_timeout_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().extract_timeout_seconds == 25
+
+    monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "7.5")
+    assert load_settings().extract_timeout_seconds == 7.5
+
+    monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ConfigError, match="extract_timeout_seconds"):
+        load_settings()

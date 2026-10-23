@@ -185,6 +185,11 @@ def _identifier() -> LanguageIdentifier:
     return LanguageIdentifier.from_model_file(MODEL_FILE, norm_probs=True)
 
 
+def load_language_model() -> None:
+    """Load the language model now (about a second), not on the first request that needs it."""
+    _identifier()
+
+
 def detect_language(html_lang: str | None, header_lang: str | None, text: str) -> str | None:
     """ISO 639-1 language of a page: the ``lang`` attribute, then ``Content-Language``, then
     a guess from the start of the text, which needs at least 50 words to be worth anything."""

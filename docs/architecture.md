@@ -64,8 +64,22 @@ Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `unsupported_content_type`, `too_large`, `conversion_failed`, `no_transcript_available`,
 `media_too_long`, `transcription_failed`, `llm_failed`, `rate_limited`, `internal_error`.
 
+Codes of the API's own 4xx answers (never an extraction outcome): `invalid_request`,
+`unauthorized`, `forbidden`, `not_found`. `tests/test_errors.py` keeps both lists in step
+with `ErrorCode`.
+
 HTTP status of the API: 200 with `status: failed` when the target failed; 4xx for bad
 requests, auth and rate limits; 5xx only for our own faults.
+
+`POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
+also on failure, as far as the request got. `partial` keeps the content and names
+`content_too_short`; a failed quality verdict (`bot_protection`, `likely_error_page`,
+`login_required`, `empty_content`) keeps it too, a compliance block or a target error has none.
+`data.cache` is `miss`, `hit` (fresh stored result, no fetch), `revalidated` (stale stored
+result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no read, no write).
+Only `success` and `partial` results are cached and fingerprinted. `attempts` counts fetches of
+the target in this request (0 for a cache hit or a refusal before the fetch). The outbound gate
+refusing a turn gives `rate_limited` (busy) or `connection_error` (host paused), both retryable.
 
 ## Public API (port 8080)
 

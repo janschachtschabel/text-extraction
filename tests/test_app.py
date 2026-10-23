@@ -201,3 +201,13 @@ def test_main_exits_2_on_invalid_log_level_or_port(
         main()
 
     assert exit_info.value.code == 2
+
+
+def test_servers_wait_30_seconds_for_requests_in_flight() -> None:
+    from fastapi import FastAPI
+
+    from text_extraction.server import _server
+
+    config = _server(FastAPI(), "127.0.0.1", 8080).config
+
+    assert config.timeout_graceful_shutdown == 30

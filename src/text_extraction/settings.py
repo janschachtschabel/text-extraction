@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     result_cache_ttl_seconds: int = Field(default=3600, ge=0)  # stored result is served unchecked
     result_store_ttl_seconds: int = Field(default=86400, ge=0)  # kept for revalidation
     fingerprint_ttl_seconds: int = Field(default=2_592_000, ge=0)  # 30 days
+    # Time budget of one POST /v1/extract, from compliance checks to the finished result.
+    extract_timeout_seconds: float = Field(default=25, gt=0)
 
     @field_validator("log_level", mode="before")
     @classmethod
