@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
     rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True
+    fetch_timeout_seconds: float = Field(default=20, gt=0)  # total time budget of one fetch
+    fetch_max_bytes: int = Field(default=20_000_000, ge=1024)  # response body limit
+    fetch_max_redirects: int = Field(default=5, ge=0, le=20)
+    # UNSAFE: lifts the SSRF guard for private networks. Development and tests only.
+    fetch_allow_private_networks: bool = False
 
     @field_validator("log_level", mode="before")
     @classmethod

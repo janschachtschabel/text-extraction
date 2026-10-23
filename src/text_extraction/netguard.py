@@ -1,0 +1,239 @@
+"""URL validation and the SSRF guard for every outbound fetch.
+
+The guard sits in the network backend, below HTTP: whatever the caller asks for (a first request
+or a redirect target), the address about to be connected to is resolved here, checked against an
+``AddressPolicy`` and then connected to *by IP*. There is no second lookup between check and
+connect, so DNS rebinding cannot swap the address.
+
+``GuardedTransport`` is the one class callers use: ``httpx.AsyncClient(transport=GuardedTransport(
+policy))``. Errors a caller has to tell apart:
+
+* ``BlockedAddressError`` (an ``OSError``) is raised as itself, not wrapped in an httpx error:
+  it is not an ``httpx.HTTPError``, so ``except httpx.HTTPError`` does not catch it.
+* A DNS failure is raised as itself too: ``socket.gaierror`` (an ``OSError``).
+* Everything else maps to the matching ``httpx`` exception (``ConnectError``, ``ReadTimeout``, ...).
+"""
+
+import asyncio
+import contextlib
+import socket
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
+from typing import Any
+from urllib.parse import urlsplit
+
+import httpcore
+import httpx
+
+MAX_URL_LENGTH = 2048
+
+AddressPolicy = Callable[[IPv4Address | IPv6Address], bool]
+
+
+class InvalidUrlError(ValueError):
+    """The URL is not an acceptable fetch target (shape, scheme, host, userinfo, port, length)."""
+
+
+class BlockedAddressError(OSError):
+    """The target resolves to an address the policy forbids, or the connection type is not allowed.
+
+    The message names the host and the offending address. It is meant for logs; do not echo it to
+    callers verbatim.
+    """
+
+
+def validate_url(url: str) -> str:
+    """Return ``url`` unchanged when it is a plain http(s) URL, else raise ``InvalidUrlError``."""
+    if len(url) > MAX_URL_LENGTH:
+        raise InvalidUrlError(f"URL is longer than {MAX_URL_LENGTH} characters")
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        raise InvalidUrlError("URL cannot be parsed") from None
+    if parts.scheme not in ("http", "https"):
+        raise InvalidUrlError("URL scheme must be http or https")
+    if not parts.hostname:
+        raise InvalidUrlError("URL has no host")
+    if "@" in parts.netloc:
+        raise InvalidUrlError("URL must not contain user information")
+    if port is not None and not 1 <= port <= 65535:
+        raise InvalidUrlError("URL port must be between 1 and 65535")
+    return url
+
+
+_NAT64 = ip_network("64:ff9b::/96")  # well-known prefix; embeds an IPv4 address in the last 32 bits
+
+
+def _embedded_ipv4(ip: IPv4Address | IPv6Address) -> IPv4Address | None:
+    """The IPv4 address an IPv6 address stands for (mapped, 6to4 or NAT64), if any."""
+    if isinstance(ip, IPv4Address):
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip.sixtofour is not None:
+        return ip.sixtofour
+    if ip in _NAT64:
+        return IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
+def is_public_address(ip: IPv4Address | IPv6Address) -> bool:
+    """True only for globally routable unicast addresses.
+
+    Private, loopback, link-local (including the 169.254.169.254 metadata address), multicast,
+    reserved, unspecified, shared (100.64.0.0/10), documentation and IPv6 unique-local addresses
+    are not public. An IPv6 address that embeds an IPv4 address is judged by the embedded one.
+    """
+    embedded = _embedded_ipv4(ip)
+    if embedded is not None:
+        return is_public_address(embedded)
+    return ip.is_global and not ip.is_multicast
+
+
+class GuardedBackend(httpcore.AsyncNetworkBackend):
+    """Network backend that connects only to addresses the policy allows.
+
+    Resolution happens here; the inner backend is handed the chosen IP, never the name.
+    TLS still verifies against the original host name, because httpcore takes that from the URL.
+    """
+
+    def __init__(
+        self, policy: AddressPolicy, inner: httpcore.AsyncNetworkBackend | None = None
+    ) -> None:
+        self._policy = policy
+        self._inner = inner if inner is not None else httpcore.AnyIOBackend()
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,  # noqa: ASYNC109 - fixed by the httpcore interface
+        local_address: str | None = None,
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        try:
+            async with asyncio.timeout(timeout):
+                addresses = await self._resolve(host, port)
+        except TimeoutError:
+            raise httpcore.ConnectTimeout(f"DNS resolution of {host} timed out") from None
+
+        for address in addresses:
+            if not self._policy(address):
+                raise BlockedAddressError(f"connection to {host} blocked: address {address}")
+        return await self._inner.connect_tcp(
+            str(addresses[0]),
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+    async def connect_unix_socket(
+        self,
+        path: str,
+        timeout: float | None = None,  # noqa: ASYNC109 - fixed by the httpcore interface
+        socket_options: Iterable[Any] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        raise BlockedAddressError("unix sockets are not allowed")
+
+    async def sleep(self, seconds: float) -> None:
+        await self._inner.sleep(seconds)
+
+    @staticmethod
+    async def _resolve(host: str, port: int) -> list[IPv4Address | IPv6Address]:
+        try:
+            return [ip_address(host)]  # an IP literal is used as is
+        except ValueError:
+            pass
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addresses = [ip_address(info[4][0]) for info in infos]
+        if not addresses:
+            raise socket.gaierror(socket.EAI_NONAME, "no address found")
+        return addresses
+
+
+# httpcore exception -> httpx exception, most specific first (the first isinstance match wins).
+_EXCEPTION_MAP: tuple[tuple[type[Exception], type[httpx.HTTPError]], ...] = (
+    (httpcore.ConnectTimeout, httpx.ConnectTimeout),
+    (httpcore.ReadTimeout, httpx.ReadTimeout),
+    (httpcore.WriteTimeout, httpx.WriteTimeout),
+    (httpcore.PoolTimeout, httpx.PoolTimeout),
+    (httpcore.TimeoutException, httpx.TimeoutException),
+    (httpcore.ConnectError, httpx.ConnectError),
+    (httpcore.ReadError, httpx.ReadError),
+    (httpcore.WriteError, httpx.WriteError),
+    (httpcore.NetworkError, httpx.NetworkError),
+    (httpcore.UnsupportedProtocol, httpx.UnsupportedProtocol),
+    (httpcore.LocalProtocolError, httpx.LocalProtocolError),
+    (httpcore.RemoteProtocolError, httpx.RemoteProtocolError),
+    (httpcore.ProtocolError, httpx.ProtocolError),
+)
+
+
+@contextlib.contextmanager
+def _map_httpcore_exceptions() -> Iterator[None]:
+    try:
+        yield
+    except Exception as error:
+        for core_type, httpx_type in _EXCEPTION_MAP:
+            if isinstance(error, core_type):
+                raise httpx_type(str(error)) from error
+        raise
+
+
+class _ResponseStream(httpx.AsyncByteStream):
+    def __init__(self, stream: AsyncIterable[bytes]) -> None:
+        self._stream = stream
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        with _map_httpcore_exceptions():
+            async for part in self._stream:
+                yield part
+
+    async def aclose(self) -> None:
+        close = getattr(self._stream, "aclose", None)
+        if close is not None:
+            await close()
+
+
+class GuardedTransport(httpx.AsyncBaseTransport):
+    """httpx transport whose connections all pass ``GuardedBackend``.
+
+    No proxy and no environment lookup: the pool connects straight to the checked address.
+    """
+
+    def __init__(self, policy: AddressPolicy, *, http2: bool = True) -> None:
+        self._pool = httpcore.AsyncConnectionPool(
+            network_backend=GuardedBackend(policy), http2=http2
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if not isinstance(request.stream, httpx.AsyncByteStream):
+            raise TypeError("GuardedTransport needs an async request body")
+        core_request = httpcore.Request(
+            method=request.method,
+            url=httpcore.URL(
+                scheme=request.url.raw_scheme,
+                host=request.url.raw_host,
+                port=request.url.port,
+                target=request.url.raw_path,
+            ),
+            headers=request.headers.raw,
+            content=request.stream,
+            extensions=request.extensions,
+        )
+        with _map_httpcore_exceptions():
+            core_response = await self._pool.handle_async_request(core_request)
+        if not isinstance(core_response.stream, AsyncIterable):  # pragma: no cover - async pool
+            raise TypeError("httpcore returned a synchronous response stream")
+        return httpx.Response(
+            status_code=core_response.status,
+            headers=core_response.headers,
+            stream=_ResponseStream(core_response.stream),
+            extensions=core_response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._pool.aclose()
