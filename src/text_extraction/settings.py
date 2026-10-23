@@ -99,6 +99,8 @@ class Settings(BaseSettings):
     compliance_default: Literal["enforce", "report", "ignore"] = "enforce"  # mode without a request
     compliance_allow_override: bool = True  # may non-admin callers choose another mode?
     compliance_cache_seconds: int = Field(default=3600, ge=0)  # cache of the origin files; 0 = off
+    # Quality gate: extracted content with fewer words than this is `partial`/`content_too_short`.
+    quality_min_words: int = Field(default=50, ge=0)
 
     @field_validator("log_level", mode="before")
     @classmethod

@@ -448,3 +448,15 @@ def test_outbound_limits_are_validated(
 
     with pytest.raises(ConfigError, match=field):
         load_settings()
+
+
+def test_quality_min_words_default_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().quality_min_words == 50
+
+    monkeypatch.setenv("QUALITY_MIN_WORDS", "0")
+    assert load_settings().quality_min_words == 0
+
+    monkeypatch.setenv("QUALITY_MIN_WORDS", "-1")
+    with pytest.raises(ConfigError, match="quality_min_words"):
+        load_settings()

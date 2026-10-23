@@ -37,6 +37,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `COMPLIANCE_DEFAULT` | `enforce` | Compliance mode when a request does not choose one: `enforce` blocks what robots.txt, TDMRep, ai.txt or `noai` forbid; `report` only reports it; `ignore` skips the checks. |
 | `COMPLIANCE_ALLOW_OVERRIDE` | `true` | Whether non-admin callers may choose `enforce` or `report` per request. `ignore` stays admin-only (unless it is the default). Admins may always choose. A refused choice answers 403 `forbidden`. |
 | `COMPLIANCE_CACHE_SECONDS` | `3600` | How long robots.txt, `tdmrep.json` and ai.txt of an origin are cached in Valkey. 0 switches the cache off. A file that could not be fetched (5xx, 429, network error) is cached at most 300 s, so a short outage does not block a site for the whole period. |
+| `QUALITY_MIN_WORDS` | `50` | Fewest words (tokens with a letter or digit) the extracted content must have. Fewer ends as `partial` with `content_too_short`; no words at all is `failed` with `empty_content`. 0 switches the length check off. |
 
 The fetcher identifies itself on every outbound request with a fixed, honest user agent,
 `text-extraction/<version> (+https://github.com/janschachtschabel/text-extraction)`. It is not

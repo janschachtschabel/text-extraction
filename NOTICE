@@ -7,3 +7,6 @@ under the Apache License, Version 2.0 (see LICENSE).
 Portions adapted from Website-Textextraction-Selenium, Copyright Jan Schachtschabel,
 Apache-2.0: src/text_extraction/convert/ (HTML preparation, MathML to LaTeX, embedded
 content, link handling and the linked-document handling of the HTML converter).
+
+src/text_extraction/data/domain_boilerplate.json contains boilerplate line lists from
+openeduhub/text-extraction (learned lines per domain; hosts stored without a leading "www.").
