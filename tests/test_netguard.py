@@ -1,6 +1,7 @@
 import asyncio
 import socket
-from collections.abc import Awaitable, Callable, Iterable
+import time
+from collections.abc import Callable, Coroutine, Iterable
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Any
 
@@ -53,8 +54,9 @@ class RecordingStream(httpcore.AsyncNetworkStream):
 class RecordingBackend(httpcore.AsyncNetworkBackend):
     """Inner backend that records the host it is asked to connect to."""
 
-    def __init__(self) -> None:
+    def __init__(self, fail_on: set[str] | None = None) -> None:
         self.connected: list[tuple[str, int]] = []
+        self._fail_on = fail_on or set()
 
     async def connect_tcp(
         self,
@@ -65,11 +67,13 @@ class RecordingBackend(httpcore.AsyncNetworkBackend):
         socket_options: Iterable[Any] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         self.connected.append((host, port))
+        if host in self._fail_on:
+            raise httpcore.ConnectError(f"cannot connect to {host}")
         return RecordingStream()
 
 
-def run[T](test: Callable[[], Awaitable[T]]) -> T:
-    return asyncio.run(test())  # type: ignore[arg-type]
+def run[T](test: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    return asyncio.run(test())
 
 
 # --- validate_url ---
@@ -147,6 +151,9 @@ def test_invalid_url_error_is_a_value_error() -> None:
         "64:ff9b::7f00:1",
         "::ffff:10.0.0.1",
         "2002:a9fe:a9fe::",
+        "::7f00:1",
+        "::a00:1",
+        "fec0::1",
     ],
 )
 def test_private_addresses_are_not_public(address: str) -> None:
@@ -165,10 +172,12 @@ def test_public_addresses_are_public(address: str) -> None:
 
 
 def test_backend_refuses_loopback_literal() -> None:
-    backend = GuardedBackend(lambda ip: is_public_address(ip), RecordingBackend())
+    inner = RecordingBackend()
+    backend = GuardedBackend(is_public_address, inner)
 
     with pytest.raises(BlockedAddressError):
         run(lambda: backend.connect_tcp("127.0.0.1", 80))
+    assert inner.connected == []
 
 
 def test_backend_refuses_ipv6_literal() -> None:
@@ -210,6 +219,39 @@ def test_backend_connects_to_the_resolved_address_not_the_name(
     run(scenario)
 
     assert inner.connected == [("93.184.216.34", 8080)]
+
+
+def test_backend_falls_back_to_the_next_vetted_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    inner = RecordingBackend(fail_on={"2606:2800:220:1::"})
+    backend = GuardedBackend(is_public_address, inner)
+
+    async def scenario() -> None:
+        fake_getaddrinfo(
+            monkeypatch,
+            asyncio.get_running_loop(),
+            addrinfo("2606:2800:220:1::", "93.184.216.34"),
+        )
+        await backend.connect_tcp("example.org", 80)
+
+    run(scenario)
+
+    assert inner.connected == [("2606:2800:220:1::", 80), ("93.184.216.34", 80)]
+
+
+def test_backend_reraises_the_last_connect_error_when_all_addresses_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inner = RecordingBackend(fail_on={"93.184.216.34", "93.184.216.35"})
+    backend = GuardedBackend(is_public_address, inner)
+
+    async def scenario() -> None:
+        fake_getaddrinfo(
+            monkeypatch, asyncio.get_running_loop(), addrinfo("93.184.216.34", "93.184.216.35")
+        )
+        await backend.connect_tcp("example.org", 80)
+
+    with pytest.raises(httpcore.ConnectError, match=r"93\.184\.216\.35"):
+        run(scenario)
 
 
 def test_backend_connects_to_an_allowed_literal() -> None:
@@ -344,8 +386,6 @@ def test_transport_sends_method_headers_and_body(httpserver: HTTPServer) -> None
 
 def test_transport_maps_a_read_timeout_to_the_httpx_exception(httpserver: HTTPServer) -> None:
     def slow(request: Request) -> Response:
-        import time
-
         time.sleep(0.5)
         return Response("late")
 
@@ -362,9 +402,7 @@ def test_transport_maps_a_read_timeout_to_the_httpx_exception(httpserver: HTTPSe
         run(scenario)
 
 
-def test_transport_maps_a_refused_connection_to_connect_error(
-    httpserver: HTTPServer,
-) -> None:
+def test_transport_maps_a_refused_connection_to_connect_error() -> None:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]

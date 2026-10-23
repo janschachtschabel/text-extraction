@@ -34,7 +34,6 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
-    "httpx>=0.28.1",
     "fakeredis>=2.40.0",
     "httpx2>=2.16.0",
     "pytest-httpserver>=1.2.0",

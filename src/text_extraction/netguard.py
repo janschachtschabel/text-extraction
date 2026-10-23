@@ -88,13 +88,17 @@ def is_public_address(ip: IPv4Address | IPv6Address) -> bool:
     embedded = _embedded_ipv4(ip)
     if embedded is not None:
         return is_public_address(embedded)
-    return ip.is_global and not ip.is_multicast
+    if ip.is_multicast or ip.is_reserved:  # reserved covers IPv4 240/4 and IPv6 ::/8
+        return False
+    if isinstance(ip, IPv6Address) and ip.is_site_local:  # deprecated fec0::/10
+        return False
+    return ip.is_global
 
 
 class GuardedBackend(httpcore.AsyncNetworkBackend):
     """Network backend that connects only to addresses the policy allows.
 
-    Resolution happens here; the inner backend is handed the chosen IP, never the name.
+    Resolution happens here; the inner backend is handed a vetted IP, never the name.
     TLS still verifies against the original host name, because httpcore takes that from the URL.
     """
 
@@ -118,16 +122,24 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
         except TimeoutError:
             raise httpcore.ConnectTimeout(f"DNS resolution of {host} timed out") from None
 
-        for address in addresses:
+        for address in addresses:  # vet everything first: a mixed answer is blocked
             if not self._policy(address):
                 raise BlockedAddressError(f"connection to {host} blocked: address {address}")
-        return await self._inner.connect_tcp(
-            str(addresses[0]),
-            port,
-            timeout=timeout,
-            local_address=local_address,
-            socket_options=socket_options,
-        )
+
+        # Try the vetted addresses in order (the first may be IPv6 on a host without IPv6).
+        last_error: Exception = BlockedAddressError(f"no address to connect to for {host}")
+        for address in addresses:
+            try:
+                return await self._inner.connect_tcp(
+                    str(address),
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except (httpcore.ConnectError, httpcore.ConnectTimeout) as error:
+                last_error = error
+        raise last_error
 
     async def connect_unix_socket(
         self,
