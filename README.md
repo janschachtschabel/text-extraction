@@ -21,9 +21,24 @@ uv run mypy                  # type-check (strict)
 uv run pre-commit install    # install the git hooks
 ```
 
+## Quick start with Docker
+
+Requires Docker with Compose. Compose starts the API and a Valkey for the rate limit.
+
+```bash
+cp .env.example .env         # set API_KEYS: the sha256 of your key, see the comments in the file
+docker compose up --build    # public API on http://localhost:8080
+curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
+```
+
+The internal port 9090 (`/health`, `/ready`, `/metrics`) is not published. For Kubernetes use the
+[Helm chart](deploy/helm/text-extraction/README.md).
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md): environment variables, secrets, ports, headers
+- [Helm chart](deploy/helm/text-extraction/README.md)
 - [CLAUDE.md](CLAUDE.md): rules and workflow for contributors
 
 ## Licence

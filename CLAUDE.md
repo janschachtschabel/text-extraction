@@ -75,6 +75,8 @@ uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run mypy                  # type-check (strict)
 uv run pre-commit install    # install the git hooks
+docker compose up --build    # API + Valkey; needs .env (cp .env.example .env, set API_KEYS)
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint text-extraction  # helm lint
 ```
 
 ## Reference material
