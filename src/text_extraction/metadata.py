@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import jstyleson
 import structlog
 from extruct.rdfa import RDFaExtractor
+from extruct.utils import parse_html as parse_lxml
 from extruct.utils import parse_xmldom_html
 from extruct.w3cmicrodata import MicrodataExtractor
 from lxml.html import HtmlElement, HTMLParser, fromstring
@@ -133,6 +134,9 @@ _FOOTER_XPATH = (
     "//footer | //*[@role='contentinfo'] | //*[@id='footer' or @id='colophon']"
     " | //*[contains(@class, 'footer')]"
 )
+_ITEMSCOPE = re.compile(r"itemscope", re.IGNORECASE)
+# The lenient JSON reader is pure Python (3 s for 15 MB): only small scripts get it.
+_LENIENT_JSON_MAX_CHARS = 1_000_000
 _JSON_LD_TYPE = "application/ld+json"
 _JSON_LD_WRAPPERS = re.compile(
     r"^\s*(?:<!--|//\s*<!\[CDATA\[|/\*\s*<!\[CDATA\[\s*\*/)"
@@ -305,6 +309,8 @@ def _json_ld_items(tree: HtmlElement) -> list[Any]:
             try:
                 data = json.loads(text, strict=False)
             except ValueError:
+                if len(text) > _LENIENT_JSON_MAX_CHARS:
+                    raise
                 # Lenient JSON, as many CMS templates write it: comment or CDATA markers around
                 # the script, `//` comments, trailing commas.
                 data = jstyleson.loads(_JSON_LD_WRAPPERS.sub("", text), strict=False)
@@ -328,9 +334,7 @@ class _Structured:
 
     def __init__(self, tree: HtmlElement, html: str, base: str) -> None:
         self.json_ld = _own_nodes(_json_ld_items(tree))
-        self.microdata = _own_nodes(
-            _run("microdata", MicrodataExtractor().extract_items, tree, base)
-        )
+        self.microdata = _own_nodes(self._microdata(html, base))
         self.rdfa: list[dict[str, Any]] = []
         if len(html) <= _RDFA_MAX_CHARS and _RDFA_HINT.search(html):
             try:
@@ -339,6 +343,21 @@ class _Structured:
                 _log.debug("metadata_parse_failed", error=type(error).__name__)
             else:
                 self.rdfa = _own_nodes(_run("rdfa", RDFaExtractor().extract_items, rdfa_tree, base))
+
+    @staticmethod
+    def _microdata(html: str, base: str) -> list[Any]:
+        """Microdata from extruct's own parse of the page. Its extractor is super-linear in
+        the nesting of ``itemscope`` elements (400 nested pairs take 20 s), and that parser
+        stops building the tree at 256 nested elements, which bounds the cost at about 0.3 s.
+        The page's main tree has no such limit, so it must not be used here."""
+        if not _ITEMSCOPE.search(html):
+            return []
+        try:
+            tree = parse_lxml(html.encode(), "UTF-8")
+        except Exception as error:
+            _log.debug("metadata_parse_failed", error=type(error).__name__)
+            return []
+        return _run("microdata", MicrodataExtractor().extract_items, tree, base)
 
     def content_nodes(self) -> list[dict[str, Any]]:
         """The JSON-LD nodes that describe the page rather than its site."""

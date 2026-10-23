@@ -718,3 +718,53 @@ def test_author_list_is_deduplicated_then_capped_at_fifty() -> None:
     authors = meta(page(head=names)).authors
 
     assert authors == [f"Autor {n}" for n in range(50)]
+
+
+def test_deeply_nested_itemscopes_do_not_blow_up_microdata_extraction() -> None:
+    nested = (
+        '<div itemscope itemtype="https://schema.org/CreativeWork"><div itemprop="x" itemscope>'
+        * 300
+        + "</div></div>" * 300
+    )
+    link = '<link rel="license" href="https://creativecommons.org/licenses/by/4.0/">'
+
+    started = time.perf_counter()
+    result = meta(page(head=link, body=nested))
+    elapsed = time.perf_counter() - started
+
+    assert result.license is not None  # the other readers are not affected
+    assert elapsed < 2
+
+
+def test_ordinary_nested_microdata_is_still_read() -> None:
+    html = page(
+        body="""
+        <div itemscope itemtype="https://schema.org/LearningResource">
+          <meta itemprop="teaches" content="Algebra">
+          <div itemprop="author" itemscope itemtype="https://schema.org/Person">
+            <span itemprop="name">Erika Muster</span>
+            <div itemprop="affiliation" itemscope itemtype="https://schema.org/Organization">
+              <span itemprop="name">Schule</span>
+            </div>
+          </div>
+          <a itemprop="license" href="https://creativecommons.org/licenses/by-sa/4.0/">CC</a>
+        </div>"""
+    )
+
+    result = meta(html)
+
+    assert result.lrmi == {"teaches": "Algebra"}
+    assert [item.id for item in result.licenses] == ["CC-BY-SA-4.0"]
+
+
+def test_lenient_jsonld_fallback_is_skipped_for_huge_scripts() -> None:
+    padding = "a" * 1_500_000
+    lenient = f'{{"@type": "Article", "headline": "Huge", "pad": "{padding}",}}'
+    small = '{"@type": "Article", "headline": "Small",}'
+
+    assert meta(page(head=_jsonld_raw(lenient))).title is None
+    assert meta(page(head=_jsonld_raw(small))).title == "Small"
+
+
+def _jsonld_raw(text: str) -> str:
+    return f'<script type="application/ld+json">{text}</script>'
