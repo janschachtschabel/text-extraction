@@ -9,6 +9,7 @@ license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "charset-normalizer>=3.5.2",
+    "extruct>=0.18.0",
     "fastapi>=0.162.0",
     "httpcore>=1.0.9",
     "httpx[http2]>=0.28.1",
@@ -16,6 +17,7 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "prometheus-fastapi-instrumentator>=8.1.0",
     "protego>=0.7.0",
+    "py3langid>=0.4.0",
     "pydantic-settings>=2.16.1",
     "redis>=8.1.0",
     "structlog>=26.1.0",
@@ -60,6 +62,10 @@ select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "RUF", "N", "ASYNC", "PT"]
 strict = true
 python_version = "3.13"
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["extruct.*", "py3langid.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
