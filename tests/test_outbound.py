@@ -4,9 +4,10 @@ from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from typing import Any
 
 import pytest
-from fakeredis import FakeAsyncRedis
+from fakeredis import FakeAsyncRedis, FakeServer
 
 from text_extraction.outbound import (
     CircuitOpen,
@@ -46,8 +47,13 @@ def make_gate(fake_time: FakeTime, valkey: FakeAsyncRedis, **overrides: object) 
 
 
 async def inflight(valkey: FakeAsyncRedis, host: str = HOST) -> int:
-    value = await valkey.get(f"out:inflight:{host}")
-    return int(value) if value is not None else 0
+    return int(await valkey.zcard(f"out:inflight:{{{host}}}"))
+
+
+async def settle() -> None:
+    """Let background tasks (releases that outlive a cancelled caller) finish."""
+    for _ in range(20):
+        await asyncio.sleep(0)
 
 
 def test_concurrency_limit_per_host() -> None:
@@ -228,6 +234,19 @@ def test_429_with_retry_after_sets_cooldown() -> None:
     assert elapsed == 12.5
 
 
+def test_a_shorter_pause_never_replaces_a_longer_one() -> None:
+    async def scenario() -> float:
+        gate = make_gate(FakeTime(), FakeAsyncRedis())
+        await gate.record(HOST, status=429, retry_after=60.0)
+        await gate.record(HOST, status=503, retry_after=10.0)
+        with pytest.raises(CircuitOpen) as info:
+            async with gate.slot(HOST):
+                pytest.fail("the host is cooling down")
+        return info.value.retry_after
+
+    assert asyncio.run(scenario()) == pytest.approx(60.0)
+
+
 def test_retry_after_is_capped_at_the_max_backoff() -> None:
     async def scenario() -> float:
         gate = make_gate(FakeTime(), FakeAsyncRedis(), outbound_max_backoff_seconds=300)
@@ -260,6 +279,10 @@ def test_retry_after_http_date() -> None:
         ("", None),
         ("soon", None),
         ("1.5", None),
+        ("1" + "0" * 400, None),  # a header the target controls must never crash us
+        ("1" * 5000, None),
+        ("\u0663\u0664", None),  # Arabic-Indic digits are no delta-seconds
+        ("9999999999", 9999999999.0),
         ("Fri, 99 Foo 2026 99:99:99 GMT", None),
     ],
 )
@@ -268,7 +291,7 @@ def test_parse_retry_after_seconds_and_garbage(value: str | None, expected: floa
 
 
 def test_503_without_retry_after_uses_default_backoff() -> None:
-    async def scenario() -> tuple[float, float]:
+    async def scenario() -> float:
         fake_time = FakeTime()
         gate = make_gate(fake_time, FakeAsyncRedis(), outbound_backoff_seconds=30)
         await gate.record(HOST, status=503, retry_after=None)
@@ -276,13 +299,11 @@ def test_503_without_retry_after_uses_default_backoff() -> None:
             async with gate.slot(HOST):
                 pytest.fail("the host is cooling down")
         fake_time.now += 31.0
-        async with gate.slot(HOST):
+        async with gate.slot(HOST):  # the pause is over after 30 s
             pass
-        return info.value.retry_after, fake_time.now - START
+        return info.value.retry_after
 
-    retry_after, _ = asyncio.run(scenario())
-
-    assert retry_after == pytest.approx(30.0)
+    assert asyncio.run(scenario()) == pytest.approx(30.0)
 
 
 def test_circuit_opens_after_threshold_and_closes_after_timeout() -> None:
@@ -344,6 +365,8 @@ def test_429_neither_counts_as_failure_nor_resets_the_count() -> None:
         )
         await gate.record(HOST, status=500, retry_after=None)
         await gate.record(HOST, status=429, retry_after=0.0)  # no pause, no change to the count
+        async with gate.slot(HOST):  # the circuit is still closed after one failure and a 429
+            pass
         await gate.record(HOST, status=500, retry_after=None)
         with pytest.raises(CircuitOpen):
             async with gate.slot(HOST):
@@ -371,14 +394,148 @@ def test_lease_released_on_exception() -> None:
     assert asyncio.run(scenario()) == (1, 0)
 
 
-def test_lease_has_a_safety_ttl() -> None:
-    async def scenario() -> int:
+def test_lease_has_a_safety_expiry() -> None:
+    async def scenario() -> tuple[float, int]:
         valkey = FakeAsyncRedis()
         gate = make_gate(FakeTime(), valkey, outbound_min_delay_ms=0)
         async with gate.slot(HOST):
-            return int(await valkey.ttl(f"out:inflight:{HOST}"))
+            key = f"out:inflight:{{{HOST}}}"
+            members = await valkey.zrange(key, 0, -1, withscores=True)
+            return float(members[0][1]), int(await valkey.ttl(key))
 
-    assert 100 < asyncio.run(scenario()) <= 120
+    expires_at, ttl = asyncio.run(scenario())
+
+    assert expires_at == START + 120
+    assert ttl > 100  # the key outlives its last lease; it is only cleanup
+
+
+def test_leaked_lease_frees_the_slot_after_its_expiry() -> None:
+    async def scenario() -> tuple[int, int]:
+        fake_time = FakeTime()
+        valkey = FakeAsyncRedis()
+        gate = make_gate(
+            fake_time,
+            valkey,
+            outbound_max_concurrency_per_host=1,
+            outbound_min_delay_ms=0,
+            outbound_max_wait_seconds=1,
+        )
+        leaker = gate.slot(HOST)
+        await leaker.__aenter__()  # never exited: the pod died
+        with pytest.raises(OutboundBusy):
+            async with gate.slot(HOST):
+                pytest.fail("the only lease is held")
+        # Refused polls must not keep the dead lease alive.
+        fake_time.now += 117.0
+        with pytest.raises(OutboundBusy):
+            async with gate.slot(HOST):
+                pytest.fail("the lease has not expired yet")
+        fake_time.now += 2.0
+        async with gate.slot(HOST):
+            held = await inflight(valkey)
+        return held, await inflight(valkey)
+
+    assert asyncio.run(scenario()) == (1, 0)  # only the new lease, which was released
+
+
+def test_cancel_during_the_spacing_wait_releases_the_lease() -> None:
+    async def scenario() -> tuple[int, int]:
+        fake_time = FakeTime()
+        valkey = FakeAsyncRedis()
+        waiting = asyncio.Event()
+
+        async def stuck_sleep(seconds: float) -> None:
+            waiting.set()
+            await asyncio.Event().wait()
+
+        gate = DomainGate(
+            valkey,
+            Settings(auth_mode="none", outbound_min_delay_ms=1000),
+            clock=fake_time.clock,
+            sleep=stuck_sleep,
+        )
+        async with gate.slot(HOST):
+            pass
+
+        async def second() -> None:
+            async with gate.slot(HOST):
+                pytest.fail("cancelled before its turn")
+
+        task = asyncio.create_task(second())
+        await waiting.wait()
+        held = await inflight(valkey)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await settle()
+        return held, await inflight(valkey)
+
+    assert asyncio.run(scenario()) == (1, 0)
+
+
+class StallingRedis(FakeAsyncRedis):
+    """Runs the lease script, then never answers: the caller is cancelled mid-flight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stall = asyncio.Event()
+        self.stalled = asyncio.Event()
+
+    async def evalsha(self, sha: str, numkeys: int, *keys_and_args: Any) -> Any:
+        result = await super().evalsha(sha, numkeys, *keys_and_args)
+        if "inflight" in str(keys_and_args[0]) and not self.stall.is_set():
+            self.stalled.set()
+            await asyncio.Event().wait()
+        return result
+
+
+def test_cancel_during_the_acquire_releases_the_lease() -> None:
+    async def scenario() -> tuple[int, int]:
+        valkey = StallingRedis()
+        gate = make_gate(FakeTime(), valkey, outbound_min_delay_ms=0)
+
+        async def request() -> None:
+            async with gate.slot(HOST):
+                pytest.fail("cancelled before the answer arrived")
+
+        task = asyncio.create_task(request())
+        await valkey.stalled.wait()
+        valkey.stall.set()  # later calls behave normally
+        held = await inflight(valkey)  # the lease exists in Valkey, the caller never saw it
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await settle()
+        return held, await inflight(valkey)
+
+    assert asyncio.run(scenario()) == (1, 0)
+
+
+def test_gates_of_two_pods_share_the_concurrency_limit() -> None:
+    async def scenario() -> list[int]:
+        fake_time = FakeTime()
+        server = FakeServer()
+        settings = {
+            "outbound_max_concurrency_per_host": 2,
+            "outbound_min_delay_ms": 0,
+            "outbound_max_wait_seconds": 0,
+        }
+        pod_a = make_gate(fake_time, FakeAsyncRedis(server=server), **settings)
+        pod_b = make_gate(fake_time, FakeAsyncRedis(server=server), **settings)
+        refused = []
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(pod_a.slot(HOST))
+            await stack.enter_async_context(pod_b.slot(HOST))
+            for pod in (pod_a, pod_b):
+                with pytest.raises(OutboundBusy):
+                    async with pod.slot(HOST):
+                        pytest.fail("two requests are in flight across the pods")
+                refused.append(1)
+        async with pod_b.slot(HOST):  # everything released: a pod may go again
+            refused.append(2)
+        return refused
+
+    assert asyncio.run(scenario()) == [1, 1, 2]
 
 
 def test_hosts_are_independent() -> None:
@@ -414,4 +571,4 @@ def test_hosts_are_lower_cased_idna() -> None:
                 pytest.fail("the same host in another spelling")
         return keys
 
-    assert asyncio.run(scenario()) == {"out:circuit:xn--bcher-kva.example"}
+    assert asyncio.run(scenario()) == {"out:circuit:{xn--bcher-kva.example}"}

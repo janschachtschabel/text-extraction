@@ -100,20 +100,25 @@ with `Retry-After`. If Valkey is unavailable the request is refused with 503 (`i
 ## Outbound limits per host
 
 Every fetch of a target site passes a per-host gate. All state is in Valkey, so the pods share it.
-Hosts are compared lower-cased and in IDNA form.
+Hosts are compared lower-cased and in IDNA form. The braces around the host in the keys are
+literal (a cluster hash tag), so all keys of one host live in the same slot.
 
 | Key | Content | Lifetime |
 | --- | --- | --- |
-| `out:inflight:{host}` | Number of requests in flight. | 120 s safety TTL, renewed on each lease. |
-| `out:next:{host}` | Earliest start time of the next request. | Until the slot has passed. |
-| `out:cooldown:{host}` | End of the pause after 429 or 503. | Until it ends. |
-| `out:fail:{host}` | Consecutive failures (connection error or 5xx). | 10 minutes, renewed on each failure. |
-| `out:circuit:{host}` | End of an open circuit. | Until it ends. |
+| `out:inflight:{<host>}` | Requests in flight: one entry per lease, scored by its expiry time. | A lease expires 120 s after it starts, so a crashed pod frees its slot by itself. |
+| `out:next:{<host>}` | Earliest start time of the next request. | Until the slot has passed. |
+| `out:cooldown:{<host>}` | End of the pause after 429 or 503. | Until it ends. |
+| `out:fail:{<host>}` | Consecutive failures (connection error or 5xx). | 10 minutes, renewed on each failure. |
+| `out:circuit:{<host>}` | End of an open circuit. | Until it ends. |
 
 A request waits for a free lease (at most `OUTBOUND_MAX_CONCURRENCY_PER_HOST`) and for its spacing
 slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`.
 If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. While a pause
 or an open circuit is set, requests to that host are refused at once. A 429 or 503 sets the pause to
 `Retry-After` (seconds or HTTP date) or `OUTBOUND_BACKOFF_SECONDS`, never above
-`OUTBOUND_MAX_BACKOFF_SECONDS`. `CIRCUIT_FAILURE_THRESHOLD` failures in a row open the circuit for
-`CIRCUIT_OPEN_SECONDS`; any answer below 500 other than 429 resets the count.
+`OUTBOUND_MAX_BACKOFF_SECONDS`; a new pause never shortens one that is already running.
+`CIRCUIT_FAILURE_THRESHOLD` failures in a row open the circuit for `CIRCUIT_OPEN_SECONDS`; any
+answer below 500 other than 429 resets the count.
+
+Spacing, pauses and lease expiry use each pod's own clock, so the pods need NTP-synchronised
+clocks.
