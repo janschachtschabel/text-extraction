@@ -58,8 +58,9 @@ detection off for the affected requests (logged without the URL) and never fails
 The fetcher identifies itself on every outbound request with a fixed, honest user agent,
 `text-extraction/<version> (+https://github.com/janschachtschabel/text-extraction)`. It is not
 configurable. The robots.txt product token is `text-extraction`; robots.txt is read per RFC 9309
-(4xx and unfollowable redirects mean no rules; 5xx, 429, a network error or a file over 512 KB means "unavailable", which
-`enforce` treats as disallowed). Client trace headers
+(4xx and unfollowable redirects mean no rules; 5xx, 429 or a network error means "unavailable",
+which `enforce` treats as disallowed; a file over 500 KiB is parsed from its first 500 KiB). The
+compliance files of an origin are loaded once per pod for concurrent requests. Client trace headers
 (`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
 variables are ignored.
 
