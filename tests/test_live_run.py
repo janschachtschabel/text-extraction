@@ -1,0 +1,224 @@
+"""Scheduling, output and summary of the live harness (`tests/live/run_live.py`)."""
+
+import asyncio
+import io
+import json
+from collections import defaultdict
+from pathlib import Path
+
+import httpx
+import pytest
+
+from tests.live import run_live
+from tests.live.run_live import Record, domain_of, ok_rate, read_urls, summarize
+
+
+def ok_body(url: str) -> dict[str, object]:
+    return {
+        "status": "success",
+        "data": {"word_count": 100, "compliance": {"decision": "reported"}},
+        "error": None,
+    }
+
+
+def run_with(
+    transport: httpx.MockTransport, urls: list[str], concurrency: int = 4
+) -> tuple[list[Record], list[dict[str, object]]]:
+    sink = io.StringIO()
+
+    async def scenario() -> list[Record]:
+        async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+            return await run_live.run(
+                urls, client, concurrency=concurrency, compliance="report", min_words=50, sink=sink
+            )
+
+    records = asyncio.run(scenario())
+    return records, [json.loads(line) for line in sink.getvalue().splitlines()]
+
+
+def test_read_urls_takes_the_url_column_and_keeps_order(tmp_path: Path) -> None:
+    path = tmp_path / "urls.csv"
+    path.write_text(
+        "url,category\nhttps://b.example/,x\nhttps://a.example/,y\nhttps://b.example/,z\n"
+    )
+    assert read_urls(path) == ["https://b.example/", "https://a.example/", "https://b.example/"]
+
+
+def test_read_urls_needs_a_url_header(tmp_path: Path) -> None:
+    path = tmp_path / "urls.csv"
+    path.write_text("https://a.example/\n")
+    with pytest.raises(ValueError, match="url"):
+        read_urls(path)
+
+
+@pytest.mark.parametrize("name", ["smoke", "wlo_50", "wlo_200", "wlo_4000"])
+def test_shipped_url_lists_have_a_url_column(name: str) -> None:
+    urls = read_urls(Path(run_live.__file__).parent / "urls" / f"{name}.csv")
+    assert urls
+    assert all(url.startswith(("http://", "https://")) for url in urls)
+
+
+def test_domain_of_lower_cases_the_host() -> None:
+    assert domain_of("https://WWW.Example.org:8443/a?b=1") == "www.example.org"
+    assert domain_of("not a url") == ""
+
+
+def test_run_sends_the_documented_request_and_writes_one_line_per_url() -> None:
+    seen: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        return httpx.Response(200, json=ok_body(body["url"]))
+
+    records, lines = run_with(httpx.MockTransport(handler), ["https://a.example/x"])
+    assert seen == [
+        {
+            "url": "https://a.example/x",
+            "mode": "auto",
+            "format": "text",
+            "cache": False,
+            "compliance": "report",
+        }
+    ]
+    assert [r.bucket for r in records] == ["ok"]
+    assert lines[0].keys() == {
+        "url",
+        "domain",
+        "bucket",
+        "http_status",
+        "status",
+        "error_code",
+        "word_count",
+        "compliance_decision",
+        "elapsed_ms",
+    }
+
+
+def test_run_keeps_one_request_per_domain_in_flight_and_respects_concurrency() -> None:
+    in_flight: dict[str, int] = defaultdict(int)
+    peak_per_domain: dict[str, int] = defaultdict(int)
+    total = 0
+    peak_total = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal total, peak_total
+        url = json.loads(request.content)["url"]
+        domain = domain_of(url)
+        in_flight[domain] += 1
+        total += 1
+        peak_per_domain[domain] = max(peak_per_domain[domain], in_flight[domain])
+        peak_total = max(peak_total, total)
+        await asyncio.sleep(0.01)
+        in_flight[domain] -= 1
+        total -= 1
+        return httpx.Response(200, json=ok_body(url))
+
+    urls = [f"https://{host}.example/{n}" for host in "abc" for n in range(4)]
+    records, _ = run_with(httpx.MockTransport(handler), urls, concurrency=2)
+    assert len(records) == len(urls)
+    assert max(peak_per_domain.values()) == 1
+    assert peak_total == 2
+
+
+def test_run_takes_turns_between_domains() -> None:
+    order: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        url = json.loads(request.content)["url"]
+        order.append(domain_of(url))
+        await asyncio.sleep(0)
+        return httpx.Response(200, json=ok_body(url))
+
+    urls = [f"https://{host}.example/{n}" for host in "ab" for n in range(3)]
+    run_with(httpx.MockTransport(handler), urls, concurrency=1)
+    assert order == ["a.example", "b.example"] * 3
+
+
+def test_run_records_a_transport_failure_and_a_non_json_body_as_service_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "down" in json.loads(request.content)["url"]:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, text="<html>oops</html>")
+
+    records, _ = run_with(
+        httpx.MockTransport(handler), ["https://down.example/", "https://html.example/"]
+    )
+    by_domain = {r.domain: r for r in records}
+    assert by_domain["down.example"].bucket == "service_error"
+    assert by_domain["down.example"].error_code == "client_ReadTimeout"
+    assert by_domain["down.example"].http_status is None
+    assert by_domain["html.example"].bucket == "service_error"
+    assert by_domain["html.example"].http_status == 200
+
+
+def record(domain: str, bucket: str, decision: str | None = "allowed") -> Record:
+    return Record(
+        url=f"https://{domain}/",
+        domain=domain,
+        bucket=bucket,  # type: ignore[arg-type]
+        http_status=200,
+        status="success",
+        error_code=None,
+        word_count=100,
+        compliance_decision=decision,
+        elapsed_ms=1,
+    )
+
+
+def test_ok_rate_counts_against_all_urls() -> None:
+    records = [record("a", "ok"), record("a", "too_short"), record("b", "ok"), record("b", "ok")]
+    assert ok_rate(records) == 75.0
+    assert ok_rate([]) == 0.0
+
+
+def test_summary_lists_buckets_rate_would_be_blocked_and_domains() -> None:
+    records = [
+        record("a.example", "ok", "reported"),
+        record("a.example", "ok"),
+        record("a.example", "too_short"),
+        record("b.example", "blocked", "blocked"),
+    ]
+    text = summarize(records, top_domains=1)
+    assert "Ok rate: 50.0 % (2 of 4)" in text
+    assert "Would be blocked under `enforce`: 1" in text
+    assert "| ok | 2 | 50.0 % |" in text
+    assert "| too_short | 1 | 25.0 % |" in text
+    assert "| a.example | 3 | 2 | 1 |" in text
+    assert "b.example" not in text.split("### Top")[1]
+
+
+@pytest.mark.parametrize(("min_ok_rate", "exit_code"), [(None, 0), (50.0, 0), (80.0, 1)])
+def test_main_exit_code_follows_min_ok_rate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    min_ok_rate: float | None,
+    exit_code: int,
+) -> None:
+    urls = tmp_path / "urls.csv"
+    urls.write_text("url\nhttps://a.example/ok\nhttps://b.example/short\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = json.loads(request.content)["url"]
+        words = 100 if url.endswith("/ok") else 3
+        body = ok_body(url)
+        body["data"] = {"word_count": words, "compliance": {"decision": "allowed"}}
+        return httpx.Response(200, json=body)
+
+    real_client = httpx.AsyncClient
+
+    def client_with_mock(**kwargs: object) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_mock)
+    out = tmp_path / "nested" / "out.jsonl"
+    summary = tmp_path / "summary.md"
+    argv = ["--urls", str(urls), "--out", str(out), "--summary-out", str(summary)]
+    if min_ok_rate is not None:
+        argv += ["--min-ok-rate", str(min_ok_rate)]
+
+    assert run_live.main(argv) == exit_code
+    assert len(out.read_text().splitlines()) == 2
+    assert "Ok rate: 50.0 % (1 of 2)" in capsys.readouterr().out
+    assert "Ok rate: 50.0 % (1 of 2)" in summary.read_text()

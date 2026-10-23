@@ -1,0 +1,25 @@
+url,category,expected_lang,notes
+https://www.geogebra.org/m/UdFeUTfC,watchlist,de,"GeoGebra: rotating 'similar materials' widget, known instability (Jaccard ~0.35-0.48 day to day), 25% of the whole catalogue"
+https://www.geogebra.org/m/px3wKYRx,watchlist,de,"GeoGebra, second example, same reason as above"
+https://www.geogebra.org/m/FY8VbrCs,watchlist,de,"GeoGebra, third example: the domain is ~1/4 of the catalogue and deserves several samples"
+https://av.tib.eu/media/61654,watchlist,en,"av.tib.eu: table metadata and formerly hidden tabs (now fixed), boilerplate list was relearned after a trafilatura update; browser ~194w / simple ~194w as reference"
+https://av.tib.eu/media/62189,watchlist,en,"av.tib.eu, second example"
+https://www.hoou.de/materials/sdg-6-clean-water-and-sanitation,watchlist,de,"hoou.de: portal/teaser page, the least stable domain in the corpus for weeks (Jaccard down to 0.03), volatile as expected"
+http://ginkgomaps.com/landkarten_suedamerika.html,watchlist,de,"ginkgomaps.com: table boilerplate, relearned after a trafilatura update"
+https://lecture2go.uni-hamburg.de/l2go/-/get/v/57863,watchlist,de,lecture2go: clear divergence between methods: browser ~54w vs simple ~174w
+https://open.umn.edu/opentextbooks/textbooks/u-s-history,watchlist,en,"open.umn.edu: massive divergence between methods: browser ~2605w vs simple ~35490w, keep an eye on it"
+https://www.zebis.ch/unterrichtsmaterial/1jour1actu,watchlist,de,"zebis.ch: stable too_short in both methods (~36-45w), expected bucket"
+https://www.grundschulkoenig.de/mathe/4-klasse/zahlenraum-1-000-000/nachbarzahlen-im-zahlenraum-1-000-000/,watchlist,de,grundschulkoenig.de: moderate divergence between methods (~760w vs ~540w)
+https://phaidra.univie.ac.at/o:1062679,watchlist,de,"phaidra.univie.ac.at: likely_error_page in both methods, bucket diversity"
+https://www.dwu-unterrichtsmaterialien.de/pap003vs.htm,watchlist,de,"dwu-unterrichtsmaterialien.de: table boilerplate, relearned after a trafilatura update"
+https://www.br.de/mediathek/podcast/iq-wissenschaft-und-forschung/operieren-bestrahlen-oder-abwarten-was-tun-bei-prostatakrebs/36241,stable,de,"br.de: stable ok/ok reference, 444w identical in both methods"
+https://www.br.de/mediathek/podcast/ich-mach-s/pferdewirt-in/55887,stable,de,"br.de: stable too_short reference, 44w identical in both methods"
+https://klexikon.zum.de/wiki/Dante_Alighieri,stable,de,klexikon.zum.de: stable ok/ok reference
+https://imoox.at/course/ipad_bild_ton,stable,de,imoox.at: stable ok/ok reference
+https://deutsch-lernen.zum.de/wiki/Bilder%20im%20DaF-Unterricht,stable,de,deutsch-lernen.zum.de: stable ok/ok reference
+https://serlo.org/68262,stable,de,serlo.org: stable ok/ok reference (126w/126w)
+https://serlo.org/229083,divergence,de,"serlo.org: counter-example: browser too_short (42w) / simple ok (175w), shows that simple is not always worse"
+https://www.zoerr.de/edu-sharing/components/render/33001463-6df3-40ac-8c4c-5d06eb7fd7dd,divergence,de,"zoerr.de: browser ok, simple no_content_extracted (JS-dependent content)"
+https://doi.org/10.60877/xxfz-nq49,divergence,en,"doi.org: browser ok (82w), simple no_content_extracted (needs JS rendering)"
+https://oer-portal.uni-graz.at/edu-sharing/components/render/b9bc0557-b4af-4513-ac39-9389892c59b1,divergence,de,"oer-portal.uni-graz.at: browser ok (87w), simple no_content_extracted"
+https://media.sodis.de/open/melt/ab5_judentum.pdf,document,de,"PDF via download trigger / MarkItDown route: browser ok (303w), simple no_content_extracted (no PDF parsing in the simple path)"

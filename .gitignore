@@ -21,3 +21,6 @@ htmlcov/
 
 # Superpowers SDD scratch (never commit)
 .superpowers/
+
+# Live regression output
+/results/

@@ -71,5 +71,6 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --strict-config"
+# tests/live needs a running service and the internet: only run_live.py runs it, by hand or in CI.
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live"
 xfail_strict = true
