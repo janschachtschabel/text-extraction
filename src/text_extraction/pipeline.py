@@ -8,7 +8,8 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here.
 5. The fetch, inside the host's ``DomainGate`` slot, and its outcome reported to the gate. A
    stale cache entry's validators are sent; a 304 or unchanged bytes reuse the stored result
-   (``cache: revalidated``).
+   (``cache: revalidated``). Each redirect target passes the compliance checks of step 4 before
+   it is requested, and one on another host waits for that host's slot instead.
 6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
 7. HTML and XHTML: decode, compliance after the fetch (headers, meta tags, ``noai``; may block),
    convert, strip domain boilerplate. ``text/plain``: decode, header checks, ``convert_plain``.
@@ -26,6 +27,7 @@ step bounds its own cost.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import html as html_lib
 import math
@@ -51,6 +53,7 @@ from text_extraction.compliance import (
     blocking_code,
     resolve_mode,
     with_page_findings,
+    with_redirect_findings,
 )
 from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -199,6 +202,32 @@ class _Run:
             data=self.result(),
             error=ErrorInfo(code=code, message=message, retryable=retryable),
         )
+
+
+class _Turn:
+    """The outbound gate's turn for the host being fetched; it moves along a redirect chain.
+
+    ``answering`` is the host whose answer the fetch waits for: None while no turn is held (a
+    redirect target is being checked, or its turn is being waited for)."""
+
+    def __init__(self, gate: DomainGate) -> None:
+        self._gate = gate
+        self._held: contextlib.AsyncExitStack | None = None
+        self.answering: str | None = None
+
+    async def take(self, host: str, crawl_delay: float | None) -> None:
+        """Give back the turn held, if any, then wait for a turn at ``host``."""
+        await self.give_back()
+        held = contextlib.AsyncExitStack()
+        await held.enter_async_context(self._gate.slot(host, crawl_delay))
+        self._held = held
+        self.answering = host
+
+    async def give_back(self) -> None:
+        held, self._held = self._held, None
+        self.answering = None
+        if held is not None:
+            await held.aclose()
 
 
 @dataclass(frozen=True)
@@ -358,7 +387,7 @@ class Pipeline:
                 )
             # No body: the page is the stored one, so its own statements still hold.
             run.report = self._checker.after_fetch(
-                with_page_findings(report, stored.result.compliance), fetched, None
+                with_page_findings(run.report, stored.result.compliance), fetched, None
             )
             if (code := blocking_code(run.report)) is not None:
                 return run.failed(code, _BLOCK_MESSAGES[code])
@@ -381,7 +410,7 @@ class Pipeline:
         run.convert_ms += _ms(started)
         started = time.perf_counter()
         page = text if kind == "html" else None
-        run.report = await asyncio.to_thread(self._checker.after_fetch, report, fetched, page)
+        run.report = await asyncio.to_thread(self._checker.after_fetch, run.report, fetched, page)
         run.compliance_ms += _ms(started)
         if (code := blocking_code(run.report)) is not None:
             return run.failed(code, _BLOCK_MESSAGES[code])
@@ -394,37 +423,66 @@ class Pipeline:
         return await self._extract_content(run, stored, fetched, kind, text)
 
     async def _fetch(self, run: _Run, validators: Validators | None) -> FetchResult:
-        """Fetch the target in its host's turn and report the outcome to the gate."""
-        host = run.host or ""
+        """Fetch the target in its host's turn and report the outcome to the gate.
+
+        A redirect target is checked against the compliance files of its origin before it is
+        requested (a block ends the chain), and a target on another host waits for that host's
+        turn; the previous host's turn is given back first. The outcome is recorded for the host
+        that gave it.
+        """
+        turn = _Turn(self._gate)
+        checked = {run.req.url}
         started = time.perf_counter()
+        hop_checks = 0.0  # seconds of compliance checks inside the fetch
+
+        async def on_redirect(url: str) -> None:
+            nonlocal hop_checks
+            turn.answering = None  # until the target's turn is taken, no answer is the host's
+            if url not in checked:
+                checked.add(url)
+                check_started = time.perf_counter()
+                hop = await self._checker.before_fetch(url, run.report.mode)
+                hop_checks += time.perf_counter() - check_started
+                run.report = with_redirect_findings(run.report, hop)
+                if (code := blocking_code(run.report)) is not None:
+                    raise FetchError(code, _BLOCK_MESSAGES[code])
+            await turn.take(urlsplit(url).hostname or "", run.report.crawl_delay)
+
         try:
-            async with self._gate.slot(host, run.report.crawl_delay):
-                budget = self._fetch_budget(run)
-                if budget < _MIN_FETCH_SECONDS:
-                    # Not the host's fault: the turn came too late. Nothing is fetched or recorded.
-                    raise FetchError(
-                        ErrorCode.TIMEOUT,
-                        "Too little time was left to fetch the target.",
-                        retryable=True,
-                    )
-                run.attempts += 1
-                try:
-                    fetched = await self._fetcher.fetch(
-                        run.req.url, validators=validators, timeout_seconds=budget
-                    )
-                except FetchError as error:
-                    await self._record_failure(host, error, budget)
-                    raise
-                # Recorded while the turn is held, so a 429 pauses the host before the next turn.
+            await turn.take(run.host or "", run.report.crawl_delay)
+            budget = self._fetch_budget(run)
+            if budget < _MIN_FETCH_SECONDS:
+                # Not the host's fault: the turn came too late. Nothing is fetched or recorded.
+                raise FetchError(
+                    ErrorCode.TIMEOUT,
+                    "Too little time was left to fetch the target.",
+                    retryable=True,
+                )
+            run.attempts += 1
+            try:
+                fetched = await self._fetcher.fetch(
+                    run.req.url,
+                    validators=validators,
+                    timeout_seconds=budget,
+                    on_redirect=on_redirect,
+                )
+            except FetchError as error:
+                if turn.answering is not None:
+                    await self._record_failure(turn.answering, error, budget)
+                raise
+            # Recorded while the turn is held, so a 429 pauses the host before the next turn.
+            if turn.answering is not None:
                 await self._gate.record(
-                    host,
+                    turn.answering,
                     status=fetched.status,
                     retry_after=parse_retry_after(
                         fetched.headers.get("retry-after"), now=time.time()
                     ),
                 )
         finally:
-            run.fetch_ms += _ms(started)
+            await turn.give_back()
+            run.compliance_ms += round(hop_checks * 1000)
+            run.fetch_ms += max(_ms(started) - round(hop_checks * 1000), 0)
         run.final_url = fetched.final_url
         run.upstream_status = fetched.status
         run.content_type = fetched.content_type

@@ -9,6 +9,9 @@ The pipeline calls this module three times per request:
    ``tdm-reservation`` and ``tdm-policy`` headers, the same two ``<meta>`` tags and
    ``noai``/``noml`` in ``X-Robots-Tag`` or ``<meta name="robots">``.
 
+Every redirect target is checked like the first URL (``before_fetch`` again; the files are
+cached per origin) and merged into the report with ``with_redirect_findings``.
+
 ``blocking_code`` is asked after both steps; it names the error to answer with, and only in
 ``enforce`` mode. In ``report`` mode nothing blocks, but the report says what would have. In
 ``ignore`` mode nothing is fetched or checked at all.
@@ -171,6 +174,33 @@ def with_page_findings(report: ComplianceReport, previous: ComplianceReport) -> 
     if not update:
         return report
     update["reasons"] = reasons
+    return _decided(report.model_copy(update=update))
+
+
+# Worse answers rank higher; a redirect chain reports the worst answer of its URLs.
+_ROBOTS_RANK = {"not_checked": 0, "allowed": 1, "unavailable": 2, "disallowed": 3}
+_AI_TXT_RANK = {"not_checked": 0, "absent": 1, "allowed": 2, "disallowed": 3}
+
+
+def with_redirect_findings(report: ComplianceReport, hop: ComplianceReport) -> ComplianceReport:
+    """``report`` plus the findings of ``before_fetch`` for a redirect target, ``hop``.
+
+    The target is fetched too, so its findings count as much as the first URL's: the worse
+    robots.txt and ai.txt answer, a TDM reservation from either, and the reasons of both.
+    ``crawl_delay`` becomes the target's, since its host is the one fetched next.
+    """
+    update: dict[str, object] = {
+        "robots": max(report.robots, hop.robots, key=_ROBOTS_RANK.__getitem__),
+        "ai_txt": max(report.ai_txt, hop.ai_txt, key=_AI_TXT_RANK.__getitem__),
+        "crawl_delay": hop.crawl_delay,
+        "noai": report.noai or hop.noai,
+        "reasons": [*report.reasons, *(r for r in hop.reasons if r not in report.reasons)],
+    }
+    takes_hop_tdm = hop.tdm_reserved is True and report.tdm_reserved is not True
+    if takes_hop_tdm or (report.tdm_reserved is None and hop.tdm_reserved is not None):
+        update.update(
+            tdm_reserved=hop.tdm_reserved, tdm_policy=hop.tdm_policy, tdm_source=hop.tdm_source
+        )
     return _decided(report.model_copy(update=update))
 
 

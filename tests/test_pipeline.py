@@ -1,4 +1,7 @@
 import asyncio
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
 
@@ -16,6 +19,7 @@ from tests.fakes import (
     ROBOTS,
     Answer,
     FakeFetcher,
+    Redirect,
     RefusingGate,
     fetched,
 )
@@ -717,3 +721,142 @@ def test_non_ascii_validators_are_not_sent_back(httpserver: HTTPServer) -> None:
     assert len(page_requests) == 2
     assert "If-None-Match" not in page_requests[1].headers
     assert "If-Modified-Since" not in page_requests[1].headers
+
+
+# --- redirects: compliance and the outbound gate per hop ---------------------------------------
+
+OTHER = "https://other.example"
+MOVED = f"{ORIGIN}/private/moved.html"
+DISALLOW_PRIVATE = "User-agent: *\nDisallow: /private/\n"
+
+
+class RecordingGate:
+    """A real DomainGate that notes each turn taken and given back, and each outcome."""
+
+    def __init__(self, gate: DomainGate) -> None:
+        self.gate = gate
+        self.events: list[tuple[str, str]] = []
+
+    @asynccontextmanager
+    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
+        async with self.gate.slot(host, crawl_delay):
+            self.events.append(("take", host))
+            try:
+                yield
+            finally:
+                self.events.append(("give back", host))
+
+    async def record(self, host: str, *, status: int | None, retry_after: float | None) -> None:
+        self.events.append(("record", host))
+        await self.gate.record(host, status=status, retry_after=retry_after)
+
+
+def recording_harness(
+    answers: dict[str, Answer], **overrides: Any
+) -> tuple[Harness, RecordingGate]:
+    valkey = FakeAsyncRedis()
+    gate = RecordingGate(DomainGate(valkey, make_settings(**overrides)))
+    harness = Harness(answers, gate=gate, **overrides)
+    harness.valkey = valkey
+    return harness, gate
+
+
+def leases(harness: Harness) -> int:
+    async def count() -> int:
+        return sum(
+            [
+                await harness.valkey.zcard(key)
+                async for key in harness.valkey.scan_iter("out:inflight:*")
+            ]
+        )
+
+    return asyncio.run(count())
+
+
+def test_same_origin_redirect_to_a_disallowed_path_is_blocked() -> None:
+    harness = Harness(
+        {PAGE: Redirect(MOVED), MOVED: fetched(MOVED), ROBOTS: fetched(ROBOTS, DISALLOW_PRIVATE)}
+    )
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
+    assert envelope.error.retryable is False
+    data = data_of(envelope)
+    assert data.compliance.robots == "disallowed"
+    assert data.compliance.decision == "blocked"
+    assert data.content is None
+    assert MOVED not in [url for url, _ in harness.fetcher.calls]
+
+
+def test_same_origin_redirect_to_a_disallowed_path_is_reported() -> None:
+    harness = Harness(
+        {PAGE: Redirect(MOVED), MOVED: fetched(MOVED), ROBOTS: fetched(ROBOTS, DISALLOW_PRIVATE)}
+    )
+
+    envelope = harness.run_once(compliance="report")
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.final_url == MOVED
+    assert data.compliance.robots == "disallowed"
+    assert data.compliance.decision == "reported"
+    assert any("robots.txt disallows" in reason for reason in data.compliance.reasons)
+
+
+def test_cross_origin_redirect_checks_the_targets_files_and_charges_its_gate() -> None:
+    target = f"{OTHER}/learn/page.html"
+    harness, gate = recording_harness({PAGE: Redirect(target), target: fetched(target)})
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "success"
+    assert f"{OTHER}/robots.txt" in [url for url, _ in harness.fetcher.calls]
+    assert gate.events == [
+        ("take", "example.org"),
+        ("give back", "example.org"),
+        ("take", "other.example"),
+        ("record", "other.example"),
+        ("give back", "other.example"),
+    ]
+    assert leases(harness) == 0
+
+
+def test_cross_origin_redirect_blocked_by_the_targets_robots() -> None:
+    target = f"{OTHER}/private/page.html"
+    other_robots = f"{OTHER}/robots.txt"
+    harness, gate = recording_harness(
+        {
+            PAGE: Redirect(target),
+            target: fetched(target),
+            other_robots: fetched(other_robots, DISALLOW_PRIVATE),
+        }
+    )
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
+    assert target not in [url for url, _ in harness.fetcher.calls]
+    assert ("take", "other.example") not in gate.events
+    assert leases(harness) == 0
+
+
+def test_redirect_to_a_paused_host_gives_every_lease_back() -> None:
+    target = f"{OTHER}/learn/page.html"
+    harness, gate = recording_harness({PAGE: Redirect(target), target: fetched(target)})
+
+    async def pause_other() -> None:
+        await harness.valkey.set("out:cooldown:{other.example}", f"{time.time() + 60:.6f}")
+
+    asyncio.run(pause_other())
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.CONNECTION_ERROR  # the circuit-open answer
+    assert target not in [url for url, _ in harness.fetcher.calls]
+    assert gate.events == [("take", "example.org"), ("give back", "example.org")]
+    assert leases(harness) == 0

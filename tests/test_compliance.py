@@ -993,3 +993,32 @@ def test_rules_are_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) ->
     assert report.ai_txt == "disallowed"
     assert len(threads) == 2
     assert threading.main_thread().name not in threads
+
+
+def test_redirect_findings_keep_the_worst_answer_of_the_chain() -> None:
+    first = compliance._decided(
+        ComplianceReport(mode="report", robots="allowed", ai_txt="disallowed", crawl_delay=1.0)
+    )
+    hop = compliance._decided(
+        ComplianceReport(
+            mode="report",
+            robots="disallowed",
+            ai_txt="allowed",
+            crawl_delay=4.0,
+            tdm_reserved=True,
+            tdm_policy="https://other.example/policy.json",
+            tdm_source="tdmrep.json",
+            reasons=["robots.txt disallows this URL for text-extraction."],
+        )
+    )
+
+    merged = compliance.with_redirect_findings(first, hop)
+
+    assert merged.robots == "disallowed"
+    assert merged.ai_txt == "disallowed"
+    assert merged.crawl_delay == 4.0  # the target's host is fetched next
+    assert merged.tdm_reserved is True
+    assert merged.tdm_source == "tdmrep.json"
+    assert merged.reasons == ["robots.txt disallows this URL for text-extraction."]
+    assert merged.decision == "reported"
+    assert compliance.with_redirect_findings(hop, first).tdm_reserved is True

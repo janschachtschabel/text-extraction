@@ -60,7 +60,10 @@ The fetcher identifies itself on every outbound request with a fixed, honest use
 configurable. The robots.txt product token is `text-extraction`; robots.txt is read per RFC 9309
 (4xx and unfollowable redirects mean no rules; 5xx, 429 or a network error means "unavailable",
 which `enforce` treats as disallowed; a file over 500 KiB is parsed from its first 500 KiB). The
-compliance files of an origin are loaded once per pod for concurrent requests. Client trace headers
+compliance files of an origin are loaded once per pod for concurrent requests. Every redirect
+target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
+`enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
+`report` its findings join the report. Client trace headers
 (`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
 variables are ignored.
 
@@ -140,7 +143,9 @@ literal (a cluster hash tag), so all keys of one host live in the same slot.
 
 A request waits for a free lease (at most `OUTBOUND_MAX_CONCURRENCY_PER_HOST`) and for its spacing
 slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`.
-If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. While a pause
+If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. A redirect to
+another host gives the first host's lease back and waits for a turn at the new host; the outcome
+counts for the host that answered. While a pause
 or an open circuit is set, requests to that host are refused at once. A 429 or 503 sets the pause to
 `Retry-After` (seconds or HTTP date) or `OUTBOUND_BACKOFF_SECONDS`, never above
 `OUTBOUND_MAX_BACKOFF_SECONDS`; a new pause never shortens one that is already running.

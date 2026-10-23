@@ -3,6 +3,7 @@
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from typing import Any
 
 from text_extraction.fetch import FetchError, FetchResult, Validators
@@ -61,24 +62,45 @@ def fetched(
     )
 
 
-Answer = FetchResult | FetchError | Callable[[Validators | None], Awaitable[FetchResult]]
+@dataclass(frozen=True)
+class Redirect:
+    """A redirect answer: the fake fetcher follows it like the real one, hook included."""
+
+    location: str
+
+
+Answer = FetchResult | FetchError | Redirect | Callable[[Validators | None], Awaitable[FetchResult]]
 
 
 class FakeFetcher:
-    """Canned answers by URL; anything else (robots.txt, tdmrep.json, ai.txt) is a 404."""
+    """Canned answers by URL; anything else (robots.txt, tdmrep.json, ai.txt) is a 404.
+
+    ``calls`` has one entry per request, redirect hops included (with the options of the
+    ``fetch`` call they belong to)."""
 
     def __init__(self, answers: dict[str, Answer]) -> None:
         self.answers = answers
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def fetch(self, url: str, **options: Any) -> FetchResult:
-        self.calls.append((url, options))
-        answer = self.answers.get(url, fetched(url, "Not found", status=404))
+        current = url
+        hops: list[str] = []
+        while True:
+            self.calls.append((current, options))
+            answer = self.answers.get(current, fetched(current, "Not found", status=404))
+            if not isinstance(answer, Redirect):
+                break
+            current = answer.location
+            hops.append(current)
+            if options.get("on_redirect") is not None:
+                await options["on_redirect"](current)
         if isinstance(answer, FetchError):
             raise answer
-        if isinstance(answer, FetchResult):
-            return answer
-        return await answer(options.get("validators"))
+        if not isinstance(answer, FetchResult):
+            answer = await answer(options.get("validators"))
+        if hops:
+            answer = replace(answer, url=url, final_url=current, redirects=hops)
+        return answer
 
     def page_calls(self) -> list[dict[str, Any]]:
         return [options for url, options in self.calls if url == PAGE]
