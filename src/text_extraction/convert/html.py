@@ -1,8 +1,8 @@
 """HTML and plain text to the requested output format, with a record of the converter used.
 
 ``convert_html`` is synchronous and CPU-bound (callers run it in a thread) and keeps no global
-state. It parses the page once, edits that tree in place and serialises it once for
-Trafilatura; there is no further copy of the document.
+state. It parses the page once, edits that tree in place and serialises it once, which lxml
+parses for Trafilatura (with ``huge_tree``, so deep nesting is kept); there is no further copy.
 
 Pipeline: equations become ``$$...$$`` source, data-carried content (JSON-LD ``articleBody``,
 YouTube details) replaces a page that shows none, scripts and hidden elements go, and every
@@ -21,6 +21,8 @@ from html import escape, unescape
 from typing import Literal
 from urllib.parse import unquote, urlsplit
 
+import lxml.etree
+import lxml.html
 from bs4 import BeautifulSoup
 from trafilatura import extract
 
@@ -78,6 +80,12 @@ _BLOCKS = [
 _CELLS = ["td", "th"]
 _URL = re.compile(r"https?://[^\s<>\"'()\[\]]+")
 _TRAFILATURA_FORMAT = {"markdown": "markdown", "text": "txt", "html": "html"}
+# Markup and Markdown link targets, matched in linear time: neither part can run past the start
+# of the next candidate, so text full of "<" or "](" cannot make the match quadratic.
+_MARKUP_OR_LINK_TARGET = re.compile(r"<[^<>]*>|\]\([^()\[\]]*\)")
+_LINK_SCHEMES = frozenset({"http", "https"})
+# Characters XML (and so lxml) does not accept in text; Trafilatura removes them too.
+_XML_INVALID = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 
 
 @dataclass(frozen=True)
@@ -119,7 +127,7 @@ def _title(soup: BeautifulSoup, heading: str) -> str | None:
 
 def _compact(text: str) -> str:
     # Letters and digits only, so Markdown emphasis or link targets do not hide a kept heading.
-    text = unescape(re.sub(r"<[^>]*>|\]\([^)]*\)", "", text))
+    text = unescape(_MARKUP_OR_LINK_TARGET.sub("", text))
     return re.sub(r"[\W_]+", "", text).casefold()
 
 
@@ -193,16 +201,24 @@ def _with_documents(text: str, documents: list[tuple[str, str]], fmt: OutputForm
 
 def _make_absolute(soup: BeautifulSoup, url: str) -> None:
     """Every href and src resolved against the page (or its <base>) - or removed, when no URL
-    parser accepts it. The link's text stays."""
+    parser accepts it or it is not an http(s) URL (``javascript:``, ``data:``, ``mailto:``, ...):
+    the output carries web links only. The link's text stays."""
     base = base_url_of(soup, url)
     for tag in soup.select("[href], [src]"):
         for name in ("href", "src"):
             if tag.get(name):
-                target = absolute_url(base, attr(tag, name))
-                if target is None:
+                target = absolute_url(base, attr(tag, name).strip())
+                if target is None or _scheme(target) not in _LINK_SCHEMES:
                     del tag[name]
                 else:
                     tag[name] = target
+
+
+def _scheme(url: str) -> str:
+    try:
+        return urlsplit(url).scheme.lower()
+    except ValueError:
+        return ""
 
 
 def _visible_text(soup: BeautifulSoup) -> str:
@@ -231,9 +247,28 @@ def _as_format(text: str, fmt: OutputFormat) -> str:
     return f"<html><body>{paragraphs}</body></html>"
 
 
+def _tree(html: str) -> lxml.html.HtmlElement | str:
+    """The page parsed for Trafilatura, with ``huge_tree``: Trafilatura's own parse stops at
+    libxml2's depth limit of 255 elements and silently drops everything nested deeper. The
+    options are otherwise Trafilatura's own. Should lxml refuse the text, Trafilatura gets the
+    string and parses it itself."""
+    parser = lxml.html.HTMLParser(
+        collect_ids=False,
+        default_doctype=False,
+        encoding="utf-8",
+        remove_comments=True,
+        remove_pis=True,
+        huge_tree=True,
+    )
+    try:
+        return lxml.html.fromstring(_XML_INVALID.sub("", html), parser=parser)
+    except (ValueError, lxml.etree.ParserError):
+        return html
+
+
 def _extract(html: str, url: str, fmt: OutputFormat, *, recall: bool) -> str | None:
     return extract(
-        html,
+        _tree(html),
         url=url,
         output_format=_TRAFILATURA_FORMAT[fmt],
         include_links=fmt != "text",

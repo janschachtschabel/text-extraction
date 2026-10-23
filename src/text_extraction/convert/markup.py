@@ -9,6 +9,7 @@ Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 
 import re
 from html import escape
+from itertools import islice
 
 from bs4 import BeautifulSoup, Tag
 
@@ -75,6 +76,13 @@ def _presentation(equation: Tag) -> str:
     return equation.get_text(" ", strip=True)
 
 
+def _more_than_one_element(parent: Tag) -> bool:
+    """Whether ``parent`` has a second child element. Stops at the second one, so a parent of
+    thousands of formulas costs no more than one of two."""
+    elements = (child for child in parent.children if isinstance(child, Tag))
+    return len(list(islice(elements, 2))) > 1
+
+
 def _reveal(replacement: Tag) -> None:
     """Unhide the wrappers that exist only to keep this formula from sighted readers.
 
@@ -85,8 +93,7 @@ def _reveal(replacement: Tag) -> None:
     """
     formula = replacement.string
     for parent in replacement.parents:
-        children = [child for child in parent.children if isinstance(child, Tag)]
-        if parent.name in {"body", "html", "[document]"} or len(children) != 1:
+        if parent.name in {"body", "html", "[document]"} or _more_than_one_element(parent):
             return
         if parent.get_text(" ", strip=True) != formula:
             return
