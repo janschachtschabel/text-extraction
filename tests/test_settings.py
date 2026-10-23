@@ -25,6 +25,14 @@ SETTING_ENV_VARS = (
     "FETCH_MAX_BYTES",
     "FETCH_MAX_REDIRECTS",
     "FETCH_ALLOW_PRIVATE_NETWORKS",
+    "OUTBOUND_MAX_CONCURRENCY_PER_HOST",
+    "OUTBOUND_MIN_DELAY_MS",
+    "OUTBOUND_MAX_CRAWL_DELAY_SECONDS",
+    "OUTBOUND_MAX_WAIT_SECONDS",
+    "OUTBOUND_BACKOFF_SECONDS",
+    "OUTBOUND_MAX_BACKOFF_SECONDS",
+    "CIRCUIT_FAILURE_THRESHOLD",
+    "CIRCUIT_OPEN_SECONDS",
 )
 
 
@@ -402,3 +410,41 @@ def test_fetch_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.fetch_max_bytes == 2048
     assert settings.fetch_max_redirects == 0
     assert settings.fetch_allow_private_networks is True
+
+
+def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.outbound_max_concurrency_per_host == 2
+    assert settings.outbound_min_delay_ms == 1000
+    assert settings.outbound_max_crawl_delay_seconds == 10
+    assert settings.outbound_max_wait_seconds == 10
+    assert settings.outbound_backoff_seconds == 30
+    assert settings.outbound_max_backoff_seconds == 300
+    assert settings.circuit_failure_threshold == 5
+    assert settings.circuit_open_seconds == 60
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "field"),
+    [
+        ("OUTBOUND_MAX_CONCURRENCY_PER_HOST", "0", "outbound_max_concurrency_per_host"),
+        ("OUTBOUND_MIN_DELAY_MS", "-1", "outbound_min_delay_ms"),
+        ("OUTBOUND_MAX_CRAWL_DELAY_SECONDS", "-1", "outbound_max_crawl_delay_seconds"),
+        ("OUTBOUND_MAX_WAIT_SECONDS", "-1", "outbound_max_wait_seconds"),
+        ("OUTBOUND_BACKOFF_SECONDS", "0.5", "outbound_backoff_seconds"),
+        ("OUTBOUND_MAX_BACKOFF_SECONDS", "0", "outbound_max_backoff_seconds"),
+        ("CIRCUIT_FAILURE_THRESHOLD", "0", "circuit_failure_threshold"),
+        ("CIRCUIT_OPEN_SECONDS", "0", "circuit_open_seconds"),
+    ],
+)
+def test_outbound_limits_are_validated(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, field: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError, match=field):
+        load_settings()

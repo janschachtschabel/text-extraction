@@ -86,6 +86,15 @@ class Settings(BaseSettings):
     fetch_max_redirects: int = Field(default=5, ge=0, le=20)
     # UNSAFE: lifts the SSRF guard for private networks. Development and tests only.
     fetch_allow_private_networks: bool = False
+    # Per-domain outbound gate (shared by all pods through Valkey).
+    outbound_max_concurrency_per_host: int = Field(default=2, ge=1)  # requests in flight per host
+    outbound_min_delay_ms: int = Field(default=1000, ge=0)  # least gap between request starts
+    outbound_max_crawl_delay_seconds: float = Field(default=10, ge=0)  # cap for robots Crawl-delay
+    outbound_max_wait_seconds: float = Field(default=10, ge=0)  # longest wait for a slot
+    outbound_backoff_seconds: float = Field(default=30, ge=1)  # cooldown after 429/503
+    outbound_max_backoff_seconds: float = Field(default=300, ge=1)  # cap for any cooldown
+    circuit_failure_threshold: int = Field(default=5, ge=1)  # consecutive failures to open
+    circuit_open_seconds: float = Field(default=60, ge=1)  # how long the circuit stays open
 
     @field_validator("log_level", mode="before")
     @classmethod

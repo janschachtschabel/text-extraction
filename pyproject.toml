@@ -34,7 +34,7 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
-    "fakeredis>=2.40.0",
+    "fakeredis[lua]>=2.40.0",
     "httpx2>=2.16.0",
     "pytest-httpserver>=1.2.0",
 ]
