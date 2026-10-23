@@ -15,7 +15,7 @@
 - English only in code, comments, docs and commit messages.
 - Python `>=3.13,<3.14`; `.python-version` = `3.13`.
 - Package name `text-extraction`, import name `text_extraction`, version `0.1.0`.
-- No AGPL/GPL dependencies.
+- No AGPL/GPL dependencies. Project licence: Apache-2.0 (root `LICENSE`).
 - Images: tagged SemVer for production, `latest` only for staging (applies from package 1, where the first Dockerfile lands).
 
 ## Review Focus
@@ -56,7 +56,7 @@ def test_version_is_semver() -> None:
     assert all(part.isdigit() for part in parts)
 ```
 
-- [ ] **Step 2: Create `pyproject.toml`** with `[project]` (name, version `0.1.0`, description, `requires-python = ">=3.13,<3.14"`, MIT license, no runtime deps), `[build-system]` `uv_build`, `[tool.uv.build-backend] module-root = "src"`, `[dependency-groups] dev = ["pytest", "ruff", "mypy", "pre-commit"]`.
+- [ ] **Step 2: Create `pyproject.toml`** with `[project]` (name, version `0.1.0`, description, `requires-python = ">=3.13,<3.14"`, `license = "Apache-2.0"` (root LICENSE), no runtime deps), `[build-system]` `uv_build`, `[tool.uv.build-backend] module-root = "src"`, `[dependency-groups] dev = ["pytest", "ruff", "mypy", "pre-commit"]`.
 - [ ] **Step 3: Run `uv sync` then `uv run pytest -q`** — Expected: FAIL (`AttributeError: __version__`).
 - [ ] **Step 4: Implement `__version__`** in `src/text_extraction/__init__.py`; add empty `py.typed`.
 - [ ] **Step 5: Run `uv run pytest -q`** — Expected: 2 passed.
