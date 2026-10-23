@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.tracing import current_trace_id, request_log_context
 
 _log = structlog.get_logger(__name__)
 
@@ -37,17 +38,22 @@ class ServiceError(Exception):
         self.headers = headers
 
 
-def _current_trace_id() -> str | None:
-    """Trace id of the current request. Task 3 replaces this with `current_trace_id()`."""
-    return None
+def _trace_id(request: Request) -> str | None:
+    """Trace id of the request.
+
+    The request comes first: the catch-all handler runs outside `TraceMiddleware`, where the
+    contextvar is already reset. The contextvar covers code that has no request at hand.
+    """
+    return request_log_context(request).get("trace_id") or current_trace_id()
 
 
 def _failed(
+    request: Request,
     http_status: int,
     error: ErrorInfo,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
-    envelope: Envelope[None] = Envelope(status="failed", error=error, trace_id=_current_trace_id())
+    envelope: Envelope[None] = Envelope(status="failed", error=error, trace_id=_trace_id(request))
     return JSONResponse(
         status_code=http_status,
         content=envelope.model_dump(mode="json"),
@@ -55,13 +61,13 @@ def _failed(
     )
 
 
-async def _handle_service_error(_request: Request, exc: Exception) -> JSONResponse:
+async def _handle_service_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ServiceError)  # noqa: S101 - narrows the type for mypy
     error = ErrorInfo(code=exc.code, message=exc.message, retryable=exc.retryable)
-    return _failed(exc.http_status, error, exc.headers)
+    return _failed(request, exc.http_status, error, exc.headers)
 
 
-async def _handle_validation_error(_request: Request, exc: Exception) -> JSONResponse:
+async def _handle_validation_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, RequestValidationError)  # noqa: S101 - narrows the type for mypy
     details: list[dict[str, Any]] = [
         {"loc": list(item["loc"]), "msg": item["msg"]} for item in exc.errors()
@@ -71,10 +77,10 @@ async def _handle_validation_error(_request: Request, exc: Exception) -> JSONRes
         message="The request is invalid.",
         details=details,
     )
-    return _failed(HTTPStatus.UNPROCESSABLE_ENTITY, error)
+    return _failed(request, HTTPStatus.UNPROCESSABLE_ENTITY, error)
 
 
-async def _handle_http_exception(_request: Request, exc: Exception) -> JSONResponse:
+async def _handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, StarletteHTTPException)  # noqa: S101 - narrows the type for mypy
     code = ErrorCode.NOT_FOUND if exc.status_code == HTTPStatus.NOT_FOUND else None
     if code is None:
@@ -84,13 +90,15 @@ async def _handle_http_exception(_request: Request, exc: Exception) -> JSONRespo
     except ValueError:
         message = "Request failed."
     error = ErrorInfo(code=code, message=message)
-    return _failed(exc.status_code, error, exc.headers)
+    return _failed(request, exc.status_code, error, exc.headers)
 
 
-async def _handle_unhandled(_request: Request, exc: Exception) -> JSONResponse:
-    _log.error("unhandled_exception", exc_info=exc)
+async def _handle_unhandled(request: Request, exc: Exception) -> JSONResponse:
+    # The contextvars are already reset here, so bind the request's trace fields again.
+    with structlog.contextvars.bound_contextvars(**request_log_context(request)):
+        _log.error("unhandled_exception", exc_info=exc)
     error = ErrorInfo(code=ErrorCode.INTERNAL_ERROR, message=_GENERIC_INTERNAL_MESSAGE)
-    return _failed(HTTPStatus.INTERNAL_SERVER_ERROR, error)
+    return _failed(request, HTTPStatus.INTERNAL_SERVER_ERROR, error)
 
 
 def install_error_handlers(app: FastAPI) -> None:
