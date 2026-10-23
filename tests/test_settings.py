@@ -1,11 +1,12 @@
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from text_extraction.settings import ApiKey, Settings, get_settings
+from text_extraction.settings import ApiKey, ConfigError, Settings, get_settings, load_settings
 
 SETTING_ENV_VARS = (
     "PUBLIC_HOST",
@@ -170,3 +171,102 @@ def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
 
     assert get_settings() is get_settings()
+
+
+API_KEYS_HINT = "API_KEYS must be a JSON list of {name, role, sha256} objects"
+
+
+@pytest.mark.parametrize("raw", ["{not json", "", "   ", '{"name": "x"}', '"text"', "42"])
+def test_malformed_api_keys_env_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("API_KEYS", raw)
+
+    with pytest.raises(ConfigError, match=re.escape(API_KEYS_HINT)):
+        load_settings()
+
+
+def test_missing_api_keys_file_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing = tmp_path / "missing.json"
+    monkeypatch.setenv("API_KEYS_FILE", str(missing))
+
+    with pytest.raises(ConfigError, match="API_KEYS_FILE") as info:
+        load_settings()
+
+    assert str(missing) in str(info.value)
+
+
+def test_invalid_json_api_keys_file_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    keys_file = tmp_path / "keys.json"
+    keys_file.write_text("{garbage")
+    monkeypatch.setenv("API_KEYS_FILE", str(keys_file))
+
+    with pytest.raises(ConfigError, match="API_KEYS_FILE") as info:
+        load_settings()
+
+    assert str(keys_file) in str(info.value)
+
+
+def test_wrong_shape_api_keys_file_names_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    keys_file = tmp_path / "keys.json"
+    keys_file.write_text(json.dumps({"name": "not-a-list"}))
+    monkeypatch.setenv("API_KEYS_FILE", str(keys_file))
+
+    with pytest.raises(ConfigError) as info:
+        load_settings()
+
+    assert "API_KEYS_FILE" in str(info.value)
+    assert str(keys_file) in str(info.value)
+
+
+def test_config_error_for_missing_keys() -> None:
+    with pytest.raises(ConfigError, match="AUTH_MODE=api_key requires API_KEYS or API_KEYS_FILE"):
+        load_settings()
+
+
+def test_load_settings_returns_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    assert load_settings().auth_mode == "none"
+
+
+def test_get_settings_raises_config_error() -> None:
+    with pytest.raises(ConfigError):
+        get_settings()
+
+
+SECRET = "my-super-secret-raw-key"  # noqa: S105
+
+
+def test_raw_secret_in_env_is_not_echoed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("API_KEYS", json.dumps([{"name": "x", "role": "user", "sha256": SECRET}]))
+
+    with pytest.raises(ValidationError) as validation_info:
+        Settings()
+    with pytest.raises(ConfigError) as config_info:
+        load_settings()
+
+    assert SECRET not in str(validation_info.value)
+    assert SECRET not in str(config_info.value)
+    assert "sha256" in str(config_info.value)
+
+
+def test_raw_secret_in_file_is_not_echoed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    keys_file = tmp_path / "keys.json"
+    keys_file.write_text(json.dumps([{"name": "x", "role": "user", "sha256": SECRET}]))
+    monkeypatch.setenv("API_KEYS_FILE", str(keys_file))
+
+    with pytest.raises(ValidationError) as validation_info:
+        Settings()
+    with pytest.raises(ConfigError) as config_info:
+        load_settings()
+
+    assert SECRET not in str(validation_info.value)
+    assert SECRET not in str(config_info.value)
+    assert str(keys_file) in str(config_info.value)
