@@ -460,3 +460,23 @@ def test_quality_min_words_default_and_validation(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("QUALITY_MIN_WORDS", "-1")
     with pytest.raises(ConfigError, match="quality_min_words"):
         load_settings()
+
+
+def test_result_cache_and_fingerprint_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.result_cache_ttl_seconds == 3600
+    assert settings.result_store_ttl_seconds == 86400
+    assert settings.fingerprint_ttl_seconds == 2_592_000
+
+    monkeypatch.setenv("RESULT_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setenv("RESULT_STORE_TTL_SECONDS", "0")
+    monkeypatch.setenv("FINGERPRINT_TTL_SECONDS", "0")
+    settings = load_settings()
+    assert settings.result_cache_ttl_seconds == 0
+    assert settings.result_store_ttl_seconds == 0
+    assert settings.fingerprint_ttl_seconds == 0
+
+    monkeypatch.setenv("FINGERPRINT_TTL_SECONDS", "-1")
+    with pytest.raises(ConfigError, match="fingerprint_ttl_seconds"):
+        load_settings()

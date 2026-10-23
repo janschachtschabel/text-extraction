@@ -114,7 +114,9 @@ optional rate limit.
 - **Change detection:** before extraction ETag/Last-Modified + SHA-256 of raw bytes
   (unchanged → stored result). After extraction the text is normalized (no Markdown
   syntax, case, whitespace) and gets SHA-256 + 128-permutation MinHash.
-  `similarity_to_previous`, `changed`; optional LSH (datasketch) for near-duplicates.
+  `similarity_to_previous`, `changed`; the MinHash is a small numpy implementation compatible
+  with datasketch 2.x (`affine32`, seed 1), which would give optional LSH for near-duplicates
+  without pulling scipy into the image by default.
 - **Structured output:** LLM-free `metadata`, `selectors` (CSS/XPath schema),
   `patterns` (regex, tables); `llm` with JSON schema output validated by Pydantic;
   `learn_selectors` stores an LLM-written CSS schema per domain for LLM-free reuse.

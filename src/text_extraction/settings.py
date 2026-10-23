@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     compliance_cache_seconds: int = Field(default=3600, ge=0)  # cache of the origin files; 0 = off
     # Quality gate: extracted content with fewer words than this is `partial`/`content_too_short`.
     quality_min_words: int = Field(default=50, ge=0)
+    # Result cache (fresh window and storage time) and change-detection fingerprints; 0 = off.
+    result_cache_ttl_seconds: int = Field(default=3600, ge=0)  # stored result is served unchecked
+    result_store_ttl_seconds: int = Field(default=86400, ge=0)  # kept for revalidation
+    fingerprint_ttl_seconds: int = Field(default=2_592_000, ge=0)  # 30 days
 
     @field_validator("log_level", mode="before")
     @classmethod
