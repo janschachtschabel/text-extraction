@@ -6,7 +6,15 @@ readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dependencies = []
+dependencies = [
+    "fastapi>=0.162.0",
+    "prometheus-client>=0.26.0",
+    "prometheus-fastapi-instrumentator>=8.1.0",
+    "pydantic-settings>=2.16.1",
+    "redis>=8.1.0",
+    "structlog>=26.1.0",
+    "uvicorn[standard]>=0.54.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
@@ -16,7 +24,14 @@ build-backend = "uv_build"
 module-root = "src"
 
 [dependency-groups]
-dev = ["pytest", "ruff", "mypy", "pre-commit"]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "httpx>=0.28.1",
+    "fakeredis>=2.40.0",
+]
 
 [tool.ruff]
 line-length = 100
