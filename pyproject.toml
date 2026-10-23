@@ -5,7 +5,7 @@ description = "API service that extracts text and Markdown from web pages, files
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "charset-normalizer>=3.5.2",

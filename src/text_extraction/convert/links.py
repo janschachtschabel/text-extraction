@@ -5,7 +5,7 @@ Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
 
@@ -89,8 +89,9 @@ def page_links(html: str, base_url: str) -> list[Link]:
     """The page's http(s) links in page order, once per absolute URL (first occurrence wins).
 
     A link to a path ending in one of ``DOWNLOAD_EXTS`` is a ``file``; any other link is
-    ``internal`` when it stays on the page's host (ignoring a leading ``www.``). In-page
-    fragments and non-http schemes (``mailto:``, ``javascript:``, ...) are left out.
+    ``internal`` when it stays on the page's host (ignoring a leading ``www.``). The
+    fragment is dropped (``page#a`` and ``page`` are one link); links that only point into the
+    page and non-http schemes (``mailto:``, ``javascript:``, ...) are left out.
     """
     soup = parse_html(html)
     base = base_url_of(soup, base_url)
@@ -102,6 +103,8 @@ def page_links(html: str, base_url: str) -> list[Link]:
         if not href or href.startswith("#"):
             continue
         target = absolute_url(base, href)
+        if target is not None:
+            target = urldefrag(target).url  # page#a and page are one link
         if target is None or target in seen:
             continue
         try:

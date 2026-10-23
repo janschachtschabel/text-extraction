@@ -127,10 +127,9 @@ def test_data_tex_attributes_become_equations() -> None:
 
 
 def test_linked_documents_kept() -> None:
-    page = f"""<html><head><title>Worksheets</title></head><body>
+    page = """<html><head><title>Worksheets</title></head><body>
     <nav><a href="/downloads/site-map.pdf">Site map</a></nav>
     <main><h1>Worksheets for grade 5</h1>
-    <p>{LONG}</p>
     <ul>
     <li><a href="/files/fractions.pdf">Fractions</a></li>
     <li><a href="/files/decimals%20basic.pdf">Decimals (basic)</a></li>
@@ -147,6 +146,7 @@ def test_linked_documents_kept() -> None:
         assert "https://www.example.org/files/fractions.pdf" in result.content
         assert "https://www.example.org/files/answers.docx" in result.content
         assert "site-map.pdf" not in result.content  # navigation belongs to the site
+        assert "Site map" not in result.content
         assert "privacy.pdf" not in result.content
     assert "- [Fractions](https://www.example.org/files/fractions.pdf)" in markdown.content
     assert "- [Decimals (basic)](https://www.example.org/files/decimals%20basic.pdf)" in (
@@ -282,3 +282,14 @@ def test_xhtml_with_xml_declaration_is_converted_without_warnings() -> None:
         page_links(page, URL)
 
     assert result.content == "Only text"
+
+
+def test_linked_document_is_not_mistaken_for_a_longer_url_in_the_text() -> None:
+    page = f"""<html><body><main><h1>Downloads</h1><p>{LONG} Get the
+    <a href="/files/a.pdf.zip">archive</a>.</p>
+    <ul><li><a href="/files/a.pdf">Sheet A</a></li></ul></main></body></html>"""
+
+    content = convert_html(page, URL, "markdown").content
+
+    assert "(https://www.example.org/files/a.pdf.zip)" in content
+    assert "[Sheet A](https://www.example.org/files/a.pdf)" in content

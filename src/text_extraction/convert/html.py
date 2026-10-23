@@ -76,6 +76,7 @@ _BLOCKS = [
     "ul",
 ]
 _CELLS = ["td", "th"]
+_URL = re.compile(r"https?://[^\s<>\"'()\[\]]+")
 _TRAFILATURA_FORMAT = {"markdown": "markdown", "text": "txt", "html": "html"}
 
 
@@ -157,10 +158,18 @@ def _document_links(soup: BeautifulSoup) -> list[tuple[str, str]]:
     return [(label, url) for url, label in found.items()]
 
 
+def _urls_in(text: str, *, unescape_entities: bool) -> set[str]:
+    """The URLs the text holds, whole: a link to ``a.pdf.zip`` is no link to ``a.pdf``."""
+    if unescape_entities:
+        text = unescape(text)
+    return {url.rstrip(".,;:") for url in _URL.findall(text)}
+
+
 def _with_documents(text: str, documents: list[tuple[str, str]], fmt: OutputFormat) -> str:
     # Trafilatura drops a list that holds nothing but links, as navigation. On a worksheet page
     # that list is the material, so the files the content links to and the text lacks follow it.
-    missing = [(label, url) for label, url in documents if url not in text]
+    present = _urls_in(text, unescape_entities=fmt == "html")
+    missing = [(label, url) for label, url in documents if url not in present]
     if not missing:
         return text
     if fmt == "markdown":
@@ -253,6 +262,9 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     if not soup.get_text(" ", strip=True):
         return Conversion("", "bs4", title, ["The page contains no text"])
     documents = _document_links(soup)
+    for navigation in soup.select('nav, [role="navigation"]'):
+        if not navigation.decomposed:
+            navigation.decompose()
     equations = protect_equations(soup)
     markup = fmt == "html"
     warnings: list[str] = []

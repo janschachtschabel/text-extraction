@@ -49,3 +49,11 @@ def test_page_links_resolve_against_the_page_without_a_base_tag() -> None:
 def test_absolute_url_returns_none_for_unparseable_references() -> None:
     assert absolute_url("https://example.org/", "http://[URL]") is None
     assert absolute_url("https://example.org/a/", "b") == "https://example.org/a/b"
+
+
+def test_page_links_ignore_the_fragment_when_deduplicating() -> None:
+    html = '<a href="/page#a">One</a><a href="/page">Two</a><a href="/page#b">Three</a>'
+
+    assert page_links(html, "https://example.org/") == [
+        Link("https://example.org/page", "One", "internal")
+    ]
