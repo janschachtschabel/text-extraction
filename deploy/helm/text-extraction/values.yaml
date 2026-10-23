@@ -1,0 +1,115 @@
+# Default values for the text-extraction chart. Every key is documented in README.md.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/janschachtschabel/text-extraction
+  # Defaults to the chart appVersion. Production uses SemVer tags; `latest` is for staging only.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 2
+
+# Non-secret settings. Each key becomes an environment variable of the same name
+# (rendered into a ConfigMap and passed with envFrom). Values are quoted strings.
+# PUBLIC_PORT (8080) and INTERNAL_PORT (9090) are fixed by the chart.
+config:
+  LOG_LEVEL: INFO
+  LOG_FORMAT: json
+  AUTH_MODE: api_key
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_PER_MINUTE: "60"
+
+# Secrets. API_KEYS is a JSON list of {"name", "role", "sha256", "rate_limit_per_minute"} objects.
+# Set `apiKeys` for a chart-managed Secret, or point `existingSecret` at your own Secret.
+secrets:
+  apiKeys: ""
+  # Name of an existing Secret that holds the API_KEYS JSON. Takes precedence over `apiKeys`.
+  existingSecret: ""
+  # Key inside the existing Secret.
+  existingSecretKey: API_KEYS
+
+# Placeholder values until package 11 measures real consumption.
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+service:
+  type: ClusterIP
+  # Public API port. The ingress targets this port only.
+  port: 8080
+
+# The ingress exposes the public Service (port `http`, 8080) only.
+# The internal port 9090 (/health, /ready, /metrics) is never routed through it.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: text-extraction.example.org
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Single-replica Valkey for rate limits and other shared state.
+# Switch it off and set `externalValkey` to use a managed or shared Valkey/Redis.
+valkey:
+  enabled: true
+  image:
+    repository: valkey/valkey
+    tag: 8.1-alpine
+    pullPolicy: IfNotPresent
+  persistence:
+    # false: data lives in an emptyDir and is lost on restart (fine for rate-limit counters).
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+    existingClaim: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+# Used when valkey.enabled is false.
+externalValkey:
+  # Plain URL, for example redis://valkey.example.org:6379/0. Do not put a password here.
+  url: ""
+  # For a URL that carries a password, reference a Secret instead. It takes precedence over `url`.
+  existingSecret:
+    name: ""
+    key: VALKEY_URL
+
+metrics:
+  # Needs the Prometheus Operator CRDs. Scrapes the internal Service, port `internal`, path /metrics.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels, for example the `release` label that your Prometheus selects on.
+    labels: {}
+  # Needs the Prometheus Operator CRDs and kube-state-metrics (for TextExtractionDown).
+  prometheusRule:
+    enabled: false
+    labels: {}
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

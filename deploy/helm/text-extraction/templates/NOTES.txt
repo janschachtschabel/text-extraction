@@ -1,0 +1,16 @@
+text-extraction {{ .Chart.AppVersion }} is installed as release {{ .Release.Name }}.
+
+Public API (port 8080):
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "text-extraction.fullname" . }} 8080:{{ .Values.service.port }}
+  curl http://127.0.0.1:8080/v1/info
+
+Internal port 9090 (/health, /ready, /metrics) is served by svc/{{ include "text-extraction.internalServiceName" . }} inside the cluster only.
+{{- if and (eq (toString (get .Values.config "AUTH_MODE" | default "api_key")) "api_key") (not (include "text-extraction.hasApiKeys" .)) }}
+
+WARNING: AUTH_MODE is api_key but no API keys are configured. The pods will refuse to start.
+  Set secrets.apiKeys (JSON) or secrets.existingSecret, or set config.AUTH_MODE to none.
+{{- end }}
+{{- if .Values.valkey.enabled }}
+
+Valkey runs in the chart (single replica, {{ ternary "persistent" "no persistence" .Values.valkey.persistence.enabled }}). Set valkey.enabled=false and externalValkey.* to use your own.
+{{- end }}

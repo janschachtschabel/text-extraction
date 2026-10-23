@@ -1,0 +1,40 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+{{- $fullName := include "text-extraction.fullname" . }}
+{{- $internal := include "text-extraction.internalServiceName" . }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: {{ $fullName }}
+      rules:
+        # Needs kube-state-metrics. The `or vector(0)` also fires when the Deployment series is missing.
+        - alert: TextExtractionDown
+          expr: |
+            (sum(kube_deployment_status_replicas_available{namespace="{{ .Release.Namespace }}", deployment="{{ $fullName }}"}) or vector(0)) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: No ready text-extraction pod
+            description: Deployment {{ $fullName }} in namespace {{ .Release.Namespace }} has had no ready pod for 5 minutes.
+        # prometheus-fastapi-instrumentator groups the status label as 2xx, 4xx and 5xx.
+        - alert: TextExtractionHigh5xx
+          expr: |
+            sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}", service="{{ $internal }}", status="5xx"}[5m]))
+              /
+            sum(rate(http_requests_total{namespace="{{ .Release.Namespace }}", service="{{ $internal }}"}[5m]))
+              > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: text-extraction answers more than 5 % of requests with 5xx
+            description: More than 5 % of the requests to {{ $fullName }} in namespace {{ .Release.Namespace }} ended in a 5xx status for 10 minutes.
+{{- end }}

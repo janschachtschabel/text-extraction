@@ -1,0 +1,17 @@
+# Internal port 9090 (/health, /ready, /metrics). Cluster-internal only; the ingress never uses it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "text-extraction.internalServiceName" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: internal
+spec:
+  type: ClusterIP
+  ports:
+    - name: internal
+      port: 9090
+      targetPort: internal
+      protocol: TCP
+  selector:
+    {{- include "text-extraction.selectorLabels" . | nindent 4 }}

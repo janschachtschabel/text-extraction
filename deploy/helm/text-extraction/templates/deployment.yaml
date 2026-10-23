@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "text-extraction.fullname" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "text-extraction.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.secrets.apiKeys (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "text-extraction.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: text-extraction
+          image: {{ include "text-extraction.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: internal
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "text-extraction.fullname" . }}
+          env:
+            - name: PUBLIC_PORT
+              value: "8080"
+            - name: INTERNAL_PORT
+              value: "9090"
+            - name: VALKEY_URL
+              {{- if .Values.valkey.enabled }}
+              value: {{ include "text-extraction.valkeyUrl" . | quote }}
+              {{- else if .Values.externalValkey.existingSecret.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.externalValkey.existingSecret.name }}
+                  key: {{ .Values.externalValkey.existingSecret.key }}
+              {{- else }}
+              value: {{ required "externalValkey.url or externalValkey.existingSecret.name is required when valkey.enabled is false" .Values.externalValkey.url | quote }}
+              {{- end }}
+            {{- if include "text-extraction.hasApiKeys" . }}
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "text-extraction.secretName" . }}
+                  key: {{ .Values.secrets.existingSecretKey }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: internal
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: internal
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
