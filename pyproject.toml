@@ -3,7 +3,7 @@ name = "text-extraction"
 version = "0.1.0"
 description = "FastAPI service for extracting text from documents."
 requires-python = ">=3.13,<3.14"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = []
 
