@@ -1,0 +1,140 @@
+# Architecture
+
+Status: planning closed on 2026-10-23. This file is the source of truth for the build;
+update it in the same PR as any change to the design.
+
+## Overview
+
+Stateless API pods handle fast-mode requests inline and hand slow work to worker pools
+through Valkey.
+
+```
+Clients / AI agents ──(8080: REST /v1, /mcp, /ui)──▶ API pods (FastAPI, stateless)
+Prometheus ──(9090: /health /ready /metrics)──────▶ API pods
+API pods ──fetch (SSRF guard)──▶ target websites and files
+API pods ──▶ LLM endpoint (OpenAI-compatible, default model gpt-6-luna)
+API pods ──jobs──▶ Valkey (queues, results, cache, rate limits, fingerprints)
+Valkey ◀──▶ browser-worker  (Playwright Chromium: auto fallback, actions, screenshots)
+Valkey ◀──▶ docling-worker  (OCR, scanned and table-heavy PDFs, images)
+Valkey ◀──▶ nlp-worker      (MarkItDown, Presidio)
+Valkey ◀──▶ asr-worker      (faster-whisper transcription)
+workers ──▶ model volume (PVC, read-only: spaCy, Docling, Whisper models)
+optional: S3-compatible store for screenshots and large results
+```
+
+Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker`,
+`asr-worker`. Each worker is a Helm toggle and scales on queue length (KEDA or HPA).
+
+## Extraction pipeline
+
+1. **Validate and guard:** scheme, SSRF check (private, loopback, link-local and metadata
+   IPs refused; re-checked after each redirect and for browser sub-requests), size and time limits.
+2. **Compliance:** robots.txt, TDMRep (`/.well-known/tdmrep.json`, `tdm-reservation` header
+   and meta), robots meta / `X-Robots-Tag`, ai.txt / llms.txt. Mode `enforce|report|ignore`
+   per request; operator default and override permission via `COMPLIANCE_DEFAULT`,
+   `COMPLIANCE_ALLOW_OVERRIDE`. Every result carries a `compliance` block.
+3. **Fetch (fast):** httpx, HTTP/2, byte cap, conditional requests (ETag, Last-Modified).
+   Per-domain outbound limits in Valkey (parallelism, delay, `Crawl-delay`, backoff on
+   429/503, circuit breaker).
+4. **Quality gate (auto mode):** fewer than 500 visible characters while the page runs
+   JavaScript, a bot challenge, or a soft-404 → browser worker.
+5. **Convert:** HTML → Trafilatura (keep link-only lists of linked files, domain
+   boilerplate rules, MathML → LaTeX). Office/EPUB and PDFs with a good text layer →
+   MarkItDown. Scans, table-heavy PDFs, images → Docling. Vision LLM opt-in.
+   Video/audio → see below.
+6. **Post-process (optional):** DOM metadata, PII, links, structured output, chunking,
+   screenshot.
+7. **Fingerprint and classify:** see change detection; return the result envelope.
+
+## Result envelope and errors
+
+Fields: `status` (`success|partial|failed`), `error.code`, `error.message`,
+`error.retryable`, `upstream_status`, `mode_used` (`fast|browser`), `attempts`,
+`final_url`, `content_type`, `language`, `word_count`, `quality`, `timings`,
+`compliance`, `metadata`, `fingerprint`.
+
+Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
+`dns_error`, `connection_error`, `timeout`, `target_http_error`, `bot_protection`,
+`login_required`, `likely_error_page`, `empty_content`, `content_too_short`,
+`unsupported_content_type`, `too_large`, `conversion_failed`, `no_transcript_available`,
+`media_too_long`, `transcription_failed`, `llm_failed`, `rate_limited`, `internal_error`.
+
+HTTP status of the API: 200 with `status: failed` when the target failed; 4xx for bad
+requests, auth and rate limits; 5xx only for our own faults.
+
+## Public API (port 8080)
+
+| Endpoint | Purpose | Mode |
+| --- | --- | --- |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode`, `format`, `actions`, `pii`, `links`, `metadata`, `screenshot`, `chunking`, `compliance` | sync, job after `wait_seconds` (default 25) |
+| `POST /v1/extract/file` | Upload (multipart) → text/Markdown | sync, job for large files |
+| `POST /v1/screenshot` | Full page or viewport PNG, 1920×1080 | sync, job fallback |
+| `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
+| `POST /v1/chunk` | Text/Markdown/URL → chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`) | sync |
+| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
+| `POST /v1/batch` | Many URLs, fair per-domain scheduling | job |
+| `GET /v1/jobs/{id}` | Status, progress, paged results | — |
+| `GET /v1/jobs/{id}/artifacts/{name}` | Screenshot or large result | — |
+| `/mcp` | MCP tools (optional, `MCP_ENABLED`) | streamable HTTP |
+| `/ui` | Playground (optional, `UI_ENABLED`), htmx, no Node build | — |
+
+Internal port 9090: `/health`, `/ready`, `/metrics` (not in OpenAPI).
+
+Non-JSON content types to clear with operations: `multipart/form-data` (uploads),
+`image/png` (artifact download), SSE (MCP).
+
+## Auth
+
+`AUTH_MODE=api_key|none`. Keys come from a secret as hashed entries with name, role and
+optional rate limit.
+
+- `user`: all extraction endpoints; own jobs only.
+- `admin`: everything, plus all jobs, cache purge, `compliance: ignore`, JavaScript
+  actions, stealth browser, higher limits, effective config, key usage stats.
+
+`INTERNAL_API_ENABLED` (off by default) serves the API without auth for cluster-internal callers.
+
+## Feature notes
+
+- **Browser actions:** `click`, `scroll`, `wait_for`, `type`, `press`, `select`,
+  `expand_all`, presets `infinite_scroll`, `accept_cookies`; `cookies` and `headers`
+  for logged-in pages; max 20 actions; `evaluate` admin-only. Stealth (Patchright) opt-in, admin-only.
+- **DOM metadata:** extruct (JSON-LD, microdata, RDFa, OpenGraph) + Trafilatura. License
+  normalized (e.g. `CC-BY-SA-4.0`) with source and confidence; author, dates, canonical,
+  language, LRMI educational fields, images with alt text.
+- **Audio/video:** tier 1 subtitles (youtube-transcript-api, yt-dlp, HTML5 `<track>`),
+  tier 2 metadata, tier 3 ASR (faster-whisper local, external OpenAI-compatible
+  transcription switchable), opt-in `transcribe: true`, always a job.
+  `transcript_source`: `manual_subtitles|auto_subtitles|asr|metadata_only`.
+- **Change detection:** before extraction ETag/Last-Modified + SHA-256 of raw bytes
+  (unchanged → stored result). After extraction the text is normalized (no Markdown
+  syntax, case, whitespace) and gets SHA-256 + 128-permutation MinHash.
+  `similarity_to_previous`, `changed`; optional LSH (datasketch) for near-duplicates.
+- **Structured output:** LLM-free `metadata`, `selectors` (CSS/XPath schema),
+  `patterns` (regex, tables); `llm` with JSON schema output validated by Pydantic;
+  `learn_selectors` stores an LLM-written CSS schema per domain for LLM-free reuse.
+  Env: `LLM_BASE_URL`, `LLM_MODEL` (default `gpt-6-luna`), `LLM_API_KEY` (secret),
+  `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_INPUT_TOKENS`.
+- **Batch:** one sub-queue per domain, round-robin over domains with free capacity;
+  fair shares between clients.
+- **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs; `S3_ENABLED`
+  moves screenshots and large results to an S3-compatible store.
+
+## Observability
+
+Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
+duration, extraction outcome by error code and mode, browser pool usage, LLM calls,
+tokens and failures, rate-limit rejections. Alert rules ship in the Helm chart
+(queue filling, error-rate spike, workers down). structlog JSON logs; query strings
+are never logged.
+
+## Lessons from the previous services
+
+| Topic | Source | Taken over |
+| --- | --- | --- |
+| Auto mode: < 500 visible chars + JS → browser; bot challenges qualify | Selenium service 3.2 | Yes |
+| YouTube text from embedded page data; MathML → LaTeX; linked files kept | Selenium service | Yes |
+| Domain boilerplate lists, cookie auto-consent, soft-404 detection | Playwright service (kidra) | Yes |
+| WLO URL sets (25 / 200 / 4,000) and live result buckets | Playwright service | Regression harness |
+| Baseline 2026-09-28 on 4,000 URLs: fast 68 %, browser 80 %; medians 0.5 s / 9-10 s | Playwright service | Bar to beat |
+| diskcache state on local disk | Selenium service | Replaced by Valkey |
