@@ -19,12 +19,12 @@ from itertools import chain, islice
 from typing import Any
 from urllib.parse import urlsplit
 
+import jstyleson
 import structlog
 from extruct.rdfa import RDFaExtractor
-from extruct.utils import parse_html as parse_lxml
 from extruct.utils import parse_xmldom_html
 from extruct.w3cmicrodata import MicrodataExtractor
-from lxml.html import HtmlElement
+from lxml.html import HtmlElement, HTMLParser, fromstring
 from py3langid.langid import MODEL_FILE, LanguageIdentifier
 from pydantic import BaseModel, Field
 
@@ -304,8 +304,10 @@ def _json_ld_items(tree: HtmlElement) -> list[Any]:
         try:
             try:
                 data = json.loads(text, strict=False)
-            except ValueError:  # often a script wrapped in comment or CDATA markers
-                data = json.loads(_JSON_LD_WRAPPERS.sub("", text), strict=False)
+            except ValueError:
+                # Lenient JSON, as many CMS templates write it: comment or CDATA markers around
+                # the script, `//` comments, trailing commas.
+                data = jstyleson.loads(_JSON_LD_WRAPPERS.sub("", text), strict=False)
         except (ValueError, RecursionError) as error:
             _log.debug("metadata_syntax_failed", syntax="json-ld", error=type(error).__name__)
             continue
@@ -534,11 +536,14 @@ def _collect_licenses(
     return licenses.result()
 
 
-def _take(values: Iterable[str], count: int) -> Iterator[str]:
-    for number, value in enumerate(values):
-        if number >= _MAX_ITEMS_SCANNED:
-            return
-        yield value
+def _distinct(values: Iterable[str], count: int) -> list[str]:
+    """The first ``count`` different values; stops reading once it has them."""
+    found: dict[str, None] = {}
+    for value in values:
+        found.setdefault(value)
+        if len(found) >= count:
+            break
+    return list(found)
 
 
 def _first_of(*groups: Iterable[str]) -> str | None:
@@ -556,12 +561,13 @@ def _publishers(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _parse(html: str) -> HtmlElement:
     """The page as an lxml tree; an empty document when it cannot be parsed. Bytes, because
-    lxml rejects a str that carries an XML encoding declaration."""
+    lxml rejects a str that carries an XML encoding declaration. ``huge_tree`` lifts libxml2's
+    limit of 256 nested elements, which would cut a deeply nested page off, footer and all."""
     try:
-        return parse_lxml(html.encode(), "UTF-8")
+        return fromstring(html.encode(), parser=HTMLParser(encoding="utf-8", huge_tree=True))
     except Exception as error:  # an empty document, or lxml giving up
         _log.debug("metadata_parse_failed", error=type(error).__name__)
-        return parse_lxml(b"<html></html>", "UTF-8")
+        return fromstring(b"<html></html>", parser=HTMLParser(encoding="utf-8"))
 
 
 def extract_metadata(html: str, url: str, headers: Mapping[str, str]) -> PageMetadata:
@@ -614,7 +620,7 @@ def extract_metadata(html: str, url: str, headers: Mapping[str, str]) -> PageMet
             declared("og:description", "description", "twitter:description"),
             _node_values(nodes, "description"),
         ),
-        authors=list(dict.fromkeys(_take(authors, _MAX_LIST_ITEMS))),
+        authors=_distinct(authors, _MAX_LIST_ITEMS),
         published=_first_of(declared(*_PUBLISHED_META), _node_values(nodes, "datePublished")),
         modified=_first_of(declared(*_MODIFIED_META), _node_values(nodes, "dateModified")),
         site_name=_first_of(

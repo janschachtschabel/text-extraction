@@ -664,3 +664,57 @@ def test_language_detection_only_looks_at_a_bounded_prefix() -> None:
     padding = " " * 20_000
     # Fifty words, but only after a long stretch of blanks: outside the scanned prefix.
     assert detect_language(None, None, padding + GERMAN_TEXT) is None
+
+
+def test_deeply_nested_page_still_yields_footer_licence_and_images() -> None:
+    html = page(
+        body=(
+            "<div>" * 300
+            + '<img src="/deep.png" alt="Deep">'
+            + '<footer><a href="https://creativecommons.org/licenses/by/4.0/">CC</a></footer>'
+            + "</div>" * 300
+        )
+    )
+
+    result = meta(html)
+
+    assert result.license is not None
+    assert result.license.id == "CC-BY-4.0"
+    assert [image.url for image in result.images] == ["https://www.example.org/deep.png"]
+
+
+def test_microdata_and_jsonld_still_work_on_the_big_tree_parser() -> None:
+    html = page(
+        head=_jsonld({"@type": "Article", "headline": "Titel"}),
+        body='<div itemscope itemtype="https://schema.org/Article">'
+        '<meta itemprop="educationalLevel" content="Klasse 5"></div>',
+    )
+
+    result = meta(html)
+
+    assert result.title == "Titel"
+    assert result.lrmi == {"educationalLevel": "Klasse 5"}
+
+
+def test_jsonld_with_trailing_commas_and_comments_is_read() -> None:
+    lenient = """{
+        // the headline
+        "@type": "Article",
+        "headline": "Lenient",
+        "license": "CC0",
+    }"""
+    html = page(head=f'<script type="application/ld+json">{lenient}</script>')
+
+    result = meta(html)
+
+    assert result.title == "Lenient"
+    assert result.license is not None
+    assert result.license.id == "CC0-1.0"
+
+
+def test_author_list_is_deduplicated_then_capped_at_fifty() -> None:
+    names = "".join(f'<meta name="author" content="Autor {n % 120}">' for n in range(300))
+
+    authors = meta(page(head=names)).authors
+
+    assert authors == [f"Autor {n}" for n in range(50)]
