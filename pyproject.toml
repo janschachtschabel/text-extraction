@@ -12,6 +12,7 @@ dependencies = [
     "httpx[http2]>=0.28.1",
     "prometheus-client>=0.26.0",
     "prometheus-fastapi-instrumentator>=8.1.0",
+    "protego>=0.7.0",
     "pydantic-settings>=2.16.1",
     "redis>=8.1.0",
     "structlog>=26.1.0",

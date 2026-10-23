@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     outbound_max_backoff_seconds: float = Field(default=300, ge=1)  # cap for any cooldown
     circuit_failure_threshold: int = Field(default=5, ge=1)  # consecutive failures to open
     circuit_open_seconds: float = Field(default=60, ge=1)  # how long the circuit stays open
+    # Compliance: robots.txt, TDMRep, ai.txt and noai.
+    compliance_default: Literal["enforce", "report", "ignore"] = "enforce"  # mode without a request
+    compliance_allow_override: bool = True  # may non-admin callers choose another mode?
+    compliance_cache_seconds: int = Field(default=3600, ge=0)  # cache of the origin files; 0 = off
 
     @field_validator("log_level", mode="before")
     @classmethod
