@@ -538,3 +538,100 @@ def test_concurrent_fetches_are_not_serialised_by_the_connection_pool() -> None:
         server.server_close()
 
     assert statuses == [200] * 20
+
+
+@pytest.fixture
+def other_server() -> Iterator[HTTPServer]:
+    """A second local server: another port is another origin."""
+    server = HTTPServer(host="127.0.0.1", port=0)
+    server.start()
+    try:
+        yield server
+    finally:
+        server.clear()
+        server.stop()
+
+
+VALIDATORS = Validators(etag='"v1"', last_modified="Wed, 21 Oct 2026 07:28:00 GMT")
+
+
+def test_validators_follow_a_redirect_on_the_same_origin(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/old").respond_with_data("", 301, headers={"Location": "/new"})
+    httpserver.expect_request("/new").respond_with_data("moved here")
+
+    fetch(httpserver.url_for("/old"), validators=VALIDATORS)
+
+    headers = httpserver.log[1][0].headers
+    assert headers.get("If-None-Match") == '"v1"'
+    assert headers.get("If-Modified-Since") == VALIDATORS.last_modified
+
+
+def test_validators_are_not_sent_to_another_origin(
+    httpserver: HTTPServer, other_server: HTTPServer
+) -> None:
+    other_server.expect_request("/new").respond_with_data(
+        "", 302, headers={"Location": httpserver.url_for("/back")}
+    )
+    httpserver.expect_request("/old").respond_with_data(
+        "", 301, headers={"Location": other_server.url_for("/new")}
+    )
+    httpserver.expect_request("/back").respond_with_data("home again")
+
+    result = fetch(httpserver.url_for("/old"), validators=VALIDATORS)
+
+    assert result.content == b"home again"
+    for headers in (other_server.log[0][0].headers, httpserver.log[1][0].headers):
+        assert "If-None-Match" not in headers  # once the chain left the origin, never again
+        assert "If-Modified-Since" not in headers
+
+
+@pytest.mark.parametrize("encoding", ["identity", "gzip"])
+def test_truncating_fetch_keeps_the_first_bytes(httpserver: HTTPServer, encoding: str) -> None:
+    body = bytes(range(256)) * 40  # 10,240 bytes
+    data = gzip.compress(body) if encoding == "gzip" else body
+    httpserver.expect_request("/robots.txt").respond_with_data(
+        data, headers={"Content-Encoding": encoding}
+    )
+
+    result = fetch(httpserver.url_for("/robots.txt"), max_bytes=4096, truncate=True)
+
+    assert result.content == body[:4096]
+    assert result.truncated is True
+    assert result.raw_sha256 == hashlib.sha256(body[:4096]).hexdigest()
+
+
+def test_fetch_within_the_cap_is_not_truncated(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/small").respond_with_data(b"x" * 100)
+
+    result = fetch(httpserver.url_for("/small"), max_bytes=4096, truncate=True)
+
+    assert result.content == b"x" * 100
+    assert result.truncated is False
+
+
+def test_redirect_hook_sees_every_hop(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/a").respond_with_data("", 301, headers={"Location": "/b"})
+    httpserver.expect_request("/b").respond_with_data("", 302, headers={"Location": "/c"})
+    httpserver.expect_request("/c").respond_with_data("done")
+    hops: list[str] = []
+
+    async def on_redirect(url: str) -> None:
+        hops.append(url)
+
+    result = fetch(httpserver.url_for("/a"), on_redirect=on_redirect)
+
+    assert result.content == b"done"
+    assert hops == [httpserver.url_for("/b"), httpserver.url_for("/c")]
+
+
+def test_redirect_hook_can_stop_the_chain(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/a").respond_with_data("", 301, headers={"Location": "/private"})
+    httpserver.expect_request("/private").respond_with_data("secret")
+
+    async def on_redirect(url: str) -> None:
+        raise FetchError(ErrorCode.BLOCKED_BY_ROBOTS, "robots.txt disallows the redirect target.")
+
+    error = fetch_error(httpserver.url_for("/a"), on_redirect=on_redirect)
+
+    assert error.code is ErrorCode.BLOCKED_BY_ROBOTS
+    assert [request.path for request, _ in httpserver.log] == ["/a"]

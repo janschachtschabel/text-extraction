@@ -6,7 +6,13 @@ What it enforces, for the first request and every redirect hop alike:
 * the SSRF guard (``GuardedTransport``), with no proxy and no environment lookup;
 * one overall deadline for the whole call, redirects included;
 * a cap on the *decoded* body size. ``gzip`` and ``deflate`` are inflated here in bounded steps,
-  so a compression bomb cannot allocate more than one step beyond the cap.
+  so a compression bomb cannot allocate more than one step beyond the cap. With ``truncate`` the
+  body is cut at the cap instead (robots.txt is read from its first 500 KiB, RFC 9309);
+* cache validators go only to the origin they came from: once a redirect leaves it, the
+  conditional headers are dropped for the rest of the chain.
+
+The caller may watch the chain with ``on_redirect``: it is awaited with each redirect target
+before that target is requested, and may raise ``FetchError`` to end the chain there.
 
 Failures of the target or the network are raised as ``FetchError`` with a code from
 ``ErrorCode``. A response with status >= 400 is not an error here: it is returned and the
@@ -20,7 +26,7 @@ import re
 import socket
 import time
 import zlib
-from collections.abc import AsyncGenerator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import urljoin, urlsplit
@@ -62,6 +68,11 @@ _REQUEST_HEADERS = {
 # httpx encodes header values as ASCII, and the value comes from the target site.
 _MAX_VALIDATOR_CHARS = 1024
 _SENDABLE_VALUE = re.compile(rf"[\x20-\x7e]{{1,{_MAX_VALIDATOR_CHARS}}}")
+_CONDITIONAL_HEADERS = ("If-None-Match", "If-Modified-Since")
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+# Awaited with each redirect target before it is requested; raises ``FetchError`` to stop.
+RedirectHook = Callable[[str], Awaitable[None]]
 
 
 def _sendable(value: str | None) -> str | None:
@@ -93,7 +104,8 @@ class FetchResult:
     ``redirects`` lists the URLs that were followed to, in order, so ``final_url`` is its last
     element when it is not empty. ``raw_sha256`` is the hash of ``content`` as received after
     transfer decoding, before any text extraction. ``not_modified`` is true for a 304 answer,
-    which has empty ``content``.
+    which has empty ``content``. ``truncated`` is true when a truncating fetch cut the body at
+    its byte limit.
     """
 
     url: str
@@ -107,6 +119,17 @@ class FetchResult:
     redirects: list[str]
     not_modified: bool
     raw_sha256: str
+    truncated: bool = False
+
+
+@dataclass(frozen=True)
+class _Limits:
+    """The limits of one ``fetch`` call."""
+
+    max_bytes: int
+    truncate: bool
+    deadline: float  # seconds for the whole call
+    started: float  # time.monotonic() at the start
 
 
 class FetchError(Exception):
@@ -211,6 +234,13 @@ async def _remember_status(response: httpx.Response) -> None:
     response.request.extensions[_STATUS_KEY] = response.status_code
 
 
+def _origin_of(url: str) -> tuple[str, str, int | None]:
+    """Scheme, host and port of a validated URL, the port filled in for http and https."""
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or "").lower(), parts.port or _DEFAULT_PORTS.get(scheme)
+
+
 def _host_of(url: str) -> str | None:
     try:
         return urlsplit(url).hostname
@@ -250,8 +280,14 @@ class Fetcher:
         validators: Validators | None = None,
         max_bytes: int | None = None,
         timeout_seconds: float | None = None,
+        truncate: bool = False,
+        on_redirect: RedirectHook | None = None,
     ) -> FetchResult:
-        """GET ``url``, following redirects, or raise ``FetchError``."""
+        """GET ``url``, following redirects, or raise ``FetchError``.
+
+        ``truncate`` keeps the first ``max_bytes`` of a longer body instead of failing with
+        ``too_large``. ``on_redirect`` runs inside the deadline of this call.
+        """
         limit = max_bytes if max_bytes is not None else self._settings.fetch_max_bytes
         deadline = (
             timeout_seconds if timeout_seconds is not None else self._settings.fetch_timeout_seconds
@@ -261,7 +297,9 @@ class Fetcher:
         started = time.monotonic()
         try:
             async with asyncio.timeout(deadline):
-                return await self._fetch(url, validators, limit, deadline, started)
+                return await self._fetch(
+                    url, validators, _Limits(limit, truncate, deadline, started), on_redirect
+                )
         except FetchError:
             raise
         except (InvalidUrlError, httpx.InvalidURL) as error:
@@ -292,9 +330,8 @@ class Fetcher:
         self,
         url: str,
         validators: Validators | None,
-        max_bytes: int,
-        deadline: float,
-        started: float,
+        limits: _Limits,
+        on_redirect: RedirectHook | None,
     ) -> FetchResult:
         headers = dict(_REQUEST_HEADERS)
         # Validators come from an earlier answer of the target (possibly from the cache): only a
@@ -305,11 +342,20 @@ class Fetcher:
             headers["If-Modified-Since"] = last_modified
 
         current = url
+        origin = _origin_of(url)
         redirects: list[str] = []
         cookies = httpx.Cookies()  # lives for this call (one redirect chain) only
         while True:
             validate_url(current)
-            request = self._client.build_request("GET", current, headers=headers, timeout=deadline)
+            if redirects:
+                if _origin_of(current) != origin:
+                    for name in _CONDITIONAL_HEADERS:  # the validators belong to the first origin
+                        headers.pop(name, None)
+                if on_redirect is not None:
+                    await on_redirect(current)
+            request = self._client.build_request(
+                "GET", current, headers=headers, timeout=limits.deadline
+            )
             cookies.set_cookie_header(request)
             async with contextlib.aclosing(await self._send(request)) as response:
                 cookies.extract_cookies(response)
@@ -325,7 +371,9 @@ class Fetcher:
                     current = self._redirect_target(current, location, status)
                     redirects.append(current)
                     continue
-                content = b"" if status == 304 else await self._read_body(response, max_bytes)
+                content, truncated = (
+                    (b"", False) if status == 304 else await self._read_body(response, limits)
+                )
                 content_type, charset = _split_content_type(response.headers.get("content-type"))
                 return FetchResult(
                     url=url,
@@ -335,10 +383,11 @@ class Fetcher:
                     content=content,
                     content_type=content_type,
                     charset=charset,
-                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    elapsed_ms=round((time.monotonic() - limits.started) * 1000),
                     redirects=redirects,
                     not_modified=status == 304,
                     raw_sha256=hashlib.sha256(content).hexdigest(),
+                    truncated=truncated,
                 )
 
     async def _send(self, request: httpx.Request) -> httpx.Response:
@@ -370,10 +419,13 @@ class Fetcher:
             ) from None
         return target
 
-    async def _read_body(self, response: httpx.Response, max_bytes: int) -> bytes:
+    async def _read_body(self, response: httpx.Response, limits: _Limits) -> tuple[bytes, bool]:
+        """The decoded body and whether it was cut at the limit."""
+        max_bytes = limits.max_bytes
         declared = response.headers.get("content-length", "")
         if (
-            declared.isdigit()
+            not limits.truncate
+            and declared.isdigit()
             and int(declared) > max_bytes
             and not response.headers.get("content-encoding")
         ):
@@ -383,8 +435,10 @@ class Fetcher:
             async for chunk in chunks:
                 body += chunk
                 if len(body) > max_bytes:
-                    raise self._too_large(response.status_code)
-        return bytes(body)
+                    if not limits.truncate:
+                        raise self._too_large(response.status_code)
+                    return bytes(body[:max_bytes]), True
+        return bytes(body), False
 
     async def _decoded_chunks(self, response: httpx.Response) -> AsyncGenerator[bytes]:
         """Decoded body in pieces of at most ``_CHUNK_SIZE`` bytes."""
