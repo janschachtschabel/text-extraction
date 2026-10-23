@@ -26,6 +26,8 @@ import httpcore
 import httpx
 
 MAX_URL_LENGTH = 2048
+# Idle connections are closed after this many seconds.
+KEEPALIVE_EXPIRY_SECONDS = 30.0
 
 AddressPolicy = Callable[[IPv4Address | IPv6Address], bool]
 
@@ -216,9 +218,23 @@ class GuardedTransport(httpx.AsyncBaseTransport):
     No proxy and no environment lookup: the pool connects straight to the checked address.
     """
 
-    def __init__(self, policy: AddressPolicy, *, http2: bool = True) -> None:
+    def __init__(
+        self,
+        policy: AddressPolicy,
+        *,
+        http2: bool = True,
+        max_connections: int = 200,
+        max_keepalive_connections: int = 50,
+        keepalive_expiry: float = KEEPALIVE_EXPIRY_SECONDS,
+    ) -> None:
+        # httpcore's own defaults (10 connections, idle connections kept forever) would cap a
+        # pod at ten fetches in flight.
         self._pool = httpcore.AsyncConnectionPool(
-            network_backend=GuardedBackend(policy), http2=http2
+            network_backend=GuardedBackend(policy),
+            http2=http2,
+            max_connections=max_connections,
+            max_keepalive_connections=max_keepalive_connections,
+            keepalive_expiry=keepalive_expiry,
         )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

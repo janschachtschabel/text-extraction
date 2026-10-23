@@ -425,6 +425,8 @@ def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.outbound_max_backoff_seconds == 300
     assert settings.circuit_failure_threshold == 5
     assert settings.circuit_open_seconds == 60
+    assert settings.outbound_max_connections == 200
+    assert settings.outbound_max_keepalive == 50
 
 
 @pytest.mark.parametrize(
@@ -438,6 +440,8 @@ def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         ("OUTBOUND_MAX_BACKOFF_SECONDS", "0", "outbound_max_backoff_seconds"),
         ("CIRCUIT_FAILURE_THRESHOLD", "0", "circuit_failure_threshold"),
         ("CIRCUIT_OPEN_SECONDS", "0", "circuit_open_seconds"),
+        ("OUTBOUND_MAX_CONNECTIONS", "0", "outbound_max_connections"),
+        ("OUTBOUND_MAX_KEEPALIVE", "-1", "outbound_max_keepalive"),
     ],
 )
 def test_outbound_limits_are_validated(

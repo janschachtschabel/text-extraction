@@ -230,7 +230,11 @@ class Fetcher:
                 else is_public_address
             )
         self._client = httpx.AsyncClient(
-            transport=GuardedTransport(policy),
+            transport=GuardedTransport(
+                policy,
+                max_connections=settings.outbound_max_connections,
+                max_keepalive_connections=settings.outbound_max_keepalive,
+            ),
             trust_env=False,
             follow_redirects=False,
             event_hooks={"response": [_remember_status]},

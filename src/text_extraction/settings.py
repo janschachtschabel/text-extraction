@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     outbound_max_backoff_seconds: float = Field(default=300, ge=1)  # cap for any cooldown
     circuit_failure_threshold: int = Field(default=5, ge=1)  # consecutive failures to open
     circuit_open_seconds: float = Field(default=60, ge=1)  # how long the circuit stays open
+    # Connection pool of this pod's fetcher, over all hosts.
+    outbound_max_connections: int = Field(default=200, ge=1)  # open connections at most
+    outbound_max_keepalive: int = Field(default=50, ge=0)  # idle connections kept for reuse
     # Compliance: robots.txt, TDMRep, ai.txt and noai.
     compliance_default: Literal["enforce", "report", "ignore"] = "enforce"  # mode without a request
     compliance_allow_override: bool = True  # may non-admin callers choose another mode?

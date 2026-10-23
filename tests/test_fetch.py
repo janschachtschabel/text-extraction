@@ -6,6 +6,7 @@ import threading
 import time
 import zlib
 from collections.abc import Callable, Coroutine, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import IPv4Address, IPv6Address
 from typing import Any
 
@@ -492,3 +493,48 @@ def test_validators_from_headers_keep_only_sendable_values(value: str, kept: boo
 
     expected = value if kept else None
     assert validators == Validators(etag=expected, last_modified=expected)
+
+
+def test_concurrent_fetches_are_not_serialised_by_the_connection_pool() -> None:
+    # Every request waits until 20 are in the server at once; a pool of 10 connections never
+    # gets there, and the barrier breaks.
+    barrier = threading.Barrier(20, timeout=15)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            try:
+                barrier.wait()
+                status = 200
+            except threading.BrokenBarrierError:
+                status = 503
+            self.send_response(status)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/slow"
+
+    async def scenario() -> list[int]:
+        fetcher = make_fetcher()
+        try:
+            results = await asyncio.gather(
+                *(fetcher.fetch(url, timeout_seconds=30) for _ in range(20))
+            )
+            return [result.status for result in results]
+        finally:
+            await fetcher.aclose()
+
+    try:
+        statuses = run(scenario)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert statuses == [200] * 20

@@ -34,6 +34,8 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `OUTBOUND_MAX_BACKOFF_SECONDS` | `300` | Upper limit for any pause after 429 or 503, including `Retry-After`. Minimum 1. |
 | `CIRCUIT_FAILURE_THRESHOLD` | `5` | Consecutive connection failures or 5xx answers from a host that open its circuit. Minimum 1. |
 | `CIRCUIT_OPEN_SECONDS` | `60` | How long an open circuit refuses requests to the host. Minimum 1. |
+| `OUTBOUND_MAX_CONNECTIONS` | `200` | Open outbound connections of one pod at most, over all hosts (the fetcher's connection pool). Minimum 1. |
+| `OUTBOUND_MAX_KEEPALIVE` | `50` | Idle outbound connections a pod keeps for reuse; an idle connection is closed after 30 s. Minimum 0. |
 | `COMPLIANCE_DEFAULT` | `enforce` | Compliance mode when a request does not choose one: `enforce` blocks what robots.txt, TDMRep, ai.txt or `noai` forbid; `report` only reports it; `ignore` skips the checks. |
 | `COMPLIANCE_ALLOW_OVERRIDE` | `true` | Whether non-admin callers may choose `enforce` or `report` per request. `ignore` stays admin-only (unless it is the default). Admins may always choose. A refused choice answers 403 `forbidden`. |
 | `COMPLIANCE_CACHE_SECONDS` | `3600` | How long robots.txt, `tdmrep.json` and ai.txt of an origin are cached in Valkey. 0 switches the cache off. A file that could not be fetched (5xx, 429, network error) is cached at most 300 s, so a short outage does not block a site for the whole period. |
