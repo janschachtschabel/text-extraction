@@ -41,7 +41,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 The fetcher identifies itself on every outbound request with a fixed, honest user agent,
 `text-extraction/<version> (+https://github.com/janschachtschabel/text-extraction)`. It is not
 configurable. The robots.txt product token is `text-extraction`; robots.txt is read per RFC 9309
-(4xx means no rules; 5xx, 429, a network error or a file over 512 KB means "unavailable", which
+(4xx and unfollowable redirects mean no rules; 5xx, 429, a network error or a file over 512 KB means "unavailable", which
 `enforce` treats as disallowed). Client trace headers
 (`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
 variables are ignored.

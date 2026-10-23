@@ -17,7 +17,9 @@ robots.txt follows RFC 9309 (via protego) with the product token ``text-extracti
 
 * 2xx: the rules apply;
 * 4xx: no rules, everything is allowed. 429 is the exception: it means "try later", so it is
-  treated like a server error;
+  treated like a server error. A final 3xx (no usable Location, too many redirects) also means
+  no rules. The fetcher raises ``too_large`` or similar for some of these answers; their
+  ``upstream_status`` decides, so a 404 page over the size limit still means "no file";
 * 5xx, any other status and any fetch error: ``unavailable``, which ``enforce`` treats as
   disallowed. The body of a robots.txt over the 512 KB fetch limit is not available to us
   (the fetcher raises ``too_large`` without a body), so that case is ``unavailable`` too.
@@ -33,9 +35,11 @@ site does not block it for a whole cache period.
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import math
 import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
@@ -66,6 +70,8 @@ _UNAVAILABLE_TTL_SECONDS = 300
 # Only the head of a page can carry the meta tags we read.
 _META_SCAN_CHARS = 262_144
 _MAX_POLICY_CHARS = 2048
+# Parsed robots.txt / ai.txt files kept in this process.
+_RULES_CACHE_SIZE = 256
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 _NOAI_DIRECTIVES = frozenset({"noai", "noml"})
@@ -165,6 +171,9 @@ class ComplianceChecker:
         self._fetcher = fetcher
         self._valkey = valkey
         self._settings = settings
+        # Parsed rules by SHA-256 of their text: a 500 KB file takes a while to parse, and the
+        # same text from the Valkey cache must not be parsed again on every request.
+        self._rules_cache: OrderedDict[str, Protego | None] = OrderedDict()
 
     async def before_fetch(self, url: str, mode: ComplianceMode) -> ComplianceReport:
         """Check robots.txt, TDMRep and ai.txt for ``url``; fetches nothing in ``ignore`` mode."""
@@ -199,7 +208,8 @@ class ComplianceChecker:
 
         metas = _head_metas(html)
         found: list[tuple[bool, str | None, Literal["header", "meta"]]] = []
-        header_value = _parse_reservation(fetched.headers.get("tdm-reservation"))
+        # Repeated headers arrive joined with ", "; the first value counts.
+        header_value = _parse_reservation(fetched.headers.get("tdm-reservation", "").split(",")[0])
         if header_value is not None:
             found.append((header_value, _policy(fetched.headers.get("tdm-policy")), "header"))
         meta_value = _parse_reservation(_first_content(metas, "tdm-reservation"))
@@ -230,7 +240,7 @@ class ComplianceChecker:
         if entry.state == "absent":
             return report.model_copy(update={"robots": "allowed"})
         reasons = list(report.reasons)
-        rules = _parse_rules(entry.body) if entry.state == "found" else None
+        rules = self._rules(entry.body) if entry.state == "found" else None
         if rules is None:
             reasons.append("robots.txt could not be retrieved, so access cannot be confirmed.")
             return report.model_copy(update={"robots": "unavailable", "reasons": reasons})
@@ -267,7 +277,7 @@ class ComplianceChecker:
 
     def _apply_ai_txt(self, report: ComplianceReport, entry: _Entry, url: str) -> ComplianceReport:
         reasons = list(report.reasons)
-        rules = _parse_rules(entry.body) if entry.state == "found" else None
+        rules = self._rules(entry.body) if entry.state == "found" else None
         if rules is None:
             if entry.state == "unavailable":
                 reasons.append("ai.txt could not be retrieved.")
@@ -276,6 +286,17 @@ class ComplianceChecker:
             return report.model_copy(update={"ai_txt": "allowed"})
         reasons.append(f"ai.txt disallows this URL for {PRODUCT_TOKEN}.")
         return report.model_copy(update={"ai_txt": "disallowed", "reasons": reasons})
+
+    def _rules(self, text: str) -> Protego | None:
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        if digest in self._rules_cache:
+            self._rules_cache.move_to_end(digest)
+            return self._rules_cache[digest]
+        rules = _parse_rules(text)
+        self._rules_cache[digest] = rules
+        if len(self._rules_cache) > _RULES_CACHE_SIZE:
+            self._rules_cache.popitem(last=False)
+        return rules
 
     # --- reading the origin files --------------------------------------------------------------
 
@@ -294,11 +315,19 @@ class ComplianceChecker:
                 file_url, max_bytes=_FILE_MAX_BYTES, timeout_seconds=_FILE_TIMEOUT_SECONDS
             )
         except FetchError as error:
-            _log.info("compliance_file_unavailable", code=str(error.code))
+            # The fetcher also raises for some answers it did read: a 404 page over the size limit,
+            # too many redirects. Their status says "no file here", not "site down".
+            if error.upstream_status is not None and _says_absent(error.upstream_status):
+                return _Entry("absent")
+            _log.info(
+                "compliance_file_unavailable",
+                host=urlsplit(file_url).hostname,
+                code=str(error.code),
+            )
             return _Entry("unavailable")
         if 200 <= fetched.status < 300:
             return _Entry("found", fetched.content.decode("utf-8-sig", errors="replace"))
-        if 400 <= fetched.status < 500 and fetched.status != 429:
+        if _says_absent(fetched.status):
             return _Entry("absent")
         return _Entry("unavailable")
 
@@ -347,6 +376,15 @@ def _origin(url: str) -> _Origin:
     port = parts.port or _DEFAULT_PORTS[scheme]
     base = f"{scheme}://{host}" + ("" if port == _DEFAULT_PORTS[scheme] else f":{port}")
     return _Origin(key=f"{scheme}://{host}:{port}", base=base)
+
+
+def _says_absent(status: int) -> bool:
+    """Whether an HTTP status means "no such file": 4xx (not 429) and a 3xx that went nowhere.
+
+    RFC 9309 section 2.3.1.3 treats 4xx as "unavailable", which allows everything. Section 2.3.1.2
+    lets a crawler treat redirects that cannot be followed the same way.
+    """
+    return 300 <= status < 400 or (400 <= status < 500 and status != 429)
 
 
 def _parse_rules(text: str) -> Protego | None:

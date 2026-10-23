@@ -1,12 +1,15 @@
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from protego import Protego
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from text_extraction import compliance
 from text_extraction.auth import Principal
 from text_extraction.compliance import (
     ComplianceChecker,
@@ -51,9 +54,7 @@ def page_result(
     headers: dict[str, str] | None = None, content_type: str = "text/html"
 ) -> FetchResult:
     fetched = result(PAGE, "<html></html>")
-    return FetchResult(
-        **{**fetched.__dict__, "headers": headers or {}, "content_type": content_type}
-    )
+    return replace(fetched, headers=headers or {}, content_type=content_type)
 
 
 class FakeFetcher:
@@ -167,6 +168,55 @@ def test_robots_fetch_error_is_unavailable_and_only_reported_in_report_mode() ->
     assert blocking_code(enforced) is ErrorCode.BLOCKED_BY_ROBOTS
     assert reported.decision == "reported"
     assert blocking_code(reported) is None
+
+
+def test_robots_too_large_404_page_is_absent_not_unavailable() -> None:
+    oversized_404 = FetchError(ErrorCode.TOO_LARGE, "too large", upstream_status=404)
+    answers: dict[str, FetchResult | FetchError] = {ROBOTS: oversized_404, AI_TXT: oversized_404}
+
+    report = check(answers)
+
+    assert report.robots == "allowed"
+    assert report.ai_txt == "absent"
+    assert report.decision == "allowed"
+
+
+def test_robots_too_large_429_or_5xx_or_200_stays_unavailable() -> None:
+    for status in (429, 503, 200):
+        answers: dict[str, FetchResult | FetchError] = {
+            ROBOTS: FetchError(ErrorCode.TOO_LARGE, "too large", upstream_status=status)
+        }
+
+        assert check(answers).robots == "unavailable", status
+
+
+def test_robots_final_3xx_is_absent() -> None:
+    stray_304 = check(robots_answer("", status=304))
+    no_location = check(robots_answer("moved", status=301))
+
+    assert stray_304.robots == "allowed"
+    assert no_location.robots == "allowed"
+    assert no_location.decision == "allowed"
+
+
+def test_robots_too_many_redirects_is_absent() -> None:
+    answers: dict[str, FetchResult | FetchError] = {
+        ROBOTS: FetchError(
+            ErrorCode.TARGET_HTTP_ERROR,
+            "The target redirected too many times.",
+            upstream_status=302,
+        ),
+        AI_TXT: FetchError(
+            ErrorCode.TARGET_HTTP_ERROR,
+            "The target redirected too many times.",
+            upstream_status=302,
+        ),
+    }
+
+    report = check(answers)
+
+    assert report.robots == "allowed"
+    assert report.ai_txt == "absent"
 
 
 def test_robots_too_large_is_unavailable() -> None:
@@ -320,6 +370,36 @@ def test_cache_disabled_with_zero_seconds() -> None:
 
     assert asyncio.run(scenario()) == []
     assert len(fetcher.calls) == 6
+
+
+def test_parsed_rules_are_reused_between_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    parsed: list[str] = []
+    real_parse = Protego.parse
+
+    def counting_parse(text: str) -> Any:
+        parsed.append(text)
+        return real_parse(text)
+
+    monkeypatch.setattr(Protego, "parse", counting_parse)
+    checker, _, _ = make_checker(robots_answer("User-agent: *\nDisallow: /docs/\n"))
+
+    async def scenario() -> list[ComplianceReport]:
+        return [await checker.before_fetch(PAGE, "enforce") for _ in range(3)]
+
+    reports = asyncio.run(scenario())
+
+    assert {report.robots for report in reports} == {"disallowed"}
+    assert parsed == ["User-agent: *\nDisallow: /docs/\n"]  # robots.txt once; the 404s have no text
+
+
+def test_parsed_rules_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(compliance, "_RULES_CACHE_SIZE", 2)
+    checker, _, _ = make_checker({})
+
+    for number in range(5):
+        checker._rules(f"User-agent: *\nDisallow: /{number}\n")
+
+    assert len(checker._rules_cache) == 2
 
 
 def test_garbled_cache_entry_is_refetched() -> None:
@@ -486,6 +566,16 @@ def test_tdm_header_and_meta() -> None:
     assert open_header.tdm_source == "header"
     assert open_header.decision == "allowed"
     assert base.tdm_reserved is None  # after_fetch returns a new report
+
+
+def test_repeated_tdm_reservation_header_uses_the_first_value() -> None:
+    checker, _, _ = make_checker({})
+
+    reserved = checker.after_fetch(check({}), page_result({"tdm-reservation": "1, 1"}), None)
+    open_first = checker.after_fetch(check({}), page_result({"tdm-reservation": "0, 1"}), None)
+
+    assert reserved.tdm_reserved is True
+    assert open_first.tdm_reserved is False
 
 
 def test_header_reservation_overrides_an_open_tdmrep_entry() -> None:
