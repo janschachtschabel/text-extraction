@@ -38,6 +38,11 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
    429/503, circuit breaker).
 4. **Quality gate (auto mode):** fewer than 500 visible characters while the page runs
    JavaScript, a bot challenge, or a soft-404 → browser worker.
+   `quality.py` reports `js_heavy`, `bot_challenge`, `soft_404` and `login_wall`; a bot
+   challenge, soft-404, login wall or empty content ends `failed` (`bot_protection`,
+   `likely_error_page`, `login_required`, `empty_content`), fewer than `QUALITY_MIN_WORDS`
+   words ends `partial` (`content_too_short`). Until the browser package, `auto` only reports
+   `quality.browser_recommended`.
 5. **Convert:** HTML → Trafilatura (keep link-only lists of linked files, domain
    boilerplate rules, MathML → LaTeX). Office/EPUB and PDFs with a good text layer →
    MarkItDown. Scans, table-heavy PDFs, images → Docling. Vision LLM opt-in.

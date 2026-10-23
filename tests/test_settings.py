@@ -21,6 +21,18 @@ SETTING_ENV_VARS = (
     "VALKEY_URL",
     "RATE_LIMIT_PER_MINUTE",
     "RATE_LIMIT_ENABLED",
+    "FETCH_TIMEOUT_SECONDS",
+    "FETCH_MAX_BYTES",
+    "FETCH_MAX_REDIRECTS",
+    "FETCH_ALLOW_PRIVATE_NETWORKS",
+    "OUTBOUND_MAX_CONCURRENCY_PER_HOST",
+    "OUTBOUND_MIN_DELAY_MS",
+    "OUTBOUND_MAX_CRAWL_DELAY_SECONDS",
+    "OUTBOUND_MAX_WAIT_SECONDS",
+    "OUTBOUND_BACKOFF_SECONDS",
+    "OUTBOUND_MAX_BACKOFF_SECONDS",
+    "CIRCUIT_FAILURE_THRESHOLD",
+    "CIRCUIT_OPEN_SECONDS",
 )
 
 
@@ -55,6 +67,10 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.valkey_url == "redis://localhost:6379/0"
     assert settings.rate_limit_per_minute == 60
     assert settings.rate_limit_enabled is True
+    assert settings.fetch_timeout_seconds == 20
+    assert settings.fetch_max_bytes == 20_000_000
+    assert settings.fetch_max_redirects == 5
+    assert settings.fetch_allow_private_networks is False
     assert settings.api_keys == [
         ApiKey(name="ci", role="user", sha256=sha256_hex("secret"), rate_limit_per_minute=None)
     ]
@@ -360,3 +376,87 @@ def test_duplicate_sha256_across_env_and_file_rejected(
         load_settings()
 
     assert digest not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "field"),
+    [
+        ("FETCH_TIMEOUT_SECONDS", "0", "fetch_timeout_seconds"),
+        ("FETCH_MAX_BYTES", "1023", "fetch_max_bytes"),
+        ("FETCH_MAX_REDIRECTS", "-1", "fetch_max_redirects"),
+        ("FETCH_MAX_REDIRECTS", "21", "fetch_max_redirects"),
+    ],
+)
+def test_fetch_limits_are_validated(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, field: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError, match=field):
+        load_settings()
+
+
+def test_fetch_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("FETCH_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("FETCH_MAX_BYTES", "2048")
+    monkeypatch.setenv("FETCH_MAX_REDIRECTS", "0")
+    monkeypatch.setenv("FETCH_ALLOW_PRIVATE_NETWORKS", "true")
+
+    settings = load_settings()
+
+    assert settings.fetch_timeout_seconds == 2.5
+    assert settings.fetch_max_bytes == 2048
+    assert settings.fetch_max_redirects == 0
+    assert settings.fetch_allow_private_networks is True
+
+
+def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.outbound_max_concurrency_per_host == 2
+    assert settings.outbound_min_delay_ms == 1000
+    assert settings.outbound_max_crawl_delay_seconds == 10
+    assert settings.outbound_max_wait_seconds == 10
+    assert settings.outbound_backoff_seconds == 30
+    assert settings.outbound_max_backoff_seconds == 300
+    assert settings.circuit_failure_threshold == 5
+    assert settings.circuit_open_seconds == 60
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "field"),
+    [
+        ("OUTBOUND_MAX_CONCURRENCY_PER_HOST", "0", "outbound_max_concurrency_per_host"),
+        ("OUTBOUND_MIN_DELAY_MS", "-1", "outbound_min_delay_ms"),
+        ("OUTBOUND_MAX_CRAWL_DELAY_SECONDS", "-1", "outbound_max_crawl_delay_seconds"),
+        ("OUTBOUND_MAX_WAIT_SECONDS", "-1", "outbound_max_wait_seconds"),
+        ("OUTBOUND_BACKOFF_SECONDS", "0.5", "outbound_backoff_seconds"),
+        ("OUTBOUND_MAX_BACKOFF_SECONDS", "0", "outbound_max_backoff_seconds"),
+        ("CIRCUIT_FAILURE_THRESHOLD", "0", "circuit_failure_threshold"),
+        ("CIRCUIT_OPEN_SECONDS", "0", "circuit_open_seconds"),
+    ],
+)
+def test_outbound_limits_are_validated(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str, field: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError, match=field):
+        load_settings()
+
+
+def test_quality_min_words_default_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().quality_min_words == 50
+
+    monkeypatch.setenv("QUALITY_MIN_WORDS", "0")
+    assert load_settings().quality_min_words == 0
+
+    monkeypatch.setenv("QUALITY_MIN_WORDS", "-1")
+    with pytest.raises(ConfigError, match="quality_min_words"):
+        load_settings()

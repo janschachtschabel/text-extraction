@@ -1,0 +1,375 @@
+"""The guarded HTTP fetcher: every outbound request of the service goes through ``Fetcher``.
+
+What it enforces, for the first request and every redirect hop alike:
+
+* ``validate_url`` on each URL (relative ``Location`` headers are resolved against the current URL);
+* the SSRF guard (``GuardedTransport``), with no proxy and no environment lookup;
+* one overall deadline for the whole call, redirects included;
+* a cap on the *decoded* body size. ``gzip`` and ``deflate`` are inflated here in bounded steps,
+  so a compression bomb cannot allocate more than one step beyond the cap.
+
+Failures of the target or the network are raised as ``FetchError`` with a code from
+``ErrorCode``. A response with status >= 400 is not an error here: it is returned and the
+pipeline decides what it means.
+"""
+
+import asyncio
+import contextlib
+import hashlib
+import socket
+import time
+import zlib
+from collections.abc import AsyncGenerator, Iterator
+from dataclasses import dataclass
+from http.cookiejar import DefaultCookiePolicy
+from urllib.parse import urljoin, urlsplit
+
+import httpx
+import structlog
+
+from text_extraction import __version__
+from text_extraction.envelope import ErrorCode
+from text_extraction.netguard import (
+    AddressPolicy,
+    BlockedAddressError,
+    GuardedTransport,
+    InvalidUrlError,
+    is_public_address,
+    validate_url,
+)
+from text_extraction.settings import Settings
+
+USER_AGENT = (
+    f"text-extraction/{__version__} (+https://github.com/janschachtschabel/text-extraction)"
+)
+
+_log = structlog.get_logger(__name__)
+
+_CHUNK_SIZE = 65536  # largest piece of decoded body handled at once
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+# Only encodings we can inflate in bounded steps are advertised; anything else is refused.
+_ACCEPT_ENCODING = "gzip, deflate"
+_REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+    "Accept-Language": "de,en;q=0.8",
+    "Accept-Encoding": _ACCEPT_ENCODING,
+}
+
+
+@dataclass(frozen=True)
+class Validators:
+    """Cache validators of an earlier response, sent back as a conditional request."""
+
+    etag: str | None = None
+    last_modified: str | None = None
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """A completed fetch (any HTTP status).
+
+    ``redirects`` lists the URLs that were followed to, in order, so ``final_url`` is its last
+    element when it is not empty. ``raw_sha256`` is the hash of ``content`` as received after
+    transfer decoding, before any text extraction. ``not_modified`` is true for a 304 answer,
+    which has empty ``content``.
+    """
+
+    url: str
+    final_url: str
+    status: int
+    headers: dict[str, str]  # lower-case names
+    content: bytes
+    content_type: str | None  # media type only, lower-case
+    charset: str | None
+    elapsed_ms: int
+    redirects: list[str]
+    not_modified: bool
+    raw_sha256: str
+
+
+class FetchError(Exception):
+    """The target could not be fetched. The message is safe to show to API callers."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        upstream_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.upstream_status = upstream_status
+
+
+class _Inflater:
+    """Incremental gzip or deflate decoder that never yields more than ``_CHUNK_SIZE`` at a time."""
+
+    def __init__(self, *, gzip: bool) -> None:
+        self._gzip = gzip
+        self._decoder: zlib._Decompress | None = None
+
+    def feed(self, data: bytes) -> Iterator[bytes]:
+        if not data:
+            return
+        if self._decoder is None:
+            self._decoder = zlib.decompressobj(self._window_bits(data))
+        pending = data
+        while True:
+            try:
+                out = self._decoder.decompress(pending, _CHUNK_SIZE)
+            except zlib.error as error:
+                raise FetchError(
+                    ErrorCode.CONNECTION_ERROR,
+                    "The response body could not be decoded.",
+                    retryable=True,
+                ) from error
+            if out:
+                yield out
+            pending = self._decoder.unconsumed_tail
+            # A full chunk may mean more output is still buffered inside the decoder.
+            if self._decoder.eof or (not pending and len(out) < _CHUNK_SIZE):
+                return
+
+    def _window_bits(self, first: bytes) -> int:
+        if self._gzip:
+            return zlib.MAX_WBITS | 16
+        # HTTP "deflate" is zlib-wrapped, but some servers send a raw deflate stream.
+        zlib_header = (
+            len(first) >= 2 and first[0] & 0x0F == 8 and ((first[0] << 8) | first[1]) % 31 == 0
+        )
+        return zlib.MAX_WBITS if zlib_header or len(first) < 2 else -zlib.MAX_WBITS
+
+
+def _inflaters(content_encoding: str | None) -> list[_Inflater]:
+    """Decoders to apply to a body, in the order of application (last-applied encoding first)."""
+    names = [part.strip().lower() for part in (content_encoding or "").split(",") if part.strip()]
+    inflaters: list[_Inflater] = []
+    for name in reversed(names):
+        if name in ("gzip", "x-gzip"):
+            inflaters.append(_Inflater(gzip=True))
+        elif name == "deflate":
+            inflaters.append(_Inflater(gzip=False))
+        elif name != "identity":
+            raise FetchError(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE, "The response uses an unsupported encoding."
+            )
+    return inflaters
+
+
+def _decode(inflaters: list[_Inflater], data: bytes) -> Iterator[bytes]:
+    if not inflaters:
+        yield data
+        return
+    for part in inflaters[0].feed(data):
+        yield from _decode(inflaters[1:], part)
+
+
+def _split_content_type(value: str | None) -> tuple[str | None, str | None]:
+    """Media type and charset of a Content-Type header, both lower-case."""
+    if not value:
+        return None, None
+    media_type, _, parameters = value.partition(";")
+    charset = None
+    for parameter in parameters.split(";"):
+        name, _, parameter_value = parameter.partition("=")
+        if name.strip().lower() == "charset":
+            charset = parameter_value.strip().strip("\"'").lower() or None
+    return media_type.strip().lower() or None, charset
+
+
+_STATUS_KEY = "text_extraction.status"
+
+
+async def _remember_status(response: httpx.Response) -> None:
+    """Response hook: note the status on the request, for ``Fetcher._send``."""
+    response.request.extensions[_STATUS_KEY] = response.status_code
+
+
+def _host_of(url: str) -> str | None:
+    try:
+        return urlsplit(url).hostname
+    except ValueError:
+        return None
+
+
+class Fetcher:
+    """Guarded HTTP client with redirect, size and time limits. Create once, ``aclose`` last."""
+
+    def __init__(self, settings: Settings, *, policy: AddressPolicy | None = None) -> None:
+        self._settings = settings
+        if policy is None:
+            policy = (
+                (lambda _address: True)
+                if settings.fetch_allow_private_networks
+                else is_public_address
+            )
+        self._client = httpx.AsyncClient(
+            transport=GuardedTransport(policy),
+            trust_env=False,
+            follow_redirects=False,
+            event_hooks={"response": [_remember_status]},
+        )
+        # The shared client never stores cookies, so nothing leaks from one fetch() to the next.
+        # Cookies live in a jar of their own per fetch() call, see ``_fetch``.
+        self._client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+
+    async def fetch(
+        self,
+        url: str,
+        *,
+        validators: Validators | None = None,
+        max_bytes: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> FetchResult:
+        """GET ``url``, following redirects, or raise ``FetchError``."""
+        limit = max_bytes if max_bytes is not None else self._settings.fetch_max_bytes
+        deadline = (
+            timeout_seconds if timeout_seconds is not None else self._settings.fetch_timeout_seconds
+        )
+        if deadline <= 0:
+            raise ValueError("timeout_seconds must be greater than 0")
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(deadline):
+                return await self._fetch(url, validators, limit, deadline, started)
+        except FetchError:
+            raise
+        except (InvalidUrlError, httpx.InvalidURL) as error:
+            raise FetchError(ErrorCode.INVALID_URL, str(error)) from None
+        except BlockedAddressError as error:
+            # The message names the resolved address: for the log, not for the caller.
+            _log.warning("fetch_blocked", host=_host_of(url), detail=str(error))
+            raise FetchError(ErrorCode.BLOCKED_URL, "The target address is not allowed.") from None
+        except socket.gaierror:
+            raise FetchError(
+                ErrorCode.DNS_ERROR, "The host name could not be resolved.", retryable=True
+            ) from None
+        except (TimeoutError, httpx.TimeoutException):
+            raise FetchError(
+                ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True
+            ) from None
+        except (httpx.HTTPError, OSError) as error:
+            raise FetchError(
+                ErrorCode.CONNECTION_ERROR,
+                f"The connection to the target failed ({type(error).__name__}).",
+                retryable=True,
+            ) from None
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    async def _fetch(
+        self,
+        url: str,
+        validators: Validators | None,
+        max_bytes: int,
+        deadline: float,
+        started: float,
+    ) -> FetchResult:
+        headers = dict(_REQUEST_HEADERS)
+        if validators is not None and validators.etag:
+            headers["If-None-Match"] = validators.etag
+        if validators is not None and validators.last_modified:
+            headers["If-Modified-Since"] = validators.last_modified
+
+        current = url
+        redirects: list[str] = []
+        cookies = httpx.Cookies()  # lives for this call (one redirect chain) only
+        while True:
+            validate_url(current)
+            request = self._client.build_request("GET", current, headers=headers, timeout=deadline)
+            cookies.set_cookie_header(request)
+            async with contextlib.aclosing(await self._send(request)) as response:
+                cookies.extract_cookies(response)
+                status = response.status_code
+                location = response.headers.get("location", "").strip()
+                if status in _REDIRECT_STATUSES and location:
+                    if len(redirects) >= self._settings.fetch_max_redirects:
+                        raise FetchError(
+                            ErrorCode.TARGET_HTTP_ERROR,
+                            "The target redirected too many times.",
+                            upstream_status=status,
+                        )
+                    current = self._redirect_target(current, location, status)
+                    redirects.append(current)
+                    continue
+                content = b"" if status == 304 else await self._read_body(response, max_bytes)
+                content_type, charset = _split_content_type(response.headers.get("content-type"))
+                return FetchResult(
+                    url=url,
+                    final_url=current,
+                    status=status,
+                    headers={name.lower(): value for name, value in response.headers.items()},
+                    content=content,
+                    content_type=content_type,
+                    charset=charset,
+                    elapsed_ms=round((time.monotonic() - started) * 1000),
+                    redirects=redirects,
+                    not_modified=status == 304,
+                    raw_sha256=hashlib.sha256(content).hexdigest(),
+                )
+
+    async def _send(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._client.send(request, stream=True)
+        except httpx.RemoteProtocolError:
+            # httpx prepares the next redirect request itself and fails on an unparsable Location.
+            # The response hook ran by then, so a recorded status means the headers were fine.
+            status = request.extensions.get(_STATUS_KEY)
+            if status is None:
+                raise
+            raise FetchError(
+                ErrorCode.TARGET_HTTP_ERROR,
+                "The target sent an invalid redirect location.",
+                upstream_status=status,
+            ) from None
+
+    @staticmethod
+    def _redirect_target(current: str, location: str, status: int) -> str:
+        """The absolute URL a ``Location`` points to; a malformed one is the target's fault."""
+        try:
+            target = urljoin(current, location)
+            httpx.URL(target)
+        except (ValueError, httpx.InvalidURL):
+            raise FetchError(
+                ErrorCode.TARGET_HTTP_ERROR,
+                "The target sent an invalid redirect location.",
+                upstream_status=status,
+            ) from None
+        return target
+
+    async def _read_body(self, response: httpx.Response, max_bytes: int) -> bytes:
+        declared = response.headers.get("content-length", "")
+        if (
+            declared.isdigit()
+            and int(declared) > max_bytes
+            and not response.headers.get("content-encoding")
+        ):
+            raise self._too_large(response.status_code)
+        body = bytearray()
+        async with contextlib.aclosing(self._decoded_chunks(response)) as chunks:
+            async for chunk in chunks:
+                body += chunk
+                if len(body) > max_bytes:
+                    raise self._too_large(response.status_code)
+        return bytes(body)
+
+    async def _decoded_chunks(self, response: httpx.Response) -> AsyncGenerator[bytes]:
+        """Decoded body in pieces of at most ``_CHUNK_SIZE`` bytes."""
+        inflaters = _inflaters(response.headers.get("content-encoding"))
+        async for raw in response.aiter_raw(_CHUNK_SIZE):
+            for chunk in _decode(inflaters, raw):
+                yield chunk
+
+    @staticmethod
+    def _too_large(status: int) -> FetchError:
+        return FetchError(
+            ErrorCode.TOO_LARGE,
+            "The response body is larger than the limit.",
+            upstream_status=status,
+        )

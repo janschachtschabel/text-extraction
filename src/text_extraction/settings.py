@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
     rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True
+    fetch_timeout_seconds: float = Field(default=20, gt=0)  # total time budget of one fetch
+    fetch_max_bytes: int = Field(default=20_000_000, ge=1024)  # response body limit
+    fetch_max_redirects: int = Field(default=5, ge=0, le=20)
+    # UNSAFE: lifts the SSRF guard for private networks. Development and tests only.
+    fetch_allow_private_networks: bool = False
+    # Per-domain outbound gate (shared by all pods through Valkey).
+    outbound_max_concurrency_per_host: int = Field(default=2, ge=1)  # requests in flight per host
+    outbound_min_delay_ms: int = Field(default=1000, ge=0)  # least gap between request starts
+    outbound_max_crawl_delay_seconds: float = Field(default=10, ge=0)  # cap for robots Crawl-delay
+    outbound_max_wait_seconds: float = Field(default=10, ge=0)  # longest wait for a slot
+    outbound_backoff_seconds: float = Field(default=30, ge=1)  # cooldown after 429/503
+    outbound_max_backoff_seconds: float = Field(default=300, ge=1)  # cap for any cooldown
+    circuit_failure_threshold: int = Field(default=5, ge=1)  # consecutive failures to open
+    circuit_open_seconds: float = Field(default=60, ge=1)  # how long the circuit stays open
+    # Compliance: robots.txt, TDMRep, ai.txt and noai.
+    compliance_default: Literal["enforce", "report", "ignore"] = "enforce"  # mode without a request
+    compliance_allow_override: bool = True  # may non-admin callers choose another mode?
+    compliance_cache_seconds: int = Field(default=3600, ge=0)  # cache of the origin files; 0 = off
+    # Quality gate: extracted content with fewer words than this is `partial`/`content_too_short`.
+    quality_min_words: int = Field(default=50, ge=0)
 
     @field_validator("log_level", mode="before")
     @classmethod
