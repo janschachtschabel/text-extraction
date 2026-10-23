@@ -1,13 +1,14 @@
 # Configuration
 
 Every setting is an environment variable with a default. Variable names are case-insensitive.
-[`.env.example`](../.env.example) lists them in the same order for docker compose, and the Helm
+[`.env.example`](../.env.example) lists them for docker compose, and the Helm
 chart README has the [full values table](../deploy/helm/text-extraction/README.md#values).
 
 ## Environment variables
 
 Non-secret settings. In Helm, put a variable under `config.<NAME>` in the values; it lands in the
-chart's ConfigMap with the same name (values are strings).
+chart's ConfigMap with the same name (values are strings). The chart overrides `PUBLIC_PORT`,
+`INTERNAL_PORT` and `VALKEY_URL`; values for them under `config` are ignored.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -15,7 +16,7 @@ chart's ConfigMap with the same name (values are strings).
 | `PUBLIC_PORT` | `8080` | Port of the public API. Fixed to 8080 by the Helm chart. |
 | `INTERNAL_HOST` | `0.0.0.0` | Bind address of the internal listener. |
 | `INTERNAL_PORT` | `9090` | Port of the internal listener (`/health`, `/ready`, `/metrics`). Fixed to 9090 by the Helm chart. |
-| `LOG_LEVEL` | `INFO` | Log level. |
+| `LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive). Anything else makes the service exit with code 2. |
 | `LOG_FORMAT` | `json` | `json` (stdout, one object per line) or `console` (plain text for local development). |
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
@@ -32,8 +33,9 @@ Keep these out of ConfigMaps, images and logs.
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
 | `VALKEY_URL` | Only when the URL carries a password. | `externalValkey.existingSecret.name` + `.key`. Without a password use `externalValkey.url`; the in-chart Valkey (`valkey.enabled`) needs no secret. |
 
-Compute the hash of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`. Clients send the key
-as `Authorization: Bearer <key>`. Key names must be unique.
+Generate a key with `openssl rand -hex 32` and compute its hash with
+`printf %s "$KEY" | sha256sum | cut -d' ' -f1`. Clients send the key as
+`Authorization: Bearer <key>`. Key names and hashes must be unique.
 
 ## Ports and probes
 

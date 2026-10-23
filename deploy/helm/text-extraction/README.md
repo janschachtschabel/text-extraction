@@ -31,7 +31,12 @@ port: `/health` for liveness and `/ready` for readiness.
 ## Configuration
 
 Every service setting is an environment variable. `config` entries are non-secret and become
-variables of the same name. `PUBLIC_PORT` (8080) and `INTERNAL_PORT` (9090) are fixed by the chart.
+variables of the same name. The chart overrides `config.PUBLIC_PORT` (8080), `config.INTERNAL_PORT`
+(9090) and `config.VALKEY_URL`: values set there are ignored. Set the Valkey address with
+`valkey.enabled` or `externalValkey.*`.
+
+> **Warning:** never put secrets into `config:`. It becomes a ConfigMap, which is stored and shown
+> in clear text. Use `secrets.*` and `externalValkey.existingSecret.*` for secrets.
 
 Secrets, listed separately:
 
@@ -94,7 +99,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `metrics.serviceMonitor.labels` | `{}` | For example the `release` label your Prometheus selects on. |
 | `metrics.prometheusRule.enabled` | `false` | Needs the Prometheus Operator CRDs and kube-state-metrics. |
 | `metrics.prometheusRule.labels` | `{}` | |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods (the last three also to Valkey). |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Valkey gets only `nodeSelector` and `tolerations`, not `affinity`. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.
