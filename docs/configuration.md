@@ -27,6 +27,12 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
 | `FETCH_ALLOW_PRIVATE_NETWORKS` | `false` | **Unsafe.** `true` switches the SSRF guard off for private, loopback and link-local addresses. For local development and tests only; never set it in a deployment. |
 
+The fetcher identifies itself on every outbound request with a fixed, honest user agent,
+`text-extraction/<version> (+https://github.com/janschachtschabel/text-extraction)`. It is not
+configurable. The robots.txt product token is `text-extraction`. Client trace headers
+(`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
+variables are ignored.
+
 ## Secrets
 
 Keep these out of ConfigMaps, images and logs.
