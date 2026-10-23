@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # uv reads .python-version (3.13) and provisions its own managed Python.
       - uses: astral-sh/setup-uv@v7

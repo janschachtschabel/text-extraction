@@ -1,7 +1,7 @@
 [project]
 name = "text-extraction"
 version = "0.1.0"
-description = "FastAPI service for extracting text from documents."
+description = "API service that extracts text and Markdown from web pages, files, audio and video."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 license = "Apache-2.0"

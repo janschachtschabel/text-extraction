@@ -16,6 +16,8 @@ htmlcov/
 
 # Local configuration
 .env
+.env.*
+!.env.example
 
 # Superpowers SDD scratch (never commit)
 .superpowers/
