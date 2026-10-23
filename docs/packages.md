@@ -5,10 +5,11 @@ when the one it builds on is merged.
 
 Per package:
 
-1. Implement with the **better-coding-workflow** skill.
-2. Run the **better-coding-review** skill on the package.
-3. Fix the findings with the better-coding-workflow skill.
-4. Tests, ruff and mypy green; the "done when" criterion below is met; open the PR.
+1. Plan with the Superpowers `writing-plans` skill (`docs/superpowers/plans/`).
+2. Implement with `subagent-driven-development` (or `executing-plans`) and `test-driven-development`.
+3. Review with `requesting-code-review`; fix findings via `receiving-code-review` and `systematic-debugging`.
+4. `verification-before-completion`: tests, ruff and mypy green and the "done when"
+   criterion below met; then `finishing-a-development-branch` opens and merges the PR.
 
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |

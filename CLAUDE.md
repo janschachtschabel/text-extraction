@@ -39,12 +39,24 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
 
 ## Workflow
 
+Coding follows the **Superpowers** skills, vendored in `.claude/skills/`
+(see `.claude/skills/SUPERPOWERS.md`). At the start of every session read
+`.claude/skills/using-superpowers/SKILL.md` and its `references/claude-code-tools.md`.
+`superpowers:<name>` in a skill means `.claude/skills/<name>`.
+
 - Build package by package as listed in `docs/packages.md`; one branch and one PR per package.
-- For coding use the **better-coding-workflow** skill. After each package run the
-  **better-coding-review** skill, then fix its findings with the better-coding-workflow skill
-  before opening or updating the PR.
+- Design is settled in `docs/architecture.md`; use `brainstorming` only for an open design
+  question inside a package, and record the answer in that file.
+- Per package:
+  1. `writing-plans` → plan in `docs/superpowers/plans/<date>-package-<n>-<name>.md`.
+  2. `subagent-driven-development` (or `executing-plans` when working inline), with
+     `test-driven-development` for every feature and fix.
+  3. `requesting-code-review` on the whole package; handle findings with
+     `receiving-code-review`, bugs and failing tests with `systematic-debugging`.
+  4. `verification-before-completion`, then `finishing-a-development-branch`: open the PR.
 - A package is done only when its "done when" criterion in `docs/packages.md` is met,
-  tests and linters are green, and the review findings are fixed.
+  tests and linters are green, and the review findings are fixed. Jan allows merging a
+  done package PR without waiting for him (squash merge).
 
 ## Stack
 
