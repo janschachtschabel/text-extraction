@@ -16,7 +16,7 @@ def test_count_words_counts_tokens_with_letters_or_digits() -> None:
 
 
 def test_normal_article_passes() -> None:
-    q = assess(ARTICLE_HTML, ARTICLE_TEXT, min_words=50)
+    q = assess(ARTICLE_HTML, ARTICLE_TEXT)
     assert q.word_count > 300
     assert q.visible_chars > 500
     assert q.script_count == 0
@@ -33,7 +33,7 @@ def test_js_heavy_spa_shell() -> None:
         '<html><head><script src="/app.js"></script></head>'
         '<body><div id="root"></div><script>boot()</script></body></html>'
     )
-    q = assess(html, "", min_words=50)
+    q = assess(html, "")
     assert q.js_heavy
     assert q.script_count == 2
     assert q.visible_chars == 0
@@ -51,7 +51,7 @@ def test_js_heavy_spa_shell() -> None:
     ],
 )
 def test_js_heavy_hints(html: str) -> None:
-    assert assess(html, "Loading", min_words=50).js_heavy
+    assert assess(html, "Loading").js_heavy
 
 
 @pytest.mark.parametrize(
@@ -63,21 +63,21 @@ def test_js_heavy_hints(html: str) -> None:
     ],
 )
 def test_short_static_pages_are_not_js_heavy(html: str) -> None:
-    q = assess(html, "A short static page.", min_words=50)
+    q = assess(html, "A short static page.")
     assert not q.js_heavy
     assert not q.browser_recommended
 
 
 def test_long_page_with_scripts_is_not_js_heavy() -> None:
     html = f"<body><p>{ARTICLE_TEXT}</p><script src='a.js'></script></body>"
-    q = assess(html, ARTICLE_TEXT, min_words=50)
+    q = assess(html, ARTICLE_TEXT)
     assert q.script_count == 1
     assert not q.js_heavy
 
 
 def test_scripts_and_styles_are_not_visible_text() -> None:
     html = "<body><style>p{color:red}</style><script>var a = 1;</script><p>Hello   world</p></body>"
-    assert assess(html, "Hello world", min_words=1).visible_chars == len("Hello world")
+    assert assess(html, "Hello world").visible_chars == len("Hello world")
 
 
 def test_cloudflare_challenge() -> None:
@@ -87,7 +87,7 @@ def test_cloudflare_challenge() -> None:
         "<p>Enable JavaScript and cookies to continue</p>"
         "<script>window._cf_chl_opt = {};</script></body></html>"
     )
-    q = assess(html, "Verifying you are human. This may take a few seconds.", min_words=50)
+    q = assess(html, "Verifying you are human. This may take a few seconds.")
     assert q.bot_challenge
     assert q.browser_recommended
     assert quality_error(q, 50) == ("failed", ErrorCode.BOT_PROTECTION)
@@ -104,39 +104,39 @@ def test_cloudflare_challenge() -> None:
     ],
 )
 def test_bot_challenge_phrases(text: str) -> None:
-    q = assess(f"<body><p>{text}</p></body>", text, min_words=50)
+    q = assess(f"<body><p>{text}</p></body>", text)
     assert q.bot_challenge
 
 
 def test_challenge_markup_marker() -> None:
     html = '<body><p>Please wait</p><form action="/?__cf_chl_f_tk=x"></form></body>'
-    assert assess(html, "Please wait", min_words=50).bot_challenge
+    assert assess(html, "Please wait").bot_challenge
 
 
 def test_long_article_mentioning_captcha_is_not_a_bot_challenge() -> None:
     text = ARTICLE_TEXT + " A captcha tells computers and humans apart. Just a moment, please."
-    q = assess(f"<body><p>{text}</p></body>", text, min_words=50)
+    q = assess(f"<body><p>{text}</p></body>", text)
     assert not q.bot_challenge
 
 
 def test_soft_404_short_page() -> None:
     text = "Seite nicht gefunden. Die angeforderte Seite existiert nicht."
-    q = assess(f"<body><h1>{text}</h1></body>", text, min_words=50)
+    q = assess(f"<body><h1>{text}</h1></body>", text)
     assert q.soft_404
     assert quality_error(q, 50) == ("failed", ErrorCode.LIKELY_ERROR_PAGE)
-    english = assess("<body><h1>Error 404</h1></body>", "Oops! Page   Not\nFound", min_words=1)
+    english = assess("<body><h1>Error 404</h1></body>", "Oops! Page   Not\nFound")
     assert english.soft_404
 
 
 def test_long_page_mentioning_404_is_not_soft_404() -> None:
     text = ARTICLE_TEXT + " The HTTP status 404 means page not found."
-    q = assess(f"<body><p>{text}</p></body>", text, min_words=50)
+    q = assess(f"<body><p>{text}</p></body>", text)
     assert q.word_count > 50
     assert not q.soft_404
 
 
 def test_numbers_containing_404_are_not_soft_404() -> None:
-    q = assess(None, "Invoice 14040 total 1404 euro", min_words=1)
+    q = assess(None, "Invoice 14040 total 1404 euro")
     assert not q.soft_404
 
 
@@ -145,19 +145,19 @@ def test_login_wall() -> None:
         "<body><h1>Sign in</h1><form><input type='text' name='user'>"
         "<input type='PASSWORD' name='pw'><button>Log in</button></form></body>"
     )
-    q = assess(html, "Sign in Log in", min_words=50)
+    q = assess(html, "Sign in Log in")
     assert q.login_wall
     assert quality_error(q, 50) == ("failed", ErrorCode.LOGIN_REQUIRED)
 
 
 def test_article_with_comment_form_is_not_a_login_wall() -> None:
     html = f"<body><p>{ARTICLE_TEXT}</p><input type='password'></body>"
-    assert not assess(html, ARTICLE_TEXT, min_words=50).login_wall
+    assert not assess(html, ARTICLE_TEXT).login_wall
 
 
 def test_too_short_is_partial() -> None:
     text = "A short but real page with ten words and nothing wrong."
-    q = assess(f"<body><p>{text}</p></body>", text, min_words=50)
+    q = assess(f"<body><p>{text}</p></body>", text)
     assert q.word_count == 11
     assert quality_error(q, 50) == ("partial", ErrorCode.CONTENT_TOO_SHORT)
     assert quality_error(q, 11) is None
@@ -165,14 +165,14 @@ def test_too_short_is_partial() -> None:
 
 
 def test_empty_is_failed() -> None:
-    q = assess("<body><p>Something</p></body>", "  \n ", min_words=50)
+    q = assess("<body><p>Something</p></body>", "  \n ")
     assert q.word_count == 0
     assert quality_error(q, 50) == ("failed", ErrorCode.EMPTY_CONTENT)
     assert quality_error(q, 0) == ("failed", ErrorCode.EMPTY_CONTENT)
 
 
 def test_plain_text_has_no_markup_signals() -> None:
-    q = assess(None, ARTICLE_TEXT, min_words=50)
+    q = assess(None, ARTICLE_TEXT)
     assert q.script_count == 0
     assert q.visible_chars == len(" ".join(ARTICLE_TEXT.split()))
     assert not q.js_heavy
@@ -181,10 +181,8 @@ def test_plain_text_has_no_markup_signals() -> None:
 
 
 def test_plain_text_can_still_be_a_challenge_or_soft_404() -> None:
-    assert assess(
-        None, "Checking your browser before accessing example.org", min_words=1
-    ).bot_challenge
-    assert assess(None, "404 - page not found", min_words=1).soft_404
+    assert assess(None, "Checking your browser before accessing example.org").bot_challenge
+    assert assess(None, "404 - page not found").soft_404
 
 
 def test_error_priority() -> None:
@@ -203,3 +201,33 @@ def test_error_priority() -> None:
     assert quality_error(no_bot, 50) == ("failed", ErrorCode.LIKELY_ERROR_PAGE)
     only_login = no_bot.model_copy(update={"soft_404": False})
     assert quality_error(only_login, 50) == ("failed", ErrorCode.LOGIN_REQUIRED)
+
+
+def test_weak_bot_words_in_page_chrome_are_not_a_challenge() -> None:
+    html = (
+        "<body><main><p>Ferns reproduce by spores.</p></main>"
+        "<footer>This site is protected by reCAPTCHA. Bot detection by DataDome.</footer></body>"
+    )
+    q = assess(html, "Ferns reproduce by spores.")
+    assert not q.bot_challenge
+    assert quality_error(q, 3) is None
+
+
+def test_strong_challenge_phrase_in_page_chrome_still_counts() -> None:
+    html = "<body><main><p>Ferns.</p></main><aside>Checking your browser</aside></body>"
+    assert assess(html, "Ferns.").bot_challenge
+
+
+def test_only_the_head_title_counts_as_title() -> None:
+    svg = "<svg><title>Error 404 just a moment</title></svg>"
+    body = f"<body>{svg}<p>Short real text about ferns.</p></body>"
+    q = assess(f"<html><head><title>Ferns</title></head>{body}</html>", "Short real text.")
+    assert not q.soft_404
+    assert not q.bot_challenge
+    # No <title> in the head: the SVG title is not the page title either.
+    q = assess(f"<html><head></head>{body}</html>", "Short real text.")
+    assert not q.soft_404
+    assert not q.bot_challenge
+    # The page title still counts when it is in the head.
+    q = assess("<html><head><title>404 Not Found</title></head><body></body></html>", "Sorry.")
+    assert q.soft_404

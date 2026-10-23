@@ -85,7 +85,9 @@ class _Markup:
     def __init__(self, html: str) -> None:
         soup = parse_html(html)
         self.raw = html.casefold()
-        self.title = soup.title.get_text(" ") if soup.title else ""
+        # Only the head's title: an SVG ``<title>`` in the body is a tooltip, not the page's.
+        head_title = soup.head.find("title") if soup.head else None
+        self.title = head_title.get_text(" ") if head_title else ""
         self.script_count = sum(
             1
             for script in soup("script")
@@ -107,42 +109,42 @@ class _Markup:
         self.text = " ".join(soup.get_text(" ").split())
 
 
-def _is_bot_challenge(haystack: str, markup: _Markup | None, words: int) -> bool:
-    if any(phrase in haystack for phrase in _CHALLENGE_PHRASES):
+def _is_bot_challenge(page_text: str, own_text: str, markup: _Markup | None, words: int) -> bool:
+    """``page_text``: title, page and content; ``own_text``: title and content only."""
+    if any(phrase in page_text for phrase in _CHALLENGE_PHRASES):
         return True
     if markup is not None and _CHALLENGE_MARKUP.search(markup.raw):
         return True
-    return words < THIN_PAGE_BELOW_WORDS and bool(_WEAK_CHALLENGE_WORDS.search(haystack))
+    return words < THIN_PAGE_BELOW_WORDS and bool(_WEAK_CHALLENGE_WORDS.search(own_text))
 
 
-def assess(html: str | None, content: str, *, min_words: int) -> Quality:
+def assess(html: str | None, content: str) -> Quality:
     """Judge a page. ``html`` is the fetched markup, ``None`` for plain text; ``content`` is
     what extraction produced. CPU-bound: it parses the markup once.
 
-    ``min_words`` is not used here: the facts do not depend on it. The caller passes the same
-    threshold to ``quality_error``, which decides on it.
+    The facts do not depend on a length threshold; ``quality_error`` applies it.
     """
-    del min_words
     words = count_words(content)
     markup = _Markup(html) if html is not None else None
     visible = markup.text if markup else " ".join(content.split())
     title = markup.title if markup else ""
-    # A challenge says so anywhere on the page; an error page in its title or its content.
-    page_text = f"{title} {markup.text if markup else ''} {content}"
-    error_text = _normalise(f"{title} {content}")
+    # A challenge says so anywhere on the page. The weak signals (a captcha note in a template, a
+    # consent list naming a protection vendor) and error pages count in the title and content only.
+    page_text = _normalise(f"{title} {markup.text if markup else ''} {content}")
+    own_text = _normalise(f"{title} {content}")
     js_heavy = (
         markup is not None
         and len(visible) < JS_HEAVY_BELOW_CHARS
         and (markup.script_count >= 1 or markup.noscript_hint or markup.empty_spa_root)
     )
-    bot_challenge = _is_bot_challenge(_normalise(page_text), markup, words)
+    bot_challenge = _is_bot_challenge(page_text, own_text, markup, words)
     return Quality(
         visible_chars=len(visible),
         word_count=words,
         script_count=markup.script_count if markup else 0,
         js_heavy=js_heavy,
         bot_challenge=bot_challenge,
-        soft_404=words <= SOFT_404_MAX_WORDS and bool(_SOFT_404_PHRASES.search(error_text)),
+        soft_404=words <= SOFT_404_MAX_WORDS and bool(_SOFT_404_PHRASES.search(own_text)),
         login_wall=markup is not None and markup.password_input and words < THIN_PAGE_BELOW_WORDS,
         browser_recommended=js_heavy or bot_challenge,
     )
