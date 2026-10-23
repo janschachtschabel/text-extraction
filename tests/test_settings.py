@@ -270,3 +270,93 @@ def test_raw_secret_in_file_is_not_echoed(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert SECRET not in str(validation_info.value)
     assert SECRET not in str(config_info.value)
     assert str(keys_file) in str(config_info.value)
+
+
+def hash_entry(name: str, sha256: str) -> dict[str, object]:
+    return {"name": name, "role": "user", "sha256": sha256}
+
+
+@pytest.mark.parametrize("value", ["verbose", "LOUD", "", "10"])
+def test_invalid_log_level_is_a_config_error(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LOG_LEVEL", value)
+
+    with pytest.raises(ConfigError, match="log_level"):
+        load_settings()
+
+
+@pytest.mark.parametrize("value", ["debug", "Info", "WARNING", " error ", "critical"])
+def test_log_level_is_case_insensitive(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LOG_LEVEL", value)
+
+    assert load_settings().log_level == value.strip().upper()
+
+
+@pytest.mark.parametrize("name", ["PUBLIC_PORT", "INTERNAL_PORT"])
+@pytest.mark.parametrize("value", ["70000", "0", "-1", "65536", "http"])
+def test_invalid_port_is_a_config_error(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError, match=name.lower()):
+        load_settings()
+
+
+@pytest.mark.parametrize("value", ["1", "65535"])
+def test_port_bounds_are_accepted(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("PUBLIC_PORT", value)
+
+    assert load_settings().public_port == int(value)
+
+
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_rate_limit_per_minute_must_be_positive(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("RATE_LIMIT_PER_MINUTE", value)
+
+    with pytest.raises(ConfigError, match="rate_limit_per_minute"):
+        load_settings()
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_api_key_rate_limit_must_be_positive(value: int) -> None:
+    with pytest.raises(ValidationError, match="rate_limit_per_minute"):
+        ApiKey(name="x", role="user", sha256=sha256_hex("x"), rate_limit_per_minute=value)
+
+
+def test_api_key_name_must_not_be_empty() -> None:
+    with pytest.raises(ValidationError, match="name"):
+        ApiKey(name="", role="user", sha256=sha256_hex("x"))
+
+
+def test_duplicate_sha256_rejected_and_names_the_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    digest = sha256_hex("same-secret")
+    monkeypatch.setenv(
+        "API_KEYS", json.dumps([hash_entry("first", digest), hash_entry("second", digest)])
+    )
+
+    with pytest.raises(ConfigError, match="first and second share the same sha256") as info:
+        load_settings()
+
+    assert digest not in str(info.value)
+
+
+def test_duplicate_sha256_across_env_and_file_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    digest = sha256_hex("same-secret")
+    keys_file = tmp_path / "keys.json"
+    keys_file.write_text(json.dumps([hash_entry("from-file", digest)]))
+    monkeypatch.setenv("API_KEYS", json.dumps([hash_entry("from-env", digest)]))
+    monkeypatch.setenv("API_KEYS_FILE", str(keys_file))
+
+    with pytest.raises(ConfigError, match="from-env and from-file share the same sha256") as info:
+        load_settings()
+
+    assert digest not in str(info.value)

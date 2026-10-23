@@ -162,3 +162,42 @@ def test_main_exits_2_on_invalid_config(
 
     assert exit_info.value.code == 2
     assert "AUTH_MODE=api_key requires API_KEYS" in capsys.readouterr().out
+
+
+def test_info_with_valkey_down_is_503_retryable_envelope(registry: CollectorRegistry) -> None:
+    app = create_public_app(make_settings(), FakeAsyncRedis(connected=False), registry)
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/info",
+            headers={"Authorization": f"Bearer {USER_KEY}", "x-client-trace-id": "trace-503"},
+        )
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["retryable"] is True
+    assert body["trace_id"] == "trace-503"
+
+
+def test_servers_do_not_send_a_server_header() -> None:
+    from fastapi import FastAPI
+
+    from text_extraction.server import _server
+
+    config = _server(FastAPI(), "127.0.0.1", 8080).config
+
+    assert config.server_header is False
+
+
+@pytest.mark.parametrize(("name", "value"), [("LOG_LEVEL", "verbose"), ("PUBLIC_PORT", "70000")])
+def test_main_exits_2_on_invalid_log_level_or_port(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 2

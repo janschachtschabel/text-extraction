@@ -81,12 +81,19 @@ async def rate_limited(
     if not settings.rate_limit_enabled:
         return
     limiter: RateLimiter = request.app.state.rate_limiter
-    limit = principal.rate_limit_per_minute or limiter.default_per_minute
+    limit = (
+        principal.rate_limit_per_minute
+        if principal.rate_limit_per_minute is not None
+        else limiter.default_per_minute
+    )
     try:
         decision = await limiter.hit(principal.name, limit)
     except (RedisError, OSError) as error:
-        # Not the URL: it may carry a password. The exception text names host and port only.
-        _log.warning("rate_limit_backend_unavailable", exc_info=error)
+        # Type and text only, no traceback per request. Not the URL: it may carry a password;
+        # the exception text names host and port only.
+        _log.warning(
+            "rate_limit_backend_unavailable", error_type=type(error).__name__, error=str(error)
+        )
         raise _unavailable() from None
     if not decision.allowed:
         raise ServiceError(

@@ -5,7 +5,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
 
@@ -15,10 +23,10 @@ class ApiKey(BaseModel):
 
     model_config = ConfigDict(hide_input_in_errors=True)
 
-    name: str
+    name: str = Field(min_length=1)
     role: Literal["user", "admin"]
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$", description="Lowercase hex SHA-256 of the key.")
-    rate_limit_per_minute: int | None = None
+    rate_limit_per_minute: int | None = Field(default=None, ge=1)
 
 
 _API_KEY_LIST = TypeAdapter(list[ApiKey])
@@ -62,17 +70,22 @@ class Settings(BaseSettings):
     )
 
     public_host: str = "0.0.0.0"  # noqa: S104 - bind inside the container
-    public_port: int = 8080
+    public_port: int = Field(default=8080, ge=1, le=65535)
     internal_host: str = "0.0.0.0"  # noqa: S104 - bind inside the container
-    internal_port: int = 9090
-    log_level: str = "INFO"
+    internal_port: int = Field(default=9090, ge=1, le=65535)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"  # any case
     log_format: Literal["json", "console"] = "json"
     auth_mode: Literal["api_key", "none"] = "api_key"
     api_keys: list[ApiKey] = []  # secret; JSON list in env API_KEYS
     api_keys_file: Path | None = None  # JSON file with the same shape, merged with API_KEYS
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
-    rate_limit_per_minute: int = 60
+    rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_case_log_level(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _merge_and_validate_api_keys(self) -> Self:
@@ -80,11 +93,18 @@ class Settings(BaseSettings):
         if self.api_keys_file is not None:
             keys.extend(_read_api_keys_file(self.api_keys_file))
 
-        seen: set[str] = set()
+        names: set[str] = set()
+        hashes: dict[str, str] = {}  # sha256 -> name of the first key that used it
         for key in keys:
-            if key.name in seen:
+            if key.name in names:
                 raise ValueError(f"duplicate API key name: {key.name}")
-            seen.add(key.name)
+            names.add(key.name)
+            if key.sha256 in hashes:
+                # Names only: the hash identifies the secret and stays out of messages.
+                raise ValueError(
+                    f"API keys {hashes[key.sha256]} and {key.name} share the same sha256"
+                )
+            hashes[key.sha256] = key.name
 
         if self.auth_mode == "api_key" and not keys:
             raise ValueError("AUTH_MODE=api_key requires API_KEYS or API_KEYS_FILE")

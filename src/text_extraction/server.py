@@ -38,7 +38,12 @@ class _Server(uvicorn.Server):
 def _server(app: FastAPI, host: str, port: int) -> _Server:
     # `log_config=None` keeps uvicorn from installing its own plain-text handlers;
     # `TraceMiddleware` writes the access line.
-    return _Server(uvicorn.Config(app, host=host, port=port, log_config=None, access_log=False))
+    # `server_header=False`: no `server: uvicorn` response header (ops guide: no default headers).
+    return _Server(
+        uvicorn.Config(
+            app, host=host, port=port, log_config=None, access_log=False, server_header=False
+        )
+    )
 
 
 async def _serve(servers: list[_Server]) -> None:

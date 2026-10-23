@@ -242,7 +242,10 @@ def test_valkey_down_is_503_retryable(clock: Clock, kind: str) -> None:
     assert body["error"]["code"] == "internal_error"
     assert body["error"]["retryable"] is True
     warnings = [entry for entry in logs if entry["log_level"] == "warning"]
-    assert warnings
+    (warning,) = warnings
+    assert warning["event"] == "rate_limit_backend_unavailable"
+    assert warning["error_type"]
+    assert "exc_info" not in warning  # one short line per request, no traceback
     # The URL may carry a password: neither the log nor the answer may contain it.
     assert "s3cret-password" not in repr(logs)
     assert "s3cret-password" not in response.text
@@ -301,3 +304,15 @@ def test_create_valkey_uses_short_socket_timeouts() -> None:
 
     assert kwargs["socket_connect_timeout"] == 2
     assert kwargs["socket_timeout"] == 2
+
+
+def test_per_key_limit_is_not_replaced_by_the_default_when_falsy(fake: Redis, clock: Clock) -> None:
+    # `is not None`, not truthiness: a limit of 0 must not fall back to the default of 2.
+    app = build_app(make_settings(), fake, clock, default_per_minute=2)
+    from text_extraction.auth import authenticate
+
+    app.dependency_overrides[authenticate] = lambda: Principal("zero", "user", 0)
+    with TestClient(app) as client:
+        response = client.get("/limited")
+
+    assert response.status_code == 429
