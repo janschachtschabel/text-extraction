@@ -68,7 +68,14 @@ Quality: ruff, mypy, pytest.
 
 ## Commands
 
-Filled in by package 0 (`uv sync`, `uv run pytest`, `uv run ruff check`, `docker compose up`).
+```bash
+uv sync                      # install dependencies into .venv
+uv run pytest                # run the tests
+uv run ruff check .          # lint
+uv run ruff format .         # format
+uv run mypy                  # type-check (strict)
+uv run pre-commit install    # install the git hooks
+```
 
 ## Reference material
 
