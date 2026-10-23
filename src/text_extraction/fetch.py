@@ -21,6 +21,7 @@ import time
 import zlib
 from collections.abc import AsyncGenerator, Iterator
 from dataclasses import dataclass
+from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -181,6 +182,14 @@ def _split_content_type(value: str | None) -> tuple[str | None, str | None]:
     return media_type.strip().lower() or None, charset
 
 
+_STATUS_KEY = "text_extraction.status"
+
+
+async def _remember_status(response: httpx.Response) -> None:
+    """Response hook: note the status on the request, for ``Fetcher._send``."""
+    response.request.extensions[_STATUS_KEY] = response.status_code
+
+
 def _host_of(url: str) -> str | None:
     try:
         return urlsplit(url).hostname
@@ -200,8 +209,14 @@ class Fetcher:
                 else is_public_address
             )
         self._client = httpx.AsyncClient(
-            transport=GuardedTransport(policy), trust_env=False, follow_redirects=False
+            transport=GuardedTransport(policy),
+            trust_env=False,
+            follow_redirects=False,
+            event_hooks={"response": [_remember_status]},
         )
+        # The shared client never stores cookies, so nothing leaks from one fetch() to the next.
+        # Cookies live in a jar of their own per fetch() call, see ``_fetch``.
+        self._client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
 
     async def fetch(
         self,
@@ -213,7 +228,11 @@ class Fetcher:
     ) -> FetchResult:
         """GET ``url``, following redirects, or raise ``FetchError``."""
         limit = max_bytes if max_bytes is not None else self._settings.fetch_max_bytes
-        deadline = timeout_seconds or self._settings.fetch_timeout_seconds
+        deadline = (
+            timeout_seconds if timeout_seconds is not None else self._settings.fetch_timeout_seconds
+        )
+        if deadline <= 0:
+            raise ValueError("timeout_seconds must be greater than 0")
         started = time.monotonic()
         try:
             async with asyncio.timeout(deadline):
@@ -260,11 +279,13 @@ class Fetcher:
 
         current = url
         redirects: list[str] = []
+        cookies = httpx.Cookies()  # lives for this call (one redirect chain) only
         while True:
             validate_url(current)
-            async with self._client.stream(
-                "GET", current, headers=headers, timeout=deadline
-            ) as response:
+            request = self._client.build_request("GET", current, headers=headers, timeout=deadline)
+            cookies.set_cookie_header(request)
+            async with contextlib.aclosing(await self._send(request)) as response:
+                cookies.extract_cookies(response)
                 status = response.status_code
                 location = response.headers.get("location", "").strip()
                 if status in _REDIRECT_STATUSES and location:
@@ -274,7 +295,7 @@ class Fetcher:
                             "The target redirected too many times.",
                             upstream_status=status,
                         )
-                    current = urljoin(current, location)
+                    current = self._redirect_target(current, location, status)
                     redirects.append(current)
                     continue
                 content = b"" if status == 304 else await self._read_body(response, max_bytes)
@@ -292,6 +313,35 @@ class Fetcher:
                     not_modified=status == 304,
                     raw_sha256=hashlib.sha256(content).hexdigest(),
                 )
+
+    async def _send(self, request: httpx.Request) -> httpx.Response:
+        try:
+            return await self._client.send(request, stream=True)
+        except httpx.RemoteProtocolError:
+            # httpx prepares the next redirect request itself and fails on an unparsable Location.
+            # The response hook ran by then, so a recorded status means the headers were fine.
+            status = request.extensions.get(_STATUS_KEY)
+            if status is None:
+                raise
+            raise FetchError(
+                ErrorCode.TARGET_HTTP_ERROR,
+                "The target sent an invalid redirect location.",
+                upstream_status=status,
+            ) from None
+
+    @staticmethod
+    def _redirect_target(current: str, location: str, status: int) -> str:
+        """The absolute URL a ``Location`` points to; a malformed one is the target's fault."""
+        try:
+            target = urljoin(current, location)
+            httpx.URL(target)
+        except (ValueError, httpx.InvalidURL):
+            raise FetchError(
+                ErrorCode.TARGET_HTTP_ERROR,
+                "The target sent an invalid redirect location.",
+                upstream_status=status,
+            ) from None
+        return target
 
     async def _read_body(self, response: httpx.Response, max_bytes: int) -> bytes:
         declared = response.headers.get("content-length", "")

@@ -1,6 +1,5 @@
 import asyncio
 import socket
-import time
 from collections.abc import Callable, Coroutine, Iterable
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from typing import Any
@@ -384,22 +383,20 @@ def test_transport_sends_method_headers_and_body(httpserver: HTTPServer) -> None
     assert seen == {"method": "POST", "header": "1", "body": "payload"}
 
 
-def test_transport_maps_a_read_timeout_to_the_httpx_exception(httpserver: HTTPServer) -> None:
-    def slow(request: Request) -> Response:
-        time.sleep(0.5)
-        return Response("late")
+def test_transport_maps_a_read_timeout_to_the_httpx_exception() -> None:
+    with socket.socket() as silent:  # accepts connections (backlog) but never answers
+        silent.bind(("127.0.0.1", 0))
+        silent.listen()
+        url = f"http://127.0.0.1:{silent.getsockname()[1]}/"
 
-    httpserver.expect_request("/slow").respond_with_handler(slow)
-    url = httpserver.url_for("/slow")
+        async def scenario() -> None:
+            async with httpx.AsyncClient(
+                transport=GuardedTransport(allow_loopback_only), timeout=0.1
+            ) as client:
+                await client.get(url)
 
-    async def scenario() -> None:
-        async with httpx.AsyncClient(
-            transport=GuardedTransport(allow_loopback_only), timeout=0.1
-        ) as client:
-            await client.get(url)
-
-    with pytest.raises(httpx.ReadTimeout):
-        run(scenario)
+        with pytest.raises(httpx.ReadTimeout):
+            run(scenario)
 
 
 def test_transport_maps_a_refused_connection_to_connect_error() -> None:

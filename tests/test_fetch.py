@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import hashlib
 import socket
+import threading
 import time
 import zlib
 from collections.abc import Callable, Coroutine, Iterator
@@ -211,6 +212,8 @@ def test_gzip_body_is_decoded(httpserver: HTTPServer) -> None:
 
 
 def test_gzip_bomb_is_too_large(httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Depends on the private Fetcher._decoded_chunks (every decoded piece passes through it):
+    # if that method is renamed or split, update the spy below.
     bomb = gzip.compress(b"\0" * 50_000_000, compresslevel=9)
     assert len(bomb) < 100_000
     httpserver.expect_request("/bomb").respond_with_data(bomb, headers={"Content-Encoding": "gzip"})
@@ -379,3 +382,77 @@ def test_timeout_argument_overrides_the_setting() -> None:
 
     assert error.code is ErrorCode.TIMEOUT
     assert time.monotonic() - started < 5
+
+
+def test_cookie_from_one_fetch_is_not_sent_on_the_next(httpserver: HTTPServer) -> None:
+    httpserver.expect_ordered_request("/set").respond_with_data(
+        "x", headers={"Set-Cookie": "session=abc; Path=/"}
+    )
+    httpserver.expect_ordered_request("/set").respond_with_data("y")
+
+    async def scenario() -> None:
+        fetcher = make_fetcher()
+        try:
+            await fetcher.fetch(httpserver.url_for("/set"))
+            await fetcher.fetch(httpserver.url_for("/set"))
+        finally:
+            await fetcher.aclose()
+
+    run(scenario)
+
+    assert "Cookie" not in httpserver.log[0][0].headers
+    assert "Cookie" not in httpserver.log[1][0].headers
+
+
+def test_cookie_set_on_a_redirect_is_sent_to_the_target_in_the_same_fetch(
+    httpserver: HTTPServer,
+) -> None:
+    httpserver.expect_request("/login").respond_with_data(
+        "", 302, headers={"Location": "/home", "Set-Cookie": "session=abc; Path=/"}
+    )
+    httpserver.expect_request("/home").respond_with_data("welcome")
+
+    result = fetch(httpserver.url_for("/login"))
+
+    assert result.content == b"welcome"
+    assert httpserver.log[1][0].headers["Cookie"] == "session=abc"
+
+
+def test_malformed_redirect_location_is_a_target_error() -> None:
+    # Raw socket: werkzeug refuses to send a Location it cannot parse.
+    reply = b"HTTP/1.1 302 Found\r\nLocation: http://[::1/x\r\nContent-Length: 0\r\n\r\n"
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+
+        def answer_once() -> None:
+            connection, _ = server.accept()
+            with connection:
+                connection.recv(65536)
+                connection.sendall(reply)
+
+        thread = threading.Thread(target=answer_once)
+        thread.start()
+        try:
+            error = fetch_error(f"http://127.0.0.1:{server.getsockname()[1]}/bad")
+        finally:
+            thread.join(5)
+
+    assert error.code is ErrorCode.TARGET_HTTP_ERROR
+    assert error.retryable is False
+    assert error.upstream_status == 302
+
+
+def test_accept_encoding_offers_only_what_the_fetcher_can_inflate(
+    httpserver: HTTPServer,
+) -> None:
+    httpserver.expect_request("/enc").respond_with_data("x")
+
+    fetch(httpserver.url_for("/enc"))
+
+    assert httpserver.log[0][0].headers["Accept-Encoding"] == "gzip, deflate"
+
+
+def test_zero_timeout_is_rejected_not_replaced_by_the_default() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        fetch("http://127.0.0.1:1/", timeout_seconds=0)
