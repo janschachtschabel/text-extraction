@@ -1,0 +1,123 @@
+{{- if .Values.valkey.enabled }}
+{{- $name := include "text-extraction.valkeyName" . }}
+{{- $claim := .Values.valkey.persistence.existingClaim | default $name }}
+{{- if and .Values.valkey.persistence.enabled (not .Values.valkey.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with .Values.valkey.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.valkey.persistence.size }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "text-extraction.valkeySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "text-extraction.valkeySelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: valkey
+          image: "{{ .Values.valkey.image.repository }}:{{ .Values.valkey.image.tag }}"
+          imagePullPolicy: {{ .Values.valkey.image.pullPolicy }}
+          args:
+            - --save
+            - {{ ternary "60 1" "" .Values.valkey.persistence.enabled | quote }}
+            - --appendonly
+            - {{ ternary "yes" "no" .Values.valkey.persistence.enabled | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: valkey
+              containerPort: 6379
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command: [valkey-cli, ping]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: [valkey-cli, ping]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.valkey.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.valkey.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $claim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: valkey
+spec:
+  type: ClusterIP
+  ports:
+    - name: valkey
+      port: 6379
+      targetPort: valkey
+      protocol: TCP
+  selector:
+    {{- include "text-extraction.valkeySelectorLabels" . | nindent 4 }}
+{{- end }}

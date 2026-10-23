@@ -1,0 +1,44 @@
+# Reference setup for local runs. Production uses the Helm chart, not this file.
+# Start: cp .env.example .env, set API_KEYS, then `docker compose up -d --wait`.
+services:
+  api:
+    build: .
+    image: text-extraction:dev
+    ports:
+      - "8080:8080" # public API; the internal port 9090 is not published
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      VALKEY_URL: redis://valkey:6379/0
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/ready', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      valkey:
+        condition: service_healthy
+
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - valkey-data:/data
+
+volumes:
+  valkey-data:
