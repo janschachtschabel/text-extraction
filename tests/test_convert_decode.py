@@ -181,3 +181,55 @@ def test_decode_undeclared_latin1_pages_over_a_varied_corpus() -> None:
                 wrong.append(page[:60])
 
     assert wrong == []
+
+
+def _utf8_page_with_stray_bytes(count: int, *, meta: bool) -> bytes:
+    head = '<html><head><meta charset="utf-8"></head>' if meta else "<html><head></head>"
+    body = "".join(f"<p>{GERMAN}</p>" for _ in range(10)).encode()
+    stray = b"<p>caf\xe9</p>" * count  # a windows-1252 \xe9 pasted into a UTF-8 page
+    return head.encode() + body + stray + b"</html>"
+
+
+@pytest.mark.parametrize(("header", "meta"), [("utf-8", True), ("utf-8", False), (None, True)])
+def test_decode_declared_utf8_with_a_stray_byte_keeps_the_umlauts(
+    header: str | None, meta: bool
+) -> None:
+    text = decode_html(_utf8_page_with_stray_bytes(1, meta=meta), header)
+
+    assert "Größe und Maße" in text
+    assert "Ã" not in text
+    assert text.count("�") == 1
+
+
+def test_decode_utf8_bom_with_a_stray_byte_keeps_the_umlauts() -> None:
+    text = decode_html(codecs.BOM_UTF8 + _utf8_page_with_stray_bytes(1, meta=False), None)
+
+    assert "Größe und Maße" in text
+    assert text.count("�") == 1
+
+
+def test_decode_declared_utf8_still_drops_a_character_cut_at_the_byte_limit() -> None:
+    data = _utf8_page_with_stray_bytes(1, meta=True) + "ö".encode()[:1]
+
+    assert decode_html(data, "utf-8").endswith("</html>")
+
+
+@pytest.mark.parametrize("count", [1, 8])
+def test_decode_undeclared_utf8_with_a_few_stray_bytes_keeps_the_umlauts(count: int) -> None:
+    text = decode_html(_utf8_page_with_stray_bytes(count, meta=False), None)
+
+    assert "Größe und Maße" in text
+    assert text.count("�") == count
+
+
+def test_decode_undeclared_utf8_with_many_stray_bytes_is_guessed() -> None:
+    text = decode_html(_utf8_page_with_stray_bytes(9, meta=False), None)
+
+    assert "�" not in text
+    assert "café" in text  # read as windows-1252, like a page of mixed encodings in a browser
+
+
+def test_decode_undeclared_latin1_page_with_one_utf8_looking_pair_stays_windows_1252() -> None:
+    page = "<p>Straße\xa0Nr. 5, Größe: groß, Übung für alle, schön und süß.</p>"
+
+    assert decode_html(page.encode("cp1252"), None) == page
