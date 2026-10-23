@@ -17,6 +17,7 @@ writes are dropped, both with one log line that carries no URL.
 
 import hashlib
 import json
+import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ import structlog
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from text_extraction import __version__
 from text_extraction.fetch import Validators
 from text_extraction.fingerprint import normalize_url
 from text_extraction.settings import Settings
@@ -50,10 +52,13 @@ def cache_key(url: str, options: Mapping[str, Any]) -> str:
     """Key of the result for ``url`` extracted with ``options`` (JSON-serialisable values).
 
     The order of the options does not matter; the spelling of the URL matters only as much as
-    ``normalize_url`` leaves it.
+    ``normalize_url`` leaves it. The package version is part of the hash, so a new release never
+    serves (or revalidates) what an older extractor produced.
     """
     canonical = json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    digest = hashlib.sha256(f"{normalize_url(url)}\0{canonical}".encode()).hexdigest()
+    digest = hashlib.sha256(
+        f"{__version__}\0{normalize_url(url)}\0{canonical}".encode()
+    ).hexdigest()
     return f"res:{{{digest}}}"
 
 
@@ -80,26 +85,33 @@ class ResultCache:
         entry = _decode(raw)
         if entry is None:
             return None
-        fresh = self._clock() - entry.stored_at < self._fresh_seconds
+        # A stored_at in the future (another pod's clock is ahead) gives a negative age: stale.
+        age = self._clock() - entry.stored_at
+        fresh = 0 <= age < self._fresh_seconds
         return entry, fresh
 
     async def put(self, key: str, entry: CachedEntry) -> None:
         """Store ``entry`` for ``RESULT_STORE_TTL_SECONDS`` (0: store nothing; over 2 MB: skip)."""
         if self._store_seconds <= 0:
             return
-        payload = json.dumps(
-            {
-                "stored_at": entry.stored_at,
-                "validators": {
-                    "etag": entry.validators.etag,
-                    "last_modified": entry.validators.last_modified,
+        try:
+            payload = json.dumps(
+                {
+                    "stored_at": entry.stored_at,
+                    "validators": {
+                        "etag": entry.validators.etag,
+                        "last_modified": entry.validators.last_modified,
+                    },
+                    "raw_sha256": entry.raw_sha256,
+                    "result": entry.result,
                 },
-                "raw_sha256": entry.raw_sha256,
-                "result": entry.result,
-            },
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode()
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode()
+        except (TypeError, ValueError) as error:  # e.g. a lone surrogate or a non-JSON value
+            _log.warning("result_cache_entry_not_serialisable", error=type(error).__name__)
+            return
         if len(payload) > MAX_ENTRY_BYTES:
             _log.info("result_cache_entry_too_large", size=len(payload))
             return
@@ -124,6 +136,7 @@ def _decode(raw: bytes | str) -> CachedEntry | None:
     if (
         isinstance(stored_at, bool)
         or not isinstance(stored_at, int | float)
+        or not math.isfinite(stored_at)
         or not isinstance(validators, dict)
         or not isinstance(raw_sha256, str)
         or not isinstance(result, dict)

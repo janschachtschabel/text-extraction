@@ -1,11 +1,14 @@
 import asyncio
 import json
+import math
 from typing import Any
 
+import pytest
 from fakeredis import FakeAsyncRedis
 from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
+from text_extraction import result_cache
 from text_extraction.fetch import Validators
 from text_extraction.result_cache import CachedEntry, ResultCache, cache_key
 from text_extraction.settings import Settings
@@ -170,3 +173,58 @@ def test_valkey_errors_degrade_to_no_cache() -> None:
     assert events == {"result_cache_write_failed", "result_cache_read_failed"}
     assert "example.org" not in repr(logs)
     assert "token" not in repr(logs)
+
+
+def test_cache_key_depends_on_the_package_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = cache_key(URL, {"mode": "auto"})
+    monkeypatch.setattr(result_cache, "__version__", "99.0.0")
+    after = cache_key(URL, {"mode": "auto"})
+    assert after != before
+    assert cache_key(URL, {"mode": "auto"}) == after  # stable within one version
+
+
+def test_non_finite_stored_at_is_a_miss() -> None:
+    async def scenario() -> list[Any]:
+        valkey = FakeAsyncRedis()
+        cache = make_cache(valkey)
+        key = cache_key(URL, {})
+        out = []
+        for stored_at in ("Infinity", "-Infinity", "NaN"):
+            raw = (
+                f'{{"stored_at": {stored_at}, "validators": {{}}, '
+                '"raw_sha256": "x", "result": {}}'
+            )
+            await valkey.set(key, raw)
+            out.append(await cache.get(key))
+        return out
+
+    assert asyncio.run(scenario()) == [None] * 3
+
+
+def test_future_stored_at_is_stale() -> None:
+    async def scenario() -> tuple[CachedEntry, bool] | None:
+        clock = Clock()
+        cache = make_cache(FakeAsyncRedis(), clock)
+        key = cache_key(URL, {})
+        await cache.put(key, make_entry(stored_at=clock.now + 30))  # another pod's clock is ahead
+        return await cache.get(key)
+
+    got = asyncio.run(scenario())
+    assert got is not None
+    assert got[1] is False
+    assert math.isfinite(got[0].stored_at)
+
+
+@pytest.mark.parametrize("bad", ["\ud800", object()], ids=["lone_surrogate", "not_json"])
+def test_unserialisable_result_is_not_cached(bad: object) -> None:
+    async def scenario() -> tuple[bool, list[Any]]:
+        valkey = FakeAsyncRedis()
+        cache = make_cache(valkey)
+        key = cache_key(URL, {})
+        with capture_logs() as logs:
+            await cache.put(key, make_entry(result={"content": bad}))  # must not raise
+        return await valkey.exists(key) == 1, logs
+
+    stored, logs = asyncio.run(scenario())
+    assert stored is False
+    assert [entry["event"] for entry in logs] == ["result_cache_entry_not_serialisable"]

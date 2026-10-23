@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import time
+import tracemalloc
 from typing import Any
 
 import pytest
@@ -8,7 +9,10 @@ from fakeredis import FakeAsyncRedis
 from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
+from text_extraction import fingerprint
 from text_extraction.fingerprint import (
+    MAX_SHINGLES,
+    SHINGLE_WORDS,
     Fingerprint,
     FingerprintStore,
     compute_fingerprint,
@@ -53,6 +57,18 @@ def test_normalize_strips_markdown_and_case() -> None:
     )
 
 
+def test_whitespace_collapse_is_the_same_across_chunk_borders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = " \t".join(["word", "\u00a0", "two\n\nthree", "  ", "x" * 50, "\u2003y"] * 40) + "  "
+    expected = " ".join(text.split())
+    for chunk in (1, 2, 7, 64, 1 << 20):
+        monkeypatch.setattr(fingerprint, "_COLLAPSE_CHUNK", chunk)
+        assert fingerprint._collapse_whitespace(text) == expected
+    assert fingerprint._collapse_whitespace("") == ""
+    assert fingerprint._collapse_whitespace(" \n ") == ""
+
+
 def test_normalize_casefolds_and_collapses_whitespace() -> None:
     assert normalize_text("  Straße\t\tMASSE \n\n\n x  ") == "strasse masse x"
     assert normalize_text("") == ""
@@ -77,13 +93,45 @@ def test_fingerprint_fields_and_minhash_encoding() -> None:
     assert fp.changed is None
 
 
+PINNED_MINHASH = (
+    "HEawOiHPtDHZ95NFQucyR0gWMG8JbcCI+vF0hybdFYTgLWm+VwxuGJEe25c/Dle5I3HPTJEz2AmswfmY1yiCKpjJIRwv"
+    "xPdwAMFOQOo2RzSw7lk4iydJKvNe+Uj5qdo06HgGrcXWxGEcDN4ZiBk6Eza0KlQcNuAE+SP1blY1zjhrEwEK0IEWltXq"
+    "szzLfd+MzRCrGtQJIKFG5kq5WMRpVqjF3h4kuSJGEPsMIAVqMx9yLGAS0D/JiLW5o21MvmILxowbU1/reyP9L2RZduGR"
+    "1ijY0yaYIoJPe1FlQkYNQX2eKRBrEvaKaRQrEyOV9qdC3qbnMhq1t286DH9ZvoeIkRsY1IPbTdKHtCOh8ppf2GtrrAPl"
+    "QbUR2dXzegbe3cmCIOjSAlLKCjJ8S2Qggogto8lkVgSB4S5fdYWMC47Vnbr1u2u7MQ/jK6DMQQ0O1CeE9L5ebyPuXkmR"
+    "a5MvfN+iroWyZE5JtAf5I7xvgdxsaRl9tBlPR+2lH10ig9t9ou8LUohaMSHYG4Ew0IpUGItEIU+9hB46rOVMsT3No7Q8"
+    "AYH39f5Ae3K6b4TNgk1XrmgTTbFZHMbiWiHLtnm8+ekmZvlrKhHo2DNGSWU9GoTY0AFx0DBNtPeXCVkn9RBX5p9I3Xw8"
+    "cTVity/zfI+sQSt8nOxvWFyy3eAukRfTUNPl0ww="
+)
+
+
 def test_minhash_matches_the_datasketch_affine32_layout() -> None:
     # Known value for a fixed text (equal to datasketch 2.x MinHash(128, seed=1, "affine32")):
     # guards against accidental changes of the algorithm, which would silently make every
     # stored fingerprint "changed".
     fp = compute_fingerprint(RAW, "one two three four five six")
-    assert fp.minhash.startswith("HEawOiHPtDHZ")
+    assert fp.minhash == PINNED_MINHASH
     assert fp.text_sha256 == compute_fingerprint(RAW, "ONE two  three four five six").text_sha256
+
+
+def test_words_beyond_the_shingle_cap_do_not_enter_the_minhash() -> None:
+    head = " ".join(f"w{i}" for i in range(MAX_SHINGLES + SHINGLE_WORDS - 1))
+    a = compute_fingerprint(RAW, head)
+    b = compute_fingerprint(RAW, head + " extra words after the cap")
+    assert a.minhash == b.minhash  # the cap is on shingles: the first MAX_SHINGLES of them
+    assert a.text_sha256 != b.text_sha256  # but the text hash still sees everything
+
+
+def test_fingerprint_does_not_materialise_every_word() -> None:
+    text = " ".join(f"w{i}" for i in range(1_500_000))  # 1.5 M words, ~10 MB
+    tracemalloc.start()
+    try:
+        compute_fingerprint(RAW, text)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Holding every word costs ~90 MB on top of the ~50 MB the capped shingles need.
+    assert peak < 80_000_000, f"peak {peak / 1e6:.0f} MB"
 
 
 def test_minhash_similarity_close_for_small_edit() -> None:

@@ -23,6 +23,7 @@ import base64
 import hashlib
 import re
 from functools import lru_cache
+from itertools import islice
 from urllib.parse import urlsplit, urlunsplit
 
 import numpy as np
@@ -48,6 +49,11 @@ _BLOCK = 4096
 _MAX_HASH = (1 << 32) - 1
 
 
+_WHITESPACE_CHAR = re.compile(r"\s")
+# Whitespace is collapsed in pieces of about this many characters (see _collapse_whitespace).
+_COLLAPSE_CHUNK = 1 << 20
+_WORD = re.compile(r"\S+")
+
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # Markdown syntax that carries no text. Every pattern is linear: lines are anchored with ``^`` and
@@ -69,7 +75,27 @@ def normalize_text(content: str) -> str:
     text = _MD_LINK.sub(r"\1", text)
     text = _MD_EMPHASIS.sub("", text)
     text = _MD_TABLE_PIPE.sub(" ", text)
-    return " ".join(text.casefold().split())
+    return _collapse_whitespace(text.casefold())
+
+
+def _collapse_whitespace(text: str) -> str:
+    """``" ".join(text.split())`` without holding every word of a huge text in memory at once.
+
+    ``split()`` makes a list of all words (about 90 MB per 10 MB of prose) and ``re.sub`` a list of
+    all matches, so the text is cut at whitespace into pieces of ``_COLLAPSE_CHUNK`` characters.
+    """
+    pieces: list[str] = []
+    start = 0
+    while start < len(text):
+        end = start + _COLLAPSE_CHUNK
+        if end < len(text):
+            cut = _WHITESPACE_CHAR.search(text, end)  # never inside a word
+            end = cut.start() if cut else len(text)
+        piece = " ".join(text[start:end].split())
+        if piece:
+            pieces.append(piece)
+        start = end
+    return " ".join(pieces)
 
 
 def normalize_url(url: str) -> str:
@@ -156,10 +182,14 @@ def _minhash(words: list[str]) -> bytes:
 def compute_fingerprint(raw_sha256: str, content: str) -> Fingerprint:
     """Fingerprint ``content``; ``raw_sha256`` is the hash of the fetched bytes."""
     normalized = normalize_text(content)
+    # Only the words the capped shingles need are materialised, not every word of a huge text.
+    words = [
+        m.group() for m in islice(_WORD.finditer(normalized), MAX_SHINGLES + SHINGLE_WORDS - 1)
+    ]
     return Fingerprint(
         raw_sha256=raw_sha256,
         text_sha256=hashlib.sha256(normalized.encode()).hexdigest(),
-        minhash=base64.b64encode(_minhash(normalized.split())).decode("ascii"),
+        minhash=base64.b64encode(_minhash(words)).decode("ascii"),
     )
 
 
