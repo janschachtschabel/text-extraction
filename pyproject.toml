@@ -64,7 +64,7 @@ python_version = "3.13"
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["extruct.*", "py3langid.*"]
+module = ["extruct.*", "lxml.*", "py3langid.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

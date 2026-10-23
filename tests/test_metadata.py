@@ -1,17 +1,13 @@
 import json
+import time
 
 import pytest
 from extruct.rdfa import RDFaExtractor
 from extruct.w3cmicrodata import MicrodataExtractor
 
 from text_extraction import metadata
-from text_extraction.metadata import (
-    License,
-    PageMetadata,
-    detect_language,
-    extract_metadata,
-    normalize_license,
-)
+from text_extraction.licenses import License
+from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
 
 URL = "https://www.example.org/de/lesson"
 
@@ -280,59 +276,6 @@ def test_licence_without_known_id_is_kept_and_ranked_behind_a_known_one() -> Non
     assert result.licenses[2].label == "Alle Rechte vorbehalten"
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("https://creativecommons.org/licenses/by/4.0/", "CC-BY-4.0"),
-        ("http://creativecommons.org/licenses/by-sa/3.0/", "CC-BY-SA-3.0"),
-        ("https://creativecommons.org/licenses/by-nc-nd/2.0/deed.de", "CC-BY-NC-ND-2.0"),
-        ("http://creativecommons.org/licenses/by-nc-sa/3.0/de/legalcode", "CC-BY-NC-SA-3.0"),
-        ("https://www.creativecommons.org/licenses/by-nc/2.5/ch/", "CC-BY-NC-2.5"),
-        ("https://creativecommons.org/licenses/by-sa/1.0", "CC-BY-SA-1.0"),
-        ("https://creativecommons.org/publicdomain/zero/1.0/", "CC0-1.0"),
-        ("http://creativecommons.org/publicdomain/zero/1.0/deed.en", "CC0-1.0"),
-        ("https://creativecommons.org/publicdomain/mark/1.0/", "PDM-1.0"),
-        ("CC BY-SA 4.0", "CC-BY-SA-4.0"),
-        ("cc-by-nc-nd-3.0", "CC-BY-NC-ND-3.0"),
-        ("CC BY 4.0 International", "CC-BY-4.0"),
-        ("CC-BY-SA-4.0", "CC-BY-SA-4.0"),
-        ("CC BY-NC-SA 4.0", "CC-BY-NC-SA-4.0"),
-        ("CC0", "CC0-1.0"),
-        ("CC0 1.0 Universal", "CC0-1.0"),
-        ("CC0-1.0", "CC0-1.0"),
-        ("Public Domain Mark 1.0", "PDM-1.0"),
-        ("PDM-1.0", "PDM-1.0"),
-        ("Creative Commons Attribution 4.0 International", "CC-BY-4.0"),
-        ("Creative Commons Attribution-ShareAlike 3.0 Unported", "CC-BY-SA-3.0"),
-        (
-            "Creative Commons Attribution-NonCommercial-NoDerivatives 4.0",
-            "CC-BY-NC-ND-4.0",
-        ),
-        ("Namensnennung - Weitergabe unter gleichen Bedingungen 4.0", "CC-BY-SA-4.0"),
-        ("Namensnennung 4.0 International", "CC-BY-4.0"),
-        (
-            "Namensnennung - Nicht kommerziell - Keine Bearbeitungen 3.0 Deutschland",
-            "CC-BY-NC-ND-3.0",
-        ),
-        (
-            "Namensnennung-Nicht kommerziell-Weitergabe unter gleichen Bedingungen 2.0",
-            "CC-BY-NC-SA-2.0",
-        ),
-        ("  cc by 4.0  ", "CC-BY-4.0"),
-        ("All rights reserved", None),
-        ("", None),
-        ("CC BY-SA", None),  # no version: not an SPDX id
-        ("https://creativecommons.org/licenses/by/", None),
-        ("https://creativecommons.org/licenses/by-sa/9.9/", None),
-        ("https://example.org/licenses/by/4.0/", None),
-        ("CC BY-SA-ND 4.0", None),  # SA and ND exclude each other
-        ("Attribution 2024", None),
-    ],
-)
-def test_normalize_license_variants(value: str, expected: str | None) -> None:
-    assert normalize_license(value) == expected
-
-
 def test_opengraph_and_canonical() -> None:
     html = page(
         head="""
@@ -531,3 +474,193 @@ def test_lrmi_values_are_clipped() -> None:
 
     assert len(lrmi["educationalLevel"]) == 1000
     assert len(lrmi["teaches"]) == 50
+
+
+def _jsonld(*nodes: object) -> str:
+    return "".join(
+        f'<script type="application/ld+json">{json.dumps(node)}</script>' for node in nodes
+    )
+
+
+def test_keywords_are_deduplicated_and_capped_in_linear_time() -> None:
+    words = ",".join(f"word{number}" for number in range(100_000))
+    html = page(
+        head=f'<meta name="keywords" content="{words}">'
+        + _jsonld({"@type": "Article", "keywords": words.split(",")})
+    )
+
+    started = time.perf_counter()
+    result = meta(html)
+    elapsed = time.perf_counter() - started
+
+    assert result.keywords == [f"word{number}" for number in range(50)]
+    assert elapsed < 3
+
+
+def test_licence_of_a_list_page_child_is_not_the_page_licence() -> None:
+    listing = {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "item": {
+                    "@type": "LearningResource",
+                    "license": "https://creativecommons.org/licenses/by/4.0/",
+                    "educationalLevel": "Klasse 9",
+                },
+            }
+        ],
+    }
+
+    result = meta(page(head=_jsonld(listing)))
+
+    assert result.license is None
+    assert result.lrmi == {}
+
+
+def test_licence_of_a_source_work_or_part_or_media_is_not_the_page_licence() -> None:
+    article = {
+        "@type": "Article",
+        "license": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "isBasedOn": {
+            "@type": "CreativeWork",
+            "license": "https://creativecommons.org/licenses/by/2.0/",
+        },
+        "hasPart": [{"@type": "WebPageElement", "license": "CC0"}],
+        "associatedMedia": {"@type": "ImageObject", "license": "CC BY-NC 3.0"},
+        "author": {"@type": "Person", "license": "CC BY-ND 4.0"},
+    }
+
+    result = meta(page(head=_jsonld(article)))
+
+    assert [item.id for item in result.licenses] == ["CC-BY-SA-4.0"]
+
+
+def test_licence_and_lrmi_of_main_entity_and_graph_members_are_the_pages() -> None:
+    page_node = {
+        "@type": "WebPage",
+        "mainEntity": {
+            "@type": "LearningResource",
+            "license": "https://creativecommons.org/licenses/by/4.0/",
+            "educationalLevel": "Klasse 7",
+        },
+    }
+    graph = {
+        "@context": "https://schema.org",
+        "@graph": [{"@type": "Course", "teaches": "Algebra", "license": "CC0"}],
+    }
+
+    result = meta(page(head=_jsonld(page_node, graph)))
+
+    assert [item.id for item in result.licenses] == ["CC-BY-4.0", "CC0-1.0"]
+    assert result.lrmi == {"educationalLevel": "Klasse 7", "teaches": "Algebra"}
+
+
+def test_microdata_list_items_do_not_leak_into_the_page() -> None:
+    html = page(
+        body="""
+        <div itemscope itemtype="https://schema.org/ItemList">
+          <div itemprop="itemListElement" itemscope itemtype="https://schema.org/LearningResource">
+            <a itemprop="license" href="https://creativecommons.org/licenses/by/4.0/">CC</a>
+            <meta itemprop="educationalLevel" content="Klasse 9">
+          </div>
+        </div>"""
+    )
+
+    result = meta(html)
+
+    assert result.license is None
+    assert result.lrmi == {}
+
+
+def test_microdata_image_licence_is_not_the_page_licence() -> None:
+    html = page(
+        body="""
+        <div itemscope itemtype="https://schema.org/Article">
+          <a itemprop="license" href="https://creativecommons.org/licenses/by/4.0/">CC</a>
+          <div itemprop="image" itemscope itemtype="https://schema.org/ImageObject">
+            <a itemprop="license" href="https://creativecommons.org/licenses/by-nd/4.0/">CC</a>
+          </div>
+        </div>"""
+    )
+
+    assert [item.id for item in meta(html).licenses] == ["CC-BY-4.0"]
+
+
+def test_rel_license_in_a_figure_is_an_image_credit() -> None:
+    html = page(
+        body=(
+            '<figure><img src="/a.png"><figcaption>Foto: '
+            '<a rel="license" href="https://creativecommons.org/licenses/by-nd/2.0/">CC BY-ND</a>'
+            "</figcaption></figure>"
+        )
+    )
+
+    result = meta(html)
+
+    assert result.license is not None
+    assert (result.license.id, result.license.source, result.license.confidence) == (
+        "CC-BY-ND-2.0",
+        "rel-license",
+        "medium",
+    )
+
+
+def test_site_footer_wins_over_early_footers() -> None:
+    articles = "".join(f"<article><footer>Autor {n}</footer></article>" for n in range(30))
+    html = page(body=articles + "<footer>Alle Texte unter CC BY-SA 4.0</footer>")
+
+    result = meta(html)
+
+    assert result.license is not None
+    assert result.license.id == "CC-BY-SA-4.0"
+
+
+def test_footer_anchor_without_licence_url_is_not_a_licence() -> None:
+    html = page(body='<footer><a href="/tag/cc0">Schlagwort</a> Dosis CC 0,5 mg</footer>')
+
+    assert meta(html).license is None
+
+
+def test_jsonld_script_type_is_matched_case_insensitively_with_parameters() -> None:
+    node = json.dumps({"@type": "Article", "headline": "Titel", "license": "CC0"})
+    html = page(
+        head=(
+            f'<script type="Application/LD+JSON; charset=utf-8">{node}</script>'
+            '<script type="application/json">{"headline": "Wrong"}</script>'
+        )
+    )
+
+    result = meta(html)
+
+    assert result.title == "Titel"
+    assert result.license is not None
+    assert result.license.id == "CC0-1.0"
+
+
+def test_jsonld_wrapped_in_comment_markers_is_read() -> None:
+    node = json.dumps({"@type": "Article", "headline": "Kommentiert"})
+    html = page(head=f'<script type="application/ld+json"><!-- {node} --></script>')
+
+    assert meta(html).title == "Kommentiert"
+
+
+def test_a_big_page_is_processed_in_a_few_seconds() -> None:
+    link = '<link rel="license" href="https://creativecommons.org/licenses/by/4.0/">'
+    html = page(head=link, body="<p>x</p>" * 700_000 + "<footer>CC0</footer>")
+    assert len(html) > 5_000_000
+
+    started = time.perf_counter()
+    result = meta(html)
+    elapsed = time.perf_counter() - started
+
+    assert result.license is not None
+    assert result.license.id == "CC-BY-4.0"
+    assert elapsed < 6  # about 1 s on a laptop; the bound leaves room for a slow CI runner
+
+
+def test_language_detection_only_looks_at_a_bounded_prefix() -> None:
+    padding = " " * 20_000
+    # Fifty words, but only after a long stretch of blanks: outside the scanned prefix.
+    assert detect_language(None, None, padding + GERMAN_TEXT) is None
