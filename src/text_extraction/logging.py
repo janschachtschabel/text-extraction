@@ -10,6 +10,8 @@ from structlog.typing import Processor
 _HANDLER_MARK = "_text_extraction_handler"
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error")
 _UVICORN_ACCESS_LOGGER = "uvicorn.access"
+# Client libraries log full request URLs (query strings can carry secrets) at INFO and below.
+_QUIET_CLIENT_LOGGERS = ("httpx", "httpcore")
 
 
 def _level_number(level: str) -> int:
@@ -35,7 +37,13 @@ def configure_logging(level: str, fmt: Literal["json", "console"]) -> None:
         structlog.processors.StackInfoRenderer(),
     ]
     renderer: list[Processor] = (
-        [structlog.processors.dict_tracebacks, structlog.processors.JSONRenderer()]
+        [
+            # Frame locals would put secrets (passwords, tokens) into the log line.
+            structlog.processors.ExceptionRenderer(
+                structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
+            ),
+            structlog.processors.JSONRenderer(),
+        ]
         if fmt == "json"
         else [structlog.dev.ConsoleRenderer()]
     )
@@ -65,6 +73,8 @@ def configure_logging(level: str, fmt: Literal["json", "console"]) -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level_number)
+    for name in _QUIET_CLIENT_LOGGERS:
+        logging.getLogger(name).setLevel(max(level_number, logging.WARNING))
 
     # Uvicorn installs its own handlers (plain text); drop them and let records reach the root.
     for name in _UVICORN_LOGGERS:

@@ -136,3 +136,40 @@ def test_calling_twice_does_not_duplicate_lines(capsys: pytest.CaptureFixture[st
     structlog.get_logger("app").info("once")
 
     assert len(stdout_lines(capsys)) == 1
+
+
+def _contains_key(value: object, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_key(item, key) for item in value)
+    return False
+
+
+def test_json_traceback_has_no_frame_locals(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging("INFO", "json")
+
+    def connect() -> None:
+        auth_args = "hunter2-password"  # noqa: F841 - a local that must not be logged
+        raise RuntimeError("boom")
+
+    try:
+        connect()
+    except RuntimeError:
+        structlog.get_logger("app").error("failed", exc_info=True)
+
+    (line,) = stdout_lines(capsys)
+    assert "hunter2-password" not in line
+    assert not _contains_key(json.loads(line), "locals")
+    assert json.loads(line)["exception"][0]["exc_type"] == "RuntimeError"
+
+
+def test_httpx_info_records_are_not_emitted(capsys: pytest.CaptureFixture[str]) -> None:
+    configure_logging("DEBUG", "json")
+
+    logging.getLogger("httpx").info('HTTP Request: GET https://x.test/?token=abc "200 OK"')
+    logging.getLogger("httpcore.http11").debug("send_request_headers")
+    logging.getLogger("httpx").warning("kept")
+
+    (line,) = stdout_lines(capsys)
+    assert json.loads(line)["event"] == "kept"
