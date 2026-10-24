@@ -30,6 +30,10 @@ DEFAULT_URLS = Path(__file__).parent / "urls" / "wlo_200.csv"
 # so that a slow answer is recorded as the service's, not cut off by the harness.
 DEFAULT_CLIENT_TIMEOUT_SECONDS = 90.0
 TOP_DOMAINS = 10
+# Domains named per error code in the summary.
+TOP_CODE_DOMAINS = 3
+# The warning of an ``auto`` answer whose browser worker did not answer in time.
+BROWSER_UNAVAILABLE = "browser_unavailable"
 MODES = ("fast", "auto", "browser")
 # The mode of the gate: the service decides per URL, as it does for callers who leave it out.
 DEFAULT_MODE = "auto"
@@ -48,6 +52,7 @@ class Record:
     word_count: int | None
     compliance_decision: str | None
     mode_used: str | None  # "fast" or "browser": what produced the answer; None without data
+    warnings: list[str]  # data.warnings (for example browser_unavailable); empty without data
     elapsed_ms: int
 
 
@@ -121,8 +126,18 @@ async def extract_one(
         word_count=fields.word_count if fields else None,
         compliance_decision=fields.compliance_decision if fields else None,
         mode_used=fields.mode_used if fields else None,
+        warnings=_warnings(payload),
         elapsed_ms=elapsed_ms,
     )
+
+
+def _warnings(payload: object) -> list[str]:
+    """The string entries of ``data.warnings``; empty when the answer has none."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    warnings = data.get("warnings") if isinstance(data, dict) else None
+    if not isinstance(warnings, list):
+        return []
+    return [warning for warning in warnings if isinstance(warning, str)]
 
 
 async def run(
@@ -186,8 +201,9 @@ def _percent(count: int, total: int) -> str:
 
 
 def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> str:
-    """The Markdown summary: buckets overall, ok rate, would-be blocks, results per mode that
-    produced them, buckets per domain."""
+    """The Markdown summary: buckets overall, ok rate, would-be blocks, answers whose browser
+    worker did not answer in time, results per mode that produced them, buckets per domain and
+    the error codes of the answers."""
     total = len(records)
     counts = Counter(record.bucket for record in records)
     lines = [
@@ -197,6 +213,8 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
         f"Ok rate: {ok_rate(records):.1f} % ({counts['ok']} of {total})",
         "Would be blocked under `enforce`: "
         f"{sum(record.compliance_decision == 'reported' for record in records)}",
+        f"Answers with the warning `{BROWSER_UNAVAILABLE}`: "
+        f"{sum(BROWSER_UNAVAILABLE in record.warnings for record in records)}",
         "",
         "| Bucket | URLs | Share |",
         "| --- | ---: | ---: |",
@@ -237,7 +255,26 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
             f"| {domain or '(none)'} | {c.total()} | " + " | ".join(str(c[b]) for b in shown) + " |"
             for domain, c in top
         ]
+    lines += _error_codes(records)
     return "\n".join(lines) + "\n"
+
+
+def _error_codes(records: Sequence[Record]) -> list[str]:
+    """The ``error.code`` of failed and partial answers and of every ``connection_error``, most
+    frequent first, each with the domains that gave it most: the per-cause view of a run."""
+    per_code: dict[str, Counter[str]] = defaultdict(Counter)
+    for record in records:
+        answered = record.status in ("failed", "partial") or record.bucket == "connection_error"
+        if answered and record.status is not None and record.error_code is not None:
+            per_code[record.error_code][record.domain] += 1
+    if not per_code:
+        return []
+    lines = ["", "### Error codes", "", "| Code | URLs | Top domains |", "| --- | ---: | --- |"]
+    for code, domains in sorted(per_code.items(), key=lambda item: (-item[1].total(), item[0])):
+        top = sorted(domains.items(), key=lambda item: (-item[1], item[0]))[:TOP_CODE_DOMAINS]
+        named = ", ".join(f"{domain or '(none)'} {count}" for domain, count in top)
+        lines.append(f"| {code} | {domains.total()} | {named} |")
+    return lines
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

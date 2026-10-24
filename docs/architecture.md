@@ -341,7 +341,10 @@ while `BROWSER_ENABLED` is false, are unchanged.
 - **D2, done-when.** `wlo_200` in `auto` mode at or above the 80 % browser baseline (4,000 URLs,
   2026-09-28), and the smoke set reported. The live workflow gates on that and also reports the
   smoke set and `wlo_200` with `mode: browser`. A miss is debugged per domain, fast against
-  browser, before any setting is tuned.
+  browser, before any setting is tuned. So that the rig does not count against the product, the
+  workflow lets a sync request wait 30 s for a browser page (`BROWSER_QUEUE_WAIT_SECONDS`), runs
+  the browser report with as many requests at once as the worker renders pages, and the summary
+  counts `browser_unavailable` answers and the error codes per domain.
 - **D3, unblock mode.** Patchright with real Chrome, tied to `compliance: ignore` (admin) and
   `BROWSER_UNBLOCK_ENABLED`. Reason: partners allowed extraction by contract but keep their bot
   protection, so once getting past it is allowed we should reach as much as we can. Captchas:

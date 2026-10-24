@@ -43,7 +43,7 @@ after `BROWSER_QUEUE_WAIT_SECONDS`, and `browser` fails with `timeout`.
 | `--min-ok-rate` | none | Exit 1 when the ok rate (percent of all URLs) is below this. |
 | `--out` | `results/live_<UTC time>.jsonl` | One JSON line per URL. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
-| `--timeout` | 90 | Total client deadline per request in seconds (a slower answer is recorded as `client_TimeoutError`); keep it above the longest answer: `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + `BROWSER_TIMEOUT_SECONDS` + 5 s for an escalating `auto` request (70 s by default). |
+| `--timeout` | 90 | Total client deadline per request in seconds (a slower answer is recorded as `client_TimeoutError`); keep it above the longest answer: `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + `BROWSER_TIMEOUT_SECONDS` + 5 s for an escalating `auto` request (70 s by default; the live workflow sets the queue wait to 30 s and passes 120). |
 
 Every request is `POST /v1/extract` with the `--mode` (default `auto`), `format=text` and `cache=false`. Each domain
 has its own queue and at most one request in flight; the domains take turns under the global
@@ -52,12 +52,15 @@ sets the run time. Run the service with the default per-domain outbound limits t
 production sees.
 
 Each JSONL line has `url`, `domain`, `bucket`, `http_status`, `status`, `error_code`,
-`word_count`, `compliance_decision`, `mode_used` and `elapsed_ms`. `error_code` is the envelope's
-code, or `client_<ExceptionName>` when the request got no answer; `mode_used` is the envelope's
-`data.mode_used` (`fast` or `browser`: what produced the answer, null without data). The summary on
-stdout lists the buckets overall, the ok rate, how many URLs `enforce` would have blocked
-(`compliance.decision == "reported"`), the URLs and ok count per `mode_used` and the buckets of
-the ten domains with the most URLs. To see where the browser helps, run a set in `fast` and in
+`word_count`, `compliance_decision`, `mode_used`, `warnings` and `elapsed_ms`. `error_code` is
+the envelope's code, or `client_<ExceptionName>` when the request got no answer; `mode_used` is
+the envelope's `data.mode_used` (`fast` or `browser`: what produced the answer, null without
+data); `warnings` is `data.warnings`. The summary on stdout lists the buckets overall, the ok
+rate, how many URLs `enforce` would have blocked (`compliance.decision == "reported"`), how many
+answers carry the warning `browser_unavailable` (no browser worker answered in time), the URLs
+and ok count per `mode_used`, the buckets of the ten domains with the most URLs and an "Error
+codes" table: the `error.code` of every failed or partial answer and of every
+`connection_error`, most frequent first, with the three domains that gave it most. To see where the browser helps, run a set in `fast` and in
 `browser` mode and compare the domains, as the 2026-09-28 baseline did.
 
 ## Buckets

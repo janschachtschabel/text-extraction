@@ -86,6 +86,11 @@ jobs:
           VALKEY_URL: redis://127.0.0.1:6379/0
           BROWSER_ENABLED: "true"
           BROWSER_UNBLOCK_ENABLED: "false"
+          # One browser worker with 4 pages at once serves every escalation of the run: a sync
+          # request waits up to 30 s for a free page, so a burst of escalations is measured as
+          # the product's answer, not as a browser_unavailable of the test rig.
+          BROWSER_CONCURRENCY: "4"
+          BROWSER_QUEUE_WAIT_SECONDS: "30"
         run: |
           mkdir -p results
           nohup uv run text-extraction > results/server.log 2>&1 &
@@ -106,7 +111,8 @@ jobs:
           exit 1
 
       # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke). Always
-      # in auto mode, the mode of production.
+      # in auto mode, the mode of production. The client waits 120 s: an escalating request can
+      # take the fast phase (25 s), the queue wait (30 s) and the render (30 s + 5 s).
       - name: Run ${{ env.URL_SET }} in auto mode
         run: |
           gate=(--min-ok-rate "$MIN_OK_RATE")
@@ -116,19 +122,22 @@ jobs:
           uv run python -m tests.live.run_live \
             --urls "tests/live/urls/${URL_SET}.csv" \
             --mode auto \
+            --timeout 120 \
             --out "results/live_${URL_SET}_auto.jsonl" \
             --summary-out "results/summary_${URL_SET}_auto.md" \
             "${gate[@]}"
 
       # Reports only, no gate: the smoke set is a watchlist of hard pages, and wlo_200 with every
       # URL forced through the browser shows what the fast path leaves out (per domain, fast
-      # against browser). The smoke report is skipped when the run above was the smoke set.
+      # against browser). The smoke report is skipped when the run above was the smoke set. The
+      # browser run sends as many requests at once as the worker renders pages.
       - name: Run smoke in auto mode (report only)
         if: always() && env.URL_SET != 'smoke'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/smoke.csv \
             --mode auto \
+            --timeout 120 \
             --out results/live_smoke_auto.jsonl \
             --summary-out results/summary_smoke_auto.md
 
@@ -138,6 +147,8 @@ jobs:
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/wlo_200.csv \
             --mode browser \
+            --concurrency 4 \
+            --timeout 120 \
             --out results/live_wlo_200_browser.jsonl \
             --summary-out results/summary_wlo_200_browser.md
 

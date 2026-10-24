@@ -99,6 +99,7 @@ def test_run_sends_the_documented_request_and_writes_one_line_per_url() -> None:
         "word_count",
         "compliance_decision",
         "mode_used",
+        "warnings",
         "elapsed_ms",
     }
 
@@ -204,20 +205,70 @@ def test_run_records_a_transport_failure_and_a_non_json_body_as_service_errors()
 
 
 def record(
-    domain: str, bucket: str, decision: str | None = "allowed", mode_used: str | None = "fast"
+    domain: str,
+    bucket: str,
+    decision: str | None = "allowed",
+    mode_used: str | None = "fast",
+    *,
+    status: str | None = "success",
+    error_code: str | None = None,
+    warnings: tuple[str, ...] = (),
 ) -> Record:
     return Record(
         url=f"https://{domain}/",
         domain=domain,
         bucket=bucket,  # type: ignore[arg-type]
         http_status=200,
-        status="success",
-        error_code=None,
+        status=status,
+        error_code=error_code,
         word_count=100,
         compliance_decision=decision,
         mode_used=mode_used,
+        warnings=list(warnings),
         elapsed_ms=1,
     )
+
+
+def test_run_records_the_warnings_of_the_answer() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = ok_body("x")
+        answer["data"] = {"word_count": 100, "warnings": ["browser_unavailable", 7]}
+        return httpx.Response(200, json=answer)
+
+    (only,), (line,) = run_with(httpx.MockTransport(handler), ["https://a.example/"])
+
+    assert only.warnings == ["browser_unavailable"]  # strings only
+    assert line["warnings"] == ["browser_unavailable"]
+
+
+def test_summary_counts_browser_unavailable_and_error_codes() -> None:
+    # M-7: the summary is the only per-cause signal of a CI run.
+    records = [
+        record("a.example", "ok", warnings=("browser_unavailable",)),
+        record("a.example", "too_short", status="partial", error_code="content_too_short"),
+        record("b.example", "connection_error", status="failed", error_code="timeout"),
+        record("b.example", "connection_error", status="failed", error_code="timeout"),
+        record("c.example", "connection_error", status="failed", error_code="dns_error"),
+        record("c.example", "ok", status="success", error_code=None),
+        record("d.example", "service_error", status=None, error_code="client_ReadTimeout"),
+    ]
+
+    text = summarize(records)
+
+    assert "Answers with the warning `browser_unavailable`: 1" in text
+    section = text.split("### Error codes")[1]
+    assert "| Code | URLs | Top domains |" in section
+    assert "| timeout | 2 | b.example 2 |" in section
+    assert "| content_too_short | 1 | a.example 1 |" in section
+    assert "| dns_error | 1 | c.example 1 |" in section
+    assert section.index("| timeout |") < section.index("| content_too_short |")
+    assert "client_ReadTimeout" not in section  # no answer, no envelope: counted as a bucket
+
+
+def test_summary_without_error_codes_has_no_error_table() -> None:
+    text = summarize([record("a.example", "ok")])
+    assert "Answers with the warning `browser_unavailable`: 0" in text
+    assert "### Error codes" not in text
 
 
 def test_ok_rate_counts_against_all_urls() -> None:
