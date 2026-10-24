@@ -301,7 +301,7 @@ literal (a cluster hash tag), so all keys of one host live in the same slot.
 
 | Key | Content | Lifetime |
 | --- | --- | --- |
-| `out:inflight:{<host>}` | Requests in flight: one entry per lease, scored by its expiry time. | A lease expires 120 s after it starts, so a crashed pod frees its slot by itself. |
+| `out:inflight:{<host>}` | Requests in flight: one entry per lease, scored by its expiry time. | A lease expires after the longest deadline a turn can be held for (`EXTRACT_TIMEOUT_SECONDS`, `BROWSER_TIMEOUT_SECONDS`, `BROWSER_UNBLOCK_TIMEOUT_SECONDS`) plus 30 s, at least 120 s after it starts, so a crashed pod frees its slot by itself and a render that holds its turn to its deadline keeps it. |
 | `out:next:{<host>}` | Earliest start time of the next request: the next turn to book. | Until the slot has passed. |
 | `out:starts:{<host>}` | Real starts per turn: one entry per turn token, scored by the latest real start of a request in that turn. Set when a request is let through, moved on (never back) when its headers have gone out; entries older than twice the longest spacing are dropped. | The longest spacing plus 60 s. |
 | `out:cooldown:{<host>}` | End of the pause after 429 or 503. | Until it ends. |
