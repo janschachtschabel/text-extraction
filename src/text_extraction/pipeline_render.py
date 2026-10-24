@@ -27,6 +27,7 @@ from text_extraction.settings import Settings
 CHALLENGE_STATUSES = frozenset({403, 429, 503})
 # The renderer's warning for a challenge that was still there when the wait ended (B14).
 CHALLENGE_NOT_CLEARED = "challenge_not_cleared"
+_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
 
 def blocked_resources(settings: Settings) -> frozenset[str]:
@@ -35,18 +36,31 @@ def blocked_resources(settings: Settings) -> frozenset[str]:
 
 
 def caller_cookies(req: ExtractRequest, host: str) -> list[CookieData]:
-    """The request's cookies; one without a domain gets the request host."""
+    """The request's cookies. One without a domain is host-only on the request host; one with
+    a domain is a domain cookie (a leading dot, as a ``Domain`` attribute makes it), so a
+    parent domain's cookie reaches the request host too. An IP address has no subdomains."""
     return [
         CookieData(
             name=cookie.name,
             value=cookie.value,
-            domain=cookie.domain or host,
+            domain=_cookie_domain(cookie.domain, host),
             path=cookie.path,
             secure=cookie.secure,
             http_only=cookie.http_only,
         )
         for cookie in req.cookies
     ]
+
+
+def _cookie_domain(domain: str | None, host: str) -> str:
+    if domain is None:
+        return host
+    name = domain.lower().strip(".")
+    try:
+        ip_address(name)
+    except ValueError:
+        return f".{name}"
+    return name
 
 
 def render_options(
@@ -127,17 +141,21 @@ def challenged_by_hosts(quality: Quality, rendered: Rendered) -> bool:
 
 
 def answers_for_gate(rendered: Rendered, *, unblock: bool) -> tuple[MainResponse, ...]:
-    """The document answers the outbound gate hears of. An unblock render whose challenge
-    cleared leaves out the challenge's 403, 429 or 503 before its 2xx document: the host did not
-    ask us to back off, its protection asked us to prove we are a browser. A challenge that
-    stayed is reported as it answered (real backoff)."""
+    """The document answers the outbound gate hears of. Under unblock, a render that ends on a
+    2xx HTML document that is no challenge (no ``challenge_not_cleared``), after a 403, 429 or
+    503 answer, got past a challenge: only its final answer is reported. The host did not ask
+    us to back off; its protection asked us to prove we are a browser. This is judged by the
+    answers, wherever the challenge cleared (in the idle wait or in the challenge wait). A
+    challenge that stayed is reported as it answered (real backoff)."""
     answers = rendered.responses
-    if not (unblock and rendered.challenge_cleared and answers and 200 <= answers[-1].status < 300):
+    if not unblock or not answers or CHALLENGE_NOT_CLEARED in rendered.warnings:
         return answers
-    return (
-        *(answer for answer in answers[:-1] if answer.status not in CHALLENGE_STATUSES),
-        answers[-1],
-    )
+    last = answers[-1]
+    if not 200 <= last.status < 300 or last.content_type not in _HTML_TYPES:
+        return answers
+    if not any(answer.status in CHALLENGE_STATUSES for answer in answers[:-1]):
+        return answers
+    return (last,)
 
 
 def challenge_not_cleared(rendered: Rendered, *, unblock: bool) -> bool:

@@ -33,7 +33,9 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 @dataclass(frozen=True)
 class CookieData:
-    """A browser cookie. ``expires`` is Unix time, None for a session cookie."""
+    """A browser cookie. ``expires`` is Unix time, None for a session cookie. ``domain`` is
+    as Chromium reports it: with a leading dot for a domain cookie (sent to the subdomains
+    too), without for a host-only one; ``add_cookies`` reads it the same way."""
 
     name: str
     value: str = field(repr=False)
@@ -90,9 +92,7 @@ class Rendered:
     ``responses`` holds every main-frame document answer, in order; the last one is the
     document ``html`` was read from. ``hosts`` are the hosts the page contacted (through the
     egress proxy). ``cookies`` are the target host's and its parent domain's, for the
-    clearance reuse of unblock mode (B14). ``challenge_cleared``: the unblock renderer met a bot
-    challenge after the load and it cleared (one it did not clear adds the warning
-    ``challenge_not_cleared``)."""
+    clearance reuse of unblock mode (B14)."""
 
     html: str = field(repr=False)
     final_url: str
@@ -102,7 +102,6 @@ class Rendered:
     warnings: tuple[str, ...] = ()
     hosts: frozenset[str] = frozenset()
     cookies: tuple[CookieData, ...] = field(default=(), repr=False)
-    challenge_cleared: bool = False
 
 
 class Renderer(Protocol):

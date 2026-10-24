@@ -213,7 +213,6 @@ def rendered(
     warnings: Sequence[str] = (),
     hosts: Sequence[str] = (),
     cookies: Sequence[CookieData] = (),
-    challenge_cleared: bool = False,
 ) -> Rendered:
     answers = tuple(responses) if responses is not None else (response(url),)
     return Rendered(
@@ -225,7 +224,6 @@ def rendered(
         warnings=tuple(warnings),
         hosts=frozenset(hosts) | {urlsplit(url).hostname or ""},
         cookies=tuple(cookies),
-        challenge_cleared=challenge_cleared,
     )
 
 

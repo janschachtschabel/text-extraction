@@ -332,6 +332,14 @@ class _Handler(BaseHTTPRequestHandler):
                 "</script>"
             )
             self._send(article(form, title="Form"))
+        elif path == "/set-domain-cookie":
+            # A clearance cookie for the parent domain of the host (www.example.test, say).
+            host = (self.headers.get("host") or "").split(":")[0]
+            parent = host.split(".", 1)[1] if host.count(".") > 1 else host
+            self._send(
+                article(title="Domain cookie"),
+                headers={"Set-Cookie": f"cf_clearance=domain-wide; Domain={parent}; Path=/"},
+            )
         elif path == "/set-cookie":
             self._send(
                 article(title="Cookies"),

@@ -28,7 +28,7 @@ import re
 import struct
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin, urlsplit
 
 import structlog
@@ -65,6 +65,9 @@ from text_extraction.render import (
     site,
 )
 from text_extraction.settings import Settings
+
+if TYPE_CHECKING:
+    from playwright._impl._api_structures import Cookie
 
 _log = structlog.get_logger(__name__)
 
@@ -110,17 +113,9 @@ class Loaded:
     raise_kept: Callable[[], None]
 
 
-@dataclass(frozen=True)
-class AfterLoadOutcome:
-    """What the step after the load adds to the render: warnings, and whether a bot challenge
-    it met cleared (``Rendered.challenge_cleared``)."""
-
-    warnings: Sequence[str] = ()
-    challenge_cleared: bool = False
-
-
-# Runs after the load and the network-idle wait, before the consent step and the actions.
-type AfterLoad = Callable[[Loaded], Awaitable[AfterLoadOutcome]]
+# Runs after the load and the network-idle wait, before the consent step and the actions, and
+# returns the render's warnings it adds.
+type AfterLoad = Callable[[Loaded], Awaitable[Sequence[str]]]
 
 
 async def render_page(
@@ -205,6 +200,22 @@ async def strip_hidden(page: Page) -> None:
         await page.evaluate(STRIP_HIDDEN)
 
 
+def cookie_data(cookie: "Cookie") -> CookieData:
+    """A cookie as ``BrowserContext.cookies()`` reports it. The domain is kept as it is: its
+    leading dot makes it a domain cookie, which ``add_cookies`` keeps one (without the dot it
+    would come back host-only, and a parent domain's clearance would miss the subdomains)."""
+    expires = cookie.get("expires", -1)
+    return CookieData(
+        name=cookie.get("name", ""),
+        value=cookie.get("value", ""),
+        domain=cookie.get("domain", ""),
+        path=cookie.get("path", "/"),
+        secure=cookie.get("secure", False),
+        http_only=cookie.get("httpOnly", False),
+        expires=expires if expires > 0 else None,
+    )
+
+
 def png_size(png: bytes) -> tuple[int, int]:
     """Width and height from a PNG's header."""
     width, height = struct.unpack(">II", png[16:24])
@@ -226,7 +237,6 @@ class _Render:
     ) -> None:
         self.page = page
         self.after_load = after_load
-        self.challenge_cleared = False
         self.url = url
         self.check = check
         self.options = options
@@ -313,9 +323,7 @@ class _Render:
             loaded = Loaded(
                 self.page, self.deadline - reserve, self._read_loaded, self._hosts, self.raise_kept
             )
-            outcome = await self.after_load(loaded)
-            self.warnings.extend(outcome.warnings)
-            self.challenge_cleared = outcome.challenge_cleared
+            self.warnings.extend(await self.after_load(loaded))
             self.raise_kept()
             if self.download:
                 return self._rendered("", None, None, ())
@@ -468,19 +476,7 @@ class _Render:
 
     async def _cookies(self) -> tuple[CookieData, ...]:
         """The cookies the request URL would get: its host's and its parent domains'."""
-        cookies = await self.page.context.cookies([self.url])
-        return tuple(
-            CookieData(
-                name=cookie.get("name", ""),
-                value=cookie.get("value", ""),
-                domain=cookie.get("domain", "").lstrip("."),
-                path=cookie.get("path", "/"),
-                secure=cookie.get("secure", False),
-                http_only=cookie.get("httpOnly", False),
-                expires=expires if (expires := cookie.get("expires", -1)) > 0 else None,
-            )
-            for cookie in cookies
-        )
+        return tuple(cookie_data(cookie) for cookie in await self.page.context.cookies([self.url]))
 
     def _rendered(
         self,
@@ -503,7 +499,6 @@ class _Render:
             warnings=tuple(dict.fromkeys(warnings)),
             hosts=self.traffic.hosts if self.traffic is not None else frozenset(),
             cookies=cookies,
-            challenge_cleared=self.challenge_cleared,
         )
 
     def _main_responses(self) -> list[MainResponse]:

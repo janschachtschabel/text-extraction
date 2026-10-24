@@ -352,7 +352,7 @@ class BrowserPool:
             outcome = "error"
             try:
                 slot, context = await self._context(self._page_proxy(traffic), options)
-                pooled = PooledPage(await context.new_page(), traffic, slot)
+                pooled = PooledPage(await self._first_page(context), traffic, slot)
                 pooled.page.on("crash", pooled._on_crash)
                 context.on("close", pooled._on_close)
                 context.on("page", _close_other(pooled.page))
@@ -382,6 +382,13 @@ class BrowserPool:
                     self._metrics.seconds.labels(driver=driver).observe(
                         time.perf_counter() - started
                     )
+
+    async def _first_page(self, context: BrowserContext) -> Page:
+        """The page of a context: a persistent context's own first tab (a second one would
+        cost a renderer process), else a new one."""
+        if self._launcher.persistent and context.pages:
+            return context.pages[0]
+        return await context.new_page()
 
     def _page_proxy(self, traffic: ProxyContext) -> PageProxy:
         return PageProxy(self._proxy.url, traffic.username, traffic.password)

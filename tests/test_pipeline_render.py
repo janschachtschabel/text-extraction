@@ -928,8 +928,10 @@ def gate_records(harness: RenderHarness) -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize("status", [403, 429, 503])
 def test_a_cleared_challenge_is_kept_out_of_the_hosts_backoff(status: int) -> None:
+    # Judged by the answers: the challenge may have cleared in the render's idle wait, before
+    # the challenge wait ever saw it.
     answers = [response(status=status), response(status=200)]
-    harness = unblock_harness(rendered(responses=answers, challenge_cleared=True))
+    harness = unblock_harness(rendered(responses=answers))
 
     envelope = harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
 
@@ -955,17 +957,59 @@ def test_a_challenge_that_stays_keeps_its_backoff() -> None:
     assert harness.keys("out:cooldown:*") != []  # 503: the host is paused
 
 
-def test_the_cleared_flag_counts_only_under_unblock() -> None:
+def test_a_challenge_answer_is_dropped_only_under_unblock() -> None:
     answers = [response(status=503), response(status=200)]
-    harness = RenderHarness(
-        renderer=FakeRenderer(rendered(responses=answers, challenge_cleared=True))
-    )
+    harness = RenderHarness(renderer=FakeRenderer(rendered(responses=answers)))
 
     envelope = harness.run_once(mode="browser")
 
     assert envelope.status == "success"
     assert gate_records(harness) == [("record", "example.org")] * 2
     assert harness.keys("out:cooldown:*") != []
+
+
+@pytest.mark.parametrize(
+    ("answers", "records"),
+    [
+        ([503, 200], 1),  # cleared: the final answer only
+        ([200, 503, 200], 1),
+        ([301, 200], 2),  # no challenge status: as answered
+        ([503, 404], 2),  # did not end on a 2xx
+    ],
+)
+def test_which_unblock_answers_reach_the_gate(answers: list[int], records: int) -> None:
+    harness = unblock_harness(rendered(responses=[response(status=s) for s in answers]))
+
+    harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
+
+    assert len(gate_records(harness)) == records
+
+
+def test_a_non_html_final_answer_does_not_clear_a_challenge() -> None:
+    final = response(status=200, content_type="application/pdf")
+    harness = unblock_harness(rendered("", responses=[response(status=503), final]))
+
+    harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
+
+    assert len(gate_records(harness)) == 2
+
+
+def test_an_explicit_cookie_domain_is_a_domain_cookie() -> None:
+    renderer = FakeRenderer(rendered())
+    harness = RenderHarness(renderer=renderer)
+    url = "https://www.example.org/learn/page.html"
+    cookies = [
+        {"name": "parent", "value": "a", "domain": "example.org"},
+        {"name": "own", "value": "b"},
+    ]
+
+    harness.run_once(mode="browser", url=url, cookies=cookies)
+
+    (call,) = renderer.calls
+    assert [(cookie.name, cookie.domain) for cookie in call.options.cookies] == [
+        ("parent", ".example.org"),  # sent to www.example.org too
+        ("own", "www.example.org"),  # host-only, as a cookie without a Domain attribute
+    ]
 
 
 @pytest.mark.parametrize("status", [403, 429, 503, 200])

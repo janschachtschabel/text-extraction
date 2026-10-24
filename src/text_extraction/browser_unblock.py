@@ -24,12 +24,17 @@ scripts by intercepting documents, so the handler costs nothing in stealth.
 that contacted a challenge host, B12) and ``BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS`` are not
 over, the render looks again every second, following the challenge's own navigations. A
 visible checkbox widget (a Cloudflare Turnstile frame, an hCaptcha checkbox frame) still there
-after 3 s is clicked, with a mouse move to the box first: at most twice per render, 3 s apart
-(warning ``challenge_checkbox_clicked``). Nothing else is attempted: no image or puzzle
-captcha, no solver service (B15). A wait that ends on a challenge adds ``challenge_not_cleared``,
-and the pipeline ends the item as ``bot_protection`` whatever the last status; a challenge that
-cleared sets ``Rendered.challenge_cleared``, and the pipeline then keeps the challenge's
-403/429/503 out of the host's backoff in the outbound gate.
+after 3 s is clicked, with a mouse move to the box first: at most twice per render, the second
+at least 3 s after the first (warning ``challenge_checkbox_clicked``). Nothing else is
+attempted: no image or puzzle captcha, no solver service (B15). A wait that ends on a challenge
+adds ``challenge_not_cleared``, and the pipeline ends the item as ``bot_protection`` whatever
+the last status. A render that ends on a 2xx page after a 403/429/503 answer got past a
+challenge (in this wait or already in the idle wait before it): the pipeline then keeps that
+answer out of the host's backoff in the outbound gate.
+
+The B12 rule holds here too: a thin page (under 100 words) whose render contacted a challenge
+host counts as a challenge, so a short page behind a cleared challenge, or one with an embedded
+Turnstile, waits the whole challenge time and ends as ``bot_protection``.
 
 **Chrome's own traffic.** A real Chrome contacts Google services in the background (for
 example ``www.google.com``, ``accounts.google.com``, ``android.clients.google.com``). It goes
@@ -49,7 +54,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast
@@ -68,7 +73,7 @@ from text_extraction.browser import (
     chromium_args,
 )
 from text_extraction.browser_driver import DRIVER_ERRORS
-from text_extraction.browser_render import AfterLoad, AfterLoadOutcome, Loaded
+from text_extraction.browser_render import AfterLoad, Loaded
 from text_extraction.convert.markup import parse_html, strip_non_content
 from text_extraction.pipeline_render import CHALLENGE_NOT_CLEARED
 from text_extraction.quality import THIN_PAGE_BELOW_WORDS, assess
@@ -329,7 +334,7 @@ class ChallengeWait:
         self._settings = settings
         self._checkbox_frame = checkbox_frame
 
-    async def __call__(self, loaded: Loaded) -> AfterLoadOutcome:
+    async def __call__(self, loaded: Loaded) -> Sequence[str]:
         loop = asyncio.get_running_loop()
         started = loop.time()
         end = min(started + self._settings.browser_unblock_challenge_wait_seconds, loaded.deadline)
@@ -343,20 +348,24 @@ class ChallengeWait:
             if now >= end:
                 _log.info("challenge_not_cleared", host=host, clicks=clicks)
                 warnings.append(CHALLENGE_NOT_CLEARED)
-                return AfterLoadOutcome(tuple(warnings))
+                return warnings
             met = True
-            if clicks < MAX_CLICKS and now - last_click >= CHECKBOX_AFTER_SECONDS:
-                if await self._click_checkbox(loaded.page):
-                    clicks += 1
-                    _log.info("challenge_checkbox_clicked", host=host, click=clicks)
-                    warnings.append("challenge_checkbox_clicked")
+            # Looked for every second after 3 s; the next click 3 s after a real one.
+            if (
+                clicks < MAX_CLICKS
+                and now - last_click >= CHECKBOX_AFTER_SECONDS
+                and await self._click_checkbox(loaded.page)
+            ):
+                clicks += 1
                 last_click = loop.time()
+                _log.info("challenge_checkbox_clicked", host=host, click=clicks)
+                warnings.append("challenge_checkbox_clicked")
             await asyncio.sleep(max(min(_POLL_SECONDS, end - loop.time()), 0.0))
             loaded.raise_kept()
         if met:
             _log.info("challenge_cleared", host=_host(loaded.page), clicks=clicks)
             await self._idle(loaded)
-        return AfterLoadOutcome(tuple(warnings), challenge_cleared=met)
+        return warnings
 
     async def _idle(self, loaded: Loaded) -> None:
         """Give the page behind the challenge its network-idle wait."""
@@ -367,25 +376,30 @@ class ChallengeWait:
                 await loaded.page.wait_for_load_state("networkidle", timeout=idle * 1000)
 
     async def _click_checkbox(self, page: Page) -> bool:
-        """Click the checkbox of the first visible widget frame; whether one was clicked."""
+        """Click the checkbox of the first visible widget frame; whether one was clicked. Once
+        the mouse is pressed the attempt counts as the click, even if the driver fails then:
+        never a second press in one call."""
         for frame in page.frames:
             if frame.is_detached() or frame.parent_frame is None:
                 continue
             if not self._checkbox_frame(frame.url):
                 continue
-            with contextlib.suppress(*DRIVER_ERRORS):
+            try:
                 point = await _checkbox_point(frame)
                 if point is None:
                     continue
                 x, y = point
-                # Towards the box from a little above and left of it, then a press.
+                # Towards the box from a little above and left of it.
                 await page.mouse.move(x - 40, y - 20, steps=4)
                 await page.mouse.move(x, y, steps=10)
                 await asyncio.sleep(0.1)
+            except DRIVER_ERRORS:
+                continue
+            with contextlib.suppress(*DRIVER_ERRORS):
                 await page.mouse.down()
                 await asyncio.sleep(0.08)
                 await page.mouse.up()
-                return True
+            return True
         return False
 
 

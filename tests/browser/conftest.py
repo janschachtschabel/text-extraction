@@ -90,16 +90,26 @@ def _clear_site_log(site: Site) -> None:
 class SiteProxy(EgressProxy):
     """The egress proxy with the test policy: 127.0.0.1, and only on the site's two ports."""
 
-    def __init__(self, settings: Settings, ports: set[int], registry: CollectorRegistry) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        ports: set[int],
+        registry: CollectorRegistry,
+        *,
+        aliases: dict[str, str] | None = None,
+    ) -> None:
+        """``aliases``: host names the proxy dials as another host (``www.example.test`` as
+        ``127.0.0.1``), so tests can use names with subdomains; still through the proxy."""
         super().__init__(settings, policy=_loopback_only, registry=registry)
         self._ports = ports
+        self._aliases = aliases or {}
 
     async def _dial(
         self, host: str, port: int
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         if port not in self._ports:
             raise _Refusal(403, "blocked_address", host)
-        return await super()._dial(host, port)
+        return await super()._dial(self._aliases.get(host, host), port)
 
 
 def _loopback_only(address: IPv4Address | IPv6Address) -> bool:

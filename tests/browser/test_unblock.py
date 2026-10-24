@@ -52,6 +52,8 @@ _SHELL_GLOB = (
     "/opt/pw-browsers/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"
 )
 CHALLENGE_SECONDS = 10.0
+# Host names the test proxy dials as 127.0.0.1: a site with a parent domain for cookies.
+ALIASED = ("example.test", "www.example.test", "learn.example.test")
 
 
 async def _patchright_own_chromium_works() -> bool:
@@ -148,7 +150,8 @@ async def open_unblock_stack(
 ) -> AsyncIterator[UnblockStack]:
     registry = CollectorRegistry()
     ports = {urlsplit(site.base).port or 0, urlsplit(site.third).port or 0}
-    proxy = SiteProxy(settings, ports, registry)
+    aliases = {name: "127.0.0.1" for name in ALIASED}
+    proxy = SiteProxy(settings, ports, registry, aliases=aliases)
     await proxy.start()
     slots = asyncio.Semaphore(settings.browser_concurrency)
     launcher = RecordingPatchright(settings, executable_path=executable, profile_root=profiles)
@@ -293,7 +296,6 @@ def test_challenge_page_clears_within_wait(run_unblock: Any, site: Site) -> None
         assert "challenge_checkbox_clicked" not in rendered.warnings
         assert [answer.status for answer in rendered.responses] == [503, 200]
         assert [cookie.name for cookie in rendered.cookies] == ["cleared"]
-        assert rendered.challenge_cleared
 
     run_unblock(body)
 
@@ -302,7 +304,6 @@ def test_challenge_not_cleared_adds_warning(run_unblock: Any, site: Site) -> Non
     async def body(stack: UnblockStack) -> None:
         rendered = await render(stack, f"{site.base}/challenge")
         assert "challenge_not_cleared" in rendered.warnings
-        assert not rendered.challenge_cleared
 
         envelope = await run_admin(stack, url=f"{site.base}/checkbox?stubborn=1")
         assert envelope.status == "failed"
@@ -338,7 +339,8 @@ def test_checkbox_is_clicked_at_most_twice(run_unblock: Any, site: Site) -> None
         assert "challenge_not_cleared" in rendered.warnings
         assert len(site.seen(site.third, "/turnstile-clicked")) == 2
 
-    run_unblock(body, browser_unblock_challenge_wait_seconds=9)
+    # Long enough for a third click, were there no cap (clicks come 3 s apart).
+    run_unblock(body, browser_unblock_challenge_wait_seconds=15)
 
 
 def test_clearance_is_reused_by_the_next_render(run_unblock: Any, site: Site) -> None:
@@ -360,6 +362,29 @@ def test_clearance_is_reused_by_the_next_render(run_unblock: Any, site: Site) ->
         assert second.status == "success", second.error
         (request,) = site.seen(site.base, "/challenge")
         assert "cleared=1" in request.headers.get("cookie", "")
+
+    run_unblock(body)
+
+
+def test_domain_clearance_cookies_reach_the_subdomains(run_unblock: Any, site: Site) -> None:
+    port = urlsplit(site.base).port
+
+    async def body(stack: UnblockStack) -> None:
+        first = await render(stack, f"http://www.example.test:{port}/set-domain-cookie")
+        (cookie,) = [cookie for cookie in first.cookies if cookie.name == "cf_clearance"]
+        assert cookie.domain == ".example.test"
+
+        # Through the clearance store and back, as the next unblock render gets them.
+        valkey = FakeAsyncRedis()
+        clearance = ValkeyClearance(valkey, stack.settings)
+        await clearance.put("www.example.test", list(first.cookies))
+        reused = tuple(await clearance.get("www.example.test"))
+        second = await render(
+            stack,
+            f"http://learn.example.test:{port}/echo-headers",
+            RenderOptions(unblock=True, cookies=reused),
+        )
+        assert "cf_clearance=domain-wide" in second.html
 
     run_unblock(body)
 
@@ -387,7 +412,6 @@ def test_unmodified_user_agent(run_unblock: Any, site: Site) -> None:
         # Chrome's own background requests (Google services) are no challenge hosts (B12).
         rendered = await render(stack, f"{site.base}/static")
         assert not contacted_challenge_host(rendered.hosts)
-        assert not rendered.challenge_cleared
         assert rendered.warnings == ()
 
     run_unblock(body)
