@@ -114,10 +114,13 @@ class RecordingLauncher(PlaywrightLauncher):
     def __init__(self, settings: Settings) -> None:
         super().__init__(settings)
         self.browsers: list[Browser] = []
+        self.launch_delay = 0.0  # seconds before each launch
 
     async def open(
         self, browser: Browser | None, proxy: PageProxy, options: RenderOptions
     ) -> tuple[Browser | None, BrowserContext]:
+        if browser is None and self.launch_delay:
+            await asyncio.sleep(self.launch_delay)
         opened, context = await super().open(browser, proxy, options)
         if opened is not None and opened is not browser:
             self.browsers.append(opened)

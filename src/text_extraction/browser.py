@@ -258,6 +258,7 @@ class BrowserPool:
         self._lock = asyncio.Lock()
         self._current: _Slot | None = None
         self._open: set[_Slot] = set()  # launched and not closed yet
+        self._discards: set[asyncio.Task[None]] = set()  # launches whose caller went away
         self._stopped = False
 
     @property
@@ -286,6 +287,7 @@ class BrowserPool:
             self._current = None
             for slot in list(self._open):
                 await self._close_browser(slot)
+        await asyncio.gather(*self._discards, return_exceptions=True)
         await self._launcher.stop()
 
     @asynccontextmanager
@@ -365,7 +367,16 @@ class BrowserPool:
     async def _launch(
         self, proxy: PageProxy, options: RenderOptions, reason: str
     ) -> tuple[_Slot | None, BrowserContext]:
-        browser, context = await self._launcher.open(None, proxy, options)
+        # A launch the caller gives up on (its deadline passed) still finishes, and its browser
+        # is closed then: a cancelled launch would leave a Chromium nobody holds.
+        launch = asyncio.ensure_future(self._launcher.open(None, proxy, options))
+        try:
+            browser, context = await asyncio.shield(launch)
+        except asyncio.CancelledError:
+            discard = asyncio.ensure_future(_discard_launch(launch))
+            self._discards.add(discard)
+            discard.add_done_callback(self._discards.discard)
+            raise
         self._metrics.launches.labels(driver=self.driver, reason=reason).inc()
         _log.info("browser_launched", driver=self.driver, reason=reason)
         if browser is None:
@@ -401,6 +412,21 @@ class BrowserPool:
         with contextlib.suppress(*DRIVER_ERRORS, TimeoutError):
             async with asyncio.timeout(CLOSE_SECONDS):
                 await slot.browser.close()
+
+
+async def _discard_launch(
+    launch: "asyncio.Future[tuple[Browser | None, BrowserContext]]",
+) -> None:
+    """Close what a launch nobody waits for any more opened, once it is done."""
+    try:
+        browser, context = await launch
+    except BaseException:
+        return
+    await _close_context(context)
+    if browser is not None:
+        with contextlib.suppress(*DRIVER_ERRORS, TimeoutError):
+            async with asyncio.timeout(CLOSE_SECONDS):
+                await browser.close()
 
 
 async def _close_context(context: BrowserContext) -> None:

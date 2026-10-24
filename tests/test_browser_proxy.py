@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from prometheus_client import CollectorRegistry
+from structlog.testing import capture_logs
 
 from text_extraction.browser_proxy import EgressProxy, ProxyContext, host_header
 from text_extraction.settings import Settings
@@ -276,7 +277,9 @@ def test_missing_or_unknown_credentials_get_407() -> None:
                 assert headers["connection"] == "close"
                 assert await reader.read() == b""
                 writer.close()
-            assert refused(registry, "auth") == len(attempts)
+            # The challenge to a request without credentials is how every browser starts, so
+            # only the wrong credentials count.
+            assert refused(registry, "auth") == len(attempts) - 1
             assert context.bytes == 0
             assert context.refused == ()  # nobody was identified, so nothing to record
 
@@ -284,6 +287,23 @@ def test_missing_or_unknown_credentials_get_407() -> None:
             reader, writer = await talk(proxy, connect_request(target, basic(context)))
             assert (await read_head(reader))[0] == 407
             writer.close()
+
+    run_scenario(scenario)
+
+
+def test_a_request_without_credentials_is_challenged_silently() -> None:
+    async def scenario() -> None:
+        async with running(policy=allow_all) as (proxy, echo_port, registry):
+            context = proxy.open_context()
+            with capture_logs() as logs:
+                reader, writer = await talk(proxy, connect_request(f"127.0.0.1:{echo_port}", None))
+                status, headers, _ = await read_head(reader)
+                writer.close()
+            assert status == 407
+            assert headers["proxy-authenticate"] == 'Basic realm="browser"'
+            assert refused(registry, "auth") == 0
+            assert [log for log in logs if log["event"] == "browser_proxy_refused"] == []
+            context.close()
 
     run_scenario(scenario)
 

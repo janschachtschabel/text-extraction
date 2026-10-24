@@ -21,7 +21,9 @@ context get ``407``.
 Refusals answer ``403`` (forbidden address, byte cap), ``502`` (DNS or connect failure), ``400``
 (malformed request), ``407`` (credentials) or ``503`` (too many connections), always with
 ``Connection: close``. They are counted in ``text_extraction_browser_proxy_refused_total`` and
-logged with the host only, never a URL.
+logged with the host only, never a URL. A request without any credentials is not a refusal: a
+browser sends its first request so and its credentials only after the ``407`` challenge, so that
+answer is neither counted nor logged. Wrong credentials count as ``auth``.
 """
 
 import asyncio
@@ -129,13 +131,20 @@ class ProxyContext:
 
 class _Refusal(Exception):  # noqa: N818 - not an error, an answer
     def __init__(
-        self, status: int, reason: str, host: str | None = None, *, challenge: bool = False
+        self,
+        status: int,
+        reason: str,
+        host: str | None = None,
+        *,
+        challenge: bool = False,
+        quiet: bool = False,
     ) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
         self.host = host
         self.challenge = challenge
+        self.quiet = quiet  # answered, but not counted or logged
 
 
 class _Request:
@@ -354,7 +363,8 @@ class EgressProxy:
                 raise _Refusal(403, "bytes_cap", request.host)
             await self._tunnel(context, request, reader, writer)
         except _Refusal as refusal:
-            self._record(context, refusal)
+            if not refusal.quiet:
+                self._record(context, refusal)
             await self._send(writer, refusal.status, refusal.challenge)
         except OSError:  # the browser went away, or the tunnel ended
             pass
@@ -384,9 +394,9 @@ class EgressProxy:
         return _parse_head(buffer[:end], buffer[end + 4 :])
 
     def _authenticate(self, authorization: str | None) -> ProxyContext:
+        if authorization is None:  # the browser asks for the challenge first: not a refusal
+            raise _Refusal(407, "auth", challenge=True, quiet=True)
         refusal = _Refusal(407, "auth", challenge=True)
-        if authorization is None:
-            raise refusal
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "basic":
             raise refusal

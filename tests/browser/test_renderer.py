@@ -462,6 +462,30 @@ def test_browser_crash_fails_page_and_pool_relaunches(
     scenario(settings_for, site, body, browser_idle_wait_seconds=10)
 
 
+def test_launch_given_up_by_its_render_leaves_no_browser(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        (first,) = stack.launcher.browsers
+        await first.close()  # the next page relaunches
+        stack.launcher.launch_delay = 1.0
+        with pytest.raises(FetchError) as caught:
+            await render(stack, f"{site.base}/static", seconds=1.0)
+        assert caught.value.code is ErrorCode.TIMEOUT
+        for _ in range(100):  # the launch finishes after the render gave up
+            if len(stack.launcher.browsers) == 2 and not stack.launcher.browsers[1].is_connected():
+                break
+            await asyncio.sleep(0.05)
+        _, abandoned = stack.launcher.browsers
+        assert not abandoned.is_connected()
+
+        stack.launcher.launch_delay = 0.0
+        rendered = await render(stack, f"{site.base}/static")
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+
+    scenario(settings_for, site, body)
+
+
 def test_recycle_launches_new_browser(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
         for _ in range(3):

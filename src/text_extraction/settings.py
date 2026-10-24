@@ -168,7 +168,7 @@ class Settings(BaseSettings):
     browser_max_bytes: int = Field(default=50_000_000, ge=1_000_000)  # all responses of one page
     # Comma-separated Playwright resource types that are not loaded; empty: none. Not `document`.
     browser_blocked_resources: str = "image,media,font"
-    browser_autoconsent: bool = True  # accept cookie banners automatically
+    browser_autoconsent: bool = True  # opt out of cookie banners automatically (B11)
     browser_executable_path: Path | None = None  # development only: a local Chromium
     # Unblock mode: a second browser that clears bot challenges. Only for requests whose
     # compliance mode is `ignore` (admins), and only where the operator switches it on.
