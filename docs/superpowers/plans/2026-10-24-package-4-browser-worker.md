@@ -54,7 +54,7 @@ The browser image additionally holds Google Chrome stable (freeware licence, not
 - Outbound gate in both modes: a render holds its host's turn. Unblock mode changes how we look, never how often we come. No IP or proxy rotation.
 - Never log URLs, query strings, cookies, header values, action text or scripts. Host and `path_hash` at most.
 - The fast pipeline's answers for `mode: "fast"`, and for `mode: "auto"` while `BROWSER_ENABLED=false`, must not change.
-- Not in this package: PDF and Office routing (package 5: a download in browser mode is `unsupported_content_type`), S3 offload (package 11), actions/cookies/headers in batches (B6), captcha-solving services (B15).
+- Not in this package: PDF and Office routing (package 5: a download in browser mode is `unsupported_content_type`), S3 offload (package 11), actions/cookies/headers in batches (B6), captcha-solving services and paid services of any kind (B15).
 
 ## Rulings in this plan
 
@@ -109,11 +109,13 @@ The browser image additionally holds Google Chrome stable (freeware licence, not
   - **Driver:** Patchright, with `channel="chrome"` (`BROWSER_UNBLOCK_CHANNEL`, default `chrome`; `chromium` uses Patchright's own build). Headful under Xvfb by default (`BROWSER_UNBLOCK_HEADLESS=false`); the worker starts Xvfb itself. One persistent context per page in a fresh temporary profile, `no_viewport=True` with a 1920×1080 window. No custom UA, no extra context headers. Caller `headers` still go only to the target host via the route handler.
   - **What it changes:** robots and TDM are not checked (that is `ignore`). Nothing is blocked (B3), service workers and non-GET navigations are allowed, and the proxy and the gate stay.
   - **Challenges:** after load, while the DOM is a challenge (`assess` or B12) and time is left, the render waits up to `BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS` (20). It re-checks every second and follows the challenge's own navigation. Non-interactive challenges clear this way (Cloudflare managed and Turnstile in non-interactive mode, Anubis proof-of-work, DataDome and Akamai JS checks).
+  - **Checkbox click (Jan, 2026-10-24):** a visible checkbox widget may still be there after 3 s of the wait: a Cloudflare Turnstile iframe (`challenges.cloudflare.com`) or an hCaptcha checkbox iframe (`hcaptcha.com`, the checkbox frame, not the image challenge). The render then clicks its checkbox once, with a mouse move to the box first, and goes on waiting. At most 2 clicks per render. Image or puzzle challenges are not attempted, and the result is `bot_protection` with the warning `challenge_not_cleared`.
   - **Clearance reuse:** after a render whose last document was 2xx and not a challenge, the cookies of the target host and its parent domain are stored in `unblock:cookies:{<host>}` (JSON, TTL = earliest cookie expiry, at most `BROWSER_UNBLOCK_COOKIE_TTL_SECONDS`, 1800). The next unblock render of that host adds them first. They are used only by unblock renders and are never shown.
   - **Escalation:** under unblock, `auto` also escalates per B5.
   - **Result:** `unblocked: true` (B10).
 - **B15 (what unblock does not do):**
-  - No interactive captcha solving (clicking or third-party solver services).
+  - No image or puzzle captcha solving, and no paid or third-party solver services (Jan, 2026-10-24: nothing paid).
+  - Partners are advised to add an allowlist rule instead: a secret header (sent with `headers`) or our egress IP, exempted in their bot protection.
   - No IP or proxy rotation; CLAUDE.md rule 6 keeps that.
   - If a partner blocks by IP, the right fix is that they allow our egress IP. A later package can add an upstream proxy option if Jan wants it.
 - **D2 (done-when, Jan 2026-10-24):**
@@ -462,7 +464,7 @@ Behaviour:
   - `class Xvfb`: `async start(display=":99")` and `async stop()`, run by the browser worker when `BROWSER_UNBLOCK_ENABLED` and not headless. It sets `DISPLAY` for the launcher.
   - `class UnblockRenderer(Renderer)` with `__init__(pool: BrowserPool, settings: Settings)`.
     - It runs `render_page` with the unblock `RenderOptions`: nothing blocked, non-GET allowed, the route handler installed only when caller headers exist.
-    - Then the challenge wait (B14): while `assess(html)` or the B12 host check says challenge and time is left, sleep 1 s, follow navigations and re-read.
+    - Then the challenge wait (B14): while `assess(html)` or the B12 host check says challenge and time is left, sleep 1 s, follow navigations and re-read. After 3 s, click a visible Turnstile or hCaptcha checkbox frame (at most 2 clicks per render), with the warning `challenge_checkbox_clicked`.
     - It adds the warning `challenge_not_cleared` when the wait ends on a challenge.
     - `Rendered.cookies` holds the target host's cookies.
   - `clearance.py`: `class ValkeyClearance(ClearanceStore)` with `__init__(valkey, settings)`. Key `unblock:cookies:{<host>}`, JSON list, TTL = min(earliest expiry, `BROWSER_UNBLOCK_COOKIE_TTL_SECONDS`). A TTL of 0 disables it.
@@ -475,6 +477,7 @@ Behaviour:
   - `tests/browser/test_unblock.py` (`@pytest.mark.browser`). They run with Patchright and `channel="chromium"`, headless, against the site, so CI needs no Chrome. Skip when Patchright's Chromium is missing.
     - `test_challenge_page_clears_within_wait` (`/challenge`);
     - `test_challenge_not_cleared_adds_warning` (wait 0);
+    - `test_checkbox_challenge_is_clicked_once_and_clears` (site page `/checkbox`: an iframe from the second port, path `/turnstile`, standing in for the widget; the frame matcher is injectable, so the test does not need the real Cloudflare host; clicking its box sets the clearance cookie);
     - `test_navigator_webdriver_is_false`;
     - `test_unmodified_user_agent` (no `text-extraction` token);
     - `test_private_addresses_still_refused` (proxy in place);
