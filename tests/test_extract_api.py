@@ -21,14 +21,16 @@ from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_api import extract
+from text_extraction.extract_api import _store_result, extract
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher
+from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
 from text_extraction.pipeline import Pipeline, create_pipeline
 from text_extraction.settings import Settings
 
 USER_KEY = "user-key-0123456789-raw-secret"
+USER = Principal(name="user", role="user", rate_limit_per_minute=None)
 AUTH = {"Authorization": f"Bearer {USER_KEY}"}
 
 
@@ -359,6 +361,81 @@ def test_slow_extract_hands_over_to_a_job(handover: Callable[..., Handover]) -> 
         assert case.keys("jobs:*") == []
         case.wait_for_idle()
         assert case.app.state.background == set()
+
+
+def sample(case: Handover, name: str, kind: str = "extract") -> float | None:
+    return case.registry.get_sample_value(f"text_extraction_{name}", {"kind": kind})
+
+
+def test_handed_over_extract_is_counted_and_timed_once(
+    handover: Callable[..., Handover],
+) -> None:
+    case = handover()
+    assert sample(case, "jobs_created_total") == 0
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        assert response.status_code == 202
+        assert sample(case, "jobs_created_total") == 1
+        assert sample(case, "job_duration_seconds_count") is None  # still running
+
+        case.pipeline.release.set()
+        case.wait_for_job(client, response.json()["data"]["id"])
+        case.wait_for_idle()
+
+        assert sample(case, "job_duration_seconds_count") == 1
+        assert 0 <= (sample(case, "job_duration_seconds_sum") or -1) < 30
+        assert sample(case, "jobs_created_total", "batch") == 0
+        assert sample(case, "job_duration_seconds_count", "batch") is None
+
+
+def test_extract_that_finishes_within_wait_is_not_a_job_in_the_metrics(
+    handover: Callable[..., Handover],
+) -> None:
+    case = handover()
+    case.pipeline.release.set()
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 30}, headers=AUTH)
+        assert response.status_code == 200
+    assert sample(case, "jobs_created_total") == 0
+    assert sample(case, "job_duration_seconds_count") is None
+
+
+def test_failed_hand_over_is_not_counted(
+    handover: Callable[..., Handover], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    case = handover()
+
+    async def down(*args: object, **kwargs: object) -> None:
+        case.pipeline.release.set()
+        raise RedisConnectionError("valkey is down")
+
+    monkeypatch.setattr(case.app.state.job_store, "create", down)
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        assert response.status_code == 200
+    assert sample(case, "jobs_created_total") == 0
+    assert sample(case, "job_duration_seconds_count") is None
+
+
+def test_only_the_write_that_completes_the_job_is_timed(
+    handover: Callable[..., Handover],
+) -> None:
+    case = handover()
+    store: JobStore = case.app.state.job_store
+    metrics = case.app.state.job_metrics
+    options = JobOptions(mode="fast", compliance="enforce")
+    envelope = Envelope[ExtractResult](status="failed")
+
+    async def store_twice() -> None:
+        job_id = await store.create("extract", USER, options, [PAGE])
+        await store.mark_running(job_id, lease_seconds=60)
+        await _store_result(store, metrics, job_id, time.monotonic(), envelope)
+        await _store_result(store, metrics, job_id, time.monotonic(), envelope)  # repeat
+        await _store_result(store, metrics, "f" * 32, time.monotonic(), envelope)  # job gone
+
+    asyncio.run(store_twice())
+
+    assert sample(case, "job_duration_seconds_count") == 1
 
 
 def test_wait_seconds_zero_is_immediate_202(handover: Callable[..., Handover]) -> None:

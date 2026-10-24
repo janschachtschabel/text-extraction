@@ -21,6 +21,7 @@ An extract job is not a batch: it does not count toward ``BATCH_MAX_OPEN_PER_CLI
 
 import asyncio
 import contextlib
+import time
 from functools import partial
 from typing import Annotated, Any
 
@@ -37,6 +38,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.job_models import JobAccepted, JobOptions
 from text_extraction.jobs import JobLost, JobStore
 from text_extraction.pipeline import Pipeline
+from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
@@ -112,6 +114,7 @@ async def extract(
         cache=body.cache,
     )
     job_id: str | None = None
+    handed_over_at = time.monotonic()
     # At the cap this pod holds no more extractions for jobs: the request waits for its own.
     if len(background) <= settings.extract_max_background:
         try:
@@ -125,7 +128,11 @@ async def extract(
             return await task
         finally:
             background.discard(task)
-    task.add_done_callback(partial(_store_when_done, background, store, job_id))
+    metrics: JobMetrics = request.app.state.job_metrics
+    metrics.created.labels(kind="extract").inc()
+    task.add_done_callback(
+        partial(_store_when_done, background, store, metrics, job_id, handed_over_at)
+    )
     _log.info("extract_job_accepted", job_id=job_id)
     accepted = Envelope(
         status="success",
@@ -188,25 +195,37 @@ def _envelope_of(task: asyncio.Task[Envelope[ExtractResult]]) -> Envelope[Extrac
 def _store_when_done(
     background: _Background,
     store: JobStore,
+    metrics: JobMetrics,
     job_id: str,
+    created_at: float,
     task: asyncio.Task[Envelope[ExtractResult]],
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job. The storing
     task is added to ``background`` before the extraction leaves it, so a shutdown that waits
     for the set never misses the write."""
-    storing = asyncio.create_task(_store_result(store, job_id, _envelope_of(task)))
+    storing = asyncio.create_task(
+        _store_result(store, metrics, job_id, created_at, _envelope_of(task))
+    )
     background.add(storing)
     storing.add_done_callback(background.discard)
     background.discard(task)
 
 
-async def _store_result(store: JobStore, job_id: str, envelope: Envelope[ExtractResult]) -> None:
-    """Store the envelope as item 0. A Valkey failure is logged and not raised: the job's lease
-    then runs out and ``GET /v1/jobs/{id}`` reports the item as lost."""
+async def _store_result(
+    store: JobStore,
+    metrics: JobMetrics,
+    job_id: str,
+    created_at: float,
+    envelope: Envelope[ExtractResult],
+) -> None:
+    """Store the envelope as item 0 and observe the job's duration (``created_at`` is a
+    ``time.monotonic()`` reading from just before the job was created). A Valkey failure is logged
+    and not raised: the job's lease then runs out and ``GET /v1/jobs/{id}`` reports the item as
+    lost."""
     try:
-        # The first and only write of an extract job completes it. The job-duration metric is not
-        # observed here: the API app has none yet (queue and job metrics follow in Task 6).
-        await store.write_result(job_id, 0, envelope)
+        # The first and only write of an extract job completes it ("last"); a repeat is not counted.
+        if await store.write_result(job_id, 0, envelope) == "last":
+            metrics.duration.labels(kind="extract").observe(max(time.monotonic() - created_at, 0.0))
     except JobLost:
         _log.warning("extract_job_gone", job_id=job_id)
     except (RedisError, OSError) as error:

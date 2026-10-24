@@ -556,6 +556,11 @@ class FairQueue:
         )
         return bool(int(deferred))
 
+    @property
+    def pool(self) -> str:
+        """The name of the worker pool this queue belongs to."""
+        return self._pool
+
     async def counts(self) -> QueueCounts:
         """How many items are pending and leased, and how many clients and domains wait."""
         pending, leased, clients, domains = await self._counts(keys=self._keys, args=[self._prefix])

@@ -242,3 +242,37 @@ domain, which is not claimed before the gate's retry time; an item at `JOB_ITEM_
 stored with the gate's error (`rate_limited` or `connection_error`, retryable) instead. An item
 whose job has expired is dropped. While Valkey fails, a worker backs off for 1, 2, 4 … 30 s and
 then goes on; the item it held (an exhausted one too) is claimed again once its lease expires.
+
+## Metrics
+
+Every process exports Prometheus text on its internal port (`/metrics`, 9090). API pods and
+workers are separate processes with separate registries; a metric that both record (the job
+duration) has the same name, labels and buckets in each.
+
+The job system exports these besides the HTTP and extraction metrics:
+
+| Metric | Type | Labels | Exported by | Meaning |
+| --- | --- | --- | --- | --- |
+| `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. |
+| `text_extraction_queue_leased_items` | gauge | `pool` | API pods | Items of the pool that a worker has leased (also leases that expired and are not taken back yet). |
+| `text_extraction_queue_clients` | gauge | `pool` | API pods | Clients (API key names) with items waiting. |
+| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job. |
+| `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
+| `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused) or `lost` (the job was gone). |
+| `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
+| `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |
+
+The queue gauges come from the API pods and not from the workers, because workers may scale to
+zero and the autoscaler (KEDA) must still see the backlog. Every API pod reads the same queue, so
+**query them with `max()` over the pods** (for example
+`max(text_extraction_queue_pending_items{pool="extract"})`); `sum()` would multiply the backlog by
+the number of API pods, and `avg()` is only right while all pods have read it at the same moment.
+The same holds for `text_extraction_queue_leased_items` and `text_extraction_queue_clients`.
+`text_extraction_jobs_created_total` is per pod: use `sum()` over pods for the total.
+
+A pod reads the queue in the background every 5 seconds (the read walks the clients' lists, so it
+is not done per scrape); the gauges are up to 5 s old. A pod exports no queue gauge until its first
+read has succeeded, so an empty series means "not known", never "empty queue". While Valkey fails
+the pod keeps exporting the last values and logs `queue_metrics_unavailable` once; it logs
+`queue_metrics_recovered` when the reads work again. With `JOBS_ENABLED=false` the pod does not
+read the queue and exports no queue gauge.

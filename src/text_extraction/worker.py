@@ -56,6 +56,7 @@ from text_extraction.jobs import JobLost, JobRecord, JobStore
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.queue_metrics import job_duration_for
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.server import (
     _HANDLED_SIGNALS,
@@ -88,7 +89,6 @@ _LOST = "lost"
 _SUPERSEDED = "superseded"
 
 _ITEM_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 20, 25, 30, 45, 60)
-_JOB_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 43200, 86400)
 
 
 @dataclass(frozen=True)
@@ -126,13 +126,7 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
                 "Slots of this worker that are processing an item.",
                 registry=registry,
             ),
-            job_duration=Histogram(
-                "text_extraction_job_duration_seconds",
-                "Time from the creation of a job to its last result, by job kind.",
-                ["kind"],
-                buckets=_JOB_BUCKETS,
-                registry=registry,
-            ),
+            job_duration=job_duration_for(registry),
         )
         _METRICS[registry] = metrics
     return metrics

@@ -217,6 +217,8 @@ async def create_batch(
     except (RedisError, OSError) as error:
         _log_unavailable(error)
         raise _unavailable() from None
+    # Counted only here: a job that was discarded above never reaches a worker.
+    request.app.state.job_metrics.created.labels(kind="batch").inc()
     _log.info("batch_accepted", job_id=job_id, total=len(body.urls))
     data = JobAccepted(
         id=job_id,

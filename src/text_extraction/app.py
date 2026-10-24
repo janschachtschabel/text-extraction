@@ -23,6 +23,7 @@ from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import router as jobs_router
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_pipeline
+from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
@@ -85,13 +86,21 @@ async def _finish_background(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request; wait for extractions handed over to a
-    job; close the fetcher's connections and the conversion pool last."""
+    """Load the language model before the first request; start the queue gauges; wait for
+    extractions handed over to a job; stop the gauges (their task reads Valkey, whose client the
+    server closes after the lifespan); close the fetcher's connections and the conversion pool
+    last."""
     await asyncio.to_thread(load_language_model)
+    gauges: QueueGauges = app.state.queue_gauges
+    if app.state.settings.jobs_enabled:
+        gauges.start()
     try:
         yield
     finally:
-        await _finish_background(app)
+        try:
+            await _finish_background(app)
+        finally:
+            await gauges.stop()
         fetcher: Fetcher = app.state.fetcher
         pool: ConversionPool = app.state.conversion_pool
         await fetcher.aclose()
@@ -105,8 +114,10 @@ def create_public_app(
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
-    ``app.state.job_queue`` back the batch and job routes; ``app.state.background`` holds the
-    tasks of extractions handed over to a job, which the shutdown waits for.
+    ``app.state.job_queue`` back the batch and job routes; ``app.state.job_metrics`` counts the
+    jobs and ``app.state.queue_gauges`` exports the queue's backlog (the lifespan starts and stops
+    its task); ``app.state.background`` holds the tasks of extractions handed over to a job, which
+    the shutdown waits for.
     """
     app = FastAPI(
         title="Text Extraction API",
@@ -124,6 +135,8 @@ def create_public_app(
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
+    app.state.job_metrics = job_metrics_for(registry)
+    app.state.queue_gauges = QueueGauges(app.state.job_queue, registry)
     app.state.background = set()
     install_error_handlers(app)
     app.include_router(extract_router)
