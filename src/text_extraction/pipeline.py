@@ -29,7 +29,21 @@ A caller that can retry later itself (the job worker) may ask for the gate's ref
 (``OutboundBusy``, ``CircuitOpen``) to be raised instead of answered as envelopes.
 
 Only ``success`` and ``partial`` results are cached and fingerprinted: a bot challenge or an
-error page is nothing to serve again, nor to compare the next version of the page with.
+error page is nothing to serve again, nor to compare the next version of the page with. Requests
+with browser secrets (actions, cookies, headers) touch neither; screenshot requests skip the
+cache, since their artifact belongs to one job.
+
+With a ``Renderer`` (the browser worker only; docs/architecture.md, "Browser worker"), ``browser``
+requests, screenshots and ``auto`` items with a draft are rendered instead of fetched, and an
+``auto`` request renders when its fast result needs the browser (``escalation.needs_browser``).
+A render runs step 4 for the request URL, takes the host's turn and holds it until the render
+ends. Each later main-frame navigation is checked before the browser sends it; the HTTP redirect
+hops and the document answers are checked when the render returns, before any content is used.
+The rendered HTML then goes through step 7 (compliance after the fetch, conversion) and step 8.
+An ``auto`` result that will escalate is neither cached nor fingerprinted; of the fast result
+(or draft) and the render, only the better one is (``escalation.better``). Rendered results
+store no validators, so they are never revalidated. Unblock mode (admins, ``compliance:
+ignore``, ``BROWSER_UNBLOCK_ENABLED``) uses the unblock renderer and its clearance cookies.
 A body over ``CONVERT_MAX_BYTES`` fails with ``too_large`` before it is decoded. CPU-bound steps
 run on the ``ConversionPool`` (``CONVERT_CONCURRENCY`` threads); waiting for a slot counts
 against the deadline. The deadline cannot stop a running thread, but every step bounds its
@@ -43,7 +57,8 @@ import html as html_lib
 import math
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Awaitable
+from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
@@ -56,6 +71,7 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
 from text_extraction.boilerplate import load_boilerplate_rules, strip_boilerplate
+from text_extraction.browser_options import ArtifactRef
 from text_extraction.compliance import (
     ComplianceChecker,
     ComplianceMode,
@@ -69,6 +85,7 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
+from text_extraction.escalation import better, needs_browser, unblock_applies
 from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
@@ -81,7 +98,24 @@ from text_extraction.outbound import (
     normalize_host,
     parse_retry_after,
 )
+from text_extraction.pipeline_render import (
+    as_fetched,
+    blocked_resources,
+    caller_cookies,
+    challenged_by_hosts,
+    check_address,
+    check_target,
+    render_options,
+)
 from text_extraction.quality import Quality, assess, quality_error
+from text_extraction.render import (
+    ArtifactSink,
+    ArtifactUnavailable,
+    ClearanceStore,
+    Rendered,
+    Renderer,
+    RenderOptions,
+)
 from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
@@ -98,11 +132,16 @@ _KINDS: dict[str, Literal["html", "text"]] = {
 _HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429})
+# Answers whose body may be a bot challenge that unblock mode can get past (B5, B14).
+_CHALLENGE_STATUSES = frozenset({403, 429, 503})
 # The fetch gets the time left before the deadline minus this, so it times out first and the
 # timeout is recorded for the host.
 _FETCH_MARGIN_SECONDS = 0.25
-# With less time than this left when its turn comes, the target is not fetched at all.
+# With less time than this left when its turn comes, the target is not fetched (or rendered).
 _MIN_FETCH_SECONDS = 1.0
+# The renderer's deadline is this much before the extraction's, so the render ends in time for
+# the conversion and the result after it.
+_RENDER_MARGIN_SECONDS = 2.0
 # A fetch timeout counts against the host only if the fetch had this share of
 # FETCH_TIMEOUT_SECONDS.
 _FAIR_BUDGET_SHARE = 0.5
@@ -178,6 +217,21 @@ class _Run:
     compliance_ms: int = 0
     fetch_ms: int = 0
     convert_ms: int = 0
+    render_ms: int = 0
+    # Set once per request: may it read and write the result cache (no secrets, no screenshot),
+    # and fingerprints (no secrets, B6)? Does unblock mode apply (B14)? Is the caller an admin?
+    cacheable: bool = True
+    private: bool = False
+    unblock: bool = False
+    admin: bool = False
+    draft: Envelope[ExtractResult] | None = None  # the fast result of an ``auto`` item (B5)
+    artifacts: ArtifactSink | None = None
+    # A render whose result is compared with an earlier one: only the better one is stored.
+    comparing: bool = False
+    mode_used: Literal["fast", "browser"] = "fast"
+    unblocked: bool = False
+    warnings: list[str] = field(default_factory=list)  # of the renderer, also on failures
+    validators: Validators = field(default_factory=Validators)  # of the fast fetch's answer
 
     def timings(self) -> Timings:
         return Timings(
@@ -185,6 +239,7 @@ class _Run:
             compliance_ms=self.compliance_ms,
             fetch_ms=self.fetch_ms,
             convert_ms=self.convert_ms,
+            render_ms=self.render_ms,
         )
 
     def result(self, **fields: Any) -> ExtractResult:
@@ -193,7 +248,8 @@ class _Run:
             "final_url": self.final_url,
             "upstream_status": self.upstream_status,
             "content_type": self.content_type,
-            "mode_used": "fast",
+            "mode_used": self.mode_used,
+            "unblocked": self.unblocked,
             "attempts": self.attempts,
             "language": None,
             "word_count": 0,
@@ -207,7 +263,7 @@ class _Run:
             "links": None,
             "fingerprint": None,
             "cache": self.cache,
-            "warnings": [],
+            "warnings": list(self.warnings),
         }
         values.update(fields)
         return ExtractResult(**values)
@@ -291,8 +347,18 @@ class Pipeline:
         settings: Settings,
         registry: CollectorRegistry,
         pool: ConversionPool | None = None,
+        *,
+        renderer: Renderer | None = None,
+        unblock_renderer: Renderer | None = None,
+        clearance: ClearanceStore | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
-        """``pool`` runs the CPU-bound steps; without one the pipeline makes its own."""
+        """``pool`` runs the CPU-bound steps; without one the pipeline makes its own.
+
+        Only the browser worker passes a ``renderer`` (and, with unblock mode enabled, the
+        ``unblock_renderer`` and the ``clearance`` store). ``timeout_seconds`` replaces
+        ``EXTRACT_TIMEOUT_SECONDS`` as the deadline; an unblock render has
+        ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``."""
         self._fetcher = fetcher
         self._gate = gate
         self._checker = checker
@@ -302,6 +368,11 @@ class Pipeline:
         self._pool = pool if pool is not None else ConversionPool(settings.convert_concurrency)
         self._rules = load_boilerplate_rules()
         self._metrics = _metrics_for(registry)
+        self._renderer = renderer
+        self._unblock_renderer = unblock_renderer
+        self._clearance = clearance
+        self._timeout_seconds = timeout_seconds
+        self._blocked_resources = blocked_resources(settings)
 
     async def run(
         self,
@@ -309,6 +380,8 @@ class Pipeline:
         principal: Principal,
         *,
         gate_refusals: Literal["fail", "raise"] = "fail",
+        artifacts: ArtifactSink | None = None,
+        draft: Envelope[ExtractResult] | None = None,
     ) -> Envelope[ExtractResult]:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
         and an unavailable Valkey (503).
@@ -316,14 +389,27 @@ class Pipeline:
         A refusal of the outbound gate is a ``rate_limited`` (busy) or ``connection_error``
         (paused) envelope, retryable. With ``gate_refusals="raise"`` the ``OutboundBusy`` or
         ``CircuitOpen`` propagates unchanged instead; the metrics count it under the same code.
+
+        With a renderer: ``artifacts`` stores the screenshot of a ``screenshot`` request (it is
+        required then), and ``draft`` is the fast result of an ``auto`` item, which the render is
+        compared with instead of fetching the page again (B5).
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
+        private = not req.secrets().empty()
+        cacheable = req.cache and not private and not req.screenshot
         run = _Run(
             req=req,
             report=ComplianceReport(mode=mode, decision="skipped"),  # until it is checked
-            cache="miss" if req.cache else "bypass",
+            cache="miss" if cacheable else "bypass",
             started=time.perf_counter(),
             raise_refusals=gate_refusals == "raise",
+            cacheable=cacheable,
+            private=private,
+            # Unblock mode is for admins only, even where the operator's default is ``ignore``.
+            unblock=principal.role == "admin" and unblock_applies(mode, self._settings),
+            admin=principal.role == "admin",
+            draft=draft if req.mode == "auto" else None,
+            artifacts=artifacts,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -345,7 +431,11 @@ class Pipeline:
     # --- steps ---------------------------------------------------------------------------------
 
     async def _within_deadline(self, run: _Run) -> Envelope[ExtractResult]:
-        deadline = asyncio.timeout(self._settings.extract_timeout_seconds)
+        seconds = self._timeout_seconds or self._settings.extract_timeout_seconds
+        chosen = self._renderer_for(run)
+        if chosen is not None and chosen[1]:
+            seconds = self._settings.browser_unblock_timeout_seconds
+        deadline = asyncio.timeout(seconds)
         try:
             async with deadline:
                 run.deadline = deadline
@@ -365,11 +455,25 @@ class Pipeline:
             return run.failed(ErrorCode.INVALID_URL, str(error))
         run.host = urlsplit(req.url).hostname
 
-        stored = await self._cached(req, run.report.mode) if req.cache else None
+        stored = await self._cached(req, run.report.mode) if run.cacheable else None
         if stored is not None and stored.fresh:
             return self._serve_hit(run, stored)
+        if stored is not None and stored.result.mode_used == "browser":
+            stored = None  # a rendered result has no validators and is never revalidated (B10)
+        if self._renders_first(run):
+            return await self._rendered(run, earlier=run.draft)
+        fast = await self._guarded(run, self._fetch_and_extract(run, stored))
+        if self._renderer_for(run) is not None and self._escalates(run, fast):
+            return await self._rendered(run, earlier=fast)
+        return fast
+
+    async def _guarded(
+        self, run: _Run, step: Awaitable[Envelope[ExtractResult]]
+    ) -> Envelope[ExtractResult]:
+        """``step``'s envelope; a failed fetch or render and a refusal of the gate become
+        failed envelopes, and an unavailable gate backend a 503."""
         try:
-            return await self._fetch_and_extract(run, stored)
+            return await step
         except FetchError as error:
             run.upstream_status = error.upstream_status
             return run.failed(error.code, error.message, retryable=error.retryable)
@@ -446,11 +550,14 @@ class Pipeline:
                 return run.failed(code, _BLOCK_MESSAGES[code])
             return await self._revalidated(run, stored, fetched)
         if not 200 <= fetched.status < 300:  # also a 3xx the fetcher could not follow
-            return run.failed(
+            failed = run.failed(
                 ErrorCode.TARGET_HTTP_ERROR,
                 f"The target answered with HTTP status {fetched.status}.",
                 retryable=fetched.status in _RETRYABLE_STATUSES or fetched.status >= 500,
             )
+            if failed.data is not None and self._assesses_challenge(run, fetched):
+                failed.data.quality = await self._challenge_quality(run, fetched)
+            return failed
         kind = _KINDS.get(fetched.content_type or "")
         if kind is None:
             return run.failed(
@@ -481,7 +588,32 @@ class Pipeline:
             and fetched.raw_sha256 == stored.entry.raw_sha256
         ):
             return await self._revalidated(run, stored, fetched)
-        return await self._extract_content(run, stored, fetched, kind, text)
+        return await self._extract_content(run, fetched, kind, text)
+
+    def _assesses_challenge(self, run: _Run, fetched: FetchResult) -> bool:
+        """Whether a failed answer's body is judged as a possible challenge: only in unblock
+        mode, where ``auto`` escalates a challenge answer (B5, B14)."""
+        return (
+            fetched.status in _CHALLENGE_STATUSES
+            and run.unblock
+            and run.req.mode == "auto"
+            and self._settings.browser_enabled
+            and _KINDS.get(fetched.content_type or "") == "html"
+            and len(fetched.content) <= self._settings.convert_max_bytes
+        )
+
+    async def _challenge_quality(self, run: _Run, fetched: FetchResult) -> Quality | None:
+        """The quality facts of a failed answer's body, with ``challenge_status`` set, when the
+        body is a bot challenge; None otherwise."""
+        started = time.perf_counter()
+        try:
+            text = await self._pool.run(decode_html, fetched.content, fetched.charset)
+            quality = await self._pool.run(assess, text, "")
+        finally:
+            run.convert_ms += _ms(started)
+        if not quality.bot_challenge:
+            return None
+        return quality.model_copy(update={"challenge_status": True})
 
     async def _check_origin(self, run: _Run, url: str, turn: _Turn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
@@ -658,14 +790,39 @@ class Pipeline:
     async def _extract_content(
         self,
         run: _Run,
-        stored: _Stored | None,
         fetched: FetchResult,
         kind: Literal["html", "text"],
         text: str,
     ) -> Envelope[ExtractResult]:
+        processed = await self._converted(run, fetched, kind, text)
+        if isinstance(processed, Envelope):
+            return processed
+        run.validators = Validators.from_headers(fetched.headers)
+        envelope = self._envelope(
+            run.result(
+                language=processed.language,
+                word_count=processed.quality.word_count,
+                title=processed.title,
+                content=processed.content,
+                quality=processed.quality,
+                metadata=processed.metadata,
+                links=processed.links,
+                fingerprint=processed.fingerprint,
+                warnings=processed.warnings,
+            )
+        )
+        if self._escalates(run, envelope):
+            # B5: the browser's result, or the better of both, is stored instead of this one.
+            return envelope
+        return await self._finish(run, envelope, run.validators)
+
+    async def _converted(
+        self, run: _Run, fetched: FetchResult, kind: Literal["html", "text"], text: str
+    ) -> _Processed | Envelope[ExtractResult]:
+        """``_process`` on the conversion pool, or the failed envelope of a page that broke it."""
         started = time.perf_counter()
         try:
-            processed = await self._pool.run(self._process, run.req, fetched, kind, text)
+            return await self._pool.run(self._process, run.req, fetched, kind, text)
         except Exception as error:  # a page that breaks a converter fails alone
             # Traceback without locals (see logging.py); the host only, never the URL.
             _log.error(
@@ -674,36 +831,300 @@ class Pipeline:
             return run.failed(ErrorCode.CONVERSION_FAILED, "The page could not be converted.")
         finally:
             run.convert_ms += _ms(started)
-        fingerprint = processed.fingerprint
-        if fingerprint is not None:
-            fingerprint = await self._fingerprints.compare_and_save(
-                run.req.url, fingerprint, variant=run.req.format
-            )
-        result = run.result(
-            language=processed.language,
-            word_count=processed.quality.word_count,
-            title=processed.title,
-            content=processed.content,
-            quality=processed.quality,
-            metadata=processed.metadata,
-            links=processed.links,
-            fingerprint=fingerprint,
-            warnings=processed.warnings,
+
+    def _escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
+        """Whether this fast result of an ``auto`` request goes on to the browser (B5)."""
+        return (
+            run.req.mode == "auto"
+            and self._settings.browser_enabled
+            and needs_browser(envelope, unblock=run.unblock)
         )
-        envelope = self._envelope(result)
-        if run.req.cache and envelope.status != "failed":
-            options = _cache_options(run.req, run.report.mode)
-            key = stored.key if stored else cache_key(run.req.url, options)
+
+    async def _finish(
+        self, run: _Run, envelope: Envelope[ExtractResult], validators: Validators
+    ) -> Envelope[ExtractResult]:
+        """Compare the result's fingerprint with the previous one and cache the result: the last
+        step of an answer that is kept. A failed result is not cached, and a request with
+        secrets touches neither the cache nor the fingerprints (B6). The cache entry's
+        ``raw_sha256`` is the fingerprint's: the fetched bytes, or the rendered HTML."""
+        result = envelope.data
+        if result is None:
+            return envelope
+        if result.fingerprint is not None and not run.private:
+            fingerprint = await self._fingerprints.compare_and_save(
+                run.req.url, result.fingerprint, variant=run.req.format
+            )
+            result = result.model_copy(update={"fingerprint": fingerprint})
+            envelope = envelope.model_copy(update={"data": result})
+        if run.cacheable and envelope.status != "failed" and result.fingerprint is not None:
             await self._cache.put(
-                key,
+                cache_key(run.req.url, _cache_options(run.req, run.report.mode)),
                 CachedEntry(
                     stored_at=time.time(),
-                    validators=Validators.from_headers(fetched.headers),
-                    raw_sha256=fetched.raw_sha256,
+                    validators=validators,
+                    raw_sha256=result.fingerprint.raw_sha256,
                     result=result.model_dump(mode="json"),
                 ),
             )
         return envelope
+
+    # --- the render path (browser worker only) -------------------------------------------------
+
+    def _renderer_for(self, run: _Run) -> tuple[Renderer, bool] | None:
+        """The renderer for this request and whether it is the unblock one; None when it is not
+        rendered at all (``mode: fast``, or a pipeline without a renderer)."""
+        if run.req.mode == "fast":
+            return None
+        if run.unblock and self._unblock_renderer is not None:
+            return self._unblock_renderer, True
+        if self._renderer is not None:
+            return self._renderer, False
+        return None
+
+    def _renders_first(self, run: _Run) -> bool:
+        """``browser``, a screenshot and an ``auto`` item with a draft render without a fast
+        fetch; ``auto`` otherwise renders only when its fast result needs it."""
+        req = run.req
+        wants = req.mode == "browser" or req.screenshot or run.draft is not None
+        return wants and self._renderer_for(run) is not None
+
+    async def _rendered(
+        self, run: _Run, *, earlier: Envelope[ExtractResult] | None
+    ) -> Envelope[ExtractResult]:
+        """Render the page; with an ``earlier`` result (the draft or this run's fast result),
+        keep the better of both and store only that one."""
+        run.comparing = earlier is not None
+        rendered = await self._guarded(run, self._render_and_extract(run))
+        if earlier is None:
+            return rendered
+        winner = better(earlier, rendered)
+        if winner.data is not None:
+            # Every fetch of the target for this item counts, the draft's too.
+            drafted = run.draft.data.attempts if run.draft and run.draft.data else 0
+            data = winner.data.model_copy(update={"attempts": run.attempts + drafted})
+            winner = winner.model_copy(update={"data": data})
+        # This run's fast result keeps its validators; a draft (fetched elsewhere) or a render
+        # has none, and a run that took no fast step has none either.
+        fast = winner.data is not None and winner.data.mode_used == "fast"
+        return await self._finish(run, winner, run.validators if fast else Validators())
+
+    async def _render_and_extract(self, run: _Run) -> Envelope[ExtractResult]:
+        """Render the page in its host's turn and extract it (B2):
+
+        1. the request URL's origin is checked, then the host's turn is taken and held;
+        2. the renderer loads the page, and asks before each later main-frame navigation;
+        3. every document answer and redirect hop is checked when the render returns, before
+           any content is used, and its status is reported to the gate; then the turn is given
+           back, on every path.
+        """
+        chosen = self._renderer_for(run)
+        if chosen is None:  # pragma: no cover - only called when there is one
+            raise RuntimeError("no renderer")
+        renderer, unblock = chosen
+        req = run.req
+        if req.screenshot and run.artifacts is None:
+            raise ValueError("a screenshot request needs an artifact sink")
+        # What a fast step before learned is in its own result; the render starts afresh.
+        run.mode_used, run.unblocked = "browser", unblock
+        run.report = ComplianceReport(mode=run.report.mode, decision="skipped")
+        run.final_url = run.upstream_status = run.content_type = None
+        turn = _Turn(self._gate)
+        checked = {req.url}
+        try:
+            run.report = await self._check_origin(run, req.url, turn)
+            if (code := blocking_code(run.report)) is not None:
+                return run.failed(code, _BLOCK_MESSAGES[code])
+            options = await self._render_options(run, unblock)
+            rendered = await self._render(run, renderer, options, turn, checked)
+            refused = await self._check_answers(run, rendered, turn, checked)
+            if refused is not None:
+                return refused
+        finally:
+            await turn.give_back()
+        return await self._extract_rendered(run, rendered, unblock)
+
+    async def _render_options(self, run: _Run, unblock: bool) -> RenderOptions:
+        """The request's browser options; an unblock render first adds the clearance cookies
+        stored for the host (B14), so the caller's own cookies of the same name win."""
+        host = run.host or ""
+        cookies = caller_cookies(run.req, host)
+        if unblock and self._clearance is not None:
+            cookies = [*await self._clearance.get(host), *cookies]
+        return render_options(
+            run.req, cookies, admin=run.admin, unblock=unblock, blocked=self._blocked_resources
+        )
+
+    async def _render(
+        self,
+        run: _Run,
+        renderer: Renderer,
+        options: RenderOptions,
+        turn: _Turn,
+        checked: set[str],
+    ) -> Rendered:
+        """Take the host's turn and render. Each later main-frame navigation is checked before
+        it is sent: its URL, its origin's compliance files (a block refuses it) and the turn of
+        its host, which moves along. The checks count as render time."""
+        await turn.take(run.host or "", run.report.crawl_delay)
+        loop = asyncio.get_running_loop()
+        when = run.deadline.when() if run.deadline is not None else None
+        if when is None:  # pragma: no cover - the run always has a deadline
+            when = loop.time() + self._settings.browser_timeout_seconds
+        deadline = when - _RENDER_MARGIN_SECONDS
+        if deadline - loop.time() < _MIN_FETCH_SECONDS:
+            raise FetchError(
+                ErrorCode.TIMEOUT, "Too little time was left to render the target.", retryable=True
+            )
+
+        async def check(url: str) -> None:
+            check_target(url)
+            host = urlsplit(url).hostname or ""
+            check_address(host, self._settings)
+            if url not in checked:
+                checked.add(url)
+                compliance_ms, fetch_ms = run.compliance_ms, run.fetch_ms
+                hop = await self._check_origin(run, url, turn)
+                run.compliance_ms, run.fetch_ms = compliance_ms, fetch_ms
+                run.report = with_redirect_findings(run.report, hop)
+                if (code := blocking_code(run.report)) is not None:
+                    raise FetchError(code, _BLOCK_MESSAGES[code])
+            await turn.take(host, run.report.crawl_delay)
+
+        started = time.perf_counter()
+        try:
+            return await renderer.render(run.req.url, check, options, deadline=deadline)
+        finally:
+            run.render_ms += _ms(started)
+
+    async def _check_answers(
+        self, run: _Run, rendered: Rendered, turn: _Turn, checked: set[str]
+    ) -> Envelope[ExtractResult] | None:
+        """Report each document answer to the gate, then check every URL the render arrived
+        at that was not checked before it was sent (HTTP redirect hops, which the browser
+        follows unasked): with the cached verdicts, or with the origin's files fetched in its
+        host's turn. A block discards the render: its failed envelope is returned."""
+        run.attempts += len(rendered.responses)
+        for answer in rendered.responses:
+            await self._gate.record(
+                urlsplit(answer.url).hostname or "",
+                status=answer.status,
+                retry_after=parse_retry_after(answer.headers.get("retry-after"), now=time.time()),
+            )
+        for answer in rendered.responses:
+            for url in (*answer.redirects, answer.url):
+                if url in checked:
+                    continue
+                checked.add(url)
+                check_target(url)
+                run.report = with_redirect_findings(
+                    run.report, await self._check_origin(run, url, turn)
+                )
+                if (code := blocking_code(run.report)) is not None:
+                    return run.failed(code, _BLOCK_MESSAGES[code])
+        return None
+
+    async def _extract_rendered(
+        self, run: _Run, rendered: Rendered, unblock: bool
+    ) -> Envelope[ExtractResult]:
+        """Judge the last document answer as fast mode would, then convert the rendered HTML."""
+        req = run.req
+        run.warnings = list(rendered.warnings)
+        if not rendered.responses:
+            return run.failed(
+                ErrorCode.INTERNAL_ERROR, "The browser reported no document.", retryable=True
+            )
+        last = rendered.responses[-1]
+        run.final_url = rendered.final_url
+        run.upstream_status = last.status
+        run.content_type = last.content_type
+        if not 200 <= last.status < 300:
+            return run.failed(
+                ErrorCode.TARGET_HTTP_ERROR,
+                f"The target answered with HTTP status {last.status}.",
+                retryable=last.status in _RETRYABLE_STATUSES or last.status >= 500,
+            )
+        if _KINDS.get(last.content_type or "") != "html":  # a download, text, an image ...
+            return run.failed(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+                f"Content type {last.content_type or 'unknown'} is not supported in browser mode.",
+            )
+        content = rendered.html.encode("utf-8", "surrogatepass")
+        limit = self._settings.convert_max_bytes
+        if len(content) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The rendered page has {len(content)} bytes, more than the {limit} bytes "
+                "that are converted.",
+            )
+        fetched = as_fetched(req.url, rendered, content, run.render_ms)
+        started = time.perf_counter()
+        run.report = await self._pool.run(
+            self._checker.after_fetch, run.report, fetched, rendered.html
+        )
+        run.compliance_ms += _ms(started)
+        if (code := blocking_code(run.report)) is not None:
+            return run.failed(code, _BLOCK_MESSAGES[code])
+
+        processed = await self._converted(run, fetched, "html", rendered.html)
+        if isinstance(processed, Envelope):
+            return processed
+        quality, fingerprint = processed.quality, processed.fingerprint
+        if challenged_by_hosts(quality, rendered):
+            quality = quality.model_copy(
+                update={"bot_challenge": True, "browser_recommended": True}
+            )
+            fingerprint = None
+        screenshot = await self._store_screenshot(run, rendered) if req.screenshot else None
+        if isinstance(screenshot, Envelope):
+            return screenshot
+        result = run.result(
+            language=processed.language,
+            word_count=quality.word_count,
+            title=processed.title,
+            content=processed.content,
+            quality=quality,
+            metadata=processed.metadata,
+            links=processed.links,
+            fingerprint=fingerprint,
+            warnings=[*processed.warnings, *rendered.warnings],
+            screenshot=screenshot,
+        )
+        # B7: a stored screenshot is the answer; the page's quality is reported, not judged.
+        envelope = Envelope(status="success", data=result) if screenshot else self._envelope(result)
+        if (
+            unblock
+            and self._clearance is not None
+            and rendered.cookies
+            and not quality.bot_challenge
+        ):
+            await self._clearance.put(run.host or "", list(rendered.cookies))
+        if run.comparing:
+            return envelope
+        return await self._finish(run, envelope, Validators())  # B10: never revalidated
+
+    async def _store_screenshot(
+        self, run: _Run, rendered: Rendered
+    ) -> ArtifactRef | Envelope[ExtractResult]:
+        """Store the render's screenshot (B7): its reference, or the failed envelope."""
+        png, size = rendered.screenshot, rendered.screenshot_size
+        if png is None or size is None or run.artifacts is None:
+            return run.failed(
+                ErrorCode.INTERNAL_ERROR, "The browser took no screenshot.", retryable=True
+            )
+        limit = self._settings.screenshot_max_bytes
+        if len(png) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The screenshot has {len(png)} bytes, more than the {limit} bytes that are kept.",
+            )
+        try:
+            return await run.artifacts.put_screenshot(png, *size)
+        except ArtifactUnavailable:
+            return run.failed(
+                ErrorCode.INTERNAL_ERROR,
+                "The screenshot could not be stored now. Try again later.",
+                retryable=True,
+            )
 
     def _process(
         self, req: ExtractRequest, fetched: FetchResult, kind: Literal["html", "text"], text: str
@@ -796,12 +1217,17 @@ def create_pipeline(
     *,
     gate: DomainGate | None = None,
     memory_guard: MemoryPressure | None = None,
+    renderer: Renderer | None = None,
+    unblock_renderer: Renderer | None = None,
+    clearance: ClearanceStore | None = None,
+    timeout_seconds: float | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
 
     ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
     without it a new gate is made, which then counts its spacing from the turn starts only.
-    With ``memory_guard`` the result cache skips its writes while Valkey's memory is high."""
+    With ``memory_guard`` the result cache skips its writes while Valkey's memory is high.
+    The browser options go to ``Pipeline`` unchanged."""
     if gate is None:
         gate = DomainGate(valkey, settings)
     return Pipeline(
@@ -813,6 +1239,10 @@ def create_pipeline(
         settings,
         registry,
         pool,
+        renderer=renderer,
+        unblock_renderer=unblock_renderer,
+        clearance=clearance,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -822,9 +1252,9 @@ def create_pipeline(
 def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
     """Every request option that changes the result; the cache key covers them.
 
-    ``mode`` gives the same result in both modes today (``quality.browser_recommended`` is
-    reported in both, and nothing escalates), but ``auto`` will escalate to the browser in
-    package 4, so its results are kept apart already.
+    ``mode`` keeps the results of each mode apart: ``browser`` renders, and ``auto`` keeps a
+    rendered result when the fast one needed the browser. The browser options that are not
+    here (actions, cookies, headers, a screenshot) keep a request out of the cache altogether.
     """
     return {
         "mode": req.mode,

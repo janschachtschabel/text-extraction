@@ -1,8 +1,6 @@
 import asyncio
 import threading
 import time
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Any, cast
 
@@ -20,6 +18,7 @@ from tests.fakes import (
     ROBOTS,
     Answer,
     FakeFetcher,
+    RecordingGate,
     Redirect,
     RefusingGate,
     fetched,
@@ -847,33 +846,6 @@ def test_non_ascii_validators_are_not_sent_back(httpserver: HTTPServer) -> None:
 OTHER = "https://other.example"
 MOVED = f"{ORIGIN}/private/moved.html"
 DISALLOW_PRIVATE = "User-agent: *\nDisallow: /private/\n"
-
-
-class RecordingGate:
-    """A real DomainGate that notes each turn taken and given back, and each outcome."""
-
-    def __init__(self, gate: DomainGate) -> None:
-        self.gate = gate
-        self.events: list[tuple[str, str]] = []
-
-    @asynccontextmanager
-    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
-        async with self.gate.slot(host, crawl_delay):
-            self.events.append(("take", host))
-            try:
-                yield
-            finally:
-                self.events.append(("give back", host))
-
-    async def record(self, host: str, *, status: int | None, retry_after: float | None) -> None:
-        self.events.append(("record", host))
-        await self.gate.record(host, status=status, retry_after=retry_after)
-
-    async def before_request(self, host: str) -> None:
-        await self.gate.before_request(host)
-
-    async def mark_sent(self, host: str) -> None:
-        await self.gate.mark_sent(host)
 
 
 def recording_harness(
