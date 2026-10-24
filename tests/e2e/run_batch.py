@@ -25,8 +25,9 @@ Checks, all from the outside, on what the outbound gate guarantees (docs/configu
   request, pages included. The farm's clock reads a request when it arrives, a little after the
   service sent it: hence the slack;
 - per host, each compliance file (robots.txt, ``tdmrep.json``, ai.txt) is loaded at most once
-  per worker (2 in all), and two loads of the same file never overlap. Each worker shares one
-  load among its turns; the workers do not share theirs, so two loads of a file are accepted.
+  per worker (2 in all), and two loads of the same file start at least 180 ms apart (they may
+  be in flight at once: the limit is 2). Each worker shares one load among its turns; the
+  workers do not share theirs, so two loads of a file are accepted.
   A turn's own requests go back to back, so the farm cannot tell which turn a request belongs
   to: the order inside a turn (files one after another, then the page) is checked by the
   pipeline tests (``tests/test_pipeline.py``), not here;
@@ -145,11 +146,13 @@ def is_page(request: Request) -> bool:
     return request.path.startswith("/p/")
 
 
-def file_load_violations(requests: Iterable[Request], *, max_loads: int) -> list[str]:
-    """How a host's compliance files broke "each file loaded at most once per worker, and never
-    twice at once": a file loaded more than ``max_loads`` times (one load per worker), or two
-    loads of the same file that overlap. Different files may overlap: they can belong to the
-    turns of different workers."""
+def file_load_violations(
+    requests: Iterable[Request], *, max_loads: int, min_gap: float
+) -> list[str]:
+    """How a host's compliance files broke "each file loaded at most once per worker, and two
+    loads of one file at least ``min_gap`` apart": a file loaded more than ``max_loads`` times
+    (one load per worker), or two loads of the same file that started closer. Two loads may be
+    in flight at once (the limit is 2); their starts keep the spacing between turns."""
     by_path: dict[str, list[Request]] = {}
     for request in sorted(requests, key=lambda request: request.start):
         if not is_page(request):
@@ -158,9 +161,17 @@ def file_load_violations(requests: Iterable[Request], *, max_loads: int) -> list
     for path, loads in by_path.items():
         if len(loads) > max_loads:
             problems.append(f"{path} loaded {len(loads)} times")
-        if any(second.start < first.end for first, second in pairwise(loads)):
-            problems.append(f"two loads of {path} overlap")
+        problems += [
+            f"two loads of {path} started {(second.start - first.start) * 1000:.0f} ms apart"
+            for first, second in pairwise(loads)
+            if second.start - first.start < min_gap
+        ]
     return problems
+
+
+def loads_bad(requests: Iterable[Request]) -> list[str]:
+    """``file_load_violations`` with this run's limits."""
+    return file_load_violations(requests, max_loads=WORKERS, min_gap=MIN_START_GAP)
 
 
 def file_loads(requests: Iterable[Request]) -> int:
@@ -413,8 +424,9 @@ def _ms(seconds: float | None) -> str:
 def host_rows(record: dict[str, list[Request]]) -> list[str]:
     rows = [
         "| Host | Pages | Compliance files | Max in flight (all) | Min page start gap ms | "
-        f"Page gaps < {MIN_START_GAP * 1000:.0f} ms | Most loads of one file | File loads ok |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        f"Page gaps < {MIN_START_GAP * 1000:.0f} ms | Min start gap ms (all, info) | "
+        "Most loads of one file | File loads ok |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for host, requests in record.items():
         pages = [request for request in requests if is_page(request)]
@@ -422,8 +434,9 @@ def host_rows(record: dict[str, list[Request]]) -> list[str]:
             f"| {host} | {len(pages)} | {len(requests) - len(pages)} | {max_overlap(requests)} | "
             f"{_ms(min_start_gap(pages))} | "
             f"{len(spacing_violations(pages, min_gap=MIN_START_GAP))} | "
+            f"{_ms(min_start_gap(requests))} | "
             f"{file_loads(requests)} | "
-            f"{'yes' if not file_load_violations(requests, max_loads=WORKERS) else 'NO'} |"
+            f"{'yes' if not loads_bad(requests) else 'NO'} |"
         )
     return rows
 
@@ -477,15 +490,13 @@ def evaluate(
             or f"min {_ms(min(gaps, default=None))} ms",
         )
     )
-    loads = {
-        host: file_load_violations(requests, max_loads=WORKERS) for host, requests in record.items()
-    }
+    loads = {host: loads_bad(requests) for host, requests in record.items()}
     files = sum(1 for requests in record.values() for r in requests if not is_page(r))
     most = max((file_loads(requests) for requests in record.values()), default=0)
     checks.append(
         Check(
             f"per host each compliance file loaded at most once per worker (<= {WORKERS}), "
-            "never twice at once",
+            f"two loads of one file >= {MIN_START_GAP * 1000:.0f} ms apart",
             not any(loads.values()),
             "; ".join(f"{host}: {', '.join(found)}" for host, found in loads.items() if found)
             or f"{files} file loads, at most {most} of one file at one host",
@@ -542,7 +553,8 @@ def summary(
         "A turn's own requests go back to back, so the farm cannot tell turns apart: the order "
         "inside a turn (the compliance files one after another, then the page) is checked by the "
         "pipeline tests, not here. Each worker loads a file at most once; loads of the two "
-        "workers are accepted.",
+        "workers are accepted. The minimum start gap over all requests per host is shown for "
+        "information only.",
     ]
     lines += ["", "| Job | URLs | State | Created | Finished |", "| --- | ---: | --- | --- | --- |"]
     lines += [

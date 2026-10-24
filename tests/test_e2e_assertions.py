@@ -46,16 +46,16 @@ TDMREP = "/.well-known/tdmrep.json"
 AI_TXT = "/ai.txt"
 
 
-def test_each_file_loaded_once_per_worker_without_overlap_passes() -> None:
+def test_each_file_loaded_once_per_worker_and_spaced_passes() -> None:
     requests = [
         Request(ROBOTS, 0.000, 0.300, 404),
-        Request(TDMREP, 0.300, 0.600, 404),
-        Request(TDMREP, 0.650, 0.950, 404),  # the other worker's load, after the first ended
-        Request(AI_TXT, 0.600, 0.900, 404),
-        Request("/p/1.html", 0.700, 0.900),  # pages are not checked here
+        Request(TDMREP, 0.304, 0.604, 404),
+        Request(TDMREP, 0.509, 0.809, 404),  # the other worker's load: in flight at once, spaced
+        Request(AI_TXT, 0.711, 1.012, 404),
+        Request("/p/1.html", 0.300, 0.900),  # pages are not checked here
     ]
 
-    assert file_load_violations(requests, max_loads=2) == []
+    assert file_load_violations(requests, max_loads=2, min_gap=0.18) == []
 
 
 def test_a_file_loaded_more_often_than_there_are_workers_is_reported() -> None:
@@ -65,14 +65,16 @@ def test_a_file_loaded_more_often_than_there_are_workers_is_reported() -> None:
         Request(ROBOTS, 0.4, 0.5, 404),
     ]
 
-    assert file_load_violations(requests, max_loads=2) == [f"{ROBOTS} loaded 3 times"]
+    assert file_load_violations(requests, max_loads=2, min_gap=0.18) == [f"{ROBOTS} loaded 3 times"]
 
 
-def test_two_loads_of_one_file_at_once_are_reported() -> None:
+def test_two_loads_of_one_file_closer_than_the_gap_are_reported() -> None:
     requests = [
         Request(TDMREP, 0.300, 0.600, 404),
-        Request(TDMREP, 0.500, 0.800, 404),
-        Request(AI_TXT, 0.600, 0.900, 404),  # another file may overlap: another turn's
+        Request(TDMREP, 0.420, 0.720, 404),  # 120 ms after the first
+        Request(AI_TXT, 0.450, 0.750, 404),  # another file is not compared with it
     ]
 
-    assert file_load_violations(requests, max_loads=2) == [f"two loads of {TDMREP} overlap"]
+    assert file_load_violations(requests, max_loads=2, min_gap=0.18) == [
+        f"two loads of {TDMREP} started 120 ms apart"
+    ]

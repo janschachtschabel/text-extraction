@@ -257,8 +257,8 @@ spacing slot there.
 host, 600 over nine) plus a second client's 20 URLs on the busiest host, across two workers,
 against a local site farm. Both jobs complete with no failed item. Every host sees at most 2
 requests at once and page starts at least 180 ms apart (200 ms minus 10 %). Each compliance file
-is loaded at most once per worker, and two loads of one file never overlap. The second client
-finishes first.
+is loaded at most once per worker, and two loads of one file start at least 180 ms apart. The
+second client finishes first.
 
 ## Observability
 
