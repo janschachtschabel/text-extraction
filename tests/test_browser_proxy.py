@@ -499,6 +499,16 @@ def test_oversized_or_slow_request_head_is_refused() -> None:
             b"POST http://example.org/ HTTP/1.1\r\nContent-Length: 1\r\n"
             b"Transfer-Encoding: chunked\r\n\r\n"
         ),
+        b"POST http://example.org/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        pytest.param(
+            b"POST http://example.org/ HTTP/1.1\r\nContent-Length: " + b"9" * 5000 + b"\r\n\r\n",
+            id="content-length-5000-digits",
+        ),
+        pytest.param(
+            b"POST http://example.org/ HTTP/1.1\r\nContent-Length: " + b"1" * 19 + b"\r\n\r\n",
+            id="content-length-19-digits",
+        ),
+        b"POST http://example.org/ HTTP/1.1\r\nContent-Length: -1\r\n\r\n",
     ],
 )
 def test_malformed_requests_are_400(raw: bytes) -> None:

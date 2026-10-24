@@ -8,6 +8,10 @@ absolute-form plain ``http://`` requests. For each connection it resolves the ho
 allowed address that answers, so a DNS answer cannot change between check and connect. TLS stays
 end to end: the proxy relays bytes and never looks inside a tunnel.
 
+A plain request is the only one of its connection: only its head and the body its
+``Content-Length`` declares go to the origin (a chunked or otherwise ambiguous request is
+refused), and the response head tells the browser to close the connection.
+
 One proxy serves one browser process. Every browser page gets its own ``ProxyContext`` from
 ``open_context()`` with random credentials, which the browser sends as ``Proxy-Authorization``.
 The context counts the bytes of its page (both directions), the hosts it reached and the requests
@@ -146,7 +150,7 @@ class _Request:
         headers: list[str],
         authorization: str | None,
         rest: bytes,
-        body_limit: int | None = 0,
+        body_limit: int = 0,
     ) -> None:
         self.method = method
         self.host = host
@@ -155,8 +159,7 @@ class _Request:
         self.headers = headers  # the header lines as received
         self.authorization = authorization
         self.rest = rest  # bytes that arrived behind the head
-        # Bytes of request body a plain request may send (Content-Length); None for a chunked
-        # body, whose end is not tracked.
+        # Bytes of request body a plain request may send: its Content-Length.
         self.body_limit = body_limit
 
 
@@ -223,13 +226,14 @@ def _parse_head(head: bytes, rest: bytes) -> _Request:
     host, port = _split_authority(authority, 80)
     if not path.startswith("/"):
         path = "/" + path
-    # One request per connection (see EgressProxy._tunnel): the body's extent decides how much of
-    # the client's stream is passed on. Ambiguous framing is refused.
-    if chunked and lengths:
+    # One request per connection (see EgressProxy._tunnel): only the head and the declared body
+    # are passed on, so the framing must be unambiguous. A body without a Content-Length (chunked)
+    # has no end the proxy could find, and browsers frame plain HTTP/1.1 uploads with a length.
+    if chunked or len(lengths) > 1:
         raise _Refusal(400, "bad_request")
-    if len(lengths) > 1 or any(not (v.isascii() and v.isdecimal()) for v in lengths):
+    if lengths and not (lengths[0].isascii() and lengths[0].isdecimal() and len(lengths[0]) <= 18):
         raise _Refusal(400, "bad_request")
-    body_limit = None if chunked else int(lengths[0]) if lengths else 0
+    body_limit = int(lengths[0]) if lengths else 0
     return _Request(method, host, port, path, headers, authorization, rest, body_limit)
 
 
@@ -413,7 +417,7 @@ class EgressProxy:
             async with asyncio.timeout(self._tunnel_timeout):
                 remote_reader, remote = await self._dial(request.host, request.port)
                 context._saw(request.host)
-                remaining: int | None = None
+                remaining = 0
                 if request.path is None:
                     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                     first = request.rest
@@ -431,9 +435,8 @@ class EgressProxy:
                     ]
                     head = f"{request.method} {request.path} HTTP/1.1\r\n" + "\r\n".join(kept)
                     body = request.rest
-                    if request.body_limit is not None:
-                        body = body[: request.body_limit]
-                        remaining = request.body_limit - len(body)
+                    body = body[: request.body_limit]
+                    remaining = request.body_limit - len(body)
                     first = head.encode("latin-1") + b"\r\n\r\n" + body
                 established = True
                 if first:
@@ -507,15 +510,14 @@ class EgressProxy:
         context: ProxyContext,
         source: asyncio.StreamReader,
         sink: asyncio.StreamWriter,
-        remaining: int | None,
+        remaining: int,
     ) -> None:
-        """Pass on the rest of a plain request's body (``remaining`` bytes, all of a chunked one).
+        """Pass on the rest of a plain request's body (``remaining`` bytes).
 
         Then the client's stream is only read, so that its end is noticed, and dropped.
         """
         while chunk := await source.read(_CHUNK_BYTES):
-            if remaining is not None:
-                chunk, remaining = chunk[:remaining], remaining - len(chunk[:remaining])
+            chunk, remaining = chunk[:remaining], remaining - len(chunk[:remaining])
             if chunk:
                 if not context._count(len(chunk)):
                     return
