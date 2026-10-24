@@ -382,6 +382,7 @@ def test_duplicate_sha256_across_env_and_file_rejected(
     ("name", "value", "field"),
     [
         ("FETCH_TIMEOUT_SECONDS", "0", "fetch_timeout_seconds"),
+        ("FETCH_TIMEOUT_SECONDS", "0.5", "fetch_timeout_seconds"),
         ("FETCH_MAX_BYTES", "1023", "fetch_max_bytes"),
         ("FETCH_MAX_REDIRECTS", "-1", "fetch_max_redirects"),
         ("FETCH_MAX_REDIRECTS", "21", "fetch_max_redirects"),
@@ -399,14 +400,14 @@ def test_fetch_limits_are_validated(
 
 def test_fetch_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
-    monkeypatch.setenv("FETCH_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("FETCH_TIMEOUT_SECONDS", "1")
     monkeypatch.setenv("FETCH_MAX_BYTES", "2048")
     monkeypatch.setenv("FETCH_MAX_REDIRECTS", "0")
     monkeypatch.setenv("FETCH_ALLOW_PRIVATE_NETWORKS", "true")
 
     settings = load_settings()
 
-    assert settings.fetch_timeout_seconds == 2.5
+    assert settings.fetch_timeout_seconds == 1
     assert settings.fetch_max_bytes == 2048
     assert settings.fetch_max_redirects == 0
     assert settings.fetch_allow_private_networks is True
@@ -425,6 +426,8 @@ def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.outbound_max_backoff_seconds == 300
     assert settings.circuit_failure_threshold == 5
     assert settings.circuit_open_seconds == 60
+    assert settings.outbound_max_connections == 200
+    assert settings.outbound_max_keepalive == 50
 
 
 @pytest.mark.parametrize(
@@ -438,6 +441,8 @@ def test_outbound_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         ("OUTBOUND_MAX_BACKOFF_SECONDS", "0", "outbound_max_backoff_seconds"),
         ("CIRCUIT_FAILURE_THRESHOLD", "0", "circuit_failure_threshold"),
         ("CIRCUIT_OPEN_SECONDS", "0", "circuit_open_seconds"),
+        ("OUTBOUND_MAX_CONNECTIONS", "0", "outbound_max_connections"),
+        ("OUTBOUND_MAX_KEEPALIVE", "-1", "outbound_max_keepalive"),
     ],
 )
 def test_outbound_limits_are_validated(
@@ -459,4 +464,69 @@ def test_quality_min_words_default_and_validation(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setenv("QUALITY_MIN_WORDS", "-1")
     with pytest.raises(ConfigError, match="quality_min_words"):
+        load_settings()
+
+
+def test_result_cache_and_fingerprint_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.result_cache_ttl_seconds == 3600
+    assert settings.result_store_ttl_seconds == 86400
+    assert settings.fingerprint_ttl_seconds == 2_592_000
+
+    monkeypatch.setenv("RESULT_CACHE_TTL_SECONDS", "0")
+    monkeypatch.setenv("RESULT_STORE_TTL_SECONDS", "0")
+    monkeypatch.setenv("FINGERPRINT_TTL_SECONDS", "0")
+    settings = load_settings()
+    assert settings.result_cache_ttl_seconds == 0
+    assert settings.result_store_ttl_seconds == 0
+    assert settings.fingerprint_ttl_seconds == 0
+
+    monkeypatch.setenv("FINGERPRINT_TTL_SECONDS", "-1")
+    with pytest.raises(ConfigError, match="fingerprint_ttl_seconds"):
+        load_settings()
+
+
+def test_extract_timeout_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().extract_timeout_seconds == 25
+
+    monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "7.5")
+    assert load_settings().extract_timeout_seconds == 7.5
+
+    monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "2")
+    assert load_settings().extract_timeout_seconds == 2
+
+    # Below 2 s, the fetch could be left with less than its 1 s minimum on every request.
+    for value in ("0", "1.9"):
+        monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", value)
+        with pytest.raises(ConfigError, match="extract_timeout_seconds"):
+            load_settings()
+
+
+def test_conversion_budget_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.convert_max_bytes == 5_242_880
+    assert settings.convert_concurrency == 2
+
+    monkeypatch.setenv("CONVERT_MAX_BYTES", "1023")
+    with pytest.raises(ConfigError, match="convert_max_bytes"):
+        load_settings()
+
+    monkeypatch.setenv("CONVERT_MAX_BYTES", "1024")
+    monkeypatch.setenv("CONVERT_CONCURRENCY", "0")
+    with pytest.raises(ConfigError, match="convert_concurrency"):
+        load_settings()
+
+
+def test_shutdown_drain_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().shutdown_drain_seconds == 5
+
+    monkeypatch.setenv("SHUTDOWN_DRAIN_SECONDS", "0")
+    assert load_settings().shutdown_drain_seconds == 0
+
+    monkeypatch.setenv("SHUTDOWN_DRAIN_SECONDS", "-1")
+    with pytest.raises(ConfigError, match="shutdown_drain_seconds"):
         load_settings()

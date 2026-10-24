@@ -41,8 +41,9 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
    `quality.py` reports `js_heavy`, `bot_challenge`, `soft_404` and `login_wall`; a bot
    challenge, soft-404, login wall or empty content ends `failed` (`bot_protection`,
    `likely_error_page`, `login_required`, `empty_content`), fewer than `QUALITY_MIN_WORDS`
-   words ends `partial` (`content_too_short`). Until the browser package, `auto` only reports
-   `quality.browser_recommended`.
+   words ends `partial` (`content_too_short`). `quality.browser_recommended` is reported in
+   both modes; only `auto` will act on it (escalation arrives with the browser package), which
+   is why `mode` is already part of the result cache key.
 5. **Convert:** HTML → Trafilatura (keep link-only lists of linked files, domain
    boilerplate rules, MathML → LaTeX). Office/EPUB and PDFs with a good text layer →
    MarkItDown. Scans, table-heavy PDFs, images → Docling. Vision LLM opt-in.
@@ -64,8 +65,22 @@ Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `unsupported_content_type`, `too_large`, `conversion_failed`, `no_transcript_available`,
 `media_too_long`, `transcription_failed`, `llm_failed`, `rate_limited`, `internal_error`.
 
+Codes of the API's own 4xx answers (never an extraction outcome): `invalid_request`,
+`unauthorized`, `forbidden`, `not_found`. `tests/test_errors.py` keeps both lists in step
+with `ErrorCode`.
+
 HTTP status of the API: 200 with `status: failed` when the target failed; 4xx for bad
 requests, auth and rate limits; 5xx only for our own faults.
+
+`POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
+also on failure, as far as the request got. `partial` keeps the content and names
+`content_too_short`; a failed quality verdict (`bot_protection`, `likely_error_page`,
+`login_required`, `empty_content`) keeps it too, a compliance block or a target error has none.
+`data.cache` is `miss`, `hit` (fresh stored result, no fetch), `revalidated` (stale stored
+result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no read, no write).
+Only `success` and `partial` results are cached and fingerprinted (per URL and output format). `attempts` counts fetches of
+the target in this request (0 for a cache hit or a refusal before the fetch). The outbound gate
+refusing a turn gives `rate_limited` (busy) or `connection_error` (host paused), both retryable.
 
 ## Public API (port 8080)
 
@@ -114,7 +129,9 @@ optional rate limit.
 - **Change detection:** before extraction ETag/Last-Modified + SHA-256 of raw bytes
   (unchanged → stored result). After extraction the text is normalized (no Markdown
   syntax, case, whitespace) and gets SHA-256 + 128-permutation MinHash.
-  `similarity_to_previous`, `changed`; optional LSH (datasketch) for near-duplicates.
+  `similarity_to_previous`, `changed`; the MinHash is a small numpy implementation compatible
+  with datasketch 2.x (`affine32`, seed 1), which would give optional LSH for near-duplicates
+  without pulling scipy into the image by default.
 - **Structured output:** LLM-free `metadata`, `selectors` (CSS/XPath schema),
   `patterns` (regex, tables); `llm` with JSON schema output validated by Pydantic;
   `learn_selectors` stores an LLM-written CSS schema per domain for LLM-free reuse.

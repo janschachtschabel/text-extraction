@@ -9,6 +9,9 @@ The pipeline calls this module three times per request:
    ``tdm-reservation`` and ``tdm-policy`` headers, the same two ``<meta>`` tags and
    ``noai``/``noml`` in ``X-Robots-Tag`` or ``<meta name="robots">``.
 
+Every redirect target is checked like the first URL (``before_fetch`` again; the files are
+cached per origin) and merged into the report with ``with_redirect_findings``.
+
 ``blocking_code`` is asked after both steps; it names the error to answer with, and only in
 ``enforce`` mode. In ``report`` mode nothing blocks, but the report says what would have. In
 ``ignore`` mode nothing is fetched or checked at all.
@@ -21,8 +24,10 @@ robots.txt follows RFC 9309 (via protego) with the product token ``text-extracti
   no rules. The fetcher raises ``too_large`` or similar for some of these answers; their
   ``upstream_status`` decides, so a 404 page over the size limit still means "no file";
 * 5xx, any other status and any fetch error: ``unavailable``, which ``enforce`` treats as
-  disallowed. The body of a robots.txt over the 512 KB fetch limit is not available to us
-  (the fetcher raises ``too_large`` without a body), so that case is ``unavailable`` too.
+  disallowed.
+
+A robots.txt over 500 KiB is parsed from its first 500 KiB (RFC 9309 section 2.5), without the
+line the cut went through. tdmrep.json and ai.txt over that size count as not retrievable.
 
 ``llms.txt`` is a hint for models, not a restriction, and is never fetched.
 
@@ -30,7 +35,9 @@ State lives in Valkey, one key per origin and file: ``cmp:{kind}:{<origin>}`` (t
 literal cluster hash tag) holding JSON ``{"state", "body"}``. The state is ``found`` (2xx, with
 the raw text), ``absent`` (4xx) or ``unavailable`` (5xx, 429 or a fetch error). The first two live
 ``compliance_cache_seconds``; ``unavailable`` lives at most five minutes, so a short outage of a
-site does not block it for a whole cache period.
+site does not block it for a whole cache period. Concurrent checks of one origin in this process
+share one load of each file (cache read, fetch, cache write); other pods load their own.
+Parsing a rules file runs in a worker thread, off the event loop.
 """
 
 import asyncio
@@ -63,7 +70,7 @@ ComplianceMode = Literal["enforce", "report", "ignore"]
 
 PRODUCT_TOKEN = "text-extraction"  # noqa: S105 - the robots.txt user-agent token, not a secret
 
-_FILE_MAX_BYTES = 512_000
+_FILE_MAX_BYTES = 512_000  # 500 KiB, RFC 9309's least parsing limit for robots.txt
 _FILE_TIMEOUT_SECONDS = 10
 # A cached "unavailable" answer is kept at most this long.
 _UNAVAILABLE_TTL_SECONDS = 300
@@ -137,6 +144,66 @@ def blocking_code(report: ComplianceReport) -> ErrorCode | None:
     return _violation(report) if report.mode == "enforce" else None
 
 
+def with_page_findings(report: ComplianceReport, previous: ComplianceReport) -> ComplianceReport:
+    """``report`` plus the TDM statement and ``noai`` that a stored copy of the page carried.
+
+    For a 304 answer: it has no body and often leaves out headers, but it says the page is the
+    stored one, so what that page said about itself (``tdm-reservation`` header or meta tag,
+    ``noai``) still holds. Findings of the origin files (robots.txt, tdmrep.json, ai.txt) are not
+    carried; ``report`` has fresh ones. Pass the result to ``after_fetch`` with the 304 so its own
+    headers count too. Returns ``report`` itself when there is nothing to carry.
+    """
+    update: dict[str, object] = {}
+    reasons = list(report.reasons)
+    source = previous.tdm_source
+    carry_tdm = (
+        source in ("header", "meta")
+        and previous.tdm_reserved is not None
+        and report.tdm_reserved is not True
+        and (previous.tdm_reserved or report.tdm_reserved is None)
+    )
+    if carry_tdm:
+        update.update(
+            tdm_reserved=previous.tdm_reserved, tdm_policy=previous.tdm_policy, tdm_source=source
+        )
+        if previous.tdm_reserved:
+            reasons.append(f"The page reserves text and data mining rights ({source}).")
+    if previous.noai and not report.noai:
+        update["noai"] = True
+        reasons.append("The page asks not to be used for AI (noai or noml).")
+    if not update:
+        return report
+    update["reasons"] = reasons
+    return _decided(report.model_copy(update=update))
+
+
+# Worse answers rank higher; a redirect chain reports the worst answer of its URLs.
+_ROBOTS_RANK = {"not_checked": 0, "allowed": 1, "unavailable": 2, "disallowed": 3}
+_AI_TXT_RANK = {"not_checked": 0, "absent": 1, "allowed": 2, "disallowed": 3}
+
+
+def with_redirect_findings(report: ComplianceReport, hop: ComplianceReport) -> ComplianceReport:
+    """``report`` plus the findings of ``before_fetch`` for a redirect target, ``hop``.
+
+    The target is fetched too, so its findings count as much as the first URL's: the worse
+    robots.txt and ai.txt answer, a TDM reservation from either, and the reasons of both.
+    ``crawl_delay`` becomes the target's, since its host is the one fetched next.
+    """
+    update: dict[str, object] = {
+        "robots": max(report.robots, hop.robots, key=_ROBOTS_RANK.__getitem__),
+        "ai_txt": max(report.ai_txt, hop.ai_txt, key=_AI_TXT_RANK.__getitem__),
+        "crawl_delay": hop.crawl_delay,
+        "noai": report.noai or hop.noai,
+        "reasons": [*report.reasons, *(r for r in hop.reasons if r not in report.reasons)],
+    }
+    takes_hop_tdm = hop.tdm_reserved is True and report.tdm_reserved is not True
+    if takes_hop_tdm or (report.tdm_reserved is None and hop.tdm_reserved is not None):
+        update.update(
+            tdm_reserved=hop.tdm_reserved, tdm_policy=hop.tdm_policy, tdm_source=hop.tdm_source
+        )
+    return _decided(report.model_copy(update=update))
+
+
 def _decided(report: ComplianceReport) -> ComplianceReport:
     """The report with ``decision`` set from its findings and mode."""
     if report.mode == "ignore":
@@ -174,6 +241,8 @@ class ComplianceChecker:
         # Parsed rules by SHA-256 of their text: a 500 KB file takes a while to parse, and the
         # same text from the Valkey cache must not be parsed again on every request.
         self._rules_cache: OrderedDict[str, Protego | None] = OrderedDict()
+        # Loads in flight by cache key; concurrent checks of one origin wait for the same one.
+        self._loading: dict[str, asyncio.Task[_Entry]] = {}
 
     async def before_fetch(self, url: str, mode: ComplianceMode) -> ComplianceReport:
         """Check robots.txt, TDMRep and ai.txt for ``url``; fetches nothing in ``ignore`` mode."""
@@ -188,10 +257,11 @@ class ComplianceChecker:
             )
             ai_task = group.create_task(self._load("ai", origin, "/ai.txt"))
 
+        robots, ai = robots_task.result(), ai_task.result()
         report = ComplianceReport(mode=mode)
-        report = self._apply_robots(report, robots_task.result(), url)
+        report = self._apply_robots(report, robots, await self._rules(robots), url)
         report = self._apply_tdmrep(report, tdmrep_task.result(), url)
-        report = self._apply_ai_txt(report, ai_task.result(), url)
+        report = self._apply_ai_txt(report, ai, await self._rules(ai), url)
         return _decided(report)
 
     def after_fetch(
@@ -236,11 +306,12 @@ class ComplianceChecker:
 
     # --- applying one file to the report -------------------------------------------------------
 
-    def _apply_robots(self, report: ComplianceReport, entry: _Entry, url: str) -> ComplianceReport:
+    def _apply_robots(
+        self, report: ComplianceReport, entry: _Entry, rules: Protego | None, url: str
+    ) -> ComplianceReport:
         if entry.state == "absent":
             return report.model_copy(update={"robots": "allowed"})
         reasons = list(report.reasons)
-        rules = self._rules(entry.body) if entry.state == "found" else None
         if rules is None:
             reasons.append("robots.txt could not be retrieved, so access cannot be confirmed.")
             return report.model_copy(update={"robots": "unavailable", "reasons": reasons})
@@ -275,9 +346,10 @@ class ComplianceChecker:
             }
         )
 
-    def _apply_ai_txt(self, report: ComplianceReport, entry: _Entry, url: str) -> ComplianceReport:
+    def _apply_ai_txt(
+        self, report: ComplianceReport, entry: _Entry, rules: Protego | None, url: str
+    ) -> ComplianceReport:
         reasons = list(report.reasons)
-        rules = self._rules(entry.body) if entry.state == "found" else None
         if rules is None:
             if entry.state == "unavailable":
                 reasons.append("ai.txt could not be retrieved.")
@@ -287,12 +359,15 @@ class ComplianceChecker:
         reasons.append(f"ai.txt disallows this URL for {PRODUCT_TOKEN}.")
         return report.model_copy(update={"ai_txt": "disallowed", "reasons": reasons})
 
-    def _rules(self, text: str) -> Protego | None:
-        digest = hashlib.sha256(text.encode()).hexdigest()
+    async def _rules(self, entry: _Entry) -> Protego | None:
+        """The parsed rules of a found robots.txt or ai.txt; None for any other entry."""
+        if entry.state != "found":
+            return None
+        digest = hashlib.sha256(entry.body.encode()).hexdigest()
         if digest in self._rules_cache:
             self._rules_cache.move_to_end(digest)
             return self._rules_cache[digest]
-        rules = _parse_rules(text)
+        rules = await asyncio.to_thread(_parse_rules, entry.body)
         self._rules_cache[digest] = rules
         if len(self._rules_cache) > _RULES_CACHE_SIZE:
             self._rules_cache.popitem(last=False)
@@ -301,18 +376,35 @@ class ComplianceChecker:
     # --- reading the origin files --------------------------------------------------------------
 
     async def _load(self, kind: str, origin: _Origin, path: str) -> _Entry:
+        """The file's entry. Concurrent callers share one load; its error reaches them all."""
         key = f"cmp:{kind}:{{{origin.key}}}"
+        task = self._loading.get(key)
+        if task is None:
+            task = asyncio.create_task(self._load_now(key, kind, origin.base + path))
+            self._loading[key] = task
+            task.add_done_callback(lambda done: self._forget_load(key, done))
+        # A cancelled caller must not cancel the load the others wait for.
+        return await asyncio.shield(task)
+
+    def _forget_load(self, key: str, task: asyncio.Task[_Entry]) -> None:
+        if self._loading.get(key) is task:
+            del self._loading[key]
+
+    async def _load_now(self, key: str, kind: str, file_url: str) -> _Entry:
         cached = await self._cache_get(key)
         if cached is not None:
             return cached
-        entry = await self._fetch_file(origin.base + path)
+        entry = await self._fetch_file(file_url, truncate=kind == "robots")
         await self._cache_set(key, entry)
         return entry
 
-    async def _fetch_file(self, file_url: str) -> _Entry:
+    async def _fetch_file(self, file_url: str, *, truncate: bool) -> _Entry:
         try:
             fetched = await self._fetcher.fetch(
-                file_url, max_bytes=_FILE_MAX_BYTES, timeout_seconds=_FILE_TIMEOUT_SECONDS
+                file_url,
+                max_bytes=_FILE_MAX_BYTES,
+                timeout_seconds=_FILE_TIMEOUT_SECONDS,
+                truncate=truncate,
             )
         except FetchError as error:
             # The fetcher also raises for some answers it did read: a 404 page over the size limit,
@@ -326,7 +418,12 @@ class ComplianceChecker:
             )
             return _Entry("unavailable")
         if 200 <= fetched.status < 300:
-            return _Entry("found", fetched.content.decode("utf-8-sig", errors="replace"))
+            text = fetched.content.decode("utf-8-sig", errors="replace")
+            if fetched.truncated:
+                # The cut may have gone through a rule; "Disallow: /d" must not stand for more.
+                text = text[: text.rfind("\n") + 1]
+                _log.info("compliance_file_truncated", host=urlsplit(file_url).hostname)
+            return _Entry("found", text)
         if _says_absent(fetched.status):
             return _Entry("absent")
         return _Entry("unavailable")

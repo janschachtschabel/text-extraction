@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from typing import Any, cast
 
@@ -279,8 +280,10 @@ def test_robots_requested_with_limits() -> None:
     asyncio.run(checker.before_fetch(PAGE, "enforce"))
 
     assert set(fetcher.urls()) == {ROBOTS, TDMREP, AI_TXT}
-    for _, options in fetcher.calls:
-        assert options == {"max_bytes": 512_000, "timeout_seconds": 10}
+    for url, options in fetcher.calls:
+        # robots.txt is read from its first 500 KiB (RFC 9309); the others must fit.
+        truncate = url == ROBOTS
+        assert options == {"max_bytes": 512_000, "timeout_seconds": 10, "truncate": truncate}
 
 
 def test_robots_origin_includes_scheme_and_port() -> None:
@@ -396,8 +399,13 @@ def test_parsed_rules_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(compliance, "_RULES_CACHE_SIZE", 2)
     checker, _, _ = make_checker({})
 
-    for number in range(5):
-        checker._rules(f"User-agent: *\nDisallow: /{number}\n")
+    async def scenario() -> None:
+        for number in range(5):
+            await checker._rules(
+                compliance._Entry("found", f"User-agent: *\nDisallow: /{number}\n")
+            )
+
+    asyncio.run(scenario())
 
     assert len(checker._rules_cache) == 2
 
@@ -861,3 +869,156 @@ def test_invalid_compliance_settings_are_rejected(
 
     with pytest.raises(ValueError, match=name.lower()):
         Settings(auth_mode="none")
+
+
+def test_with_page_findings_carries_the_stored_pages_statements() -> None:
+    fresh = ComplianceReport(mode="report", robots="allowed", ai_txt="absent")
+    previous = ComplianceReport(
+        mode="report",
+        decision="reported",
+        robots="disallowed",  # an old origin-file finding: never carried
+        tdm_reserved=True,
+        tdm_policy="https://example.org/policy",
+        tdm_source="meta",
+        noai=True,
+    )
+
+    merged = compliance.with_page_findings(fresh, previous)
+
+    assert merged.robots == "allowed"
+    assert merged.tdm_reserved is True
+    assert merged.tdm_policy == "https://example.org/policy"
+    assert merged.tdm_source == "meta"
+    assert merged.noai is True
+    assert merged.decision == "reported"
+    assert len(merged.reasons) == 2
+
+
+def test_with_page_findings_keeps_origin_reservations_and_ignores_tdmrep() -> None:
+    fresh = ComplianceReport(
+        mode="enforce", robots="allowed", tdm_reserved=True, tdm_source="tdmrep.json"
+    )
+    previous = ComplianceReport(mode="enforce", tdm_reserved=False, tdm_source="meta")
+    assert compliance.with_page_findings(fresh, previous) == fresh
+
+    stale_origin = ComplianceReport(mode="enforce", tdm_reserved=True, tdm_source="tdmrep.json")
+    plain = ComplianceReport(mode="enforce", robots="allowed")
+    assert compliance.with_page_findings(plain, stale_origin) == plain
+
+
+def test_truncated_robots_is_parsed_from_its_first_part() -> None:
+    head = "User-agent: *\nDisallow: /private/\n"
+    filler = "".join(f"Disallow: /old/{number}/\n" for number in range(30_000))
+    lines = (head + filler)[:500_000]
+    body = lines[: lines.rindex("\n") + 1] + "Disallow: /d"  # cut inside "/docs-archive/"
+    truncated = replace(result(ROBOTS, body), truncated=True)
+    answers: dict[str, FetchResult | FetchError] = {ROBOTS: truncated}
+
+    private = check(answers, url=f"{ORIGIN}/private/x")
+    docs = check(answers)
+
+    assert private.robots == "disallowed"
+    assert private.decision == "blocked"
+    assert docs.robots == "allowed"  # the cut-off last line is not a rule
+
+
+def test_concurrent_checks_of_one_origin_fetch_each_file_once() -> None:
+    checker, fetcher, _ = make_checker(robots_answer("User-agent: *\nDisallow: /docs/\n"))
+    answer_fetch = fetcher.fetch
+
+    async def slow_fetch(url: str, **options: Any) -> FetchResult:
+        await asyncio.sleep(0.05)
+        return await answer_fetch(url, **options)
+
+    fetcher.fetch = slow_fetch  # type: ignore[method-assign]
+
+    async def scenario() -> list[ComplianceReport]:
+        return await asyncio.gather(*(checker.before_fetch(PAGE, "enforce") for _ in range(10)))
+
+    reports = asyncio.run(scenario())
+
+    assert {report.robots for report in reports} == {"disallowed"}
+    assert sorted(fetcher.urls()) == sorted([ROBOTS, TDMREP, AI_TXT])
+
+
+def test_a_failed_shared_load_fails_every_waiter_and_is_retried() -> None:
+    checker, fetcher, _ = make_checker({})
+    answer_fetch = fetcher.fetch
+    failing = True
+
+    attempts: list[str] = []
+
+    async def flaky_fetch(url: str, **options: Any) -> FetchResult:
+        attempts.append(url)
+        await asyncio.sleep(0.05)
+        if failing and url == ROBOTS:
+            raise RuntimeError("fetcher broke")
+        return await answer_fetch(url, **options)
+
+    fetcher.fetch = flaky_fetch  # type: ignore[method-assign]
+
+    async def scenario() -> list[ComplianceReport | BaseException]:
+        return await asyncio.gather(
+            *(checker.before_fetch(PAGE, "enforce") for _ in range(3)), return_exceptions=True
+        )
+
+    first = asyncio.run(scenario())
+    failing = False
+    second = asyncio.run(scenario())
+
+    # The three file loads run in a task group, so the error arrives in an exception group.
+    assert all(
+        isinstance(outcome, ExceptionGroup) and outcome.subgroup(RuntimeError) is not None
+        for outcome in first
+    )
+    assert attempts.count(ROBOTS) == 2  # once for the failed round, once for the retry
+    assert all(isinstance(outcome, ComplianceReport) for outcome in second)
+
+
+def test_rules_are_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads: list[str] = []
+    real_parse = Protego.parse
+
+    def recording_parse(text: str) -> Any:
+        threads.append(threading.current_thread().name)
+        return real_parse(text)
+
+    monkeypatch.setattr(Protego, "parse", recording_parse)
+    answers = robots_answer("User-agent: *\nDisallow: /docs/\n")
+    answers[AI_TXT] = result(AI_TXT, "User-agent: *\nDisallow: /\n")
+
+    report = check(answers)
+
+    assert report.robots == "disallowed"
+    assert report.ai_txt == "disallowed"
+    assert len(threads) == 2
+    assert threading.main_thread().name not in threads
+
+
+def test_redirect_findings_keep_the_worst_answer_of_the_chain() -> None:
+    first = compliance._decided(
+        ComplianceReport(mode="report", robots="allowed", ai_txt="disallowed", crawl_delay=1.0)
+    )
+    hop = compliance._decided(
+        ComplianceReport(
+            mode="report",
+            robots="disallowed",
+            ai_txt="allowed",
+            crawl_delay=4.0,
+            tdm_reserved=True,
+            tdm_policy="https://other.example/policy.json",
+            tdm_source="tdmrep.json",
+            reasons=["robots.txt disallows this URL for text-extraction."],
+        )
+    )
+
+    merged = compliance.with_redirect_findings(first, hop)
+
+    assert merged.robots == "disallowed"
+    assert merged.ai_txt == "disallowed"
+    assert merged.crawl_delay == 4.0  # the target's host is fetched next
+    assert merged.tdm_reserved is True
+    assert merged.tdm_source == "tdmrep.json"
+    assert merged.reasons == ["robots.txt disallows this URL for text-extraction."]
+    assert merged.decision == "reported"
+    assert compliance.with_redirect_findings(hop, first).tdm_reserved is True

@@ -6,6 +6,7 @@ import threading
 import time
 import zlib
 from collections.abc import Callable, Coroutine, Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import IPv4Address, IPv6Address
 from typing import Any
 
@@ -456,3 +457,181 @@ def test_accept_encoding_offers_only_what_the_fetcher_can_inflate(
 def test_zero_timeout_is_rejected_not_replaced_by_the_default() -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         fetch("http://127.0.0.1:1/", timeout_seconds=0)
+
+
+def test_unsendable_validators_are_left_out(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/page").respond_with_data("fresh")
+
+    result = fetch(
+        httpserver.url_for("/page"),
+        validators=Validators(etag='"café"', last_modified="Mon\r\nX-Injected: 1"),
+    )
+
+    assert result.status == 200
+    (request, _) = httpserver.log[-1]
+    assert "If-None-Match" not in request.headers
+    assert "If-Modified-Since" not in request.headers
+    assert "X-Injected" not in request.headers
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        ('"v1"', True),
+        ('W/"a b"', True),
+        ("Mon, 05 Oct 2026 10:00:00 GMT", True),
+        ('"café"', False),
+        ("a\tb", False),
+        ("a\x7fb", False),
+        ("x" * 1025, False),
+        ("", False),
+    ],
+    ids=["etag", "weak-etag", "date", "non-ascii", "tab", "del", "too-long", "empty"],
+)
+def test_validators_from_headers_keep_only_sendable_values(value: str, kept: bool) -> None:
+    validators = Validators.from_headers({"etag": value, "last-modified": value})
+
+    expected = value if kept else None
+    assert validators == Validators(etag=expected, last_modified=expected)
+
+
+def test_concurrent_fetches_are_not_serialised_by_the_connection_pool() -> None:
+    # Every request waits until 20 are in the server at once; a pool of 10 connections never
+    # gets there, and the barrier breaks.
+    barrier = threading.Barrier(20, timeout=15)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            try:
+                barrier.wait()
+                status = 200
+            except threading.BrokenBarrierError:
+                status = 503
+            self.send_response(status)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/slow"
+
+    async def scenario() -> list[int]:
+        fetcher = make_fetcher()
+        try:
+            results = await asyncio.gather(
+                *(fetcher.fetch(url, timeout_seconds=30) for _ in range(20))
+            )
+            return [result.status for result in results]
+        finally:
+            await fetcher.aclose()
+
+    try:
+        statuses = run(scenario)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert statuses == [200] * 20
+
+
+@pytest.fixture
+def other_server() -> Iterator[HTTPServer]:
+    """A second local server: another port is another origin."""
+    server = HTTPServer(host="127.0.0.1", port=0)
+    server.start()
+    try:
+        yield server
+    finally:
+        server.clear()
+        server.stop()
+
+
+VALIDATORS = Validators(etag='"v1"', last_modified="Wed, 21 Oct 2026 07:28:00 GMT")
+
+
+def test_validators_follow_a_redirect_on_the_same_origin(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/old").respond_with_data("", 301, headers={"Location": "/new"})
+    httpserver.expect_request("/new").respond_with_data("moved here")
+
+    fetch(httpserver.url_for("/old"), validators=VALIDATORS)
+
+    headers = httpserver.log[1][0].headers
+    assert headers.get("If-None-Match") == '"v1"'
+    assert headers.get("If-Modified-Since") == VALIDATORS.last_modified
+
+
+def test_validators_are_not_sent_to_another_origin(
+    httpserver: HTTPServer, other_server: HTTPServer
+) -> None:
+    other_server.expect_request("/new").respond_with_data(
+        "", 302, headers={"Location": httpserver.url_for("/back")}
+    )
+    httpserver.expect_request("/old").respond_with_data(
+        "", 301, headers={"Location": other_server.url_for("/new")}
+    )
+    httpserver.expect_request("/back").respond_with_data("home again")
+
+    result = fetch(httpserver.url_for("/old"), validators=VALIDATORS)
+
+    assert result.content == b"home again"
+    for headers in (other_server.log[0][0].headers, httpserver.log[1][0].headers):
+        assert "If-None-Match" not in headers  # once the chain left the origin, never again
+        assert "If-Modified-Since" not in headers
+
+
+@pytest.mark.parametrize("encoding", ["identity", "gzip"])
+def test_truncating_fetch_keeps_the_first_bytes(httpserver: HTTPServer, encoding: str) -> None:
+    body = bytes(range(256)) * 40  # 10,240 bytes
+    data = gzip.compress(body) if encoding == "gzip" else body
+    httpserver.expect_request("/robots.txt").respond_with_data(
+        data, headers={"Content-Encoding": encoding}
+    )
+
+    result = fetch(httpserver.url_for("/robots.txt"), max_bytes=4096, truncate=True)
+
+    assert result.content == body[:4096]
+    assert result.truncated is True
+    assert result.raw_sha256 == hashlib.sha256(body[:4096]).hexdigest()
+
+
+def test_fetch_within_the_cap_is_not_truncated(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/small").respond_with_data(b"x" * 100)
+
+    result = fetch(httpserver.url_for("/small"), max_bytes=4096, truncate=True)
+
+    assert result.content == b"x" * 100
+    assert result.truncated is False
+
+
+def test_redirect_hook_sees_every_hop(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/a").respond_with_data("", 301, headers={"Location": "/b"})
+    httpserver.expect_request("/b").respond_with_data("", 302, headers={"Location": "/c"})
+    httpserver.expect_request("/c").respond_with_data("done")
+    hops: list[str] = []
+
+    async def on_redirect(url: str) -> None:
+        hops.append(url)
+
+    result = fetch(httpserver.url_for("/a"), on_redirect=on_redirect)
+
+    assert result.content == b"done"
+    assert hops == [httpserver.url_for("/b"), httpserver.url_for("/c")]
+
+
+def test_redirect_hook_can_stop_the_chain(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/a").respond_with_data("", 301, headers={"Location": "/private"})
+    httpserver.expect_request("/private").respond_with_data("secret")
+
+    async def on_redirect(url: str) -> None:
+        raise FetchError(ErrorCode.BLOCKED_BY_ROBOTS, "robots.txt disallows the redirect target.")
+
+    error = fetch_error(httpserver.url_for("/a"), on_redirect=on_redirect)
+
+    assert error.code is ErrorCode.BLOCKED_BY_ROBOTS
+    assert [request.path for request, _ in httpserver.log] == ["/a"]

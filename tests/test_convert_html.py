@@ -1,3 +1,4 @@
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
@@ -293,3 +294,52 @@ def test_linked_document_is_not_mistaken_for_a_longer_url_in_the_text() -> None:
 
     assert "(https://www.example.org/files/a.pdf.zip)" in content
     assert "[Sheet A](https://www.example.org/files/a.pdf)" in content
+
+
+@pytest.mark.parametrize("depth", [300, 2000])
+def test_content_nested_deeper_than_255_elements_is_kept(depth: int) -> None:
+    deep = "Deep paragraph about leaves and their many green cells. " * 8
+    page = (
+        f"<html><body><article><h1>Leaves</h1><p>{LONG}</p><p>{LONG}</p>"
+        + "<div>" * depth
+        + f"<p>{deep}</p>"
+        + "</div>" * depth
+        + "</article></body></html>"
+    )
+
+    started = time.perf_counter()
+    result = convert_html(page, URL, "markdown")
+
+    assert time.perf_counter() - started < 20
+    assert result.converter == "trafilatura"
+    assert "Deep paragraph about leaves" in result.content
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "html"])
+def test_links_with_a_script_or_data_scheme_lose_their_target(fmt: OutputFormat) -> None:
+    page = f"""<html><body><article><h1>Links</h1><p>{LONG}
+    <a href="javascript:alert(1)">Script link</a>, <a href="JaVaScRiPt:alert(2)">Mixed case</a>,
+    <a href="data:text/html;base64,PHNjcmlwdD4=">Data link</a>,
+    <a href="vbscript:msgbox(1)">VB link</a> and <a href="/lessons/next">next lesson</a>.</p>
+    </article></body></html>"""
+
+    content = convert_html(page, URL, fmt).content.lower()
+
+    for scheme in ("javascript:", "data:", "vbscript:"):
+        assert scheme not in content
+    assert "script link" in content
+    assert "data link" in content
+    assert "https://www.example.org/lessons/next" in content
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["<" * 80_000, "](" * 80_000, "<a" * 40_000 + "](x" * 40_000],
+    ids=["open-tags", "open-link-targets", "both"],
+)
+def test_the_heading_check_takes_linear_time(text: str) -> None:
+    started = time.perf_counter()
+
+    html_module._compact(text)
+
+    assert time.perf_counter() - started < 5

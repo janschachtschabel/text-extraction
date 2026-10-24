@@ -81,7 +81,8 @@ class Settings(BaseSettings):
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
     rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True
-    fetch_timeout_seconds: float = Field(default=20, gt=0)  # total time budget of one fetch
+    # Total time budget of one fetch; at least the pipeline's 1 s minimum for a fetch.
+    fetch_timeout_seconds: float = Field(default=20, ge=1)
     fetch_max_bytes: int = Field(default=20_000_000, ge=1024)  # response body limit
     fetch_max_redirects: int = Field(default=5, ge=0, le=20)
     # UNSAFE: lifts the SSRF guard for private networks. Development and tests only.
@@ -95,12 +96,27 @@ class Settings(BaseSettings):
     outbound_max_backoff_seconds: float = Field(default=300, ge=1)  # cap for any cooldown
     circuit_failure_threshold: int = Field(default=5, ge=1)  # consecutive failures to open
     circuit_open_seconds: float = Field(default=60, ge=1)  # how long the circuit stays open
+    # Connection pool of this pod's fetcher, over all hosts.
+    outbound_max_connections: int = Field(default=200, ge=1)  # open connections at most
+    outbound_max_keepalive: int = Field(default=50, ge=0)  # idle connections kept for reuse
     # Compliance: robots.txt, TDMRep, ai.txt and noai.
     compliance_default: Literal["enforce", "report", "ignore"] = "enforce"  # mode without a request
     compliance_allow_override: bool = True  # may non-admin callers choose another mode?
     compliance_cache_seconds: int = Field(default=3600, ge=0)  # cache of the origin files; 0 = off
     # Quality gate: extracted content with fewer words than this is `partial`/`content_too_short`.
     quality_min_words: int = Field(default=50, ge=0)
+    # Result cache (fresh window and storage time) and change-detection fingerprints; 0 = off.
+    result_cache_ttl_seconds: int = Field(default=3600, ge=0)  # stored result is served unchecked
+    result_store_ttl_seconds: int = Field(default=86400, ge=0)  # kept for revalidation
+    fingerprint_ttl_seconds: int = Field(default=2_592_000, ge=0)  # 30 days
+    # Time budget of one POST /v1/extract, from compliance checks to the finished result. At
+    # least 2 s, so the fetch can get its 1 s minimum after the 0.25 s margin.
+    extract_timeout_seconds: float = Field(default=25, ge=2)
+    # Seconds between SIGTERM (readiness off) and the start of the graceful shutdown.
+    shutdown_drain_seconds: float = Field(default=5, ge=0)
+    # Conversion budget: largest HTML/text body converted, and conversions at once per pod.
+    convert_max_bytes: int = Field(default=5_242_880, ge=1024)  # 5 MiB
+    convert_concurrency: int = Field(default=2, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod

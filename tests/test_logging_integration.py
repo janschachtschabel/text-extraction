@@ -2,11 +2,8 @@
 
 import hashlib
 import json
-import logging
-from collections.abc import Iterator
 
 import pytest
-import structlog
 from fakeredis import FakeAsyncRedis
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,16 +14,6 @@ from text_extraction.logging import configure_logging
 from text_extraction.settings import Settings
 
 USER_KEY = "user-key-0123456789-raw-secret"
-
-
-@pytest.fixture(autouse=True)
-def restore_logging() -> Iterator[None]:
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
-    structlog.reset_defaults()
 
 
 def make_app() -> FastAPI:

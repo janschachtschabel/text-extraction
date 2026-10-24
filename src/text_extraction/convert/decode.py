@@ -12,11 +12,20 @@ into mojibake or an error. Two corrections follow browsers and the real web:
   defines it: pages that say Latin-1 routinely contain curly quotes and the euro sign, and the
   five bytes that windows-1252 leaves undefined keep their Latin-1 code points.
 
-The guess is strict UTF-8; then charset-normalizer, restricted to the legacy encodings of the
-Encoding Standard and trusted only for a clearly non-Latin result (CJK, Cyrillic, Greek,
-Hebrew, Arabic, Thai); everything else is windows-1252, which is what browsers do for German
-and English. charset-normalizer alone mistakes short Latin-1 text with a few umlauts for CJK
-or Arabic.
+A UTF-8 declaration (byte order mark, header or meta) is kept when a few bytes are not valid
+UTF-8: the bad sequences become U+FFFD, as in browsers, and the rest of the page keeps its
+umlauts. A meta tag that contradicts a UTF-8 header wins only when the bytes are nothing like
+UTF-8 (see ``_mostly_utf8``); a Latin-1 family declaration yields to nearly-UTF-8 bytes just as
+it yields to valid ones.
+
+The guess is strict UTF-8; then UTF-8 with replacement when the bytes are UTF-8 but for a few
+stray bytes (at most ``_MAX_STRAY_SEQUENCES`` invalid sequences, and at least
+``_MIN_UTF8_PER_STRAY`` valid non-ASCII characters for each of them, so a Latin-1 page whose
+umlauts are all invalid UTF-8 never qualifies); then charset-normalizer, restricted to the
+legacy encodings of the Encoding Standard and trusted only for a clearly non-Latin result (CJK,
+Cyrillic, Greek, Hebrew, Arabic, Thai); everything else is windows-1252, which is what browsers
+do for German and English. charset-normalizer alone mistakes short Latin-1 text with a few
+umlauts for CJK or Arabic.
 """
 
 import codecs
@@ -108,6 +117,12 @@ _SCRIPTS = [
     "THAI",
 ]
 _MIN_NON_ASCII_BYTES = 8  # fewer is too little evidence for a script
+# Undeclared bytes count as UTF-8 with replacement with at most this many invalid sequences...
+_MAX_STRAY_SEQUENCES = 8
+# ... and at least this many valid non-ASCII characters per invalid sequence.
+_MIN_UTF8_PER_STRAY = 4
+_REPLACEMENT = "\ufffd"
+_REPLACEMENT_BYTES = _REPLACEMENT.encode()
 _MIN_SHARE = 0.8  # of non-ASCII bytes in runs, and of non-ASCII characters in the script
 _C1_AS_CP1252 = {
     code: bytes([code]).decode("cp1252")
@@ -151,6 +166,23 @@ def _decode(data: bytes, codec: str) -> str | None:
         return None  # a codec that exists but is not a text encoding, such as "hex"
 
 
+def _utf8_replacing(data: bytes) -> str:
+    """UTF-8 with each invalid sequence as U+FFFD. A character cut off at the very end (a body
+    capped at a byte limit) is dropped, as in strict decoding."""
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    return decoder.decode(data, final=False)
+
+
+def _mostly_utf8(data: bytes) -> str | None:
+    """The bytes as UTF-8 with replacement, when only a few stray bytes are invalid."""
+    text = _utf8_replacing(data)
+    invalid = text.count(_REPLACEMENT) - data.count(_REPLACEMENT_BYTES)
+    if not 0 < invalid <= _MAX_STRAY_SEQUENCES:
+        return None
+    non_ascii = len(text) - len(text.encode("ascii", "ignore")) - invalid
+    return text if non_ascii >= _MIN_UTF8_PER_STRAY * invalid else None
+
+
 def _utf8_text(data: bytes) -> str | None:
     """The bytes as UTF-8 when they are valid and hold a non-ASCII character. A body that is
     ASCII but for half a character cut off at a byte limit does not count."""
@@ -160,7 +192,9 @@ def _utf8_text(data: bytes) -> str | None:
 
 def _declared(data: bytes, codec: str) -> str | None:
     if codec in _LATIN_FAMILY:
-        text = _utf8_text(data)
+        # A Latin-1 declaration yields to bytes that are UTF-8, or nearly: a page with a stray
+        # byte in it is still a UTF-8 page, and reading it as windows-1252 is pure mojibake.
+        text = _utf8_text(data) or _mostly_utf8(data)
         if text is not None:
             return text
     return _decode(data, codec)
@@ -169,18 +203,19 @@ def _declared(data: bytes, codec: str) -> str | None:
 def _from_bom(data: bytes) -> str | None:
     for bom, codec in _BOMS:
         if data.startswith(bom):
-            return _decode(data, codec)
+            text = _decode(data, codec)
+            if text is None and codec == "utf-8-sig":
+                return _utf8_replacing(data)  # a UTF-8 BOM leaves no doubt about the encoding
+            return text
     return None
 
 
-def _from_meta(data: bytes) -> str | None:
+def _meta_codec(data: bytes) -> str | None:
     match = _META_CHARSET.search(data[:_META_WINDOW])
     codec = _codec(match.group(1).decode("ascii", "replace")) if match else None
-    if codec is None:
-        return None
-    if codec.startswith(("utf-16", "utf-32")):
+    if codec is not None and codec.startswith(("utf-16", "utf-32")):
         codec = "utf-8"  # the declaration was readable as ASCII, so the page cannot be UTF-16
-    return _declared(data, codec)
+    return codec
 
 
 def _non_latin_script(data: bytes, text: str) -> bool:
@@ -206,7 +241,7 @@ def _non_latin_script(data: bytes, text: str) -> bool:
 def _guess(data: bytes) -> str:
     # Valid UTF-8 with non-ASCII characters is UTF-8: no legacy encoding produces it by chance.
     # (Pure ASCII is UTF-8 as well, and cut-off characters at the end are dropped.)
-    text = _decode(data, "utf-8")
+    text = _decode(data, "utf-8") or _mostly_utf8(data)
     if text is not None:
         return text
     best = from_bytes(data, cp_isolation=_LEGACY).best()
@@ -219,13 +254,23 @@ def _guess(data: bytes) -> str:
 
 def decode_html(data: bytes, content_type_charset: str | None) -> str:
     """The text of an HTML document; never raises."""
-    if content_type_charset:
-        codec = _codec(content_type_charset)
-        text = _declared(data, codec) if codec else None
-        if text is not None:
-            return text.removeprefix("\ufeff")
-    for source in (_from_bom, _from_meta):
-        text = source(data)
-        if text is not None:
-            return text.removeprefix("\ufeff")
-    return _guess(data).removeprefix("\ufeff")
+    return _decode_html(data, content_type_charset).removeprefix("\ufeff")
+
+
+def _decode_html(data: bytes, content_type_charset: str | None) -> str:
+    header = _codec(content_type_charset) if content_type_charset else None
+    if header and (text := _declared(data, header)) is not None:
+        return text
+    if (text := _from_bom(data)) is not None:
+        return text
+    # A UTF-8 declaration the bytes nearly keep beats a contradicting meta declaration: a stale
+    # `<meta charset=iso-8859-1>` must not turn the page into mojibake. A meta declaration that
+    # decodes bytes which are nothing like UTF-8 still wins, below.
+    if header == "utf-8" and (text := _mostly_utf8(data)) is not None:
+        return text
+    meta = _meta_codec(data)
+    if meta and (text := _declared(data, meta)) is not None:
+        return text
+    if "utf-8" in (header, meta):
+        return _utf8_replacing(data)
+    return _guess(data)

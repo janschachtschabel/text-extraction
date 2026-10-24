@@ -21,6 +21,8 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
+    # SIGTERM starts a 5 s drain and a graceful shutdown of up to 30 s (docs/configuration.md).
+    stop_grace_period: 45s
     read_only: true
     tmpfs:
       - /tmp

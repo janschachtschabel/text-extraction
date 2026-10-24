@@ -1,31 +1,10 @@
 import json
 import logging
-from collections.abc import Iterator
 
 import pytest
 import structlog
 
 from text_extraction.logging import configure_logging
-
-
-@pytest.fixture(autouse=True)
-def restore_logging() -> Iterator[None]:
-    """`configure_logging` changes process-wide state; put it back after each test."""
-    root = logging.getLogger()
-    handlers, level = list(root.handlers), root.level
-    uvicorn_state = {
-        name: (list(logging.getLogger(name).handlers), logging.getLogger(name).propagate)
-        for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
-    }
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
-    for name, (saved_handlers, propagate) in uvicorn_state.items():
-        logger = logging.getLogger(name)
-        logger.handlers[:] = saved_handlers
-        logger.propagate = propagate
-        logger.disabled = False
-    structlog.reset_defaults()
 
 
 def stdout_lines(capsys: pytest.CaptureFixture[str]) -> list[str]:

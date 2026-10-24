@@ -21,8 +21,8 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) used for the rate-limit counters and the per-host outbound state. A secret when it carries a password, see below. |
-| `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Must be greater than 0. |
+| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints. A secret when it carries a password, see below. |
+| `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
 | `FETCH_MAX_BYTES` | `20000000` | Largest response body the fetcher accepts, in bytes. Minimum 1024. |
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
 | `FETCH_ALLOW_PRIVATE_NETWORKS` | `false` | **Unsafe.** `true` switches the SSRF guard off for private, loopback and link-local addresses. For local development and tests only; never set it in a deployment. |
@@ -34,16 +34,39 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `OUTBOUND_MAX_BACKOFF_SECONDS` | `300` | Upper limit for any pause after 429 or 503, including `Retry-After`. Minimum 1. |
 | `CIRCUIT_FAILURE_THRESHOLD` | `5` | Consecutive connection failures or 5xx answers from a host that open its circuit. Minimum 1. |
 | `CIRCUIT_OPEN_SECONDS` | `60` | How long an open circuit refuses requests to the host. Minimum 1. |
+| `OUTBOUND_MAX_CONNECTIONS` | `200` | Open outbound connections of one pod at most, over all hosts (the fetcher's connection pool). Minimum 1. |
+| `OUTBOUND_MAX_KEEPALIVE` | `50` | Idle outbound connections a pod keeps for reuse; an idle connection is closed after 30 s. Minimum 0. |
 | `COMPLIANCE_DEFAULT` | `enforce` | Compliance mode when a request does not choose one: `enforce` blocks what robots.txt, TDMRep, ai.txt or `noai` forbid; `report` only reports it; `ignore` skips the checks. |
 | `COMPLIANCE_ALLOW_OVERRIDE` | `true` | Whether non-admin callers may choose `enforce` or `report` per request. `ignore` stays admin-only (unless it is the default). Admins may always choose. A refused choice answers 403 `forbidden`. |
 | `COMPLIANCE_CACHE_SECONDS` | `3600` | How long robots.txt, `tdmrep.json` and ai.txt of an origin are cached in Valkey. 0 switches the cache off. A file that could not be fetched (5xx, 429, network error) is cached at most 300 s, so a short outage does not block a site for the whole period. |
 | `QUALITY_MIN_WORDS` | `50` | Fewest words (tokens with a letter or digit) the extracted content must have. Fewer ends as `partial` with `content_too_short`; no words at all is `failed` with `empty_content`. 0 switches the length check off. |
+| `RESULT_CACHE_TTL_SECONDS` | `3600` | How long a stored extraction result counts as fresh and is served without asking the site, measured from the time it was produced. 0 means a stored result is never served unchecked; it can still be revalidated. A fresh hit skips the compliance checks too: it carries the compliance report of the extraction that produced it, so a new robots.txt or TDM opt-out reaches cached results only after up to `RESULT_CACHE_TTL_SECONDS` plus `COMPLIANCE_CACHE_SECONDS`. Setting this above `COMPLIANCE_CACHE_SECONDS` lengthens that lag. |
+| `RESULT_STORE_TTL_SECONDS` | `86400` | How long a result stays in Valkey so a stale one can be revalidated with ETag/Last-Modified or the raw-content hash instead of being extracted again. 0 stores no results. Results over 2 MB as JSON are never stored. |
+| `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
+| `CONVERT_MAX_BYTES` | `5242880` | Largest HTML or text body that is converted, in bytes (5 MiB; minimum 1024). A larger page fails with `too_large` (not retryable) before it is decoded. `FETCH_MAX_BYTES` stays the download limit. |
+| `CONVERT_CONCURRENCY` | `2` | Conversions (decoding, HTML conversion, metadata and licences, fingerprint) running at once in one pod, on a thread pool of their own; DNS lookups keep the default pool. A request waits for a free slot within its `EXTRACT_TIMEOUT_SECONDS`, else it fails with `timeout`. Python cannot stop a running thread: a conversion that outlives its request runs to its end and holds its slot until then, so this bound is what limits CPU and memory. Such a conversion also holds the shutdown up, because Python joins its worker threads when the process exits. That is usually seconds, but the worst case can run to the end of the grace period, where the pod is killed (Trafilatura is quadratic on repeated paragraphs: one 5.7 MB page took 125 s). That is harmless, because pods are stateless: the request it served has already been answered `timeout`. Peak memory is roughly `CONVERT_CONCURRENCY` times the peak of one page (about 450 MB for a 5 MB page), see the Helm memory limit. Minimum 1. |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop to that host began). The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. |
+| `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
+
+Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
+taken over the normalised URL: lower-case scheme and host, no fragment, no default port (80 for
+`http`, 443 for `https`); the path and the query are kept exactly as given. For results it also
+covers the extraction options, in sorted key order (`mode`, `format`, `metadata`, `links` and the
+compliance mode that applied). Fingerprints are kept per URL and output format, since Markdown,
+text and HTML of one page are different texts; a revalidated result renews its fingerprint's TTL.
+Validators (`ETag`, `Last-Modified`) are only stored and sent back when they are printable ASCII
+of at most 1 KB. A Valkey outage turns the cache and the change
+detection off for the affected requests (logged without the URL) and never fails them.
 
 The fetcher identifies itself on every outbound request with a fixed, honest user agent,
 `text-extraction/<version> (+https://github.com/janschachtschabel/text-extraction)`. It is not
 configurable. The robots.txt product token is `text-extraction`; robots.txt is read per RFC 9309
-(4xx and unfollowable redirects mean no rules; 5xx, 429, a network error or a file over 512 KB means "unavailable", which
-`enforce` treats as disallowed). Client trace headers
+(4xx and unfollowable redirects mean no rules; 5xx, 429 or a network error means "unavailable",
+which `enforce` treats as disallowed; a file over 500 KiB is parsed from its first 500 KiB). The
+compliance files of an origin are loaded once per pod for concurrent requests. Every redirect
+target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
+`enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
+`report` its findings join the report. Client trace headers
 (`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
 variables are ignored.
 
@@ -69,7 +92,9 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
 | `9090` | `/health`, `/ready`, `/metrics`. Never part of the OpenAPI spec. | Cluster-internal only. |
 
 - `/health` is the liveness probe. It never touches Valkey, so a Valkey outage does not restart pods.
-- `/ready` is the readiness probe. It checks Valkey, so pods without Valkey leave the load balancer.
+- `/ready` is the readiness probe. It answers 200 only when the public port listens (after the
+  start-up, which loads the language model), no shutdown has begun and Valkey answers. Pods
+  without Valkey leave the load balancer, and so does a pod as soon as it gets SIGTERM.
 - `/metrics` is Prometheus text and is not reachable on 8080.
 
 docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
@@ -79,7 +104,13 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 ## Response times
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
-Work that takes longer than about 30 s will run as a job in a later package.
+`POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
+few milliseconds. Work that takes longer than about 30 s will run as a job in a later package. On
+SIGTERM `/ready` turns 503 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5);
+then the public port stops accepting connections and gives requests in flight
+`max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the internal port
+(`/health`, `/metrics`) stops last. The Helm chart's `terminationGracePeriodSeconds` (45) must
+stay above drain plus graceful time (35 s by default).
 
 ## Headers
 
@@ -119,7 +150,9 @@ literal (a cluster hash tag), so all keys of one host live in the same slot.
 
 A request waits for a free lease (at most `OUTBOUND_MAX_CONCURRENCY_PER_HOST`) and for its spacing
 slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`.
-If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. While a pause
+If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. A redirect to
+another host gives the first host's lease back and waits for a turn at the new host; the outcome
+counts for the host that answered. While a pause
 or an open circuit is set, requests to that host are refused at once. A 429 or 503 sets the pause to
 `Retry-After` (seconds or HTTP date) or `OUTBOUND_BACKOFF_SECONDS`, never above
 `OUTBOUND_MAX_BACKOFF_SECONDS`; a new pause never shortens one that is already running.

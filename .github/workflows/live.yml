@@ -1,0 +1,128 @@
+name: live
+
+# Live regression: runs the service against real URLs (needs the internet) and checks the
+# share of URLs that yield usable text. Not part of ci.yml: it is slow and depends on third-party
+# sites. Start it by hand, label a pull request `live`, or wait for the weekly run.
+on:
+  workflow_dispatch:
+    inputs:
+      url_set:
+        description: URL list in tests/live/urls
+        type: choice
+        options: [smoke, wlo_50, wlo_200, wlo_4000]
+        default: wlo_200
+      min_ok_rate:
+        description: Fail below this ok rate, in percent
+        type: string
+        default: "68"
+  pull_request:
+    types: [labeled, synchronize, opened, reopened]
+  schedule:
+    - cron: "0 3 * * 1" # Mondays, 03:00 UTC
+
+permissions:
+  contents: read
+
+# A new run for the same ref cancels the one in progress. Adding any other label than `live`
+# gets a group of its own, so it neither cancels a live run nor runs itself (see `if` below).
+concurrency:
+  group: >-
+    live-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'live'
+    && format('-other-label-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    # Pull requests run only while they carry the `live` label, and adding another label does
+    # not start a run.
+    if: >-
+      github.event_name != 'pull_request'
+      || (contains(github.event.pull_request.labels.*.name, 'live')
+          && (github.event.action != 'labeled' || github.event.label.name == 'live'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The gate: wlo_200 at the 68 % fast baseline. Only a manual run can pick others; the
+      # smoke set is never a gate.
+      URL_SET: ${{ inputs.url_set || 'wlo_200' }}
+      MIN_OK_RATE: ${{ inputs.min_ok_rate || '68' }}
+    services:
+      valkey:
+        image: valkey/valkey:8.1-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # uv reads .python-version (3.13) and provisions its own managed Python.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      - name: Start the service
+        env:
+          AUTH_MODE: none
+          RATE_LIMIT_ENABLED: "false"
+          VALKEY_URL: redis://127.0.0.1:6379/0
+        run: |
+          mkdir -p results
+          nohup uv run text-extraction > results/server.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:9090/ready > /dev/null 2>&1 \
+              && curl -sS -o /dev/null http://127.0.0.1:8080/ 2>/dev/null; then
+              echo "service is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "service did not become ready within 120 s" >&2
+          tail -n 50 results/server.log >&2
+          exit 1
+
+      # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke).
+      - name: Run ${{ env.URL_SET }}
+        run: |
+          gate=(--min-ok-rate "$MIN_OK_RATE")
+          if [ "$URL_SET" = smoke ]; then
+            gate=()
+          fi
+          uv run python -m tests.live.run_live \
+            --urls "tests/live/urls/${URL_SET}.csv" \
+            --out "results/live_${URL_SET}.jsonl" \
+            --summary-out "results/summary_${URL_SET}.md" \
+            "${gate[@]}"
+
+      # Report only: the smoke set is a watchlist of hard pages, its ok rate is no gate.
+      - name: Run smoke (report only)
+        if: always() && env.URL_SET != 'smoke'
+        run: |
+          uv run python -m tests.live.run_live \
+            --urls tests/live/urls/smoke.csv \
+            --out results/live_smoke.jsonl \
+            --summary-out results/summary_smoke.md
+
+      - name: Add the summaries to the job summary
+        if: always()
+        run: |
+          for file in results/summary_*.md; do
+            [ -f "$file" ] && { echo "### $(basename "$file" .md)"; cat "$file"; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit 0
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: live-results
+          path: |
+            results/*.jsonl
+            results/server.log
+          if-no-files-found: warn

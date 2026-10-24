@@ -1,4 +1,6 @@
+import re
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -114,3 +116,31 @@ def test_unhandled_exception_is_generic_500(client: TestClient) -> None:
     assert body["error"]["retryable"] is False
     assert "secret internal detail" not in response.text
     assert "RuntimeError" not in response.text
+
+
+ARCHITECTURE = Path(__file__).resolve().parents[1] / "docs" / "architecture.md"
+
+
+def _documented_codes(paragraph_start: str) -> set[str]:
+    """The backticked codes of the paragraph in docs/architecture.md that starts so."""
+    text = ARCHITECTURE.read_text(encoding="utf-8")
+    start = text.index(paragraph_start)
+    end = text.find("\n\n", start)
+    return set(re.findall(r"`([a-z_]+)`", text[start : end if end >= 0 else None]))
+
+
+def test_error_codes_match_architecture() -> None:
+    """Every ``ErrorCode`` is documented, and every documented code exists.
+
+    The architecture lists two groups: outcomes of an extraction (a target or pipeline result,
+    answered with 200 and ``status: failed|partial``, plus ``rate_limited`` and ``internal_error``
+    that the API also uses for its own answers) and the codes of the API's own 4xx answers
+    (bad request, auth, unknown route), which no extraction ever reports.
+    """
+    outcomes = _documented_codes("Error codes:")
+    api_only = _documented_codes("Codes of the API's own 4xx answers")
+
+    assert outcomes, "the outcome list was not found"
+    assert api_only == {"invalid_request", "unauthorized", "forbidden", "not_found"}
+    assert not outcomes & api_only
+    assert outcomes | api_only == {code.value for code in ErrorCode}
