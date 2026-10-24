@@ -1035,3 +1035,26 @@ def test_a_hop_that_got_a_full_budget_counts_against_its_host() -> None:
     harness.run_once()
 
     assert harness.keys("out:fail:*") == [b"out:fail:{other.example}"]
+
+
+def test_a_hop_is_judged_by_what_is_left_of_the_chains_fetch_budget() -> None:
+    # The request deadline is far away, but the fetcher gives the whole redirect chain one
+    # FETCH_TIMEOUT_SECONDS: a hop that starts late gets only the rest of it.
+    target = f"{OTHER}/learn/page.html"
+    other_robots = f"{OTHER}/robots.txt"
+    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+
+    async def slow_robots(validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(1.4)  # leaves the hop 0.6 s of the chain's 2 s
+        return fetched(other_robots, "Not found", status=404)
+
+    harness = Harness(
+        {PAGE: Redirect(target), target: timed_out, other_robots: slow_robots},
+        fetch_timeout_seconds=2,
+    )
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert harness.keys("out:fail:*") == []

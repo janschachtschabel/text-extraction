@@ -47,8 +47,9 @@ class ConversionPool:
 
         A conversion that is already running is not stopped and not abandoned either:
         ``concurrent.futures`` joins its worker threads when the interpreter exits, so the
-        process ends only once that conversion is done (or the pod is killed at the end of its
-        grace period). ``CONVERT_MAX_BYTES`` is what bounds that wait.
+        process ends only once that conversion is done. ``CONVERT_MAX_BYTES`` bounds the size,
+        not the time: a pathological page can run to the end of the grace period, where the
+        pod is killed. That is harmless, because pods keep no state.
         """
         self._executor.shutdown(wait=False, cancel_futures=True)
 

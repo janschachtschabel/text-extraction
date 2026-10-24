@@ -466,6 +466,8 @@ class Pipeline:
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
         budget = 0.0  # seconds the request at `turn.answering` has, for `_record_failure`
+        chain_budget = 0.0  # the fetcher's deadline for the whole redirect chain ...
+        chain_started = started  # ... counted from here
 
         async def on_redirect(url: str) -> None:
             nonlocal hop_checks, budget
@@ -481,8 +483,11 @@ class Pipeline:
                 if (code := blocking_code(run.report)) is not None:
                     raise FetchError(code, _BLOCK_MESSAGES[code])
             await turn.take(host, run.report.crawl_delay)
-            # The hop starts now, so this is its budget, whatever the whole chain started with.
-            budget = self._fetch_budget(run)
+            # The hop starts now. It gets what is left of the fetcher's deadline for the whole
+            # chain (hook time included), capped as any fetch is by the request's own deadline.
+            budget = min(
+                self._fetch_budget(run), chain_budget - (time.perf_counter() - chain_started)
+            )
 
         try:
             await turn.take(run.host or "", run.report.crawl_delay)
@@ -495,6 +500,7 @@ class Pipeline:
                     retryable=True,
                 )
             run.attempts += 1
+            chain_budget, chain_started = budget, time.perf_counter()
             try:
                 fetched = await self._fetcher.fetch(
                     run.req.url,
