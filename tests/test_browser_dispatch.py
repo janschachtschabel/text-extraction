@@ -516,5 +516,8 @@ async def test_valkey_errors_of_submit_and_wait_are_counted(
     monkeypatch.setattr(parts.queue, "enqueue_items", down)
     with pytest.raises(RedisConnectionError):
         await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    monkeypatch.setattr(parts.store, "create", down)  # the job itself cannot be created
+    with pytest.raises(RedisConnectionError):
+        await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
 
-    assert parts.outcomes() == {"backend_error": 2}
+    assert parts.outcomes() == {"backend_error": 3}

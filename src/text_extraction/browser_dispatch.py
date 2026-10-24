@@ -214,14 +214,18 @@ class BrowserDispatcher:
         secrets = req.secrets()
         created = job_id is None
         if job_id is None:
-            job_id = await self._store.create(
-                kind,
-                principal,
-                job_options(req, compliance),
-                [req.url],
-                trace_id=current_trace_id(),
-                secrets=secrets,
-            )
+            try:
+                job_id = await self._store.create(
+                    kind,
+                    principal,
+                    job_options(req, compliance),
+                    [req.url],
+                    trace_id=current_trace_id(),
+                    secrets=secrets,
+                )
+            except _BACKEND_ERRORS:
+                self._count("backend_error")
+                raise
         elif not secrets.empty():
             raise ValueError("a reused job cannot take secrets")
         try:
