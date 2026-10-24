@@ -353,14 +353,14 @@ async def _in_browser(
         _dispatch_failed(error)
         if not handover.release():
             return None  # the route answered 202 with the job: the worker writes its result
-        await dispatcher.abandon(job_id)
+        await asyncio.shield(dispatcher.abandon(job_id))
         if draft is None:
             raise _backend_unavailable() from None
         return _unavailable(body, compliance, draft, started)
     if result is None:
         if not handover.release():
             return None  # the route answered 202 with the job: the worker writes its result
-        await dispatcher.abandon(job_id)
+        await asyncio.shield(dispatcher.abandon(job_id))
         return _unavailable(body, compliance, draft, started)
     # Answered here: nobody reads the job again, unless the route answered 202 with it meanwhile.
     if handover.release():

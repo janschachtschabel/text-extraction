@@ -21,11 +21,12 @@ from structlog.testing import capture_logs
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
+from text_extraction.browser_dispatch import Handover as BrowserHandover
 from text_extraction.browser_options import ArtifactRef, BrowserSecrets, EvaluateAction
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
-from text_extraction.extract_api import _store_result, extract
+from text_extraction.extract_api import _in_browser, _store_result, extract
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
@@ -1519,3 +1520,58 @@ def test_fast_mode_and_auto_with_browser_disabled_unchanged() -> None:
             assert worker.seen == []
             assert case.keys("job*") == []
             assert case.keys("q:*") == []
+
+
+class AbandoningDispatcher:
+    """A dispatcher whose wait gives up (None) or fails, and whose abandon takes a while."""
+
+    def __init__(self, wait_error: Exception | None) -> None:
+        self.wait_error = wait_error
+        self.abandoning = asyncio.Event()
+        self.abandoned = False
+
+    async def submit(self, *args: Any, **kwargs: Any) -> str:
+        return "f" * 32
+
+    async def wait(self, *args: Any, **kwargs: Any) -> Envelope[ExtractResult] | None:
+        if self.wait_error is not None:
+            raise self.wait_error
+        return None
+
+    async def abandon(self, job_id: str) -> None:
+        self.abandoning.set()
+        await asyncio.sleep(0.2)
+        self.abandoned = True
+
+
+@pytest.mark.parametrize(
+    "wait_error", [None, RedisConnectionError("valkey blinked")], ids=["gave-up", "valkey-error"]
+)
+def test_a_cancelled_request_still_abandons_its_job(wait_error: Exception | None) -> None:
+    # M-8: a client that disconnects while the job is being deleted must not cut the DEL short,
+    # or a worker renders and stores a job nobody waits for.
+    dispatcher = AbandoningDispatcher(wait_error)
+    state = SimpleNamespace(browser_dispatcher=dispatcher, settings=browser_settings())
+
+    async def scenario() -> None:
+        flow = asyncio.create_task(
+            _in_browser(
+                state,
+                ExtractRequest(url=PAGE, mode="browser"),
+                USER,
+                "enforce",
+                BrowserHandover(),
+                "extract",
+                None,
+                time.perf_counter(),
+            )
+        )
+        await asyncio.wait_for(dispatcher.abandoning.wait(), 5)
+        flow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flow
+        await asyncio.sleep(0.4)
+
+    asyncio.run(scenario())
+
+    assert dispatcher.abandoned
