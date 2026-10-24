@@ -48,6 +48,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop to that host began). The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. |
 | `JOB_TTL_SECONDS` | `86400` | How long a job (its status, URL list and results) stays in Valkey, in seconds. The time starts at creation and starts again when the job completes, so a caller has this long to fetch the results of a finished job. Minimum 60. |
 | `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
+| `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -178,3 +179,26 @@ slot.
 
 A result is written once: storing the same index again changes nothing, so an item that is run a
 second time after a lost lease counts once. Times are epoch seconds from the pod's clock.
+
+## Queue keys
+
+Batch items wait in a fair queue per worker pool (`extract` for the fast workers). The pool name is
+a literal cluster hash tag, so all keys of one pool share a slot. Client names (the API key name)
+and domains appear escaped in the keys (`%` as `%25`, `:` as `%3A`, tab as `%09`).
+
+| Key | Content |
+| --- | --- |
+| `q:{<pool>}:clients` | List of the clients with queued items, in rotation order. |
+| `q:{<pool>}:c:<client>:domains` | List of that client's domains with queued items, in rotation order. |
+| `q:{<pool>}:c:<client>:d:<domain>` | List of that client's items of that domain (`<job_id>:<index>:<attempts>`). |
+| `q:{<pool>}:notbefore` | Hash of domain to the time before which its items are not claimed (deferred). |
+| `q:{<pool>}:running` | Hash of domain to its number of leased items. |
+| `q:{<pool>}:leases` | Sorted set of leased items, scored by lease expiry. |
+| `q:{<pool>}:leased` | Hash of leased item to its client and domain. |
+| `q:{<pool>}:pending` | Number of queued items, claimable or deferred (leased items not counted). |
+
+A claim rotates the clients, then the domains of the client, so a small batch is not queued behind
+a large one. It skips a domain that is deferred or holds `OUTBOUND_MAX_CONCURRENCY_PER_HOST` leased
+items. Before that, it takes back up to 20 expired leases: each item goes to the front of its domain
+with one more attempt, or fails once it is past `JOB_ITEM_MAX_ATTEMPTS`. The keys have no TTL; the
+lists empty themselves as items are claimed.

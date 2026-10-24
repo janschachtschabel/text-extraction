@@ -551,3 +551,15 @@ def test_job_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOB_ITEM_MAX_BYTES", "9999")
     with pytest.raises(ConfigError, match="job_item_max_bytes"):
         load_settings()
+
+
+def test_job_item_max_attempts_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().job_item_max_attempts == 5
+
+    monkeypatch.setenv("JOB_ITEM_MAX_ATTEMPTS", "1")
+    assert load_settings().job_item_max_attempts == 1
+
+    monkeypatch.setenv("JOB_ITEM_MAX_ATTEMPTS", "0")
+    with pytest.raises(ConfigError, match="job_item_max_attempts"):
+        load_settings()

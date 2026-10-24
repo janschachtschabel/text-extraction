@@ -121,6 +121,8 @@ class Settings(BaseSettings):
     # largest stored result of one item as JSON; a bigger one is stored without its content.
     job_ttl_seconds: int = Field(default=86400, ge=60)
     job_item_max_bytes: int = Field(default=2_000_000, ge=10_000)
+    # Lost leases plus deferrals one job item may have; one more lost lease fails the item.
+    job_item_max_attempts: int = Field(default=5, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod
