@@ -13,7 +13,8 @@ workers.
 4. If no browser worker answers in time, ``auto`` answers its fast result with the warning
    ``browser_unavailable``, without its fingerprint (it was never compared or stored, and the
    browser may answer the next request), and ``browser`` answers ``failed``/``timeout``,
-   retryable. The browser job is deleted.
+   retryable. The browser job is deleted, as it is once the request answers with its result
+   (one with a screenshot is kept as long as the screenshot).
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result:
@@ -361,6 +362,9 @@ async def _in_browser(
             return None  # the route answered 202 with the job: the worker writes its result
         await dispatcher.abandon(job_id)
         return _unavailable(body, compliance, draft, started)
+    # Answered here: nobody reads the job again, unless the route answered 202 with it meanwhile.
+    if handover.release():
+        await asyncio.shield(dispatcher.answered(job_id, result))
     return _timed(result, started)
 
 

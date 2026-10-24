@@ -23,9 +23,10 @@ modules, so the API and the extract worker never load Playwright or Patchright.
    ``job:{<id>}:artifact:screenshot.png`` for ``ARTIFACT_TTL_SECONDS`` and served at
    ``/v1/jobs/<id>/artifacts/screenshot.png``. While Valkey's memory guard is high, or when the
    write fails, nothing is stored and the item fails ``internal_error``, retryable (B7);
-4. deletes the secrets once the item has its outcome, also when the run failed. An item that is
-   given back to run again (a gate refusal it is deferred for, a Valkey error, a cancelled
-   shutdown) keeps them for that run; they expire on their own after their short TTL.
+4. deletes the secrets and the item's draft once the item has its outcome, also when the run
+   failed. An item that is given back to run again (a gate refusal it is deferred for, a Valkey
+   error, a cancelled shutdown) keeps them for that run; the secrets expire on their own after
+   their short TTL, a draft with the job.
 
 **The process** serves only the internal port, like the extract worker. Before ``/ready``
 answers 200 it loads the language model, starts the egress proxy, then Xvfb (only for unblock
@@ -188,6 +189,7 @@ class BrowserRunner:
         finally:
             if finished:
                 await self._drop_secrets(job.id)
+                await self._drop_draft(job.id, item.index)
 
     async def _drop_secrets(self, job_id: str) -> None:
         """Delete the secrets; a failure leaves them to their TTL rather than the result."""
@@ -195,6 +197,14 @@ class BrowserRunner:
             await self._store.drop_secrets(job_id)
         except (RedisError, OSError) as error:
             _log.warning("job_secrets_not_dropped", error_type=type(error).__name__)
+
+    async def _drop_draft(self, job_id: str, index: int) -> None:
+        """Delete the item's draft; a failure leaves it to the job's TTL rather than the
+        result."""
+        try:
+            await self._store.drop_draft(job_id, index)
+        except (RedisError, OSError) as error:
+            _log.warning("job_draft_not_dropped", error_type=type(error).__name__)
 
 
 def _request(job: JobRecord, url: str, secrets: BrowserSecrets) -> ExtractRequest:

@@ -14,11 +14,11 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from tests.fakes import PAGE
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import BrowserDispatcher, Handover
-from text_extraction.browser_options import BrowserCookie, ClickAction
+from text_extraction.browser_options import ArtifactRef, BrowserCookie, ClickAction
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobStore
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 
@@ -306,6 +306,60 @@ async def test_abandon_deletes_job() -> None:
 
     assert await parts.job_keys() == []
     await parts.dispatcher.abandon(job_id)  # gone already: no error
+
+
+@scenario
+async def test_an_answered_extract_job_is_deleted() -> None:
+    parts = Parts()
+    req = ExtractRequest(url=PAGE, cookies=[BrowserCookie(name="s", value="cookie-secret-1")])
+    job_id = await parts.dispatcher.submit("extract", req, USER, "enforce", draft=fast_draft())
+    await parts.store.write_result(job_id, 0, rendered_result())
+
+    await parts.dispatcher.answered(job_id, rendered_result())
+
+    assert await parts.job_keys() == []  # meta, urls, results, done, secrets and drafts
+
+
+@scenario
+async def test_an_answered_job_with_a_screenshot_lives_as_long_as_the_artifact() -> None:
+    settings = Settings(
+        auth_mode="none", browser_enabled=True, job_ttl_seconds=86400, artifact_ttl_seconds=900
+    )
+    parts = Parts(settings)
+    req = ExtractRequest(url=PAGE, mode="browser", screenshot=True)
+    job_id = await parts.dispatcher.submit("screenshot", req, USER, "enforce")
+    expires = await parts.store.put_artifact(job_id, SCREENSHOT_ARTIFACT, b"png")
+    result = rendered_result()
+    assert result.data is not None
+    result.data.screenshot = ArtifactRef(
+        name=SCREENSHOT_ARTIFACT,
+        url=f"/v1/jobs/{job_id}/artifacts/{SCREENSHOT_ARTIFACT}",
+        content_type="image/png",
+        bytes=3,
+        width=1920,
+        height=1080,
+        expires_at=expires,
+    )
+    await parts.store.write_result(job_id, 0, result)
+
+    await parts.dispatcher.answered(job_id, result)
+
+    # The artifact route needs the job's record (owner) as long as the file is there.
+    assert await parts.store.get(job_id) is not None
+    assert await parts.store.artifact(job_id, SCREENSHOT_ARTIFACT) == b"png"
+    assert 0 < await parts.valkey.ttl(f"job:{{{job_id}}}:meta") <= 900
+
+
+@scenario
+async def test_answered_swallows_valkey_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    parts = Parts()
+
+    async def down(*args: object, **kwargs: object) -> None:
+        raise RedisConnectionError("valkey is down")
+
+    monkeypatch.setattr(parts.store, "delete", down)
+
+    await parts.dispatcher.answered("f" * 32, rendered_result())  # left to expire
 
 
 @scenario

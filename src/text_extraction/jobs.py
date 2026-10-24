@@ -21,9 +21,13 @@ Browser jobs (package 4) may have these as well:
                           BROWSER_QUEUE_WAIT_SECONDS + 60`` seconds at most, and deleted by the
                           worker once it has finished the item. No read of the job shows them.
 - ``job:{<id>}:drafts``   hash: item index -> the fast ``Envelope[ExtractResult]`` of an ``auto``
-                          item that moved to the browser (B5), with the job's remaining TTL
+                          item that moved to the browser (B5), with the job's remaining TTL;
+                          deleted by the browser worker once the item has its outcome
 - ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
+
+A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
+then; one with a screenshot is kept only as long as the screenshot (``shorten``).
 
 Times are epoch seconds from the injected clock (every pod needs a synchronised clock), stored
 as numbers and handed out as UTC datetimes, except ``lease_until``, which stays a number.
@@ -295,6 +299,18 @@ class JobStore:
             *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
         )
 
+    async def shorten(self, job_id: str, seconds: int) -> None:
+        """Let the job and its files expire within ``seconds`` (never later than they would)
+        and delete its secrets and drafts: a sync answer's screenshot job, which only the
+        artifact route still reads. A job that is gone already is not an error."""
+        async with self._valkey.pipeline(transaction=True) as pipe:
+            for kind in ("meta", "urls", "results", "done"):
+                pipe.expire(_key(job_id, kind), seconds, lt=True)
+            for name in ARTIFACT_NAMES:
+                pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
+            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"))
+            await pipe.execute()
+
     async def secrets(self, job_id: str) -> BrowserSecrets:
         """The caller's browser secrets of the job; empty when it had none or they are gone."""
         raw = await self._valkey.get(_key(job_id, "secrets"))
@@ -316,6 +332,10 @@ class JobStore:
         )
         if outcome == _NOT_FOUND:
             raise JobLost(job_id)
+
+    async def drop_draft(self, job_id: str, index: int) -> None:
+        """Delete the draft of item ``index`` (the item has its outcome)."""
+        await self._valkey.hdel(_key(job_id, "drafts"), str(index))
 
     async def draft(self, job_id: str, index: int) -> Envelope[ExtractResult] | None:
         """The draft of item ``index``, or None when there is none."""

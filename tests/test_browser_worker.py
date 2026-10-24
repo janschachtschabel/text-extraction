@@ -556,6 +556,20 @@ async def test_a_moved_item_finishes_its_job_in_the_browser_pool() -> None:
     assert items[1].result is not None
     assert items[1].result.data is not None
     assert items[1].result.data.mode_used == "browser"
+    assert await harness.store.draft(job_id, 1) is None  # done with once the item has its result
+
+
+@scenario
+async def test_a_deferred_item_keeps_its_draft_for_its_next_run() -> None:
+    harness = Harness(gate=RefusingGate(OutboundBusy(3.0)))
+    job_id = await harness.submit(AUTO)
+    draft = await fast_draft(SHELL_WITH_WORDS)
+    await harness.store.put_draft(job_id, 0, draft)
+
+    await harness.process_next()
+
+    assert harness.outcome("deferred") == 1
+    assert await harness.store.draft(job_id, 0) == draft
 
 
 # --- the process ------------------------------------------------------------------------------

@@ -16,6 +16,12 @@ browser options, or an ``auto`` result that escalates) is handed to the ``browse
    (``BROWSER_UNBLOCK_TIMEOUT_SECONDS`` + 5 s in unblock mode).
 3. A request that gives up calls ``abandon``, which deletes the job: a worker that claims the
    item later finds no job and drops it.
+4. A request that answers with the result calls ``answered``: nobody can read the job any
+   more, so it is deleted (its secrets and drafts too). A job whose result has a screenshot is
+   kept only as long as the screenshot (``ARTIFACT_TTL_SECONDS``), since the artifact route
+   needs the job's record. The worker has written the result by then and touches the job no
+   more; a late copy of the item finds no job (or its result) and is dropped. A job answered
+   with 202 keeps ``JOB_TTL_SECONDS``.
 
 ``Handover`` is what the route of a request with ``wait_seconds`` and its task share. Exactly one
 of them may turn the request into a job (``claim_p1`` or ``claim_browser``, decided without an
@@ -255,6 +261,17 @@ class BrowserDispatcher:
             await self._store.clear_lease(job_id)
         except (RedisError, OSError, JobLost) as error:
             _log.warning("browser_job_lease_kept", job_id=job_id, error_type=type(error).__name__)
+
+    async def answered(self, job_id: str, result: Envelope[ExtractResult]) -> None:
+        """The request answered with ``result``: delete the job, or keep one with a screenshot
+        only as long as its file. A Valkey failure leaves it to expire (logged)."""
+        try:
+            if result.data is not None and result.data.screenshot is not None:
+                await self._store.shorten(job_id, self._settings.artifact_ttl_seconds)
+            else:
+                await self._store.delete(job_id)
+        except (RedisError, OSError) as error:
+            _log.warning("browser_job_kept", job_id=job_id, error_type=type(error).__name__)
 
     async def abandon(self, job_id: str) -> None:
         """Delete the job; a Valkey failure leaves it to expire."""

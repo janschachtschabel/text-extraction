@@ -1008,6 +1008,12 @@ class BrowserCase:
 
         return asyncio.run(find())
 
+    def ttl(self, key: str) -> int:
+        async def find() -> int:
+            return int(await FakeAsyncRedis(server=self.server).ttl(key))
+
+        return asyncio.run(find())
+
     def record(self, job_id: str) -> JobRecord | None:
         return asyncio.run(JobStore(FakeAsyncRedis(server=self.server), self.settings).get(job_id))
 
@@ -1221,6 +1227,88 @@ def test_wait_seconds_during_browser_phase_answers_202_with_browser_job() -> Non
         case.wait_for_idle()
         assert case.app.state.background == set()
         assert sample(cast(Handover, case), "jobs_created_total") == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "answers"),
+    [
+        ({"mode": "browser"}, None),
+        ({"cookies": [{"name": "s", "value": "v"}]}, None),  # secrets
+        ({}, {PAGE: fetched(body=SHELL_WITH_WORDS)}),  # escalated, with its draft
+        ({"mode": "browser", "wait_seconds": 30}, None),  # answered within wait_seconds
+    ],
+    ids=["browser", "secrets", "escalated", "within-wait"],
+)
+def test_a_sync_browser_answer_leaves_no_job_behind(
+    body: dict[str, Any], answers: dict[str, Any] | None
+) -> None:
+    # I-3: nobody can read the job of an answer given to the caller; it must not stay 24 h.
+    case = BrowserCase(answers)
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": PAGE, **body}, headers=AUTH)
+
+        assert response.status_code == 200
+        assert response.json()["data"]["mode_used"] == "browser"
+        assert len(worker.seen) == 1
+        assert case.keys("job*") == []
+
+
+def test_a_sync_screenshot_job_lives_only_as_long_as_its_artifact() -> None:
+    case = BrowserCase(artifact_ttl_seconds=900)
+    with TestClient(case.app) as client, case.worker(artifact=b"\x89PNG") as worker:
+        response = client.post("/v1/extract", json={"url": PAGE, "screenshot": True}, headers=AUTH)
+
+        assert response.status_code == 200
+        job_id = worker.seen[0].job.id
+        assert 0 < case.ttl(f"job:{{{job_id}}}:meta") <= 900
+        assert case.keys(f"job:{{{job_id}}}:drafts") == []
+        url = response.json()["data"]["screenshot"]["url"]
+        assert client.get(url, headers=AUTH).status_code == 200
+
+
+def test_a_202_browser_job_keeps_the_job_ttl() -> None:
+    case = BrowserCase(job_ttl_seconds=86400, artifact_ttl_seconds=900)
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0}, headers=AUTH
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        worker.hold.set()
+        final = case.wait_for_job(client, job_id)
+        assert final["status"] == "success"
+        case.wait_for_idle()
+
+        assert case.ttl(f"job:{{{job_id}}}:meta") > 86000
+
+
+def test_a_result_read_while_the_route_hands_over_keeps_the_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The flow reads the result just as wait_seconds runs out: the route answers 202 with the
+    # job, so the flow must not delete it after all.
+    case = BrowserCase()
+    store: JobStore = case.app.state.job_store
+    real_items = store.items
+
+    async def slow_items(job_id: str, offset: int, limit: int) -> Any:
+        found = await real_items(job_id, offset, limit)
+        await asyncio.sleep(0.6)  # the route detaches meanwhile
+        return found
+
+    monkeypatch.setattr(store, "items", slow_items)
+    with TestClient(case.app) as client, case.worker():
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.3}, headers=AUTH
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        case.wait_for_idle()
+
+        assert case.record(job_id) is not None
+        final = case.wait_for_job(client, job_id)
+        assert final["data"]["items"][0]["result"]["data"]["mode_used"] == "browser"
 
 
 def test_wait_seconds_zero_for_a_browser_request_answers_202() -> None:

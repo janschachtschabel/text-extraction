@@ -357,7 +357,11 @@ while `BROWSER_ENABLED` is false, are unchanged.
   to 0.5 s), waits `BROWSER_QUEUE_WAIT_SECONDS` for a worker to claim the item, then the render
   deadline + 5 s for the result. A request that gives up deletes the job, so a worker that claims
   it later drops it. With `wait_seconds` the request becomes a 202 with that job instead
-  (`Handover` decides which of the route and its task turns the request into a job).
+  (`Handover` decides which of the route and its task turns the request into a job). A request
+  that answers with the job's result deletes the job too (nobody can read it); one whose result
+  has a screenshot is kept `ARTIFACT_TTL_SECONDS` at most, for the artifact route. A job answered
+  with 202 keeps `JOB_TTL_SECONDS`. The browser worker deletes an item's draft once the item has
+  its outcome.
 - **B2, hybrid loading (D1).** A render runs these steps:
   1. Before the navigation: robots, TDM and `noai` for the request URL (missing compliance files
      are fetched by our own fetcher inside the turn). A block ends the item without any browser

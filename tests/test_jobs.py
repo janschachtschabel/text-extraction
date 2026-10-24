@@ -535,6 +535,45 @@ async def test_delete_removes_secrets_drafts_and_artifacts() -> None:
 
 
 @scenario
+async def test_shorten_cuts_the_ttl_and_drops_secrets_and_drafts() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400, artifact_ttl_seconds=3600)
+    job_id = await store.create("screenshot", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+    await store.put_draft(job_id, 0, success())
+    await store.put_artifact(job_id, "screenshot.png", PNG)
+    await store.write_result(job_id, 0, success())
+
+    await store.shorten(job_id, 600)
+
+    for kind in ("meta", "urls", "results", "done", "artifact:screenshot.png"):
+        assert 595 <= await valkey.ttl(f"job:{{{job_id}}}:{kind}") <= 600, kind
+    assert await valkey.exists(f"job:{{{job_id}}}:secrets", f"job:{{{job_id}}}:drafts") == 0
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.state == "completed"
+    assert await store.artifact(job_id, "screenshot.png") == PNG
+
+    await store.shorten(job_id, 7200)  # never longer than before
+    assert await valkey.ttl(f"job:{{{job_id}}}:meta") <= 600
+    await store.shorten("f" * 32, 600)  # an unknown job: nothing happens
+    assert await valkey.exists(f"job:{{{'f' * 32}}}:meta") == 0
+
+
+@scenario
+async def test_drop_draft_removes_one_items_draft() -> None:
+    store = make_store(FakeAsyncRedis())
+    job_id = await create_job(store)
+    await store.put_draft(job_id, 0, success(URLS[0]))
+    await store.put_draft(job_id, 1, success(URLS[1]))
+
+    await store.drop_draft(job_id, 0)
+
+    assert await store.draft(job_id, 0) is None
+    assert await store.draft(job_id, 1) is not None
+    await store.drop_draft("f" * 32, 0)  # an unknown job: no error
+
+
+@scenario
 async def test_clear_lease_keeps_the_job_running_without_a_claim() -> None:
     clock = Clock()
     store = make_store(FakeAsyncRedis(), clock)
