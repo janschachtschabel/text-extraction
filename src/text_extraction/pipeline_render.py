@@ -15,12 +15,18 @@ from text_extraction.netguard import InvalidUrlError, is_public_address, validat
 from text_extraction.quality import THIN_PAGE_BELOW_WORDS, Quality
 from text_extraction.render import (
     CookieData,
+    MainResponse,
     Rendered,
     RenderOptions,
     contacted_challenge_host,
     site,
 )
 from text_extraction.settings import Settings
+
+# Answers whose body may be a bot challenge that unblock mode can get past (B5, B14).
+CHALLENGE_STATUSES = frozenset({403, 429, 503})
+# The renderer's warning for a challenge that was still there when the wait ended (B14).
+CHALLENGE_NOT_CLEARED = "challenge_not_cleared"
 
 
 def blocked_resources(settings: Settings) -> frozenset[str]:
@@ -118,3 +124,23 @@ def challenged_by_hosts(quality: Quality, rendered: Rendered) -> bool:
         and not quality.bot_challenge
         and contacted_challenge_host(rendered.hosts)
     )
+
+
+def answers_for_gate(rendered: Rendered, *, unblock: bool) -> tuple[MainResponse, ...]:
+    """The document answers the outbound gate hears of. An unblock render whose challenge
+    cleared leaves out the challenge's 403, 429 or 503 before its 2xx document: the host did not
+    ask us to back off, its protection asked us to prove we are a browser. A challenge that
+    stayed is reported as it answered (real backoff)."""
+    answers = rendered.responses
+    if not (unblock and rendered.challenge_cleared and answers and 200 <= answers[-1].status < 300):
+        return answers
+    return (
+        *(answer for answer in answers[:-1] if answer.status not in CHALLENGE_STATUSES),
+        answers[-1],
+    )
+
+
+def challenge_not_cleared(rendered: Rendered, *, unblock: bool) -> bool:
+    """An unblock render that ended on a challenge: ``bot_protection``, whatever the status of
+    the last answer (B15)."""
+    return unblock and CHALLENGE_NOT_CLEARED in rendered.warnings

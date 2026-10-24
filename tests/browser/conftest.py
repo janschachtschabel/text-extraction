@@ -50,6 +50,9 @@ _SHELL_GLOB = (
 async def _playwright_own_chromium_works() -> bool:
     try:
         async with async_playwright() as driver:
+            # A launch that fails leaves its /tmp/playwright-artifacts-* dir: look first.
+            if not await asyncio.to_thread(Path(driver.chromium.executable_path).exists):
+                return False
             browser = await driver.chromium.launch()
             await browser.close()
     except Exception:

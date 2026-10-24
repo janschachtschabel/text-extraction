@@ -110,9 +110,17 @@ class Loaded:
     raise_kept: Callable[[], None]
 
 
-# Runs after the load and the network-idle wait, before the consent step and the actions, and
-# returns the render's warnings it adds.
-type AfterLoad = Callable[[Loaded], Awaitable[Sequence[str]]]
+@dataclass(frozen=True)
+class AfterLoadOutcome:
+    """What the step after the load adds to the render: warnings, and whether a bot challenge
+    it met cleared (``Rendered.challenge_cleared``)."""
+
+    warnings: Sequence[str] = ()
+    challenge_cleared: bool = False
+
+
+# Runs after the load and the network-idle wait, before the consent step and the actions.
+type AfterLoad = Callable[[Loaded], Awaitable[AfterLoadOutcome]]
 
 
 async def render_page(
@@ -218,6 +226,7 @@ class _Render:
     ) -> None:
         self.page = page
         self.after_load = after_load
+        self.challenge_cleared = False
         self.url = url
         self.check = check
         self.options = options
@@ -304,7 +313,9 @@ class _Render:
             loaded = Loaded(
                 self.page, self.deadline - reserve, self._read_loaded, self._hosts, self.raise_kept
             )
-            self.warnings.extend(await self.after_load(loaded))
+            outcome = await self.after_load(loaded)
+            self.warnings.extend(outcome.warnings)
+            self.challenge_cleared = outcome.challenge_cleared
             self.raise_kept()
             if self.download:
                 return self._rendered("", None, None, ())
@@ -492,6 +503,7 @@ class _Render:
             warnings=tuple(dict.fromkeys(warnings)),
             hosts=self.traffic.hosts if self.traffic is not None else frozenset(),
             cookies=cookies,
+            challenge_cleared=self.challenge_cleared,
         )
 
     def _main_responses(self) -> list[MainResponse]:

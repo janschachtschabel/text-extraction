@@ -39,7 +39,7 @@ from text_extraction.fetch import Fetcher, FetchError
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline
-from text_extraction.render import CookieData, Rendered, RenderOptions
+from text_extraction.render import CookieData, Rendered, RenderOptions, contacted_challenge_host
 from text_extraction.render import site as site_key
 from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
@@ -57,6 +57,9 @@ CHALLENGE_SECONDS = 10.0
 async def _patchright_own_chromium_works() -> bool:
     try:
         async with async_patchright() as driver:
+            # A launch that fails leaves its /tmp/playwright-artifacts-* dir: look first.
+            if not await asyncio.to_thread(Path(driver.chromium.executable_path).exists):
+                return False
             browser = await driver.chromium.launch(channel="chromium")
             await browser.close()
     except Exception:
@@ -227,12 +230,10 @@ async def render(
     )
 
 
-def pipeline_for(stack: UnblockStack, clearance: FakeAsyncRedis) -> Pipeline:
-    """The real pipeline with the unblock renderer and the clearance store in ``clearance``.
-    The rest has a Valkey of its own: a challenge's 503 pauses the host in the gate."""
+def pipeline_for(stack: UnblockStack, valkey: FakeAsyncRedis) -> Pipeline:
+    """The real pipeline with the unblock renderer, everything (gate, clearance) in ``valkey``."""
     fetcher = cast(Fetcher, FakeFetcher({}))
     standard = stack.standard or stack.renderer
-    valkey = FakeAsyncRedis()
     return Pipeline(
         fetcher,
         DomainGate(valkey, stack.settings),
@@ -243,7 +244,7 @@ def pipeline_for(stack: UnblockStack, clearance: FakeAsyncRedis) -> Pipeline:
         stack.registry,
         renderer=standard,
         unblock_renderer=stack.renderer,
-        clearance=ValkeyClearance(clearance, stack.settings),
+        clearance=ValkeyClearance(valkey, stack.settings),
         timeout_seconds=stack.settings.browser_timeout_seconds,
     )
 
@@ -292,6 +293,7 @@ def test_challenge_page_clears_within_wait(run_unblock: Any, site: Site) -> None
         assert "challenge_checkbox_clicked" not in rendered.warnings
         assert [answer.status for answer in rendered.responses] == [503, 200]
         assert [cookie.name for cookie in rendered.cookies] == ["cleared"]
+        assert rendered.challenge_cleared
 
     run_unblock(body)
 
@@ -300,11 +302,12 @@ def test_challenge_not_cleared_adds_warning(run_unblock: Any, site: Site) -> Non
     async def body(stack: UnblockStack) -> None:
         rendered = await render(stack, f"{site.base}/challenge")
         assert "challenge_not_cleared" in rendered.warnings
+        assert not rendered.challenge_cleared
 
         envelope = await run_admin(stack, url=f"{site.base}/checkbox?stubborn=1")
         assert envelope.status == "failed"
         assert envelope.error is not None
-        assert envelope.error.code in (ErrorCode.BOT_PROTECTION, ErrorCode.TARGET_HTTP_ERROR)
+        assert envelope.error.code is ErrorCode.BOT_PROTECTION  # though the answer was a 403
         assert envelope.data is not None
         assert envelope.data.unblocked
         assert "challenge_not_cleared" in envelope.data.warnings
@@ -349,6 +352,8 @@ def test_clearance_is_reused_by_the_next_render(run_unblock: Any, site: Site) ->
         assert await valkey.exists("unblock:cookies:{127.0.0.1}") == 1
         assert "cleared" not in first.data.model_dump_json()
 
+        # The challenge's 503 did not pause the host: it cleared (only the 200 was reported).
+        assert [key async for key in valkey.scan_iter("out:cooldown:*")] == []
         site.clear()
         stack.settings.browser_unblock_challenge_wait_seconds = 0
         second = await run_admin(stack, valkey, url=f"{site.base}/challenge", cache=False)
@@ -378,6 +383,12 @@ def test_unmodified_user_agent(run_unblock: Any, site: Site) -> None:
         assert "text-extraction" not in agent
         assert "Chrome/" in agent
         assert stack.renderer.user_agent == agent
+
+        # Chrome's own background requests (Google services) are no challenge hosts (B12).
+        rendered = await render(stack, f"{site.base}/static")
+        assert not contacted_challenge_host(rendered.hosts)
+        assert not rendered.challenge_cleared
+        assert rendered.warnings == ()
 
     run_unblock(body)
 

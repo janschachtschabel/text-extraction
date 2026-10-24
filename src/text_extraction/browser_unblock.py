@@ -26,7 +26,16 @@ over, the render looks again every second, following the challenge's own navigat
 visible checkbox widget (a Cloudflare Turnstile frame, an hCaptcha checkbox frame) still there
 after 3 s is clicked, with a mouse move to the box first: at most twice per render, 3 s apart
 (warning ``challenge_checkbox_clicked``). Nothing else is attempted: no image or puzzle
-captcha, no solver service (B15). A wait that ends on a challenge adds ``challenge_not_cleared``.
+captcha, no solver service (B15). A wait that ends on a challenge adds ``challenge_not_cleared``,
+and the pipeline ends the item as ``bot_protection`` whatever the last status; a challenge that
+cleared sets ``Rendered.challenge_cleared``, and the pipeline then keeps the challenge's
+403/429/503 out of the host's backoff in the outbound gate.
+
+**Chrome's own traffic.** A real Chrome contacts Google services in the background (for
+example ``www.google.com``, ``accounts.google.com``, ``android.clients.google.com``). It goes
+through the egress proxy like everything else, counts towards the page's bytes and shows in
+``Rendered.hosts``; it is left as it is, since it is what a visitor's Chrome does. Those hosts
+are no challenge hosts, so they never make a page a challenge (B12).
 
 **Display.** ``Xvfb`` runs the virtual display headful Chrome needs; the browser worker starts
 it before the pool when unblock mode is on and not headless.
@@ -40,7 +49,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Final, cast
@@ -59,8 +68,9 @@ from text_extraction.browser import (
     chromium_args,
 )
 from text_extraction.browser_driver import DRIVER_ERRORS
-from text_extraction.browser_render import AfterLoad, Loaded
+from text_extraction.browser_render import AfterLoad, AfterLoadOutcome, Loaded
 from text_extraction.convert.markup import parse_html, strip_non_content
+from text_extraction.pipeline_render import CHALLENGE_NOT_CLEARED
 from text_extraction.quality import THIN_PAGE_BELOW_WORDS, assess
 from text_extraction.render import RenderOptions, contacted_challenge_host
 from text_extraction.settings import Settings
@@ -319,7 +329,7 @@ class ChallengeWait:
         self._settings = settings
         self._checkbox_frame = checkbox_frame
 
-    async def __call__(self, loaded: Loaded) -> Sequence[str]:
+    async def __call__(self, loaded: Loaded) -> AfterLoadOutcome:
         loop = asyncio.get_running_loop()
         started = loop.time()
         end = min(started + self._settings.browser_unblock_challenge_wait_seconds, loaded.deadline)
@@ -332,8 +342,8 @@ class ChallengeWait:
             host = _host(loaded.page)
             if now >= end:
                 _log.info("challenge_not_cleared", host=host, clicks=clicks)
-                warnings.append("challenge_not_cleared")
-                return warnings
+                warnings.append(CHALLENGE_NOT_CLEARED)
+                return AfterLoadOutcome(tuple(warnings))
             met = True
             if clicks < MAX_CLICKS and now - last_click >= CHECKBOX_AFTER_SECONDS:
                 if await self._click_checkbox(loaded.page):
@@ -346,7 +356,7 @@ class ChallengeWait:
         if met:
             _log.info("challenge_cleared", host=_host(loaded.page), clicks=clicks)
             await self._idle(loaded)
-        return warnings
+        return AfterLoadOutcome(tuple(warnings), challenge_cleared=met)
 
     async def _idle(self, loaded: Loaded) -> None:
         """Give the page behind the challenge its network-idle wait."""

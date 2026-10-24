@@ -101,9 +101,12 @@ from text_extraction.outbound import (
     parse_retry_after,
 )
 from text_extraction.pipeline_render import (
+    CHALLENGE_STATUSES,
+    answers_for_gate,
     as_fetched,
     blocked_resources,
     caller_cookies,
+    challenge_not_cleared,
     challenged_by_hosts,
     check_address,
     check_target,
@@ -134,8 +137,6 @@ _KINDS: dict[str, Literal["html", "text"]] = {
 _HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429})
-# Answers whose body may be a bot challenge that unblock mode can get past (B5, B14).
-_CHALLENGE_STATUSES = frozenset({403, 429, 503})
 # The fetch gets the time left before the deadline minus this, so it times out first and the
 # timeout is recorded for the host.
 _FETCH_MARGIN_SECONDS = 0.25
@@ -596,7 +597,7 @@ class Pipeline:
         """Whether a failed answer's body is judged as a possible challenge: only in unblock
         mode, where ``auto`` escalates a challenge answer (B5, B14)."""
         return (
-            fetched.status in _CHALLENGE_STATUSES
+            fetched.status in CHALLENGE_STATUSES
             and run.unblock
             and run.req.mode == "auto"
             and self._settings.browser_enabled
@@ -1016,12 +1017,13 @@ class Pipeline:
     async def _check_answers(
         self, run: _Run, rendered: Rendered, turn: _Turn, checked: set[str]
     ) -> Envelope[ExtractResult] | None:
-        """Report each document answer to the gate, then check every URL the render arrived
-        at that was not checked before it was sent (HTTP redirect hops, which the browser
-        follows unasked): with the cached verdicts, or with the origin's files fetched in its
-        host's turn. A block discards the render: its failed envelope is returned."""
+        """Report each document answer to the gate (but a cleared challenge's, B14), then check
+        every URL the render arrived at that was not checked before it was sent (HTTP redirect
+        hops, which the browser follows unasked): with the cached verdicts, or with the
+        origin's files fetched in its host's turn. A block discards the render: its failed
+        envelope is returned."""
         run.attempts += len(rendered.responses)
-        for answer in rendered.responses:
+        for answer in answers_for_gate(rendered, unblock=run.unblocked):
             await self._gate.record(
                 urlsplit(answer.url).hostname or "",
                 status=answer.status,
@@ -1055,6 +1057,9 @@ class Pipeline:
         run.final_url = rendered.final_url
         run.upstream_status = last.status
         run.content_type = last.content_type
+        not_cleared = challenge_not_cleared(rendered, unblock=unblock)
+        if not_cleared and not 200 <= last.status < 300:
+            return run.failed(ErrorCode.BOT_PROTECTION, _QUALITY_MESSAGES[ErrorCode.BOT_PROTECTION])
         if not 200 <= last.status < 300:
             return run.failed(
                 ErrorCode.TARGET_HTTP_ERROR,
@@ -1087,7 +1092,7 @@ class Pipeline:
         if isinstance(processed, Envelope):
             return processed
         quality, fingerprint = processed.quality, processed.fingerprint
-        if challenged_by_hosts(quality, rendered):
+        if not_cleared or challenged_by_hosts(quality, rendered):
             quality = quality.model_copy(
                 update={"bot_challenge": True, "browser_recommended": True}
             )

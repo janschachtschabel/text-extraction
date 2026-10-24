@@ -912,6 +912,90 @@ def test_clearance_cookies_loaded_and_stored_only_for_unblock() -> None:
     assert clearance.puts == [("example.org", [new])]  # not after the challenge stayed
 
 
+def unblock_harness(*results: Any, **overrides: Any) -> RenderHarness:
+    return RenderHarness(
+        renderer=FakeRenderer(rendered()),
+        unblock_renderer=FakeRenderer(*results),
+        clearance=FakeClearance(),
+        browser_unblock_enabled=True,
+        **overrides,
+    )
+
+
+def gate_records(harness: RenderHarness) -> list[tuple[str, str]]:
+    return [event for event in harness.gate.events if event[0] == "record"]
+
+
+@pytest.mark.parametrize("status", [403, 429, 503])
+def test_a_cleared_challenge_is_kept_out_of_the_hosts_backoff(status: int) -> None:
+    answers = [response(status=status), response(status=200)]
+    harness = unblock_harness(rendered(responses=answers, challenge_cleared=True))
+
+    envelope = harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
+
+    assert envelope.status == "success", envelope.error
+    assert data_of(envelope).attempts == 2
+    assert gate_records(harness) == [("record", "example.org")]  # the final answer only
+    assert harness.keys("out:cooldown:*") == []
+
+
+def test_a_challenge_that_stays_keeps_its_backoff() -> None:
+    harness = unblock_harness(
+        rendered(
+            CHALLENGE_PAGE,
+            responses=[response(status=503)],
+            warnings=["challenge_not_cleared"],
+        )
+    )
+
+    envelope = harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
+
+    assert code_of(envelope) == ErrorCode.BOT_PROTECTION
+    assert gate_records(harness) == [("record", "example.org")]
+    assert harness.keys("out:cooldown:*") != []  # 503: the host is paused
+
+
+def test_the_cleared_flag_counts_only_under_unblock() -> None:
+    answers = [response(status=503), response(status=200)]
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(responses=answers, challenge_cleared=True))
+    )
+
+    envelope = harness.run_once(mode="browser")
+
+    assert envelope.status == "success"
+    assert gate_records(harness) == [("record", "example.org")] * 2
+    assert harness.keys("out:cooldown:*") != []
+
+
+@pytest.mark.parametrize("status", [403, 429, 503, 200])
+def test_a_challenge_not_cleared_is_bot_protection_whatever_its_status(status: int) -> None:
+    clearance = FakeClearance()
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered()),
+        unblock_renderer=FakeRenderer(
+            rendered(
+                ARTICLE,  # the page itself need not look like a challenge: the renderer says so
+                responses=[response(status=status)],
+                warnings=["challenge_not_cleared"],
+            )
+        ),
+        clearance=clearance,
+        browser_unblock_enabled=True,
+    )
+
+    envelope = harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
+
+    assert code_of(envelope) == ErrorCode.BOT_PROTECTION
+    data = data_of(envelope)
+    assert data.unblocked is True
+    assert data.upstream_status == status
+    assert "challenge_not_cleared" in data.warnings
+    assert data.fingerprint is None
+    assert clearance.puts == []
+    assert harness.keys("res:*") == []
+
+
 # --- deadline and fast mode ---------------------------------------------------------------------
 
 
