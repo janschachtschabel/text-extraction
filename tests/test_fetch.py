@@ -12,11 +12,20 @@ from typing import Any
 
 import pytest
 from pytest_httpserver import HTTPServer
+from structlog.testing import capture_logs
 from werkzeug import Request, Response
 
 import text_extraction
 from text_extraction.envelope import ErrorCode
-from text_extraction.fetch import USER_AGENT, Fetcher, FetchError, FetchResult, Validators
+from text_extraction.fetch import (
+    USER_AGENT,
+    Fetcher,
+    FetchError,
+    FetchResult,
+    SentHook,
+    Validators,
+    _sent_tracer,
+)
 from text_extraction.settings import Settings
 
 Addr = IPv4Address | IPv6Address
@@ -27,8 +36,12 @@ def allow_loopback_only(ip: Addr) -> bool:
     return ip == LOOPBACK
 
 
-def make_fetcher(**settings: Any) -> Fetcher:
-    return Fetcher(Settings(auth_mode="none", **settings), policy=allow_loopback_only)
+def make_fetcher(*, on_request_sent: SentHook | None = None, **settings: Any) -> Fetcher:
+    return Fetcher(
+        Settings(auth_mode="none", **settings),
+        policy=allow_loopback_only,
+        on_request_sent=on_request_sent,
+    )
 
 
 def run[T](test: Callable[[], Coroutine[Any, Any, T]]) -> T:
@@ -642,13 +655,12 @@ def test_each_request_is_reported_once_it_is_sent(httpserver: HTTPServer) -> Non
         "", status=301, headers={"Location": "/new"}
     )
     httpserver.expect_request("/new").respond_with_data("<p>moved</p>", content_type="text/html")
-    fetcher = make_fetcher()
     sent: list[str] = []
 
     async def on_sent(host: str) -> None:
         sent.append(host)
 
-    fetcher.on_request_sent = on_sent
+    fetcher = make_fetcher(on_request_sent=on_sent)
 
     async def scenario() -> FetchResult:
         try:
@@ -664,12 +676,38 @@ def test_each_request_is_reported_once_it_is_sent(httpserver: HTTPServer) -> Non
 
 def test_a_failing_send_report_does_not_fail_the_fetch(httpserver: HTTPServer) -> None:
     httpserver.expect_request("/page").respond_with_data("<p>hi</p>", content_type="text/html")
-    fetcher = make_fetcher()
+    raised: list[str] = []
 
     async def broken(host: str) -> None:
+        raised.append(host)
         raise OSError("valkey is down")
 
-    fetcher.on_request_sent = broken
+    fetcher = make_fetcher(on_request_sent=broken)
+
+    async def scenario() -> FetchResult:
+        try:
+            return await fetcher.fetch(httpserver.url_for("/page?token=secret"))
+        finally:
+            await fetcher.aclose()
+
+    with capture_logs() as logs:
+        result = run(scenario)
+
+    assert result.status == 200
+    assert raised == ["127.0.0.1"]  # the hook ran and raised
+    (line,) = [entry for entry in logs if entry["event"] == "request_sent_hook_failed"]
+    assert line["host"] == "127.0.0.1"
+    assert line["error_type"] == "OSError"
+    assert "secret" not in repr(line)
+
+
+def test_a_stalled_send_report_is_cut_short(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/page").respond_with_data("<p>hi</p>", content_type="text/html")
+
+    async def stalled(host: str) -> None:
+        await asyncio.sleep(30)
+
+    fetcher = make_fetcher(on_request_sent=stalled)
 
     async def scenario() -> FetchResult:
         try:
@@ -677,4 +715,37 @@ def test_a_failing_send_report_does_not_fail_the_fetch(httpserver: HTTPServer) -
         finally:
             await fetcher.aclose()
 
-    assert run(scenario).status == 200
+    started = time.monotonic()
+    with capture_logs() as logs:
+        result = run(scenario)
+
+    assert result.status == 200
+    assert time.monotonic() - started < 2  # the hook gets half a second
+    (line,) = [entry for entry in logs if entry["event"] == "request_sent_hook_failed"]
+    assert line["error_type"] == "TimeoutError"
+
+
+@pytest.mark.parametrize(
+    ("event", "reported"),
+    [
+        ("http11.send_request_headers.complete", True),
+        ("http2.send_request_headers.complete", True),  # HTTP/2 names its events like this
+        ("http11.send_request_headers.started", False),
+        ("http2.send_request_body.complete", False),
+        ("connection.connect_tcp.complete", False),
+    ],
+)
+def test_only_the_sent_headers_are_reported(event: str, reported: bool) -> None:
+    sent: list[str] = []
+
+    async def on_sent(host: str) -> None:
+        sent.append(host)
+
+    trace = _sent_tracer(on_sent, "https://Example.org/page?q=1")
+
+    async def report() -> None:
+        await trace(event, {})
+
+    asyncio.run(report())
+
+    assert sent == (["example.org"] if reported else [])

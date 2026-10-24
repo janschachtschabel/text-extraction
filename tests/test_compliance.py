@@ -1115,6 +1115,34 @@ def test_a_load_is_cancelled_with_its_last_waiter() -> None:
     assert asyncio.run(scenario()) == (True, 0)
 
 
+def test_a_cancelled_check_returns_only_after_its_request_has_ended() -> None:
+    checker, fetcher, _store = make_checker({})
+    started = asyncio.Event()
+    ended = asyncio.Event()
+
+    async def hanging_fetch(url: str, **options: Any) -> FetchResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)  # closing the connection takes a moment
+            ended.set()
+        raise AssertionError("unreachable")
+
+    fetcher.fetch = hanging_fetch  # type: ignore[method-assign]
+
+    async def scenario() -> bool:
+        task = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return ended.is_set()
+
+    # The caller gives its gate turn back right after: the request must be over by then.
+    assert asyncio.run(scenario()) is True
+
+
 def test_a_shared_load_survives_one_cancelled_waiter() -> None:
     checker, fetcher, _ = make_checker({})
     release = asyncio.Event()

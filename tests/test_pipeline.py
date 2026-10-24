@@ -24,6 +24,7 @@ from tests.fakes import (
     RefusingGate,
     fetched,
 )
+from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.convert import convert_html
@@ -33,7 +34,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
-from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
 
@@ -641,18 +642,66 @@ def test_two_pipelines_share_one_registry() -> None:
     assert registry.get_sample_value("text_extraction_extract_total", labels) == 2
 
 
-def test_the_pipelines_fetcher_reports_sent_requests_to_the_gate() -> None:
+def test_the_outbound_fetcher_reports_sent_requests_to_its_gate() -> None:
     valkey = FakeAsyncRedis()
-    fetcher = FakeFetcher({})
-    create_pipeline(make_settings(), valkey, cast(Fetcher, fetcher), CollectorRegistry())
+    gate, fetcher = create_outbound(make_settings(), valkey)
 
     async def send() -> object:
-        hook = fetcher.on_request_sent  # type: ignore[attr-defined]
+        hook = fetcher.on_request_sent
+        assert hook is not None
         await hook("Example.ORG")
         value: object = await valkey.get("out:last:{example.org}")
+        await fetcher.aclose()
         return value
 
+    assert fetcher.on_request_sent == gate.mark_sent
     assert asyncio.run(send()) is not None
+
+
+def test_the_api_pipeline_uses_the_gate_its_fetcher_reports_to() -> None:
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+
+    assert app.state.fetcher.on_request_sent == app.state.pipeline._gate.mark_sent
+
+
+def test_a_page_is_reported_sent_after_its_turn_has_confirmed_the_start(
+    httpserver: HTTPServer,
+) -> None:
+    for path in ("/robots.txt", "/ai.txt", "/.well-known/tdmrep.json"):
+        httpserver.expect_request(path).respond_with_data("", status=404)
+    httpserver.expect_request("/page").respond_with_data(ARTICLE, content_type="text/html")
+    settings = make_settings(fetch_allow_private_networks=True, outbound_min_delay_ms=100)
+    valkey = FakeAsyncRedis()
+    gate = DomainGate(valkey, settings)
+    confirmed: list[float] = []  # latest start the gate recorded, before each send
+    sent: list[float] = []  # latest start once the fetcher reported the send
+
+    async def last() -> float:
+        value = await valkey.get("out:last:{127.0.0.1}")
+        assert value is not None
+        return float(value)
+
+    async def on_sent(host: str) -> None:
+        confirmed.append(await last())
+        await gate.mark_sent(host)
+        sent.append(await last())
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, on_request_sent=on_sent)
+        pipeline = create_pipeline(settings, valkey, fetcher, CollectorRegistry(), gate=gate)
+        try:
+            return await pipeline.run(ExtractRequest(url=httpserver.url_for("/page")), USER)
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    assert envelope.status == "success"
+    assert len(sent) == 4  # three compliance files and the page
+    # The send never records a start earlier than the one its turn confirmed.
+    assert all(after >= before for before, after in zip(confirmed, sent, strict=True))
+    # The page went out at least the spacing after the last file.
+    assert confirmed[3] - sent[2] >= 0.1 - 0.005
 
 
 def test_redirect_target_is_the_final_url() -> None:

@@ -50,12 +50,11 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult
-from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
-from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.queue_metrics import job_duration_for
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.server import (
@@ -361,13 +360,13 @@ async def _serve(
 
 async def _run(settings: Settings) -> None:
     valkey = create_valkey(settings.valkey_url)
-    fetcher = Fetcher(settings)
+    gate, fetcher = create_outbound(settings, valkey)
     pool = ConversionPool(settings.convert_concurrency)
     registry = REGISTRY
     worker = Worker(
         settings,
         valkey,
-        create_pipeline(settings, valkey, fetcher, registry, pool),
+        create_pipeline(settings, valkey, fetcher, registry, pool, gate=gate),
         JobStore(valkey, settings),
         FairQueue(valkey, settings),
         registry,

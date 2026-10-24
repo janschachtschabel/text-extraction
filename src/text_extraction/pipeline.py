@@ -779,19 +779,29 @@ class Pipeline:
         )
 
 
+def create_outbound(settings: Settings, valkey: Redis) -> tuple[DomainGate, Fetcher]:
+    """The per-host gate in ``valkey`` and a fetcher that reports every request it sends (pages,
+    redirect hops, compliance files) to that gate, so the spacing counts from the real send. Pass
+    both to ``create_pipeline``; ``aclose`` the fetcher last."""
+    gate = DomainGate(valkey, settings)
+    return gate, Fetcher(settings, on_request_sent=gate.mark_sent)
+
+
 def create_pipeline(
     settings: Settings,
     valkey: Redis,
     fetcher: Fetcher,
     registry: CollectorRegistry,
     pool: ConversionPool | None = None,
+    *,
+    gate: DomainGate | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
 
-    Every request of ``fetcher`` (pages, redirect hops, compliance files) reports its send to the
-    gate, so the spacing counts from the real send."""
-    gate = DomainGate(valkey, settings)
-    fetcher.on_request_sent = gate.mark_sent
+    ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
+    without it a new gate is made, which then counts its spacing from the turn starts only."""
+    if gate is None:
+        gate = DomainGate(valkey, settings)
     return Pipeline(
         fetcher,
         gate,

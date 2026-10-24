@@ -20,10 +20,10 @@ Checks, all from the outside, on what the outbound gate guarantees (docs/configu
 - both jobs ``completed`` with every result and none ``failed``;
 - per host, at most ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` (2) requests in flight at once, over
   every request the host saw (pages and compliance files alike);
-- per host, page requests start at least ``OUTBOUND_MIN_DELAY_MS`` (200 ms) minus 10 % apart. A
-  page request starts a gate turn, unless the turn fetched the origin's compliance files first,
-  and the spacing lies between turns. The farm's clock reads a request when it arrives, a little
-  after the service sent it: hence the slack;
+- per host, page requests start at least ``OUTBOUND_MIN_DELAY_MS`` (200 ms) minus 10 % apart:
+  every page waits out the spacing since the host's latest real start, a cold turn's page also
+  after its own files. The farm's clock reads a request when it arrives, a little after the
+  service sent it: hence the slack;
 - per host, the compliance files (robots.txt, ``tdmrep.json``, ai.txt) never overlap each other,
   and the page of their turn starts after the last of them ended;
 - each worker counted items in its ``text_extraction_job_items_total``;
@@ -590,7 +590,8 @@ def main(argv: list[str] | None = None) -> int:
             raise RuntimeError("the Valkey database is not empty; the run needs a fresh one")
 
         farm_port = free_port()
-        farm = subprocess.Popen(  # noqa: S603 - this harness's own module
+        processes.start(
+            "farm",
             [
                 sys.executable,
                 "-m",
@@ -602,13 +603,14 @@ def main(argv: list[str] | None = None) -> int:
                 "--record",
                 str(record_path),
             ],
-            stdout=subprocess.PIPE,
-            stderr=(log_dir / "farm.log").open("wb"),
         )
-        assert farm.stdout is not None
-        processes.started.append(("farm", farm, farm.stdout))
-        if farm.stdout.readline().strip() != b"ready":
-            raise RuntimeError("the site farm did not start")
+        farm_log = log_dir / "farm.log"
+        _wait_until(
+            "the site farm",
+            lambda: b"ready" in farm_log.read_bytes(),
+            processes,
+            READY_TIMEOUT_SECONDS,
+        )
 
         keys, api_keys = _api_keys()
         env = {**os.environ, **SETTINGS, "VALKEY_URL": url, "API_KEYS": api_keys}

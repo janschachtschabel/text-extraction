@@ -430,6 +430,10 @@ class ComplianceChecker:
                 if not task.done():
                     task.cancel()
                     self._forget_load(key, task)
+                    # Wait until its request has ended: the caller gives its turn back next.
+                    # Nobody waits for its outcome any more, an error included.
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
 
     def _forget_load(self, key: str, task: asyncio.Task[_Entry]) -> None:
         if self._loading.get(key) is task:

@@ -22,7 +22,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import router as jobs_router
 from text_extraction.metadata import load_language_model
-from text_extraction.pipeline import create_pipeline
+from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
@@ -128,10 +128,10 @@ def create_public_app(
     app.state.settings = settings
     app.state.valkey = valkey
     app.state.rate_limiter = RateLimiter(valkey, settings.rate_limit_per_minute)
-    app.state.fetcher = Fetcher(settings)
+    gate, app.state.fetcher = create_outbound(settings, valkey)
     app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
     app.state.pipeline = create_pipeline(
-        settings, valkey, app.state.fetcher, registry, app.state.conversion_pool
+        settings, valkey, app.state.fetcher, registry, app.state.conversion_pool, gate=gate
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)

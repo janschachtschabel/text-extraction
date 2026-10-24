@@ -62,7 +62,8 @@ Coding follows the **Superpowers** skills, vendored in `.claude/skills/`
 
 Python 3.13, uv, FastAPI, pydantic-settings, httpx, Playwright (Chromium), Trafilatura,
 extruct, MarkItDown, Docling, Presidio + spaCy, youtube-transcript-api, yt-dlp,
-faster-whisper, own fair job queue on Valkey (Lua, leases), OpenAI SDK (OpenAI-compatible endpoints), FastMCP,
+faster-whisper, own fair job queue on Valkey (Lua, leases), OpenAI SDK
+(OpenAI-compatible endpoints), FastMCP,
 structlog, prometheus-fastapi-instrumentator, OpenTelemetry (B3 propagator).
 Quality: ruff, mypy, pytest.
 

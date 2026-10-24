@@ -3,8 +3,9 @@ address, all on one port.
 
     python -m tests.e2e.site_farm --port 18000 --hosts 10 --record farm-record.json
 
-Every host serves ``/p/<n>.html``, a 600-word article sent after a random 50-200 ms delay, and
-answers 404 to anything else (``robots.txt``, ``/.well-known/tdmrep.json``, ``ai.txt``). It
+Every host serves ``/p/<n>.html``, a 600-word article sent after a random 150-600 ms delay, and
+answers 404 after about 300 ms to anything else (``robots.txt``, ``/.well-known/tdmrep.json``,
+``ai.txt``): slow enough that turns overlap and cold turns share their file loads. It
 records, per host, the start and end (``time.monotonic()`` of this process) of every request it
 sees, whatever the path. On SIGTERM or SIGINT it writes the record as JSON to ``--record`` and
 exits. Once every server listens it prints ``ready`` on stdout.
@@ -28,8 +29,9 @@ from typing import Any
 
 _PAGE = re.compile(r"/p/(\d{1,6})\.html")
 _ARTICLE_WORDS = 600
-_MIN_DELAY_SECONDS = 0.05
-_MAX_DELAY_SECONDS = 0.2
+_MIN_DELAY_SECONDS = 0.15
+_MAX_DELAY_SECONDS = 0.6
+_FILE_DELAY_SECONDS = 0.3
 
 _TEXT = (
     "the school library opened a new reading room where pupils and teachers meet after "
@@ -104,6 +106,7 @@ class _Handler(BaseHTTPRequestHandler):
             time.sleep(random.uniform(_MIN_DELAY_SECONDS, _MAX_DELAY_SECONDS))  # noqa: S311
             status, body, kind = 200, article(int(match.group(1))), "text/html; charset=utf-8"
         else:
+            time.sleep(_FILE_DELAY_SECONDS)
             status, body, kind = 404, b"not found\n", "text/plain; charset=utf-8"
         self.send_response(status)
         self.send_header("Content-Type", kind)

@@ -237,6 +237,14 @@ the page, bounded by `OUTBOUND_MAX_WAIT_SECONDS`. So on a cold origin the page s
 after the last file (about 1 s more on first contact at the defaults, once per cache period), and
 two cold turns that shared one file load cannot send their pages back to back.
 
+Taking the turn before the files changes two answers on a cold origin (one whose files are not
+cached). A busy host (no lease or no slot within `OUTBOUND_MAX_WAIT_SECONDS`, an open circuit or a
+pause) now answers `rate_limited` or `connection_error` before robots.txt is read, where package
+2 could answer `blocked_by_robots` first; a page that robots.txt disallows is still answered
+`blocked_by_robots` without its own request and without the extra wait before the page. A
+cross-host redirect to a cold origin takes a turn at the target for its files, so even a target
+that robots.txt then blocks has used one spacing slot there.
+
 **Done when (package 3):** `tests/e2e/run_batch.py` (workflow `e2e`) runs 1,000 URLs (400 on one
 host, 600 over nine) plus a second client's 20 URLs on the busiest host, across two workers,
 against a local site farm. Both jobs complete with no failed item. Every host sees at most 2
