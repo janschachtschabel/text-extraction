@@ -5,7 +5,8 @@ keys share a slot and a Lua script can touch all of them:
 
 - ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON), state, created_at,
                           finished_at, total, done, success, partial, failed, lease_until,
-                          trace_id (of the request that created the job, when it had one)
+                          trace_id (of the request that created the job, when it had one),
+                          secrets (``1`` when the job was created with caller secrets)
 - ``job:{<id>}:urls``     list: the URLs in input order
 - ``job:{<id>}:results``  hash: item index -> ``Envelope[ExtractResult]`` as JSON
 - ``job:{<id>}:done``     bitmap: bit ``index`` is set once that item has its result
@@ -13,10 +14,27 @@ keys share a slot and a Lua script can touch all of them:
 All keys expire ``JOB_TTL_SECONDS`` after creation and again after completion. ``results`` and
 ``done`` do not exist before the first result; they take the remaining TTL of ``meta`` then.
 
+Browser jobs (package 4) may have these as well:
+
+- ``job:{<id>}:secrets``  string: the caller's ``BrowserSecrets`` as JSON (actions, cookies,
+                          headers; B6). Kept ``BROWSER_QUEUE_WAIT_SECONDS`` + the browser
+                          lease (``browser_lease_seconds``) + 60 seconds at most, and deleted by
+                          the worker once it has finished the item. No read of the job shows them.
+- ``job:{<id>}:drafts``   hash: item index -> the fast ``Envelope[ExtractResult]`` of an ``auto``
+                          item that moved to the browser (B5), with the job's remaining TTL;
+                          deleted by the browser worker once the item has its outcome
+- ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
+                          ``ARTIFACT_TTL_SECONDS``
+
+A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
+then; one with a screenshot is kept only as long as the screenshot (``shorten``).
+
 Times are epoch seconds from the injected clock (every pod needs a synchronised clock), stored
 as numbers and handed out as UTC datetimes, except ``lease_until``, which stays a number.
 """
 
+import math
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -27,6 +45,7 @@ from typing import Any, Literal
 from redis.asyncio import Redis
 
 from text_extraction.auth import Principal, Role
+from text_extraction.browser_options import BrowserSecrets
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
@@ -50,8 +69,13 @@ CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
 
-# The four keys of a job.
-_KINDS = ("meta", "urls", "results", "done")
+# The keys of a job: the four of every job, and those of browser jobs.
+_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts")
+
+# The files a job can have; ``delete`` removes them by name.
+SCREENSHOT_ARTIFACT = "screenshot.png"
+ARTIFACT_NAMES = (SCREENSHOT_ARTIFACT,)
+_ARTIFACT_NAME = re.compile(r"[a-z0-9_.-]{1,64}", re.ASCII)
 
 _NOT_FOUND = -1
 _OUT_OF_RANGE = -2
@@ -114,6 +138,30 @@ return 1
 """
 
 
+# KEYS = meta, drafts; ARGV = index, envelope JSON. Stores the draft with the remaining TTL of
+# the job; returns 1, or -1 when the job is gone (nothing is written).
+_PUT_DRAFT = """
+local remaining = redis.call('PTTL', KEYS[1])
+if remaining == -2 then
+  return -1
+end
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+if remaining > 0 then
+  redis.call('PEXPIRE', KEYS[2], remaining)
+end
+return 1
+"""
+
+# KEYS = meta, artifact; ARGV = data, ttl in seconds. Returns 1, or -1 when the job is gone.
+_PUT_ARTIFACT = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+  return -1
+end
+redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+return 1
+"""
+
+
 class JobLost(Exception):  # noqa: N818 - public name fixed by the plan
     """The keys of the job expired (or were deleted) while it was being written."""
 
@@ -140,11 +188,32 @@ class JobRecord:
     progress: JobProgress
     lease_until: float | None
     trace_id: str | None = None
+    # The job was created with caller secrets (B6); it stays set after they are gone, so the
+    # browser worker never renders the job without them.
+    has_secrets: bool = False
+
+
+def browser_lease_seconds(settings: Settings) -> float:
+    """How long the browser worker holds an item: two of the longest render deadline
+    (``BROWSER_TIMEOUT_SECONDS`` or ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``) plus 10 s."""
+    longest = max(settings.browser_timeout_seconds, settings.browser_unblock_timeout_seconds)
+    return 2 * longest + 10
 
 
 def _key(job_id: str, kind: str) -> str:
     """``job:{<id>}:<kind>`` with the id in literal braces: a cluster hash tag."""
     return f"job:{{{job_id}}}:{kind}"
+
+
+def valid_artifact_name(name: str) -> bool:
+    """Whether ``name`` can name a file of a job: ``[a-z0-9_.-]{1,64}``."""
+    return _ARTIFACT_NAME.fullmatch(name) is not None
+
+
+def _artifact_key(job_id: str, name: str) -> str:
+    if not valid_artifact_name(name):
+        raise ValueError(f"Invalid artifact name: {name!r}")
+    return _key(job_id, f"artifact:{name}")
 
 
 def _epoch(value: float) -> str:
@@ -169,8 +238,17 @@ class JobStore:
         self._ttl_seconds = settings.job_ttl_seconds
         self._item_max_bytes = settings.job_item_max_bytes
         self._clock = clock
+        # B6: long enough for a sync request's wait in the queue, then two renders or a worker
+        # that dies at the claim, whose item runs again once the browser lease has ended (M-2).
+        # The lease covers two of the longest render.
+        self._secrets_ttl_seconds = math.ceil(
+            settings.browser_queue_wait_seconds + browser_lease_seconds(settings) + 60
+        )
+        self._artifact_ttl_seconds = settings.artifact_ttl_seconds
         self._store_result = valkey.register_script(_STORE_RESULT)
         self._mark_running = valkey.register_script(_MARK_RUNNING)
+        self._put_draft = valkey.register_script(_PUT_DRAFT)
+        self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
 
     async def create(
         self,
@@ -180,9 +258,10 @@ class JobStore:
         urls: list[str],
         *,
         trace_id: str | None = None,
+        secrets: BrowserSecrets | None = None,
     ) -> str:
         """Store a new job in state ``queued`` and return its id. ``trace_id`` is the creating
-        request's."""
+        request's. ``secrets`` (B6) are stored apart from the job, for a short time only."""
         if not urls:
             raise ValueError("A job needs at least one URL")
         job_id = uuid.uuid4().hex
@@ -203,18 +282,94 @@ class JobStore:
         }
         if trace_id is not None:
             meta["trace_id"] = trace_id
+        stored_secrets = secrets if secrets is not None and not secrets.empty() else None
+        if stored_secrets is not None:
+            meta["secrets"] = "1"
         async with self._valkey.pipeline(transaction=True) as pipe:
             pipe.hset(meta_key, mapping=meta)
             for start in range(0, len(urls), _URL_CHUNK):
                 pipe.rpush(urls_key, *urls[start : start + _URL_CHUNK])
             pipe.expire(meta_key, self._ttl_seconds)
             pipe.expire(urls_key, self._ttl_seconds)
+            if stored_secrets is not None:
+                pipe.set(
+                    _key(job_id, "secrets"),
+                    stored_secrets.model_dump_json(),
+                    ex=min(self._secrets_ttl_seconds, self._ttl_seconds),
+                )
             await pipe.execute()
         return job_id
 
     async def delete(self, job_id: str) -> None:
-        """Remove all keys of the job. A job that is gone already is not an error."""
-        await self._valkey.delete(*(_key(job_id, kind) for kind in _KINDS))
+        """Remove all keys of the job, its secrets, drafts and files too. A job that is gone
+        already is not an error."""
+        await self._valkey.delete(
+            *(_key(job_id, kind) for kind in _KINDS),
+            *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
+        )
+
+    async def shorten(self, job_id: str, seconds: int) -> None:
+        """Let the job and its files expire within ``seconds`` (never later than they would)
+        and delete its secrets and drafts: a sync answer's screenshot job, which only the
+        artifact route still reads. A job that is gone already is not an error."""
+        async with self._valkey.pipeline(transaction=True) as pipe:
+            for kind in ("meta", "urls", "results", "done"):
+                pipe.expire(_key(job_id, kind), seconds, lt=True)
+            for name in ARTIFACT_NAMES:
+                pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
+            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"))
+            await pipe.execute()
+
+    async def secrets(self, job_id: str) -> BrowserSecrets:
+        """The caller's browser secrets of the job; empty when it had none or they are gone."""
+        raw = await self._valkey.get(_key(job_id, "secrets"))
+        if raw is None:
+            return BrowserSecrets()
+        return BrowserSecrets.model_validate_json(raw)
+
+    async def drop_secrets(self, job_id: str) -> None:
+        """Delete the job's secrets (the worker has finished its item)."""
+        await self._valkey.delete(_key(job_id, "secrets"))
+
+    async def put_draft(self, job_id: str, index: int, envelope: Envelope[ExtractResult]) -> None:
+        """Keep the fast result of item ``index`` while the browser renders it (B5); a later
+        draft of the item replaces it. Over ``JOB_ITEM_MAX_BYTES`` it is kept without its
+        content, as a result would be. Raises ``JobLost`` when the job is gone."""
+        outcome = await self._put_draft(
+            keys=[_key(job_id, "meta"), _key(job_id, "drafts")],
+            args=[index, self._encode(envelope)],
+        )
+        if outcome == _NOT_FOUND:
+            raise JobLost(job_id)
+
+    async def drop_draft(self, job_id: str, index: int) -> None:
+        """Delete the draft of item ``index`` (the item has its outcome)."""
+        await self._valkey.hdel(_key(job_id, "drafts"), str(index))
+
+    async def draft(self, job_id: str, index: int) -> Envelope[ExtractResult] | None:
+        """The draft of item ``index``, or None when there is none."""
+        raw = await self._valkey.hget(_key(job_id, "drafts"), str(index))
+        if raw is None:
+            return None
+        return Envelope[ExtractResult].model_validate_json(raw)
+
+    async def put_artifact(self, job_id: str, name: str, data: bytes) -> datetime:
+        """Store a file of the job for ``ARTIFACT_TTL_SECONDS`` and return when it expires.
+        ``name`` matches ``[a-z0-9_.-]{1,64}`` (``ValueError`` otherwise). Raises ``JobLost``
+        when the job is gone, so nothing is stored for it."""
+        key = _artifact_key(job_id, name)
+        expires = self._clock() + self._artifact_ttl_seconds
+        outcome = await self._put_artifact(
+            keys=[_key(job_id, "meta"), key], args=[data, self._artifact_ttl_seconds]
+        )
+        if outcome == _NOT_FOUND:
+            raise JobLost(job_id)
+        return datetime.fromtimestamp(expires, tz=UTC)
+
+    async def artifact(self, job_id: str, name: str) -> bytes | None:
+        """The file ``name`` of the job, or None when it is unknown or expired."""
+        raw = await self._valkey.get(_artifact_key(job_id, name))
+        return raw.encode() if isinstance(raw, str) else raw
 
     async def get(self, job_id: str) -> JobRecord | None:
         """The job's record, or None when it is unknown or expired."""
@@ -242,6 +397,7 @@ class JobStore:
             ),
             lease_until=float(lease_until) if lease_until is not None else None,
             trace_id=meta.get("trace_id"),
+            has_secrets=meta.get("secrets") == "1",
         )
 
     async def url(self, job_id: str, index: int) -> str | None:
@@ -274,6 +430,10 @@ class JobStore:
             )
             for position, url in enumerate(urls)
         ]
+
+    async def has_result(self, job_id: str, index: int) -> bool:
+        """Whether item ``index`` has its result already (its ``done`` bit is set)."""
+        return bool(await self._valkey.getbit(_key(job_id, "done"), index))
 
     async def write_result(
         self, job_id: str, index: int, envelope: Envelope[ExtractResult]
@@ -319,6 +479,10 @@ class JobStore:
         outcome: Any = await self._mark_running(keys=[_key(job_id, "meta")], args=[lease_until])
         if outcome == _NOT_FOUND:
             raise JobLost(job_id)
+
+    async def clear_lease(self, job_id: str) -> None:
+        """End the job's claim and keep it ``running`` (``mark_running`` without a lease)."""
+        await self.mark_running(job_id, lease_seconds=None)
 
     def _encode(self, envelope: Envelope[ExtractResult]) -> str:
         """The envelope as JSON; over the size limit, without the content."""

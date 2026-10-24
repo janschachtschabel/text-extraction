@@ -1,9 +1,21 @@
 """Request and result models of ``POST /v1/extract``."""
 
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from text_extraction.browser_options import (
+    ACTIONS_DESCRIPTION,
+    COOKIES_DESCRIPTION,
+    HEADERS_DESCRIPTION,
+    ActionList,
+    ArtifactRef,
+    BrowserSecrets,
+    CookieList,
+    Headers,
+    WaitSeconds,
+    check_cookie_domains,
+)
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -16,45 +28,91 @@ from text_extraction.tracing import current_trace_id
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
 
-class ExtractRequest(BaseModel, extra="forbid"):
+class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
     """Body of ``POST /v1/extract``."""
 
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to extract.")
-    mode: Literal["fast", "auto"] = Field(
+    mode: Literal["fast", "auto", "browser"] = Field(
         default="auto",
-        description="`fast`: HTTP only. `auto`: will also use a browser when the page needs one "
-        "(a later release). Both report `quality.browser_recommended`.",
+        description="`fast`: HTTP only. `auto`: HTTP first, then a browser when the page needs "
+        "one (a JavaScript shell, a challenge, a soft 404) and browser mode is enabled; the "
+        "better of both results is kept. Without a browser worker in time `auto` keeps the HTTP "
+        "result, with the warning `browser_unavailable`; while browser mode is off it never "
+        "uses a browser. `auto` with `actions`, `cookies`, `headers` or `screenshot` always "
+        "renders. `browser`: always renders the page in a browser; without a browser worker in "
+        "time it fails with "
+        "`timeout` (retryable). While browser mode is off, `browser` and the browser options "
+        "answer 400.",
     )
     format: OutputFormat = Field(default="markdown", description="Format of `content`.")
     metadata: bool = Field(default=True, description="Include the page's DOM metadata.")
     links: bool = Field(default=False, description="Include the page's links.")
     compliance: ComplianceMode | None = Field(
         default=None,
-        description="`enforce`, `report` or `ignore` (admins only); default: the operator's.",
+        description="`enforce`, `report` or `ignore` (admins only); default: the operator's. "
+        "`ignore` also allows unblock mode where the operator enabled it: a browser that gets "
+        "past bot protection, for sites that allowed extraction by contract.",
     )
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
     )
-    wait_seconds: float | None = Field(
+    wait_seconds: WaitSeconds = Field(
         default=None,
-        ge=0,
-        le=60,
         description="Without it, the request answers when the extraction ends (the unchanged "
         "default). With it, an extraction that is still running after this many seconds becomes "
         "a job: the answer is then 202 with the job's id and `status_url`, and "
         "`GET /v1/jobs/{id}` has the result. 0 hands over at once. Ignored when jobs are "
-        "disabled (`JOBS_ENABLED=false`).",
+        "disabled (`JOBS_ENABLED=false`). A request that waits for the browser when the time "
+        "is up answers 202 with the browser's job.",
     )
+    actions: ActionList = Field(
+        default=[], repr=False, description=f"{ACTIONS_DESCRIPTION} Not with `mode: fast`."
+    )
+    cookies: CookieList = Field(
+        default=[], repr=False, description=f"{COOKIES_DESCRIPTION} Not with `mode: fast`."
+    )
+    headers: Headers = Field(
+        default={}, repr=False, description=f"{HEADERS_DESCRIPTION} Not with `mode: fast`."
+    )
+    screenshot: bool = Field(
+        default=False,
+        description="Also capture a PNG screenshot (1920 px wide): `data.screenshot` then "
+        "references it for `GET /v1/jobs/{id}/artifacts/screenshot.png` (`ARTIFACT_TTL_SECONDS`). "
+        "Not with `mode: fast`.",
+    )
+    full_page: bool = Field(
+        default=True,
+        description="Screenshot of the whole page; `false`: the first viewport only. Not with "
+        "`mode: fast`.",
+    )
+
+    @model_validator(mode="after")
+    def _browser_options(self) -> Self:
+        if self.mode == "fast" and (
+            self.actions or self.cookies or self.headers or self.screenshot or not self.full_page
+        ):
+            raise ValueError(
+                "mode fast cannot take actions, cookies, headers, screenshot or full_page: "
+                "they need the browser (use mode auto or browser)"
+            )
+        check_cookie_domains(self.url, self.cookies)
+        return self
+
+    def secrets(self) -> BrowserSecrets:
+        """The options that may carry secrets."""
+        return BrowserSecrets(actions=self.actions, cookies=self.cookies, headers=self.headers)
 
 
 class Timings(BaseModel):
     """Milliseconds spent in this request. ``fetch_ms`` includes the wait for the host's turn;
-    ``convert_ms`` covers decoding, conversion and the steps after it."""
+    ``convert_ms`` covers decoding, conversion and the steps after it; ``render_ms`` is the time
+    in the browser (0 in fast mode)."""
 
     total_ms: int
     compliance_ms: int
     fetch_ms: int
     convert_ms: int
+    render_ms: int = 0  # browser: navigation, actions and settling; 0 in fast mode
 
 
 class ExtractResult(BaseModel):
@@ -64,7 +122,7 @@ class ExtractResult(BaseModel):
     final_url: str | None
     upstream_status: int | None  # of the response the content came from
     content_type: str | None
-    mode_used: Literal["fast"]
+    mode_used: Literal["fast", "browser"]
     attempts: int  # fetches of the target in this request
     language: str | None
     word_count: int
@@ -79,6 +137,9 @@ class ExtractResult(BaseModel):
     fingerprint: Fingerprint | None
     cache: CacheState
     warnings: list[str]
+    # Browser mode only; the defaults keep results cached before browser mode valid.
+    screenshot: ArtifactRef | None = None
+    unblocked: bool = False  # the page was loaded in unblock mode
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

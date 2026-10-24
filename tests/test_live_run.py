@@ -23,14 +23,20 @@ def ok_body(url: str) -> dict[str, object]:
 
 
 def run_with(
-    transport: httpx.MockTransport, urls: list[str], concurrency: int = 4
+    transport: httpx.MockTransport, urls: list[str], concurrency: int = 4, mode: str = "auto"
 ) -> tuple[list[Record], list[dict[str, object]]]:
     sink = io.StringIO()
 
     async def scenario() -> list[Record]:
         async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
             return await run_live.run(
-                urls, client, concurrency=concurrency, compliance="report", min_words=50, sink=sink
+                urls,
+                client,
+                concurrency=concurrency,
+                compliance="report",
+                min_words=50,
+                sink=sink,
+                mode=mode,
             )
 
     records = asyncio.run(scenario())
@@ -92,8 +98,53 @@ def test_run_sends_the_documented_request_and_writes_one_line_per_url() -> None:
         "error_code",
         "word_count",
         "compliance_decision",
+        "mode_used",
+        "warnings",
         "elapsed_ms",
     }
+
+
+def test_mode_option_is_sent_and_reported() -> None:
+    sent: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body["mode"])
+        if body["url"].endswith("/failed"):
+            return httpx.Response(
+                200, json={"status": "failed", "data": None, "error": {"code": "timeout"}}
+            )
+        used = "browser" if body["url"].endswith("/js") else "fast"
+        answer = ok_body(body["url"])
+        answer["data"] = {"word_count": 100, "mode_used": used, "compliance": {}}
+        return httpx.Response(200, json=answer)
+
+    urls = ["https://a.example/js", "https://a.example/plain", "https://b.example/failed"]
+    # The default is auto, the mode of the gate.
+    run_with(httpx.MockTransport(handler), urls[:1])
+    assert sent == ["auto"]
+
+    sent.clear()
+    records, lines = run_with(httpx.MockTransport(handler), urls, mode="browser")
+    assert sent == ["browser"] * 3
+    by_url = {r.url: r.mode_used for r in records}
+    assert by_url == {
+        "https://a.example/js": "browser",
+        "https://a.example/plain": "fast",
+        "https://b.example/failed": None,
+    }
+    assert {line["url"]: line["mode_used"] for line in lines} == by_url
+
+    text = summarize(records)
+    assert "| browser | 1 | 1 |" in text
+    assert "| fast | 1 | 1 |" in text
+    assert "| (none) | 1 | 0 |" in text
+
+    # The command line sets the same option; the default is auto.
+    assert run_live.parse_args([]).mode == "auto"
+    assert run_live.parse_args(["--mode", "fast"]).mode == "fast"
+    with pytest.raises(SystemExit):
+        run_live.parse_args(["--mode", "bogus"])
 
 
 def test_run_keeps_one_request_per_domain_in_flight_and_respects_concurrency() -> None:
@@ -153,18 +204,71 @@ def test_run_records_a_transport_failure_and_a_non_json_body_as_service_errors()
     assert by_domain["html.example"].http_status == 200
 
 
-def record(domain: str, bucket: str, decision: str | None = "allowed") -> Record:
+def record(
+    domain: str,
+    bucket: str,
+    decision: str | None = "allowed",
+    mode_used: str | None = "fast",
+    *,
+    status: str | None = "success",
+    error_code: str | None = None,
+    warnings: tuple[str, ...] = (),
+) -> Record:
     return Record(
         url=f"https://{domain}/",
         domain=domain,
         bucket=bucket,  # type: ignore[arg-type]
         http_status=200,
-        status="success",
-        error_code=None,
+        status=status,
+        error_code=error_code,
         word_count=100,
         compliance_decision=decision,
+        mode_used=mode_used,
+        warnings=list(warnings),
         elapsed_ms=1,
     )
+
+
+def test_run_records_the_warnings_of_the_answer() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = ok_body("x")
+        answer["data"] = {"word_count": 100, "warnings": ["browser_unavailable", 7]}
+        return httpx.Response(200, json=answer)
+
+    (only,), (line,) = run_with(httpx.MockTransport(handler), ["https://a.example/"])
+
+    assert only.warnings == ["browser_unavailable"]  # strings only
+    assert line["warnings"] == ["browser_unavailable"]
+
+
+def test_summary_counts_browser_unavailable_and_error_codes() -> None:
+    # M-7: the summary is the only per-cause signal of a CI run.
+    records = [
+        record("a.example", "ok", warnings=("browser_unavailable",)),
+        record("a.example", "too_short", status="partial", error_code="content_too_short"),
+        record("b.example", "connection_error", status="failed", error_code="timeout"),
+        record("b.example", "connection_error", status="failed", error_code="timeout"),
+        record("c.example", "connection_error", status="failed", error_code="dns_error"),
+        record("c.example", "ok", status="success", error_code=None),
+        record("d.example", "service_error", status=None, error_code="client_ReadTimeout"),
+    ]
+
+    text = summarize(records)
+
+    assert "Answers with the warning `browser_unavailable`: 1" in text
+    section = text.split("### Error codes")[1]
+    assert "| Code | URLs | Top domains |" in section
+    assert "| timeout | 2 | b.example 2 |" in section
+    assert "| content_too_short | 1 | a.example 1 |" in section
+    assert "| dns_error | 1 | c.example 1 |" in section
+    assert section.index("| timeout |") < section.index("| content_too_short |")
+    assert "client_ReadTimeout" not in section  # no answer, no envelope: counted as a bucket
+
+
+def test_summary_without_error_codes_has_no_error_table() -> None:
+    text = summarize([record("a.example", "ok")])
+    assert "Answers with the warning `browser_unavailable`: 0" in text
+    assert "### Error codes" not in text
 
 
 def test_ok_rate_counts_against_all_urls() -> None:

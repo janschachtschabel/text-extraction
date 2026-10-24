@@ -677,3 +677,24 @@ def test_pool_name_must_be_safe_in_a_key() -> None:
     settings = Settings(auth_mode="none")
     with pytest.raises(ValueError, match="pool"):
         FairQueue(FakeAsyncRedis(), settings, "x}y")
+
+
+@scenario
+async def test_enqueue_items_keeps_given_indexes() -> None:
+    valkey = await make_valkey()
+    queue = make_queue(valkey, Clock(), "browser")
+    await queue.enqueue_items(
+        JOB_A, "alice", [(7, "https://example.org/a"), (3, "https://other.example/b")]
+    )
+
+    first = await claim_item(queue)
+    second = await claim_item(queue)
+
+    assert {(item.job_id, item.index, item.domain, item.attempts) for item in (first, second)} == {
+        (JOB_A, 7, "example.org", 0),
+        (JOB_A, 3, "other.example", 0),
+    }
+    assert {first.client, second.client} == {"alice"}
+    assert (await queue.claim(LEASE)).item is None
+    # The other pool's queue is untouched.
+    assert (await make_queue(valkey, Clock()).counts()).pending == 0

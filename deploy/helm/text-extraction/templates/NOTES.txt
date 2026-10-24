@@ -22,10 +22,25 @@ The chart generated it and keeps it across upgrades. A render without a cluster 
 {{- end }}
 {{- if .Values.workers.extract.enabled }}
 
-Extract workers: {{ include "text-extraction.workerExtractName" . }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" .Values.workers.extract.autoscaling.hpa.enabled) .Values.workers.extract.autoscaling.keda.enabled }}); internal port 9090 on svc/{{ include "text-extraction.workerExtractInternalServiceName" . }}.
+Extract workers: {{ include "text-extraction.workerName" (list . "extract") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" .Values.workers.extract.autoscaling.hpa.enabled) .Values.workers.extract.autoscaling.keda.enabled }}); internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "extract") }}.
 {{- else }}
 
 No extract workers are deployed. Jobs are {{ ternary "enabled, so batches wait for workers that run elsewhere" "disabled: the batch and job routes answer 503" (eq (include "text-extraction.jobsEnabled" .) "true") }}.
+{{- end }}
+{{- if .Values.workers.browser.enabled }}
+
+Browser workers: {{ include "text-extraction.workerName" (list . "browser") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" .Values.workers.browser.autoscaling.hpa.enabled) .Values.workers.browser.autoscaling.keda.enabled }}), image {{ include "text-extraction.workerImage" (list . "browser") }}; internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "browser") }}.
+Browser mode is on (BROWSER_ENABLED=true in every pod); unblock mode is {{ ternary "on (admins with compliance \"ignore\" only)" "off" (eq (include "text-extraction.browserUnblockEnabled" .) "true") }}.
+{{- if ne (include "text-extraction.jobsEnabled" .) "true" }}
+
+WARNING: browser workers run but jobs are disabled on the API pods (JOBS_ENABLED=false). Screenshots
+  cannot be downloaded (the artifact route is a job route) and the API pods export no queue gauges.
+  Set jobs.enabled=true.
+{{- end }}
+{{- else }}
+
+No browser workers are deployed: browser mode is off (BROWSER_ENABLED=false), so mode "browser" and
+screenshots answer 400 and mode "auto" never uses a browser.
 {{- end }}
 
 {{- if and .Values.networkPolicy.enabled .Values.metrics.serviceMonitor.enabled (eq (toJson .Values.networkPolicy.metricsFrom) "[{\"podSelector\":{}}]") }}

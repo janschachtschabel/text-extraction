@@ -409,6 +409,28 @@ def test_lease_has_a_safety_expiry() -> None:
     assert ttl > 100  # the key outlives its last lease; it is only cleanup
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expiry"),
+    [
+        ({}, 120),  # the defaults' deadlines (25, 30, 60 s) are well within it
+        ({"browser_unblock_timeout_seconds": 180}, 210),
+        ({"browser_timeout_seconds": 120}, 150),
+        ({"extract_timeout_seconds": 300}, 330),
+    ],
+)
+def test_a_lease_outlives_the_longest_turn(overrides: dict[str, float], expiry: float) -> None:
+    # M-4: a render holds its turn for its whole deadline (B3); a lease that ran out earlier
+    # would let another turn on the same host in, past the per-host concurrency limit.
+    async def scenario() -> float:
+        valkey = FakeAsyncRedis()
+        gate = make_gate(FakeTime(), valkey, outbound_min_delay_ms=0, **overrides)
+        async with gate.slot(HOST):
+            members = await valkey.zrange(f"out:inflight:{{{HOST}}}", 0, -1, withscores=True)
+            return float(members[0][1])
+
+    assert asyncio.run(scenario()) == START + expiry
+
+
 def test_leaked_lease_frees_the_slot_after_its_expiry() -> None:
     async def scenario() -> tuple[int, int]:
         fake_time = FakeTime()

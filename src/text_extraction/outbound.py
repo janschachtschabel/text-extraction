@@ -53,8 +53,11 @@ from text_extraction.settings import Settings
 
 _log = structlog.get_logger(__name__)
 
-# A lease whose holder died frees itself after this long.
+# A lease whose holder died frees itself after this long at least; ...
 _LEASE_TTL_SECONDS = 120
+# ... and never before the longest deadline a turn can be held for (a render holds its turn for
+# its whole deadline, B3), plus this margin.
+_LEASE_MARGIN_SECONDS = 30
 # Failures in a row count only while they are recent.
 _FAILURE_TTL_SECONDS = 600
 # How often a request that waits for a lease asks again.
@@ -224,6 +227,19 @@ def _key(kind: str, host: str) -> str:
     return f"out:{kind}:{{{host}}}"
 
 
+def lease_ttl_seconds(settings: Settings) -> float:
+    """How long a turn's lease lasts: past the longest deadline of an extraction that holds a
+    turn (``EXTRACT_TIMEOUT_SECONDS``, ``BROWSER_TIMEOUT_SECONDS``,
+    ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``), so it never frees a turn that is still held, and at
+    least 120 s. Only a holder that died waits it out."""
+    longest = max(
+        settings.extract_timeout_seconds,
+        settings.browser_timeout_seconds,
+        settings.browser_unblock_timeout_seconds,
+    )
+    return max(_LEASE_TTL_SECONDS, longest + _LEASE_MARGIN_SECONDS)
+
+
 class DomainGate:
     """Limits our outbound traffic per target host, across all pods."""
 
@@ -244,6 +260,7 @@ class DomainGate:
         self._mark_sent = valkey.register_script(_MARK_SENT)
         self._acquire_lease_script = valkey.register_script(_ACQUIRE_LEASE)
         self._extend_pause = valkey.register_script(_EXTEND_PAUSE)
+        self._lease_ttl = lease_ttl_seconds(settings)
         # Releases that outlive a cancelled caller; kept so the tasks are not garbage collected.
         self._releases: set[asyncio.Task[None]] = set()
 
@@ -357,8 +374,8 @@ class DomainGate:
                     now,
                     limit,
                     token,
-                    now + _LEASE_TTL_SECONDS,
-                    (_LEASE_TTL_SECONDS + _TTL_MARGIN_SECONDS) * 1000,
+                    now + self._lease_ttl,
+                    math.ceil((self._lease_ttl + _TTL_MARGIN_SECONDS) * 1000),
                 ],
             )
             if int(granted):

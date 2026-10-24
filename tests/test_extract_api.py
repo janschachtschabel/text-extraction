@@ -5,6 +5,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -20,14 +21,18 @@ from structlog.testing import capture_logs
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
+from text_extraction.browser_dispatch import Handover as BrowserHandover
+from text_extraction.browser_options import ArtifactRef, BrowserSecrets, EvaluateAction
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_api import _store_result, extract
+from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
+from text_extraction.extract_api import _in_browser, _store_result, extract
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
-from text_extraction.fetch import Fetcher
+from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobRecord, JobStore
 from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 
 USER_KEY = "user-key-0123456789-raw-secret"
@@ -128,11 +133,19 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "fingerprint",
         "cache",
         "warnings",
+        "screenshot",
+        "unblocked",
     }
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
     assert data["upstream_status"] == 200
-    assert set(data["timings"]) == {"total_ms", "compliance_ms", "fetch_ms", "convert_ms"}
+    assert set(data["timings"]) == {
+        "total_ms",
+        "compliance_ms",
+        "fetch_ms",
+        "convert_ms",
+        "render_ms",
+    }
     assert data["compliance"]["decision"] == "allowed"
     assert {"url", "text", "kind"} <= set(data["links"][0])
 
@@ -703,6 +716,7 @@ def test_cancelled_hand_over_leaves_nothing_behind(
             job_store=store,
             background=app.state.background,
             memory_guard=app.state.memory_guard,
+            browser_dispatcher=None,
         )
         request = cast(Request, SimpleNamespace(app=SimpleNamespace(state=state)))
         principal = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -799,3 +813,797 @@ def test_hand_over_stores_the_trace_id_of_its_request(handover: Callable[..., Ha
 
     assert record is not None
     assert record.trace_id == "trace-h"
+
+
+# --- browser dispatch (package 4) -------------------------------------------------------------
+#
+# The API pod never renders: it queues the page on pool `browser` and waits for the browser
+# worker's result. `FakeBrowserWorker` stands in for that worker: a thread with its own event loop
+# on the same fakeredis server that claims from `browser`, notes what it saw and writes a result.
+
+ADMIN_KEY = "admin-key-0123456789-raw-secret"
+ADMIN_AUTH = {"Authorization": f"Bearer {ADMIN_KEY}"}
+SHELL_WITH_WORDS = (
+    "<html><head><title>Learning app</title></head><body><div id='root'></div>"
+    "<p>The learning app about photosynthesis loads here in a moment, please wait for it.</p>"
+    "<script src='/app.js'></script></body></html>"
+)
+CHALLENGE_PAGE = """<!doctype html><html><head><title>Just a moment...</title></head>
+<body><p>Checking your browser before accessing the site.</p></body></html>"""
+# Markers, not credentials: the tests look for them where they must never show up.
+HEADER_SECRET = "header-secret-4711"  # noqa: S105
+COOKIE_SECRET = "cookie-secret-4711"  # noqa: S105
+ACTION_SECRET = "typed-secret-4711"  # noqa: S105
+SECRET_BODY: dict[str, Any] = {
+    "headers": {"Authorization": f"Bearer {HEADER_SECRET}"},
+    "cookies": [{"name": "session", "value": COOKIE_SECRET}],
+    "actions": [{"type": "type", "selector": "#q", "text": ACTION_SECRET}],
+}
+
+
+def browser_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
+        "auth_mode": "api_key",
+        "api_keys": [
+            {
+                "name": "alice",
+                "role": "user",
+                "sha256": hashlib.sha256(USER_KEY.encode()).hexdigest(),
+            },
+            {
+                "name": "root",
+                "role": "admin",
+                "sha256": hashlib.sha256(ADMIN_KEY.encode()).hexdigest(),
+            },
+        ],
+        "outbound_min_delay_ms": 0,
+        "browser_enabled": True,
+        "browser_queue_wait_seconds": 5,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def rendered_envelope(url: str = PAGE, *, words: int = 400) -> Envelope[ExtractResult]:
+    """What the browser worker would store for a page it rendered well."""
+    return Envelope[ExtractResult].model_validate(
+        {
+            "status": "success",
+            "data": {
+                "url": url,
+                "final_url": url,
+                "upstream_status": 200,
+                "content_type": "text/html",
+                "mode_used": "browser",
+                "attempts": 1,
+                "language": "en",
+                "word_count": words,
+                "title": "Rendered",
+                "format": "markdown",
+                "content": "Rendered text.",
+                "quality": None,
+                "timings": {
+                    "total_ms": 7,
+                    "compliance_ms": 1,
+                    "fetch_ms": 0,
+                    "convert_ms": 2,
+                    "render_ms": 4,
+                },
+                "compliance": {"mode": "enforce"},
+                "metadata": None,
+                "links": None,
+                "fingerprint": None,
+                "cache": "miss",
+                "warnings": [],
+            },
+        }
+    )
+
+
+@dataclass
+class Seen:
+    """One item the fake browser worker took: its job and what the job carried for it."""
+
+    job: JobRecord
+    client: str
+    secrets: BrowserSecrets
+    draft: Envelope[ExtractResult] | None
+
+
+class FakeBrowserWorker:
+    """Claims items of pool ``browser`` and writes ``respond(seen)`` as their result. While
+    ``hold`` is clear it claims but does not write yet."""
+
+    def __init__(
+        self,
+        server: FakeServer,
+        settings: Settings,
+        respond: Callable[[Seen], Envelope[ExtractResult]] | None = None,
+        *,
+        artifact: bytes | None = None,
+    ) -> None:
+        self.server = server
+        self.settings = settings
+        self.respond = respond or (lambda seen: rendered_envelope())
+        self.artifact = artifact
+        self.seen: list[Seen] = []
+        self.hold = threading.Event()
+        self.hold.set()
+        self.claimed = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=lambda: asyncio.run(self._run()), daemon=True)
+
+    def __enter__(self) -> "FakeBrowserWorker":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.hold.set()
+        self._stop.set()
+        self._thread.join(10)
+
+    async def _run(self) -> None:
+        valkey = FakeAsyncRedis(server=self.server)
+        store = JobStore(valkey, self.settings)
+        queue = FairQueue(valkey, self.settings, "browser")
+        while not self._stop.is_set():
+            claim = await queue.claim(60)
+            if claim.item is None:
+                await asyncio.sleep(0.01)
+                continue
+            item = claim.item
+            job = await store.get(item.job_id)
+            if job is None:  # abandoned by the API: dropped like the real worker does
+                await queue.complete(item)
+                continue
+            if job.state == "queued":
+                await store.mark_running(item.job_id)
+            seen = Seen(job, item.client, await store.secrets(job.id), await store.draft(job.id, 0))
+            self.seen.append(seen)
+            self.claimed.set()
+            while not self.hold.is_set():  # noqa: ASYNC110 - set by another thread
+                await asyncio.sleep(0.01)
+            envelope = self.respond(seen)
+            if self.artifact is not None:
+                expires = await store.put_artifact(job.id, SCREENSHOT_ARTIFACT, self.artifact)
+                assert envelope.data is not None
+                envelope.data.screenshot = ArtifactRef(
+                    name=SCREENSHOT_ARTIFACT,
+                    url=f"/v1/jobs/{job.id}/artifacts/{SCREENSHOT_ARTIFACT}",
+                    content_type="image/png",
+                    bytes=len(self.artifact),
+                    width=1920,
+                    height=1080,
+                    expires_at=expires,
+                )
+            await store.drop_secrets(job.id)
+            await store.write_result(job.id, item.index, envelope)
+            await queue.complete(item)
+
+
+class BrowserCase:
+    """A public app with browser mode on, on a fakeredis server, with a fake fetcher."""
+
+    def __init__(self, answers: dict[str, Any] | None = None, **overrides: Any) -> None:
+        self.settings = browser_settings(**overrides)
+        self.server = FakeServer()
+        self.registry = CollectorRegistry()
+        valkey = FakeAsyncRedis(server=self.server)
+        self.app = create_public_app(self.settings, valkey, self.registry)
+        self.fetcher = FakeFetcher(answers or {PAGE: fetched(body=ARTICLE)})
+        self.real = create_pipeline(
+            self.settings, valkey, cast(Fetcher, self.fetcher), self.registry
+        )
+        self.app.state.pipeline = self.real
+
+    def worker(self, **kwargs: Any) -> FakeBrowserWorker:
+        return FakeBrowserWorker(self.server, self.settings, **kwargs)
+
+    def keys(self, pattern: str) -> list[str]:
+        async def find() -> list[str]:
+            valkey = FakeAsyncRedis(server=self.server)
+            return sorted(
+                key.decode() if isinstance(key, bytes) else key
+                for key in await valkey.keys(pattern)
+            )
+
+        return asyncio.run(find())
+
+    def ttl(self, key: str) -> int:
+        async def find() -> int:
+            return int(await FakeAsyncRedis(server=self.server).ttl(key))
+
+        return asyncio.run(find())
+
+    def record(self, job_id: str) -> JobRecord | None:
+        return asyncio.run(JobStore(FakeAsyncRedis(server=self.server), self.settings).get(job_id))
+
+    def wait_for_job(self, client: TestClient, job_id: str, auth: dict[str, str] = AUTH) -> Any:
+        deadline = time.monotonic() + 30
+        while True:
+            body = client.get(f"/v1/jobs/{job_id}", headers=auth).json()
+            if body["data"]["state"] == "completed" or time.monotonic() > deadline:
+                return body
+            time.sleep(0.01)
+
+    def wait_for_idle(self) -> None:
+        deadline = time.monotonic() + 30
+        while self.app.state.background and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"mode": "browser"},
+        {"screenshot": True},
+        {"actions": [{"type": "scroll"}]},
+        {"headers": {"x-token": "t"}},
+    ],
+)
+def test_browser_mode_disabled_is_400(options: dict[str, Any]) -> None:
+    case = BrowserCase(browser_enabled=False)
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, **options}, headers=AUTH)
+
+        assert response.status_code == 400
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["error"]["code"] == "invalid_request"
+        assert body["error"]["message"] == "Browser mode is not enabled on this service."
+        assert case.keys("job*") == []
+        assert case.fetcher.calls == []
+
+
+def test_evaluate_by_user_is_403() -> None:
+    case = BrowserCase()
+    evaluate = {"actions": [{"type": "evaluate", "script": "document.title = 'x'"}]}
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", **evaluate}, headers=AUTH
+        )
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "forbidden"
+        assert case.keys("job*") == []
+
+        allowed = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", **evaluate}, headers=ADMIN_AUTH
+        )
+        assert allowed.status_code == 200
+        assert allowed.json()["data"]["mode_used"] == "browser"
+        assert worker.seen[0].job.owner_role == "admin"
+        assert isinstance(worker.seen[0].secrets.actions[0], EvaluateAction)
+
+
+def test_browser_mode_returns_the_rendered_result() -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "mode": "browser", "format": "text"},
+            headers={**AUTH, "x-client-trace-id": "trace-b"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert body["trace_id"] == "trace-b"
+        assert body["data"]["mode_used"] == "browser"
+        assert body["data"]["timings"]["total_ms"] >= 7
+        assert case.fetcher.calls == []  # the API pod fetched nothing itself
+        seen = worker.seen[0]
+        assert (seen.job.kind, seen.job.owner, seen.client) == ("extract", "alice", "alice#live")
+        assert (seen.job.options.mode, seen.job.options.format) == ("browser", "text")
+        assert seen.job.trace_id == "trace-b"
+        assert seen.draft is None
+
+
+def test_auto_escalates_and_returns_browser_result() -> None:
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)})
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert body["data"]["mode_used"] == "browser"
+        assert BROWSER_UNAVAILABLE_WARNING not in body["data"]["warnings"]
+        seen = worker.seen[0]
+        assert seen.job.options.mode == "auto"
+        assert seen.draft is not None  # the fast result, for the worker to compare (B5)
+        assert seen.draft.status == "partial"
+        assert seen.draft.data is not None
+        assert seen.draft.data.mode_used == "fast"
+        assert len(case.fetcher.page_calls()) == 1
+
+
+@pytest.mark.parametrize("stored", ["hit", "revalidated"])
+def test_a_stored_fast_winner_is_answered_without_a_browser_job(stored: str) -> None:
+    async def answer(validators: Validators | None) -> FetchResult:
+        if validators is not None and validators.etag == '"v1"':
+            return fetched(body=b"", status=304, headers={"etag": '"v1"'})
+        return fetched(body=SHELL_WITH_WORDS, headers={"etag": '"v1"'})
+
+    ttl = 3600 if stored == "hit" else 0
+    case = BrowserCase({PAGE: answer}, result_cache_ttl_seconds=ttl)
+    # The entry the browser worker stores when the fast result wins (B5): mode_used fast,
+    # browser_recommended true. A pipeline with browser mode off stores the same one.
+    seeding = create_pipeline(
+        browser_settings(browser_enabled=False, result_cache_ttl_seconds=ttl),
+        FakeAsyncRedis(server=case.server),
+        cast(Fetcher, case.fetcher),
+        CollectorRegistry(),
+    )
+    seed = asyncio.run(seeding.run(ExtractRequest(url=PAGE), USER))
+    assert seed.data is not None
+    assert seed.data.quality is not None
+    assert seed.data.quality.browser_recommended
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
+
+        body = response.json()
+        assert body["status"] == "partial"
+        assert body["data"]["cache"] == stored
+        assert body["data"]["mode_used"] == "fast"
+        assert BROWSER_UNAVAILABLE_WARNING not in body["data"]["warnings"]
+        assert worker.seen == []
+        assert case.keys("job*") == []
+
+
+def test_auto_with_browser_options_renders_without_a_fast_phase() -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "headers": {"x-token": "t"}}, headers=AUTH
+        )
+
+        assert response.json()["data"]["mode_used"] == "browser"
+        assert case.fetcher.calls == []  # R8: always rendered, like a screenshot
+        assert worker.seen[0].draft is None
+        assert worker.seen[0].secrets.headers == {"x-token": "t"}
+
+
+def test_auto_without_worker_returns_fast_with_browser_unavailable() -> None:
+    # Review Focus 4: no browser worker runs.
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}, browser_queue_wait_seconds=0.3)
+    with TestClient(case.app) as client:
+        started = time.monotonic()
+        response = client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
+        took = time.monotonic() - started
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "partial"  # the fast result's own status
+        data = body["data"]
+        assert data["mode_used"] == "fast"
+        assert data["warnings"] == [BROWSER_UNAVAILABLE_WARNING]
+        # Never compared or stored, so not shown: the browser may answer the next request.
+        assert data["fingerprint"] is None
+        assert data["content"]
+        assert took >= 0.3
+        assert case.keys("job*") == []  # the job is gone
+        assert case.keys("fp:*") == []
+        assert case.keys("res:*") == []
+
+
+@pytest.mark.parametrize(
+    "options", [{"mode": "browser"}, {"cookies": [{"name": "a", "value": "b"}]}]
+)
+def test_browser_mode_without_worker_is_timeout(options: dict[str, Any]) -> None:
+    case = BrowserCase(browser_queue_wait_seconds=0.2)
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, **options}, headers=AUTH)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["error"]["code"] == "timeout"
+        assert body["error"]["retryable"] is True
+        assert body["data"]["mode_used"] == "browser"
+        assert body["data"]["url"] == PAGE
+        assert case.keys("job*") == []
+
+
+def test_wait_seconds_during_browser_phase_answers_202_with_browser_job() -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.3}, headers=AUTH
+        )
+
+        assert response.status_code == 202
+        accepted = response.json()["data"]
+        assert worker.claimed.wait(10)
+        assert accepted["id"] == worker.seen[0].job.id  # the dispatched job, no P1 job
+        assert (accepted["kind"], accepted["total"]) == ("extract", 1)
+        assert accepted["state"] in {"queued", "running"}
+        assert len(case.keys("job:*:meta")) == 1
+
+        worker.hold.set()
+        final = case.wait_for_job(client, accepted["id"])
+        assert final["status"] == "success"
+        assert final["data"]["items"][0]["result"]["data"]["mode_used"] == "browser"
+        case.wait_for_idle()
+        assert case.app.state.background == set()
+        assert sample(cast(Handover, case), "jobs_created_total") == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "answers"),
+    [
+        ({"mode": "browser"}, None),
+        ({"cookies": [{"name": "s", "value": "v"}]}, None),  # secrets
+        ({}, {PAGE: fetched(body=SHELL_WITH_WORDS)}),  # escalated, with its draft
+        ({"mode": "browser", "wait_seconds": 30}, None),  # answered within wait_seconds
+    ],
+    ids=["browser", "secrets", "escalated", "within-wait"],
+)
+def test_a_sync_browser_answer_leaves_no_job_behind(
+    body: dict[str, Any], answers: dict[str, Any] | None
+) -> None:
+    # I-3: nobody can read the job of an answer given to the caller; it must not stay 24 h.
+    case = BrowserCase(answers)
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": PAGE, **body}, headers=AUTH)
+
+        assert response.status_code == 200
+        assert response.json()["data"]["mode_used"] == "browser"
+        assert len(worker.seen) == 1
+        assert case.keys("job*") == []
+
+
+def test_a_sync_screenshot_job_lives_only_as_long_as_its_artifact() -> None:
+    case = BrowserCase(artifact_ttl_seconds=900)
+    with TestClient(case.app) as client, case.worker(artifact=b"\x89PNG") as worker:
+        response = client.post("/v1/extract", json={"url": PAGE, "screenshot": True}, headers=AUTH)
+
+        assert response.status_code == 200
+        job_id = worker.seen[0].job.id
+        assert 0 < case.ttl(f"job:{{{job_id}}}:meta") <= 900
+        assert case.keys(f"job:{{{job_id}}}:drafts") == []
+        url = response.json()["data"]["screenshot"]["url"]
+        assert client.get(url, headers=AUTH).status_code == 200
+
+
+def test_a_202_browser_job_keeps_the_job_ttl() -> None:
+    case = BrowserCase(job_ttl_seconds=86400, artifact_ttl_seconds=900)
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0}, headers=AUTH
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        worker.hold.set()
+        final = case.wait_for_job(client, job_id)
+        assert final["status"] == "success"
+        case.wait_for_idle()
+
+        assert case.ttl(f"job:{{{job_id}}}:meta") > 86000
+
+
+def test_a_result_read_while_the_route_hands_over_keeps_the_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The flow reads the result just as wait_seconds runs out: the route answers 202 with the
+    # job, so the flow must not delete it after all.
+    case = BrowserCase()
+    store: JobStore = case.app.state.job_store
+    real_items = store.items
+
+    async def slow_items(job_id: str, offset: int, limit: int) -> Any:
+        found = await real_items(job_id, offset, limit)
+        await asyncio.sleep(0.6)  # the route detaches meanwhile
+        return found
+
+    monkeypatch.setattr(store, "items", slow_items)
+    with TestClient(case.app) as client, case.worker():
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.3}, headers=AUTH
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        case.wait_for_idle()
+
+        assert case.record(job_id) is not None
+        final = case.wait_for_job(client, job_id)
+        assert final["data"]["items"][0]["result"]["data"]["mode_used"] == "browser"
+
+
+def test_wait_seconds_zero_for_a_browser_request_answers_202() -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0}, headers=AUTH
+        )
+
+        assert response.status_code == 202
+        assert worker.claimed.wait(10)
+        assert response.json()["data"]["id"] == worker.seen[0].job.id
+        assert len(case.keys("job:*:meta")) == 1
+        worker.hold.set()
+        final = case.wait_for_job(client, response.json()["data"]["id"])
+        assert final["data"]["items"][0]["result"]["status"] == "success"
+
+
+def test_valkey_error_after_the_202_never_deletes_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The poll in flight when wait_seconds runs out fails: the job was handed to the caller
+    # (202), so the flow must leave it to the worker instead of deleting it.
+    case = BrowserCase()
+    store: JobStore = case.app.state.job_store
+    real_get = store.get
+    calls = 0
+
+    async def get_failing_once(job_id: str) -> JobRecord | None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the dispatcher's second poll, still running at the 202
+            await asyncio.sleep(0.6)
+            raise RedisConnectionError("valkey blinked")
+        return await real_get(job_id)
+
+    monkeypatch.setattr(store, "get", get_failing_once)
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.3}, headers=AUTH
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        case.wait_for_idle()  # the flow has seen the error and ended
+
+        assert case.record(job_id) is not None
+        worker.hold.set()
+        final = case.wait_for_job(client, job_id)
+        assert final["status"] == "success"
+        assert final["data"]["items"][0]["result"]["data"]["mode_used"] == "browser"
+
+
+def test_abandon_in_progress_answers_the_fallback_not_a_202(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The flow gave up and is deleting its job when wait_seconds runs out: no 202 with that job.
+    case = BrowserCase(browser_queue_wait_seconds=0.1)
+    store: JobStore = case.app.state.job_store
+    real_delete = store.delete
+
+    async def slow_delete(job_id: str) -> None:
+        await asyncio.sleep(0.6)
+        await real_delete(job_id)
+
+    monkeypatch.setattr(store, "delete", slow_delete)
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.4}, headers=AUTH
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert (body["status"], body["error"]["code"]) == ("failed", "timeout")
+        assert case.keys("job*") == []
+
+
+def test_handover_during_fast_phase_then_escalation_writes_into_p1_job() -> None:
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)})
+    gated = GatedPipeline(case.real)
+    case.app.state.pipeline = gated
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        record = case.record(job_id)
+        assert record is not None
+        assert record.lease_until is not None  # the P1 lease of the fast phase
+
+        gated.release.set()  # the fast result needs the browser: it escalates into this job
+        assert worker.claimed.wait(10)
+        seen = worker.seen[0]
+        assert seen.job.id == job_id
+        assert seen.draft is not None
+        assert seen.draft.status == "partial"
+        assert seen.job.lease_until is None  # cleared: the browser has its own time
+
+        case.wait_for_idle()  # the extraction stored nothing: the worker writes item 0
+        view = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()["data"]
+        assert (view["state"], view["items"][0]["state"]) == ("running", "pending")
+
+        worker.hold.set()
+        final = case.wait_for_job(client, job_id)
+        assert final["status"] == "success"
+        assert final["data"]["items"][0]["result"]["data"]["mode_used"] == "browser"
+        assert len(case.keys("job:*:meta")) == 1
+
+
+def test_handover_then_escalation_without_worker_keeps_the_job_waiting() -> None:
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)})
+    gated = GatedPipeline(case.real)
+    case.app.state.pipeline = gated
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        job_id = response.json()["data"]["id"]
+        gated.release.set()
+        case.wait_for_idle()
+
+        async def lease_is_cleared() -> None:  # so it can never run out (P1's lost view)
+            valkey = FakeAsyncRedis(server=case.server)
+            assert await valkey.hget(f"job:{{{job_id}}}:meta", "lease_until") is None
+
+        asyncio.run(lease_is_cleared())
+        view = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+        # The lost view does not apply: the item waits in the browser queue for a worker.
+        assert view["data"]["state"] == "running"
+        assert view["data"]["items"][0]["state"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("auth", "compliance", "unblock", "escalates"),
+    [
+        (ADMIN_AUTH, "ignore", True, True),
+        (ADMIN_AUTH, "ignore", False, False),
+        (ADMIN_AUTH, "enforce", True, False),
+        (AUTH, "enforce", True, False),
+    ],
+)
+def test_bot_wall_escalates_only_for_admin_ignore_with_unblock(
+    auth: dict[str, str], compliance: str, unblock: bool, escalates: bool
+) -> None:
+    # Review Focus 5: a 403 challenge answer goes to the browser only for unblock mode.
+    case = BrowserCase(
+        {PAGE: fetched(body=CHALLENGE_PAGE, status=403)}, browser_unblock_enabled=unblock
+    )
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "compliance": compliance}, headers=auth
+        )
+
+        data = response.json()["data"]
+        if escalates:
+            assert data["mode_used"] == "browser"
+            assert worker.seen[0].job.options.compliance == "ignore"
+            assert worker.seen[0].job.owner_role == "admin"
+        else:
+            assert response.json()["error"]["code"] == "target_http_error"
+            assert data["mode_used"] == "fast"
+            assert BROWSER_UNAVAILABLE_WARNING not in data["warnings"]
+            assert worker.seen == []
+            assert case.keys("job*") == []
+
+
+def test_secrets_never_in_job_view_or_logs() -> None:
+    # Review Focus 5: headers, cookies and action text reach the worker and nothing else.
+    case = BrowserCase()
+    with TestClient(case.app) as client, case.worker() as worker, capture_logs() as logs:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "mode": "browser", "wait_seconds": 0, **SECRET_BODY},
+            headers=AUTH,
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        assert worker.claimed.wait(10)
+        running = client.get(f"/v1/jobs/{job_id}", headers=AUTH).text
+        worker.hold.set()
+        case.wait_for_job(client, job_id)
+        done = client.get(f"/v1/jobs/{job_id}", headers=AUTH).text
+
+        secrets = worker.seen[0].secrets
+        assert secrets.headers == {"authorization": f"Bearer {HEADER_SECRET}"}
+        assert secrets.cookies[0].value == COOKIE_SECRET
+        assert any(log["event"] == "browser_job_queued" for log in logs)  # logs were captured
+        logged = json.dumps(logs, default=str)
+        for text in (response.text, running, done, logged):
+            for secret in (HEADER_SECRET, COOKIE_SECRET, ACTION_SECRET):
+                assert secret not in text
+        assert "secret-token" not in logged  # nor the URL's query (the job view shows the URL)
+        assert case.keys("job:*:secrets") == []  # the worker dropped them
+
+
+def test_fast_mode_and_auto_with_browser_disabled_unchanged() -> None:
+    for case, body in [
+        (BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}, browser_enabled=False), {}),
+        (BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}), {"mode": "fast"}),
+    ]:
+        with TestClient(case.app) as client, case.worker() as worker:
+            response = client.post("/v1/extract", json={"url": PAGE, **body}, headers=AUTH)
+
+            assert response.status_code == 200
+            data = response.json()["data"]
+            assert response.json()["status"] == "partial"
+            assert data["mode_used"] == "fast"
+            assert data["warnings"] == []
+            assert data["fingerprint"] is not None
+            assert worker.seen == []
+            assert case.keys("job*") == []
+            assert case.keys("q:*") == []
+
+
+class AbandoningDispatcher:
+    """A dispatcher whose wait gives up (None) or fails, and whose abandon takes a while."""
+
+    def __init__(self, wait_error: Exception | None) -> None:
+        self.wait_error = wait_error
+        self.abandoning = asyncio.Event()
+        self.abandoned = False
+
+    async def submit(self, *args: Any, **kwargs: Any) -> str:
+        return "f" * 32
+
+    async def wait(self, *args: Any, **kwargs: Any) -> Envelope[ExtractResult] | None:
+        if self.wait_error is not None:
+            raise self.wait_error
+        return None
+
+    async def abandon(self, job_id: str) -> None:
+        self.abandoning.set()
+        await asyncio.sleep(0.2)
+        self.abandoned = True
+
+
+@pytest.mark.parametrize(
+    "wait_error", [None, RedisConnectionError("valkey blinked")], ids=["gave-up", "valkey-error"]
+)
+def test_a_cancelled_request_still_abandons_its_job(wait_error: Exception | None) -> None:
+    # M-8: a client that disconnects while the job is being deleted must not cut the DEL short,
+    # or a worker renders and stores a job nobody waits for.
+    dispatcher = AbandoningDispatcher(wait_error)
+    state = SimpleNamespace(browser_dispatcher=dispatcher, settings=browser_settings())
+
+    async def scenario() -> None:
+        flow = asyncio.create_task(
+            _in_browser(
+                state,
+                ExtractRequest(url=PAGE, mode="browser"),
+                USER,
+                "enforce",
+                BrowserHandover(),
+                "extract",
+                None,
+                time.perf_counter(),
+            )
+        )
+        await asyncio.wait_for(dispatcher.abandoning.wait(), 5)
+        flow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await flow
+        await asyncio.sleep(0.4)
+
+    asyncio.run(scenario())
+
+    assert dispatcher.abandoned
+
+
+def test_a_cookie_chromium_would_refuse_is_422_without_its_value() -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "cookies": [{"name": "sid", "value": f"{COOKIE_SECRET};x"}]},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert COOKIE_SECRET not in response.text
+        assert case.keys("job*") == []
+
+
+def test_the_api_exports_its_sync_dispatch_outcomes() -> None:
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}, browser_queue_wait_seconds=0.3)
+    with TestClient(case.app) as client:
+        client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)  # no worker: fast answer
+        with case.worker():
+            client.post("/v1/extract", json={"url": PAGE, "mode": "browser"}, headers=AUTH)
+
+        def outcome(name: str) -> float | None:
+            return case.registry.get_sample_value(
+                "text_extraction_browser_dispatch_total", {"outcome": name}
+            )
+
+        assert outcome("not_claimed") == 1
+        assert outcome("rendered") == 1
+        assert outcome("no_result") == 0  # exported from the start

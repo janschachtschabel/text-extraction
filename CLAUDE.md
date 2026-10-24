@@ -35,6 +35,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
    byte and time limits, no evaluation of caller JavaScript unless the caller is admin.
 6. **Respect sites:** robots.txt and EU TDM opt-out checks (`enforce|report|ignore`),
    per-domain outbound limits, honest user agent. No IP/proxy rotation to evade limits.
+   Exception: unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) for sites that allowed extraction by contract may present a stealth browser with an unmodified Chrome user agent; outbound limits still apply and IP/proxy rotation stays excluded.
 7. **Licences:** no AGPL/GPL dependencies (e.g. PyMuPDF, Marker, MinerU are excluded).
 
 ## Workflow

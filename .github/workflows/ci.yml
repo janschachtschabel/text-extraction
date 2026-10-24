@@ -32,6 +32,25 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest -q
 
+  # Real Chromium against a local test site (tests/browser, marker `browser`).
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+      - run: uv run playwright install --with-deps --only-shell chromium
+      # Unblock mode's tests run Patchright with its own Chromium (no Google Chrome in CI).
+      - run: uv run patchright install --with-deps chromium
+      - run: uv run pytest -m browser -q
+
   helm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -44,7 +63,14 @@ jobs:
         with:
           version: v3.19.0
 
-      - run: helm lint deploy/helm/text-extraction
+      - name: helm lint (browser workers on, the default)
+        run: helm lint --strict deploy/helm/text-extraction
+      - name: helm lint (browser workers with unblock mode)
+        run: helm lint --strict deploy/helm/text-extraction --set workers.browser.unblock=true
+      - name: helm lint (browser workers off)
+        run: helm lint --strict deploy/helm/text-extraction --set workers.browser.enabled=false
+      # Render checks: toggles, env, grace periods, KEDA queries, network policies, alerts.
+      - run: deploy/helm/test.sh
 
   compose:
     runs-on: ubuntu-latest
@@ -60,6 +86,24 @@ jobs:
         env:
           VALKEY_PASSWORD: ci-dummy-password
           API_KEYS: '[{"name":"ci","role":"admin","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]'
+
+      # The browser worker service: its image target, hardening and grace period, and browser mode
+      # on for every app service, with unblock mode off unless the environment switches it on.
+      - name: docker compose config (browser worker)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose config --format json > compose.json
+          jq -e '.services["browser-worker"]
+            | .build.target == "browser" and .read_only == true and .tmpfs == ["/tmp:size=1g"]
+              and .shm_size == "1073741824" and .stop_grace_period == "1m30s"
+              and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
+          jq -e '[.services.api, .services.worker, .services["browser-worker"]]
+            | all(.environment.BROWSER_ENABLED == "true" and .environment.BROWSER_UNBLOCK_ENABLED == "false")' compose.json
+          jq -e '.services.api.build.target == null' compose.json
+          BROWSER_UNBLOCK_ENABLED=true docker compose config --format json \
+            | jq -e '[.services.api, .services.worker, .services["browser-worker"]] | all(.environment.BROWSER_UNBLOCK_ENABLED == "true")'
+          rm compose.json
 
       # VALKEY_PASSWORD has no default: without it the file must be rejected.
       - run: |

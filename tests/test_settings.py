@@ -33,6 +33,25 @@ SETTING_ENV_VARS = (
     "OUTBOUND_MAX_BACKOFF_SECONDS",
     "CIRCUIT_FAILURE_THRESHOLD",
     "CIRCUIT_OPEN_SECONDS",
+    "BROWSER_ENABLED",
+    "BROWSER_TIMEOUT_SECONDS",
+    "BROWSER_QUEUE_WAIT_SECONDS",
+    "BROWSER_CONCURRENCY",
+    "BROWSER_IDLE_WAIT_SECONDS",
+    "BROWSER_RECYCLE_AFTER_PAGES",
+    "BROWSER_MAX_BYTES",
+    "BROWSER_BLOCKED_RESOURCES",
+    "BROWSER_AUTOCONSENT",
+    "BROWSER_EXECUTABLE_PATH",
+    "BROWSER_UNBLOCK_ENABLED",
+    "BROWSER_UNBLOCK_CHANNEL",
+    "BROWSER_UNBLOCK_HEADLESS",
+    "BROWSER_UNBLOCK_TIMEOUT_SECONDS",
+    "BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS",
+    "BROWSER_UNBLOCK_COOKIE_TTL_SECONDS",
+    "SCREENSHOT_MAX_BYTES",
+    "SCREENSHOT_MAX_HEIGHT_PX",
+    "ARTIFACT_TTL_SECONDS",
 )
 
 
@@ -613,3 +632,108 @@ def test_valkey_memory_guard_ratio_setting(monkeypatch: pytest.MonkeyPatch) -> N
         monkeypatch.setenv("VALKEY_MEMORY_GUARD_RATIO", value)
         with pytest.raises(ConfigError, match="valkey_memory_guard_ratio"):
             load_settings()
+
+
+def test_browser_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.browser_enabled is False
+    assert settings.browser_timeout_seconds == 30
+    assert settings.browser_queue_wait_seconds == 10
+    assert settings.browser_concurrency == 4
+    assert settings.browser_idle_wait_seconds == 8
+    assert settings.browser_recycle_after_pages == 200
+    assert settings.browser_max_bytes == 50_000_000
+    assert settings.browser_blocked_resources == "image,media,font"
+    assert settings.browser_autoconsent is True
+    assert settings.browser_executable_path is None
+    assert settings.browser_unblock_enabled is False
+    assert settings.browser_unblock_channel == "chrome"
+    assert settings.browser_unblock_headless is False
+    assert settings.browser_unblock_timeout_seconds == 60
+    assert settings.browser_unblock_challenge_wait_seconds == 20
+    assert settings.browser_unblock_cookie_ttl_seconds == 1800
+    assert settings.screenshot_max_bytes == 10_485_760
+    assert settings.screenshot_max_height_px == 16384
+    assert settings.artifact_ttl_seconds == 3600
+
+
+@pytest.mark.parametrize(
+    ("name", "good", "bad"),
+    [
+        ("BROWSER_TIMEOUT_SECONDS", ["5", "120"], ["4.9", "120.1"]),
+        ("BROWSER_QUEUE_WAIT_SECONDS", ["0", "60"], ["-1", "61"]),
+        ("BROWSER_CONCURRENCY", ["1", "64"], ["0"]),
+        ("BROWSER_IDLE_WAIT_SECONDS", ["0", "30"], ["-1", "31"]),
+        ("BROWSER_RECYCLE_AFTER_PAGES", ["1"], ["0"]),
+        ("BROWSER_MAX_BYTES", ["1000000"], ["999999"]),
+        ("BROWSER_UNBLOCK_CHANNEL", ["chrome", "chromium"], ["firefox"]),
+        ("BROWSER_UNBLOCK_TIMEOUT_SECONDS", ["10", "180"], ["9", "181"]),
+        ("BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS", ["0", "60"], ["-1", "61"]),
+        ("BROWSER_UNBLOCK_COOKIE_TTL_SECONDS", ["0", "1800"], ["-1"]),
+        ("SCREENSHOT_MAX_HEIGHT_PX", ["1080", "32768"], ["1079", "32769"]),
+        ("SCREENSHOT_MAX_BYTES", ["1", "10485760"], ["0"]),
+        ("ARTIFACT_TTL_SECONDS", ["60", "86400"], ["59"]),
+    ],
+)
+def test_browser_bounds(
+    monkeypatch: pytest.MonkeyPatch, name: str, good: list[str], bad: list[str]
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    for value in good:
+        monkeypatch.setenv(name, value)
+        load_settings()
+    for value in bad:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ConfigError, match=name.lower()):
+            load_settings()
+
+
+def test_browser_switches_and_path_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("BROWSER_ENABLED", "true")
+    monkeypatch.setenv("BROWSER_UNBLOCK_ENABLED", "true")
+    monkeypatch.setenv("BROWSER_EXECUTABLE_PATH", "/opt/chromium/chrome")
+
+    settings = load_settings()
+
+    assert settings.browser_enabled is True
+    assert settings.browser_unblock_enabled is True
+    assert settings.browser_executable_path == Path("/opt/chromium/chrome")
+
+
+@pytest.mark.parametrize(
+    ("value", "normalised"),
+    [
+        ("", ""),
+        ("  ", ""),
+        ("image", "image"),
+        ("Image, MEDIA ,font", "image,media,font"),
+        (
+            "stylesheet,script,xhr,fetch,websocket,other",
+            "stylesheet,script,xhr,fetch,websocket,other",
+        ),
+        ("image,image", "image"),
+        ("image,,font,", "image,font"),
+    ],
+)
+def test_browser_blocked_resources_are_normalised(
+    monkeypatch: pytest.MonkeyPatch, value: str, normalised: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("BROWSER_BLOCKED_RESOURCES", value)
+
+    assert load_settings().browser_blocked_resources == normalised
+
+
+@pytest.mark.parametrize("value", ["document", "image,document", "bogus", "image;font"])
+def test_invalid_browser_blocked_resources_is_a_config_error(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("BROWSER_BLOCKED_RESOURCES", value)
+
+    with pytest.raises(ConfigError, match="browser_blocked_resources"):
+        load_settings()

@@ -1,23 +1,43 @@
 """The extract worker (entry point ``text-extraction-worker``): runs batch items from the fair
 queue through the fast pipeline and stores their results in the job.
 
+**Worker and runner.** ``Worker`` is the part every worker pool shares: the slot loops, the
+claims and leases, deferrals, retries, exhausted items, result writes and metrics. What one item
+does is its pool's ``ItemRunner``: here the ``ExtractRunner`` (pool ``extract``, the fast
+pipeline); the browser worker (``browser_worker.py``, pool ``browser``) runs the same ``Worker``
+with its ``BrowserRunner``. A runner gives the lease its items need and turns one item into its
+envelope, or into None when it moved the item to another pool.
+
 A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 
-1. claims the next item, leased for ``EXTRACT_TIMEOUT_SECONDS * 2 + 10`` seconds. An item that
-   lost too many leases (``exhausted``) fails with ``internal_error``, retryable, and is completed
-   once that is recorded or its job is gone. A Valkey error leaves it leased: it comes back after
-   the lease, so its batch still gets a result for it;
+1. claims the next item, leased for the runner's lease (``EXTRACT_TIMEOUT_SECONDS * 2 + 10``
+   seconds here). An item that lost too many leases (``exhausted``) fails with
+   ``internal_error``, retryable, and is completed once that is recorded or its job is gone. A
+   Valkey error leaves it leased: it comes back after the lease, so its batch still gets a
+   result for it;
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
    1 s while claims keep answering that their scan budget ran out; every idle sleep has ±50 %
    jitter, so the loops of many pods do not claim in step;
-3. rebuilds the request from the job (its options and its owner as the principal) and runs the
-   pipeline. When the outbound gate refuses the host (busy or paused), the item is deferred to
-   the gate's retry time, which frees the slot for other domains. An item at
-   ``JOB_ITEM_MAX_ATTEMPTS`` is not deferred again: it runs once more with the refusal answered
-   as the pipeline's ``rate_limited`` or ``connection_error`` envelope, which is stored;
+3. hands the item to the runner, which rebuilds the request from the job (its options and its
+   owner as the principal) and runs the pipeline. When the outbound gate refuses the host (busy
+   or paused), the item is deferred to the gate's retry time, which frees the slot for other
+   domains. An item at ``JOB_ITEM_MAX_ATTEMPTS`` is not deferred again: it runs once more with
+   the refusal answered as the pipeline's ``rate_limited`` or ``connection_error`` envelope,
+   which is stored;
 4. stores the result (only the first result of an item counts), then completes the item. An item
    whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
    it) still stores its result, but its repeat write or deferral is not counted in the metrics.
+   An item the runner moved is completed without a result (outcome ``escalated``). A claimed
+   item that has its result already (a copy left by a lost lease or a double move) is completed
+   without running again. An exhausted item's caller secrets are deleted with its failure.
+
+**Auto escalation (B5).** With ``BROWSER_ENABLED``, an ``auto`` item whose fast result needs the
+browser (``escalation.needs_browser``; under unblock mode, for an admin's ``compliance: ignore``
+job, bot walls too) moves to the ``browser`` pool: its fast envelope is stored as the item's
+draft, the item is queued on ``browser`` with the same job, index and client, and it is
+completed here without a result. The browser worker renders it and keeps the better of both.
+Draft first, then the browser queue, then the completion: a crash in between leaves the item
+leased here, so it runs again and moves again, and only the first result of an item counts.
 
 While Valkey's memory is at ``VALKEY_MEMORY_GUARD_RATIO`` of its maximum (``memory_guard.py``,
 read every 5 s from the start to the end of the process), the result cache skips its writes; the
@@ -29,7 +49,7 @@ No error ends a loop.
 
 The process serves only the internal port (``/health``, ``/ready``, ``/metrics``). ``/ready``
 answers 200 once the loops run, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
-loops stop claiming, the items in flight get ``graceful_shutdown_seconds`` to finish (any still
+loops stop claiming, the items in flight get ``extraction_graceful_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
 internal server stops last. A claim already sent when the signal arrives is still processed
 within that time, since its item is leased to this worker already.
@@ -39,9 +59,9 @@ import asyncio
 import contextlib
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal, Protocol
 from weakref import WeakKeyDictionary
 
 import structlog
@@ -53,6 +73,7 @@ from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
+from text_extraction.escalation import needs_browser, unblock_for
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
@@ -68,7 +89,7 @@ from text_extraction.server import (
     _Server,
     _server,
     configured_settings,
-    graceful_shutdown_seconds,
+    extraction_graceful_seconds,
 )
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
@@ -83,13 +104,17 @@ _SCAN_BACKOFF_SECONDS = 0.05
 _MAX_VALKEY_BACKOFF_SECONDS = 30.0
 # Pause after an unexpected error in a loop, so a bug cannot spin it.
 _ERROR_PAUSE_SECONDS = 1.0
+# How long a shutdown waits for a cancelled start-up to unwind.
+_START_UNWIND_SECONDS = 5.0
 
 _LOST_MESSAGE = "The item was lost by a worker too often."
 _INTERNAL_MESSAGE = "Internal server error."
 
-# Outcomes of an item besides its envelope's: given back to the queue, or its job is gone.
+# Outcomes of an item besides its envelope's: given back to the queue, its job is gone, or it
+# moved to another pool (the browser's).
 _DEFERRED = "deferred"
 _LOST = "lost"
+_ESCALATED = "escalated"
 # Logged, not counted: the item had its result already, or another worker holds it now.
 _SUPERSEDED = "superseded"
 
@@ -115,8 +140,8 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
             items=Counter(
                 "text_extraction_job_items_total",
                 "Job items handled by this worker, by outcome: success, the error code of the "
-                "result, deferred (given back while the host is busy or paused) or lost (the "
-                "job was gone).",
+                "result, deferred (given back while the host is busy or paused), lost (the "
+                "job was gone) or escalated (moved to the browser pool).",
                 ["outcome"],
                 registry=registry,
             ),
@@ -142,8 +167,78 @@ def _outcome(envelope: Envelope[ExtractResult]) -> str:
     return envelope.error.code.value if envelope.error is not None else envelope.status
 
 
+class ItemRunner(Protocol):
+    """What a worker pool does with one claimed item (see the module docstring)."""
+
+    # How long a claim of this pool holds its item: longer than one run can take.
+    lease_seconds: float
+
+    async def run(
+        self,
+        job: JobRecord,
+        item: QueueItem,
+        url: str,
+        *,
+        gate_refusals: Literal["fail", "raise"],
+    ) -> Envelope[ExtractResult] | None:
+        """The item's result, or None when the item was moved to another pool: it is then
+        completed without a result. A gate refusal (``OutboundBusy``, ``CircuitOpen``) with
+        ``gate_refusals="raise"``, a Valkey error and ``JobLost`` propagate; the worker defers,
+        backs off or drops the item."""
+        ...
+
+
+class ExtractRunner:
+    """The ``extract`` pool's runner: the fast pipeline, and the move of an ``auto`` item that
+    needs the browser to the ``browser`` pool (B5). ``browser_queue`` is that pool's queue; None
+    while ``BROWSER_ENABLED`` is false, and then nothing moves."""
+
+    def __init__(
+        self,
+        pipeline: Pipeline,
+        store: JobStore,
+        settings: Settings,
+        browser_queue: FairQueue | None,
+    ) -> None:
+        self._pipeline = pipeline
+        self._store = store
+        self._settings = settings
+        self._browser_queue = browser_queue
+        self.lease_seconds = settings.extract_timeout_seconds * 2 + 10
+
+    async def run(
+        self,
+        job: JobRecord,
+        item: QueueItem,
+        url: str,
+        *,
+        gate_refusals: Literal["fail", "raise"],
+    ) -> Envelope[ExtractResult] | None:
+        principal = job_principal(job)
+        envelope = await self._pipeline.run(
+            ExtractRequest(url=url, **job.options.model_dump()),
+            principal,
+            gate_refusals=gate_refusals,
+        )
+        if self._browser_queue is None or job.options.mode != "auto":
+            return envelope
+        unblock = unblock_for(principal, job.options.compliance, self._settings)
+        if not needs_browser(envelope, unblock=unblock):
+            return envelope
+        # Draft first: the browser worker may claim the item as soon as it is queued.
+        await self._store.put_draft(job.id, item.index, envelope)
+        await self._browser_queue.enqueue_items(job.id, item.client, [(item.index, url)])
+        return None
+
+
+def job_principal(job: JobRecord) -> Principal:
+    """The job's owner as the principal of its items: its role decides what they may do."""
+    return Principal(name=job.owner, role=job.owner_role, rate_limit_per_minute=None)
+
+
 class Worker:
-    """Processes the items of the ``extract`` queue with ``WORKER_CONCURRENCY`` slot loops.
+    """Processes the items of one pool's queue with ``concurrency`` slot loops (default
+    ``WORKER_CONCURRENCY``), each item through ``runner``.
 
     ``valkey`` is the client behind ``store`` and ``queue``; the caller closes it. ``clock``
     (epoch seconds), ``sleep`` and ``random`` (for the jitter) can be replaced in tests.
@@ -153,30 +248,32 @@ class Worker:
         self,
         settings: Settings,
         valkey: Redis,
-        pipeline: Pipeline,
+        runner: ItemRunner,
         store: JobStore,
         queue: FairQueue,
         registry: CollectorRegistry,
         *,
+        concurrency: int | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random: Callable[[], float] = random.random,
     ) -> None:
         self._settings = settings
         self._valkey = valkey
-        self._pipeline = pipeline
+        self._runner = runner
         self._store = store
         self._queue = queue
         self._metrics = _metrics_for(registry)
         self._clock = clock
         self._sleep = sleep
         self._random = random
-        self._lease_seconds = settings.extract_timeout_seconds * 2 + 10
+        self._concurrency = concurrency if concurrency is not None else settings.worker_concurrency
+        self._lease_seconds = runner.lease_seconds
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the slot loops until ``stop`` is set and the items in flight have finished."""
         async with asyncio.TaskGroup() as slots:
-            for _ in range(self._settings.worker_concurrency):
+            for _ in range(self._concurrency):
                 slots.create_task(self._slot(stop))
 
     async def process(self, item: QueueItem, *, exhausted: bool = False) -> None:
@@ -257,6 +354,12 @@ class Worker:
         url = await self._store.url(item.job_id, item.index) if job is not None else None
         if job is None or url is None:
             return await self._drop(item)
+        if await self._store.has_result(item.job_id, item.index):
+            # A copy of an item that has finished (it was rerun after a lost lease, or moved to
+            # this pool twice): its result stands, and the target is not asked again.
+            await self._queue.complete(item)
+            _log.debug("job_item_skipped", reason="has_result")
+            return None
         if job.state == "queued":
             try:
                 await self._store.mark_running(item.job_id)
@@ -266,11 +369,9 @@ class Worker:
         at_limit = item.attempts >= self._settings.job_item_max_attempts
         gate_refusals: Literal["fail", "raise"] = "fail" if at_limit else "raise"
         try:
-            envelope = await self._pipeline.run(
-                ExtractRequest(url=url, **job.options.model_dump()),
-                Principal(name=job.owner, role=job.owner_role, rate_limit_per_minute=None),
-                gate_refusals=gate_refusals,
-            )
+            envelope = await self._runner.run(job, item, url, gate_refusals=gate_refusals)
+        except JobLost:
+            return await self._drop(item)
         except (OutboundBusy, CircuitOpen) as refusal:
             if await self._queue.defer(item, self._clock() + refusal.retry_after):
                 return _DEFERRED
@@ -284,7 +385,14 @@ class Worker:
         except Exception:
             _log.error("job_item_failed", exc_info=True)
             envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _INTERNAL_MESSAGE, retryable=False)
+        if envelope is None:
+            return await self._moved(item)
         return await self._finish(item, job, envelope)
+
+    async def _moved(self, item: QueueItem) -> str | None:
+        """Complete an item the runner queued on another pool, without a result. A worker whose
+        lease was taken back does not count it: the current holder moves it as well."""
+        return _ESCALATED if await self._queue.complete(item) else None
 
     async def _fail_exhausted(self, item: QueueItem, job: JobRecord | None) -> str | None:
         """Record the item as lost too often, then complete it. A Valkey error propagates and
@@ -294,7 +402,10 @@ class Worker:
         if job is None:
             return await self._drop(item)
         envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
-        return await self._finish(item, job, envelope)
+        outcome = await self._finish(item, job, envelope)
+        # The item never runs again: its caller secrets (a browser job's, B6) are done with.
+        await self._store.drop_secrets(item.job_id)
+        return outcome
 
     async def _finish(
         self, item: QueueItem, job: JobRecord, envelope: Envelope[ExtractResult]
@@ -329,10 +440,13 @@ async def _serve(
     *,
     graceful_seconds: float,
     guard: MemoryGuard | None = None,
+    startup: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> None:
-    """Serve the internal app, load the language model, then run the worker until a signal and
-    shut down in the order the module describes. ``guard``'s task runs from the start to the end
-    of this call, so it is stopped before the caller closes the Valkey client."""
+    """Serve the internal app, run the start-up (by default: load the language model), then run
+    the worker until a signal and shut down in the order the module describes. ``/ready``
+    answers 200 only once the start-up has finished; a failed start-up raises. ``guard``'s task
+    runs from the start to the end of this call, so it is stopped before the caller closes the
+    Valkey client."""
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in _HANDLED_SIGNALS:
@@ -341,7 +455,7 @@ async def _serve(
         guard.start()
     internal_task = asyncio.create_task(internal.serve())
     stopping = asyncio.create_task(stop.wait())
-    starting = asyncio.create_task(asyncio.to_thread(load_language_model))
+    starting = asyncio.create_task(startup() if startup is not None else _load_language_model())
     work: asyncio.Task[None] | None = None
     try:
         await asyncio.wait([starting, stopping, internal_task], return_when=asyncio.FIRST_COMPLETED)
@@ -367,12 +481,23 @@ async def _serve(
         await internal_task
     finally:
         stopping.cancel()
-        starting.cancel()  # a signal during the start-up: the thread still ends by itself
+        starting.cancel()  # a signal during the start-up: the model's thread still ends by itself
         internal.should_exit = True
         for sig in _HANDLED_SIGNALS:
             loop.remove_signal_handler(sig)
-        if guard is not None:
-            await guard.stop()
+        try:
+            # A start-up coroutine (the browser worker's) unwinds before its caller cleans up;
+            # one stuck in a driver call does not hold the shutdown for long.
+            await asyncio.wait([starting], timeout=_START_UNWIND_SECONDS)
+            if not starting.done():
+                _log.warning("worker_start_not_unwound", waited_seconds=_START_UNWIND_SECONDS)
+        finally:
+            if guard is not None:
+                await guard.stop()
+
+
+async def _load_language_model() -> None:
+    await asyncio.to_thread(load_language_model)
 
 
 @dataclass(frozen=True)
@@ -396,11 +521,13 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     pipeline = create_pipeline(
         settings, valkey, fetcher, registry, pool, gate=gate, memory_guard=guard
     )
+    store = JobStore(valkey, settings)
+    browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None
     worker = Worker(
         settings,
         valkey,
-        pipeline,
-        JobStore(valkey, settings),
+        ExtractRunner(pipeline, store, settings, browser_queue),
+        store,
         FairQueue(valkey, settings),
         registry,
     )
@@ -411,7 +538,7 @@ async def _run(settings: Settings) -> None:
     valkey = create_valkey(settings.valkey_url)
     registry = REGISTRY
     parts = build_worker(settings, valkey, registry)
-    graceful = graceful_shutdown_seconds(settings)
+    graceful = extraction_graceful_seconds(settings)
     readiness = Readiness()
     internal = _server(
         create_internal_app(settings, valkey, registry, readiness=readiness),

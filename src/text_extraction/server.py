@@ -15,8 +15,12 @@ order:
    nothing. If the pod is killed before, the job's lease expires and the job reports it lost;
 4. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
 
-``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the Helm chart's
-``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it.
+``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the API pods'
+``terminationGracePeriodSeconds`` must stay above it plus a 10 s margin. Step 3 is not part of it.
+While ``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
+(``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode. The Helm chart
+computes the grace period with the same formula (45, 90 or 120 s; ``_helpers.tpl``) and refuses
+a set value that is too short.
 """
 
 import asyncio
@@ -39,10 +43,13 @@ from text_extraction.valkey import create_valkey
 
 EXIT_CONFIG_ERROR = 2
 # Requests in flight get at least this long after the drain, and always the extract timeout plus
-# a margin (`graceful_shutdown_seconds`). The Helm chart's terminationGracePeriodSeconds (45)
-# must stay above the drain plus this (`shutdown_seconds`): raise it with either.
+# a margin (`graceful_shutdown_seconds`). The API pods' terminationGracePeriodSeconds must stay
+# above the drain plus this (`shutdown_seconds`); the Helm chart mirrors the formula.
 MIN_GRACEFUL_SHUTDOWN_SECONDS = 30
 _SHUTDOWN_MARGIN_SECONDS = 5
+# On top of the wait for a browser worker and the render: the result margin of the wait (5 s)
+# and the answer.
+_BROWSER_MARGIN_SECONDS = 10
 
 _HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -71,13 +78,35 @@ class _Server(uvicorn.Server):
             self._readiness.mark_listening()
 
 
-def graceful_shutdown_seconds(settings: Settings) -> int:
-    """How long requests in flight may finish after SIGTERM: an extraction that has just started
-    can still end within its own deadline."""
+def extraction_graceful_seconds(settings: Settings) -> int:
+    """How long an extraction in flight may finish after SIGTERM: one that has just started can
+    still end within its own deadline. The workers use this bound; they never wait for another
+    pool."""
     return max(
         MIN_GRACEFUL_SHUTDOWN_SECONDS,
         math.ceil(settings.extract_timeout_seconds + _SHUTDOWN_MARGIN_SECONDS),
     )
+
+
+def graceful_shutdown_seconds(settings: Settings) -> int:
+    """How long requests in flight to the API may finish after SIGTERM: an extraction that has
+    just started can still end within its own deadline. While ``BROWSER_ENABLED``, a sync request
+    may also wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render, after
+    the fast phase of an escalating ``auto`` request (bounded by ``EXTRACT_TIMEOUT_SECONDS``;
+    B13)."""
+    seconds = extraction_graceful_seconds(settings)
+    if settings.browser_enabled:
+        render = settings.browser_timeout_seconds
+        if settings.browser_unblock_enabled:
+            render = max(render, settings.browser_unblock_timeout_seconds)
+        browser = (
+            settings.extract_timeout_seconds
+            + settings.browser_queue_wait_seconds
+            + render
+            + _BROWSER_MARGIN_SECONDS
+        )
+        seconds = max(seconds, math.ceil(browser))
+    return seconds
 
 
 def shutdown_seconds(settings: Settings) -> float:

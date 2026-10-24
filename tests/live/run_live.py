@@ -1,6 +1,7 @@
 """Live regression harness: send a list of real URLs to a running service and bucket the answers.
 
-    uv run python -m tests.live.run_live --urls tests/live/urls/wlo_200.csv --min-ok-rate 68
+    uv run python -m tests.live.run_live --urls tests/live/urls/wlo_200.csv --mode auto \
+        --min-ok-rate 80
 
 Writes one JSON line per URL and prints a Markdown summary. See `tests/live/README.md`.
 """
@@ -29,6 +30,13 @@ DEFAULT_URLS = Path(__file__).parent / "urls" / "wlo_200.csv"
 # so that a slow answer is recorded as the service's, not cut off by the harness.
 DEFAULT_CLIENT_TIMEOUT_SECONDS = 90.0
 TOP_DOMAINS = 10
+# Domains named per error code in the summary.
+TOP_CODE_DOMAINS = 3
+# The warning of an ``auto`` answer whose browser worker did not answer in time.
+BROWSER_UNAVAILABLE = "browser_unavailable"
+MODES = ("fast", "auto", "browser")
+# The mode of the gate: the service decides per URL, as it does for callers who leave it out.
+DEFAULT_MODE = "auto"
 
 
 @dataclass(frozen=True)
@@ -43,6 +51,8 @@ class Record:
     error_code: str | None
     word_count: int | None
     compliance_decision: str | None
+    mode_used: str | None  # "fast" or "browser": what produced the answer; None without data
+    warnings: list[str]  # data.warnings (for example browser_unavailable); empty without data
     elapsed_ms: int
 
 
@@ -79,6 +89,7 @@ async def extract_one(
     *,
     compliance: str,
     min_words: int,
+    mode: str = DEFAULT_MODE,
     deadline_seconds: float = DEFAULT_CLIENT_TIMEOUT_SECONDS,
 ) -> Record:
     """Ask the service for one URL and bucket the answer.
@@ -87,7 +98,7 @@ async def extract_one(
     server that trickles bytes could hold one forever). Any failure on the client side is
     recorded as ``client_<ExceptionName>``: one URL must not end the run.
     """
-    body = {"url": url, "mode": "auto", "format": "text", "cache": False, "compliance": compliance}
+    body = {"url": url, "mode": mode, "format": "text", "cache": False, "compliance": compliance}
     started = time.monotonic()
     http_status: int | None = None
     payload: object = None
@@ -114,8 +125,19 @@ async def extract_one(
         error_code=(fields.error_code if fields else None) or client_error,
         word_count=fields.word_count if fields else None,
         compliance_decision=fields.compliance_decision if fields else None,
+        mode_used=fields.mode_used if fields else None,
+        warnings=_warnings(payload),
         elapsed_ms=elapsed_ms,
     )
+
+
+def _warnings(payload: object) -> list[str]:
+    """The string entries of ``data.warnings``; empty when the answer has none."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    warnings = data.get("warnings") if isinstance(data, dict) else None
+    if not isinstance(warnings, list):
+        return []
+    return [warning for warning in warnings if isinstance(warning, str)]
 
 
 async def run(
@@ -127,6 +149,7 @@ async def run(
     min_words: int,
     sink: TextIO,
     progress: TextIO | None = None,
+    mode: str = DEFAULT_MODE,
     deadline_seconds: float = DEFAULT_CLIENT_TIMEOUT_SECONDS,
 ) -> list[Record]:
     """Extract every URL; write each record to ``sink`` as soon as it is done.
@@ -151,6 +174,7 @@ async def run(
                     url,
                     compliance=compliance,
                     min_words=min_words,
+                    mode=mode,
                     deadline_seconds=deadline_seconds,
                 )
             records.append(record)
@@ -177,7 +201,9 @@ def _percent(count: int, total: int) -> str:
 
 
 def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> str:
-    """The Markdown summary: buckets overall, ok rate, would-be blocks, buckets per domain."""
+    """The Markdown summary: buckets overall, ok rate, would-be blocks, answers whose browser
+    worker did not answer in time, results per mode that produced them, buckets per domain and
+    the error codes of the answers."""
     total = len(records)
     counts = Counter(record.bucket for record in records)
     lines = [
@@ -187,6 +213,8 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
         f"Ok rate: {ok_rate(records):.1f} % ({counts['ok']} of {total})",
         "Would be blocked under `enforce`: "
         f"{sum(record.compliance_decision == 'reported' for record in records)}",
+        f"Answers with the warning `{BROWSER_UNAVAILABLE}`: "
+        f"{sum(BROWSER_UNAVAILABLE in record.warnings for record in records)}",
         "",
         "| Bucket | URLs | Share |",
         "| --- | ---: | ---: |",
@@ -196,6 +224,18 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
         for bucket in BUCKETS
         if counts[bucket]
     ]
+
+    modes = Counter(record.mode_used for record in records)
+    if modes:
+        lines += [
+            "",
+            "| Mode used | URLs | Ok |",
+            "| --- | ---: | ---: |",
+        ]
+        # Answers without data (no mode) come last.
+        for used in sorted(modes, key=lambda name: (name is None, name or "")):
+            ok = sum(r.bucket == "ok" for r in records if r.mode_used == used)
+            lines.append(f"| {used or '(none)'} | {modes[used]} | {ok} |")
 
     per_domain: dict[str, Counter[str]] = defaultdict(Counter)
     for record in records:
@@ -215,7 +255,26 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
             f"| {domain or '(none)'} | {c.total()} | " + " | ".join(str(c[b]) for b in shown) + " |"
             for domain, c in top
         ]
+    lines += _error_codes(records)
     return "\n".join(lines) + "\n"
+
+
+def _error_codes(records: Sequence[Record]) -> list[str]:
+    """The ``error.code`` of failed and partial answers and of every ``connection_error``, most
+    frequent first, each with the domains that gave it most: the per-cause view of a run."""
+    per_code: dict[str, Counter[str]] = defaultdict(Counter)
+    for record in records:
+        answered = record.status in ("failed", "partial") or record.bucket == "connection_error"
+        if answered and record.status is not None and record.error_code is not None:
+            per_code[record.error_code][record.domain] += 1
+    if not per_code:
+        return []
+    lines = ["", "### Error codes", "", "| Code | URLs | Top domains |", "| --- | ---: | --- |"]
+    for code, domains in sorted(per_code.items(), key=lambda item: (-item[1].total(), item[0])):
+        top = sorted(domains.items(), key=lambda item: (-item[1], item[0]))[:TOP_CODE_DOMAINS]
+        named = ", ".join(f"{domain or '(none)'} {count}" for domain, count in top)
+        lines.append(f"| {code} | {domains.total()} | {named} |")
+    return lines
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -225,6 +284,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--urls", type=Path, default=DEFAULT_URLS, help="CSV with a `url` column")
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--min-words", type=int, default=50)
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default=DEFAULT_MODE,
+        help="the request's mode: fast, auto (default) or browser",
+    )
     parser.add_argument("--compliance", choices=["enforce", "report", "ignore"], default="report")
     parser.add_argument("--min-ok-rate", type=float, default=None, help="exit 1 below this percent")
     parser.add_argument("--out", type=Path, default=None, help="JSONL file (default: results/...)")
@@ -261,6 +326,7 @@ async def amain(args: argparse.Namespace) -> int:
                 concurrency=args.concurrency,
                 compliance=args.compliance,
                 min_words=args.min_words,
+                mode=args.mode,
                 sink=sink,
                 progress=sys.stderr,
                 deadline_seconds=args.timeout,

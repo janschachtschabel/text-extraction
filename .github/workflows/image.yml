@@ -1,6 +1,9 @@
 name: image
 
-# Pull requests build the image to prove it builds; nothing is pushed.
+# Two images from one Dockerfile, with the same tags:
+#   api      ghcr.io/<repo>          default target: API and extract worker, no browser;
+#   browser  ghcr.io/<repo>-browser  target `browser`: the browser worker.
+# Each image is built and checked first; pull requests stop there and push nothing.
 # Pushes to main publish `latest` (staging) and `sha-<short>`.
 # Tags vX.Y.Z publish `X.Y.Z` and `X.Y` (production uses SemVer tags only).
 on:
@@ -16,16 +19,27 @@ concurrency:
   group: image-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
-
 jobs:
   image:
+    name: image (${{ matrix.variant }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: api
+            target: runtime
+            suffix: ""
+          - variant: browser
+            target: browser
+            suffix: "-browser"
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
+      CHECK_TAG: text-extraction-${{ matrix.variant }}:check
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,6 +60,55 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      # Build into the local Docker daemon for the checks below.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          load: true
+          push: false
+          tags: ${{ env.CHECK_TAG }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+      # The API image must not hold a browser: no Playwright or Patchright package, no Chromium,
+      # no Chrome.
+      - name: API image has no browser
+        if: matrix.variant == 'api'
+        run: |
+          docker run --rm "$CHECK_TAG" python -c '
+          import importlib.util, sys
+          found = [name for name in ("playwright", "patchright") if importlib.util.find_spec(name)]
+          sys.exit(f"browser packages in the API image: {found}" if found else 0)
+          '
+          docker run --rm "$CHECK_TAG" sh -c '
+          for path in /opt/ms-playwright /opt/google /usr/bin/google-chrome /usr/bin/chromium; do
+            if [ -e "$path" ]; then echo "browser in the API image: $path" >&2; exit 1; fi
+          done
+          '
+
+      # Both drivers start in the image, as the pods run it: non-root, read-only root filesystem,
+      # /tmp as the only writable place, Xvfb for headful Chrome. --check needs no Valkey.
+      - name: Browser image starts its browsers
+        if: matrix.variant == 'browser'
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:size=1g --shm-size 1g \
+            --security-opt no-new-privileges:true \
+            -e AUTH_MODE=none -e BROWSER_ENABLED=true -e BROWSER_UNBLOCK_ENABLED=true \
+            "$CHECK_TAG" text-extraction-browser-worker --check
+
+      # Chrome's .deb leaves no apt source or key behind, and the installer's curl is gone.
+      - name: Browser image has no extra apt source
+        if: matrix.variant == 'browser'
+        run: |
+          docker run --rm "$CHECK_TAG" sh -c '
+          if ls /etc/apt/sources.list.d/ /etc/apt/trusted.gpg.d/ 2>/dev/null | grep -i google; then
+            echo "Google apt source or key in the browser image" >&2; exit 1
+          fi
+          if command -v curl; then echo "curl in the browser image" >&2; exit 1; fi
+          test -x /opt/google/chrome/chrome
+          '
+
       - if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
@@ -53,11 +116,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v7
+      # Same build from the cache, now with the release tags and pushed.
+      - if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
+          target: ${{ matrix.target }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}

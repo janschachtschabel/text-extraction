@@ -1,9 +1,9 @@
 """Models of asynchronous jobs: stored options, progress and the views the job API returns."""
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
@@ -11,7 +11,7 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.netguard import MAX_URL_LENGTH
 
-JobKind = Literal["extract", "batch"]
+JobKind = Literal["extract", "batch", "screenshot"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
 
@@ -33,13 +33,19 @@ class BatchRequest(BaseModel, extra="forbid"):
         description="The http(s) URLs to extract, at most `BATCH_MAX_URLS`. A URL twice gets two "
         "items; an invalid URL gets an item that failed with `invalid_url`.",
     )
-    mode: Literal["fast", "auto"] = Field(default="auto", description="As for `/v1/extract`.")
+    mode: Literal["fast", "auto", "browser"] = Field(
+        default="auto",
+        description="As for `/v1/extract`. `browser` queues every URL for the browser workers "
+        "(400 while browser mode is off). A batch takes no `actions`, `cookies`, `headers` or "
+        "`screenshot`.",
+    )
     format: OutputFormat = Field(default="markdown", description="Format of `content`.")
     metadata: bool = Field(default=True, description="Include the pages' DOM metadata.")
     links: bool = Field(default=False, description="Include the pages' links.")
     compliance: ComplianceMode | None = Field(
         default=None,
-        description="`enforce`, `report` or `ignore` (admins only); default: the operator's.",
+        description="`enforce`, `report` or `ignore` (admins only); default: the operator's. "
+        "`ignore` also allows unblock mode where the operator enabled it.",
     )
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
@@ -50,12 +56,20 @@ class JobOptions(BaseModel, extra="forbid"):
     """The extraction options of a job. Same as ``ExtractRequest``, except that the compliance
     mode is already resolved for the caller: it is never None."""
 
-    mode: Literal["fast", "auto"] = "auto"
+    mode: Literal["fast", "auto", "browser"] = "auto"
     format: OutputFormat = "markdown"
     metadata: bool = True
     links: bool = False
     compliance: ComplianceMode
     cache: bool = True
+    screenshot: bool = False
+    full_page: bool = True
+
+    @model_validator(mode="after")
+    def _screenshot_needs_browser(self) -> Self:
+        if self.mode == "fast" and (self.screenshot or not self.full_page):
+            raise ValueError("mode fast cannot take screenshot or full_page")
+        return self
 
 
 class JobProgress(BaseModel):
