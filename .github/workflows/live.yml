@@ -23,18 +23,27 @@ on:
 permissions:
   contents: read
 
+# A new run for the same ref cancels the one in progress. Adding any other label than `live`
+# gets a group of its own, so it neither cancels a live run nor runs itself (see `if` below).
 concurrency:
-  group: live-${{ github.ref }}
+  group: >-
+    live-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'live'
+    && format('-other-label-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   live:
-    # Pull requests run only while they carry the `live` label.
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'live')
+    # Pull requests run only while they carry the `live` label, and adding another label does
+    # not start a run.
+    if: >-
+      github.event_name != 'pull_request'
+      || (contains(github.event.pull_request.labels.*.name, 'live')
+          && (github.event.action != 'labeled' || github.event.label.name == 'live'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      # The gate: wlo_200 at the 68 % fast baseline. Only a manual run can pick others.
+      # The gate: wlo_200 at the 68 % fast baseline. Only a manual run can pick others; the
+      # smoke set is never a gate.
       URL_SET: ${{ inputs.url_set || 'wlo_200' }}
       MIN_OK_RATE: ${{ inputs.min_ok_rate || '68' }}
     services:
@@ -79,18 +88,22 @@ jobs:
           tail -n 50 results/server.log >&2
           exit 1
 
-      # The gate: fails the job when the ok rate is below MIN_OK_RATE.
+      # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke).
       - name: Run ${{ env.URL_SET }}
         run: |
+          gate=(--min-ok-rate "$MIN_OK_RATE")
+          if [ "$URL_SET" = smoke ]; then
+            gate=()
+          fi
           uv run python -m tests.live.run_live \
             --urls "tests/live/urls/${URL_SET}.csv" \
             --out "results/live_${URL_SET}.jsonl" \
             --summary-out "results/summary_${URL_SET}.md" \
-            --min-ok-rate "$MIN_OK_RATE"
+            "${gate[@]}"
 
       # Report only: the smoke set is a watchlist of hard pages, its ok rate is no gate.
       - name: Run smoke (report only)
-        if: always() && github.event_name != 'workflow_dispatch'
+        if: always() && env.URL_SET != 'smoke'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/smoke.csv \

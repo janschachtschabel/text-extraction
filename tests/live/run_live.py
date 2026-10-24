@@ -47,12 +47,22 @@ class Record:
 
 
 def read_urls(path: Path) -> list[str]:
-    """The ``url`` column of a CSV file with a header row; order and duplicates are kept."""
+    """The ``url`` column of a CSV file with a header row; order and duplicates are kept.
+
+    A row without a URL (too short, or the field is empty) is skipped with a warning on stderr.
+    """
+    urls: list[str] = []
     with path.open(encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
         if reader.fieldnames is None or "url" not in reader.fieldnames:
             raise ValueError(f"{path}: the header row needs a `url` column")
-        return [row["url"].strip() for row in reader if row["url"].strip()]
+        for row in reader:
+            url = (row.get("url") or "").strip()
+            if url:
+                urls.append(url)
+            else:
+                print(f"{path}: line {reader.line_num} has no url, skipped", file=sys.stderr)
+    return urls
 
 
 def domain_of(url: str) -> str:
@@ -64,22 +74,33 @@ def domain_of(url: str) -> str:
 
 
 async def extract_one(
-    client: httpx.AsyncClient, url: str, *, compliance: str, min_words: int
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    compliance: str,
+    min_words: int,
+    deadline_seconds: float = DEFAULT_CLIENT_TIMEOUT_SECONDS,
 ) -> Record:
-    """Ask the service for one URL and bucket the answer."""
+    """Ask the service for one URL and bucket the answer.
+
+    ``deadline_seconds`` bounds the whole request (httpx's own timeouts are per phase, so a
+    server that trickles bytes could hold one forever). Any failure on the client side is
+    recorded as ``client_<ExceptionName>``: one URL must not end the run.
+    """
     body = {"url": url, "mode": "auto", "format": "text", "cache": False, "compliance": compliance}
     started = time.monotonic()
     http_status: int | None = None
     payload: object = None
     client_error: str | None = None
     try:
-        response = await client.post("/v1/extract", json=body)
+        async with asyncio.timeout(deadline_seconds):
+            response = await client.post("/v1/extract", json=body)
         http_status = response.status_code
         try:
             payload = response.json()
         except ValueError:
             payload = None  # not JSON: counts as a service error
-    except httpx.HTTPError as error:
+    except Exception as error:  # any client failure is this URL's record, not the run's end
         client_error = f"client_{type(error).__name__}"
     elapsed_ms = round((time.monotonic() - started) * 1000)
 
@@ -106,6 +127,7 @@ async def run(
     min_words: int,
     sink: TextIO,
     progress: TextIO | None = None,
+    deadline_seconds: float = DEFAULT_CLIENT_TIMEOUT_SECONDS,
 ) -> list[Record]:
     """Extract every URL; write each record to ``sink`` as soon as it is done.
 
@@ -124,7 +146,13 @@ async def run(
         while queue:
             url = queue.popleft()
             async with slots:
-                record = await extract_one(client, url, compliance=compliance, min_words=min_words)
+                record = await extract_one(
+                    client,
+                    url,
+                    compliance=compliance,
+                    min_words=min_words,
+                    deadline_seconds=deadline_seconds,
+                )
             records.append(record)
             sink.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
             sink.flush()
@@ -235,6 +263,7 @@ async def amain(args: argparse.Namespace) -> int:
                 min_words=args.min_words,
                 sink=sink,
                 progress=sys.stderr,
+                deadline_seconds=args.timeout,
             )
     summary = summarize(records)
     print(summary)

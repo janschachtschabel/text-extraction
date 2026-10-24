@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -222,3 +223,60 @@ def test_main_exit_code_follows_min_ok_rate(
     assert len(out.read_text().splitlines()) == 2
     assert "Ok rate: 50.0 % (1 of 2)" in capsys.readouterr().out
     assert "Ok rate: 50.0 % (1 of 2)" in summary.read_text()
+
+
+def test_read_urls_skips_rows_without_a_url_and_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "urls.csv"
+    path.write_text("category,url\nx,https://a.example/\nshort-row\ny,\nz,https://b.example/\n")
+
+    assert read_urls(path) == ["https://a.example/", "https://b.example/"]
+    warnings = capsys.readouterr().err
+    assert "line 3" in warnings
+    assert "line 4" in warnings
+
+
+def test_run_records_any_client_failure_and_keeps_going() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "broken" in json.loads(request.content)["url"]:
+            raise RuntimeError("unexpected")
+        return httpx.Response(200, json=ok_body("x"))
+
+    records, lines = run_with(
+        httpx.MockTransport(handler), ["https://broken.example/", "https://fine.example/"]
+    )
+
+    by_domain = {r.domain: r for r in records}
+    assert by_domain["broken.example"].bucket == "service_error"
+    assert by_domain["broken.example"].error_code == "client_RuntimeError"
+    assert by_domain["fine.example"].bucket == "ok"
+    assert len(lines) == 2
+
+
+def test_run_gives_each_request_a_total_deadline() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(30)  # a server that trickles: no single phase times out
+        return httpx.Response(200, json=ok_body("x"))
+
+    sink = io.StringIO()
+
+    async def scenario() -> list[Record]:
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+            return await run_live.run(
+                ["https://slow.example/"],
+                client,
+                concurrency=1,
+                compliance="report",
+                min_words=50,
+                sink=sink,
+                deadline_seconds=0.2,
+            )
+
+    started = time.monotonic()
+    (only,) = asyncio.run(scenario())
+
+    assert time.monotonic() - started < 10
+    assert only.bucket == "service_error"
+    assert only.error_code == "client_TimeoutError"

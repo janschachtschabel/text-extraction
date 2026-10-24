@@ -8,7 +8,7 @@ classifier is unit-tested, in `tests/test_live_classify.py`.
 ## URL lists
 
 All lists are CSV files in `urls/` with a header row and a `url` column. Order and duplicates are
-kept.
+kept; a row without a URL is skipped with a warning.
 
 | File | URLs | Purpose |
 | --- | ---: | --- |
@@ -36,7 +36,7 @@ LIVE_API_KEY=... uv run python -m tests.live.run_live --urls tests/live/urls/wlo
 | `--min-ok-rate` | none | Exit 1 when the ok rate (percent of all URLs) is below this. |
 | `--out` | `results/live_<UTC time>.jsonl` | One JSON line per URL. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
-| `--timeout` | 90 | Client timeout per request in seconds; keep it above `EXTRACT_TIMEOUT_SECONDS`. |
+| `--timeout` | 90 | Total client deadline per request in seconds (a slower answer is recorded as `client_TimeoutError`); keep it above `EXTRACT_TIMEOUT_SECONDS`. |
 
 Every request is `POST /v1/extract` with `mode=auto`, `format=text` and `cache=false`. Each domain
 has its own queue and at most one request in flight; the domains take turns under the global
@@ -75,7 +75,9 @@ overall, the ok rate, how many URLs `enforce` would have blocked (`compliance.de
 `RATE_LIMIT_ENABLED=false`), waits for `/ready`, runs the harness, adds the summaries to the job
 summary and uploads the JSONL files and the server log as the `live-results` artifact.
 
-- **Manually** (Actions, "live", Run workflow): choose `url_set` and `min_ok_rate`.
+- **Manually** (Actions, "live", Run workflow): choose `url_set` and `min_ok_rate`, then `smoke`
+  as a report. With `url_set=smoke` the run is a report only; `min_ok_rate` does not apply.
 - **Pull requests** that carry the label `live`: `wlo_200` with `--min-ok-rate 68`, then `smoke`
-  as a report.
+  as a report. A new push or the `live` label starts a new run and cancels the one in progress;
+  adding any other label does neither.
 - **Weekly**, Mondays 03:00 UTC: the same as for pull requests.
