@@ -48,6 +48,9 @@ CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
 
+# The four keys of a job.
+_KINDS = ("meta", "urls", "results", "done")
+
 _NOT_FOUND = -1
 _OUT_OF_RANGE = -2
 
@@ -199,6 +202,10 @@ class JobStore:
             pipe.expire(urls_key, self._ttl_seconds)
             await pipe.execute()
         return job_id
+
+    async def delete(self, job_id: str) -> None:
+        """Remove all keys of the job. A job that is gone already is not an error."""
+        await self._valkey.delete(*(_key(job_id, kind) for kind in _KINDS))
 
     async def get(self, job_id: str) -> JobRecord | None:
         """The job's record, or None when it is unknown or expired."""

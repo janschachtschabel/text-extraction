@@ -1,18 +1,43 @@
 """Models of asynchronous jobs: stored options, progress and the views the job API returns."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
+from text_extraction.netguard import MAX_URL_LENGTH
 
 JobKind = Literal["extract", "batch"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
+
+
+class BatchRequest(BaseModel, extra="forbid"):
+    """Body of ``POST /v1/batch``: the URLs and the options of ``ExtractRequest`` (same defaults).
+
+    The most URLs a batch may have is ``BATCH_MAX_URLS``; the route checks it, since a model
+    cannot see the settings."""
+
+    urls: list[Annotated[str, Field(min_length=1, max_length=MAX_URL_LENGTH)]] = Field(
+        min_length=1,
+        description="The http(s) URLs to extract, at most `BATCH_MAX_URLS`. A URL twice gets two "
+        "items; an invalid URL gets an item that failed with `invalid_url`.",
+    )
+    mode: Literal["fast", "auto"] = Field(default="auto", description="As for `/v1/extract`.")
+    format: OutputFormat = Field(default="markdown", description="Format of `content`.")
+    metadata: bool = Field(default=True, description="Include the pages' DOM metadata.")
+    links: bool = Field(default=False, description="Include the pages' links.")
+    compliance: ComplianceMode | None = Field(
+        default=None,
+        description="`enforce`, `report` or `ignore` (admins only); default: the operator's.",
+    )
+    cache: bool = Field(
+        default=True, description="Use the result cache; `false` neither reads nor stores."
+    )
 
 
 class JobOptions(BaseModel, extra="forbid"):

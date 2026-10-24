@@ -18,9 +18,12 @@ from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
 from text_extraction.extract_api import router as extract_router
 from text_extraction.fetch import Fetcher
+from text_extraction.jobs import JobStore
+from text_extraction.jobs_api import router as jobs_router
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_pipeline
 from text_extraction.ratelimit import RateLimiter, rate_limited
+from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 from text_extraction.tracing import TraceMiddleware, current_trace_id
 
@@ -58,7 +61,8 @@ def create_public_app(
     """Build the public app. Metrics are collected in ``registry`` but not exposed here.
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
-    pipeline around a fake fetcher) before the app starts.
+    pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
+    ``app.state.job_queue`` back the batch and job routes.
     """
     app = FastAPI(
         title="Text Extraction API",
@@ -74,8 +78,11 @@ def create_public_app(
     app.state.pipeline = create_pipeline(
         settings, valkey, app.state.fetcher, registry, app.state.conversion_pool
     )
+    app.state.job_store = JobStore(valkey, settings)
+    app.state.job_queue = FairQueue(valkey, settings)
     install_error_handlers(app)
     app.include_router(extract_router)
+    app.include_router(jobs_router)
 
     @app.get("/v1/info", dependencies=[Depends(rate_limited)])
     async def info(

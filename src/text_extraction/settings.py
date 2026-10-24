@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     scheduler_claim_scan_budget: int = Field(default=200, ge=1, le=5000)
     # Job items one worker pod processes at once (conversions are still capped per pod).
     worker_concurrency: int = Field(default=8, ge=1)
+    # Batch API: URLs in one batch, and unfinished batches one API key may have at a time.
+    batch_max_urls: int = Field(default=1000, ge=1, le=100_000)
+    batch_max_open_per_client: int = Field(default=5, ge=1)
+    # False: POST /v1/batch and GET /v1/jobs/{id} answer 503 (API pods without workers).
+    jobs_enabled: bool = True
 
     @field_validator("log_level", mode="before")
     @classmethod
