@@ -113,15 +113,10 @@ def _check_size(body: BatchRequest, max_urls: int) -> None:
         raise _too_long(("body", "urls"), f"A batch may have at most {max_urls} URLs.")
 
 
-async def _limit_body_size(request: Request) -> None:
-    """Dependency: refuse a body whose Content-Length is more than ``BATCH_MAX_URLS`` URLs of
-    the longest allowed length can take, before the model validates the list. A body without
-    a Content-Length is bounded by the model (``MAX_BATCH_URLS`` items)."""
-    settings: Settings = request.app.state.settings
-    bound = settings.batch_max_urls * (MAX_URL_LENGTH + _BYTES_AROUND_URL) + _BODY_ALLOWANCE
-    declared = request.headers.get("content-length", "")
-    if declared.isascii() and declared.isdigit() and int(declared) > bound:
-        raise _too_long(("body",), "The request body is too large.")
+def batch_body_limit(settings: Settings) -> int:
+    """The largest body of ``POST /v1/batch``, in bytes: ``BATCH_MAX_URLS`` URLs of the longest
+    allowed length plus the options. The body-limit middleware enforces it (413)."""
+    return settings.batch_max_urls * (MAX_URL_LENGTH + _BYTES_AROUND_URL) + _BODY_ALLOWANCE
 
 
 async def _open_count(valkey: Redis, store: JobStore, owner: str) -> int:
@@ -166,7 +161,6 @@ async def _discard(valkey: Redis, store: JobStore, owner: str, job_id: str) -> N
     dependencies=[
         Depends(_require_jobs_enabled),
         Depends(rate_limited),
-        Depends(_limit_body_size),
     ],
 )
 async def create_batch(
@@ -179,8 +173,10 @@ async def create_batch(
     Every URL becomes one item with its own result, also a URL given twice and an invalid one
     (that item fails with `invalid_url`). Items of different clients and hosts are scheduled
     fairly across the worker pods. Poll `GET /v1/jobs/{id}` for progress and results.
-    4xx answers: an invalid body or more URLs than `BATCH_MAX_URLS` (422), a compliance mode the
-    caller may not choose (403), `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches (429, retryable).
+    4xx answers: an invalid body or more URLs than `BATCH_MAX_URLS` (422), a body larger than
+    `BATCH_MAX_URLS` URLs of the longest allowed length can take (413, before it is read whole),
+    a compliance mode the caller may not choose (403), `BATCH_MAX_OPEN_PER_CLIENT` unfinished
+    batches (429, retryable).
     503 when Valkey is unavailable or jobs are disabled.
     """
     settings: Settings = request.app.state.settings

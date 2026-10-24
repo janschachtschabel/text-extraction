@@ -14,12 +14,14 @@ from redis.asyncio import Redis
 
 from text_extraction import __version__
 from text_extraction.auth import Principal, Role, require_role
+from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
 from text_extraction.extract_api import router as extract_router
 from text_extraction.fetch import Fetcher
 from text_extraction.jobs import JobStore
+from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
@@ -155,6 +157,12 @@ def create_public_app(
         )
         return Envelope(status="success", data=data, trace_id=current_trace_id())
 
+    # Inside the metrics middleware, so refused bodies are counted like any other answer.
+    app.add_middleware(
+        BodyLimitMiddleware,
+        default_limit=settings.request_max_body_bytes,
+        path_limits={"/v1/batch": batch_body_limit(settings)},
+    )
     Instrumentator(registry=registry).instrument(app)
     # Added last, so it is the outermost middleware and sees every request.
     app.add_middleware(TraceMiddleware)

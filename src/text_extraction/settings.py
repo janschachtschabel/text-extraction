@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
     rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True
+    # Largest request body of the public API, in bytes; POST /v1/batch has its own bound, from
+    # BATCH_MAX_URLS. A larger body answers 413 before it is read whole.
+    request_max_body_bytes: int = Field(default=65536, ge=1024)
     # Total time budget of one fetch; at least the pipeline's 1 s minimum for a fetch.
     fetch_timeout_seconds: float = Field(default=20, ge=1)
     fetch_max_bytes: int = Field(default=20_000_000, ge=1024)  # response body limit

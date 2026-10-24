@@ -15,8 +15,9 @@ JobKind = Literal["extract", "batch"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
 
-# The most URLs a batch may ever have: the maximum of ``BATCH_MAX_URLS``. It also bounds the
-# model, so a body without a Content-Length is bounded too.
+# The most URLs a batch may ever have: the maximum of ``BATCH_MAX_URLS``. It bounds the model;
+# the body itself is bounded in bytes before it is parsed, with or without a Content-Length
+# (``body_limit.py``, ``jobs_api.batch_body_limit``).
 MAX_BATCH_URLS = 100_000
 
 

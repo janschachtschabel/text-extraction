@@ -625,10 +625,11 @@ def test_oversized_body_is_refused_before_it_is_validated(make_api: Callable[...
         "/v1/batch", content=body, headers={**ALICE, "content-type": "application/json"}
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     error = response.json()["error"]
     assert error["code"] == "invalid_request"
-    assert [detail["msg"] for detail in error["details"]] == ["The request body is too large."]
+    assert error["message"].startswith("The request body is too large")
+    assert "details" not in error or error["details"] is None
     assert api.keys("job:*") == []
 
 

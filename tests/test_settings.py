@@ -588,3 +588,15 @@ def test_extract_max_background_setting(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("EXTRACT_MAX_BACKGROUND", "0")
     with pytest.raises(ConfigError, match="extract_max_background"):
         load_settings()
+
+
+def test_request_max_body_bytes_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().request_max_body_bytes == 65536
+
+    monkeypatch.setenv("REQUEST_MAX_BODY_BYTES", "1024")
+    assert load_settings().request_max_body_bytes == 1024
+
+    monkeypatch.setenv("REQUEST_MAX_BODY_BYTES", "1023")
+    with pytest.raises(ConfigError, match="request_max_body_bytes"):
+        load_settings()

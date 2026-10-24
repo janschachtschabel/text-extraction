@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import HTTPConnection
 
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.tracing import current_trace_id, request_log_context
@@ -38,7 +39,18 @@ class ServiceError(Exception):
         self.headers = headers
 
 
-def _trace_id(request: Request) -> str | None:
+class BodyTooLarge(StarletteHTTPException):
+    """The request body is over the limit of its path (413, ``invalid_request``). Raised while the
+    body is read (``body_limit.py``); an HTTPException, so FastAPI passes it on unchanged."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            f"The request body is too large: at most {limit} bytes are accepted.",
+        )
+
+
+def _trace_id(request: HTTPConnection) -> str | None:
     """Trace id of the request.
 
     The request comes first: the catch-all handler runs outside `TraceMiddleware`, where the
@@ -48,7 +60,7 @@ def _trace_id(request: Request) -> str | None:
 
 
 def _failed(
-    request: Request,
+    request: HTTPConnection,
     http_status: int,
     error: ErrorInfo,
     headers: Mapping[str, str] | None = None,
@@ -80,6 +92,17 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
     return _failed(request, HTTPStatus.UNPROCESSABLE_ENTITY, error)
 
 
+def body_too_large_response(request: HTTPConnection, error: BodyTooLarge) -> JSONResponse:
+    """413 ``invalid_request``; the connection is closed, since the rest of the body is unread."""
+    info = ErrorInfo(code=ErrorCode.INVALID_REQUEST, message=error.detail)
+    return _failed(request, error.status_code, info, {"connection": "close"})
+
+
+async def _handle_body_too_large(request: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, BodyTooLarge)  # noqa: S101 - narrows the type for mypy
+    return body_too_large_response(request, exc)
+
+
 async def _handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, StarletteHTTPException)  # noqa: S101 - narrows the type for mypy
     code = ErrorCode.NOT_FOUND if exc.status_code == HTTPStatus.NOT_FOUND else None
@@ -106,4 +129,5 @@ def install_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ServiceError, _handle_service_error)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, _handle_http_exception)
+    app.add_exception_handler(BodyTooLarge, _handle_body_too_large)
     app.add_exception_handler(Exception, _handle_unhandled)
