@@ -248,6 +248,19 @@ class Handover:
         """Release the pipeline from another thread, while the test thread is in a request."""
         threading.Timer(seconds, self.pipeline.release.set).start()
 
+    def release_when(self, ready: Callable[[], bool], after: float = 0.0) -> None:
+        """Release the pipeline from another thread once ``ready()`` holds (and ``after``
+        seconds later), while the test thread is in a request."""
+
+        def wait_then_release() -> None:
+            deadline = time.monotonic() + 30
+            while not ready() and time.monotonic() < deadline:
+                time.sleep(0.005)
+            time.sleep(after)
+            self.pipeline.release.set()
+
+        threading.Thread(target=wait_then_release, daemon=True).start()
+
     async def keys_async(self, pattern: str) -> list[str]:
         valkey = FakeAsyncRedis(server=self.server)
         return sorted(
@@ -555,7 +568,9 @@ def test_shutdown_gives_up_after_the_extraction_deadline(
 
 def test_jobs_disabled_ignores_wait_seconds(handover: Callable[..., Handover]) -> None:
     case = handover(jobs_enabled=False)
-    case.release_later(0.2)  # after the wait of 0.05 s would have run out
+    # Released only after the extraction started and the wait of 0.05 s has run out: with jobs
+    # enabled the request would have become a job (202) by then.
+    case.release_when(case.pipeline.started.is_set, after=0.3)
     with TestClient(case.app) as client:
         response = client.post(
             "/v1/extract", json={"url": PAGE, "wait_seconds": 0.05}, headers=AUTH
@@ -566,6 +581,7 @@ def test_jobs_disabled_ignores_wait_seconds(handover: Callable[..., Handover]) -
         assert response.json()["data"]["title"]
         assert case.job_keys() == []
         assert case.app.state.background == set()
+        assert len(case.pipeline.tasks) == 1  # one extraction, run for this request only
 
 
 def test_background_cap_keeps_the_request_waiting(handover: Callable[..., Handover]) -> None:
@@ -573,7 +589,9 @@ def test_background_cap_keeps_the_request_waiting(handover: Callable[..., Handov
     with TestClient(case.app) as client:
         first = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
         assert first.status_code == 202
-        case.release_later(0.2)  # the pod holds one background extraction: the cap
+        assert len(case.app.state.background) == 1  # the pod holds one extraction: the cap
+        # Released only once the second request's extraction runs, i.e. after its cap check.
+        case.release_when(lambda: len(case.pipeline.tasks) == 2)
 
         second = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
 
