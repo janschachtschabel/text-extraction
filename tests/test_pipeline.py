@@ -884,7 +884,8 @@ def test_cross_origin_redirect_blocked_by_the_targets_robots() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
     assert target not in [url for url, _ in harness.fetcher.calls]
-    assert ("take", "other.example") not in gate.events
+    # The target's robots.txt is fetched in the target host's turn; the block gives it back.
+    assert gate.events[-2:] == [("take", "other.example"), ("give back", "other.example")]
     assert leases(harness) == 0
 
 
@@ -1096,3 +1097,99 @@ def test_a_hop_is_judged_by_what_is_left_of_the_chains_fetch_budget() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.TIMEOUT
     assert harness.keys("out:fail:*") == []
+
+
+# --- compliance files inside the page's gate turn ---------------------------------------------
+
+
+def watch_requests(harness: Harness, gate: RecordingGate) -> list[int]:
+    """Note each request in ``gate.events`` as ("fetch", url) and return a one-item list that
+    ends up holding the most requests that were in flight at once."""
+    answer = harness.fetcher.fetch
+    in_flight = 0
+    most = [0]
+
+    async def fetch(url: str, **options: Any) -> FetchResult:
+        nonlocal in_flight
+        in_flight += 1
+        most[0] = max(most[0], in_flight)
+        gate.events.append(("fetch", url))
+        try:
+            await asyncio.sleep(0.01)
+            return await answer(url, **options)
+        finally:
+            in_flight -= 1
+
+    harness.fetcher.fetch = fetch  # type: ignore[method-assign]
+    return most
+
+
+@pytest.mark.parametrize("gate_refusals", ["fail", "raise"])  # POST /v1/extract, the worker
+def test_a_cold_origins_files_are_fetched_one_by_one_in_the_pages_turn(gate_refusals: str) -> None:
+    harness, gate = recording_harness({PAGE: fetched(PAGE)})
+    most = watch_requests(harness, gate)
+
+    async def twice() -> list[Envelope[ExtractResult]]:
+        request = ExtractRequest(url=PAGE, cache=False)
+        return [
+            await harness.pipeline.run(request, USER, gate_refusals=gate_refusals)  # type: ignore[arg-type]
+            for _ in range(2)
+        ]
+
+    first, second = asyncio.run(twice())
+
+    assert first.status == second.status == "success"
+    turn = [("take", "example.org")]
+    end = [("record", "example.org"), ("give back", "example.org")]
+    assert gate.events == [
+        *turn,
+        ("fetch", ROBOTS),
+        ("fetch", f"{ORIGIN}/.well-known/tdmrep.json"),
+        ("fetch", f"{ORIGIN}/ai.txt"),
+        ("fetch", PAGE),
+        *end,
+        # The files are cached now: the second turn fetches the page only.
+        *turn,
+        ("fetch", PAGE),
+        *end,
+    ]
+    assert most[0] == 1
+    assert leases(harness) == 0
+
+
+def test_a_refused_turn_fetches_no_compliance_file() -> None:
+    harness = Harness({PAGE: fetched(PAGE)}, gate=RefusingGate(OutboundBusy(3.0)))
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.RATE_LIMITED
+    assert harness.fetcher.calls == []
+
+
+def test_a_cross_host_redirects_files_are_fetched_in_the_targets_turn() -> None:
+    target = f"{OTHER}/learn/page.html"
+    harness, gate = recording_harness({PAGE: Redirect(target), target: fetched(target)})
+    most = watch_requests(harness, gate)
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "success"
+    assert gate.events == [
+        ("take", "example.org"),
+        ("fetch", ROBOTS),
+        ("fetch", f"{ORIGIN}/.well-known/tdmrep.json"),
+        ("fetch", f"{ORIGIN}/ai.txt"),
+        ("fetch", PAGE),
+        ("give back", "example.org"),
+        ("take", "other.example"),
+        ("fetch", f"{OTHER}/robots.txt"),
+        ("fetch", f"{OTHER}/.well-known/tdmrep.json"),
+        ("fetch", f"{OTHER}/ai.txt"),
+        ("record", "other.example"),
+        ("give back", "other.example"),
+    ]
+    # The fake fetcher follows the redirect inside the first fetch call, so that call counts as
+    # in flight while the target's files load: two, where the real fetcher has one.
+    assert most[0] == 2
+    assert leases(harness) == 0

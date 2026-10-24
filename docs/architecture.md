@@ -32,10 +32,15 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
 2. **Compliance:** robots.txt, TDMRep (`/.well-known/tdmrep.json`, `tdm-reservation` header
    and meta), robots meta / `X-Robots-Tag`, ai.txt / llms.txt. Mode `enforce|report|ignore`
    per request; operator default and override permission via `COMPLIANCE_DEFAULT`,
-   `COMPLIANCE_ALLOW_OVERRIDE`. Every result carries a `compliance` block.
+   `COMPLIANCE_ALLOW_OVERRIDE`. Every result carries a `compliance` block. The origin files are
+   cached in Valkey; files that are missing are fetched one after another inside the outbound
+   turn of the page that needs them, before the page (R22), so they count against the host's
+   limits like any request.
 3. **Fetch (fast):** httpx, HTTP/2, byte cap, conditional requests (ETag, Last-Modified).
    Per-domain outbound limits in Valkey (parallelism, delay, `Crawl-delay`, backoff on
-   429/503, circuit breaker).
+   429/503, circuit breaker). A turn has at most one request in flight, so the parallelism
+   limit holds for every request a host sees; the delay lies between the real starts of turns
+   (R21: a request that woke late delays the next instead of letting it follow closer).
 4. **Quality gate (auto mode):** fewer than 500 visible characters while the page runs
    JavaScript, a bot challenge, or a soft-404 → browser worker.
    `quality.py` reports `js_heavy`, `bot_challenge`, `soft_404` and `login_wall`; a bot

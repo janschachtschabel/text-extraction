@@ -5,11 +5,15 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 1. ``resolve_mode``: the compliance mode that applies; a refused choice is a 403.
 2. ``validate_url``.
 3. Result cache: a fresh entry is served as it is (``cache: hit``).
-4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here.
-5. The fetch, inside the host's ``DomainGate`` slot, and its outcome reported to the gate. A
-   stale cache entry's validators are sent; a 304 or unchanged bytes reuse the stored result
-   (``cache: revalidated``). Each redirect target passes the compliance checks of step 4 before
-   it is requested, and one on another host waits for that host's slot instead.
+4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here. When the
+   origin's files are cached, this takes no request. Otherwise the host's ``DomainGate`` turn is
+   taken first and the missing files are fetched in it, one after another, before the page: so
+   every request to the host counts against its limits, and the spacing lies between turns.
+5. The fetch, inside the host's ``DomainGate`` turn (the one of step 4, if taken), and its
+   outcome reported to the gate. A stale cache entry's validators are sent; a 304 or unchanged
+   bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
+   compliance checks of step 4 before it is requested; one on another host gives the first
+   host's turn back and takes the new host's, in which its missing files are fetched too.
 6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
 7. HTML and XHTML: decode, compliance after the fetch (headers, meta tags, ``noai``; may block),
    convert, strip domain boilerplate. ``text/plain``: decode, header checks, ``convert_plain``.
@@ -418,14 +422,14 @@ class Pipeline:
         self, run: _Run, stored: _Stored | None
     ) -> Envelope[ExtractResult]:
         req = run.req
-        started = time.perf_counter()
-        report = await self._checker.before_fetch(req.url, run.report.mode)
-        run.compliance_ms += _ms(started)
-        run.report = report
-        if (code := blocking_code(report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
-
-        fetched = await self._fetch(run, stored.entry.validators if stored else None)
+        turn = _Turn(self._gate)
+        try:
+            run.report = await self._check_origin(run, req.url, turn)
+            if (code := blocking_code(run.report)) is not None:
+                return run.failed(code, _BLOCK_MESSAGES[code])
+            fetched = await self._fetch(run, stored.entry.validators if stored else None, turn)
+        finally:
+            await turn.give_back()  # `_fetch` gives it back as soon as the fetch ends
         if fetched.not_modified:
             if stored is None:
                 return run.failed(
@@ -477,16 +481,34 @@ class Pipeline:
             return await self._revalidated(run, stored, fetched)
         return await self._extract_content(run, stored, fetched, kind, text)
 
-    async def _fetch(self, run: _Run, validators: Validators | None) -> FetchResult:
+    async def _check_origin(self, run: _Run, url: str, turn: _Turn) -> ComplianceReport:
+        """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
+        turn of ``url``'s host, taken here (or kept, when ``turn`` holds it already), so the
+        origin's files are fetched under the host's limits. The wait for the turn counts as
+        fetch time, the checks as compliance time."""
+        mode = run.report.mode
+        started = time.perf_counter()
+        report = await self._checker.cached_before_fetch(url, mode)
+        if report is None:
+            waited = time.perf_counter()
+            # The origin's Crawl-delay is not known yet; the request after this turn keeps it.
+            await turn.take(urlsplit(url).hostname or "", None)
+            run.fetch_ms += _ms(waited)
+            started += time.perf_counter() - waited
+            report = await self._checker.before_fetch(url, mode)
+        run.compliance_ms += _ms(started)
+        return report
+
+    async def _fetch(self, run: _Run, validators: Validators | None, turn: _Turn) -> FetchResult:
         """Fetch the target in its host's turn and report the outcome to the gate.
 
         A redirect target is checked against the compliance files of its origin before it is
         requested (a block ends the chain). A target on another host waits for that host's turn
         and the previous host's turn is given back first; one on the same host keeps the turn.
+        Missing files of the target's origin are fetched in the target's turn.
         The outcome is recorded for the host that gave it, judged against the time that host's
         request actually had.
         """
-        turn = _Turn(self._gate)
         checked = {run.req.url}
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
@@ -502,8 +524,14 @@ class Pipeline:
             if url not in checked:
                 checked.add(url)
                 check_started = time.perf_counter()
-                hop = await self._checker.before_fetch(url, run.report.mode)
-                hop_checks += time.perf_counter() - check_started
+                compliance_before = run.compliance_ms
+                fetch_before = run.fetch_ms
+                hop = await self._check_origin(run, url, turn)
+                # Counted below from hop_checks instead: the fetch time is what remains, and a
+                # wait for the target's turn is part of it.
+                waited = (run.fetch_ms - fetch_before) / 1000
+                hop_checks += time.perf_counter() - check_started - waited
+                run.compliance_ms, run.fetch_ms = compliance_before, fetch_before
                 run.report = with_redirect_findings(run.report, hop)
                 if (code := blocking_code(run.report)) is not None:
                     raise FetchError(code, _BLOCK_MESSAGES[code])

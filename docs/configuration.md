@@ -74,7 +74,8 @@ The fetcher identifies itself on every outbound request with a fixed, honest use
 configurable. The robots.txt product token is `text-extraction`; robots.txt is read per RFC 9309
 (4xx and unfollowable redirects mean no rules; 5xx, 429 or a network error means "unavailable",
 which `enforce` treats as disallowed; a file over 500 KiB is parsed from its first 500 KiB). The
-compliance files of an origin are loaded once per pod for concurrent requests. Every redirect
+compliance files of an origin are loaded once per pod for concurrent requests, one after another
+and inside the page's outbound turn (see "Outbound limits per host"). Every redirect
 target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
 `enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
 `report` its findings join the report. Client trace headers
@@ -184,7 +185,15 @@ with `Retry-After`. If Valkey is unavailable the request is refused with 503 (`i
 
 ## Outbound limits per host
 
-Every fetch of a target site passes a per-host gate. All state is in Valkey, so the pods share it.
+Every request to a target site passes a per-host gate: the page and its redirect hops, and the
+origin's compliance files (robots.txt, `tdmrep.json`, ai.txt). The files are fetched only when they
+are not cached (`COMPLIANCE_CACHE_SECONDS`), then one after another inside the turn of the page
+that needs them, before the page. A turn has at most one request in flight, so
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST` holds for every request. The spacing lies between turns: on
+first contact the files and the page follow each other without a gap, and the next turn starts
+the spacing after the last of them was sent. The first turn on an
+origin does not know its `Crawl-delay` yet; the turn after it does and keeps it. All state is in
+Valkey, so the pods share it.
 Hosts are compared lower-cased and in IDNA form. The braces around the host in the keys are
 literal (a cluster hash tag), so all keys of one host live in the same slot.
 
