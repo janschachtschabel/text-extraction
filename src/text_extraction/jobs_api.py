@@ -43,6 +43,7 @@ from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
+from text_extraction.valkey import reply_text
 
 _log = structlog.get_logger(__name__)
 
@@ -67,10 +68,6 @@ def _open_key(owner: str) -> str:
     for char, code in _OWNER_ESCAPES.items():
         owner = owner.replace(char, code)
     return f"jobs:{{owner:{owner}}}:open"
-
-
-def _text(value: bytes | str) -> str:
-    return value if isinstance(value, str) else value.decode()
 
 
 async def _require_jobs_enabled(
@@ -133,7 +130,7 @@ def batch_body_limit(settings: Settings) -> int:
 async def _open_count(valkey: Redis, store: JobStore, owner: str) -> int:
     """The owner's unfinished batches. Ids of jobs that are completed or gone are removed."""
     key = _open_key(owner)
-    ids = [_text(raw) for raw in await valkey.smembers(key)]
+    ids = [reply_text(raw) for raw in await valkey.smembers(key)]
     records = await asyncio.gather(*(store.get(job_id) for job_id in ids))
     finished = [
         job_id
@@ -212,7 +209,9 @@ async def create_batch(
     try:
         if await _open_count(valkey, store, principal.name) >= limit:
             raise _too_many_open(limit)
-        job_id = await store.create("batch", principal, options, body.urls)
+        job_id = await store.create(
+            "batch", principal, options, body.urls, trace_id=current_trace_id()
+        )
         try:
             # Counting again after the add keeps the limit under concurrent requests: of
             # several that passed the check above, those beyond the limit give their job back.

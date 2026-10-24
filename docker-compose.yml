@@ -40,8 +40,9 @@ services:
     # SIGTERM starts a 5 s drain and a graceful shutdown of up to 30 s (docs/configuration.md).
     stop_grace_period: 45s
 
-  # Extract worker: runs the items of batches and slow extractions. It serves only the internal
-  # port 9090 (not published) and needs the same API_KEYS as the API while AUTH_MODE is api_key.
+  # Extract worker: runs the items of batches (a slow POST /v1/extract that became a job keeps
+  # running in the API container). It serves only the internal port 9090 (not published) and
+  # needs the same API_KEYS as the API while AUTH_MODE is api_key.
   worker:
     <<: *app
     command: ["text-extraction-worker"]

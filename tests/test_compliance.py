@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 from fakeredis import FakeAsyncRedis
 from protego import Protego
+from pytest_httpserver import HTTPServer
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -23,6 +24,7 @@ from text_extraction.compliance import (
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.fetch import Fetcher, FetchError, FetchResult
+from text_extraction.outbound import OutboundBusy
 from text_extraction.settings import Settings
 
 ORIGIN = "https://example.org"
@@ -982,6 +984,54 @@ def test_a_failed_shared_load_fails_every_waiter_and_is_retried() -> None:
     assert all(isinstance(outcome, RuntimeError) for outcome in first)
     assert attempts.count(ROBOTS) == 2  # once for the failed round, once for the retry
     assert all(isinstance(outcome, ComplianceReport) for outcome in second)
+
+
+def test_a_gate_refusal_in_a_shared_load_reaches_every_waiter_and_caches_nothing(
+    httpserver: HTTPServer,
+) -> None:
+    """The gate hook of the real fetcher refuses the request of the check that started the
+    load (``OutboundBusy``): every check that waits for the same load gets that refusal, nothing
+    is cached for the origin, and the next check loads the files again."""
+    httpserver.expect_request("/robots.txt").respond_with_data("User-agent: *\nDisallow: /docs/\n")
+    page = httpserver.url_for("/docs/page")
+    refuse = True
+    hosts: list[str] = []
+
+    async def gate(host: str) -> None:
+        hosts.append(host)
+        await asyncio.sleep(0.05)  # the other checks join the load meanwhile
+        if refuse:
+            raise OutboundBusy(retry_after=3)
+
+    valkey = FakeAsyncRedis()
+    settings = Settings(auth_mode="none")
+    fetcher = Fetcher(settings, policy=lambda ip: str(ip) == "127.0.0.1", before_request=gate)
+    checker = ComplianceChecker(fetcher, valkey, settings)
+
+    async def scenario() -> tuple[list[ComplianceReport | BaseException], list[Any]]:
+        outcomes = await asyncio.gather(
+            *(checker.before_fetch(page, "enforce") for _ in range(3)), return_exceptions=True
+        )
+        return outcomes, await valkey.keys("*")
+
+    async def again() -> ComplianceReport:
+        try:
+            return await checker.before_fetch(page, "enforce")
+        finally:
+            await fetcher.aclose()
+
+    outcomes, cached = asyncio.run(scenario())
+
+    assert all(isinstance(outcome, OutboundBusy) for outcome in outcomes)
+    assert [outcome.retry_after for outcome in outcomes] == [3, 3, 3]  # type: ignore[union-attr]
+    assert len(hosts) == 1  # one shared load, refused once
+    assert cached == []
+
+    refuse = False
+    report = asyncio.run(again())
+
+    assert report.robots == "disallowed"
+    assert len(hosts) == 4  # the refused robots.txt, then all three files loaded anew
 
 
 def test_rules_are_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:

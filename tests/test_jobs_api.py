@@ -779,3 +779,15 @@ def test_running_batch_without_a_lease_is_never_lost(api: Api) -> None:
 
     assert view["state"] == "running"
     assert [item["state"] for item in view["items"]].count("pending") == 1
+
+
+def test_batch_stores_the_trace_id_of_its_request(api: Api) -> None:
+    response = api.client.post(
+        "/v1/batch", json={"urls": [PAGE]}, headers={**ALICE, "x-client-trace-id": "trace-b"}
+    )
+    job_id = response.json()["data"]["id"]
+
+    record = api.run(lambda valkey: JobStore(valkey, api.settings).get(job_id))
+
+    assert record is not None
+    assert record.trace_id == "trace-b"

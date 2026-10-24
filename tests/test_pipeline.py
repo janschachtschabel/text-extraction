@@ -1295,3 +1295,45 @@ def test_two_cold_turns_sharing_the_file_load_still_space_their_pages() -> None:
     assert first.status == second.status == "success"
     assert len(page_starts) == 2
     assert abs(page_starts[1] - page_starts[0]) >= 0.19  # 200 ms, minus clock slack
+
+
+@pytest.mark.parametrize(("gate_wait", "counted"), [(0.0, True), (0.7, False)])
+def test_a_timeout_is_judged_by_the_time_the_host_had_after_the_gate(
+    httpserver: HTTPServer, gate_wait: float, counted: bool
+) -> None:
+    """The fetch's budget covers the gate's wait before the request is sent. A long wait
+    followed by a slow host is not the host's fault: what counts is the time left once the gate
+    let the request go (FETCH_TIMEOUT_SECONDS 1, so a fair share is 0.5 s)."""
+
+    def hang(request: Any) -> Any:
+        time.sleep(1.5)
+        return "late"
+
+    httpserver.expect_request("/slow").respond_with_handler(hang)
+    settings = make_settings(
+        fetch_allow_private_networks=True,
+        fetch_timeout_seconds=1,
+        compliance_default="ignore",
+        outbound_min_delay_ms=0,
+    )
+    valkey = FakeAsyncRedis()
+    gate = DomainGate(valkey, settings)
+
+    async def slow_gate(host: str) -> None:
+        await gate.before_request(host)
+        await asyncio.sleep(gate_wait)
+
+    async def scenario() -> tuple[Envelope[ExtractResult], list[Any]]:
+        fetcher = Fetcher(settings, before_request=slow_gate, on_request_sent=gate.mark_sent)
+        pipeline = create_pipeline(settings, valkey, fetcher, CollectorRegistry(), gate=gate)
+        try:
+            envelope = await pipeline.run(ExtractRequest(url=httpserver.url_for("/slow")), USER)
+        finally:
+            await fetcher.aclose()
+        return envelope, await valkey.keys("out:fail:*")
+
+    envelope, failures = asyncio.run(scenario())
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert (failures == [b"out:fail:{127.0.0.1}"]) is counted

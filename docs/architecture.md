@@ -42,7 +42,9 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
 3. **Fetch (fast):** httpx, HTTP/2, byte cap, conditional requests (ETag, Last-Modified).
    Per-domain outbound limits in Valkey (parallelism, delay, `Crawl-delay`, backoff on
    429/503, circuit breaker). A turn has at most one request in flight, so the parallelism
-   limit holds for every request a host sees. The delay lies between the real starts of
+   limit holds for every request a host sees, with one exception: a compliance file that
+   redirects to another host goes out there without a lease or spacing at the target, at most
+   3 times per origin per pod per cache period. The delay lies between the real starts of
    requests of different turns, back to back within a turn (R25); a request that was sent late
    delays the other turns' next request instead of letting it follow closer (R21).
 4. **Quality gate (auto mode):** fewer than 500 visible characters while the page runs

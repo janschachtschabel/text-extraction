@@ -133,18 +133,24 @@ class FetchResult:
     truncated: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Limits:
-    """The limits of one ``fetch`` call."""
+    """The limits of one ``fetch`` call, and how far it got."""
 
     max_bytes: int
     truncate: bool
     deadline: float  # seconds for the whole call
     started: float  # time.monotonic() at the start
+    # Seconds from the start to the moment the latest request passed ``before_request``.
+    cleared_after: float | None = None
 
 
 class FetchError(Exception):
-    """The target could not be fetched. The message is safe to show to API callers."""
+    """The target could not be fetched. The message is safe to show to API callers.
+
+    ``cleared_after`` (timeouts only) is the seconds from the start of the fetch to the moment
+    the request that timed out passed ``before_request``, None when none got that far: the time
+    the host had is the call's deadline minus it."""
 
     def __init__(
         self,
@@ -153,12 +159,14 @@ class FetchError(Exception):
         *,
         retryable: bool = False,
         upstream_status: int | None = None,
+        cleared_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
         self.upstream_status = upstream_status
+        self.cleared_after = cleared_after
 
 
 class _Inflater:
@@ -341,11 +349,10 @@ class Fetcher:
         if deadline <= 0:
             raise ValueError("timeout_seconds must be greater than 0")
         started = time.monotonic()
+        limits = _Limits(limit, truncate, deadline, started)
         try:
             async with asyncio.timeout(deadline):
-                return await self._fetch(
-                    url, validators, _Limits(limit, truncate, deadline, started), on_redirect
-                )
+                return await self._fetch(url, validators, limits, on_redirect)
         except FetchError:
             raise
         except (InvalidUrlError, httpx.InvalidURL) as error:
@@ -360,7 +367,10 @@ class Fetcher:
             ) from None
         except (TimeoutError, httpx.TimeoutException):
             raise FetchError(
-                ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True
+                ErrorCode.TIMEOUT,
+                "The fetch did not finish in time.",
+                retryable=True,
+                cleared_after=limits.cleared_after,
             ) from None
         except (httpx.HTTPError, OSError) as error:
             raise FetchError(
@@ -407,6 +417,7 @@ class Fetcher:
                 request.extensions["trace"] = _sent_tracer(self._on_request_sent, current)
             if self._before_request is not None:
                 await self._before_request(urlsplit(current).hostname or "")
+            limits.cleared_after = time.monotonic() - limits.started
             async with contextlib.aclosing(await self._send(request)) as response:
                 cookies.extract_cookies(response)
                 status = response.status_code

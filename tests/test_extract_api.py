@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+import structlog
 from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -22,7 +23,7 @@ from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import _store_result, extract
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
@@ -759,3 +760,42 @@ def test_wait_for_stops_at_its_deadline() -> None:
             await hang
 
     asyncio.run(scenario())
+
+
+def test_failed_extract_carries_the_bound_trace_id() -> None:
+    plain = failed_extract(ErrorCode.TIMEOUT, "Too slow.", retryable=True)
+    assert plain.status == "failed"
+    assert plain.error is not None
+    assert (plain.error.code, plain.error.message, plain.error.retryable) == (
+        ErrorCode.TIMEOUT,
+        "Too slow.",
+        True,
+    )
+    assert plain.trace_id is None
+
+    with structlog.contextvars.bound_contextvars(trace_id="trace-7"):
+        traced = failed_extract(ErrorCode.INTERNAL_ERROR, "Broken.", retryable=False)
+
+    assert traced.trace_id == "trace-7"
+
+
+def test_hand_over_stores_the_trace_id_of_its_request(handover: Callable[..., Handover]) -> None:
+    case = handover()
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "wait_seconds": 0},
+            headers={**AUTH, "x-client-trace-id": "trace-h"},
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+
+        record = asyncio.run(
+            JobStore(FakeAsyncRedis(server=case.server), case.settings).get(job_id)
+        )
+
+        case.pipeline.release.set()
+        case.wait_for_job(client, job_id)
+
+    assert record is not None
+    assert record.trace_id == "trace-h"

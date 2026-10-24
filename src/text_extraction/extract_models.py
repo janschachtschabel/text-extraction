@@ -6,10 +6,12 @@ from pydantic import BaseModel, Field
 
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
+from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.fingerprint import Fingerprint
 from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.quality import Quality
+from text_extraction.tracing import current_trace_id
 
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
@@ -77,3 +79,10 @@ class ExtractResult(BaseModel):
     fingerprint: Fingerprint | None
     cache: CacheState
     warnings: list[str]
+
+
+def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:
+    """A failed extraction envelope without data, with the trace id bound to the context (the
+    request's, or in a worker the trace id of the job's creator)."""
+    error = ErrorInfo(code=code, message=message, retryable=retryable)
+    return Envelope[ExtractResult](status="failed", error=error, trace_id=current_trace_id())

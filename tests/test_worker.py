@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+import structlog
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -859,3 +860,43 @@ async def test_metrics_count_outcomes() -> None:
     assert harness.sample("text_extraction_worker_busy_slots") == 0
     assert harness.sample("text_extraction_job_duration_seconds_count", {"kind": "batch"}) == 1
     assert harness.sample("text_extraction_job_duration_seconds_sum", {"kind": "batch"}) == 7
+
+
+# --- the trace id of the job's creator -------------------------------------------------------
+
+
+@scenario
+async def test_worker_logs_and_stores_under_the_creators_trace_id() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    job_id = await harness.store.create("batch", OWNER, OPTIONS, [url], trace_id="trace-batch-1")
+    await harness.queue.enqueue(job_id, OWNER.name, [url])
+    claim = await harness.claim()
+
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await harness.worker.process(claim.item)  # type: ignore[arg-type]
+
+    done = [entry for entry in logs if entry["event"] == "job_item_done"]
+    assert [entry.get("trace_id") for entry in done] == ["trace-batch-1"]
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.trace_id == "trace-batch-1"
+    assert structlog.contextvars.get_contextvars().get("trace_id") is None  # unbound again
+
+
+@scenario
+async def test_worker_without_a_stored_trace_id_binds_none() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    job_id = await harness.submit([url])
+    claim = await harness.claim()
+
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
+
+    assert logs
+    assert all("trace_id" not in entry for entry in logs)
+    assert all(entry["job_id"] == job_id for entry in logs)
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.trace_id is None

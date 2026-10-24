@@ -47,9 +47,9 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
-from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore
 from text_extraction.metadata import load_language_model
@@ -131,12 +131,6 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
     return metrics
 
 
-def _failure(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:
-    return Envelope[ExtractResult](
-        status="failed", error=ErrorInfo(code=code, message=message, retryable=retryable)
-    )
-
-
 def _outcome(envelope: Envelope[ExtractResult]) -> str:
     """Metric label: the envelope's error code, else its status (``success``)."""
     return envelope.error.code.value if envelope.error is not None else envelope.status
@@ -180,16 +174,24 @@ class Worker:
                 slots.create_task(self._slot(stop))
 
     async def process(self, item: QueueItem, *, exhausted: bool = False) -> None:
-        """Handle one claimed item (``exhausted`` as the claim said). Valkey errors propagate."""
+        """Handle one claimed item (``exhausted`` as the claim said). Valkey errors propagate.
+
+        Its log lines carry the job id, the item's index and the trace id of the request that
+        created the job (when it had one); so does the envelope the pipeline produces."""
         started = time.perf_counter()
         self._metrics.busy.inc()
         try:
             with structlog.contextvars.bound_contextvars(job_id=item.job_id, item=item.index):
-                if exhausted:
-                    outcome = await self._fail_exhausted(item)
-                else:
-                    outcome = await self._extract(item)
-                _log.info("job_item_done", attempts=item.attempts, outcome=outcome or _SUPERSEDED)
+                job = await self._store.get(item.job_id)
+                trace = {"trace_id": job.trace_id} if job is not None and job.trace_id else {}
+                with structlog.contextvars.bound_contextvars(**trace):
+                    if exhausted:
+                        outcome = await self._fail_exhausted(item, job)
+                    else:
+                        outcome = await self._extract(item, job)
+                    _log.info(
+                        "job_item_done", attempts=item.attempts, outcome=outcome or _SUPERSEDED
+                    )
         finally:
             self._metrics.busy.dec()
             self._metrics.item_seconds.observe(time.perf_counter() - started)
@@ -243,9 +245,9 @@ class Worker:
 
     # --- one item ----------------------------------------------------------------------------
 
-    async def _extract(self, item: QueueItem) -> str | None:
-        """The item's metric outcome; None when it is not to be counted (``_SUPERSEDED``)."""
-        job = await self._store.get(item.job_id)
+    async def _extract(self, item: QueueItem, job: JobRecord | None) -> str | None:
+        """The item's metric outcome; None when it is not to be counted (``_SUPERSEDED``).
+        ``job`` is the item's job, None when it is gone."""
         url = await self._store.url(item.job_id, item.index) if job is not None else None
         if job is None or url is None:
             return await self._drop(item)
@@ -270,23 +272,22 @@ class Worker:
         except ServiceError as error:
             if error.http_status >= 500:
                 raise
-            envelope = _failure(error.code, error.message, retryable=error.retryable)
+            envelope = failed_extract(error.code, error.message, retryable=error.retryable)
         except (RedisError, OSError):
             raise  # Valkey (a builtin TimeoutError too): the slot loop backs off
         except Exception:
             _log.error("job_item_failed", exc_info=True)
-            envelope = _failure(ErrorCode.INTERNAL_ERROR, _INTERNAL_MESSAGE, retryable=False)
+            envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _INTERNAL_MESSAGE, retryable=False)
         return await self._finish(item, job, envelope)
 
-    async def _fail_exhausted(self, item: QueueItem) -> str | None:
+    async def _fail_exhausted(self, item: QueueItem, job: JobRecord | None) -> str | None:
         """Record the item as lost too often, then complete it. A Valkey error propagates and
         leaves the item leased, so it is offered again after the lease instead of vanishing
         without a result."""
         _log.warning("job_item_exhausted", attempts=item.attempts)
-        job = await self._store.get(item.job_id)
         if job is None:
             return await self._drop(item)
-        envelope = _failure(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
+        envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
         return await self._finish(item, job, envelope)
 
     async def _finish(

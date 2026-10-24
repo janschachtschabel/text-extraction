@@ -4,7 +4,8 @@ A job lives in four keys; the braces around the id are a literal cluster hash ta
 keys share a slot and a Lua script can touch all of them:
 
 - ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON), state, created_at,
-                          finished_at, total, done, success, partial, failed, lease_until
+                          finished_at, total, done, success, partial, failed, lease_until,
+                          trace_id (of the request that created the job, when it had one)
 - ``job:{<id>}:urls``     list: the URLs in input order
 - ``job:{<id>}:results``  hash: item index -> ``Envelope[ExtractResult]`` as JSON
 - ``job:{<id>}:done``     bitmap: bit ``index`` is set once that item has its result
@@ -36,6 +37,7 @@ from text_extraction.job_models import (
     JobState,
 )
 from text_extraction.settings import Settings
+from text_extraction.valkey import reply_text
 
 # What one result write did: finished its item (``first``), finished the item and with it the
 # job (``last``), or nothing, because the item had its result already (``repeat``).
@@ -124,7 +126,8 @@ class JobLost(Exception):  # noqa: N818 - public name fixed by the plan
 class JobRecord:
     """What the meta hash holds. ``owner`` is the principal's name, ``lease_until`` the epoch
     time at which the worker's claim ends (None: no claim); ``get`` reports it unchanged, even
-    when it lies in the past."""
+    when it lies in the past. ``trace_id`` is the trace id of the request that created the job;
+    workers log its items under it."""
 
     id: str
     kind: JobKind
@@ -136,6 +139,7 @@ class JobRecord:
     finished_at: datetime | None
     progress: JobProgress
     lease_until: float | None
+    trace_id: str | None = None
 
 
 def _key(job_id: str, kind: str) -> str:
@@ -149,10 +153,6 @@ def _epoch(value: float) -> str:
 
 def _utc(epoch: str) -> datetime:
     return datetime.fromtimestamp(float(epoch), tz=UTC)
-
-
-def _text(value: bytes | str) -> str:
-    return value if isinstance(value, str) else value.decode()
 
 
 class JobStore:
@@ -173,9 +173,16 @@ class JobStore:
         self._mark_running = valkey.register_script(_MARK_RUNNING)
 
     async def create(
-        self, kind: JobKind, owner: Principal, options: JobOptions, urls: list[str]
+        self,
+        kind: JobKind,
+        owner: Principal,
+        options: JobOptions,
+        urls: list[str],
+        *,
+        trace_id: str | None = None,
     ) -> str:
-        """Store a new job in state ``queued`` and return its id."""
+        """Store a new job in state ``queued`` and return its id. ``trace_id`` is the creating
+        request's."""
         if not urls:
             raise ValueError("A job needs at least one URL")
         job_id = uuid.uuid4().hex
@@ -194,6 +201,8 @@ class JobStore:
             "partial": 0,
             "failed": 0,
         }
+        if trace_id is not None:
+            meta["trace_id"] = trace_id
         async with self._valkey.pipeline(transaction=True) as pipe:
             pipe.hset(meta_key, mapping=meta)
             for start in range(0, len(urls), _URL_CHUNK):
@@ -212,7 +221,7 @@ class JobStore:
         raw = await self._valkey.hgetall(_key(job_id, "meta"))
         if not raw:
             return None
-        meta = {_text(key): _text(value) for key, value in raw.items()}
+        meta = {reply_text(key): reply_text(value) for key, value in raw.items()}
         finished_at = meta.get("finished_at")
         lease_until = meta.get("lease_until")
         return JobRecord(
@@ -232,6 +241,7 @@ class JobStore:
                 failed=int(meta["failed"]),
             ),
             lease_until=float(lease_until) if lease_until is not None else None,
+            trace_id=meta.get("trace_id"),
         )
 
     async def url(self, job_id: str, index: int) -> str | None:
@@ -239,7 +249,7 @@ class JobStore:
         if index < 0:
             return None
         raw = await self._valkey.lindex(_key(job_id, "urls"), index)
-        return _text(raw) if raw is not None else None
+        return reply_text(raw) if raw is not None else None
 
     async def items(self, job_id: str, offset: int, limit: int) -> list[JobItem]:
         """Up to ``limit`` items from ``offset`` in index order. Indexes past the end are absent."""
@@ -254,7 +264,7 @@ class JobStore:
         return [
             JobItem(
                 index=offset + position,
-                url=_text(url),
+                url=reply_text(url),
                 state="done" if results[position] is not None else "pending",
                 result=(
                     Envelope[ExtractResult].model_validate_json(results[position])
@@ -265,24 +275,19 @@ class JobStore:
             for position, url in enumerate(urls)
         ]
 
-    async def store_result(
-        self, job_id: str, index: int, envelope: Envelope[ExtractResult]
-    ) -> bool:
-        """Store the result of item ``index``. True when this call finished the item.
-
-        Only the first write of an index counts and is kept: a repeat (an item that ran again
-        after a lost lease) changes nothing and returns False. The last result completes the
-        job. A result over ``JOB_ITEM_MAX_BYTES`` as UTF-8 JSON is stored without its content
-        and with the warning ``content_not_stored_too_large``. Raises ``JobLost`` when the job's
-        keys are gone and ``ValueError`` when the index is outside the job.
-        """
-        return await self.write_result(job_id, index, envelope) != "repeat"
-
     async def write_result(
         self, job_id: str, index: int, envelope: Envelope[ExtractResult]
     ) -> ResultWrite:
-        """``store_result`` that also tells whether this write completed the job (``last``):
-        exactly one write of a job does, even when several workers finish items at once."""
+        """Store the result of item ``index`` and tell what the write did: ``first`` (it
+        finished the item), ``last`` (it finished the item and with it the job; exactly one write
+        of a job does, even when several workers finish items at once) or ``repeat``.
+
+        Only the first write of an index counts and is kept: a repeat (an item that ran again
+        after a lost lease) changes nothing. A result over ``JOB_ITEM_MAX_BYTES`` as UTF-8 JSON is
+        stored without its content and with the warning ``content_not_stored_too_large``. Raises
+        ``JobLost`` when the job's keys are gone and ``ValueError`` when the index is outside the
+        job.
+        """
         payload = self._encode(envelope)
         outcome = await self._store_result(
             keys=[

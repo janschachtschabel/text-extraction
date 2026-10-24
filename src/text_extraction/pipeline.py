@@ -566,6 +566,9 @@ class Pipeline:
                 )
             except FetchError as error:
                 if turn.answering is not None:
+                    if error.cleared_after is not None:
+                        # The gate's wait before the send is not time the host had.
+                        budget = min(budget, chain_budget - error.cleared_after)
                     await self._record_failure(turn.answering, error, budget)
                 raise
             # Recorded while the turn is held, so a 429 pauses the host before the next turn.
@@ -602,8 +605,9 @@ class Pipeline:
         An error with a status (too large, too many redirects) still got an answer: that status
         counts. DNS and connection errors count as failures of the host. A timeout counts only
         when the request to this host had at least half of ``FETCH_TIMEOUT_SECONDS`` (``budget``,
-        the time left when its turn came): one cut short by the extraction's own deadline says
-        little about the host, and a redirect target only gets what the chain left over. Errors
+        the time left once the gate let the request go): one cut short by the extraction's own
+        deadline or by a long wait at the gate says little about the host, and a redirect target
+        only gets what the chain left over. Errors
         that say nothing about the host's health (a redirect to a blocked or invalid URL, an
         unsupported encoding) are not reported.
         """

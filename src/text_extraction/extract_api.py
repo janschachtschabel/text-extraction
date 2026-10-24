@@ -34,9 +34,9 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal, require_role
 from text_extraction.compliance import resolve_mode
-from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.job_models import JobAccepted, JobOptions
 from text_extraction.jobs import JobLost, JobStore
 from text_extraction.pipeline import Pipeline
@@ -157,7 +157,9 @@ async def _hand_over(
     again, if that works."""
     job_id: str | None = None
     try:
-        job_id = await store.create("extract", principal, options, [url])
+        job_id = await store.create(
+            "extract", principal, options, [url], trace_id=current_trace_id()
+        )
         lease = settings.extract_timeout_seconds + _LEASE_MARGIN_SECONDS
         await store.mark_running(job_id, lease_seconds=lease)
     except (RedisError, OSError, JobLost) as error:
@@ -179,22 +181,17 @@ async def _delete_quietly(store: JobStore, job_id: str) -> None:
         await store.delete(job_id)
 
 
-def _failure(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:
-    error = ErrorInfo(code=code, message=message, retryable=retryable)
-    return Envelope[ExtractResult](status="failed", error=error, trace_id=current_trace_id())
-
-
 def _envelope_of(task: asyncio.Task[Envelope[ExtractResult]]) -> Envelope[ExtractResult]:
     """What the finished task produced; a failure becomes a failed envelope."""
     if task.cancelled():
-        return _failure(ErrorCode.INTERNAL_ERROR, _CANCELLED_MESSAGE, retryable=True)
+        return failed_extract(ErrorCode.INTERNAL_ERROR, _CANCELLED_MESSAGE, retryable=True)
     error = task.exception()
     if error is None:
         return task.result()
     if isinstance(error, ServiceError):
-        return _failure(error.code, error.message, retryable=error.retryable)
+        return failed_extract(error.code, error.message, retryable=error.retryable)
     _log.error("extract_job_failed", exc_info=error)
-    return _failure(ErrorCode.INTERNAL_ERROR, _INTERNAL_MESSAGE, retryable=False)
+    return failed_extract(ErrorCode.INTERNAL_ERROR, _INTERNAL_MESSAGE, retryable=False)
 
 
 def _store_when_done(

@@ -116,14 +116,14 @@ async def test_create_rejects_an_empty_url_list() -> None:
 
 
 @scenario
-async def test_store_result_counts_once() -> None:
+async def test_write_result_counts_once() -> None:
     store = make_store(FakeAsyncRedis())
     job_id = await create_job(store)
     first = success(URLS[1], "first")
     second = success(URLS[1], "second")
 
-    assert await store.store_result(job_id, 1, first) is True
-    assert await store.store_result(job_id, 1, second) is False
+    assert await store.write_result(job_id, 1, first) == "first"
+    assert await store.write_result(job_id, 1, second) == "repeat"
 
     record = await store.get(job_id)
     assert record is not None
@@ -135,14 +135,14 @@ async def test_store_result_counts_once() -> None:
 
 
 @scenario
-async def test_store_result_counts_each_status() -> None:
+async def test_write_result_counts_each_status() -> None:
     store = make_store(FakeAsyncRedis())
     job_id = await create_job(store)
     partial = Envelope[ExtractResult](status="partial", data=make_result(URLS[1]))
 
-    await store.store_result(job_id, 0, success())
-    await store.store_result(job_id, 1, partial)
-    await store.store_result(job_id, 2, failure())
+    await store.write_result(job_id, 0, success())
+    await store.write_result(job_id, 1, partial)
+    await store.write_result(job_id, 2, failure())
 
     record = await store.get(job_id)
     assert record is not None
@@ -158,16 +158,15 @@ async def test_write_result_tells_which_write_completed_the_job() -> None:
     assert await store.write_result(job_id, 1, success(URLS[1])) == "repeat"
     assert await store.write_result(job_id, 0, success()) == "last"
     assert await store.write_result(job_id, 0, success()) == "repeat"
-    assert await store.store_result(job_id, 0, success()) is False
 
 
 @scenario
-async def test_store_result_rejects_an_index_outside_the_job() -> None:
+async def test_write_result_rejects_an_index_outside_the_job() -> None:
     store = make_store(FakeAsyncRedis())
     job_id = await create_job(store)
     for index in (-1, 3):
         with pytest.raises(ValueError, match="index"):
-            await store.store_result(job_id, index, success())
+            await store.write_result(job_id, index, success())
     record = await store.get(job_id)
     assert record is not None
     assert record.progress.done == 0
@@ -179,8 +178,8 @@ async def test_last_result_completes_the_job() -> None:
     clock = Clock()
     store = make_store(valkey, clock, job_ttl_seconds=600)
     job_id = await create_job(store)
-    await store.store_result(job_id, 0, success())
-    await store.store_result(job_id, 2, failure())
+    await store.write_result(job_id, 0, success())
+    await store.write_result(job_id, 2, failure())
 
     record = await store.get(job_id)
     assert record is not None
@@ -193,7 +192,7 @@ async def test_last_result_completes_the_job() -> None:
         await valkey.expire(key, 30)  # so the reset to the full TTL is visible
 
     clock.now += 5
-    await store.store_result(job_id, 1, success(URLS[1]))
+    await store.write_result(job_id, 1, success(URLS[1]))
 
     record = await store.get(job_id)
     assert record is not None
@@ -213,7 +212,7 @@ async def test_creation_sets_the_ttl() -> None:
     assert 595 <= await valkey.ttl(f"job:{{{job_id}}}:meta") <= 600
     assert 595 <= await valkey.ttl(f"job:{{{job_id}}}:urls") <= 600
 
-    await store.store_result(job_id, 0, success())
+    await store.write_result(job_id, 0, success())
     for kind in ("results", "done"):
         assert 0 < await valkey.ttl(f"job:{{{job_id}}}:{kind}") <= 600
 
@@ -222,8 +221,8 @@ async def test_creation_sets_the_ttl() -> None:
 async def test_items_pages_in_index_order() -> None:
     store = make_store(FakeAsyncRedis())
     job_id = await create_job(store, URLS)
-    await store.store_result(job_id, 3, success(URLS[3]))
-    await store.store_result(job_id, 0, success(URLS[0]))
+    await store.write_result(job_id, 3, success(URLS[3]))
+    await store.write_result(job_id, 0, success(URLS[0]))
 
     items = await store.items(job_id, 2, 2)
 
@@ -265,7 +264,7 @@ async def test_oversized_result_is_stored_without_content() -> None:
     job_id = await create_job(store)
     big = success(content="ä" * 6_000)  # 12,000 bytes as UTF-8, 6,000 characters
 
-    assert await store.store_result(job_id, 0, big) is True
+    assert await store.write_result(job_id, 0, big) == "first"
 
     [item] = await store.items(job_id, 0, 1)
     assert item.result is not None
@@ -283,7 +282,7 @@ async def test_result_at_the_limit_keeps_its_content() -> None:
     store = make_store(FakeAsyncRedis(), job_item_max_bytes=10_000)
     job_id = await create_job(store)
 
-    await store.store_result(job_id, 0, success(content="a" * 500))
+    await store.write_result(job_id, 0, success(content="a" * 500))
 
     [item] = await store.items(job_id, 0, 1)
     assert item.result is not None
@@ -312,7 +311,7 @@ async def test_writing_to_an_expired_job_raises_job_lost() -> None:
     await valkey.delete(f"job:{{{job_id}}}:meta")
 
     with pytest.raises(JobLost):
-        await store.store_result(job_id, 0, success())
+        await store.write_result(job_id, 0, success())
     with pytest.raises(JobLost):
         await store.mark_running(job_id)
     assert [key async for key in valkey.scan_iter(match=f"job:{{{job_id}}}:results")] == []
@@ -342,7 +341,7 @@ async def test_mark_running_sets_state_and_lease() -> None:
 async def test_mark_running_does_not_reopen_a_completed_job() -> None:
     store = make_store(FakeAsyncRedis())
     job_id = await create_job(store, URLS[:1])
-    await store.store_result(job_id, 0, success())
+    await store.write_result(job_id, 0, success())
 
     await store.mark_running(job_id, lease_seconds=10)
 
@@ -373,7 +372,7 @@ async def test_all_job_keys_share_one_hash_tag() -> None:
     valkey = FakeAsyncRedis()
     store = make_store(valkey)
     job_id = await create_job(store)
-    await store.store_result(job_id, 0, success())
+    await store.write_result(job_id, 0, success())
 
     keys = sorted([key.decode() async for key in valkey.scan_iter(match="job:*")])
 
@@ -381,3 +380,18 @@ async def test_all_job_keys_share_one_hash_tag() -> None:
         f"job:{{{job_id}}}:{kind}" for kind in ("meta", "urls", "results", "done")
     )
     assert {re.search(r"\{([^}]*)\}", key).group(1) for key in keys} == {job_id}  # type: ignore[union-attr]
+
+
+@scenario
+async def test_create_keeps_the_creators_trace_id() -> None:
+    store = make_store(FakeAsyncRedis())
+    traced = await store.create("batch", OWNER, OPTIONS, URLS[:1], trace_id="trace-42")
+    plain = await create_job(store)
+
+    traced_record = await store.get(traced)
+    plain_record = await store.get(plain)
+
+    assert traced_record is not None
+    assert traced_record.trace_id == "trace-42"
+    assert plain_record is not None
+    assert plain_record.trace_id is None

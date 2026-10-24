@@ -55,7 +55,8 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 The job's `state` goes from `queued` to `running` to `completed`. Every URL gets its own result
 envelope in `items`, also a failed one, and `progress` counts them. A job is kept for
 `JOB_TTL_SECONDS` (24 h), and only its owner (or an admin) can read it. `POST /v1/extract` with
-`wait_seconds` hands an extraction that takes longer over to a job in the same way (202).
+`wait_seconds` answers 202 with a job when the extraction takes longer; that extraction keeps
+running in the API pod that took the request (not on a worker), and the job stores its result.
 
 ## Documentation
 

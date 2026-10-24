@@ -43,6 +43,7 @@ from redis.asyncio import Redis
 
 from text_extraction.outbound import normalize_host
 from text_extraction.settings import Settings
+from text_extraction.valkey import reply_text
 
 _log = structlog.get_logger(__name__)
 
@@ -420,17 +421,13 @@ def _unescape(name: str) -> str:
     return _ESCAPED.sub(lambda match: _UNESCAPES[match.group()], name)
 
 
-def _text(value: bytes | str) -> str:
-    return value if isinstance(value, str) else value.decode()
-
-
 def _member(item: QueueItem, attempts: int) -> str:
     return f"{item.job_id}:{item.index}:{attempts}"
 
 
 def _item(entry: Sequence[Any], lease: str) -> QueueItem:
     """A QueueItem from a script's ``{item, client, domain}``."""
-    member, client, domain = (_text(value) for value in entry)
+    member, client, domain = (reply_text(value) for value in entry)
     job_id, index, attempts = member.rsplit(":", 2)
     return QueueItem(
         job_id=job_id,
@@ -506,7 +503,7 @@ class FairQueue:
         if claimed:
             item = _item(claimed, lease)
             return Claim(item=item, exhausted=item.attempts > settings.job_item_max_attempts)
-        retry = _text(retry_in)
+        retry = reply_text(retry_in)
         return Claim(
             item=None,
             retry_in=float(retry) if retry else None,
