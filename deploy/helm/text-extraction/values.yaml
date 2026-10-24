@@ -13,14 +13,17 @@ imagePullSecrets: []
 
 replicaCount: 2
 
-# Seconds Kubernetes waits after SIGTERM before it kills a pod. On SIGTERM the server first
+# Seconds Kubernetes waits after SIGTERM before it kills an API pod. On SIGTERM the server first
 # reports not ready and keeps serving for SHUTDOWN_DRAIN_SECONDS (5), then lets requests in
-# flight finish for max(30, EXTRACT_TIMEOUT_SECONDS + 5) seconds (30), then stops the internal
-# port: 5 + 30 = 35 s at most, plus a 10 s margin = 45. Keep this above drain + graceful time:
-# raise it when you raise SHUTDOWN_DRAIN_SECONDS or EXTRACT_TIMEOUT_SECONDS. The render fails
-# when SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5) is above this value minus the
-# 10 s margin, using config.* or the defaults (5 and 25).
-terminationGracePeriodSeconds: 45
+# flight finish for its graceful time, then stops the internal port. The graceful time is
+# max(30, EXTRACT_TIMEOUT_SECONDS + 5) (30 s), and with browser workers (BROWSER_ENABLED) at least
+# EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + the render deadline + 10, where the render
+# deadline is BROWSER_TIMEOUT_SECONDS, with unblock mode the larger of it and
+# BROWSER_UNBLOCK_TIMEOUT_SECONDS: 25 + 10 + 30 + 10 = 75 s, with unblock 105 s.
+# Unset (the default), the chart sets drain + graceful + a 10 s margin from config.* or the
+# defaults: 45 without browser workers, 90 with them, 120 with unblock mode. A value set here
+# must be at least that, or the render fails.
+terminationGracePeriodSeconds: null
 
 # Non-secret settings. Each key becomes an environment variable of the same name
 # (rendered into a ConfigMap and passed with envFrom). Values are quoted strings.
@@ -118,6 +121,60 @@ workers:
         maxReplicas: 10
         targetCPUUtilizationPercentage: 70
 
+  # Browser workers: they claim the items of the pool `browser` (mode "browser", screenshots,
+  # "auto" results that need a browser) and render them in Chromium; in unblock mode in Google
+  # Chrome under Xvfb. Image `workers.browser.image`, internal port 9090 only, no ingress, same
+  # ConfigMap and Secrets as the API pods. The chart renders BROWSER_ENABLED from `enabled` and
+  # BROWSER_UNBLOCK_ENABLED from `unblock` into the API, extract worker and browser worker pods:
+  # config.BROWSER_ENABLED and config.BROWSER_UNBLOCK_ENABLED entries are ignored.
+  browser:
+    enabled: true
+    # Unblock mode (admins with compliance "ignore" only; see docs/configuration.md). Needs
+    # `enabled`.
+    unblock: false
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-browser
+      # Defaults to image.tag, then the chart appVersion: both images are released together.
+      # The pull policy is image.pullPolicy.
+      tag: ""
+    replicaCount: 2
+    # Pages one pod renders at once, also its job slots (BROWSER_CONCURRENCY). Rendered into the
+    # pod env: a config.BROWSER_CONCURRENCY entry is ignored. The resources below are sized for it.
+    concurrency: 4
+    # No drain wait. On SIGTERM the worker stops claiming and gives renders in flight
+    # max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10) seconds: 40 s, 70 s with unblock
+    # mode (BROWSER_UNBLOCK_TIMEOUT_SECONDS 60). The render fails when that plus a 10 s margin
+    # is above this value.
+    terminationGracePeriodSeconds: 150
+    # Placeholder values until package 11 measures real consumption: a browser with four pages
+    # plus the conversions.
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    # Size limit of the emptyDir at /tmp: browser profiles, Chrome's caches and Xvfb's socket.
+    # The browsers use it instead of /dev/shm (--disable-dev-shm-usage).
+    tmpSizeLimit: 2Gi
+    # As for the extract workers. KEDA reads the pool `browser` gauges that API pods export with
+    # JOBS_ENABLED=true and BROWSER_ENABLED=true. Keep at least one replica: a sync request
+    # waits only BROWSER_QUEUE_WAIT_SECONDS (10) for a worker to take its page.
+    autoscaling:
+      keda:
+        enabled: false
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        # Pending queue items per worker replica (about two rounds of `concurrency`).
+        threshold: 8
+        minReplicaCount: 1
+        maxReplicaCount: 10
+      hpa:
+        enabled: false
+        minReplicas: 2
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 70
+
 service:
   type: ClusterIP
   # Public API port. The ingress targets this port only.
@@ -200,7 +257,7 @@ externalValkey:
 
 metrics:
   # Needs the Prometheus Operator CRDs. Scrapes the internal Services of the API pods and of the
-  # extract workers, port `internal`, path /metrics.
+  # extract and browser workers, port `internal`, path /metrics.
   serviceMonitor:
     enabled: false
     interval: 30s
@@ -215,7 +272,8 @@ metrics:
 
 # Thresholds of the alerts in metrics.prometheusRule.
 alerts:
-  # TextExtractionQueueBacklog fires above this many pending items while no item completes.
+  # TextExtractionQueueBacklog fires above this many pending items of a pool (extract, browser)
+  # while no item of that pool completes.
   queueBacklogItems: 1000
   # TextExtractionValkeyMemoryHigh fires while Valkey's used memory stays above this share of
   # its maxmemory for 10 minutes. Keep it at or below config.VALKEY_MEMORY_GUARD_RATIO (0.8),
@@ -224,9 +282,9 @@ alerts:
 
 # Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
 # limited: the API must reach arbitrary sites, so egress stays open.
-#   Valkey   accepts 6379 from the API and worker pods of this release only.
+#   Valkey   accepts 6379 from the API and worker pods (extract and browser) of this release only.
 #   API      accepts 8080 from anywhere and 9090 from `metricsFrom`.
-#   Workers  accept 9090 from `metricsFrom` only.
+#   Workers  (extract and browser) accept 9090 from `metricsFrom` only.
 # Probes of the kubelet run from the node and are normally allowed by the CNI.
 networkPolicy:
   enabled: false

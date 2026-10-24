@@ -1,6 +1,6 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- if .Values.valkey.enabled }}
-# Valkey accepts connections from the API and worker pods of this release only.
+# Valkey accepts connections from the API and worker pods (extract, browser) of this release only.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,10 +19,12 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "text-extraction.selectorLabels" . | nindent 14 }}
-        {{- if .Values.workers.extract.enabled }}
+        {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
+        {{- if (index $.Values.workers $pool).enabled }}
         - podSelector:
             matchLabels:
-              {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 14 }}
+              {{- include "text-extraction.workerSelectorLabels" (list $ $pool) | nindent 14 }}
+        {{- end }}
         {{- end }}
       ports:
         - port: 6379
@@ -54,23 +56,24 @@ spec:
         - port: 9090
           protocol: TCP
     {{- end }}
-{{- if .Values.workers.extract.enabled }}
+{{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
+{{- if (index $.Values.workers $pool).enabled }}
 ---
 # Workers take no traffic except the metrics scrape of `networkPolicy.metricsFrom`.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "text-extraction.workerExtractName" . }}
+  name: {{ include "text-extraction.workerName" (list $ $pool) }}
   labels:
-    {{- include "text-extraction.workerExtractLabels" . | nindent 4 }}
-    app.kubernetes.io/component: worker-extract
+    {{- include "text-extraction.workerLabels" (list $ $pool) | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $pool }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 6 }}
+      {{- include "text-extraction.workerSelectorLabels" (list $ $pool) | nindent 6 }}
   policyTypes:
     - Ingress
-  {{- with .Values.networkPolicy.metricsFrom }}
+  {{- with $.Values.networkPolicy.metricsFrom }}
   ingress:
     - from:
         {{- toYaml . | nindent 8 }}
@@ -80,5 +83,6 @@ spec:
   {{- else }}
   ingress: []
   {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

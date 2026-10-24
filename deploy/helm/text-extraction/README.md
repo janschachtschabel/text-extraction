@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, and an optional single-replica Valkey (with a password).
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -15,12 +15,13 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | Object | When | Notes |
 | --- | --- | --- |
 | Deployment, ConfigMap | always | Stateless pods. Non-secret settings come from the ConfigMap through `envFrom`. |
-| Worker Deployment `<release>-text-extraction-worker-extract` | `workers.extract.enabled` | Runs `text-extraction-worker`: claims job items from the queue in Valkey. Serves only port 9090. Same image, ConfigMap and Secrets as the API. |
-| Service `<release>-text-extraction-worker-extract-internal` | `workers.extract.enabled` | Port `internal` 9090 of the workers, for the ServiceMonitor. Cluster-internal only. |
-| ScaledObject (KEDA) | `workers.extract.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="extract", namespace="<release namespace>"})`. |
-| HorizontalPodAutoscaler `<release>-text-extraction-worker-extract` | `workers.extract.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
+| Worker Deployment `<release>-text-extraction-worker-extract` | `workers.extract.enabled` | Runs `text-extraction-worker`: claims job items of the pool `extract` from the queue in Valkey. Serves only port 9090. Same image, ConfigMap and Secrets as the API. |
+| Worker Deployment `<release>-text-extraction-worker-browser` | `workers.browser.enabled` | Runs `text-extraction-browser-worker` from the browser image (`workers.browser.image`): claims the items of the pool `browser` and renders them in Chromium, in unblock mode in Google Chrome under Xvfb. Serves only port 9090. Same ConfigMap and Secrets as the API. |
+| Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
+| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`. |
+| HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
 | Secret `<release>-text-extraction-valkey-auth` | `valkey.enabled`, `valkey.auth.enabled` and no `valkey.auth.existingSecret` | Holds `VALKEY_PASSWORD`, generated once (32 alphanumeric characters) and kept across upgrades. |
-| NetworkPolicy (Valkey, API, workers) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
+| NetworkPolicy (Valkey, API, each worker pool) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
 | Service `<release>-text-extraction` | always | Public port `http` 8080. |
 | Service `<release>-text-extraction-internal` | always | Port `internal` 9090 (`/health`, `/ready`, `/metrics`). Cluster-internal only. |
 | Secret `<release>-text-extraction-keys` | `secrets.apiKeys` set and no `secrets.existingSecret` | Holds `API_KEYS`. |
@@ -31,7 +32,9 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | PrometheusRule | `metrics.prometheusRule.enabled` | `TextExtractionDown`, `TextExtractionHigh5xx` and, with jobs enabled, the job alerts below. |
 
 Pods run as uid/gid 10001 with a read-only root filesystem, all capabilities dropped and the
-`RuntimeDefault` seccomp profile. An `emptyDir` is mounted at `/tmp`. The probes use the internal
+`RuntimeDefault` seccomp profile. An `emptyDir` is mounted at `/tmp` (on the browser workers limited
+to `workers.browser.tmpSizeLimit`, 2Gi: browser profiles, Chrome's caches and its `HOME`; the
+browsers use it instead of `/dev/shm`). The probes use the internal
 port: `/health` for liveness and `/ready` for readiness. `/ready` answers 200 only once the public
 port listens and turns 503 as soon as SIGTERM arrives, so no preStop hook is needed.
 
@@ -42,9 +45,13 @@ variables of the same name. The chart overrides `config.PUBLIC_PORT` (8080), `co
 (9090) and `config.VALKEY_URL`: values set there are ignored. Set the Valkey address with
 `valkey.enabled` or `externalValkey.*`.
 
-Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`) on the API pods and
-`WORKER_CONCURRENCY` (from `workers.extract.concurrency`) on the workers: entries for them under
-`config` are ignored.
+Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`) on the API pods,
+`WORKER_CONCURRENCY` (from `workers.extract.concurrency`) on the extract workers,
+`BROWSER_CONCURRENCY` (from `workers.browser.concurrency`) on the browser workers, and
+`BROWSER_ENABLED` (from `workers.browser.enabled`) and `BROWSER_UNBLOCK_ENABLED` (from
+`workers.browser.unblock`) on the API, extract worker and browser worker pods: entries for them
+under `config` are ignored. So browser mode is on exactly when the chart deploys browser workers,
+and a browser worker never runs with `BROWSER_ENABLED=false`.
 
 > **Warning:** never put secrets into `config:`. It becomes a ConfigMap, which is stored and shown
 > in clear text. Use `secrets.*` and `externalValkey.existingSecret.*` for secrets.
@@ -99,7 +106,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
 | `replicaCount` | `2` | Ignored when `autoscaling.enabled`. |
-| `terminationGracePeriodSeconds` | `45` | Time between SIGTERM and kill. Must exceed the server's drain plus graceful shutdown, `SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (35 by default) plus a 10 s margin; raise it with either. The render fails when it does not fit (values from `config.*`, else the defaults 5 and 25). |
+| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). Unset, the chart computes it from `config.*` or the defaults: 45 without browser workers, 90 with them, 120 with unblock mode. A value set here that does not fit fails the render. |
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
@@ -128,6 +135,17 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.autoscaling.hpa.enabled` | `false` | CPU-based HorizontalPodAutoscaler of the workers. **Mutually exclusive with KEDA**: enabling both fails the render, because KEDA manages its own HPA. |
 | `workers.extract.autoscaling.hpa.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `workers.extract.autoscaling.hpa.targetCPUUtilizationPercentage` | `70` | |
+| `workers.browser.enabled` | `true` | Deploy the browser workers. Also renders `BROWSER_ENABLED` into every pod: false switches browser mode off (`mode: "browser"` and screenshots answer 400, `auto` never escalates). |
+| `workers.browser.unblock` | `false` | Unblock mode (`BROWSER_UNBLOCK_ENABLED` in every pod): admins with `compliance: "ignore"` get a Chrome that clears bot challenges. Needs `workers.browser.enabled`, or the render fails. |
+| `workers.browser.image.repository` | `ghcr.io/janschachtschabel/text-extraction-browser` | Browser worker image (Playwright's Chromium shell, Google Chrome stable, Xvfb; linux/amd64). |
+| `workers.browser.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
+| `workers.browser.replicaCount` | `2` | Ignored with KEDA or HPA. |
+| `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
+| `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
+| `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4Gi | Placeholder for a browser with 4 pages plus the conversions. |
+| `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
+| `workers.browser.autoscaling.keda.*` | as for the extract workers, `threshold` `8` | Scales on `max(text_extraction_queue_pending_items{pool="browser"})`; the API pods export it while `JOBS_ENABLED` and `BROWSER_ENABLED` are true. Keep `minReplicaCount` at 1 or more: a sync request waits only `BROWSER_QUEUE_WAIT_SECONDS` (10) for a worker. |
+| `workers.browser.autoscaling.hpa.*` | as for the extract workers | CPU-based. Mutually exclusive with KEDA. |
 | `networkPolicy.enabled` | `false` | Needs a CNI that enforces NetworkPolicy. |
 | `networkPolicy.metricsFrom` | `[{podSelector: {}}]` | Peers (`from` entries) allowed to scrape port 9090: by default every pod of the release namespace. |
 | `service.type` | `ClusterIP` | Type of the public Service. |
@@ -158,7 +176,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `metrics.prometheusRule.labels` | `{}` | |
 | `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog`. |
 | `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers get `podAnnotations`, `nodeSelector` and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract and browser) get `podAnnotations`, `nodeSelector` and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.
@@ -170,13 +188,16 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
-| `TextExtractionQueueBacklog` | `max(text_extraction_queue_pending_items{pool="extract"})` above `alerts.queueBacklogItems` (1000) while `sum(increase(text_extraction_job_items_total{outcome!~"deferred\|lost"}[15m])) or vector(0)` is 0 | 15 m |
-| `TextExtractionWorkersDown` | `max(text_extraction_queue_pending_items{pool="extract"}) > 0` and no available worker replica (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
-| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`; the denominator is every item that recorded a result (all but `deferred`/`lost`) | 15 m |
+| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
+| `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
+| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
-`TextExtractionWorkersDown` also needs `workers.extract.enabled`. The queue gauges come from the API
+`TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the browser pool's
+alerts need `workers.browser.enabled` (without it there is no browser queue). The item counter has
+no `pool` label, so the pools are told apart by the scrape target: the browser pool counts the
+series of the browser workers' internal Service, the extract pool all others. The queue gauges come from the API
 pods and every pod reports the same queue, so the rules use `max()`, never `sum()`. The counter
 `text_extraction_job_items_total` appears with the first item a worker handles and the kube-state
 series can be missing, so the rules use `or vector(0)` where "nothing yet" has to count as 0:
@@ -196,12 +217,13 @@ enabled. Only 5xx answers from the public API count; a target failure is a `200`
 
 ## Network policies
 
-With `networkPolicy.enabled` the chart creates three policies, all for ingress only (the API must
-reach arbitrary sites, so egress stays open):
+With `networkPolicy.enabled` the chart creates a policy for Valkey, the API and each enabled worker
+pool, all for ingress only (the API and the workers must reach arbitrary sites, so egress stays
+open):
 
-- Valkey accepts port 6379 from the API and worker pods of this release only.
+- Valkey accepts port 6379 from the API and worker pods (extract and browser) of this release only.
 - The API accepts port 8080 from anywhere and port 9090 from `networkPolicy.metricsFrom`.
-- The workers accept port 9090 from `networkPolicy.metricsFrom` only.
+- The extract and browser workers accept port 9090 from `networkPolicy.metricsFrom` only.
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
 Prometheus in another namespace add for example
@@ -215,4 +237,5 @@ warns when `networkPolicy` and the ServiceMonitor are both on with the default.
 ```bash
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
+deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

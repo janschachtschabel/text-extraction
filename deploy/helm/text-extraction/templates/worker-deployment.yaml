@@ -1,33 +1,37 @@
-{{- if .Values.workers.extract.enabled }}
-{{- $worker := .Values.workers.extract }}
+{{- /* One Deployment per enabled worker pool (workers.extract, workers.browser). */ -}}
+{{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
+{{- $worker := index $.Values.workers $pool }}
+{{- if $worker.enabled }}
+{{- $args := list $ $pool }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "text-extraction.workerExtractName" . }}
+  name: {{ include "text-extraction.workerName" $args }}
   labels:
-    {{- include "text-extraction.workerExtractLabels" . | nindent 4 }}
-    app.kubernetes.io/component: worker-extract
+    {{- include "text-extraction.workerLabels" $args | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $pool }}
 spec:
   {{- if not (or $worker.autoscaling.keda.enabled $worker.autoscaling.hpa.enabled) }}
   replicas: {{ $worker.replicaCount }}
   {{- end }}
   selector:
     matchLabels:
-      {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 6 }}
+      {{- include "text-extraction.workerSelectorLabels" $args | nindent 6 }}
   template:
     metadata:
       annotations:
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- if and .Values.secrets.apiKeys (not .Values.secrets.existingSecret) }}
-        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
+        {{- if and $.Values.secrets.apiKeys (not $.Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
         {{- end }}
-        {{- with .Values.podAnnotations }}
+        {{- with $.Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 8 }}
+        {{- include "text-extraction.workerSelectorLabels" $args | nindent 8 }}
     spec:
-      {{- with .Values.imagePullSecrets }}
+      {{- with $.Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -42,10 +46,10 @@ spec:
           type: RuntimeDefault
       containers:
         - name: worker
-          image: {{ include "text-extraction.image" . | quote }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "text-extraction.workerImage" $args | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
           command:
-            - text-extraction-worker
+            - {{ include "text-extraction.workerCommand" $pool }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -58,14 +62,20 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "text-extraction.fullname" . }}
+                name: {{ include "text-extraction.fullname" $ }}
           env:
             - name: INTERNAL_PORT
               value: "9090"
+            {{- if eq $pool "browser" }}
+            - name: BROWSER_CONCURRENCY
+              value: {{ $worker.concurrency | toString | quote }}
+            {{- else }}
             - name: WORKER_CONCURRENCY
               value: {{ $worker.concurrency | toString | quote }}
-            {{- include "text-extraction.valkeyEnv" . | trim | nindent 12 }}
-            {{- with include "text-extraction.apiKeysEnv" . | trim }}
+            {{- end }}
+            {{- include "text-extraction.browserEnv" $ | nindent 12 }}
+            {{- include "text-extraction.valkeyEnv" $ | trim | nindent 12 }}
+            {{- with include "text-extraction.apiKeysEnv" $ | trim }}
             {{- . | nindent 12 }}
             {{- end }}
           livenessProbe:
@@ -91,13 +101,19 @@ spec:
               mountPath: /tmp
       volumes:
         - name: tmp
+          {{- if $worker.tmpSizeLimit }}
+          emptyDir:
+            sizeLimit: {{ $worker.tmpSizeLimit }}
+          {{- else }}
           emptyDir: {}
-      {{- with .Values.nodeSelector }}
+          {{- end }}
+      {{- with $.Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with $.Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
 {{- end }}

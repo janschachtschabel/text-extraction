@@ -1,23 +1,28 @@
-{{- if and .Values.workers.extract.enabled .Values.workers.extract.autoscaling.keda.enabled }}
-{{- $keda := .Values.workers.extract.autoscaling.keda }}
-# Scales the extract workers on the queue length. The gauge comes from the API pods (they stay up
-# while the workers are scaled down) and needs JOBS_ENABLED=true there; max() because every API
-# pod reports the same queue.
+{{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
+{{- $worker := index $.Values.workers $pool }}
+{{- if and $worker.enabled $worker.autoscaling.keda.enabled }}
+{{- $keda := $worker.autoscaling.keda }}
+{{- $args := list $ $pool }}
+---
+# Scales the {{ $pool }} workers on the length of their pool's queue. The gauge comes from the API
+# pods (they stay up while the workers are scaled down) and needs JOBS_ENABLED=true there (for the
+# pool browser also BROWSER_ENABLED=true); max() because every API pod reports the same queue.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: {{ include "text-extraction.workerExtractName" . }}
+  name: {{ include "text-extraction.workerName" $args }}
   labels:
-    {{- include "text-extraction.workerExtractLabels" . | nindent 4 }}
+    {{- include "text-extraction.workerLabels" $args | nindent 4 }}
 spec:
   scaleTargetRef:
-    name: {{ include "text-extraction.workerExtractName" . }}
+    name: {{ include "text-extraction.workerName" $args }}
   minReplicaCount: {{ $keda.minReplicaCount }}
   maxReplicaCount: {{ $keda.maxReplicaCount }}
   triggers:
     - type: prometheus
       metadata:
-        serverAddress: {{ required "workers.extract.autoscaling.keda.serverAddress is required" $keda.serverAddress | quote }}
-        query: {{ printf `max(text_extraction_queue_pending_items{pool="extract", namespace="%s"})` .Release.Namespace | quote }}
+        serverAddress: {{ required (printf "workers.%s.autoscaling.keda.serverAddress is required" $pool) $keda.serverAddress | quote }}
+        query: {{ printf `max(text_extraction_queue_pending_items{pool="%s", namespace="%s"})` $pool $.Release.Namespace | quote }}
         threshold: {{ $keda.threshold | toString | quote }}
+{{- end }}
 {{- end }}

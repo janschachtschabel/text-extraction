@@ -57,7 +57,8 @@ def test_ready_is_503_once_shutdown_begins() -> None:
 
 
 def test_shutdown_fits_the_helm_grace_period() -> None:
-    # deploy/helm/text-extraction/values.yaml: terminationGracePeriodSeconds 45
+    # The Helm chart computes the API grace period with the same formula (_helpers.tpl,
+    # deploy/helm/test.sh): drain + graceful + 10 = 45 without the browser.
     assert shutdown_seconds(SETTINGS) == 35
     assert shutdown_seconds(Settings(auth_mode="none", shutdown_drain_seconds=0)) == 30
     assert shutdown_seconds(Settings(auth_mode="none", extract_timeout_seconds=60)) == 70

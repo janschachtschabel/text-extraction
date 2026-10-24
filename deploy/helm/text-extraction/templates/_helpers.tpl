@@ -49,27 +49,124 @@ app.kubernetes.io/name: {{ include "text-extraction.name" . }}-valkey
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{/* Names and labels of the extract worker objects. The pod name label differs from the API's
-(like Valkey's), so the API Services never select worker pods. */}}
-{{- define "text-extraction.workerExtractName" -}}
-{{- printf "%s-worker-extract" (include "text-extraction.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{/* Worker pools, in the order their objects are rendered. Each has a `workers.<pool>` block. */}}
+{{- define "text-extraction.workerPools" -}}
+extract browser
 {{- end -}}
 
-{{- define "text-extraction.workerExtractInternalServiceName" -}}
-{{- printf "%s-internal" (include "text-extraction.workerExtractName" .) | trunc 63 | trimSuffix "-" -}}
+{{/* Names and labels of the worker objects of a pool; call with (list $ "<pool>"). The pod name
+label differs from the API's (like Valkey's), so the API Services never select worker pods. */}}
+{{- define "text-extraction.workerName" -}}
+{{- printf "%s-worker-%s" (include "text-extraction.fullname" (index . 0)) (index . 1) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "text-extraction.workerExtractSelectorLabels" -}}
-app.kubernetes.io/name: {{ include "text-extraction.name" . }}-worker-extract
-app.kubernetes.io/instance: {{ .Release.Name }}
+{{- define "text-extraction.workerInternalServiceName" -}}
+{{- printf "%s-internal" (include "text-extraction.workerName" .) | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "text-extraction.workerExtractLabels" -}}
-helm.sh/chart: {{ include "text-extraction.chart" . }}
-{{ include "text-extraction.workerExtractSelectorLabels" . }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-app.kubernetes.io/part-of: {{ include "text-extraction.fullname" . }}
-app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- define "text-extraction.workerSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "text-extraction.name" (index . 0) }}-worker-{{ index . 1 }}
+app.kubernetes.io/instance: {{ (index . 0).Release.Name }}
+{{- end -}}
+
+{{- define "text-extraction.workerLabels" -}}
+{{- $root := index . 0 -}}
+helm.sh/chart: {{ include "text-extraction.chart" $root }}
+{{ include "text-extraction.workerSelectorLabels" . }}
+app.kubernetes.io/version: {{ $root.Chart.AppVersion | quote }}
+app.kubernetes.io/part-of: {{ include "text-extraction.fullname" $root }}
+app.kubernetes.io/managed-by: {{ $root.Release.Service }}
+{{- end -}}
+
+{{/* Image of a pool's workers; call with (list $ "<pool>"). Extract workers run the API image;
+browser workers their own, with image.tag and then the appVersion as the default tag. */}}
+{{- define "text-extraction.workerImage" -}}
+{{- $root := index . 0 -}}
+{{- $pool := index . 1 -}}
+{{- if eq $pool "browser" -}}
+{{- $image := $root.Values.workers.browser.image -}}
+{{- printf "%s:%s" $image.repository ($image.tag | default $root.Values.image.tag | default $root.Chart.AppVersion) -}}
+{{- else -}}
+{{- include "text-extraction.image" $root -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Command of a pool's workers. */}}
+{{- define "text-extraction.workerCommand" -}}
+{{- if eq . "browser" -}}text-extraction-browser-worker{{- else -}}text-extraction-worker{{- end -}}
+{{- end -}}
+
+{{/* BROWSER_ENABLED and BROWSER_UNBLOCK_ENABLED ("true"/"false") of every pod, from the browser
+worker toggles. */}}
+{{- define "text-extraction.browserEnabled" -}}
+{{- ternary "true" "false" (.Values.workers.browser.enabled | default false) -}}
+{{- end -}}
+
+{{- define "text-extraction.browserUnblockEnabled" -}}
+{{- ternary "true" "false" (and (.Values.workers.browser.enabled | default false) (.Values.workers.browser.unblock | default false)) -}}
+{{- end -}}
+
+{{/* The browser switches as env entries. They come after envFrom, so they override config.*. */}}
+{{- define "text-extraction.browserEnv" -}}
+- name: BROWSER_ENABLED
+  value: {{ include "text-extraction.browserEnabled" . | quote }}
+- name: BROWSER_UNBLOCK_ENABLED
+  value: {{ include "text-extraction.browserUnblockEnabled" . | quote }}
+{{- end -}}
+
+{{/* A number setting from config.*, else its default; call with (list $ "<NAME>" <default>). */}}
+{{- define "text-extraction.configNumber" -}}
+{{- $config := (index . 0).Values.config -}}
+{{- if hasKey $config (index . 1) -}}
+{{- get $config (index . 1) | toString | float64 -}}
+{{- else -}}
+{{- index . 2 | toString | float64 -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Shutdown budgets, as in server.py and browser_worker.py. extraction: max(30,
+EXTRACT_TIMEOUT_SECONDS + 5). API: that, and while BROWSER_ENABLED at least
+EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10. Browser worker:
+max(extraction, render deadline + 10). The render deadline is BROWSER_TIMEOUT_SECONDS, with unblock
+mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. */}}
+{{- define "text-extraction.extractionGracefulSeconds" -}}
+{{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
+{{- maxf 30.0 (ceil (addf $timeout 5.0)) -}}
+{{- end -}}
+
+{{- define "text-extraction.renderDeadlineSeconds" -}}
+{{- $render := include "text-extraction.configNumber" (list . "BROWSER_TIMEOUT_SECONDS" 30) | float64 -}}
+{{- if eq (include "text-extraction.browserUnblockEnabled" .) "true" -}}
+{{- $render = maxf $render (include "text-extraction.configNumber" (list . "BROWSER_UNBLOCK_TIMEOUT_SECONDS" 60) | float64) -}}
+{{- end -}}
+{{- $render -}}
+{{- end -}}
+
+{{- define "text-extraction.apiGracefulSeconds" -}}
+{{- $seconds := include "text-extraction.extractionGracefulSeconds" . | float64 -}}
+{{- if eq (include "text-extraction.browserEnabled" .) "true" -}}
+{{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
+{{- $wait := include "text-extraction.configNumber" (list . "BROWSER_QUEUE_WAIT_SECONDS" 10) | float64 -}}
+{{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
+{{- $seconds = maxf $seconds (ceil (addf $timeout $wait $render 10.0)) -}}
+{{- end -}}
+{{- $seconds -}}
+{{- end -}}
+
+{{- define "text-extraction.browserGracefulSeconds" -}}
+{{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
+{{- maxf (include "text-extraction.extractionGracefulSeconds" . | float64) (ceil (addf $render 10.0)) -}}
+{{- end -}}
+
+{{/* terminationGracePeriodSeconds of the API pods: the value when set, else drain + graceful
++ a 10 s margin. */}}
+{{- define "text-extraction.apiGracePeriodSeconds" -}}
+{{- if kindIs "invalid" .Values.terminationGracePeriodSeconds -}}
+{{- $drain := include "text-extraction.configNumber" (list . "SHUTDOWN_DRAIN_SECONDS" 5) | float64 -}}
+{{- addf $drain (include "text-extraction.apiGracefulSeconds" . | float64) 10.0 | ceil | int -}}
+{{- else -}}
+{{- .Values.terminationGracePeriodSeconds -}}
+{{- end -}}
 {{- end -}}
 
 {{/* JOBS_ENABLED of the API pods: jobs.enabled when set, else true while the extract workers run. */}}
@@ -160,24 +257,37 @@ validation requires a key while AUTH_MODE is api_key. */}}
 
 {{/* Fail early on settings that cannot work together. */}}
 {{- define "text-extraction.validate" -}}
-{{- if and .Values.workers.extract.autoscaling.keda.enabled .Values.workers.extract.autoscaling.hpa.enabled -}}
-{{- fail "workers.extract.autoscaling.keda.enabled and workers.extract.autoscaling.hpa.enabled are mutually exclusive: KEDA creates its own HorizontalPodAutoscaler. Enable only one." -}}
+{{- $root := . -}}
+{{- $jobs := eq (include "text-extraction.jobsEnabled" .) "true" -}}
+{{- range $pool := splitList " " (include "text-extraction.workerPools" .) -}}
+{{- $worker := index $root.Values.workers $pool -}}
+{{- if and $worker.autoscaling.keda.enabled $worker.autoscaling.hpa.enabled -}}
+{{- fail (printf "workers.%s.autoscaling.keda.enabled and workers.%s.autoscaling.hpa.enabled are mutually exclusive: KEDA creates its own HorizontalPodAutoscaler. Enable only one." $pool $pool) -}}
 {{- end -}}
-{{- if and (or .Values.workers.extract.autoscaling.keda.enabled .Values.workers.extract.autoscaling.hpa.enabled) (not .Values.workers.extract.enabled) -}}
-{{- fail "workers.extract.autoscaling needs workers.extract.enabled=true." -}}
+{{- if and (or $worker.autoscaling.keda.enabled $worker.autoscaling.hpa.enabled) (not $worker.enabled) -}}
+{{- fail (printf "workers.%s.autoscaling needs workers.%s.enabled=true." $pool $pool) -}}
 {{- end -}}
-{{- /* Shutdown budget, as in server.py: graceful = max(30, EXTRACT_TIMEOUT_SECONDS + 5) after the drain,
-       plus a 10 s margin before the kill. */ -}}
-{{- $timeout := get .Values.config "EXTRACT_TIMEOUT_SECONDS" | default 25 | toString | float64 -}}
-{{- $drain := get .Values.config "SHUTDOWN_DRAIN_SECONDS" | default 5 | toString | float64 -}}
-{{- $graceful := maxf 30.0 (addf $timeout 5.0) -}}
-{{- if gt (addf $drain $graceful) (subf (float64 .Values.terminationGracePeriodSeconds) 10.0) -}}
-{{- fail (printf "terminationGracePeriodSeconds (%v) is too short for the API pods: SHUTDOWN_DRAIN_SECONDS (%v) + max(30, EXTRACT_TIMEOUT_SECONDS (%v) + 5) + a 10 s margin must fit. Raise terminationGracePeriodSeconds or lower the timeouts." .Values.terminationGracePeriodSeconds $drain $timeout) -}}
+{{- if and $worker.autoscaling.keda.enabled (not $jobs) -}}
+{{- fail (printf "workers.%s.autoscaling.keda.enabled reads the queue gauges that API pods export only with JOBS_ENABLED=true; do not set jobs.enabled=false with KEDA." $pool) -}}
 {{- end -}}
-{{- if and .Values.workers.extract.enabled (gt $graceful (subf (float64 .Values.workers.extract.terminationGracePeriodSeconds) 10.0)) -}}
+{{- end -}}
+{{- if and .Values.workers.browser.unblock (not .Values.workers.browser.enabled) -}}
+{{- fail "workers.browser.unblock needs workers.browser.enabled=true: unblock mode runs in the browser workers." -}}
+{{- end -}}
+{{- /* Shutdown budgets (see text-extraction.apiGracefulSeconds), plus a 10 s margin before the kill. */ -}}
+{{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
+{{- $drain := include "text-extraction.configNumber" (list . "SHUTDOWN_DRAIN_SECONDS" 5) | float64 -}}
+{{- $apiGraceful := include "text-extraction.apiGracefulSeconds" . | float64 -}}
+{{- $apiGrace := include "text-extraction.apiGracePeriodSeconds" . | float64 -}}
+{{- if gt (addf $drain $apiGraceful) (subf $apiGrace 10.0) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%v) is too short for the API pods: SHUTDOWN_DRAIN_SECONDS (%v) + the graceful shutdown (%v s: max(30, EXTRACT_TIMEOUT_SECONDS + 5), with browser workers at least EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + the render deadline + 10) + a 10 s margin must fit. Raise it, leave it unset (the chart then computes it) or lower the timeouts." .Values.terminationGracePeriodSeconds $drain $apiGraceful) -}}
+{{- end -}}
+{{- $extractionGraceful := include "text-extraction.extractionGracefulSeconds" . | float64 -}}
+{{- if and .Values.workers.extract.enabled (gt $extractionGraceful (subf (float64 .Values.workers.extract.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.extract.terminationGracePeriodSeconds (%v) is too short: max(30, EXTRACT_TIMEOUT_SECONDS (%v) + 5) + a 10 s margin must fit. Raise it or lower EXTRACT_TIMEOUT_SECONDS." .Values.workers.extract.terminationGracePeriodSeconds $timeout) -}}
 {{- end -}}
-{{- if and .Values.workers.extract.autoscaling.keda.enabled (ne (include "text-extraction.jobsEnabled" .) "true") -}}
-{{- fail "workers.extract.autoscaling.keda.enabled reads the queue gauges that API pods export only with JOBS_ENABLED=true; do not set jobs.enabled=false with KEDA." -}}
+{{- $browserGraceful := include "text-extraction.browserGracefulSeconds" . | float64 -}}
+{{- if and .Values.workers.browser.enabled (gt $browserGraceful (subf (float64 .Values.workers.browser.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.browser.terminationGracePeriodSeconds (%v) is too short: the browser workers give renders in flight %v s (max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10); the deadline is BROWSER_TIMEOUT_SECONDS, with unblock mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS) + a 10 s margin must fit. Raise it or lower the timeouts." .Values.workers.browser.terminationGracePeriodSeconds $browserGraceful) -}}
 {{- end -}}
 {{- end -}}

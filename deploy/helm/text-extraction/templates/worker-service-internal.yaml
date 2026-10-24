@@ -1,12 +1,15 @@
-{{- if .Values.workers.extract.enabled }}
-# Internal port 9090 (/health, /ready, /metrics) of the extract workers. Cluster-internal only;
-# it exists for the ServiceMonitor, no traffic is routed through it.
+{{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
+{{- if (index $.Values.workers $pool).enabled }}
+{{- $args := list $ $pool }}
+---
+# Internal port 9090 (/health, /ready, /metrics) of the {{ $pool }} workers. Cluster-internal
+# only; it exists for the ServiceMonitor, no traffic is routed through it.
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "text-extraction.workerExtractInternalServiceName" . }}
+  name: {{ include "text-extraction.workerInternalServiceName" $args }}
   labels:
-    {{- include "text-extraction.workerExtractLabels" . | nindent 4 }}
+    {{- include "text-extraction.workerLabels" $args | nindent 4 }}
     app.kubernetes.io/component: internal
 spec:
   type: ClusterIP
@@ -16,5 +19,6 @@ spec:
       targetPort: internal
       protocol: TCP
   selector:
-    {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 4 }}
+    {{- include "text-extraction.workerSelectorLabels" $args | nindent 4 }}
+{{- end }}
 {{- end }}

@@ -1,8 +1,10 @@
 # Reference setup for local runs. Production uses the Helm chart, not this file.
 # Start: cp .env.example .env, set API_KEYS and VALKEY_PASSWORD, then `docker compose up -d --wait`.
 # VALKEY_PASSWORD has no default: compose stops with an error while it is empty or missing.
+# The browser worker image (target `browser`) holds Chromium and Google Chrome (linux/amd64 only).
 
-# Shared by the API and the worker: same image, same settings, same hardening.
+# Shared by the API and the workers: same settings, same hardening. The API and the extract worker
+# use the default image (no browser); the browser worker builds the target `browser`.
 x-app: &app
   build: .
   image: text-extraction:dev
@@ -13,6 +15,10 @@ x-app: &app
     # The password sits in a URL and is also the password Valkey checks: use letters and digits
     # only (openssl rand -hex 24). Percent-encoding does not work, see docs/configuration.md.
     VALKEY_URL: redis://:${VALKEY_PASSWORD:?set VALKEY_PASSWORD in .env}@valkey:6379/0
+    # This file always starts a browser worker, so browser mode is on for every service (an entry
+    # in .env does not change it). Unblock mode is read from .env or the shell, default off.
+    BROWSER_ENABLED: "true"
+    BROWSER_UNBLOCK_ENABLED: ${BROWSER_UNBLOCK_ENABLED:-false}
   read_only: true
   tmpfs:
     - /tmp
@@ -37,8 +43,9 @@ services:
       timeout: 3s
       retries: 3
       start_period: 10s
-    # SIGTERM starts a 5 s drain and a graceful shutdown of up to 30 s (docs/configuration.md).
-    stop_grace_period: 45s
+    # SIGTERM starts a 5 s drain and a graceful shutdown that covers a sync request waiting for
+    # the browser: 75 s, with unblock mode 105 s (docs/configuration.md, Response times).
+    stop_grace_period: 120s
 
   # Extract worker: runs the items of batches (a slow POST /v1/extract that became a job keeps
   # running in the API container). It serves only the internal port 9090 (not published) and
@@ -58,6 +65,34 @@ services:
       start_period: 20s
     # SIGTERM stops claiming and gives items in flight up to 30 s; no drain wait.
     stop_grace_period: 45s
+
+  # Browser worker: renders the items of the pool `browser` (mode "browser", screenshots, and
+  # "auto" results that need a browser) in Chromium, and in unblock mode in Chrome under Xvfb.
+  # Only the internal port 9090, not published. Chrome needs a large /dev/shm and a writable
+  # /tmp (HOME points there in the image).
+  browser-worker:
+    <<: *app
+    build:
+      context: .
+      target: browser
+    image: text-extraction-browser:dev
+    command: ["text-extraction-browser-worker"]
+    tmpfs:
+      - /tmp:size=1g
+    shm_size: 1g
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/ready', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      # The language model, the egress proxy, Xvfb and the browsers start before /ready.
+      start_period: 60s
+    # SIGTERM stops claiming and gives renders in flight up to 40 s, with unblock mode 70 s.
+    stop_grace_period: 90s
 
   valkey:
     image: valkey/valkey:8.1-alpine

@@ -15,11 +15,12 @@ order:
    nothing. If the pod is killed before, the job's lease expires and the job reports it lost;
 4. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
 
-``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the Helm chart's
-``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it. While
-``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
-(``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode, so the Helm
-grace period must then be raised to cover the drain plus that.
+``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the API pods'
+``terminationGracePeriodSeconds`` must stay above it plus a 10 s margin. Step 3 is not part of it.
+While ``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
+(``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode. The Helm chart
+computes the grace period with the same formula (45, 90 or 120 s; ``_helpers.tpl``) and refuses
+a set value that is too short.
 """
 
 import asyncio
@@ -42,8 +43,8 @@ from text_extraction.valkey import create_valkey
 
 EXIT_CONFIG_ERROR = 2
 # Requests in flight get at least this long after the drain, and always the extract timeout plus
-# a margin (`graceful_shutdown_seconds`). The Helm chart's terminationGracePeriodSeconds (45)
-# must stay above the drain plus this (`shutdown_seconds`): raise it with either.
+# a margin (`graceful_shutdown_seconds`). The API pods' terminationGracePeriodSeconds must stay
+# above the drain plus this (`shutdown_seconds`); the Helm chart mirrors the formula.
 MIN_GRACEFUL_SHUTDOWN_SECONDS = 30
 _SHUTDOWN_MARGIN_SECONDS = 5
 # On top of the wait for a browser worker and the render: the result margin of the wait (5 s)
