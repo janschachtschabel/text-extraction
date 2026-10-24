@@ -3,7 +3,8 @@
 ``render_page`` loads a page in the steps of B2 within one deadline: ``goto`` until ``load``,
 up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle, the consent opt-out (B11,
 ``run_consent``; the ``accept_cookies`` action opts in instead), the request's actions
-(``browser_actions.run_actions``), then hidden elements are removed (``strip_hidden``) and the
+(``browser_actions.run_actions``), then cookie dialogs left over are removed
+(``strip_consent_overlays``), hidden elements are removed (``strip_hidden``) and the
 DOM is read; the screenshot comes last. A renderer can add a step after the load
 (``after_load``: the unblock renderer waits out a bot challenge there).
 
@@ -49,6 +50,7 @@ from text_extraction.browser_scripts import (
     CONSENT_WAIT,
     NO_SPECULATION,
     PAGE_HEIGHT,
+    STRIP_CONSENT_OVERLAYS,
     STRIP_HIDDEN,
     consent_bundle,
     consent_config,
@@ -77,6 +79,8 @@ CONSENT_SECONDS: Final = 3.0  # B11: best effort
 _READ_RESERVE_SECONDS: Final = 1.0
 _SCREENSHOT_RESERVE_SECONDS: Final = 3.0
 _CONTENT_ATTEMPTS: Final = 3
+# A consent overlay has fewer words than this; a larger one is taken for the page itself.
+_OVERLAY_MAX_WORDS: Final = 300
 # How long an action that may navigate waits for the navigation to reach the route handler,
 # and how often the actions look whether the navigations are over.
 _NAVIGATION_GRACE_SECONDS: Final = 0.1
@@ -198,6 +202,16 @@ async def strip_hidden(page: Page) -> None:
     so the converter does not take inactive tabs and panels for text. Best effort."""
     with contextlib.suppress(*DRIVER_ERRORS):
         await page.evaluate(STRIP_HIDDEN)
+
+
+async def strip_consent_overlays(page: Page) -> bool:
+    """Remove the cookie dialogs that are still in the way (``STRIP_CONSENT_OVERLAYS``), so the
+    converter does not take their text for the page's. True when something was removed. Best
+    effort."""
+    try:
+        return bool(await page.evaluate(STRIP_CONSENT_OVERLAYS, _OVERLAY_MAX_WORDS))
+    except DRIVER_ERRORS:
+        return False
 
 
 def cookie_data(cookie: "Cookie") -> CookieData:
@@ -331,12 +345,18 @@ class _Render:
         # The accept_cookies action is the opt-in, which an earlier opt-out would make moot.
         opts_in = any(isinstance(action, AcceptCookiesAction) for action in actions)
         if self.settings.browser_autoconsent and not opts_in:
-            await run_consent(self.page, "optOut", seconds=min(CONSENT_SECONDS, self.left(reserve)))
+            result = await run_consent(
+                self.page, "optOut", seconds=min(CONSENT_SECONDS, self.left(reserve))
+            )
+            if result == "done":
+                await self._after_consent(reserve)
             self.raise_kept()
         if actions:
             await self._run_actions(actions, reserve)
             if self.download:
                 return self._rendered("", None, None, ())
+        if self.settings.browser_autoconsent and await strip_consent_overlays(self.page):
+            self.warnings.append("consent_overlay_removed")
         await strip_hidden(self.page)
         html = await self._content()
         screenshot, size = await self._screenshot() if self.options.screenshot else (None, None)
@@ -349,6 +369,15 @@ class _Render:
         if idle > 0:
             with contextlib.suppress(*DRIVER_ERRORS):
                 await self.page.wait_for_load_state("networkidle", timeout=idle * 1000)
+
+    async def _after_consent(self, reserve: float) -> None:
+        """A handled banner may reload the page (MediaWiki's saves its choice that way): wait
+        for the reload, which goes through the navigation check, to reach its document."""
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(max(self.left(reserve), 0.0)):
+                await self._navigations_done(True)
+        with contextlib.suppress(*DRIVER_ERRORS):
+            await self.page.wait_for_load_state("load", timeout=max(self.left(reserve), 0.1) * 1000)
 
     async def _run_actions(self, actions: tuple[Action, ...], reserve: float) -> None:
         """Run the request's actions (before the reserve for reading the page), then give what

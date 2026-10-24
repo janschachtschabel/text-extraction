@@ -14,6 +14,17 @@ from typing import Any, Final
 
 from duckduckgo_autoconsent import bundle, rules_json
 
+_MW_SIMPLE = ".cookie-consent-simple-dialog"
+_MW_DETAILED = ".cookie-consent-detailed-dialog"
+_MW_LINK = "a.oo-ui-buttonElement-button"
+# The n-th button of the simple dialog's "other" actions, whether the buttons are the container's
+# children or sit in wrappers.
+_MW_OTHER = (
+    f"{_MW_SIMPLE} .oo-ui-processDialog-actions-other > :nth-child({{0}}) {_MW_LINK}, "
+    f"{_MW_SIMPLE} .oo-ui-processDialog-actions-other .oo-ui-buttonElement:nth-child({{0}}) "
+    f"{_MW_LINK}"
+)
+
 # Banners autoconsent's rule set does not know, in its declarative rule format.
 CUSTOM_CONSENT_RULES: Final[list[dict[str, Any]]] = [
     {
@@ -31,6 +42,21 @@ CUSTOM_CONSENT_RULES: Final[list[dict[str, Any]]] = [
                 "waitForThenClick": ".js-banner-button-accept-all, .js-banner-button-accept, "
                 '#cookiebanner button[name*="accept" i]'
             }
+        ],
+    },
+    {
+        # MediaWiki's CookieConsent extension (Klexikon and other wikis): an OOUI dialog in the
+        # main document. Its two "other" actions are "accept all" and "manage settings"; the
+        # detailed dialog has all optional categories off, so "save" (its primary action) keeps
+        # the necessary cookies only. Saving reloads the page.
+        "name": "MediaWikiCookieConsent",
+        "detectCmp": [{"exists": _MW_SIMPLE}],
+        "detectPopup": [{"visible": _MW_SIMPLE}],
+        "optIn": [{"waitForThenClick": _MW_OTHER.format(1)}],
+        "optOut": [
+            {"waitForThenClick": _MW_OTHER.format(2)},
+            {"waitFor": _MW_DETAILED},
+            {"waitForThenClick": f"{_MW_DETAILED} .oo-ui-processDialog-actions-primary {_MW_LINK}"},
         ],
     },
 ]
@@ -250,3 +276,51 @@ EXPAND_ALL: Final = """(limit) => {
 # replaces the window).
 MARK_DOCUMENT: Final = "() => { window.__textExtractionMarked = true; }"
 DOCUMENT_MARKED: Final = "() => window.__textExtractionMarked === true"
+
+# Removes what a banner left over that autoconsent could not close: fixed or sticky overlays
+# that are dialogs (``role=dialog``, ``role=alertdialog``, ``aria-modal=true``) or known CMP
+# roots, whose text is about cookies or consent, and that are not the page itself (under
+# ``max_words`` words, no ``main`` or ``article`` inside). A dialog about anything else stays.
+# Then the scroll lock they set goes: the classes that say a modal is open on ``html`` and
+# ``body``, and an ``overflow: hidden`` on them. Answers how many overlays it removed.
+STRIP_CONSENT_OVERLAYS: Final = """(maxWords) => {
+  const roots = ['#onetrust-consent-sdk', '#CybotCookiebotDialog', '#usercentrics-root',
+    '#cookiebanner', '#cookie-banner', '#cookie-consent', '.cookie-consent-dialog',
+    '.cc-window', '#cmpwrapper', '#sp_message_container'];
+  const dialogs = '[role="dialog"], [role="alertdialog"], [aria-modal="true"]';
+  const topics = [/(^|[^a-z])cookies?([^a-z]|$)/i, /consent/i, /einwilligung/i, /zustimmung/i,
+    /datenschutzeinstellung/i, /privacy (settings|preferences)/i];
+  const about = (text) => topics.some((topic) => topic.test(text));
+  const overlaid = (element) => {
+    for (let node = element; node && node !== document.body; node = node.parentElement) {
+      const position = getComputedStyle(node).position;
+      if (position === 'fixed' || position === 'sticky') return true;
+    }
+    return false;
+  };
+  const words = (text) => (text.trim() ? text.trim().split(/[ \\n\\t\\r]+/).length : 0);
+  let removed = 0;
+  for (const element of Array.from(document.querySelectorAll(`${dialogs}, ${roots.join(', ')}`))) {
+    if (!element.isConnected || element === document.body || element === document.documentElement)
+      continue;
+    const text = element.textContent || '';
+    if (!overlaid(element) || !about(text) || words(text) >= maxWords) continue;
+    if (element.querySelector('main, article')) continue;
+    element.remove();
+    removed += 1;
+  }
+  if (removed) {
+    for (const root of [document.documentElement, document.body]) {
+      if (!root) continue;
+      for (const name of Array.from(root.classList)) {
+        if (/modal-(open|active)|no-?scroll|scroll-?(lock|locked)|overflow-hidden/i.test(name))
+          root.classList.remove(name);
+      }
+      if (root.style.overflow === 'hidden') root.style.overflow = '';
+      if (root.style.position === 'fixed') root.style.position = '';
+      if (root.getAttribute('class') === '') root.removeAttribute('class');
+      if (root.getAttribute('style') === '') root.removeAttribute('style');
+    }
+  }
+  return removed;
+}"""

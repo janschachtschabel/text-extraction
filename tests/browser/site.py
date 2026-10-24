@@ -31,6 +31,15 @@ FRAGMENT_TEXT = "The section opened by the fragment link covers the history of t
 ARIA_TEXT = "The toggled panel describes how clouds form above warm water."
 TYPED_ECHO = "The field received: "
 CHOSEN = "The chosen option is: "
+COOKIE_DIALOG_TEXT = (
+    "We use cookies to measure how this encyclopedia is read. Please choose which cookies "
+    "you allow; the necessary ones are always on."
+)
+OVERLAY_TEXT = (
+    "Diese Seite verwendet Cookies und ähnliche Techniken. Mit einem Klick stimmen Sie der "
+    "Verarbeitung Ihrer Daten zu oder ändern Ihre Einwilligung später in den Einstellungen."
+)
+NEWSLETTER_TEXT = "Subscribe to our newsletter and get one short letter about nature each week."
 LAZY_ITEMS = 30  # the list on /actions stops growing here
 CHALLENGE_TEXT = "Checking your browser before accessing the site."
 FORM_TEXT = "The form on this page posts itself as soon as the page has loaded."
@@ -109,6 +118,85 @@ def _handler_for(site: Site) -> type[BaseHTTPRequestHandler]:
 
     Handler.site = site
     return Handler
+
+
+def _js_text(text: str) -> str:
+    """``text`` as a JavaScript expression that builds it from two halves, so that the page
+    source does not hold the sentence itself (a test can then look for it in the DOM)."""
+    middle = len(text) // 2
+    return f"{text[:middle]!r} + {text[middle:]!r}"
+
+
+def _mw_consent_page() -> bytes:
+    """The dialog of MediaWiki's CookieConsent extension (OOUI), built by script: a simple
+    dialog with "accept all" and "manage settings", a detailed one with "save" (necessary
+    cookies only), and a page reload after either. The choice is in a cookie."""
+    script = f"""
+const NAME = 'testwikicookieconsent_dialog_dismissed';
+const make = (tag, className, parent) => {{
+  const node = document.createElement(tag);
+  node.className = className;
+  if (parent) parent.append(node);
+  return node;
+}};
+const button = (parent, label, onclick) => {{
+  const widget = make('span', 'oo-ui-widget oo-ui-buttonElement', parent);
+  const link = make('a', 'oo-ui-buttonElement-button', widget);
+  link.setAttribute('role', 'button');
+  link.tabIndex = 0;
+  link.textContent = label;
+  link.addEventListener('click', onclick);
+}};
+const choose = (value) => {{
+  document.cookie = NAME + '=' + value + '; path=/';
+  location.reload();
+}};
+const dialog = (kind, text, buttons) => {{
+  document.querySelectorAll('.cookie-consent-dialog').forEach((old) => old.remove());
+  const root = make('div', 'cookie-consent-dialog cookie-consent-' + kind
+    + '-dialog oo-ui-window oo-ui-dialog oo-ui-processDialog', manager);
+  root.setAttribute('role', 'dialog');
+  root.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%;'
+    + ' z-index: 101; background: white;';
+  const body = make('div', 'oo-ui-window-body', make('div', 'oo-ui-window-frame', root));
+  make('p', '', body).textContent = text;
+  const foot = make('div', 'oo-ui-window-foot', root.firstChild);
+  buttons(foot);
+}};
+const match = document.cookie.match(new RegExp(NAME + '=(\\\\w+)'));
+const state = document.getElementById('state');
+const manager = make('div', 'oo-ui-windowManager oo-ui-windowManager-modal', document.body);
+if (match) {{
+  state.textContent = 'Cookie consent: ' + match[1];
+}} else {{
+  document.body.classList.add('oo-ui-windowManager-modal-active');
+  dialog('simple', {_js_text(COOKIE_DIALOG_TEXT)}, (foot) => {{
+    const other = make('div', 'oo-ui-processDialog-actions-other', foot);
+    button(other, 'Alle Cookies akzeptieren', () => choose('all'));
+    const detailed = (foot2) => {{
+      const primary = make('div', 'oo-ui-processDialog-actions-primary', foot2);
+      button(primary, 'Speichern', () => choose('necessary'));
+    }};
+    button(other, 'Einstellungen verwalten', () => dialog('detailed', 'Manage cookies', detailed));
+  }});
+}}"""
+    return article(f"<p id='state'></p><script>{script}</script>", title="Dante")
+
+
+def _overlay_page() -> bytes:
+    """An overlay no rule knows: a fixed, full-viewport dialog about cookies that locks the
+    scroll, and a dialog about a newsletter that must stay."""
+    cookies = f"<p>{OVERLAY_TEXT}</p><button type='button'>Verstanden</button>"
+    newsletter = f"<p>{NEWSLETTER_TEXT}</p>"
+    body = (
+        f"<div id='overlay' style='position: fixed; inset: 0; z-index: 9999; background: white'>"
+        f"<div role='dialog' aria-modal='true'>{cookies}</div></div>"
+        "<div id='newsletter' role='dialog' style='position: fixed; bottom: 0; right: 0'>"
+        f"{newsletter}</div>"
+        "<script>document.body.classList.add('modal-open');"
+        "document.body.style.overflow = 'hidden';</script>"
+    )
+    return article(body, title="Overlay")
 
 
 def _actions_page() -> bytes:
@@ -312,6 +400,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "<button id='reveal' onclick=\"this.textContent = 'clicked'\">Reveal</button>"
             )
             self._send(page(markup, title="Form"))
+        elif path == "/mw-consent":
+            self._send(_mw_consent_page())
+        elif path == "/overlay":
+            self._send(_overlay_page())
         elif path == "/tall":
             self._send(article("<div style='height: 20000px'></div>", title="Tall"))
         elif path == "/never-idle":

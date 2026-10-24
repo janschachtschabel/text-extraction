@@ -25,7 +25,15 @@ from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
 from tests.browser.conftest import SiteProxy
-from tests.browser.site import ARTICLE_TEXT, OPTED_OUT, PAGE_GLOBAL, SPECULATED, Site
+from tests.browser.site import (
+    ARTICLE_TEXT,
+    COOKIE_DIALOG_TEXT,
+    OPTED_OUT,
+    OVERLAY_TEXT,
+    PAGE_GLOBAL,
+    SPECULATED,
+    Site,
+)
 from tests.fakes import FakeFetcher
 from text_extraction.auth import Principal
 from text_extraction.browser import BrowserPool, ChromiumRenderer, PageProxy, PlaywrightLauncher
@@ -435,6 +443,25 @@ def test_consent_banner_is_opted_out(run_unblock: Any, site: Site) -> None:
     async def body(stack: UnblockStack) -> None:
         rendered = await render(stack, f"{site.base}/consent")
         assert OPTED_OUT in rendered.html
+
+    run_unblock(body)
+
+
+def test_mediawiki_cookie_dialog_is_closed(run_unblock: Any, site: Site) -> None:
+    async def body(stack: UnblockStack) -> None:
+        rendered = await render(stack, f"{site.base}/mw-consent")
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+        assert COOKIE_DIALOG_TEXT not in rendered.html
+        assert "Cookie consent: necessary" in rendered.html
+
+    run_unblock(body)
+
+
+def test_overlay_about_cookies_is_removed(run_unblock: Any, site: Site) -> None:
+    async def body(stack: UnblockStack) -> None:
+        rendered = await render(stack, f"{site.base}/overlay")
+        assert OVERLAY_TEXT not in rendered.html
+        assert "consent_overlay_removed" in rendered.warnings
 
     run_unblock(body)
 

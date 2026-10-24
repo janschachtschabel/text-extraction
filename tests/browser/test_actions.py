@@ -12,6 +12,7 @@ from tests.browser.site import (
     ARIA_TEXT,
     ARTICLE_TEXT,
     CHOSEN,
+    COOKIE_DIALOG_TEXT,
     FRAGMENT_TEXT,
     LAZY_ITEMS,
     OPTED_IN,
@@ -272,6 +273,18 @@ def test_accept_cookies_opts_in(settings_for: SettingsFor, site: Site) -> None:
         assert rendered.warnings == ()
         plain = await render(stack, f"{site.base}/consent")
         assert f'<p id="state">{OPTED_OUT}</p>' in plain.html  # without the action: opt-out
+
+    scenario(settings_for, site, body)
+
+
+def test_accept_cookies_on_a_mediawiki_dialog_accepts_all(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/mw-consent", AcceptCookiesAction())
+        assert "Cookie consent: all" in rendered.html
+        assert COOKIE_DIALOG_TEXT not in rendered.html
+        assert rendered.warnings == ()
 
     scenario(settings_for, site, body)
 

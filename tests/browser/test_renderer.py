@@ -13,10 +13,13 @@ import text_extraction.browser_render
 from tests.browser.conftest import Stack, open_stack, run_pipeline
 from tests.browser.site import (
     ARTICLE_TEXT,
+    COOKIE_DIALOG_TEXT,
     FORM_TEXT,
     HIDDEN_LEAF,
     HIDDEN_TAB,
+    NEWSLETTER_TEXT,
     OPTED_OUT,
+    OVERLAY_TEXT,
     SCRIPT_TEXT,
     SHOWN_CHILD,
     SPECULATED,
@@ -372,6 +375,51 @@ def test_consent_banner_is_opted_out(settings_for: SettingsFor, site: Site) -> N
         assert "cookiebanner" not in rendered.html
 
     scenario(settings_for, site, body)
+
+
+def test_mediawiki_cookie_dialog_is_closed_with_necessary_cookies(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    checked: list[str] = []
+
+    async def check(target: str) -> None:
+        checked.append(target)
+
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/mw-consent", check=check)
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+        assert COOKIE_DIALOG_TEXT not in rendered.html
+        assert "Cookie consent: necessary" in rendered.html  # "Speichern": only the necessary
+        assert checked == [f"{site.base}/mw-consent"]  # the reload went through the check
+        assert rendered.warnings == ()
+        assert len(rendered.responses) == 2
+
+    scenario(settings_for, site, body)
+
+
+def test_overlay_about_cookies_is_removed_and_other_dialogs_stay(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/overlay")
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+        assert OVERLAY_TEXT not in rendered.html
+        assert NEWSLETTER_TEXT in rendered.html
+        assert "<body>" in rendered.html  # no scroll lock left on it
+        assert "consent_overlay_removed" in rendered.warnings
+
+    scenario(settings_for, site, body)
+
+
+def test_overlay_stays_when_consent_handling_is_switched_off(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/overlay")
+        assert OVERLAY_TEXT in rendered.html
+        assert rendered.warnings == ()
+
+    scenario(settings_for, site, body, browser_autoconsent=False)
 
 
 def test_consent_is_skipped_when_switched_off(settings_for: SettingsFor, site: Site) -> None:
