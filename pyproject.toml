@@ -73,5 +73,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # tests/live needs a running service and the internet: only run_live.py runs it, by hand or in CI.
-addopts = "-ra --strict-markers --strict-config --ignore=tests/live"
+# tests/e2e starts its own processes: only run_batch.py runs it (.github/workflows/e2e.yml).
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e"
 xfail_strict = true

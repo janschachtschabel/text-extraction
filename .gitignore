@@ -24,3 +24,6 @@ htmlcov/
 
 # Live regression output
 /results/
+
+# End-to-end batch run output
+/e2e-results/

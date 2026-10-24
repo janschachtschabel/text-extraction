@@ -6,7 +6,9 @@ update it in the same PR as any change to the design.
 ## Overview
 
 Stateless API pods handle fast-mode requests inline and hand slow work to worker pools
-through Valkey.
+through Valkey. The job queue is our own fair scheduler on Valkey (Lua scripts with leases, see
+"Jobs and the fair queue"), not Taskiq: taskiq-redis queues are plain FIFO, and its stream broker
+reclaims stale messages only when new ones arrive (Jan, 2026-10-24).
 
 ```
 Clients / AI agents ──(8080: REST /v1, /mcp, /ui)──▶ API pods (FastAPI, stateless)
@@ -14,6 +16,7 @@ Prometheus ──(9090: /health /ready /metrics)──────▶ API pods
 API pods ──fetch (SSRF guard)──▶ target websites and files
 API pods ──▶ LLM endpoint (OpenAI-compatible, default model gpt-6-luna)
 API pods ──jobs──▶ Valkey (queues, results, cache, rate limits, fingerprints)
+Valkey ◀──▶ extract-worker  (fast pipeline: batch items from the fair queue)
 Valkey ◀──▶ browser-worker  (Playwright Chromium: auto fallback, actions, screenshots)
 Valkey ◀──▶ docling-worker  (OCR, scanned and table-heavy PDFs, images)
 Valkey ◀──▶ nlp-worker      (MarkItDown, Presidio)
@@ -142,8 +145,8 @@ optional rate limit.
   `learn_selectors` stores an LLM-written CSS schema per domain for LLM-free reuse.
   Env: `LLM_BASE_URL`, `LLM_MODEL` (default `gpt-6-luna`), `LLM_API_KEY` (secret),
   `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_INPUT_TOKENS`.
-- **Batch:** one sub-queue per domain, round-robin over domains with free capacity;
-  fair shares between clients.
+- **Batch:** one sub-queue per client and domain, round-robin over clients, then over the
+  client's domains with free capacity; see "Jobs and the fair queue".
 - **Sync-to-job (P1):** `POST /v1/extract` without `wait_seconds` always answers when the
   extraction ends (at most `EXTRACT_TIMEOUT_SECONDS`, 25 s). With `wait_seconds` the extraction
   runs as a task in the API pod and the route waits that long. If it is still running, the route
@@ -163,6 +166,76 @@ optional rate limit.
   and answers 200.
 - **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs; `S3_ENABLED`
   moves screenshots and large results to an S3-compatible store.
+
+## Jobs and the fair queue
+
+Package 3, `jobs.py`, `scheduler.py`, `worker.py`, `jobs_api.py`. Keys and settings are listed in
+[configuration.md](configuration.md) ("Job keys", "Queue keys").
+
+**Job records.** A job is four keys under one hash tag, `job:{<id>}:…`: meta (owner, options,
+state, counters, lease), URLs, results and a done bitmap, all with `JOB_TTL_SECONDS`. One Lua
+script stores an item's result: it sets the done bit and counts the item only when the bit was 0,
+so a re-run after a lost lease counts once. The script answers `first`, `last` (this write
+completed the job; only then is `job_duration_seconds` observed) or `repeat` (R7).
+
+**The fair queue.** One queue per worker pool (`extract` now; browser, docling, nlp and asr pools
+reuse it), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and a queue
+key. Items are `<job>:<index>:<attempts>` in lists per client and domain.
+
+- Client = API key name (P3); under `AUTH_MODE=none` everyone is `anonymous` and batches share
+  by domain only. Domain = `normalize_host(hostname)`, the key the outbound gate uses; a URL
+  without a valid host goes to `-` (P2).
+- A claim is one script: it takes back up to 20 expired leases (front of their domain, attempts
+  + 1), then rotates clients and, within the client, its domains. It skips a domain that is
+  deferred (`notbefore`) or holds `OUTBOUND_MAX_CONCURRENCY_PER_HOST` leases (P4: the scheduler
+  only avoids pointless waits; the gate stays the authority on limits). The next item is leased
+  with a random token, so a worker whose lease was taken back cannot complete or defer the next
+  worker's lease.
+- Scan budget (R2, R5, R6): a claim visits at most `SCHEDULER_CLAIM_SCAN_BUDGET` (200)
+  client-domain pairs with read-only checks and rotates only what it visited, so an idle claim
+  stays well under a millisecond on a large blocked queue. When the budget runs out inside a
+  client, that client moves to the end too, so one client with many blocked domains cannot pin
+  the scan. Such an answer is marked `scan_incomplete`; the worker backs off 0.05 s doubling to
+  its 1 s idle sleep on consecutive ones and resets on a claimed item. No scan state is kept.
+- Exhausted items (R3, R9): an item past `JOB_ITEM_MAX_ATTEMPTS` (lost leases plus deferrals) is
+  handed out once more, marked exhausted and still leased. The worker records `failed` /
+  `internal_error` (retryable), then completes it. It also completes it when the job is gone; on
+  a Valkey error it leaves it leased, so it comes back after the lease instead of vanishing
+  without a result.
+- A gate refusal (busy, paused) defers the item: back to the front of its domain, the domain not
+  claimed before the gate's retry time. At the attempt limit the pipeline's own `rate_limited` or
+  `connection_error` envelope is stored instead.
+
+**Workers.** `text-extraction-worker` runs `WORKER_CONCURRENCY` slot loops on the internal port
+only (`/health`, `/ready`, `/metrics`). An item is leased for `EXTRACT_TIMEOUT_SECONDS` × 2 + 10 s;
+a killed worker's items return after the lease. Valkey errors back off 1, 2, 4 … 30 s.
+
+**Sync-to-job (P1).** See the feature note above. The lost view (R13): a job still `running` past
+its `lease_until` is shown as `completed`, with item 0 `failed` / `internal_error`, retryable, so
+pollers stop; the stored record stays as it is until its TTL. A pod keeps at most
+`EXTRACT_MAX_BACKGROUND` (32) such extractions (R14); beyond it a request keeps waiting inline.
+
+**Results (P6).** An item result whose JSON exceeds `JOB_ITEM_MAX_BYTES` is stored without
+`content`, with the warning `content_not_stored_too_large`; a later `POST /v1/extract` of the URL
+is a cache hit for `RESULT_CACHE_TTL_SECONDS`.
+
+**Valkey memory (P5, R18).** Valkey runs with `--maxmemory 768mb --maxmemory-policy noeviction`:
+eviction would drop gate, lease or job keys silently, while noeviction fails writes loudly (503).
+Its memory request equals its limit, 1280Mi (Guaranteed QoS), so maxmemory is 60 % of the limit
+and leaves room for fragmentation, buffers and the AOF fork. Package 11 measures real sizes.
+
+**Outbound limits under load (R21, R22).** The end-to-end run (`tests/e2e`) found two gaps in the
+package-2 gate and fixed them. Spacing now counts from real request starts: a request waits out
+the delay since the latest real start before it is sent, and the fetcher reports each request
+once its headers are on the wire, so a request held up by a busy event loop delays the next one
+instead of letting it follow closer. The compliance files ride in the page's gate turn, fetched
+one after another before the page, so the concurrency limit holds for every request a host sees.
+
+**Done when (package 3):** `tests/e2e/run_batch.py` (workflow `e2e`) runs 1,000 URLs (400 on one
+host, 600 over nine) plus a second client's 20 URLs on the busiest host, across two workers,
+against a local site farm. Both jobs complete with no failed item. Every host sees at most 2
+requests at once and page starts at least 180 ms apart (200 ms minus 10 %). The compliance files
+never overlap. The second client finishes first.
 
 ## Observability
 
