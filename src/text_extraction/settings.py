@@ -125,6 +125,8 @@ class Settings(BaseSettings):
     job_item_max_attempts: int = Field(default=5, ge=1)
     # Client-domain pairs one queue claim looks at, at most, before it answers "try again soon".
     scheduler_claim_scan_budget: int = Field(default=200, ge=1, le=5000)
+    # Job items one worker pod processes at once (conversions are still capped per pod).
+    worker_concurrency: int = Field(default=8, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod

@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from redis.asyncio import Redis
 
@@ -37,6 +37,11 @@ from text_extraction.job_models import (
 )
 from text_extraction.settings import Settings
 
+# What one result write did: finished its item (``first``), finished the item and with it the
+# job (``last``), or nothing, because the item had its result already (``repeat``).
+ResultWrite = Literal["first", "last", "repeat"]
+_WRITES: dict[int, ResultWrite] = {0: "repeat", 1: "first", 2: "last"}
+
 # Set in ``data.warnings`` of a result that was stored without its content.
 CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
 
@@ -47,8 +52,9 @@ _NOT_FOUND = -1
 _OUT_OF_RANGE = -2
 
 # KEYS = meta, results, done, urls; ARGV = index, result JSON, envelope status, now, ttl_ms.
-# Returns 1 when this call finished the index, 0 when it was finished already (nothing changes),
-# -1 when the job is gone and -2 when the index is outside the job. The first write also counts
+# Returns 1 when this call finished the index, 2 when it also finished the job, 0 when the index
+# was finished already (nothing changes), -1 when the job is gone and -2 when the index is outside
+# the job. The first write also counts
 # the item and, if it was the last, completes the job and renews the TTL of all four keys.
 # Epoch seconds go in and out as strings: Redis would cut a Lua number to an integer.
 _STORE_RESULT = """
@@ -78,6 +84,9 @@ if done >= total then
 end
 redis.call('PEXPIRE', KEYS[2], remaining)
 redis.call('PEXPIRE', KEYS[3], remaining)
+if done >= total then
+  return 2
+end
 return 1
 """
 
@@ -260,6 +269,13 @@ class JobStore:
         and with the warning ``content_not_stored_too_large``. Raises ``JobLost`` when the job's
         keys are gone and ``ValueError`` when the index is outside the job.
         """
+        return await self.write_result(job_id, index, envelope) != "repeat"
+
+    async def write_result(
+        self, job_id: str, index: int, envelope: Envelope[ExtractResult]
+    ) -> ResultWrite:
+        """``store_result`` that also tells whether this write completed the job (``last``):
+        exactly one write of a job does, even when several workers finish items at once."""
         payload = self._encode(envelope)
         outcome = await self._store_result(
             keys=[
@@ -280,7 +296,7 @@ class JobStore:
             raise JobLost(job_id)
         if outcome == _OUT_OF_RANGE:
             raise ValueError(f"index {index} is outside job {job_id}")
-        return bool(outcome == 1)
+        return _WRITES[int(outcome)]
 
     async def mark_running(self, job_id: str, *, lease_seconds: float | None = None) -> None:
         """Set the state ``running`` and claim the job for ``lease_seconds`` (None: no claim).

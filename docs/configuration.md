@@ -50,6 +50,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
 | `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
 | `SCHEDULER_CLAIM_SCAN_BUDGET` | `200` | Client-domain pairs one claim of the job queue looks at, at most. A claim that finds nothing within the budget answers "try again in 0.05 s", and the next claim goes on where it stopped (a client whose domains the budget ran out in moves to the end of the rotation), so fairness holds across claims. Workers back off from 0.05 s up to 1 s while such answers repeat. It bounds the time one claim blocks Valkey when many domains are deferred or at their limit. Minimum 1, maximum 5000. |
+| `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -100,6 +101,13 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
   start-up, which loads the language model), no shutdown has begun and Valkey answers. Pods
   without Valkey leave the load balancer, and so does a pod as soon as it gets SIGTERM.
 - `/metrics` is Prometheus text and is not reachable on 8080.
+
+The extract worker (`text-extraction-worker`) serves only port 9090, with the same three paths.
+Its `/ready` answers 200 once it has loaded the language model and its loops claim items, while
+Valkey answers. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
+items in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds to finish; an item still running
+then is cancelled, and its lease expires so that another worker runs it. There is no drain wait,
+since no Service sends traffic to the worker.
 
 docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
@@ -207,3 +215,11 @@ its failure and then completes it, and if the worker dies in between, the item c
 lease. Every lease has a token, so a worker whose lease was taken back cannot complete or defer the
 item under the next worker's lease. The keys have no TTL; the lists empty themselves as items are
 claimed.
+
+A worker leases an item for `EXTRACT_TIMEOUT_SECONDS * 2 + 10` seconds (60 by default) and runs it
+through the fast pipeline with the job's options, as the job's owner. When the outbound gate
+refuses the host (busy, or paused after errors or a 429), the item goes back to the front of its
+domain, which is not claimed before the gate's retry time; an item at `JOB_ITEM_MAX_ATTEMPTS` is
+stored with the gate's error (`rate_limited` or `connection_error`, retryable) instead. An item
+whose job has expired is dropped. While Valkey fails, a worker backs off for 1, 2, 4 … 30 s and
+then goes on; the item it held is claimed again once its lease expires.

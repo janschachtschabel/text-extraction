@@ -150,6 +150,18 @@ async def test_store_result_counts_each_status() -> None:
 
 
 @scenario
+async def test_write_result_tells_which_write_completed_the_job() -> None:
+    store = make_store(FakeAsyncRedis())
+    job_id = await create_job(store, URLS[:2])
+
+    assert await store.write_result(job_id, 1, success(URLS[1])) == "first"
+    assert await store.write_result(job_id, 1, success(URLS[1])) == "repeat"
+    assert await store.write_result(job_id, 0, success()) == "last"
+    assert await store.write_result(job_id, 0, success()) == "repeat"
+    assert await store.store_result(job_id, 0, success()) is False
+
+
+@scenario
 async def test_store_result_rejects_an_index_outside_the_job() -> None:
     store = make_store(FakeAsyncRedis())
     job_id = await create_job(store)

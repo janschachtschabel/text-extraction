@@ -168,7 +168,9 @@ async def _run(settings: Settings) -> None:
         _log.info("valkey_closed")
 
 
-def main() -> None:
+def configured_settings() -> Settings:
+    """The settings from the environment, with logging set up from them. Invalid settings are
+    logged and end the process with ``EXIT_CONFIG_ERROR`` (2)."""
     try:
         settings = load_settings()
     except ConfigError as error:
@@ -177,4 +179,8 @@ def main() -> None:
         structlog.get_logger(__name__).error("invalid_configuration", message=str(error))
         sys.exit(EXIT_CONFIG_ERROR)
     configure_logging(settings.log_level, settings.log_format)
-    asyncio.run(_run(settings))
+    return settings
+
+
+def main() -> None:
+    asyncio.run(_run(configured_settings()))

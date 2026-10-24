@@ -19,6 +19,8 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
 compliance mode (403) and a Valkey outage of the outbound gate (503) leave as ``ServiceError``.
+A caller that can retry later itself (the job worker) may ask for the gate's refusals
+(``OutboundBusy``, ``CircuitOpen``) to be raised instead of answered as envelopes.
 
 Only ``success`` and ``partial`` results are cached and fingerprinted: a bot challenge or an
 error page is nothing to serve again, nor to compare the next version of the page with.
@@ -160,6 +162,7 @@ class _Run:
     report: ComplianceReport
     cache: CacheState
     started: float
+    raise_refusals: bool = False
     deadline: asyncio.Timeout | None = None
     host: str | None = None
     final_url: str | None = None
@@ -294,15 +297,27 @@ class Pipeline:
         self._rules = load_boilerplate_rules()
         self._metrics = _metrics_for(registry)
 
-    async def run(self, req: ExtractRequest, principal: Principal) -> Envelope[ExtractResult]:
+    async def run(
+        self,
+        req: ExtractRequest,
+        principal: Principal,
+        *,
+        gate_refusals: Literal["fail", "raise"] = "fail",
+    ) -> Envelope[ExtractResult]:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
-        and an unavailable Valkey (503)."""
+        and an unavailable Valkey (503).
+
+        A refusal of the outbound gate is a ``rate_limited`` (busy) or ``connection_error``
+        (paused) envelope, retryable. With ``gate_refusals="raise"`` the ``OutboundBusy`` or
+        ``CircuitOpen`` propagates unchanged instead; the metrics count it under the same code.
+        """
         mode = resolve_mode(req.compliance, principal, self._settings)
         run = _Run(
             req=req,
             report=ComplianceReport(mode=mode, decision="skipped"),  # until it is checked
             cache="miss" if req.cache else "bypass",
             started=time.perf_counter(),
+            raise_refusals=gate_refusals == "raise",
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -312,6 +327,12 @@ class Pipeline:
             envelope.trace_id = current_trace_id()
             outcome = _outcome(envelope)
             return envelope
+        except OutboundBusy:
+            outcome = ErrorCode.RATE_LIMITED.value
+            raise
+        except CircuitOpen:
+            outcome = ErrorCode.CONNECTION_ERROR.value
+            raise
         finally:
             self._observe(run, outcome)
 
@@ -347,6 +368,8 @@ class Pipeline:
             run.upstream_status = error.upstream_status
             return run.failed(error.code, error.message, retryable=error.retryable)
         except OutboundBusy as busy:
+            if run.raise_refusals:
+                raise
             return run.failed(
                 ErrorCode.RATE_LIMITED,
                 "Too many requests to this site are waiting; "
@@ -354,6 +377,8 @@ class Pipeline:
                 retryable=True,
             )
         except CircuitOpen as paused:
+            if run.raise_refusals:
+                raise
             return run.failed(
                 ErrorCode.CONNECTION_ERROR,
                 "Requests to this site are paused after errors or a rate limit; "

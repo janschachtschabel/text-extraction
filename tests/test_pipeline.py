@@ -517,6 +517,30 @@ def test_circuit_open() -> None:
     assert envelope.error.retryable is True
 
 
+@pytest.mark.parametrize(
+    ("refusal", "code"),
+    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.CONNECTION_ERROR)],
+)
+def test_gate_refusals_raise_when_asked(refusal: Exception, code: ErrorCode) -> None:
+    harness = Harness({PAGE: fetched()}, gate=RefusingGate(refusal))
+
+    async def raised() -> BaseException:
+        with pytest.raises(type(refusal)) as caught:
+            await harness.pipeline.run(ExtractRequest(url=PAGE), USER, gate_refusals="raise")
+        return caught.value
+
+    assert asyncio.run(raised()) is refusal  # unchanged, with its retry_after
+
+    envelope = harness.run_once()  # the default still answers with an envelope
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == code
+    # Both runs count as extractions that the gate refused.
+    assert harness.registry.get_sample_value(
+        "text_extraction_extract_total", {"mode": "auto", "outcome": code.value}
+    ) == pytest.approx(2)
+
+
 def test_invalid_url_is_a_failed_envelope() -> None:
     harness = Harness({})
 
