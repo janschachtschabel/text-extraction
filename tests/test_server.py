@@ -163,9 +163,10 @@ def test_graceful_seconds_cover_browser_wait() -> None:
 
     assert graceful_shutdown_seconds(plain) == 30
     assert graceful_shutdown_seconds(unblock_only) == 30
-    assert graceful_shutdown_seconds(browser) == 10 + 30 + 10
-    assert graceful_shutdown_seconds(unblock) == 10 + 60 + 10
+    # An escalating auto request runs its fast phase (EXTRACT_TIMEOUT_SECONDS, 25) first.
+    assert graceful_shutdown_seconds(browser) == 25 + 10 + 30 + 10
+    assert graceful_shutdown_seconds(unblock) == 25 + 10 + 60 + 10
     slow = Settings(auth_mode="none", browser_enabled=True, extract_timeout_seconds=90)
-    assert graceful_shutdown_seconds(slow) == 95  # the fast phase's own bound is larger
+    assert graceful_shutdown_seconds(slow) == 90 + 10 + 30 + 10
     # Workers never wait for another pool: the extract worker keeps the extraction bound.
     assert extraction_graceful_seconds(unblock) == 30

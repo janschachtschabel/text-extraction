@@ -331,3 +331,38 @@ def test_handover_claims_once() -> None:
     assert other.claim_browser() is True
     assert other.claim_p1() is False
     assert other.claimed == "browser"
+
+
+@scenario
+async def test_reused_job_keeps_its_lease_until_the_item_is_queued(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A pod that dies between the two steps leaves a lease that expires into the lost view.
+    parts = Parts()
+    job_id = await parts.store.create("extract", USER, JobOptions(compliance="enforce"), [PAGE])
+    await parts.store.mark_running(job_id, lease_seconds=60)
+
+    async def down(*args: object, **kwargs: object) -> None:
+        raise RedisConnectionError("valkey is down")
+
+    monkeypatch.setattr(parts.queue, "enqueue_items", down)
+    with pytest.raises(RedisConnectionError):
+        await parts.dispatcher.submit(
+            "extract", ExtractRequest(url=PAGE), USER, "enforce", job_id=job_id
+        )
+
+    record = await parts.store.get(job_id)
+    assert record is not None
+    assert record.lease_until is not None
+
+
+def test_a_released_handover_cannot_be_detached_and_back() -> None:
+    released = Handover()
+    assert released.release() is True
+    assert released.detach() is False
+    assert released.detached is False
+
+    detached = Handover()
+    assert detached.detach() is True
+    assert detached.release() is False
+    assert detached.detached is True

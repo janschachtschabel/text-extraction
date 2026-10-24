@@ -165,7 +165,7 @@ class BrowserRunner:
                 # Their TTL ran out while the item waited: rendering without the caller's
                 # headers, cookies or actions would answer another request than the one sent.
                 finished = True
-                _log.info("job_secrets_expired")
+                _log.info("job_secrets_expired", job_id=job.id)
                 return failed_extract(ErrorCode.TIMEOUT, SECRETS_EXPIRED_MESSAGE, retryable=True)
             draft = await self._store.draft(job.id, item.index)
             envelope = await self._pipeline.run(

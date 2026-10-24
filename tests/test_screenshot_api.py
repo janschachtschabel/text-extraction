@@ -89,6 +89,7 @@ def test_artifact_download_png() -> None:
         route = spec["paths"]["/v1/jobs/{job_id}/artifacts/{name}"]["get"]
         assert "image/png" in route["responses"]["200"]["content"]
         assert "application/json" not in route["responses"]["200"]["content"]
+        assert {"404", "503"} <= set(route["responses"])
         assert "/v1/screenshot" in spec["paths"]
 
 

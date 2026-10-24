@@ -92,6 +92,11 @@ async def screenshot(
             "model": Envelope[None],
             "description": "No such job (or another caller's) or no such file, or it expired.",
         },
+        503: {
+            "model": Envelope[None],
+            "description": "Jobs are disabled (`JOBS_ENABLED=false`), or the job backend is "
+            "unavailable (retryable).",
+        },
     },
 )
 async def artifact(

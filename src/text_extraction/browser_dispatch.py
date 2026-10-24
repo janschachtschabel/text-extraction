@@ -7,9 +7,9 @@ browser options, or an ``auto`` result that escalates) is handed to the ``browse
    and the caller's secrets (B6), stores the fast result as the item's draft for an escalating
    ``auto`` request (B5), and queues item 0 on pool ``browser`` under the client
    ``<key name>#live``, so that the key's own batches do not queue it. An ``auto`` request that
-   was handed over to a P1 job during its fast phase reuses that job instead: its lease is
-   cleared (the browser has its own time, and the lost view must not end it) and the browser
-   worker writes item 0.
+   was handed over to a P1 job during its fast phase reuses that job instead: once the item is
+   queued, its lease is cleared (the browser has its own time, and the lost view must not end
+   it) and the browser worker writes item 0.
 2. ``wait`` polls the job every 0.2 s, rising to 0.5 s. It gives up when no worker has claimed
    the item (the job is still ``queued``) after ``BROWSER_QUEUE_WAIT_SECONDS``, or when the item
    has no result ``BROWSER_TIMEOUT_SECONDS`` + 5 s after the claim
@@ -21,7 +21,9 @@ browser options, or an ``auto`` result that escalates) is handed to the ``browse
 of them may turn the request into a job (``claim_p1`` or ``claim_browser``, decided without an
 ``await`` in between): the route's P1 job during the fast phase, or the task's browser job. The
 route then answers 202 with that job; for the browser job it detaches the task, which stops
-waiting and leaves the job to the worker.
+waiting and leaves the job to the worker. A task that gives up releases the job first; detaching
+and releasing exclude each other (both are synchronous), so a job answered with 202 is never
+deleted, and a job being deleted is never answered with 202.
 
 Logs carry job ids only, never a URL, header, cookie or action.
 """
@@ -40,7 +42,7 @@ from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import JobLost, JobStore
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
@@ -93,6 +95,7 @@ class Handover:
         self._claimed: Literal["p1", "browser"] | None = None
         self._settled = asyncio.Event()
         self._detached = False
+        self._released = False
 
     @property
     def claimed(self) -> Literal["p1", "browser"] | None:
@@ -123,9 +126,22 @@ class Handover:
     async def settled(self) -> None:
         await self._settled.wait()
 
-    def detach(self) -> None:
-        """The route answered 202 with the browser job: the task stops waiting for it."""
+    def detach(self) -> bool:
+        """The route answers 202 with the browser job: the task stops waiting for it and leaves
+        the job to the worker. False when the task has released the job already (it is deleting
+        it and answers on its own); then the route waits for that answer."""
+        if self._released:
+            return False
         self._detached = True
+        return True
+
+    def release(self) -> bool:
+        """The task ends without leaving its job to the worker (it is about to delete it). False
+        when the route has detached already: the job is the caller's now and must stay."""
+        if self._detached:
+            return False
+        self._released = True
+        return True
 
     @property
     def detached(self) -> bool:
@@ -181,8 +197,6 @@ class BrowserDispatcher:
         elif not secrets.empty():
             raise ValueError("a reused job cannot take secrets")
         try:
-            if not created:
-                await self._store.clear_lease(job_id)
             # Draft first: the browser worker may claim the item as soon as it is queued.
             if draft is not None:
                 await self._store.put_draft(job_id, 0, draft)
@@ -191,6 +205,8 @@ class BrowserDispatcher:
             if created:  # also on cancellation: no job is left that nobody waits for
                 await asyncio.shield(self.abandon(job_id))
             raise
+        if not created:
+            await self._clear_lease(job_id)
         _log.info("browser_job_queued", job_id=job_id, kind=kind, reused=not created)
         return job_id
 
@@ -229,6 +245,16 @@ class BrowserDispatcher:
             await self._sleep(interval)
             interval = min(interval + _POLL_STEP_SECONDS, _POLL_MAX_SECONDS)
         return None
+
+    async def _clear_lease(self, job_id: str) -> None:
+        """End a reused job's P1 lease, after its item is queued: a pod that dies before leaves
+        the lease to expire into the lost view, never a leaseless job without a queued item. A
+        failure keeps the lease (logged): the worker's result still completes the job, which
+        may look lost meanwhile."""
+        try:
+            await self._store.clear_lease(job_id)
+        except (RedisError, OSError, JobLost) as error:
+            _log.warning("browser_job_lease_kept", job_id=job_id, error_type=type(error).__name__)
 
     async def abandon(self, job_id: str) -> None:
         """Delete the job; a Valkey failure leaves it to expire."""

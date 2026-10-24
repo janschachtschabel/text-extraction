@@ -374,7 +374,10 @@ async def test_expired_secrets_fail_the_item_without_a_render() -> None:
     job_id = await harness.submit(BROWSER, secrets=SECRETS)
     await harness.store.drop_secrets(job_id)  # their TTL ran out while the item was queued
 
-    await harness.process_next()
+    with capture_logs() as logs:
+        await harness.process_next()
+
+    assert [log["job_id"] for log in logs if log["event"] == "job_secrets_expired"] == [job_id]
 
     assert harness.renderer.calls == []
     assert harness.fetcher.calls == []

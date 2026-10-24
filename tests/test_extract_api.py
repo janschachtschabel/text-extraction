@@ -1207,6 +1207,63 @@ def test_wait_seconds_zero_for_a_browser_request_answers_202() -> None:
         assert final["data"]["items"][0]["result"]["status"] == "success"
 
 
+def test_valkey_error_after_the_202_never_deletes_the_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The poll in flight when wait_seconds runs out fails: the job was handed to the caller
+    # (202), so the flow must leave it to the worker instead of deleting it.
+    case = BrowserCase()
+    store: JobStore = case.app.state.job_store
+    real_get = store.get
+    calls = 0
+
+    async def get_failing_once(job_id: str) -> JobRecord | None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the dispatcher's second poll, still running at the 202
+            await asyncio.sleep(0.6)
+            raise RedisConnectionError("valkey blinked")
+        return await real_get(job_id)
+
+    monkeypatch.setattr(store, "get", get_failing_once)
+    with TestClient(case.app) as client, case.worker() as worker:
+        worker.hold.clear()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.3}, headers=AUTH
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+        case.wait_for_idle()  # the flow has seen the error and ended
+
+        assert case.record(job_id) is not None
+        worker.hold.set()
+        final = case.wait_for_job(client, job_id)
+        assert final["status"] == "success"
+        assert final["data"]["items"][0]["result"]["data"]["mode_used"] == "browser"
+
+
+def test_abandon_in_progress_answers_the_fallback_not_a_202(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The flow gave up and is deleting its job when wait_seconds runs out: no 202 with that job.
+    case = BrowserCase(browser_queue_wait_seconds=0.1)
+    store: JobStore = case.app.state.job_store
+    real_delete = store.delete
+
+    async def slow_delete(job_id: str) -> None:
+        await asyncio.sleep(0.6)
+        await real_delete(job_id)
+
+    monkeypatch.setattr(store, "delete", slow_delete)
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.4}, headers=AUTH
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert (body["status"], body["error"]["code"]) == ("failed", "timeout")
+        assert case.keys("job*") == []
+
+
 def test_handover_during_fast_phase_then_escalation_writes_into_p1_job() -> None:
     case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)})
     gated = GatedPipeline(case.real)
@@ -1315,6 +1372,7 @@ def test_secrets_never_in_job_view_or_logs() -> None:
         secrets = worker.seen[0].secrets
         assert secrets.headers == {"authorization": f"Bearer {HEADER_SECRET}"}
         assert secrets.cookies[0].value == COOKIE_SECRET
+        assert any(log["event"] == "browser_job_queued" for log in logs)  # logs were captured
         logged = json.dumps(logs, default=str)
         for text in (response.text, running, done, logged):
             for secret in (HEADER_SECRET, COOKIE_SECRET, ACTION_SECRET):

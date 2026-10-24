@@ -18,7 +18,8 @@ order:
 ``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the Helm chart's
 ``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it. While
 ``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
-(``graceful_shutdown_seconds``, B13): 50 s by default, 80 s with unblock mode.
+(``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode, so the Helm
+grace period must then be raised to cover the drain plus that.
 """
 
 import asyncio
@@ -89,14 +90,20 @@ def extraction_graceful_seconds(settings: Settings) -> int:
 def graceful_shutdown_seconds(settings: Settings) -> int:
     """How long requests in flight to the API may finish after SIGTERM: an extraction that has
     just started can still end within its own deadline. While ``BROWSER_ENABLED``, a sync request
-    may also wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render
-    (B13)."""
+    may also wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render, after
+    the fast phase of an escalating ``auto`` request (bounded by ``EXTRACT_TIMEOUT_SECONDS``;
+    B13)."""
     seconds = extraction_graceful_seconds(settings)
     if settings.browser_enabled:
         render = settings.browser_timeout_seconds
         if settings.browser_unblock_enabled:
             render = max(render, settings.browser_unblock_timeout_seconds)
-        browser = settings.browser_queue_wait_seconds + render + _BROWSER_MARGIN_SECONDS
+        browser = (
+            settings.extract_timeout_seconds
+            + settings.browser_queue_wait_seconds
+            + render
+            + _BROWSER_MARGIN_SECONDS
+        )
         seconds = max(seconds, math.ceil(browser))
     return seconds
 

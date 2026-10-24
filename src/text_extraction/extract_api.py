@@ -247,12 +247,12 @@ async def _detach(
     finally:
         settled.cancel()
     job_id = handover.browser_job
-    if task.done() or job_id is None:
+    # A flow that released its job (it gave up and deletes it) answers on its own.
+    if task.done() or job_id is None or not handover.detach():
         try:
             return _answered(await task)
         finally:
             background.discard(task)
-    handover.detach()
     task.add_done_callback(partial(_forget, background))
     metrics: JobMetrics = state.job_metrics
     metrics.created.labels(kind=kind).inc()
@@ -345,17 +345,19 @@ async def _in_browser(
     try:
         result = await dispatcher.wait(job_id, unblock=unblock, detached=lambda: handover.detached)
     except asyncio.CancelledError:
-        if not handover.detached:
+        if handover.release():
             await asyncio.shield(dispatcher.abandon(job_id))
         raise
     except (RedisError, OSError) as error:
         _dispatch_failed(error)
+        if not handover.release():
+            return None  # the route answered 202 with the job: the worker writes its result
         await dispatcher.abandon(job_id)
         if draft is None:
             raise _backend_unavailable() from None
         return _unavailable(body, compliance, draft, started)
     if result is None:
-        if handover.detached:
+        if not handover.release():
             return None  # the route answered 202 with the job: the worker writes its result
         await dispatcher.abandon(job_id)
         return _unavailable(body, compliance, draft, started)
