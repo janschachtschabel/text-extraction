@@ -21,11 +21,15 @@ Checks, all from the outside, on what the outbound gate guarantees (docs/configu
 - per host, at most ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` (2) requests in flight at once, over
   every request the host saw (pages and compliance files alike);
 - per host, page requests start at least ``OUTBOUND_MIN_DELAY_MS`` (200 ms) minus 10 % apart:
-  every page waits out the spacing since the host's latest real start, a cold turn's page also
-  after its own files. The farm's clock reads a request when it arrives, a little after the
+  each page is a turn's last request, so it keeps the spacing to every other turn's latest
+  request, pages included. The farm's clock reads a request when it arrives, a little after the
   service sent it: hence the slack;
-- per host, the compliance files (robots.txt, ``tdmrep.json``, ai.txt) never overlap each other,
-  and the page of their turn starts after the last of them ended;
+- per host, each compliance file (robots.txt, ``tdmrep.json``, ai.txt) is loaded at most once
+  per worker (2 in all), and two loads of the same file never overlap. Each worker shares one
+  load among its turns; the workers do not share theirs, so two loads of a file are accepted.
+  A turn's own requests go back to back, so the farm cannot tell which turn a request belongs
+  to: the order inside a turn (files one after another, then the page) is checked by the
+  pipeline tests (``tests/test_pipeline.py``), not here;
 - each worker counted items in its ``text_extraction_job_items_total``;
 - B's job finished before A's.
 
@@ -141,24 +145,28 @@ def is_page(request: Request) -> bool:
     return request.path.startswith("/p/")
 
 
-def turn_violations(requests: Iterable[Request]) -> list[str]:
-    """How a host's compliance files broke "one after another, before the page of their turn":
-    files that overlap, or a page that started before the last file ended. The page of their
-    turn is the first page that started after the last file did; a page of an earlier turn may
-    still be in flight while the files load."""
-    ordered = sorted(requests, key=lambda request: request.start)
-    files = [request for request in ordered if not is_page(request)]
-    problems = [
-        f"{first.path} and {second.path} overlap"
-        for first, second in pairwise(files)
-        if second.start < first.end
-    ]
-    if files:
-        last = files[-1]
-        page = next((r for r in ordered if is_page(r) and r.start >= last.start), None)
-        if page is not None and page.start < last.end:
-            problems.append(f"{page.path} started before {last.path} ended")
+def file_load_violations(requests: Iterable[Request], *, max_loads: int) -> list[str]:
+    """How a host's compliance files broke "each file loaded at most once per worker, and never
+    twice at once": a file loaded more than ``max_loads`` times (one load per worker), or two
+    loads of the same file that overlap. Different files may overlap: they can belong to the
+    turns of different workers."""
+    by_path: dict[str, list[Request]] = {}
+    for request in sorted(requests, key=lambda request: request.start):
+        if not is_page(request):
+            by_path.setdefault(request.path, []).append(request)
+    problems: list[str] = []
+    for path, loads in by_path.items():
+        if len(loads) > max_loads:
+            problems.append(f"{path} loaded {len(loads)} times")
+        if any(second.start < first.end for first, second in pairwise(loads)):
+            problems.append(f"two loads of {path} overlap")
     return problems
+
+
+def file_loads(requests: Iterable[Request]) -> int:
+    """The most loads of any one compliance file at this host."""
+    counts = Counter(request.path for request in requests if not is_page(request))
+    return max(counts.values(), default=0)
 
 
 def read_record(path: Path) -> dict[str, list[Request]]:
@@ -405,8 +413,8 @@ def _ms(seconds: float | None) -> str:
 def host_rows(record: dict[str, list[Request]]) -> list[str]:
     rows = [
         "| Host | Pages | Compliance files | Max in flight (all) | Min page start gap ms | "
-        f"Page gaps < {MIN_START_GAP * 1000:.0f} ms | Files serial before their page |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        f"Page gaps < {MIN_START_GAP * 1000:.0f} ms | Most loads of one file | File loads ok |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for host, requests in record.items():
         pages = [request for request in requests if is_page(request)]
@@ -414,7 +422,8 @@ def host_rows(record: dict[str, list[Request]]) -> list[str]:
             f"| {host} | {len(pages)} | {len(requests) - len(pages)} | {max_overlap(requests)} | "
             f"{_ms(min_start_gap(pages))} | "
             f"{len(spacing_violations(pages, min_gap=MIN_START_GAP))} | "
-            f"{'yes' if not turn_violations(requests) else 'NO'} |"
+            f"{file_loads(requests)} | "
+            f"{'yes' if not file_load_violations(requests, max_loads=WORKERS) else 'NO'} |"
         )
     return rows
 
@@ -454,7 +463,7 @@ def evaluate(
     ]
     checks.append(
         Check(
-            f"per host page request starts >= {MIN_START_GAP * 1000:.0f} ms apart (turn starts)",
+            f"per host page request starts >= {MIN_START_GAP * 1000:.0f} ms apart",
             not any(close.values()),
             "; ".join(
                 f"{host}: {len(pairs)} gaps, e.g. "
@@ -468,14 +477,18 @@ def evaluate(
             or f"min {_ms(min(gaps, default=None))} ms",
         )
     )
-    turns = {host: turn_violations(requests) for host, requests in record.items()}
+    loads = {
+        host: file_load_violations(requests, max_loads=WORKERS) for host, requests in record.items()
+    }
     files = sum(1 for requests in record.values() for r in requests if not is_page(r))
+    most = max((file_loads(requests) for requests in record.values()), default=0)
     checks.append(
         Check(
-            "per host compliance files fetched one by one, before the page of their turn",
-            not any(turns.values()),
-            "; ".join(f"{host}: {', '.join(found)}" for host, found in turns.items() if found)
-            or f"{files} files, none overlapping",
+            f"per host each compliance file loaded at most once per worker (<= {WORKERS}), "
+            "never twice at once",
+            not any(loads.values()),
+            "; ".join(f"{host}: {', '.join(found)}" for host, found in loads.items() if found)
+            or f"{files} file loads, at most {most} of one file at one host",
         )
     )
     for name, counts in items.items():
@@ -523,6 +536,13 @@ def summary(
     lines += [
         f"| {check.name} | {'pass' if check.passed else 'FAIL'} | {check.detail} |"
         for check in checks
+    ]
+    lines += [
+        "",
+        "A turn's own requests go back to back, so the farm cannot tell turns apart: the order "
+        "inside a turn (the compliance files one after another, then the page) is checked by the "
+        "pipeline tests, not here. Each worker loads a file at most once; loads of the two "
+        "workers are accepted.",
     ]
     lines += ["", "| Job | URLs | State | Created | Finished |", "| --- | ---: | --- | --- | --- |"]
     lines += [

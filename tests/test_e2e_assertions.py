@@ -1,6 +1,6 @@
 """The per-host checks of the end-to-end batch run, on synthetic farm records."""
 
-from tests.e2e.run_batch import Request, max_overlap, spacing_violations, turn_violations
+from tests.e2e.run_batch import Request, file_load_violations, max_overlap, spacing_violations
 
 
 def _requests(*spans: tuple[float, float]) -> list[Request]:
@@ -46,48 +46,33 @@ TDMREP = "/.well-known/tdmrep.json"
 AI_TXT = "/ai.txt"
 
 
-def test_files_fetched_one_by_one_before_their_page_pass() -> None:
+def test_each_file_loaded_once_per_worker_without_overlap_passes() -> None:
     requests = [
-        Request(ROBOTS, 0.000, 0.001, 404),
-        Request(TDMREP, 0.001, 0.002, 404),
-        Request(AI_TXT, 0.002, 0.003, 404),
-        Request("/p/1.html", 0.004, 0.150),
-        Request("/p/2.html", 0.204, 0.300),  # the next turn
+        Request(ROBOTS, 0.000, 0.300, 404),
+        Request(TDMREP, 0.300, 0.600, 404),
+        Request(TDMREP, 0.650, 0.950, 404),  # the other worker's load, after the first ended
+        Request(AI_TXT, 0.600, 0.900, 404),
+        Request("/p/1.html", 0.700, 0.900),  # pages are not checked here
     ]
 
-    assert turn_violations(requests) == []
+    assert file_load_violations(requests, max_loads=2) == []
 
 
-def test_files_fetched_at_once_are_reported() -> None:
+def test_a_file_loaded_more_often_than_there_are_workers_is_reported() -> None:
     requests = [
-        Request(ROBOTS, 0.000, 0.002, 404),
-        Request(TDMREP, 0.001, 0.003, 404),
-        Request(AI_TXT, 0.003, 0.004, 404),
-        Request("/p/1.html", 0.005, 0.150),
+        Request(ROBOTS, 0.0, 0.1, 404),
+        Request(ROBOTS, 0.2, 0.3, 404),
+        Request(ROBOTS, 0.4, 0.5, 404),
     ]
 
-    assert turn_violations(requests) == [f"{ROBOTS} and {TDMREP} overlap"]
+    assert file_load_violations(requests, max_loads=2) == [f"{ROBOTS} loaded 3 times"]
 
 
-def test_a_page_sent_before_its_last_file_ended_is_reported() -> None:
+def test_two_loads_of_one_file_at_once_are_reported() -> None:
     requests = [
-        Request(ROBOTS, 0.000, 0.001, 404),
-        Request(TDMREP, 0.001, 0.002, 404),
-        Request(AI_TXT, 0.002, 0.010, 404),
-        Request("/p/1.html", 0.005, 0.150),
+        Request(TDMREP, 0.300, 0.600, 404),
+        Request(TDMREP, 0.500, 0.800, 404),
+        Request(AI_TXT, 0.600, 0.900, 404),  # another file may overlap: another turn's
     ]
 
-    assert turn_violations(requests) == [f"/p/1.html started before {AI_TXT} ended"]
-
-
-def test_a_page_of_another_turn_may_overlap_the_files() -> None:
-    # /p/0.html started in an earlier turn, before the files: the limit of 2 allows that.
-    requests = [
-        Request("/p/0.html", 0.000, 0.150),
-        Request(ROBOTS, 0.010, 0.011, 404),
-        Request(TDMREP, 0.011, 0.012, 404),
-        Request(AI_TXT, 0.012, 0.013, 404),
-        Request("/p/1.html", 0.014, 0.150),
-    ]
-
-    assert turn_violations(requests) == []
+    assert file_load_violations(requests, max_loads=2) == [f"two loads of {TDMREP} overlap"]
