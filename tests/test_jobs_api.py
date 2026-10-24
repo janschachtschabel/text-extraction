@@ -4,19 +4,27 @@ fakeredis, API keys for two users and an admin, and, where a job has to finish, 
 
 import asyncio
 import hashlib
+import json
 import time
 from collections.abc import Callable, Coroutine, Iterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
+from fastapi import Request
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
 from tests.fakes import ARTICLE, ORIGIN, PAGE, Answer, FakeFetcher, fetched
 from text_extraction.app import create_public_app
-from text_extraction.fetch import Fetcher
+from text_extraction.auth import Principal
+from text_extraction.envelope import ErrorCode
+from text_extraction.fetch import Fetcher, FetchError
+from text_extraction.job_models import MAX_BATCH_URLS, BatchRequest
 from text_extraction.jobs import JobStore
+from text_extraction.jobs_api import create_batch
+from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pipeline import create_pipeline
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
@@ -214,8 +222,50 @@ def test_every_item_failed_makes_the_job_failed(api: Api) -> None:
 
     view = api.job(job_id).json()
     assert view["status"] == "failed"
-    assert view["error"] is None
     assert view["data"]["state"] == "completed"
+    assert view["error"] == {
+        "code": "invalid_url",
+        "message": "All 2 items failed.",
+        "retryable": False,
+        "details": None,
+    }
+
+
+def test_failed_job_error_is_the_most_frequent_code_and_any_retryable(api: Api) -> None:
+    slow = f"{ORIGIN}/slow"
+    answers: dict[str, Answer] = {slow: FetchError(ErrorCode.TIMEOUT, "Timed out.", retryable=True)}
+    job_id = api.batch([slow, "not a url", "also not a url"]).json()["data"]["id"]
+    api.work(answers)
+
+    view = api.job(job_id).json()
+    assert view["status"] == "failed"
+    assert view["error"]["code"] == "invalid_url"  # two against one
+    assert view["error"]["message"] == "All 3 items failed."
+    assert view["error"]["retryable"] is True  # the timeout is retryable
+    # The same error whichever page is read.
+    assert api.job(job_id, offset=2, limit=1).json()["error"] == view["error"]
+
+
+def test_failed_job_error_breaks_a_tie_by_the_first_item(api: Api) -> None:
+    slow = f"{ORIGIN}/slow"
+    answers: dict[str, Answer] = {slow: FetchError(ErrorCode.TIMEOUT, "Timed out.", retryable=True)}
+    job_id = api.batch(["not a url", slow]).json()["data"]["id"]
+    api.work(answers)
+
+    error = api.job(job_id).json()["error"]
+    assert error["code"] == "invalid_url"
+    assert error["retryable"] is True
+
+
+def test_failed_job_has_no_error_while_running_or_partial(api: Api) -> None:
+    job_id = api.batch(["not a url", PAGE]).json()["data"]["id"]
+    api.work(items=1)
+    assert api.job(job_id).json()["error"] is None  # still running
+
+    api.work()
+    view = api.job(job_id).json()
+    assert view["status"] == "partial"
+    assert view["error"] is None
 
 
 def test_batch_size_limit_is_422(make_api: Callable[..., Api]) -> None:
@@ -519,3 +569,92 @@ def test_job_routes_in_openapi_internal_routes_not(api: Api) -> None:
     assert "post" in paths["/v1/batch"]
     assert "get" in paths["/v1/jobs/{job_id}"]
     assert not {"/health", "/ready", "/metrics"} & set(paths)
+
+
+def test_discard_survives_a_second_cancellation(api: Api) -> None:
+    """A request cancelled while it enqueues, and cancelled again while its job is discarded,
+    still gives the job back."""
+    started = asyncio.Event()
+    deleted = asyncio.Event()
+
+    class HangingQueue:
+        async def enqueue(self, job_id: str, client: str, urls: list[str]) -> None:
+            started.set()
+            await asyncio.sleep(60)
+
+    async def scenario(valkey: FakeAsyncRedis) -> list[str]:
+        store = JobStore(valkey, api.settings)
+        real_delete = store.delete
+
+        async def slow_delete(job_id: str) -> None:
+            await asyncio.sleep(0.05)
+            await real_delete(job_id)
+            deleted.set()
+
+        store.delete = slow_delete  # type: ignore[method-assign]
+        state = SimpleNamespace(
+            settings=api.settings, valkey=valkey, job_store=store, job_queue=HangingQueue()
+        )
+        request = cast(Request, SimpleNamespace(app=SimpleNamespace(state=state)))
+        principal = Principal(name="alice", role="user", rate_limit_per_minute=None)
+        task = asyncio.create_task(create_batch(BatchRequest(urls=[PAGE]), request, principal))
+        await started.wait()
+        task.cancel()
+        await asyncio.sleep(0.01)  # the discard is under way
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(deleted.wait(), 2)
+        await asyncio.sleep(0.05)  # the discard goes on to leave the open set
+        return sorted(str(key) for key in await valkey.keys("job:*"))
+
+    assert api.run(scenario) == []
+    assert api.keys("jobs:*") == []  # the id left the open set, which emptied
+
+
+def test_oversized_body_is_refused_before_it_is_validated(make_api: Callable[..., Api]) -> None:
+    api = make_api(batch_max_urls=3)
+    bound = 3 * (MAX_URL_LENGTH + 8)
+    # Besides its size the body has an unknown field and an empty URL: had the model seen it,
+    # the answer would list those, not only the size.
+    body = json.dumps({"urls": ["", "x" * 20], "pad": "x" * (bound + 10_000)})
+    assert len(body) > bound + 4096
+
+    response = api.client.post(
+        "/v1/batch", content=body, headers={**ALICE, "content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert [detail["msg"] for detail in error["details"]] == ["The request body is too large."]
+    assert api.keys("job:*") == []
+
+
+def test_body_at_the_bound_is_not_refused_for_its_size(make_api: Callable[..., Api]) -> None:
+    api = make_api(batch_max_urls=3)
+    url = "https://example.org/" + "a" * (MAX_URL_LENGTH - len("https://example.org/"))
+    assert len(url) == MAX_URL_LENGTH
+
+    assert api.batch([url] * 3).status_code == 202
+
+
+def test_missing_content_length_is_bounded_by_the_model(api: Api) -> None:
+    def chunks() -> Iterator[bytes]:
+        yield b'{"urls": ['
+        yield b",".join([b'"a"'] * (MAX_BATCH_URLS + 1))
+        yield b"]}"
+
+    response = api.client.post(
+        "/v1/batch", content=chunks(), headers={**ALICE, "content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    assert "content-length" not in response.request.headers
+    message = response.json()["error"]["details"][0]["msg"]
+    assert str(MAX_BATCH_URLS) in message  # the model's limit, not BATCH_MAX_URLS (1000)
+    assert api.keys("job:*") == []
+
+
+def test_model_limit_matches_the_setting_maximum() -> None:
+    assert Settings.model_fields["batch_max_urls"].metadata[-1].le == MAX_BATCH_URLS

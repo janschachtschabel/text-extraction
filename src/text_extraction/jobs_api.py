@@ -11,6 +11,7 @@ touches this key, so it shares no slot with a job or a queue.
 
 import asyncio
 import re
+from collections import Counter
 from typing import Annotated, Literal
 
 import structlog
@@ -21,7 +22,7 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
-from text_extraction.envelope import Envelope, ErrorCode
+from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import (
     BatchRequest,
@@ -31,6 +32,7 @@ from text_extraction.job_models import (
     JobView,
 )
 from text_extraction.jobs import JobRecord, JobStore
+from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.ratelimit import rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
@@ -43,6 +45,11 @@ router = APIRouter()
 # The most items one page of a job may have: the most ``JobStore.items`` is asked for.
 MAX_PAGE_SIZE = 500
 DEFAULT_PAGE_SIZE = 100
+
+# What a batch body may take besides its URLs (the options, JSON syntax), in bytes.
+_BODY_ALLOWANCE = 4096
+# JSON quotes and a comma around each URL.
+_BYTES_AROUND_URL = 8
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
@@ -90,17 +97,24 @@ def _too_many_open(limit: int) -> ServiceError:
     )
 
 
+def _too_long(loc: tuple[str, ...], message: str) -> RequestValidationError:
+    return RequestValidationError([{"type": "too_long", "loc": loc, "msg": message}])
+
+
 def _check_size(body: BatchRequest, max_urls: int) -> None:
     if len(body.urls) > max_urls:
-        raise RequestValidationError(
-            [
-                {
-                    "type": "too_long",
-                    "loc": ("body", "urls"),
-                    "msg": f"A batch may have at most {max_urls} URLs.",
-                }
-            ]
-        )
+        raise _too_long(("body", "urls"), f"A batch may have at most {max_urls} URLs.")
+
+
+async def _limit_body_size(request: Request) -> None:
+    """Dependency: refuse a body whose Content-Length is more than ``BATCH_MAX_URLS`` URLs of
+    the longest allowed length can take, before the model validates the list. A body without
+    a Content-Length is bounded by the model (``MAX_BATCH_URLS`` items)."""
+    settings: Settings = request.app.state.settings
+    bound = settings.batch_max_urls * (MAX_URL_LENGTH + _BYTES_AROUND_URL) + _BODY_ALLOWANCE
+    declared = request.headers.get("content-length", "")
+    if declared.isascii() and declared.isdigit() and int(declared) > bound:
+        raise _too_long(("body",), "The request body is too large.")
 
 
 async def _open_count(valkey: Redis, store: JobStore, owner: str) -> int:
@@ -142,7 +156,11 @@ async def _discard(valkey: Redis, store: JobStore, owner: str, job_id: str) -> N
 @router.post(
     "/v1/batch",
     status_code=202,
-    dependencies=[Depends(_require_jobs_enabled), Depends(rate_limited)],
+    dependencies=[
+        Depends(_require_jobs_enabled),
+        Depends(rate_limited),
+        Depends(_limit_body_size),
+    ],
 )
 async def create_batch(
     body: BatchRequest,
@@ -185,7 +203,9 @@ async def create_batch(
             # Enqueued exactly once and never retried: a retry could queue some items twice.
             await queue.enqueue(job_id, principal.name, body.urls)
         except BaseException:
-            await _discard(valkey, store, principal.name, job_id)
+            # Also on cancellation, and shielded from a second one: the job must not be left
+            # queued (it would hold a slot of the client's quota until it expires).
+            await asyncio.shield(_discard(valkey, store, principal.name, job_id))
             raise
     except (RedisError, OSError) as error:
         _log_unavailable(error)
@@ -218,6 +238,25 @@ def _envelope_status(record: JobRecord) -> Literal["success", "partial", "failed
     return "success"
 
 
+async def _all_failed_error(store: JobStore, record: JobRecord) -> ErrorInfo:
+    """The error of a job whose items all failed: the most frequent error code among its first
+    ``MAX_PAGE_SIZE`` items (a tie goes to the code seen first), retryable when any of those
+    items is. The per-item codes are not counted in the job record, and reading every item of a
+    large batch would load all its results; so a larger job is judged by its first items, the
+    same whichever page the caller reads."""
+    codes: Counter[ErrorCode] = Counter()
+    retryable = False
+    for item in await store.items(record.id, 0, MAX_PAGE_SIZE):
+        error = item.result.error if item.result is not None else None
+        if error is not None:
+            codes[error.code] += 1
+            retryable = retryable or error.retryable
+    code = codes.most_common(1)[0][0] if codes else ErrorCode.INTERNAL_ERROR
+    return ErrorInfo(
+        code=code, message=f"All {record.progress.total} items failed.", retryable=retryable
+    )
+
+
 @router.get(
     "/v1/jobs/{job_id}", dependencies=[Depends(_require_jobs_enabled), Depends(rate_limited)]
 )
@@ -234,8 +273,9 @@ async def get_job(
 
     The envelope `status` is `success` while the job is queued or running and when all items
     succeeded, `partial` when the finished job has failed or partial items, and `failed` when
-    every item failed. `next_offset` is set while more items follow. A job that does not exist,
-    has expired or belongs to another caller (admins see all) answers 404.
+    every item failed; `error` then has the most frequent error code among the first items and
+    the message "All N items failed.". `next_offset` is set while more items follow. A job that
+    does not exist, has expired or belongs to another caller (admins see all) answers 404.
     """
     store: JobStore = request.app.state.job_store
     if not _JOB_ID.fullmatch(job_id):
@@ -246,6 +286,8 @@ async def get_job(
             raise _not_found()
         total = record.progress.total
         items = await store.items(job_id, offset, limit) if offset < total else []
+        status = _envelope_status(record)
+        failure = await _all_failed_error(store, record) if status == "failed" else None
     except (RedisError, OSError) as error:
         _log_unavailable(error)
         raise _unavailable() from None
@@ -260,7 +302,8 @@ async def get_job(
         next_offset=offset + limit if offset + limit < total else None,
     )
     return Envelope(
-        status=_envelope_status(record),
+        status=status,
         data=view,
+        error=failure,
         trace_id=current_trace_id(),
     )

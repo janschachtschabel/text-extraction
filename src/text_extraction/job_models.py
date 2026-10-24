@@ -15,6 +15,10 @@ JobKind = Literal["extract", "batch"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
 
+# The most URLs a batch may ever have: the maximum of ``BATCH_MAX_URLS``. It also bounds the
+# model, so a body without a Content-Length is bounded too.
+MAX_BATCH_URLS = 100_000
+
 
 class BatchRequest(BaseModel, extra="forbid"):
     """Body of ``POST /v1/batch``: the URLs and the options of ``ExtractRequest`` (same defaults).
@@ -24,6 +28,7 @@ class BatchRequest(BaseModel, extra="forbid"):
 
     urls: list[Annotated[str, Field(min_length=1, max_length=MAX_URL_LENGTH)]] = Field(
         min_length=1,
+        max_length=MAX_BATCH_URLS,
         description="The http(s) URLs to extract, at most `BATCH_MAX_URLS`. A URL twice gets two "
         "items; an invalid URL gets an item that failed with `invalid_url`.",
     )
