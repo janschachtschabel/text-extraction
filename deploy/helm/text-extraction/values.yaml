@@ -13,10 +13,12 @@ imagePullSecrets: []
 
 replicaCount: 2
 
-# Seconds Kubernetes waits after SIGTERM before it kills a pod. The server lets requests in
-# flight finish for max(30, EXTRACT_TIMEOUT_SECONDS + 5) seconds (30 by default) and then closes
-# its connections, so keep this above that: raise it when you raise EXTRACT_TIMEOUT_SECONDS.
-terminationGracePeriodSeconds: 40
+# Seconds Kubernetes waits after SIGTERM before it kills a pod. On SIGTERM the server first
+# reports not ready and keeps serving for SHUTDOWN_DRAIN_SECONDS (5), then lets requests in
+# flight finish for max(30, EXTRACT_TIMEOUT_SECONDS + 5) seconds (30), then stops the internal
+# port: 5 + 30 = 35 s at most, plus a 10 s margin = 45. Keep this above drain + graceful time:
+# raise it when you raise SHUTDOWN_DRAIN_SECONDS or EXTRACT_TIMEOUT_SECONDS.
+terminationGracePeriodSeconds: 45
 
 # Non-secret settings. Each key becomes an environment variable of the same name
 # (rendered into a ConfigMap and passed with envFrom). Values are quoted strings.
@@ -29,6 +31,8 @@ config:
   RATE_LIMIT_PER_MINUTE: "60"
   # Conversions at once per pod; the memory limit below is sized for it.
   CONVERT_CONCURRENCY: "2"
+  # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
+  SHUTDOWN_DRAIN_SECONDS: "5"
 
 # Secrets. API_KEYS is a JSON list of {"name", "role", "sha256", "rate_limit_per_minute"} objects.
 # Set `apiKeys` for a chart-managed Secret, or point `existingSecret` at your own Secret.

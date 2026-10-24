@@ -512,3 +512,15 @@ def test_conversion_budget_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONVERT_CONCURRENCY", "0")
     with pytest.raises(ConfigError, match="convert_concurrency"):
         load_settings()
+
+
+def test_shutdown_drain_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().shutdown_drain_seconds == 5
+
+    monkeypatch.setenv("SHUTDOWN_DRAIN_SECONDS", "0")
+    assert load_settings().shutdown_drain_seconds == 0
+
+    monkeypatch.setenv("SHUTDOWN_DRAIN_SECONDS", "-1")
+    with pytest.raises(ConfigError, match="shutdown_drain_seconds"):
+        load_settings()

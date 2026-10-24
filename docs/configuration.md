@@ -45,7 +45,8 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
 | `CONVERT_MAX_BYTES` | `5242880` | Largest HTML or text body that is converted, in bytes (5 MiB; minimum 1024). A larger page fails with `too_large` (not retryable) before it is decoded. `FETCH_MAX_BYTES` stays the download limit. |
 | `CONVERT_CONCURRENCY` | `2` | Conversions (decoding, HTML conversion, metadata and licences, fingerprint) running at once in one pod, on a thread pool of their own; DNS lookups keep the default pool. A request waits for a free slot within its `EXTRACT_TIMEOUT_SECONDS`, else it fails with `timeout`. Python cannot stop a running thread: a conversion that outlives its request finishes in the background and holds its slot until then, so this bound is what limits CPU and memory. Peak memory is roughly `CONVERT_CONCURRENCY` times the peak of one page (about 450 MB for a 5 MB page), see the Helm memory limit. Minimum 1. |
-| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Must be greater than 0. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS`. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (40) with it. |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Must be greater than 0. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS`. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. |
+| `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
 taken over the normalised URL: lower-case scheme and host, no fragment, no default port (80 for
@@ -91,7 +92,9 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
 | `9090` | `/health`, `/ready`, `/metrics`. Never part of the OpenAPI spec. | Cluster-internal only. |
 
 - `/health` is the liveness probe. It never touches Valkey, so a Valkey outage does not restart pods.
-- `/ready` is the readiness probe. It checks Valkey, so pods without Valkey leave the load balancer.
+- `/ready` is the readiness probe. It answers 200 only when the public port listens (after the
+  start-up, which loads the language model), no shutdown has begun and Valkey answers. Pods
+  without Valkey leave the load balancer, and so does a pod as soon as it gets SIGTERM.
 - `/metrics` is Prometheus text and is not reachable on 8080.
 
 docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
@@ -103,9 +106,11 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
 `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
 few milliseconds. Work that takes longer than about 30 s will run as a job in a later package. On
-SIGTERM the server stops accepting connections and gives requests in flight
-`max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the Helm chart's
-`terminationGracePeriodSeconds` (40) must stay above that.
+SIGTERM `/ready` turns 503 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5);
+then the public port stops accepting connections and gives requests in flight
+`max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the internal port
+(`/health`, `/metrics`) stops last. The Helm chart's `terminationGracePeriodSeconds` (45) must
+stay above drain plus graceful time (35 s by default).
 
 ## Headers
 

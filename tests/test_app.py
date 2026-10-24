@@ -10,7 +10,7 @@ from redis.asyncio import Redis
 
 from text_extraction import __version__
 from text_extraction.app import create_public_app
-from text_extraction.internal import create_internal_app
+from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.server import main
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
@@ -46,13 +46,19 @@ def public(registry: CollectorRegistry) -> Iterator[TestClient]:
 
 @pytest.fixture
 def internal(registry: CollectorRegistry) -> Iterator[TestClient]:
-    app = create_internal_app(make_settings(), FakeAsyncRedis(), registry)
+    app = create_internal_app(make_settings(), FakeAsyncRedis(), registry, readiness=listening())
     with TestClient(app) as client:
         yield client
 
 
+def listening() -> Readiness:
+    readiness = Readiness()
+    readiness.mark_listening()
+    return readiness
+
+
 def internal_client(valkey: Redis, registry: CollectorRegistry) -> TestClient:
-    return TestClient(create_internal_app(make_settings(), valkey, registry))
+    return TestClient(create_internal_app(make_settings(), valkey, registry, readiness=listening()))
 
 
 def test_info_requires_key(public: TestClient) -> None:
