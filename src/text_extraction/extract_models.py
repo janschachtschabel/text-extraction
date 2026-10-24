@@ -5,13 +5,15 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from text_extraction.browser_options import (
-    MAX_ACTIONS,
-    MAX_COOKIES,
-    Action,
+    ACTIONS_DESCRIPTION,
+    COOKIES_DESCRIPTION,
+    HEADERS_DESCRIPTION,
+    ActionList,
     ArtifactRef,
-    BrowserCookie,
     BrowserSecrets,
+    CookieList,
     Headers,
+    WaitSeconds,
     check_cookie_domains,
 )
 from text_extraction.compliance import ComplianceMode, ComplianceReport
@@ -32,8 +34,15 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to extract.")
     mode: Literal["fast", "auto", "browser"] = Field(
         default="auto",
-        description="`fast`: HTTP only. `auto`: uses a browser when the page needs one and "
-        "browser mode is enabled. `browser`: always renders the page in a browser.",
+        description="`fast`: HTTP only. `auto`: HTTP first, then a browser when the page needs "
+        "one (a JavaScript shell, a challenge, a soft 404) and browser mode is enabled; the "
+        "better of both results is kept. Without a browser worker in time `auto` keeps the HTTP "
+        "result, with the warning `browser_unavailable`; while browser mode is off it never "
+        "uses a browser. `auto` with `actions`, `cookies`, `headers` or `screenshot` always "
+        "renders. `browser`: always renders the page in a browser; without a browser worker in "
+        "time it fails with "
+        "`timeout` (retryable). While browser mode is off, `browser` and the browser options "
+        "answer 400.",
     )
     format: OutputFormat = Field(default="markdown", description="Format of `content`.")
     metadata: bool = Field(default=True, description="Include the page's DOM metadata.")
@@ -41,44 +50,35 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
     compliance: ComplianceMode | None = Field(
         default=None,
         description="`enforce`, `report` or `ignore` (admins only); default: the operator's. "
-        "`ignore` also allows unblock mode where the operator enabled it.",
+        "`ignore` also allows unblock mode where the operator enabled it: a browser that gets "
+        "past bot protection, for sites that allowed extraction by contract.",
     )
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
     )
-    wait_seconds: float | None = Field(
+    wait_seconds: WaitSeconds = Field(
         default=None,
-        ge=0,
-        le=60,
         description="Without it, the request answers when the extraction ends (the unchanged "
         "default). With it, an extraction that is still running after this many seconds becomes "
         "a job: the answer is then 202 with the job's id and `status_url`, and "
         "`GET /v1/jobs/{id}` has the result. 0 hands over at once. Ignored when jobs are "
-        "disabled (`JOBS_ENABLED=false`).",
+        "disabled (`JOBS_ENABLED=false`). A request that waits for the browser when the time "
+        "is up answers 202 with the browser's job.",
     )
-    actions: list[Action] = Field(
-        default=[],
-        max_length=MAX_ACTIONS,
-        repr=False,
-        description="Page actions to run in the browser before the text is read, at most 20, in "
-        "order. Not with `mode: fast`.",
+    actions: ActionList = Field(
+        default=[], repr=False, description=f"{ACTIONS_DESCRIPTION} Not with `mode: fast`."
     )
-    cookies: list[BrowserCookie] = Field(
-        default=[],
-        max_length=MAX_COOKIES,
-        repr=False,
-        description="Cookies to set before the page loads, at most 50. A `domain` must be the "
-        "URL's host or a parent domain of it. Not with `mode: fast`.",
+    cookies: CookieList = Field(
+        default=[], repr=False, description=f"{COOKIES_DESCRIPTION} Not with `mode: fast`."
     )
     headers: Headers = Field(
-        default={},
-        repr=False,
-        description="Extra request headers for the browser, at most 20. They are sent only to "
-        "the requested URL's host and port, never to other sites, also not across a redirect. "
-        "Not with `mode: fast`.",
+        default={}, repr=False, description=f"{HEADERS_DESCRIPTION} Not with `mode: fast`."
     )
     screenshot: bool = Field(
-        default=False, description="Also capture a screenshot. Not with `mode: fast`."
+        default=False,
+        description="Also capture a PNG screenshot (1920 px wide): `data.screenshot` then "
+        "references it for `GET /v1/jobs/{id}/artifacts/screenshot.png` (`ARTIFACT_TTL_SECONDS`). "
+        "Not with `mode: fast`.",
     )
     full_page: bool = Field(
         default=True,

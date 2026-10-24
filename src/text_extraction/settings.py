@@ -161,7 +161,8 @@ class Settings(BaseSettings):
     # Browser mode (Playwright). Off by default: the image of an API pod has no browser.
     browser_enabled: bool = False
     browser_timeout_seconds: float = Field(default=30, ge=5, le=120)  # one page, navigation to end
-    browser_queue_wait_seconds: float = Field(default=10, ge=0, le=60)  # wait for a free page slot
+    # How long a sync request waits for a browser worker to claim its page (B1).
+    browser_queue_wait_seconds: float = Field(default=10, ge=0, le=60)
     browser_concurrency: int = Field(default=4, ge=1)  # pages rendered at once per pod
     browser_idle_wait_seconds: float = Field(default=8, ge=0, le=30)  # longest wait for the network
     browser_recycle_after_pages: int = Field(default=200, ge=1)  # then the browser is restarted

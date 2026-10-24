@@ -190,8 +190,13 @@ def _key(job_id: str, kind: str) -> str:
     return f"job:{{{job_id}}}:{kind}"
 
 
+def valid_artifact_name(name: str) -> bool:
+    """Whether ``name`` can name a file of a job: ``[a-z0-9_.-]{1,64}``."""
+    return _ARTIFACT_NAME.fullmatch(name) is not None
+
+
 def _artifact_key(job_id: str, name: str) -> str:
-    if not _ARTIFACT_NAME.fullmatch(name):
+    if not valid_artifact_name(name):
         raise ValueError(f"Invalid artifact name: {name!r}")
     return _key(job_id, f"artifact:{name}")
 

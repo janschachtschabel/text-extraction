@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 from text_extraction import __version__
 from text_extraction.auth import Principal, Role, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
+from text_extraction.browser_dispatch import BrowserDispatcher
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
@@ -29,6 +30,7 @@ from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
+from text_extraction.screenshot_api import router as screenshot_router
 from text_extraction.settings import Settings
 from text_extraction.tracing import TraceMiddleware, current_trace_id
 
@@ -120,9 +122,12 @@ def create_public_app(
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
-    ``app.state.job_queue`` back the batch and job routes; ``app.state.job_metrics`` counts the
-    jobs and ``app.state.queue_gauges`` exports the queue's backlog; ``app.state.memory_guard``
-    tells whether Valkey is nearly full (the lifespan starts and stops the tasks of both);
+    ``app.state.job_queue`` back the batch and job routes; with ``BROWSER_ENABLED``,
+    ``app.state.browser_queue`` is the ``browser`` pool's queue and
+    ``app.state.browser_dispatcher`` sends sync requests there (both None otherwise);
+    ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
+    of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
+    starts and stops the tasks of both);
     ``app.state.background`` holds the tasks of extractions handed over to a job, which
     the shutdown waits for.
     """
@@ -149,11 +154,21 @@ def create_public_app(
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
+    queues = [app.state.job_queue]
+    app.state.browser_queue = None
+    app.state.browser_dispatcher = None
+    if settings.browser_enabled:
+        app.state.browser_queue = FairQueue(valkey, settings, "browser")
+        app.state.browser_dispatcher = BrowserDispatcher(
+            app.state.job_store, app.state.browser_queue, settings
+        )
+        queues.append(app.state.browser_queue)
     app.state.job_metrics = job_metrics_for(registry)
-    app.state.queue_gauges = QueueGauges(app.state.job_queue, registry)
+    app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()
     install_error_handlers(app)
     app.include_router(extract_router)
+    app.include_router(screenshot_router)
     app.include_router(jobs_router)
 
     @app.get("/v1/info", dependencies=[Depends(rate_limited)])

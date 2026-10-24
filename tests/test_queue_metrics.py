@@ -306,3 +306,39 @@ def test_gauges_are_described_when_the_collector_is_registered() -> None:
     QueueGauges(FlakyQueue(), registry)
     with pytest.raises(ValueError, match="Duplicated"):
         QueueGauges(FlakyQueue(), registry)
+
+
+@scenario
+async def test_gauges_cover_each_pool() -> None:
+    settings = Settings(auth_mode="none")
+    valkey = FakeAsyncRedis()
+    extract, browser = FairQueue(valkey, settings), FairQueue(valkey, settings, "browser")
+    registry = CollectorRegistry()
+    gauges = QueueGauges([extract, browser], registry)
+
+    await browser.enqueue(JOB_A, "alice#live", ["https://a.example/1"])
+    await gauges.refresh()
+
+    assert snapshot(registry) == (0, 0, 0)
+    pending = registry.get_sample_value("text_extraction_queue_pending_items", {"pool": "browser"})
+    assert pending == 1
+    assert registry.get_sample_value(
+        "text_extraction_queue_metrics_last_success_timestamp_seconds", {"pool": "browser"}
+    )
+
+
+def test_public_app_exports_the_browser_pool_when_enabled() -> None:
+    for enabled in (False, True):
+        registry = CollectorRegistry()
+        settings = make_settings(browser_enabled=enabled)
+        app = create_public_app(settings, FakeAsyncRedis(), registry)
+        with TestClient(app):
+            deadline = time.monotonic() + 10
+            while gauge(registry, "pending_items") is None and time.monotonic() < deadline:
+                time.sleep(0.01)  # the lifespan's first read of the queues
+            assert gauge(registry, "pending_items") == 0
+            browser = registry.get_sample_value(
+                "text_extraction_queue_pending_items", {"pool": "browser"}
+            )
+            assert (browser is not None) is enabled
+            assert (app.state.browser_dispatcher is not None) is enabled

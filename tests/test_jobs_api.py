@@ -27,7 +27,7 @@ from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import create_batch
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pipeline import create_pipeline
-from text_extraction.scheduler import FairQueue
+from text_extraction.scheduler import FairQueue, QueueCounts
 from text_extraction.settings import Settings
 from text_extraction.worker import ExtractRunner, Worker
 
@@ -797,3 +797,66 @@ def test_batch_stores_the_trace_id_of_its_request(api: Api) -> None:
 
     assert record is not None
     assert record.trace_id == "trace-b"
+
+
+def test_job_whose_lease_was_cleared_is_never_lost(api: Api) -> None:
+    # An extract job whose item moved to the browser pool (Task 8): its P1 lease is cleared.
+    job_id = start_extract_job(api, lease_seconds=35, age_seconds=100)
+    api.run(lambda valkey: JobStore(valkey, api.settings).clear_lease(job_id))
+
+    view = api.job(job_id).json()["data"]
+
+    assert view["state"] == "running"
+    assert view["items"][0]["state"] == "pending"
+
+
+def queue_counts(api: Api, pool: str) -> QueueCounts:
+    return api.run(lambda valkey: FairQueue(valkey, api.settings, pool).counts())
+
+
+def test_batch_browser_mode_goes_to_browser_pool(make_api: Callable[..., Api]) -> None:
+    api = make_api(browser_enabled=True)
+
+    response = api.batch([PAGE, OTHER_PAGE], mode="browser")
+
+    assert response.status_code == 202
+    assert queue_counts(api, "browser").pending == 2
+    assert queue_counts(api, "extract").pending == 0
+    record = api.run(
+        lambda valkey: JobStore(valkey, api.settings).get(response.json()["data"]["id"])
+    )
+    assert record is not None
+    assert record.options.mode == "browser"
+    # auto stays in the extract pool: the extract worker moves what needs the browser (B5).
+    assert api.batch([PAGE]).status_code == 202
+    assert queue_counts(api, "extract").pending == 1
+
+
+def test_batch_browser_mode_disabled_is_400(api: Api) -> None:
+    response = api.batch([PAGE], mode="browser")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "Browser mode is not enabled on this service."
+    assert api.keys("job*") == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"actions": [{"type": "scroll"}]},
+        {"cookies": [{"name": "a", "value": "b"}]},
+        {"headers": {"x-token": "t"}},
+        {"screenshot": True},
+    ],
+)
+def test_batch_rejects_actions_cookies_headers(make_api: Callable[..., Api], extra: Any) -> None:
+    api = make_api(browser_enabled=True)
+
+    body = {"urls": [PAGE], "mode": "browser", **extra}
+    response = api.client.post("/v1/batch", json=body, headers=ALICE)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert api.keys("job*") == []

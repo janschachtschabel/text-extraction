@@ -9,14 +9,18 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 from text_extraction.browser_options import (
+    ACTIONS_DESCRIPTION,
+    COOKIES_DESCRIPTION,
+    HEADERS_DESCRIPTION,
     MAX_ACTIONS,
-    MAX_COOKIES,
     AcceptCookiesAction,
     Action,
+    ActionList,
     ArtifactRef,
     BrowserCookie,
     BrowserSecrets,
     ClickAction,
+    CookieList,
     EvaluateAction,
     ExpandAllAction,
     Headers,
@@ -26,6 +30,7 @@ from text_extraction.browser_options import (
     SelectAction,
     TypeAction,
     WaitForAction,
+    WaitSeconds,
     check_cookie_domains,
     validate_headers,
 )
@@ -62,38 +67,25 @@ class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
 
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to capture.")
     full_page: bool = Field(
-        default=True, description="Capture the whole page; `false` the first viewport only."
+        default=True,
+        description="Capture the whole page (cut at `SCREENSHOT_MAX_HEIGHT_PX`, with the warning "
+        "`screenshot_clipped`); `false` the first viewport (1920x1080) only.",
     )
-    actions: list[Action] = Field(
-        default=[],
-        max_length=MAX_ACTIONS,
-        repr=False,
-        description="Page actions to run before the capture, at most 20, in order.",
+    actions: ActionList = Field(
+        default=[], repr=False, description=f"{ACTIONS_DESCRIPTION} They run before the capture."
     )
-    cookies: list[BrowserCookie] = Field(
-        default=[],
-        max_length=MAX_COOKIES,
-        repr=False,
-        description="Cookies to set before the page loads, at most 50. A `domain` must be the "
-        "URL's host or a parent domain of it.",
-    )
-    headers: Headers = Field(
-        default={},
-        repr=False,
-        description="Extra request headers, at most 20. They are sent only to the requested "
-        "URL's host and port, never to other sites, also not across a redirect.",
-    )
+    cookies: CookieList = Field(default=[], repr=False, description=COOKIES_DESCRIPTION)
+    headers: Headers = Field(default={}, repr=False, description=HEADERS_DESCRIPTION)
     compliance: ComplianceMode | None = Field(
         default=None,
         description="`enforce`, `report` or `ignore` (admins only); default: the operator's. "
-        "`ignore` also allows unblock mode where the operator enabled it.",
+        "`ignore` also allows unblock mode where the operator enabled it: a browser that gets "
+        "past bot protection, for sites that allowed extraction by contract.",
     )
-    wait_seconds: float | None = Field(
+    wait_seconds: WaitSeconds = Field(
         default=None,
-        ge=0,
-        le=60,
         description="As for `/v1/extract`: after this many seconds a running capture becomes a "
-        "job and the answer is 202.",
+        "job and the answer is 202 with it (kind `screenshot`).",
     )
 
     @model_validator(mode="after")

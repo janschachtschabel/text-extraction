@@ -5,8 +5,9 @@
   export them, not the workers, because workers may scale to zero and the backlog must stay
   visible. Every API pod reads the same queue, so a query takes ``max()`` over pods (``sum()``
   would count the backlog once per pod).
-- ``text_extraction_jobs_created_total{kind}``: jobs accepted by this pod (``batch`` or
-  ``extract``).
+- ``text_extraction_jobs_created_total{kind}``: jobs accepted by this pod (``batch``,
+  ``extract`` or ``screenshot``). A sync request's browser job counts once it is handed over to
+  the caller (202), like a P1 job.
 - ``text_extraction_job_duration_seconds{kind}``: observed by whichever process writes the last
   result of a job. The definition lives here so that the worker and the API cannot drift apart;
   each process has its own registry.
@@ -19,7 +20,7 @@ last values. When Valkey fails the last values stay and the outage is logged onc
 import asyncio
 import contextlib
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Final, Protocol
 from weakref import WeakKeyDictionary
@@ -89,12 +90,12 @@ def job_metrics_for(registry: CollectorRegistry) -> JobMetrics:
     if metrics is None:
         created = Counter(
             "text_extraction_jobs_created_total",
-            "Jobs accepted by this pod, by kind: batch (POST /v1/batch) or extract (a slow "
-            "POST /v1/extract handed over to a job).",
+            "Jobs accepted by this pod, by kind: batch (POST /v1/batch), extract (a slow "
+            "POST /v1/extract handed over to a job) or screenshot (a slow POST /v1/screenshot).",
             ["kind"],
             registry=registry,
         )
-        for kind in ("batch", "extract"):
+        for kind in ("batch", "extract", "screenshot"):
             created.labels(kind=kind)  # export 0 from the start, so rate() sees the first job
         metrics = JobMetrics(created=created, duration=job_duration_for(registry))
         _JOB_METRICS[registry] = metrics
@@ -120,27 +121,54 @@ _LAST_SUCCESS: Final = (
 )
 
 
-class QueueGauges(Collector):
-    """The queue gauges of one pool, fed by a background task.
+class _PoolGauges:
+    """The last counts of one pool's queue and whether its reads are failing."""
 
-    Until the first read succeeds nothing is exported, so that a scaler never mistakes "not
-    known yet" for an empty queue.
+    def __init__(self, queue: _CountedQueue) -> None:
+        self.queue = queue
+        self.counts: QueueCounts | None = None
+        self.last_success: float | None = None
+        self.down = False
+
+    async def refresh(self, clock: Callable[[], float]) -> None:
+        try:
+            counts = await self.queue.counts()
+        except Exception as error:  # a failing read must never end the loop
+            if not self.down:
+                self.down = True
+                _log.warning(
+                    "queue_metrics_unavailable",
+                    pool=self.queue.pool,
+                    error_type=type(error).__name__,
+                    error=str(error),
+                )
+            return
+        self.counts = counts
+        self.last_success = clock()
+        if self.down:
+            self.down = False
+            _log.info("queue_metrics_recovered", pool=self.queue.pool)
+
+
+class QueueGauges(Collector):
+    """The queue gauges of one or more pools, fed by a background task.
+
+    Until the first read of a pool succeeds nothing is exported for it, so that a scaler never
+    mistakes "not known yet" for an empty queue.
     """
 
     def __init__(
         self,
-        queue: _CountedQueue,
+        queues: _CountedQueue | Sequence[_CountedQueue],
         registry: CollectorRegistry,
         *,
         interval: float = REFRESH_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._queue = queue
+        listed = tuple(queues) if isinstance(queues, Sequence) else (queues,)
+        self._pools = [_PoolGauges(queue) for queue in listed]
         self._interval = interval
         self._clock = clock
-        self._last_success: float | None = None
-        self._counts: QueueCounts | None = None
-        self._down = False
         self._task: asyncio.Task[None] | None = None
         registry.register(self)
 
@@ -155,40 +183,31 @@ class QueueGauges(Collector):
         ]
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
-        counts = self._counts
-        if counts is None:
+        known = [pool for pool in self._pools if pool.counts is not None]
+        if not known:
             return
-        pool = self._queue.pool
-        values = (counts.pending, counts.leased, counts.clients)
-        for (name, doc), value in zip(_GAUGES, values, strict=True):
+        values = {
+            pool.queue.pool: (counts.pending, counts.leased, counts.clients)
+            for pool in known
+            if (counts := pool.counts) is not None
+        }
+        for index, (name, doc) in enumerate(_GAUGES):
             family = GaugeMetricFamily(name, doc, labels=["pool"])
-            family.add_metric([pool], value)
+            for name_of_pool, counted in values.items():
+                family.add_metric([name_of_pool], counted[index])
             yield family
-        if self._last_success is not None:
-            family = GaugeMetricFamily(*_LAST_SUCCESS, labels=["pool"])
-            family.add_metric([pool], self._last_success)
-            yield family
+        family = GaugeMetricFamily(*_LAST_SUCCESS, labels=["pool"])
+        for pool in known:
+            if pool.last_success is not None:
+                family.add_metric([pool.queue.pool], pool.last_success)
+        yield family
 
     async def refresh(self) -> None:
-        """Read the queue once. A failure (Valkey is down, mostly) keeps the last values and is
-        logged on the first failure of an outage; the first success after it is logged too."""
-        try:
-            counts = await self._queue.counts()
-        except Exception as error:  # a failing read must never end the loop
-            if not self._down:
-                self._down = True
-                _log.warning(
-                    "queue_metrics_unavailable",
-                    pool=self._queue.pool,
-                    error_type=type(error).__name__,
-                    error=str(error),
-                )
-            return
-        self._counts = counts
-        self._last_success = self._clock()
-        if self._down:
-            self._down = False
-            _log.info("queue_metrics_recovered", pool=self._queue.pool)
+        """Read each queue once. A failure (Valkey is down, mostly) keeps the pool's last values
+        and is logged on the first failure of an outage; the first success after it is logged
+        too."""
+        for pool in self._pools:
+            await pool.refresh(self._clock)
 
     async def _run(self) -> None:
         while True:

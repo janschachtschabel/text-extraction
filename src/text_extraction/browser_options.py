@@ -196,6 +196,32 @@ def check_cookie_domains(url: str, cookies: list[BrowserCookie]) -> None:
             raise ValueError("a cookie domain must be the URL's host or a parent domain of it")
 
 
+# The limits that ``ExtractRequest`` and ``ScreenshotRequest`` share; each model adds its default,
+# ``repr=False`` and its own description.
+ActionList = Annotated[list[Action], Field(max_length=MAX_ACTIONS)]
+CookieList = Annotated[list[BrowserCookie], Field(max_length=MAX_COOKIES)]
+WaitSeconds = Annotated[float | None, Field(ge=0, le=60)]
+
+ACTIONS_DESCRIPTION = (
+    "Page actions to run in the browser after the page has loaded, in order, at most 20. The "
+    "first action that fails stops the rest and adds the warning `action_<index>_failed`, the "
+    "index counting from 0; the page is then read as it is. A click that leads to a page that "
+    "fails to load (or that the compliance checks refuse) fails the whole render with that "
+    "page's error. A click that starts a download discards the page: the render ends without "
+    "content. `evaluate` runs JavaScript and is for admins only (403 `forbidden` for other "
+    "keys). Action text, values and scripts are never logged or shown in a job."
+)
+COOKIES_DESCRIPTION = (
+    "Cookies to set before the page loads, at most 50. A `domain` must be the URL's host or a "
+    "parent domain of it. Never logged or shown in a job."
+)
+HEADERS_DESCRIPTION = (
+    "Extra request headers, at most 20 (for example `Authorization` for a partner's logged-in "
+    "pages). They are sent only to the requested URL's host and port, never to other sites, "
+    "also not across a redirect. Never logged or shown in a job."
+)
+
+
 class BrowserSecrets(BaseModel, hide_input_in_errors=True):
     """The parts of a request that may carry secrets (session cookies, token headers); they stay
     out of ``repr``."""

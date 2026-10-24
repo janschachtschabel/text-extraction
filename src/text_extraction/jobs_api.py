@@ -27,6 +27,7 @@ from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
+from text_extraction.extract_api import BROWSER_DISABLED_MESSAGE
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
     BatchRequest,
@@ -70,7 +71,7 @@ def _open_key(owner: str) -> str:
     return f"jobs:{{owner:{owner}}}:open"
 
 
-async def _require_jobs_enabled(
+async def require_jobs_enabled(
     request: Request, _principal: Annotated[Principal, Depends(authenticate)]
 ) -> None:
     """Dependency: 503 while ``JOBS_ENABLED`` is false (after authentication)."""
@@ -167,7 +168,7 @@ async def _discard(valkey: Redis, store: JobStore, owner: str, job_id: str) -> N
     "/v1/batch",
     status_code=202,
     dependencies=[
-        Depends(_require_jobs_enabled),
+        Depends(require_jobs_enabled),
         Depends(rate_limited),
     ],
 )
@@ -187,6 +188,10 @@ async def create_batch(
     batches (429, retryable).
     503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
+
+    `mode: browser` queues the URLs for the browser workers (400 while browser mode is off);
+    `auto` items that need a browser move there on their own. A batch takes no `actions`,
+    `cookies`, `headers` or `screenshot` (422).
     """
     settings: Settings = request.app.state.settings
     valkey: Redis = request.app.state.valkey
@@ -195,6 +200,10 @@ async def create_batch(
     guard: MemoryPressure = request.app.state.memory_guard
 
     _check_size(body, settings.batch_max_urls)
+    if body.mode == "browser":  # B9: the browser workers take the items, if there are any
+        if not settings.browser_enabled:
+            raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
+        queue = request.app.state.browser_queue
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -242,6 +251,24 @@ async def create_batch(
 
 def _not_found() -> ServiceError:
     return ServiceError(ErrorCode.NOT_FOUND, "Job not found.", 404)
+
+
+async def visible_job(store: JobStore, job_id: str, principal: Principal) -> JobRecord:
+    """The job, when it exists and the caller may see it: its owner, or any admin. Otherwise
+    404 ``not_found``, the same for a malformed id, an unknown or expired job and another
+    caller's. Valkey errors propagate."""
+    if not _JOB_ID.fullmatch(job_id):
+        raise _not_found()
+    record = await store.get(job_id)
+    if record is None or (record.owner != principal.name and principal.role != "admin"):
+        raise _not_found()
+    return record
+
+
+def backend_unavailable(error: Exception) -> ServiceError:
+    """Log a Valkey failure of a job route and return its 503."""
+    _log_unavailable(error)
+    return _unavailable()
 
 
 def _envelope_status(record: JobRecord) -> Literal["success", "partial", "failed"]:
@@ -311,7 +338,7 @@ def _lost_view(record: JobRecord, items: list[JobItem]) -> tuple[JobRecord, list
 
 
 @router.get(
-    "/v1/jobs/{job_id}", dependencies=[Depends(_require_jobs_enabled), Depends(rate_limited)]
+    "/v1/jobs/{job_id}", dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)]
 )
 async def get_job(
     job_id: str,
@@ -331,12 +358,8 @@ async def get_job(
     does not exist, has expired or belongs to another caller (admins see all) answers 404.
     """
     store: JobStore = request.app.state.job_store
-    if not _JOB_ID.fullmatch(job_id):
-        raise _not_found()
     try:
-        record = await store.get(job_id)
-        if record is None or (record.owner != principal.name and principal.role != "admin"):
-            raise _not_found()
+        record = await visible_job(store, job_id, principal)
         total = record.progress.total
         items = await store.items(job_id, offset, limit) if offset < total else []
         lost = _is_lost(record)

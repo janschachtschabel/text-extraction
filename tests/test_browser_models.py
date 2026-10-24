@@ -24,6 +24,7 @@ from text_extraction.browser_models import (
 )
 from text_extraction.compliance import ComplianceReport
 from text_extraction.extract_models import ExtractRequest, ExtractResult, Timings
+from text_extraction.job_models import JobOptions
 
 ACTIONS = TypeAdapter(list[Action])
 URL = "https://www.example.org/page"
@@ -396,3 +397,24 @@ def test_secret_values_stay_out_of_repr_and_validation_errors() -> None:
     assert len(errors) == 8
     for text in shown + errors:
         assert secret not in text
+
+
+@pytest.mark.parametrize("options", [{"screenshot": True}, {"full_page": False}])
+def test_job_options_refuse_fast_mode_with_screenshot(options: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        JobOptions(mode="fast", compliance="enforce", **options)
+
+    assert JobOptions(mode="browser", compliance="enforce", **options).mode == "browser"
+
+
+def test_extract_and_screenshot_requests_share_the_option_limits() -> None:
+    too_many = [{"type": "scroll"}] * 21
+    for model in (ExtractRequest, ScreenshotRequest):
+        with pytest.raises(ValidationError):
+            model.model_validate({"url": "https://example.org/", "actions": too_many})
+        with pytest.raises(ValidationError):
+            model.model_validate({"url": "https://example.org/", "wait_seconds": 61})
+        fields = model.model_fields
+        assert fields["actions"].repr is False
+        assert fields["cookies"].repr is False
+        assert fields["headers"].repr is False

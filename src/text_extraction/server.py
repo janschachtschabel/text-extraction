@@ -16,7 +16,9 @@ order:
 4. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
 
 ``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the Helm chart's
-``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it.
+``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it. While
+``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
+(``graceful_shutdown_seconds``, B13): 50 s by default, 80 s with unblock mode.
 """
 
 import asyncio
@@ -43,6 +45,9 @@ EXIT_CONFIG_ERROR = 2
 # must stay above the drain plus this (`shutdown_seconds`): raise it with either.
 MIN_GRACEFUL_SHUTDOWN_SECONDS = 30
 _SHUTDOWN_MARGIN_SECONDS = 5
+# On top of the wait for a browser worker and the render: the result margin of the wait (5 s)
+# and the answer.
+_BROWSER_MARGIN_SECONDS = 10
 
 _HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -73,11 +78,19 @@ class _Server(uvicorn.Server):
 
 def graceful_shutdown_seconds(settings: Settings) -> int:
     """How long requests in flight may finish after SIGTERM: an extraction that has just started
-    can still end within its own deadline."""
-    return max(
+    can still end within its own deadline. While ``BROWSER_ENABLED``, a sync request may also
+    wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render (B13)."""
+    seconds = max(
         MIN_GRACEFUL_SHUTDOWN_SECONDS,
         math.ceil(settings.extract_timeout_seconds + _SHUTDOWN_MARGIN_SECONDS),
     )
+    if settings.browser_enabled:
+        render = settings.browser_timeout_seconds
+        if settings.browser_unblock_enabled:
+            render = max(render, settings.browser_unblock_timeout_seconds)
+        browser = settings.browser_queue_wait_seconds + render + _BROWSER_MARGIN_SECONDS
+        seconds = max(seconds, math.ceil(browser))
+    return seconds
 
 
 def shutdown_seconds(settings: Settings) -> float:

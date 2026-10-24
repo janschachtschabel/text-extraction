@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.server import _serve, _server, shutdown_seconds
+from text_extraction.server import _serve, _server, graceful_shutdown_seconds, shutdown_seconds
 from text_extraction.settings import Settings
 
 SETTINGS = Settings(auth_mode="none")
@@ -146,3 +146,18 @@ def _restore_sigterm() -> Iterator[None]:
     previous = signal.getsignal(signal.SIGTERM)
     yield
     signal.signal(signal.SIGTERM, previous)
+
+
+def test_graceful_seconds_cover_browser_wait() -> None:
+    # B13: a sync request may wait BROWSER_QUEUE_WAIT_SECONDS for a worker, then the render.
+    plain = Settings(auth_mode="none")
+    browser = Settings(auth_mode="none", browser_enabled=True)
+    unblock = Settings(auth_mode="none", browser_enabled=True, browser_unblock_enabled=True)
+    unblock_only = Settings(auth_mode="none", browser_unblock_enabled=True)
+
+    assert graceful_shutdown_seconds(plain) == 30
+    assert graceful_shutdown_seconds(unblock_only) == 30
+    assert graceful_shutdown_seconds(browser) == 10 + 30 + 10
+    assert graceful_shutdown_seconds(unblock) == 10 + 60 + 10
+    slow = Settings(auth_mode="none", browser_enabled=True, extract_timeout_seconds=90)
+    assert graceful_shutdown_seconds(slow) == 95  # the fast phase's own bound is larger
