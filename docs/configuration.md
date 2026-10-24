@@ -105,7 +105,8 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
 The extract worker (`text-extraction-worker`) serves only port 9090, with the same three paths.
 Its `/ready` answers 200 once it has loaded the language model and its loops claim items, while
 Valkey answers. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
-items in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds to finish; an item still running
+items in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds to finish; a claim already sent
+when the signal arrives counts as in flight, so its item is processed too. An item still running
 then is cancelled, and its lease expires so that another worker runs it. There is no drain wait,
 since no Service sends traffic to the worker.
 
@@ -222,4 +223,4 @@ refuses the host (busy, or paused after errors or a 429), the item goes back to 
 domain, which is not claimed before the gate's retry time; an item at `JOB_ITEM_MAX_ATTEMPTS` is
 stored with the gate's error (`rate_limited` or `connection_error`, retryable) instead. An item
 whose job has expired is dropped. While Valkey fails, a worker backs off for 1, 2, 4 … 30 s and
-then goes on; the item it held is claimed again once its lease expires.
+then goes on; the item it held (an exhausted one too) is claimed again once its lease expires.

@@ -5,7 +5,8 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 
 1. claims the next item, leased for ``EXTRACT_TIMEOUT_SECONDS * 2 + 10`` seconds. An item that
    lost too many leases (``exhausted``) fails with ``internal_error``, retryable, and is completed
-   even when recording that fails, so it never comes back holding a slot of its domain;
+   once that is recorded or its job is gone. A Valkey error leaves it leased: it comes back after
+   the lease, so its batch still gets a result for it;
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
    1 s while claims keep answering that their scan budget ran out; every idle sleep has ±50 %
    jitter, so the loops of many pods do not claim in step;
@@ -15,16 +16,19 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
    ``JOB_ITEM_MAX_ATTEMPTS`` is not deferred again: it runs once more with the refusal answered
    as the pipeline's ``rate_limited`` or ``connection_error`` envelope, which is stored;
 4. stores the result (only the first result of an item counts), then completes the item. An item
-   whose job expired is completed and dropped.
+   whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
+   it) still stores its result, but its repeat write or deferral is not counted in the metrics.
 
-A Valkey error (or the gate's 503) backs the loop off for 1, 2, 4 … 30 s; the lease of the item
-in hand then expires and the item is claimed again. No error ends a loop.
+A Valkey error, an ``OSError`` (a Valkey call timing out) or the gate's 503 backs the loop off
+for 1, 2, 4 … 30 s; the lease of the item in hand then expires and the item is claimed again.
+No error ends a loop.
 
 The process serves only the internal port (``/health``, ``/ready``, ``/metrics``). ``/ready``
 answers 200 once the loops run, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
 loops stop claiming, the items in flight get ``graceful_shutdown_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
-internal server stops last.
+internal server stops last. A claim already sent when the signal arrives is still processed
+within that time, since its item is leased to this worker already.
 """
 
 import asyncio
@@ -80,6 +84,8 @@ _INTERNAL_MESSAGE = "Internal server error."
 # Outcomes of an item besides its envelope's: given back to the queue, or its job is gone.
 _DEFERRED = "deferred"
 _LOST = "lost"
+# Logged, not counted: the item had its result already, or another worker holds it now.
+_SUPERSEDED = "superseded"
 
 _ITEM_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 20, 25, 30, 45, 60)
 _JOB_BUCKETS = (1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 14400, 43200, 86400)
@@ -190,11 +196,12 @@ class Worker:
                     outcome = await self._fail_exhausted(item)
                 else:
                     outcome = await self._extract(item)
-                _log.info("job_item_done", attempts=item.attempts, outcome=outcome)
+                _log.info("job_item_done", attempts=item.attempts, outcome=outcome or _SUPERSEDED)
         finally:
             self._metrics.busy.dec()
             self._metrics.item_seconds.observe(time.perf_counter() - started)
-        self._metrics.items.labels(outcome=outcome).inc()
+        if outcome is not None:
+            self._metrics.items.labels(outcome=outcome).inc()
 
     # --- the slot loop -----------------------------------------------------------------------
 
@@ -243,7 +250,8 @@ class Worker:
 
     # --- one item ----------------------------------------------------------------------------
 
-    async def _extract(self, item: QueueItem) -> str:
+    async def _extract(self, item: QueueItem) -> str | None:
+        """The item's metric outcome; None when it is not to be counted (``_SUPERSEDED``)."""
         job = await self._store.get(item.job_id)
         url = await self._store.url(item.job_id, item.index) if job is not None else None
         if job is None or url is None:
@@ -263,50 +271,46 @@ class Worker:
                 gate_refusals=gate_refusals,
             )
         except (OutboundBusy, CircuitOpen) as refusal:
-            await self._queue.defer(item, self._clock() + refusal.retry_after)
-            return _DEFERRED
+            if await self._queue.defer(item, self._clock() + refusal.retry_after):
+                return _DEFERRED
+            return None  # the lease was lost: the item is queued again or another worker's
         except ServiceError as error:
             if error.http_status >= 500:
                 raise
             envelope = _failure(error.code, error.message, retryable=error.retryable)
-        except RedisError:
-            raise
+        except (RedisError, OSError):
+            raise  # Valkey (a builtin TimeoutError too): the slot loop backs off
         except Exception:
             _log.error("job_item_failed", exc_info=True)
             envelope = _failure(ErrorCode.INTERNAL_ERROR, _INTERNAL_MESSAGE, retryable=False)
+        return await self._finish(item, job, envelope)
+
+    async def _fail_exhausted(self, item: QueueItem) -> str | None:
+        """Record the item as lost too often, then complete it. A Valkey error propagates and
+        leaves the item leased, so it is offered again after the lease instead of vanishing
+        without a result."""
+        _log.warning("job_item_exhausted", attempts=item.attempts)
+        job = await self._store.get(item.job_id)
+        if job is None:
+            return await self._drop(item)
+        envelope = _failure(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
+        return await self._finish(item, job, envelope)
+
+    async def _finish(
+        self, item: QueueItem, job: JobRecord, envelope: Envelope[ExtractResult]
+    ) -> str | None:
+        """Store the item's result, then complete it. The write that completes the job observes
+        its duration; a repeat write (the item had its result already) is not counted."""
         try:
-            await self._record(item, job, envelope)
+            write = await self._store.write_result(item.job_id, item.index, envelope)
         except JobLost:
             return await self._drop(item)
-        await self._queue.complete(item)
-        return _outcome(envelope)
-
-    async def _fail_exhausted(self, item: QueueItem) -> str:
-        """Record the item as lost too often, then complete it, whatever recording did."""
-        _log.warning("job_item_exhausted", attempts=item.attempts)
-        envelope = _failure(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
-        try:
-            job = await self._store.get(item.job_id)
-            if job is None:
-                _log.warning("job_item_dropped", reason="job_gone")
-                return _LOST
-            try:
-                await self._record(item, job, envelope)
-            except JobLost:
-                _log.warning("job_item_dropped", reason="job_gone")
-                return _LOST
-            return _outcome(envelope)
-        finally:
-            await self._queue.complete(item)
-
-    async def _record(
-        self, item: QueueItem, job: JobRecord, envelope: Envelope[ExtractResult]
-    ) -> None:
-        """Store the item's result; the write that completes the job observes its duration."""
-        if await self._store.write_result(item.job_id, item.index, envelope) == "last":
+        if write == "last":
             seconds = max(self._clock() - job.created_at.timestamp(), 0.0)
             self._metrics.job_duration.labels(kind=job.kind).observe(seconds)
             _log.info("job_completed", kind=job.kind, seconds=round(seconds, 3))
+        await self._queue.complete(item)
+        return None if write == "repeat" else _outcome(envelope)
 
     async def _drop(self, item: QueueItem) -> str:
         """Complete an item whose job is gone (expired): there is nowhere to store its result."""

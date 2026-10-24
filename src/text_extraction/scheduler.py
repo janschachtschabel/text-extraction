@@ -533,16 +533,18 @@ class FairQueue:
         )
         return bool(int(done))
 
-    async def defer(self, item: QueueItem, until: float) -> None:
+    async def defer(self, item: QueueItem, until: float) -> bool:
         """Give the item back to the front of its domain with ``attempts + 1`` and keep the
         domain from being claimed before ``until`` (a later not-before already set stays).
+        True when that happened.
 
-        Nothing changes when the lease was lost: the item is queued again already. The caller
-        fails an item at ``JOB_ITEM_MAX_ATTEMPTS`` instead of deferring it; attempts never go
-        beyond that maximum plus one.
+        Nothing changes, and the answer is False, when the lease was lost: the item is queued
+        again already, or another worker holds it. The caller fails an item at
+        ``JOB_ITEM_MAX_ATTEMPTS`` instead of deferring it; attempts never go beyond that maximum
+        plus one.
         """
         attempts = min(item.attempts + 1, self._settings.job_item_max_attempts + 1)
-        await self._defer(
+        deferred = await self._defer(
             keys=self._keys,
             args=[
                 self._prefix,
@@ -552,6 +554,7 @@ class FairQueue:
                 f"{until:.6f}",
             ],
         )
+        return bool(int(deferred))
 
     async def counts(self) -> QueueCounts:
         """How many items are pending and leased, and how many clients and domains wait."""

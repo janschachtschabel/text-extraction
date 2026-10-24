@@ -365,30 +365,67 @@ async def test_exhausted_items_fail_with_internal_error() -> None:
     assert outcome_count(harness, "internal_error") == 1
 
 
-@pytest.mark.parametrize("raised", [JobLost("x"), RedisConnectionError("down")])
-@scenario
-async def test_exhausted_item_is_completed_even_when_recording_fails(raised: Exception) -> None:
-    harness = Harness(job_item_max_attempts=1)
+async def exhausted_claim(harness: Harness) -> Claim:
+    """Two workers die with the only item (max attempts 1): the next claim is exhausted."""
     await harness.submit([page("example.org")])
     for _ in range(2):
         await harness.claim()
         harness.clock.now += harness.lease_seconds + 1
     claim = await harness.claim()
     assert claim.exhausted
+    return claim
 
-    async def failing(job_id: str, index: int, envelope: Envelope[ExtractResult]) -> ResultWrite:
-        raise raised
 
-    harness.store.write_result = failing  # type: ignore[method-assign]
-    if isinstance(raised, JobLost):
-        await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
-        assert outcome_count(harness, "lost") == 1
-    else:
-        with pytest.raises(RedisConnectionError):
-            await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
+@scenario
+async def test_exhausted_item_is_completed_when_its_job_was_lost_while_recording() -> None:
+    harness = Harness(job_item_max_attempts=1)
+    claim = await exhausted_claim(harness)
+
+    async def lost(job_id: str, index: int, envelope: Envelope[ExtractResult]) -> ResultWrite:
+        raise JobLost(job_id)
+
+    harness.store.write_result = lost  # type: ignore[method-assign]
+    await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
 
     counts = await harness.queue.counts()
     assert (counts.pending, counts.leased) == (0, 0)
+    assert outcome_count(harness, "lost") == 1
+
+
+@pytest.mark.parametrize("failing", ["get", "write_result"])
+@pytest.mark.parametrize("raised", [RedisConnectionError("down"), TimeoutError("slow")])
+@scenario
+async def test_exhausted_item_stays_leased_when_valkey_fails_and_is_recorded_later(
+    failing: str, raised: Exception
+) -> None:
+    harness = Harness(job_item_max_attempts=1)
+    claim = await exhausted_claim(harness)
+    job_id = claim.item.job_id  # type: ignore[union-attr]
+    original = getattr(harness.store, failing)
+
+    async def broken(*args: Any) -> Any:
+        raise raised
+
+    setattr(harness.store, failing, broken)
+    with pytest.raises(type(raised)):
+        await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
+
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 1)  # not completed: it comes back
+    assert outcome_count(harness, "lost") == 0
+
+    setattr(harness.store, failing, original)  # Valkey is back
+    harness.clock.now += harness.lease_seconds + 1
+    again = await harness.claim()
+    assert again.exhausted
+    await harness.worker.process(again.item, exhausted=True)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert error_of(item) == (ErrorCode.INTERNAL_ERROR, True, LOST_MESSAGE)
+    assert await harness.completed(job_id)
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert outcome_count(harness, "internal_error") == 1
 
 
 @scenario
@@ -430,6 +467,73 @@ async def test_rerun_after_lost_lease_counts_once() -> None:
     counts = await harness.queue.counts()
     assert (counts.pending, counts.leased) == (0, 0)
     assert harness.sample("text_extraction_job_duration_seconds_count", {"kind": "batch"}) == 1
+    assert outcome_count(harness, "success") == 1  # the repeat write is not counted
+
+
+@scenario
+async def test_stale_worker_that_writes_first_counts_once() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    job_id = await harness.submit([url])
+    stale = (await harness.claim()).item
+    harness.clock.now += harness.lease_seconds + 1
+    current = (await harness.claim()).item
+    assert stale is not None
+    assert current is not None
+
+    await harness.worker.process(stale)  # writes the result, but its lease is gone
+    assert await harness.queue.complete(stale) is False
+    assert (await harness.queue.counts()).leased == 1  # the current holder still has it
+    await harness.worker.process(current)  # a repeat write, then the current lease ends
+
+    record = await harness.store.get(job_id)
+    assert record is not None
+    assert record.state == "completed"
+    assert (record.progress.done, record.progress.success) == (1, 1)
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert harness.sample("text_extraction_job_duration_seconds_count", {"kind": "batch"}) == 1
+    assert outcome_count(harness, "success") == 1
+
+
+@scenario
+async def test_deferral_after_a_lost_lease_is_not_counted() -> None:
+    harness = Harness(gate=RefusingGate(OutboundBusy(3.0)))
+    job_id = await harness.submit([page("example.org")])
+    stale = (await harness.claim()).item
+    harness.clock.now += harness.lease_seconds + 1
+    current = (await harness.claim()).item
+    assert stale is not None
+    assert current is not None
+
+    await harness.worker.process(stale)
+
+    assert outcome_count(harness, "deferred") == 0
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 1)  # still the current holder's
+    assert await queue_list(harness.valkey, "example.org") == []
+    [item] = await harness.items(job_id)
+    assert item.state == "pending"
+
+
+@pytest.mark.parametrize("raised", [TimeoutError("Valkey is slow"), ConnectionResetError()])
+@scenario
+async def test_os_errors_from_the_pipeline_back_off_instead_of_failing_the_item(
+    raised: Exception,
+) -> None:
+    class Failing:
+        async def run(self, *args: Any, **kwargs: Any) -> Envelope[ExtractResult]:
+            raise raised
+
+    harness = Harness(pipeline=Failing())
+    job_id = await harness.submit([page("example.org")])
+
+    with pytest.raises(type(raised)):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.state == "pending"
+    assert (await harness.queue.counts()).leased == 1
 
 
 # --- Valkey outages and idle sleeps ------------------------------------------------------------

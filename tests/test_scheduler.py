@@ -220,7 +220,7 @@ async def test_deferred_item_goes_back_to_the_front_of_its_domain() -> None:
     await queue.enqueue(JOB_A, "A", urls("a.example", 3))
 
     item = await claim_item(queue)
-    await queue.defer(item, clock.now)
+    assert await queue.defer(item, clock.now) is True
 
     again = await claim_item(queue)
     assert (again.index, again.attempts) == (0, 1)
@@ -235,7 +235,7 @@ async def test_defer_after_a_lost_lease_changes_nothing() -> None:
     clock.now += LEASE
     rerun = await claim_item(queue)
 
-    await queue.defer(lost, clock.now + 30)
+    assert await queue.defer(lost, clock.now + 30) is False
 
     assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
     assert await running(valkey) == {"a.example": 1}
