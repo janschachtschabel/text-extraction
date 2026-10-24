@@ -382,6 +382,7 @@ def test_duplicate_sha256_across_env_and_file_rejected(
     ("name", "value", "field"),
     [
         ("FETCH_TIMEOUT_SECONDS", "0", "fetch_timeout_seconds"),
+        ("FETCH_TIMEOUT_SECONDS", "0.5", "fetch_timeout_seconds"),
         ("FETCH_MAX_BYTES", "1023", "fetch_max_bytes"),
         ("FETCH_MAX_REDIRECTS", "-1", "fetch_max_redirects"),
         ("FETCH_MAX_REDIRECTS", "21", "fetch_max_redirects"),
@@ -399,14 +400,14 @@ def test_fetch_limits_are_validated(
 
 def test_fetch_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
-    monkeypatch.setenv("FETCH_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("FETCH_TIMEOUT_SECONDS", "1")
     monkeypatch.setenv("FETCH_MAX_BYTES", "2048")
     monkeypatch.setenv("FETCH_MAX_REDIRECTS", "0")
     monkeypatch.setenv("FETCH_ALLOW_PRIVATE_NETWORKS", "true")
 
     settings = load_settings()
 
-    assert settings.fetch_timeout_seconds == 2.5
+    assert settings.fetch_timeout_seconds == 1
     assert settings.fetch_max_bytes == 2048
     assert settings.fetch_max_redirects == 0
     assert settings.fetch_allow_private_networks is True
@@ -493,9 +494,14 @@ def test_extract_timeout_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "7.5")
     assert load_settings().extract_timeout_seconds == 7.5
 
-    monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "0")
-    with pytest.raises(ConfigError, match="extract_timeout_seconds"):
-        load_settings()
+    monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "2")
+    assert load_settings().extract_timeout_seconds == 2
+
+    # Below 2 s, the fetch could be left with less than its 1 s minimum on every request.
+    for value in ("0", "1.9"):
+        monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", value)
+        with pytest.raises(ConfigError, match="extract_timeout_seconds"):
+            load_settings()
 
 
 def test_conversion_budget_settings(monkeypatch: pytest.MonkeyPatch) -> None:

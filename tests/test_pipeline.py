@@ -408,7 +408,7 @@ def test_timeout() -> None:
         await asyncio.sleep(5)
         raise AssertionError("not reached")
 
-    harness = Harness({PAGE: slow}, extract_timeout_seconds=1.6)
+    harness = Harness({PAGE: slow}, extract_timeout_seconds=2)
 
     envelope = harness.run_once()
 
@@ -423,7 +423,11 @@ def test_timeout() -> None:
 
 
 def test_too_little_time_left_fails_without_fetching() -> None:
-    harness = Harness({PAGE: fetched()}, extract_timeout_seconds=1.0)
+    async def slow_robots(validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(1.2)  # leaves at most 2 - 1.2 - 0.25 s, under the 1 s minimum
+        return fetched(ROBOTS, "Not found", status=404)
+
+    harness = Harness({PAGE: fetched(), ROBOTS: slow_robots}, extract_timeout_seconds=2)
 
     envelope = harness.run_once()
 
