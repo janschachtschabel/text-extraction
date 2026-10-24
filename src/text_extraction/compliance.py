@@ -52,6 +52,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -77,7 +78,7 @@ ComplianceMode = Literal["enforce", "report", "ignore"]
 PRODUCT_TOKEN = "text-extraction"  # noqa: S105 - the robots.txt user-agent token, not a secret
 
 _FILE_MAX_BYTES = 512_000  # 500 KiB, RFC 9309's least parsing limit for robots.txt
-_FILE_TIMEOUT_SECONDS = 10
+_FILE_TIMEOUT_SECONDS = 10  # for the three files of an origin together
 # A cached "unavailable" answer is kept at most this long.
 _UNAVAILABLE_TTL_SECONDS = 300
 # Only the head of a page can carry the meta tags we read.
@@ -261,9 +262,12 @@ class ComplianceChecker:
             return ComplianceReport(mode=mode, decision="skipped")
 
         origin = _origin(url)
-        robots = await self._load("robots", origin, _ROBOTS_PATH)
-        tdmrep = await self._load("tdmrep", origin, _TDMREP_PATH)
-        ai = await self._load("ai", origin, _AI_TXT_PATH)
+        # One time budget for the three files together (R23): a host where all of them hang
+        # costs _FILE_TIMEOUT_SECONDS, not three times that.
+        deadline = time.monotonic() + _FILE_TIMEOUT_SECONDS
+        robots = await self._load("robots", origin, _ROBOTS_PATH, deadline)
+        tdmrep = await self._load("tdmrep", origin, _TDMREP_PATH, deadline)
+        ai = await self._load("ai", origin, _AI_TXT_PATH, deadline)
         return await self._judge(mode, url, robots, tdmrep, ai)
 
     async def cached_before_fetch(self, url: str, mode: ComplianceMode) -> ComplianceReport | None:
@@ -404,12 +408,13 @@ class ComplianceChecker:
 
     # --- reading the origin files --------------------------------------------------------------
 
-    async def _load(self, kind: str, origin: _Origin, path: str) -> _Entry:
-        """The file's entry. Concurrent callers share one load; its error reaches them all."""
+    async def _load(self, kind: str, origin: _Origin, path: str, deadline: float) -> _Entry:
+        """The file's entry. Concurrent callers share one load, within the time budget of the
+        caller that started it (``deadline``, monotonic); its error reaches them all."""
         key = _cache_key(kind, origin)
         task = self._loading.get(key)
         if task is None:
-            task = asyncio.create_task(self._load_now(key, kind, origin.base + path))
+            task = asyncio.create_task(self._load_now(key, kind, origin.base + path, deadline))
             self._loading[key] = task
             task.add_done_callback(lambda done: self._forget_load(key, done))
         self._waiters[task] = self._waiters.get(task, 0) + 1
@@ -430,20 +435,28 @@ class ComplianceChecker:
         if self._loading.get(key) is task:
             del self._loading[key]
 
-    async def _load_now(self, key: str, kind: str, file_url: str) -> _Entry:
+    async def _load_now(self, key: str, kind: str, file_url: str, deadline: float) -> _Entry:
         cached = await self._cache_get(key)
         if cached is not None:
             return cached
-        entry = await self._fetch_file(file_url, truncate=kind == "robots")
+        left = deadline - time.monotonic()
+        if left > 0:
+            entry = await self._fetch_file(file_url, truncate=kind == "robots", seconds=left)
+        else:
+            # The budget went to the files before: nothing is sent, as if this one timed out.
+            _log.info(
+                "compliance_file_unavailable", host=urlsplit(file_url).hostname, code="timeout"
+            )
+            entry = _Entry("unavailable")
         await self._cache_set(key, entry)
         return entry
 
-    async def _fetch_file(self, file_url: str, *, truncate: bool) -> _Entry:
+    async def _fetch_file(self, file_url: str, *, truncate: bool, seconds: float) -> _Entry:
         try:
             fetched = await self._fetcher.fetch(
                 file_url,
                 max_bytes=_FILE_MAX_BYTES,
-                timeout_seconds=_FILE_TIMEOUT_SECONDS,
+                timeout_seconds=min(seconds, _FILE_TIMEOUT_SECONDS),
                 truncate=truncate,
             )
         except FetchError as error:

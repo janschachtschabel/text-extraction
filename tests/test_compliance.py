@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+import time
 from dataclasses import replace
 from typing import Any, cast
 
@@ -283,7 +284,9 @@ def test_robots_requested_with_limits() -> None:
     for url, options in fetcher.calls:
         # robots.txt is read from its first 500 KiB (RFC 9309); the others must fit.
         truncate = url == ROBOTS
-        assert options == {"max_bytes": 512_000, "timeout_seconds": 10, "truncate": truncate}
+        timeout = options.pop("timeout_seconds")
+        assert options == {"max_bytes": 512_000, "truncate": truncate}
+        assert 9 < timeout <= 10  # what is left of the 10 s the three files share
 
 
 def test_robots_origin_includes_scheme_and_port() -> None:
@@ -1167,3 +1170,61 @@ def test_a_check_after_a_cancelled_load_loads_again() -> None:
         return await second
 
     assert asyncio.run(scenario()).robots == "allowed"
+
+
+def _hanging_checker(
+    monkeypatch: pytest.MonkeyPatch, *, overrun: float = 0.0
+) -> tuple[ComplianceChecker, FakeFetcher, FakeAsyncRedis]:
+    """A checker whose every file fetch hangs until its timeout (plus ``overrun``), then times
+    out; the shared budget is shortened to 0.3 s."""
+    monkeypatch.setattr(compliance, "_FILE_TIMEOUT_SECONDS", 0.3)
+    checker, fetcher, store = make_checker({})
+
+    async def hanging(url: str, **options: Any) -> FetchResult:
+        fetcher.calls.append((url, options))
+        await asyncio.sleep(options["timeout_seconds"] + overrun)
+        raise FetchError(ErrorCode.TIMEOUT, "timed out", retryable=True)
+
+    fetcher.fetch = hanging  # type: ignore[method-assign]
+    return checker, fetcher, store
+
+
+def test_the_three_files_share_one_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    checker, fetcher, _ = _hanging_checker(monkeypatch)
+
+    async def scenario() -> tuple[ComplianceReport, float]:
+        started = time.monotonic()
+        report = await checker.before_fetch(PAGE, "enforce")
+        return report, time.monotonic() - started
+
+    report, elapsed = asyncio.run(scenario())
+
+    assert elapsed < 0.45  # one budget for the three, not 0.3 s each
+    assert sum(options["timeout_seconds"] for _, options in fetcher.calls) <= 0.3 + 1e-6
+    # An unavailable robots.txt keeps its package-2 meaning: blocked under enforce.
+    assert report.robots == "unavailable"
+    assert blocking_code(report) is ErrorCode.BLOCKED_BY_ROBOTS
+    assert report.ai_txt == "absent"
+
+
+def test_a_spent_budget_sends_no_request_and_caches_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checker, fetcher, store = _hanging_checker(monkeypatch, overrun=0.05)
+
+    async def scenario() -> tuple[ComplianceReport, list[str]]:
+        report = await checker.before_fetch(PAGE, "report")
+        states = []
+        for kind in ("robots", "tdmrep", "ai"):
+            raw = await store.get(f"cmp:{kind}:{{https://example.org:443}}")
+            assert raw is not None
+            states.append(json.loads(raw)["state"])
+        return report, states
+
+    report, states = asyncio.run(scenario())
+
+    assert fetcher.urls() == [ROBOTS]  # robots.txt used the whole budget
+    assert states == ["unavailable"] * 3  # cached like a timeout
+    assert report.robots == "unavailable"
+    assert report.decision == "reported"
+    assert blocking_code(report) is None

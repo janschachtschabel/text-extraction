@@ -75,7 +75,9 @@ configurable. The robots.txt product token is `text-extraction`; robots.txt is r
 (4xx and unfollowable redirects mean no rules; 5xx, 429 or a network error means "unavailable",
 which `enforce` treats as disallowed; a file over 500 KiB is parsed from its first 500 KiB). The
 compliance files of an origin are loaded once per pod for concurrent requests, one after another
-and inside the page's outbound turn (see "Outbound limits per host"). Every redirect
+and inside the page's outbound turn (see "Outbound limits per host"). The three share one time
+budget of 10 s: each gets what the ones before left, and one whose budget is spent is not requested
+and counts as unavailable, like a timeout (cached at most 300 s). Every redirect
 target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
 `enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
 `report` its findings join the report. Client trace headers
