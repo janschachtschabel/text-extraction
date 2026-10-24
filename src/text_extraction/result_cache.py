@@ -21,7 +21,7 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from redis.asyncio import Redis
@@ -36,6 +36,13 @@ _log = structlog.get_logger(__name__)
 
 # Entries whose JSON is larger are not cached (the request is simply extracted again).
 MAX_ENTRY_BYTES = 2 * 1024 * 1024
+
+
+class MemoryPressure(Protocol):
+    """Whether Valkey is nearly full (``memory_guard.MemoryGuard``)."""
+
+    @property
+    def high(self) -> bool: ...
 
 
 @dataclass
@@ -63,15 +70,25 @@ def cache_key(url: str, options: Mapping[str, Any]) -> str:
 
 
 class ResultCache:
-    """Read and write ``CachedEntry`` objects; see the module docstring for the two TTLs."""
+    """Read and write ``CachedEntry`` objects; see the module docstring for the two TTLs.
+
+    With a ``guard``, writes are skipped while it reports Valkey's memory as high; the pause and
+    its end are logged once each."""
 
     def __init__(
-        self, valkey: Redis, settings: Settings, clock: Callable[[], float] = time.time
+        self,
+        valkey: Redis,
+        settings: Settings,
+        clock: Callable[[], float] = time.time,
+        *,
+        guard: MemoryPressure | None = None,
     ) -> None:
         self._valkey = valkey
         self._fresh_seconds = settings.result_cache_ttl_seconds
         self._store_seconds = settings.result_store_ttl_seconds
         self._clock = clock
+        self._guard = guard
+        self._paused = False
 
     async def get(self, key: str) -> tuple[CachedEntry, bool] | None:
         """The entry and whether it is fresh, or ``None`` (missing, unreadable, Valkey down)."""
@@ -91,8 +108,9 @@ class ResultCache:
         return entry, fresh
 
     async def put(self, key: str, entry: CachedEntry) -> None:
-        """Store ``entry`` for ``RESULT_STORE_TTL_SECONDS`` (0: store nothing; over 2 MB: skip)."""
-        if self._store_seconds <= 0:
+        """Store ``entry`` for ``RESULT_STORE_TTL_SECONDS`` (0: store nothing; over 2 MB or while
+        Valkey's memory is high: skip)."""
+        if self._store_seconds <= 0 or self._memory_high():
             return
         try:
             payload = json.dumps(
@@ -119,6 +137,16 @@ class ResultCache:
             await self._valkey.set(key, payload, ex=self._store_seconds)
         except (RedisError, OSError) as error:
             _log.warning("result_cache_write_failed", error=type(error).__name__)
+
+    def _memory_high(self) -> bool:
+        high = self._guard is not None and self._guard.high
+        if high != self._paused:
+            self._paused = high
+            if high:
+                _log.warning("result_cache_writes_paused", reason="valkey_memory_high")
+            else:
+                _log.info("result_cache_writes_resumed")
+        return high
 
 
 def _decode(raw: bytes | str) -> CachedEntry | None:

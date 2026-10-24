@@ -701,6 +701,7 @@ def test_cancelled_hand_over_leaves_nothing_behind(
             pipeline=app.state.pipeline,
             job_store=store,
             background=app.state.background,
+            memory_guard=app.state.memory_guard,
         )
         request = cast(Request, SimpleNamespace(app=SimpleNamespace(state=state)))
         principal = Principal(name="alice", role="user", rate_limit_per_minute=None)

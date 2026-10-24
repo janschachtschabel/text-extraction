@@ -142,7 +142,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `valkey.auth.enabled` | `true` | Valkey requires a password. |
 | `valkey.auth.existingSecret` | `""` | Your own Secret with the password; without it the chart generates one. The password must be URL-safe, see [Valkey password](#valkey-password). |
 | `valkey.auth.existingSecretKey` | `VALKEY_PASSWORD` | Key inside that Secret (also used for the chart-managed one). |
-| `valkey.maxmemory` | `768mb` | `--maxmemory`. The eviction policy is fixed to `noeviction`. |
+| `valkey.maxmemory` | `768mb` | `--maxmemory`. The eviction policy is fixed to `noeviction`. Size it for the batches open at once (about `BATCH_MAX_URLS` × the average result, plus as much in the result cache); from `VALKEY_MEMORY_GUARD_RATIO` (0.8) of it the API refuses new batches. |
 | `valkey.persistence.enabled` | `false` | `false`: `emptyDir`, data (jobs, queued items, counters) is lost on restart. `true`: PVC and append-only file. |
 | `valkey.persistence.size` | `1Gi` | |
 | `valkey.persistence.storageClass` | `""` | Cluster default when empty. |
@@ -157,6 +157,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `metrics.prometheusRule.enabled` | `false` | Needs the Prometheus Operator CRDs and kube-state-metrics. |
 | `metrics.prometheusRule.labels` | `{}` | |
 | `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog`. |
+| `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
 | `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers get `podAnnotations`, `nodeSelector` and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
@@ -168,6 +169,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | --- | --- | --- |
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
+| `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
 | `TextExtractionQueueBacklog` | `max(text_extraction_queue_pending_items{pool="extract"})` above `alerts.queueBacklogItems` (1000) while `sum(increase(text_extraction_job_items_total{outcome!~"deferred\|lost"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` | `max(text_extraction_queue_pending_items{pool="extract"}) > 0` and no available worker replica (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
 | `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`; the denominator is every item that recorded a result (all but `deferred`/`lost`) | 15 m |

@@ -39,6 +39,7 @@ from text_extraction.job_models import (
 from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.ratelimit import rate_limited
+from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
@@ -93,6 +94,16 @@ def _unavailable() -> ServiceError:
 def _log_unavailable(error: Exception) -> None:
     # Type and text only: the text names host and port, never credentials or URLs of a batch.
     _log.warning("jobs_backend_unavailable", error_type=type(error).__name__, error=str(error))
+
+
+def _memory_high() -> ServiceError:
+    return ServiceError(
+        ErrorCode.INTERNAL_ERROR,
+        "The job backend is nearly out of memory and accepts no new batches for now. "
+        "Try again later.",
+        503,
+        retryable=True,
+    )
 
 
 def _too_many_open(limit: int) -> ServiceError:
@@ -177,12 +188,14 @@ async def create_batch(
     `BATCH_MAX_URLS` URLs of the longest allowed length can take (413, before it is read whole),
     a compliance mode the caller may not choose (403), `BATCH_MAX_OPEN_PER_CLIENT` unfinished
     batches (429, retryable).
-    503 when Valkey is unavailable or jobs are disabled.
+    503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
+    `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
     """
     settings: Settings = request.app.state.settings
     valkey: Redis = request.app.state.valkey
     store: JobStore = request.app.state.job_store
     queue: FairQueue = request.app.state.job_queue
+    guard: MemoryPressure = request.app.state.memory_guard
 
     _check_size(body, settings.batch_max_urls)
     options = JobOptions(
@@ -193,6 +206,8 @@ async def create_batch(
         compliance=resolve_mode(body.compliance, principal, settings),
         cache=body.cache,
     )
+    if guard.high:
+        raise _memory_high()
     limit = settings.batch_max_open_per_client
     try:
         if await _open_count(valkey, store, principal.name) >= limit:

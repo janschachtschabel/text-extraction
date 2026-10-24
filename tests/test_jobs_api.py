@@ -594,7 +594,11 @@ def test_discard_survives_a_second_cancellation(api: Api) -> None:
 
         store.delete = slow_delete  # type: ignore[method-assign]
         state = SimpleNamespace(
-            settings=api.settings, valkey=valkey, job_store=store, job_queue=HangingQueue()
+            settings=api.settings,
+            valkey=valkey,
+            job_store=store,
+            job_queue=HangingQueue(),
+            memory_guard=SimpleNamespace(high=False),
         )
         request = cast(Request, SimpleNamespace(app=SimpleNamespace(state=state)))
         principal = Principal(name="alice", role="user", rate_limit_per_minute=None)

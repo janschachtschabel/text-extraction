@@ -82,7 +82,7 @@ from text_extraction.outbound import (
     parse_retry_after,
 )
 from text_extraction.quality import Quality, assess, quality_error
-from text_extraction.result_cache import CachedEntry, ResultCache, cache_key
+from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
 
@@ -790,18 +790,20 @@ def create_pipeline(
     pool: ConversionPool | None = None,
     *,
     gate: DomainGate | None = None,
+    memory_guard: MemoryPressure | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
 
     ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
-    without it a new gate is made, which then counts its spacing from the turn starts only."""
+    without it a new gate is made, which then counts its spacing from the turn starts only.
+    With ``memory_guard`` the result cache skips its writes while Valkey's memory is high."""
     if gate is None:
         gate = DomainGate(valkey, settings)
     return Pipeline(
         fetcher,
         gate,
         ComplianceChecker(fetcher, valkey, settings),
-        ResultCache(valkey, settings),
+        ResultCache(valkey, settings, guard=memory_guard),
         FingerprintStore(valkey, settings),
         settings,
         registry,

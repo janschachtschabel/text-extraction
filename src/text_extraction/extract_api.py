@@ -13,7 +13,9 @@ extraction keeps running in this pod, as the same task, and the job only stores 
    item as failed (``jobs_api.py``).
 
 If the job cannot be created because Valkey fails, the route does not answer 503 while the
-extraction is still running: it keeps waiting for the task and answers with its envelope. The
+extraction is still running: it keeps waiting for the task and answers with its envelope. It
+does the same without trying while the pod holds ``EXTRACT_MAX_BACKGROUND`` extractions or
+Valkey's memory is high (``memory_guard.py``). The
 tasks are kept in ``app.state.background``, so that the lifespan can wait for them.
 
 An extract job is not a batch: it does not count toward ``BATCH_MAX_OPEN_PER_CLIENT``.
@@ -40,6 +42,7 @@ from text_extraction.jobs import JobLost, JobStore
 from text_extraction.pipeline import Pipeline
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
+from text_extraction.result_cache import MemoryPressure
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
 
@@ -115,8 +118,10 @@ async def extract(
     )
     job_id: str | None = None
     handed_over_at = time.monotonic()
-    # At the cap this pod holds no more extractions for jobs: the request waits for its own.
-    if len(background) <= settings.extract_max_background:
+    guard: MemoryPressure = request.app.state.memory_guard
+    # At the cap this pod holds no more extractions for jobs, and while Valkey is nearly full it
+    # stores no new job: the request waits for its own extraction.
+    if len(background) <= settings.extract_max_background and not guard.high:
         try:
             job_id = await _hand_over(store, settings, principal, options, body.url)
         except asyncio.CancelledError:

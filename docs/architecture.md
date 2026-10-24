@@ -231,6 +231,21 @@ eviction would drop gate, lease or job keys silently, while noeviction fails wri
 Its memory request equals its limit, 1280Mi (Guaranteed QoS), so maxmemory is 60 % of the limit
 and leaves room for fragmentation, buffers and the AOF fork. Package 11 measures real sizes.
 
+**Memory guard (R28).** Under noeviction a full Valkey fails every write, and with it the rate
+limiter, the outbound gate and the job reads, for as long as the results stay (up to
+`JOB_TTL_SECONDS`). A few ordinary batches can get there: 5 × 1,000 items of ~80 KB is ~400 MB of
+job results, stored a second time by the result cache. So each API pod reads `INFO memory` every
+5 s (`memory_guard.py`, its own task, also with `JOBS_ENABLED=false`), and from
+`VALKEY_MEMORY_GUARD_RATIO` (0.8) of `maxmemory` on it takes on no new bulk: `POST /v1/batch`
+answers 503 `internal_error` (retryable), the sync-to-job hand-over does not happen (the request
+waits inline and answers 200), and the API pod's result cache skips its writes. Workers still
+store the results of accepted items, so jobs that were accepted complete, and their own result
+cache writes go on (they have no guard). Without `maxmemory` there is no guard; a failing read keeps
+the last verdict. The gauges `text_extraction_valkey_used_memory_bytes` and `…_max_memory_bytes`
+feed the alert `TextExtractionValkeyMemoryHigh`. The guard bounds new work, not the worst case:
+batches accepted below the ratio still add their results. Quotas per client and a separate cache
+Valkey are left to package 11.
+
 **Outbound limits under load (R21, R22, R25).** The end-to-end run (`tests/e2e`) found two gaps
 in the package-2 gate and fixed them. Spacing counts from real request starts, and the fetcher
 reports each request once its headers are on the wire, so a request held up by a busy event loop

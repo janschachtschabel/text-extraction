@@ -23,6 +23,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
+from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
@@ -88,12 +89,14 @@ async def _finish_background(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request; start the queue gauges; wait for
-    extractions handed over to a job; stop the gauges (their task reads Valkey, whose client the
-    server closes after the lifespan); close the fetcher's connections and the conversion pool
-    last."""
+    """Load the language model before the first request; start the memory guard and the queue
+    gauges; wait for extractions handed over to a job; stop the guard and the gauges (their
+    tasks read Valkey, whose client the server closes after the lifespan); close the fetcher's
+    connections and the conversion pool last."""
     await asyncio.to_thread(load_language_model)
+    guard: MemoryGuard = app.state.memory_guard
     gauges: QueueGauges = app.state.queue_gauges
+    guard.start()
     if app.state.settings.jobs_enabled:
         gauges.start()
     try:
@@ -103,6 +106,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await _finish_background(app)
         finally:
             await gauges.stop()
+            await guard.stop()
         fetcher: Fetcher = app.state.fetcher
         pool: ConversionPool = app.state.conversion_pool
         await fetcher.aclose()
@@ -117,8 +121,9 @@ def create_public_app(
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
     ``app.state.job_queue`` back the batch and job routes; ``app.state.job_metrics`` counts the
-    jobs and ``app.state.queue_gauges`` exports the queue's backlog (the lifespan starts and stops
-    its task); ``app.state.background`` holds the tasks of extractions handed over to a job, which
+    jobs and ``app.state.queue_gauges`` exports the queue's backlog; ``app.state.memory_guard``
+    tells whether Valkey is nearly full (the lifespan starts and stops the tasks of both);
+    ``app.state.background`` holds the tasks of extractions handed over to a job, which
     the shutdown waits for.
     """
     app = FastAPI(
@@ -130,10 +135,17 @@ def create_public_app(
     app.state.settings = settings
     app.state.valkey = valkey
     app.state.rate_limiter = RateLimiter(valkey, settings.rate_limit_per_minute)
+    app.state.memory_guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, app.state.fetcher = create_outbound(settings, valkey)
     app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
     app.state.pipeline = create_pipeline(
-        settings, valkey, app.state.fetcher, registry, app.state.conversion_pool, gate=gate
+        settings,
+        valkey,
+        app.state.fetcher,
+        registry,
+        app.state.conversion_pool,
+        gate=gate,
+        memory_guard=app.state.memory_guard,
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)

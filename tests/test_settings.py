@@ -600,3 +600,16 @@ def test_request_max_body_bytes_setting(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("REQUEST_MAX_BODY_BYTES", "1023")
     with pytest.raises(ConfigError, match="request_max_body_bytes"):
         load_settings()
+
+
+def test_valkey_memory_guard_ratio_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().valkey_memory_guard_ratio == 0.8
+
+    monkeypatch.setenv("VALKEY_MEMORY_GUARD_RATIO", "1.0")
+    assert load_settings().valkey_memory_guard_ratio == 1.0
+
+    for value in ("0.09", "1.01"):
+        monkeypatch.setenv("VALKEY_MEMORY_GUARD_RATIO", value)
+        with pytest.raises(ConfigError, match="valkey_memory_guard_ratio"):
+            load_settings()

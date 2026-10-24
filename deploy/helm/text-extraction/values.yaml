@@ -163,6 +163,11 @@ valkey:
   # 768mb is 60 % of the 1280Mi memory limit: maxmemory counts the data only, and the rest is for
   # allocator fragmentation, client and replication buffers and the copy-on-write pages of the
   # fork of an append-only-file rewrite or a background save. Keep it near 60 % of the limit.
+  # Sizing: job results are the bulk, about BATCH_MAX_URLS x the average result JSON per open
+  # batch (1,000 x ~80 KB = ~80 MB), plus as much again in the result cache, held for
+  # JOB_TTL_SECONDS / RESULT_STORE_TTL_SECONDS (24 h). At VALKEY_MEMORY_GUARD_RATIO (0.8) of
+  # maxmemory the API pods stop accepting batches (503) and skip result-cache writes, so plan
+  # maxmemory for the batches you expect to be open at once with room to spare below 80 %.
   maxmemory: 768mb
   persistence:
     # false: data lives in an emptyDir and is lost on restart (jobs and queued items are lost too).
@@ -212,6 +217,10 @@ metrics:
 alerts:
   # TextExtractionQueueBacklog fires above this many pending items while no item completes.
   queueBacklogItems: 1000
+  # TextExtractionValkeyMemoryHigh fires while Valkey's used memory stays above this share of
+  # its maxmemory for 10 minutes. Keep it at or below config.VALKEY_MEMORY_GUARD_RATIO (0.8),
+  # from which the API refuses new batches.
+  valkeyMemoryRatio: 0.8
 
 # Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
 # limited: the API must reach arbitrary sites, so egress stays open.

@@ -39,6 +39,20 @@ spec:
           annotations:
             summary: text-extraction answers more than 5 % of requests with 5xx
             description: More than 5 % of the requests to {{ $fullName }} in namespace {{ .Release.Namespace }} ended in a 5xx status for 10 minutes.
+        # The memory gauges come from the API pods (every pod reads the same Valkey), hence max().
+        # `> 0` drops a Valkey without maxmemory, which has no limit to alert on.
+        - alert: TextExtractionValkeyMemoryHigh
+          expr: |
+            max(text_extraction_valkey_used_memory_bytes{namespace="{{ $ns }}", service="{{ $internal }}"})
+              /
+            max(text_extraction_valkey_max_memory_bytes{namespace="{{ $ns }}", service="{{ $internal }}"} > 0)
+              > {{ .Values.alerts.valkeyMemoryRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Valkey is nearly full
+            description: Valkey of {{ $fullName }} in namespace {{ $ns }} has used more than {{ mulf .Values.alerts.valkeyMemoryRatio 100 }} % of its maxmemory for 10 minutes. New batches are refused (503) and result-cache writes are skipped until it drops; a full Valkey refuses every write.
         {{- if $jobs }}
         # The queue gauges come from the API pods (every pod reports the same queue), hence max().
         # Counters appear with the first item a worker handles. `or vector(0)` makes "no completion
