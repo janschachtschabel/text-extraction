@@ -59,6 +59,25 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches one API key may have unfinished (queued or running) at a time. The next `POST /v1/batch` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
 | `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
 | `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
+| `BROWSER_ENABLED` | `false` | Switch browser mode on. Off, `mode: browser` answers `status: failed` and `mode: auto` keeps the fast result with the warning `browser_unavailable`. The image of an API pod has no browser; it needs the browser worker image. |
+| `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. 5 to 120. |
+| `BROWSER_QUEUE_WAIT_SECONDS` | `10` | Longest wait for a free browser slot, in seconds. 0 to 60. |
+| `BROWSER_CONCURRENCY` | `4` | Pages one pod renders at the same time. Minimum 1. |
+| `BROWSER_IDLE_WAIT_SECONDS` | `8` | Longest time a page is given to become quiet (no network traffic) after it has loaded, in seconds. 0 to 30. |
+| `BROWSER_RECYCLE_AFTER_PAGES` | `200` | Pages a browser process renders before it is restarted, to bound its memory. Minimum 1. |
+| `BROWSER_MAX_BYTES` | `50000000` | Largest total of all responses one page may load, in bytes. Minimum 1000000. |
+| `BROWSER_BLOCKED_RESOURCES` | `image,media,font` | Comma-separated Playwright resource types that the browser does not load: `document`, `stylesheet`, `image`, `media`, `font`, `script`, `texttrack`, `xhr`, `fetch`, `eventsource`, `websocket`, `manifest`, `other`. `document` cannot be blocked. Empty blocks nothing. Anything else makes the service exit with code 2. |
+| `BROWSER_AUTOCONSENT` | `true` | Accept cookie banners automatically before the text is read. |
+| `BROWSER_EXECUTABLE_PATH` | none | Path of a local Chromium. For development only; deployments use the browser the image ships. |
+| `BROWSER_UNBLOCK_ENABLED` | `false` | Allow unblock mode: a second browser that clears bot challenges. It applies only to requests whose compliance mode is `ignore` (admins, or an operator who made it the default), so robots.txt and TDM checks are off for them. Off, a challenge stays a `bot_protection` failure. |
+| `BROWSER_UNBLOCK_CHANNEL` | `chrome` | Browser of unblock mode: `chrome` (installed Google Chrome) or `chromium`. |
+| `BROWSER_UNBLOCK_HEADLESS` | `false` | Run the unblock browser without a window. Many challenges need a headed browser, which needs a display in the container. |
+| `BROWSER_UNBLOCK_TIMEOUT_SECONDS` | `60` | Time budget of one page in unblock mode, in seconds. 10 to 180. |
+| `BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS` | `20` | How long unblock mode waits for a challenge to clear, in seconds. 0 to 60. |
+| `BROWSER_UNBLOCK_COOKIE_TTL_SECONDS` | `1800` | How long the cookies of a cleared challenge are reused for the same host, in seconds. 0 means no reuse. |
+| `SCREENSHOT_MAX_BYTES` | `10485760` | Largest screenshot file, in bytes (10 MiB). Minimum 1. |
+| `SCREENSHOT_MAX_HEIGHT_PX` | `16384` | Tallest screenshot, in pixels; a longer page is cut. 1080 to 32768. |
+| `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download, in seconds. Minimum 60. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is

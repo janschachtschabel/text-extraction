@@ -11,7 +11,7 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.netguard import MAX_URL_LENGTH
 
-JobKind = Literal["extract", "batch"]
+JobKind = Literal["extract", "batch", "screenshot"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
 
@@ -33,7 +33,9 @@ class BatchRequest(BaseModel, extra="forbid"):
         description="The http(s) URLs to extract, at most `BATCH_MAX_URLS`. A URL twice gets two "
         "items; an invalid URL gets an item that failed with `invalid_url`.",
     )
-    mode: Literal["fast", "auto"] = Field(default="auto", description="As for `/v1/extract`.")
+    mode: Literal["fast", "auto", "browser"] = Field(
+        default="auto", description="As for `/v1/extract`."
+    )
     format: OutputFormat = Field(default="markdown", description="Format of `content`.")
     metadata: bool = Field(default=True, description="Include the pages' DOM metadata.")
     links: bool = Field(default=False, description="Include the pages' links.")
@@ -50,12 +52,14 @@ class JobOptions(BaseModel, extra="forbid"):
     """The extraction options of a job. Same as ``ExtractRequest``, except that the compliance
     mode is already resolved for the caller: it is never None."""
 
-    mode: Literal["fast", "auto"] = "auto"
+    mode: Literal["fast", "auto", "browser"] = "auto"
     format: OutputFormat = "markdown"
     metadata: bool = True
     links: bool = False
     compliance: ComplianceMode
     cache: bool = True
+    screenshot: bool = False
+    full_page: bool = True
 
 
 class JobProgress(BaseModel):

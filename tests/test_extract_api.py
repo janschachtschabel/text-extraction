@@ -128,11 +128,19 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "fingerprint",
         "cache",
         "warnings",
+        "screenshot",
+        "unblocked",
     }
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
     assert data["upstream_status"] == 200
-    assert set(data["timings"]) == {"total_ms", "compliance_ms", "fetch_ms", "convert_ms"}
+    assert set(data["timings"]) == {
+        "total_ms",
+        "compliance_ms",
+        "fetch_ms",
+        "convert_ms",
+        "render_ms",
+    }
     assert data["compliance"]["decision"] == "allowed"
     assert {"url", "text", "kind"} <= set(data["links"][0])
 

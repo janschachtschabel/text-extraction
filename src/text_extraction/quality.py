@@ -2,8 +2,8 @@
 
 ``assess`` looks at the page and the extracted content and reports facts (``Quality``);
 ``quality_error`` turns them into the verdict of the result envelope. In ``auto`` mode
-``browser_recommended`` tells that a browser could do better (the escalation itself is a later
-package).
+``browser_recommended`` tells that a browser could do better (a soft 404 is often a page that
+failed to render, so it counts); ``escalation`` acts on it.
 
 Word count (``count_words``): whitespace-separated tokens that contain at least one letter or
 digit, so Markdown syntax (``#``, ``|``, ``---``, ``-``) is not counted. ``Quality.word_count``
@@ -66,7 +66,10 @@ class Quality(BaseModel):
     bot_challenge: bool
     soft_404: bool
     login_wall: bool
-    browser_recommended: bool  # js_heavy or bot_challenge
+    browser_recommended: bool  # js_heavy, bot_challenge or soft_404
+    # The body of a 403/429/503 answer is a challenge page. Set by the pipeline, which assesses
+    # such bodies only in unblock mode; ``assess`` itself never sets it.
+    challenge_status: bool = False
 
 
 def count_words(text: str) -> int:
@@ -138,15 +141,16 @@ def assess(html: str | None, content: str) -> Quality:
         and (markup.script_count >= 1 or markup.noscript_hint or markup.empty_spa_root)
     )
     bot_challenge = _is_bot_challenge(page_text, own_text, markup, words)
+    soft_404 = words <= SOFT_404_MAX_WORDS and bool(_SOFT_404_PHRASES.search(own_text))
     return Quality(
         visible_chars=len(visible),
         word_count=words,
         script_count=markup.script_count if markup else 0,
         js_heavy=js_heavy,
         bot_challenge=bot_challenge,
-        soft_404=words <= SOFT_404_MAX_WORDS and bool(_SOFT_404_PHRASES.search(own_text)),
+        soft_404=soft_404,
         login_wall=markup is not None and markup.password_input and words < THIN_PAGE_BELOW_WORDS,
-        browser_recommended=js_heavy or bot_challenge,
+        browser_recommended=js_heavy or bot_challenge or soft_404,
     )
 
 

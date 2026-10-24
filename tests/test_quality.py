@@ -128,6 +128,19 @@ def test_soft_404_short_page() -> None:
     assert english.soft_404
 
 
+def test_soft_404_recommends_browser() -> None:
+    text = "Seite nicht gefunden. Die angeforderte Seite existiert nicht."
+    q = assess(f"<body><h1>{text}</h1></body>", text)
+    assert q.soft_404
+    assert not q.js_heavy
+    assert not q.bot_challenge
+    assert q.browser_recommended
+
+
+def test_challenge_status_defaults_to_false() -> None:
+    assert not assess("<body><p>Hello world</p></body>", "Hello world").challenge_status
+
+
 def test_long_page_mentioning_404_is_not_soft_404() -> None:
     text = ARTICLE_TEXT + " The HTTP status 404 means page not found."
     q = assess(f"<body><p>{text}</p></body>", text)

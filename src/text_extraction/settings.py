@@ -17,6 +17,23 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
 
+# Playwright's resource types (``Request.resource_type``). A blocked type is not loaded.
+_RESOURCE_TYPES = (
+    "document",
+    "stylesheet",
+    "image",
+    "media",
+    "font",
+    "script",
+    "texttrack",
+    "xhr",
+    "fetch",
+    "eventsource",
+    "websocket",
+    "manifest",
+    "other",
+)
+
 
 class ApiKey(BaseModel):
     """One API key. Only the SHA-256 of the key is stored, never the key itself."""
@@ -141,11 +158,50 @@ class Settings(BaseSettings):
     # Extractions one pod keeps running after their request got a 202 (and requests waiting for
     # theirs); above it a request keeps waiting inline.
     extract_max_background: int = Field(default=32, ge=1)
+    # Browser mode (Playwright). Off by default: the image of an API pod has no browser.
+    browser_enabled: bool = False
+    browser_timeout_seconds: float = Field(default=30, ge=5, le=120)  # one page, navigation to end
+    browser_queue_wait_seconds: float = Field(default=10, ge=0, le=60)  # wait for a free page slot
+    browser_concurrency: int = Field(default=4, ge=1)  # pages rendered at once per pod
+    browser_idle_wait_seconds: float = Field(default=8, ge=0, le=30)  # longest wait for the network
+    browser_recycle_after_pages: int = Field(default=200, ge=1)  # then the browser is restarted
+    browser_max_bytes: int = Field(default=50_000_000, ge=1_000_000)  # all responses of one page
+    # Comma-separated Playwright resource types that are not loaded; empty: none. Not `document`.
+    browser_blocked_resources: str = "image,media,font"
+    browser_autoconsent: bool = True  # accept cookie banners automatically
+    browser_executable_path: Path | None = None  # development only: a local Chromium
+    # Unblock mode: a second browser that clears bot challenges. Only for requests whose
+    # compliance mode is `ignore` (admins), and only where the operator switches it on.
+    browser_unblock_enabled: bool = False
+    browser_unblock_channel: Literal["chrome", "chromium"] = "chrome"
+    browser_unblock_headless: bool = False
+    browser_unblock_timeout_seconds: float = Field(default=60, ge=10, le=180)
+    browser_unblock_challenge_wait_seconds: float = Field(default=20, ge=0, le=60)
+    # How long the cookies of a cleared challenge are reused for the host; 0: no reuse.
+    browser_unblock_cookie_ttl_seconds: int = Field(default=1800, ge=0)
+    # Screenshots: largest PNG/JPEG in bytes, tallest capture in pixels, and how long the file
+    # (an artifact) stays available.
+    screenshot_max_bytes: int = Field(default=10_485_760, ge=1)
+    screenshot_max_height_px: int = Field(default=16384, ge=1080, le=32768)
+    artifact_ttl_seconds: int = Field(default=3600, ge=60)
 
     @field_validator("log_level", mode="before")
     @classmethod
     def _upper_case_log_level(cls, value: object) -> object:
         return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("browser_blocked_resources")
+    @classmethod
+    def _known_resource_types(cls, value: str) -> str:
+        """Lower-case, no blanks, no repeats; the offending entry is not echoed."""
+        types = list(
+            dict.fromkeys(item.strip().lower() for item in value.split(",") if item.strip())
+        )
+        if "document" in types:
+            raise ValueError("the resource type document cannot be blocked")
+        if any(item not in _RESOURCE_TYPES for item in types):
+            raise ValueError(f"unknown resource type; known: {', '.join(_RESOURCE_TYPES)}")
+        return ",".join(types)
 
     @model_validator(mode="after")
     def _merge_and_validate_api_keys(self) -> Self:
