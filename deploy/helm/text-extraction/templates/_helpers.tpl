@@ -166,6 +166,17 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and (or .Values.workers.extract.autoscaling.keda.enabled .Values.workers.extract.autoscaling.hpa.enabled) (not .Values.workers.extract.enabled) -}}
 {{- fail "workers.extract.autoscaling needs workers.extract.enabled=true." -}}
 {{- end -}}
+{{- /* Shutdown budget, as in server.py: graceful = max(30, EXTRACT_TIMEOUT_SECONDS + 5) after the drain,
+       plus a 10 s margin before the kill. */ -}}
+{{- $timeout := get .Values.config "EXTRACT_TIMEOUT_SECONDS" | default 25 | toString | float64 -}}
+{{- $drain := get .Values.config "SHUTDOWN_DRAIN_SECONDS" | default 5 | toString | float64 -}}
+{{- $graceful := maxf 30.0 (addf $timeout 5.0) -}}
+{{- if gt (addf $drain $graceful) (subf (float64 .Values.terminationGracePeriodSeconds) 10.0) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%v) is too short for the API pods: SHUTDOWN_DRAIN_SECONDS (%v) + max(30, EXTRACT_TIMEOUT_SECONDS (%v) + 5) + a 10 s margin must fit. Raise terminationGracePeriodSeconds or lower the timeouts." .Values.terminationGracePeriodSeconds $drain $timeout) -}}
+{{- end -}}
+{{- if and .Values.workers.extract.enabled (gt $graceful (subf (float64 .Values.workers.extract.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.extract.terminationGracePeriodSeconds (%v) is too short: max(30, EXTRACT_TIMEOUT_SECONDS (%v) + 5) + a 10 s margin must fit. Raise it or lower EXTRACT_TIMEOUT_SECONDS." .Values.workers.extract.terminationGracePeriodSeconds $timeout) -}}
+{{- end -}}
 {{- if and .Values.workers.extract.autoscaling.keda.enabled (ne (include "text-extraction.jobsEnabled" .) "true") -}}
 {{- fail "workers.extract.autoscaling.keda.enabled reads the queue gauges that API pods export only with JOBS_ENABLED=true; do not set jobs.enabled=false with KEDA." -}}
 {{- end -}}

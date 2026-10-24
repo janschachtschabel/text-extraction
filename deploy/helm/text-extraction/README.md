@@ -62,7 +62,9 @@ Secrets, listed separately:
 The in-chart Valkey starts with `--requirepass "$(VALKEY_PASSWORD)"` (Kubernetes expands the env var;
 no shell is involved) and `--maxmemory <valkey.maxmemory> --maxmemory-policy noeviction`: jobs, the
 queue and counters are state, so a full Valkey refuses writes instead of evicting them. The memory
-limit (1Gi) leaves room above `maxmemory` (768mb) for buffers and a background save.
+request and limit are both 1280Mi (Guaranteed QoS: the node does not evict the pod that holds all
+state); `maxmemory` is 60 % of it, because it counts the data only and the rest is for allocator
+fragmentation, client buffers and the fork of an append-only-file rewrite. Raise both together.
 
 Without `valkey.auth.existingSecret` the chart creates a Secret with a random alphanumeric password
 and reads it back with `lookup` on every upgrade, so it stays the same. `lookup` needs a cluster:
@@ -97,7 +99,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
 | `replicaCount` | `2` | Ignored when `autoscaling.enabled`. |
-| `terminationGracePeriodSeconds` | `45` | Time between SIGTERM and kill. Must exceed the server's drain plus graceful shutdown, `SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (35 by default); raise it with either. |
+| `terminationGracePeriodSeconds` | `45` | Time between SIGTERM and kill. Must exceed the server's drain plus graceful shutdown, `SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (35 by default) plus a 10 s margin; raise it with either. The render fails when it does not fit (values from `config.*`, else the defaults 5 and 25). |
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
@@ -117,7 +119,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.enabled` | `true` | Deploy the extract workers. |
 | `workers.extract.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
-| `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. |
+| `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
 | `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder, sized like the API: `CONVERT_CONCURRENCY` x about 450 MB plus the service. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
@@ -145,7 +147,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `valkey.persistence.size` | `1Gi` | |
 | `valkey.persistence.storageClass` | `""` | Cluster default when empty. |
 | `valkey.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
-| `valkey.resources` | requests 50m / 64Mi, limits 500m / 1Gi | The memory limit sits above `valkey.maxmemory`. |
+| `valkey.resources` | requests = limits: 500m / 1280Mi | Guaranteed QoS; reserves 1.25Gi and half a CPU. `valkey.maxmemory` is 60 % of the memory limit: raise both together. |
 | `externalValkey.url` | `""` | Valkey or Redis URL used when `valkey.enabled` is `false`. No password in here. |
 | `externalValkey.existingSecret.name` | `""` | Secret holding a `VALKEY_URL` that carries a password (percent-encoded where needed). Takes precedence over `url`. |
 | `externalValkey.existingSecret.key` | `VALKEY_URL` | Key inside that Secret. |
@@ -168,7 +170,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
 | `TextExtractionQueueBacklog` | `max(text_extraction_queue_pending_items{pool="extract"})` above `alerts.queueBacklogItems` (1000) while `sum(increase(text_extraction_job_items_total{outcome!~"deferred\|lost"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` | `max(text_extraction_queue_pending_items{pool="extract"}) > 0` and no available worker replica (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
-| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` (all outcomes except `success`, `deferred`, `lost`) above 50 % | 15 m |
+| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`; the denominator is every item that recorded a result (all but `deferred`/`lost`) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
@@ -202,7 +204,9 @@ reach arbitrary sites, so egress stays open):
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
 Prometheus in another namespace add for example
 `{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}}`. Probes of the
-kubelet come from the node, which CNIs normally allow.
+kubelet come from the node, which CNIs normally allow. With the default `metricsFrom`, a Prometheus
+in another namespace is cut off from port 9090 and KEDA and the alerts lose their data; NOTES.txt
+warns when `networkPolicy` and the ServiceMonitor are both on with the default.
 
 ## Local checks
 

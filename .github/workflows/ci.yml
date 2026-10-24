@@ -54,9 +54,17 @@ jobs:
         with:
           persist-credentials: false
 
-      # Parses and interpolates docker-compose.yml. VALKEY_PASSWORD is required (no default), so
-      # the check also fails if someone removes the requirement. Dummy values, no real secrets.
+      # Parses and interpolates docker-compose.yml with dummy values, no real secrets. The runner
+      # has no .env, so nothing else supplies VALKEY_PASSWORD.
       - run: docker compose config -q
         env:
           VALKEY_PASSWORD: ci-dummy-password
           API_KEYS: '[{"name":"ci","role":"admin","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]'
+
+      # VALKEY_PASSWORD has no default: without it the file must be rejected.
+      - run: |
+          test ! -e .env
+          if env -u VALKEY_PASSWORD docker compose config -q; then
+            echo "docker compose config accepted a missing VALKEY_PASSWORD" >&2
+            exit 1
+          fi

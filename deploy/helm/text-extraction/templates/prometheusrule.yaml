@@ -68,10 +68,11 @@ spec:
             summary: Items wait in the queue but no extract worker is available
             description: Deployment {{ include "text-extraction.workerExtractName" . }} in namespace {{ $ns }} has had no available replica for 5 minutes while items are pending.
         {{- end }}
-        # Outcome `success` or an error code of the result. Deferred and lost items are no result.
+        # The denominator counts the items that recorded a result (not deferred, not lost). The
+        # numerator leaves out success and content_too_short: a partial result is not a failure.
         - alert: TextExtractionJobItemFailures
           expr: |
-            sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"success|deferred|lost"}[15m]))
+            sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"success|content_too_short|deferred|lost"}[15m]))
               /
             sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"deferred|lost"}[15m]))
               > 0.5
@@ -80,7 +81,7 @@ spec:
             severity: warning
           annotations:
             summary: More than half of the job items fail
-            description: More than 50 % of the job items of {{ $fullName }} in namespace {{ $ns }} ended with an error code for 15 minutes. Target sites that are down or block the service count as well.
+            description: More than 50 % of the job items of {{ $fullName }} in namespace {{ $ns }} failed for 15 minutes (partial results do not count). Target sites that are down or block the service count as failures.
         # The last-success timestamp exists from the first successful read of a pod on. `or vector(0)`
         # also fires when no API pod ever read the queue (for example Valkey down since the start).
         - alert: TextExtractionQueueMetricsStale

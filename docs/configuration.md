@@ -149,7 +149,16 @@ for at most `EXTRACT_TIMEOUT_SECONDS` + 7 s (it cancels those still running 5 s 
 its start and runs while the graceful phase does, so normally the whole sequence fits in the Helm
 chart's `terminationGracePeriodSeconds` (45); its worst case does not, and then the pod is killed
 and the job's lease expires (the job then reports a lost extraction). The Helm value must stay
-above drain plus graceful time (35 s by default).
+above drain plus graceful time (35 s by default) plus a 10 s margin. The chart checks it when it
+renders: it fails if `SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (from
+`config.*`, else the defaults 5 and 25) is above `terminationGracePeriodSeconds` minus 10, and
+likewise for `workers.extract.terminationGracePeriodSeconds` without the drain. Raise the grace
+period whenever you raise either setting.
+
+The in-chart Valkey reserves 1280Mi of memory (request equals limit) and runs with
+`--maxmemory 768mb --maxmemory-policy noeviction`, 60 % of the limit, which leaves room for
+fragmentation, client buffers and the fork of an append-only-file rewrite. Raise limit and
+`valkey.maxmemory` together.
 
 ## Headers
 

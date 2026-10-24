@@ -27,3 +27,10 @@ Extract workers: {{ include "text-extraction.workerExtractName" . }} ({{ ternary
 
 No extract workers are deployed. Jobs are {{ ternary "enabled, so batches wait for workers that run elsewhere" "disabled: the batch and job routes answer 503" (eq (include "text-extraction.jobsEnabled" .) "true") }}.
 {{- end }}
+
+{{- if and .Values.networkPolicy.enabled .Values.metrics.serviceMonitor.enabled (eq (toJson .Values.networkPolicy.metricsFrom) "[{\"podSelector\":{}}]") }}
+
+WARNING: networkPolicy.metricsFrom is still the default (pods of this namespace only). A Prometheus in
+  another namespace cannot reach port 9090 of the API and worker pods, so it scrapes nothing: KEDA and
+  the alerts lose their data. Add its namespace to networkPolicy.metricsFrom.
+{{- end }}
