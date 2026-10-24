@@ -60,7 +60,7 @@ class FlakyQueue:
     pool = "extract"
 
     def __init__(self) -> None:
-        self.counts_now = QueueCounts(pending=7, leased=2, clients=3, domains=4)
+        self.counts_now = QueueCounts(pending=7, leased=2, clients=3)
         self.down = False
         self.calls: list[float] = []
 
@@ -106,7 +106,7 @@ async def test_valkey_down_keeps_last_values_and_logs_once() -> None:
     assert snapshot(registry) == (7, 2, 3)
 
     queue.down = True
-    queue.counts_now = QueueCounts(pending=0, leased=0, clients=0, domains=0)
+    queue.counts_now = QueueCounts(pending=0, leased=0, clients=0)
     with capture_logs() as logs:
         for _ in range(3):
             await gauges.refresh()

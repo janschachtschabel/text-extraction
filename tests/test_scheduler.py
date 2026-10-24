@@ -7,6 +7,7 @@ flushed before each test.
 
 import asyncio
 import os
+import re
 from collections.abc import Callable, Coroutine
 from functools import wraps
 from typing import Any
@@ -16,6 +17,7 @@ from fakeredis import FakeAsyncRedis
 from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
+from text_extraction import scheduler
 from text_extraction.scheduler import Claim, FairQueue, QueueCounts, QueueItem, domain_of
 from text_extraction.settings import Settings
 
@@ -132,7 +134,7 @@ async def test_enqueue_of_nothing_changes_nothing() -> None:
     await queue.enqueue(JOB_A, "A", [])
 
     assert await valkey.keys("*") == []
-    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0)
 
 
 @scenario
@@ -237,7 +239,7 @@ async def test_defer_after_a_lost_lease_changes_nothing() -> None:
 
     assert await queue.defer(lost, clock.now + 30) is False
 
-    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0)
     assert await running(valkey) == {"a.example": 1}
     assert await valkey.hlen("q:{extract}:notbefore") == 0
     assert await queue.complete(rerun)
@@ -266,7 +268,7 @@ async def test_reclaimed_item_reenters_the_rotations() -> None:
     queue = make_queue(valkey, clock)
     await queue.enqueue(JOB_A, "A", urls("a.example", 1))
     await claim_item(queue)
-    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0)
 
     clock.now += LEASE
     again = await claim_item(queue)
@@ -291,12 +293,12 @@ async def test_lost_leases_beyond_max_attempts_are_exhausted() -> None:
     item = claim.item
     assert (item.job_id, item.index, item.client, item.domain) == (JOB_A, 0, "A", "a.example")
     assert item.attempts == 3
-    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0)
     assert await running(valkey) == {"a.example": 1}
 
     assert await queue.complete(item)
     assert await queue.claim(LEASE) == Claim(item=None, exhausted=False, retry_in=None)
-    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0)
     assert await running(valkey) == {}
 
 
@@ -323,10 +325,10 @@ async def test_exhausted_item_is_offered_again_until_completed() -> None:
     assert second.item.lease != first.item.lease
     assert await queue.complete(first.item) is False  # the old lease is fenced off
     await queue.defer(first.item, clock.now + 30)
-    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0)
     assert await running(valkey) == {"a.example": 1}
     assert await queue.complete(second.item) is True
-    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0)
     assert await running(valkey) == {}
 
 
@@ -375,9 +377,9 @@ async def test_reclaim_takes_at_most_twenty_expired_leases_per_claim() -> None:
     clock.now += LEASE
 
     await claim_item(queue)
-    assert await queue.counts() == QueueCounts(pending=19, leased=6, clients=1, domains=1)
+    assert await queue.counts() == QueueCounts(pending=19, leased=6, clients=1)
     await claim_item(queue)
-    assert await queue.counts() == QueueCounts(pending=23, leased=2, clients=1, domains=1)
+    assert await queue.counts() == QueueCounts(pending=23, leased=2, clients=1)
     assert await running(valkey) == {"a.example": 2}
 
 
@@ -395,7 +397,7 @@ async def test_complete_after_expiry_returns_false() -> None:
     assert await queue.complete(rerun) is True
     assert await queue.complete(rerun) is False
     assert await running(valkey) == {}
-    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0)
 
 
 @scenario
@@ -417,18 +419,18 @@ async def test_counts() -> None:
     queue = make_queue(valkey, clock)
     await queue.enqueue(JOB_A, "A", urls("a.example", 3) + urls("b.example", 2))
     await queue.enqueue(JOB_B, "B", urls("a.example", 1))
-    assert await queue.counts() == QueueCounts(pending=6, leased=0, clients=2, domains=2)
+    assert await queue.counts() == QueueCounts(pending=6, leased=0, clients=2)
 
     item = await claim_item(queue)
-    assert await queue.counts() == QueueCounts(pending=5, leased=1, clients=2, domains=2)
+    assert await queue.counts() == QueueCounts(pending=5, leased=1, clients=2)
     await queue.defer(item, clock.now + 30)
-    assert await queue.counts() == QueueCounts(pending=6, leased=0, clients=2, domains=2)
+    assert await queue.counts() == QueueCounts(pending=6, leased=0, clients=2)
 
     for _ in range(2):  # a.example is deferred: only A's b.example items are claimable
         other = await claim_item(queue)
         assert other.domain == "b.example"
         await queue.complete(other)
-    assert await queue.counts() == QueueCounts(pending=4, leased=0, clients=2, domains=1)
+    assert await queue.counts() == QueueCounts(pending=4, leased=0, clients=2)
 
 
 @scenario
@@ -473,7 +475,7 @@ async def test_client_and_domain_names_with_separators_stay_apart() -> None:
         for item in [await claim_item(queue) for _ in range(3)]
     }
     assert second == expected
-    assert await queue.counts() == QueueCounts(pending=0, leased=3, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=3, clients=0)
 
 
 @scenario
@@ -490,7 +492,7 @@ async def test_duplicate_of_a_leased_item_is_dropped() -> None:
     for index in range(2):  # the leases of the first copies keep their expiry
         assert await valkey.zscore("q:{extract}:leases", f"{JOB_A}:{index}:0") == START + LEASE
     assert await running(valkey) == {"a.example": 2}
-    assert await queue.counts() == QueueCounts(pending=0, leased=2, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=2, clients=0)
 
 
 @scenario
@@ -604,7 +606,7 @@ async def test_orphan_client_and_empty_domain_are_dropped_on_a_claim() -> None:
 
     assert item.domain == "a.example"
     assert await valkey.exists("q:{extract}:clients", "q:{extract}:c:A:domains") == 0
-    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0)
 
 
 @scenario
@@ -624,6 +626,17 @@ async def test_orphan_client_and_empty_domain_are_dropped_on_an_idle_pass() -> N
     assert await valkey.lrange("q:{extract}:c:A:domains", 0, -1) == [b"a.example"]
     clock.now += 30
     assert (await claim_item(queue)).domain == "a.example"
+
+
+def test_counts_reads_only_the_totals() -> None:
+    """The gauges read the counts every 5 s per API pod: the script reads the size of the client
+    list, the pending counter and the size of the lease set, never a client's domain list, so
+    its cost does not grow with the queue. It stays read-only."""
+    script = scheduler._COUNTS
+    assert script.startswith("#!lua flags=no-writes\n")
+    body = script.split(scheduler._PREAMBLE, 1)[1]
+    calls = sorted(set(re.findall(r"redis\.call\('([A-Z]+)'", body)))
+    assert calls == ["GET", "LLEN", "ZCARD"]
 
 
 @scenario

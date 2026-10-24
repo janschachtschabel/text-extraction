@@ -327,24 +327,14 @@ return 1
 """
 )
 
-# ARGV = prefix. Returns {pending, leased, clients, distinct domains}; writes nothing.
+# ARGV = prefix. Returns {pending, leased, clients}; writes nothing. Three size reads, so the
+# cost does not grow with the queue (the API pods run it every 5 s for the gauges).
 _COUNTS = (
     "#!lua flags=no-writes\n"
     + _PREAMBLE
     + """
-local seen = {}
-local domains = 0
-local names = redis.call('LRANGE', clients, 0, -1)
-for _, client in ipairs(names) do
-  for _, domain in ipairs(redis.call('LRANGE', domains_key(client), 0, -1)) do
-    if not seen[domain] then
-      seen[domain] = true
-      domains = domains + 1
-    end
-  end
-end
 local queued = tonumber(redis.call('GET', pending) or '0')
-return {queued, redis.call('ZCARD', leases), #names, domains}
+return {queued, redis.call('ZCARD', leases), redis.call('LLEN', clients)}
 """
 )
 
@@ -402,13 +392,11 @@ class QueueCounts:
     - ``leased``: items currently leased by a worker, including leases that expired and were not
       taken back yet.
     - ``clients``: clients with pending items.
-    - ``domains``: distinct domains with pending items, over all clients.
     """
 
     pending: int
     leased: int
     clients: int
-    domains: int
 
 
 def domain_of(url: str) -> str:
@@ -562,11 +550,9 @@ class FairQueue:
         return self._pool
 
     async def counts(self) -> QueueCounts:
-        """How many items are pending and leased, and how many clients and domains wait."""
-        pending, leased, clients, domains = await self._counts(keys=self._keys, args=[self._prefix])
-        counts = QueueCounts(
-            pending=int(pending), leased=int(leased), clients=int(clients), domains=int(domains)
-        )
+        """How many items are pending and leased, and how many clients wait. Constant time."""
+        pending, leased, clients = await self._counts(keys=self._keys, args=[self._prefix])
+        counts = QueueCounts(pending=int(pending), leased=int(leased), clients=int(clients))
         if counts.pending < 0:
             _log.warning("queue_counter_negative", pool=self._pool, pending=counts.pending)
         return counts

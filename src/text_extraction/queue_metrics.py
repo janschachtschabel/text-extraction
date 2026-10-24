@@ -11,9 +11,9 @@
   result of a job. The definition lives here so that the worker and the API cannot drift apart;
   each process has its own registry.
 
-``FairQueue.counts()`` walks the clients' lists, so a background task reads it every
-``interval`` seconds, not once per scrape; the collector only reports the last values (collectors
-are synchronous). When Valkey fails the last values stay and the outage is logged once.
+A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``
+seconds, not once per scrape, since collectors are synchronous; the collector only reports the
+last values. When Valkey fails the last values stay and the outage is logged once.
 """
 
 import asyncio

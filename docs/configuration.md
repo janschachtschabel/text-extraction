@@ -325,8 +325,8 @@ the number of API pods, and `avg()` is only right while all pods have read it at
 The same holds for `text_extraction_queue_leased_items` and `text_extraction_queue_clients`.
 `text_extraction_jobs_created_total` is per pod: use `sum()` over pods for the total.
 
-A pod reads the queue in the background every 5 seconds (the read walks the clients' lists, so it
-is not done per scrape); the gauges are up to 5 s old. A pod exports no queue gauge until its first
+A pod reads the queue in the background every 5 seconds (collectors cannot wait for Valkey; the
+read is three size lookups, whatever the queue holds); the gauges are up to 5 s old. A pod exports no queue gauge until its first
 read has succeeded, so an empty series means "not known", never "empty queue". While Valkey fails
 the pod keeps exporting the last values and logs `queue_metrics_unavailable` once; it logs
 `queue_metrics_recovered` when the reads work again. To alert on stale data, use
