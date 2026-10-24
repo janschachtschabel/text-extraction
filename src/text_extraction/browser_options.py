@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MAX_ACTIONS = 20
 MAX_COOKIES = 50
@@ -122,8 +122,22 @@ Action = Annotated[
 ]
 
 
+_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+# RFC 6265 cookie-value: cookie-octets (printable ASCII but space, DQUOTE, comma, semicolon and
+# backslash), optionally in one pair of double quotes. Chromium refuses anything else.
+_COOKIE_OCTETS = r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*"
+_COOKIE_VALUE = re.compile(f'{_COOKIE_OCTETS}|"{_COOKIE_OCTETS}"')
+_COOKIE_NAME_MESSAGE = "a cookie name must be a token (letters, digits and !#$%&'*+-.^_`|~)"
+_COOKIE_VALUE_MESSAGE = (
+    "a cookie value may hold printable ASCII except space, double quote, comma, semicolon and "
+    "backslash, optionally in double quotes (RFC 6265)"
+)
+
+
 class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True):
-    """A cookie to set before the page loads. ``domain`` defaults to the request URL's host."""
+    """A cookie to set before the page loads. ``domain`` defaults to the request URL's host.
+    ``name`` is a token and ``value`` follows RFC 6265, as Chromium requires; an error message
+    never shows the value."""
 
     name: str = Field(min_length=1, max_length=256)
     value: str = Field(max_length=4096, repr=False)
@@ -132,8 +146,21 @@ class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True):
     secure: bool = False
     http_only: bool = False
 
+    @field_validator("name")
+    @classmethod
+    def _token_name(cls, name: str) -> str:
+        if not _TOKEN.fullmatch(name):
+            raise ValueError(_COOKIE_NAME_MESSAGE)
+        return name
 
-_TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+    @field_validator("value")
+    @classmethod
+    def _cookie_octets(cls, value: str) -> str:
+        if not _COOKIE_VALUE.fullmatch(value):
+            raise ValueError(_COOKIE_VALUE_MESSAGE)
+        return value
+
+
 _PRINTABLE_ASCII = re.compile(r"[\x20-\x7e]*")
 # Set by the browser itself or by the connection; a caller must not override them.
 _REFUSED_HEADERS = frozenset(
@@ -213,7 +240,9 @@ ACTIONS_DESCRIPTION = (
 )
 COOKIES_DESCRIPTION = (
     "Cookies to set before the page loads, at most 50. A `domain` must be the URL's host or a "
-    "parent domain of it. Never logged or shown in a job."
+    "parent domain of it. `name` is a token and `value` follows RFC 6265 (printable ASCII "
+    "except space, double quote, comma, semicolon and backslash, optionally in double quotes); "
+    "anything else answers 422. Never logged or shown in a job."
 )
 HEADERS_DESCRIPTION = (
     "Extra request headers, at most 20 (for example `Authorization` for a partner's logged-in "

@@ -280,6 +280,39 @@ def test_cookie_limits() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("sid", "a;b"),  # ends the cookie early
+        ("sid", "line\x01"),  # a control character
+        ("sid", "tab\there"),
+        ("sid", "two words"),  # a space
+        ("sid", 'quo"te'),  # a DQUOTE inside
+        ("sid", '"open'),  # an unmatched DQUOTE
+        ("sid", "back\\slash"),
+        ("sid", "com,ma"),
+        ("sid", "caf\u00e9"),  # not ASCII
+        ("a b", "x"),  # a name is a token
+        ("a;b", "x"),
+        ("a=b", "x"),
+        ("n\x7f", "x"),
+    ],
+)
+def test_cookie_name_and_value_follow_rfc_6265(name: str, value: str) -> None:
+    # M-5: Chromium refuses such cookies, which ended as a retryable internal_error.
+    with pytest.raises(ValidationError) as info:
+        BrowserCookie(name=name, value=value)
+    assert value not in str(info.value) or value == "x"
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "abc", "a=b", "eyJhbGciOi.J9-_~", '"quoted"', '""', "!#$%&'()*+-./:<=>?@[]^_`{|}~"],
+)
+def test_cookie_values_of_cookie_octets_are_accepted(value: str) -> None:
+    assert BrowserCookie(name="sid", value=value).value == value
+
+
 def test_screenshot_request_shares_the_limits_of_extract_request() -> None:
     request = ScreenshotRequest(url=URL)
 
@@ -387,6 +420,7 @@ def test_secret_values_stay_out_of_repr_and_validation_errors() -> None:
         lambda: ScreenshotRequest(url=URL, headers={"x-token": "\n" + secret}),
         lambda: ScreenshotRequest(url=URL, cookies=[bad_cookie]),
         lambda: BrowserCookie(name="", value=secret),
+        lambda: BrowserCookie(name="sid", value=f"{secret};"),
         lambda: BrowserSecrets(headers={"cookie": secret}),
         lambda: ACTIONS.validate_python([{"type": "type", "selector": "", "text": secret}]),
     ):
@@ -394,7 +428,7 @@ def test_secret_values_stay_out_of_repr_and_validation_errors() -> None:
             build()
         errors.append(str(info.value))
 
-    assert len(errors) == 8
+    assert len(errors) == 9
     for text in shown + errors:
         assert secret not in text
 

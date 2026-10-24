@@ -241,7 +241,7 @@ The request fields it adds (all in the OpenAPI spec):
 | --- | --- | --- |
 | `mode` | `POST /v1/extract`, `POST /v1/batch` | `fast`, `auto` (default) or `browser`. Batches take it too but no browser options. |
 | `actions` | `POST /v1/extract`, `POST /v1/screenshot` | Up to 20 page actions. `evaluate` is for admins. A click that starts a download discards the page. |
-| `cookies`, `headers` | same | Session cookies and extra headers for logged-in pages. Headers go only to the requested URL's host and port. Never logged or shown in a job. |
+| `cookies`, `headers` | same | Session cookies and extra headers for logged-in pages. Headers go only to the requested URL's host and port. A cookie `name` is a token and its `value` follows RFC 6265 (printable ASCII except space, double quote, comma, semicolon and backslash, optionally in double quotes); anything else answers 422 without the value. Never logged or shown in a job. |
 | `screenshot`, `full_page` | `POST /v1/extract` | `data.screenshot` references the PNG for `GET /v1/jobs/{id}/artifacts/screenshot.png`, kept for `ARTIFACT_TTL_SECONDS`. |
 | `compliance: ignore` | all | Admins only. Together with `BROWSER_UNBLOCK_ENABLED` it switches on unblock mode. |
 

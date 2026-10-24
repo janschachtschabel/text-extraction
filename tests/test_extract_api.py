@@ -1575,3 +1575,18 @@ def test_a_cancelled_request_still_abandons_its_job(wait_error: Exception | None
     asyncio.run(scenario())
 
     assert dispatcher.abandoned
+
+
+def test_a_cookie_chromium_would_refuse_is_422_without_its_value() -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "cookies": [{"name": "sid", "value": f"{COOKIE_SECRET};x"}]},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert COOKIE_SECRET not in response.text
+        assert case.keys("job*") == []
