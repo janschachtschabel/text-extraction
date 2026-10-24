@@ -26,9 +26,9 @@ import contextlib
 import hmac
 import secrets
 import socket
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from ipaddress import IPv4Address, IPv6Address
-from typing import Final
+from typing import Any, Final
 from weakref import WeakKeyDictionary
 
 import structlog
@@ -45,6 +45,7 @@ MAX_CONNECTIONS: Final = 512  # open connections over all contexts
 MAX_HOSTS: Final = 200  # hosts a context remembers
 MAX_REFUSALS: Final = 50  # refusals a context remembers
 CONNECT_TIMEOUT_SECONDS: Final = 10.0  # one address
+DNS_TIMEOUT_SECONDS: Final = 10.0  # the lookup of one host
 TUNNEL_GRACE_SECONDS: Final = 5.0  # added to BROWSER_UNBLOCK_TIMEOUT_SECONDS
 _CHUNK_BYTES: Final = 64 * 1024
 _SEND_TIMEOUT_SECONDS: Final = 2.0  # a client that does not read its refusal is dropped
@@ -64,6 +65,8 @@ _BAD_HOST_CHARS: Final = frozenset(' /\\?#@[]"<>')
 _NOT_FORWARDED: Final = frozenset(
     {"host", "connection", "proxy-connection", "proxy-authorization", "keep-alive"}
 )
+# The same in a response head: the browser must see "Connection: close" and no keep-alive.
+_NOT_RETURNED: Final = frozenset({b"connection", b"proxy-connection", b"keep-alive"})
 
 
 def host_header(host: str, port: int) -> str:
@@ -143,6 +146,7 @@ class _Request:
         headers: list[str],
         authorization: str | None,
         rest: bytes,
+        body_limit: int | None = 0,
     ) -> None:
         self.method = method
         self.host = host
@@ -151,6 +155,9 @@ class _Request:
         self.headers = headers  # the header lines as received
         self.authorization = authorization
         self.rest = rest  # bytes that arrived behind the head
+        # Bytes of request body a plain request may send (Content-Length); None for a chunked
+        # body, whose end is not tracked.
+        self.body_limit = body_limit
 
 
 def _split_authority(authority: str, default_port: int | None) -> tuple[str, int]:
@@ -191,6 +198,8 @@ def _parse_head(head: bytes, rest: bytes) -> _Request:
 
     headers: list[str] = []
     authorization: str | None = None
+    lengths: list[str] = []
+    chunked = False
     for line in lines[1:]:
         name, colon, value = line.partition(":")
         if not colon or not name or not name.isascii() or not name.isprintable() or " " in name:
@@ -198,6 +207,10 @@ def _parse_head(head: bytes, rest: bytes) -> _Request:
         headers.append(line)
         if name.lower() == "proxy-authorization" and authorization is None:
             authorization = value.strip()
+        elif name.lower() == "content-length":
+            lengths.append(value.strip())
+        elif name.lower() == "transfer-encoding":
+            chunked = True
 
     if method == "CONNECT":
         host, port = _split_authority(target, None)
@@ -210,7 +223,14 @@ def _parse_head(head: bytes, rest: bytes) -> _Request:
     host, port = _split_authority(authority, 80)
     if not path.startswith("/"):
         path = "/" + path
-    return _Request(method, host, port, path, headers, authorization, rest)
+    # One request per connection (see EgressProxy._tunnel): the body's extent decides how much of
+    # the client's stream is passed on. Ambiguous framing is refused.
+    if chunked and lengths:
+        raise _Refusal(400, "bad_request")
+    if len(lengths) > 1 or any(not (v.isascii() and v.isdecimal()) for v in lengths):
+        raise _Refusal(400, "bad_request")
+    body_limit = None if chunked else int(lengths[0]) if lengths else 0
+    return _Request(method, host, port, path, headers, authorization, rest, body_limit)
 
 
 class _Metrics:
@@ -250,6 +270,7 @@ class EgressProxy:
         registry: CollectorRegistry,
         head_timeout: float = HEAD_TIMEOUT_SECONDS,
         tunnel_timeout: float | None = None,
+        dns_timeout: float = DNS_TIMEOUT_SECONDS,
         max_connections: int = MAX_CONNECTIONS,
     ) -> None:
         if policy is None:
@@ -266,6 +287,7 @@ class EgressProxy:
             if tunnel_timeout is not None
             else settings.browser_unblock_timeout_seconds + TUNNEL_GRACE_SECONDS
         )
+        self._dns_timeout = dns_timeout
         self._max_connections = max_connections
         self._metrics = _metrics_for(registry)
         self._server: asyncio.Server | None = None
@@ -391,6 +413,7 @@ class EgressProxy:
             async with asyncio.timeout(self._tunnel_timeout):
                 remote_reader, remote = await self._dial(request.host, request.port)
                 context._saw(request.host)
+                remaining: int | None = None
                 if request.path is None:
                     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
                     first = request.rest
@@ -407,7 +430,11 @@ class EgressProxy:
                         "Connection: close",
                     ]
                     head = f"{request.method} {request.path} HTTP/1.1\r\n" + "\r\n".join(kept)
-                    first = head.encode("latin-1") + b"\r\n\r\n" + request.rest
+                    body = request.rest
+                    if request.body_limit is not None:
+                        body = body[: request.body_limit]
+                        remaining = request.body_limit - len(body)
+                    first = head.encode("latin-1") + b"\r\n\r\n" + body
                 established = True
                 if first:
                     if not context._count(len(first)):
@@ -415,7 +442,18 @@ class EgressProxy:
                     remote.write(first)
                 await writer.drain()
                 await remote.drain()
-                await self._relay(context, reader, writer, remote_reader, remote)
+                if request.path is None:
+                    await self._relay(
+                        self._pump(context, reader, remote),
+                        self._pump(context, remote_reader, writer),
+                    )
+                else:
+                    # One request per connection: whatever the client sends after the request's
+                    # body is dropped, and the browser is told not to reuse the connection.
+                    await self._relay(
+                        self._pump_request(context, reader, remote, remaining),
+                        self._pump_response(context, remote_reader, writer),
+                    )
         except TimeoutError:
             if not established:
                 raise _Refusal(502, "connect_error", request.host) from None
@@ -427,10 +465,11 @@ class EgressProxy:
         self, host: str, port: int
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
-            addresses = await resolve_allowed(host, port, self._policy)
+            async with asyncio.timeout(self._dns_timeout):
+                addresses = await resolve_allowed(host, port, self._policy)
         except BlockedAddressError:
             raise _Refusal(403, "blocked_address", host) from None
-        except (socket.gaierror, UnicodeError):
+        except (socket.gaierror, UnicodeError, TimeoutError):
             raise _Refusal(502, "dns_error", host) from None
         for address in addresses:  # the first that answers; IPv6 may be unreachable here
             try:
@@ -440,19 +479,12 @@ class EgressProxy:
                 continue
         raise _Refusal(502, "connect_error", host)
 
+    @staticmethod
     async def _relay(
-        self,
-        context: ProxyContext,
-        client_reader: asyncio.StreamReader,
-        client_writer: asyncio.StreamWriter,
-        remote_reader: asyncio.StreamReader,
-        remote_writer: asyncio.StreamWriter,
+        client_to_remote: Coroutine[Any, Any, None], remote_to_client: Coroutine[Any, Any, None]
     ) -> None:
-        """Copy both ways until either side ends or the context passes its byte limit."""
-        pumps = [
-            asyncio.create_task(self._pump(context, client_reader, remote_writer)),
-            asyncio.create_task(self._pump(context, remote_reader, client_writer)),
-        ]
+        """Run both directions until either side ends or the context passes its byte limit."""
+        pumps = [asyncio.create_task(client_to_remote), asyncio.create_task(remote_to_client)]
         try:
             await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
         finally:
@@ -470,13 +502,71 @@ class EgressProxy:
             sink.write(chunk)
             await sink.drain()
 
+    @staticmethod
+    async def _pump_request(
+        context: ProxyContext,
+        source: asyncio.StreamReader,
+        sink: asyncio.StreamWriter,
+        remaining: int | None,
+    ) -> None:
+        """Pass on the rest of a plain request's body (``remaining`` bytes, all of a chunked one).
+
+        Then the client's stream is only read, so that its end is noticed, and dropped.
+        """
+        while chunk := await source.read(_CHUNK_BYTES):
+            if remaining is not None:
+                chunk, remaining = chunk[:remaining], remaining - len(chunk[:remaining])
+            if chunk:
+                if not context._count(len(chunk)):
+                    return
+                sink.write(chunk)
+                await sink.drain()
+
+    @classmethod
+    async def _pump_response(
+        cls, context: ProxyContext, source: asyncio.StreamReader, sink: asyncio.StreamWriter
+    ) -> None:
+        """Relay a plain response with ``Connection: close`` in place of its connection headers."""
+        buffer = b""
+        while True:  # interim 1xx heads come before the final one
+            while (end := buffer.find(b"\r\n\r\n")) < 0:
+                if len(buffer) > MAX_HEAD_BYTES:
+                    return
+                chunk = await source.read(_CHUNK_BYTES)
+                if not chunk:  # the origin ended mid-head: pass on what it sent
+                    if buffer and context._count(len(buffer)):
+                        sink.write(buffer)
+                        await sink.drain()
+                    return
+                buffer += chunk
+            lines = buffer[:end].split(b"\r\n")
+            buffer = buffer[end + 4 :]
+            kept = [
+                line
+                for line in lines[1:]
+                if line.partition(b":")[0].strip().lower() not in _NOT_RETURNED
+            ]
+            head = b"\r\n".join([lines[0], *kept, b"Connection: close"]) + b"\r\n\r\n"
+            if not context._count(len(head)):
+                return
+            sink.write(head)
+            status = lines[0].split(b" ")[1:2]
+            if not (status and status[0].startswith(b"1") and status[0] != b"101"):
+                break
+        if buffer:
+            if not context._count(len(buffer)):
+                return
+            sink.write(buffer)
+        await sink.drain()
+        await cls._pump(context, source, sink)
+
     # --- refusals ---
 
     def _record(self, context: ProxyContext | None, refusal: _Refusal) -> None:
         self._metrics.refused.labels(reason=refusal.reason).inc()
         if context is not None and refusal.host is not None:
             context._refuse(refusal.host, refusal.reason)
-        _log.warning("browser_proxy_refused", host=refusal.host, reason=refusal.reason)
+        _log.info("browser_proxy_refused", host=refusal.host, reason=refusal.reason)
 
     @staticmethod
     async def _send(writer: asyncio.StreamWriter, status: int, challenge: bool = False) -> None:

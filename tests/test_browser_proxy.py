@@ -52,6 +52,41 @@ async def echo_server() -> asyncio.Server:
     return await asyncio.start_server(handle, "127.0.0.1", 0)
 
 
+class KeepAliveOrigin:
+    """Answers the first request it receives with ``response`` and then keeps the connection open,
+    ignoring ``Connection: close``; records every byte it receives."""
+
+    def __init__(self, response: bytes) -> None:
+        self.response = response
+        self.received = b""
+        self.closed = asyncio.Event()
+        self.server: asyncio.Server | None = None
+
+    async def start(self) -> int:
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        return port_of(self.server)
+
+    async def stop(self) -> None:
+        assert self.server is not None
+        self.server.close()
+        await self.server.wait_closed()
+
+    async def _handle(self, reader: Reader, writer: Writer) -> None:
+        answered = False
+        try:
+            while chunk := await reader.read(65536):
+                self.received += chunk
+                if not answered and b"\r\n\r\n" in self.received:
+                    answered = True
+                    writer.write(self.response)
+                    await writer.drain()
+        except ConnectionError:
+            pass
+        finally:
+            writer.close()
+            self.closed.set()
+
+
 def port_of(server: asyncio.Server) -> int:
     return int(server.sockets[0].getsockname()[1])
 
@@ -458,6 +493,12 @@ def test_oversized_or_slow_request_head_is_refused() -> None:
         b"CONNECT example.org:99999 HTTP/1.1\r\n\r\n",
         b"CONNECT example.org:443 HTTP/2\r\n\r\n",
         b"CONNECT example.org:443 HTTP/1.1\r\nno colon here\r\n\r\n",
+        b"POST http://example.org/ HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\n",
+        b"POST http://example.org/ HTTP/1.1\r\nContent-Length: x\r\n\r\n",
+        (
+            b"POST http://example.org/ HTTP/1.1\r\nContent-Length: 1\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+        ),
     ],
 )
 def test_malformed_requests_are_400(raw: bytes) -> None:
@@ -534,5 +575,117 @@ def test_contexts_get_distinct_random_credentials() -> None:
             assert len({c.username for c in contexts}) == 5
             assert len({c.password for c in contexts}) == 5
             assert all(len(c.password) >= 16 for c in contexts)
+
+    run_scenario(scenario)
+
+
+KEEP_ALIVE_RESPONSE = (
+    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n"
+    b"Keep-Alive: timeout=60\r\nProxy-Connection: keep-alive\r\nX-Origin: yes\r\n\r\nok"
+)
+
+
+def test_a_plain_connection_carries_one_request_only() -> None:
+    async def scenario() -> None:
+        origin = KeepAliveOrigin(KEEP_ALIVE_RESPONSE)
+        origin_port = await origin.start()
+        try:
+            async with running(policy=allow_all) as (proxy, _, _):
+                context = proxy.open_context()
+                auth = f"Proxy-Authorization: {basic(context)}\r\n"
+                first = f"GET http://127.0.0.1:{origin_port}/one HTTP/1.1\r\n{auth}\r\n"
+                reader, writer = await talk(proxy, first.encode())
+                status, headers, _ = await read_head(reader)
+                assert status == 200
+                assert headers["connection"] == "close"  # the browser must not reuse the socket
+                assert "keep-alive" not in headers
+                assert "proxy-connection" not in headers
+                assert headers["x-origin"] == "yes"
+                assert await asyncio.wait_for(reader.readexactly(2), 5) == b"ok"
+
+                # A client that reuses the connection anyway: the request goes nowhere.
+                second = f"GET http://10.0.0.1/secret HTTP/1.1\r\nHost: 10.0.0.1\r\n{auth}\r\n"
+                writer.write(second.encode())
+                await writer.drain()
+                writer.close()
+                await asyncio.wait_for(origin.closed.wait(), 5)  # the proxy ended the connection
+                received = origin.received.decode()
+                assert received.count("GET ") == 1
+                assert received.startswith("GET /one HTTP/1.1\r\n")
+                assert "10.0.0.1" not in received
+                assert "Proxy-Authorization" not in received
+        finally:
+            await origin.stop()
+
+    run_scenario(scenario)
+
+
+def test_a_plain_request_body_is_forwarded_counted_and_nothing_beyond_it() -> None:
+    async def scenario() -> None:
+        origin = KeepAliveOrigin(KEEP_ALIVE_RESPONSE)
+        origin_port = await origin.start()
+        try:
+            async with running(policy=allow_all) as (proxy, _, _):
+                context = proxy.open_context()
+                head = (
+                    f"POST http://127.0.0.1:{origin_port}/form HTTP/1.1\r\n"
+                    f"Proxy-Authorization: {basic(context)}\r\nContent-Length: 5\r\n\r\nab"
+                )
+                reader, writer = await talk(proxy, head.encode())  # part of the body with the head
+                writer.write(b"cde" + b"GET http://10.0.0.1/ HTTP/1.1\r\n\r\n")  # and beyond it
+                await writer.drain()
+                assert (await read_head(reader))[0] == 200
+                writer.close()
+                await asyncio.wait_for(origin.closed.wait(), 5)
+                assert origin.received.endswith(b"\r\n\r\nabcde")
+                assert b"10.0.0.1" not in origin.received
+                assert context.bytes >= len(origin.received)  # the request, and the response too
+        finally:
+            await origin.stop()
+
+    run_scenario(scenario)
+
+
+def test_interim_responses_lose_their_keep_alive_too() -> None:
+    async def scenario() -> None:
+        interim = b"HTTP/1.1 100 Continue\r\nConnection: keep-alive\r\n\r\n"
+        origin = KeepAliveOrigin(interim + KEEP_ALIVE_RESPONSE)
+        origin_port = await origin.start()
+        try:
+            async with running(policy=allow_all) as (proxy, _, _):
+                context = proxy.open_context()
+                request = (
+                    f"GET http://127.0.0.1:{origin_port}/ HTTP/1.1\r\n"
+                    f"Proxy-Authorization: {basic(context)}\r\n\r\n"
+                )
+                reader, writer = await talk(proxy, request.encode())
+                for expected in (100, 200):
+                    status, headers, _ = await read_head(reader)
+                    assert status == expected
+                    assert headers["connection"] == "close"
+                    assert "keep-alive" not in headers
+                writer.close()
+        finally:
+            await origin.stop()
+
+    run_scenario(scenario)
+
+
+def test_a_stalled_dns_lookup_is_a_502_dns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        async with running(dns_timeout=0.2) as (proxy, _, registry):
+
+            async def stalled(host: str, port: int, **_: object) -> list[Any]:
+                await asyncio.sleep(3600)
+                return []
+
+            monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", stalled)
+            context = proxy.open_context()
+            status, _, writer = await open_tunnel(proxy, context, "slow.example:443")
+            assert status == 502
+            assert refused(registry, "dns_error") == 1
+            assert refused(registry, "connect_error") == 0
+            assert context.refused == (("slow.example", "dns_error"),)
+            writer.close()
 
     run_scenario(scenario)
