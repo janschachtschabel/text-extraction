@@ -12,6 +12,7 @@ from tests.browser.site import (
     ARIA_TEXT,
     ARTICLE_TEXT,
     CHOSEN,
+    FRAGMENT_TEXT,
     LAZY_ITEMS,
     OPTED_IN,
     OPTED_OUT,
@@ -359,6 +360,131 @@ def test_consent_outcomes_are_read_from_results_and_states(
     scenario(settings_for, site, body)
 
 
+def test_type_replaces_the_value(settings_for: SettingsFor, site: Site) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(
+            stack,
+            f"{site.base}/actions",
+            TypeAction(selector="#field", text="glaciers"),
+            PressAction(key="Enter"),
+        )
+        assert f'<p id="echoed">{TYPED_ECHO}glaciers</p>' in rendered.html
+
+    scenario(settings_for, site, body)
+
+
+def test_expand_all_does_not_follow_links_or_submit_forms(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/nav-toggle", ExpandAllAction())
+        assert rendered.final_url == f"{site.base}/nav-toggle"
+        assert FRAGMENT_TEXT in rendered.html  # a fragment link is a toggle
+        assert rendered.warnings == ()
+        assert site.seen(site.base, "/static") == []
+
+    scenario(settings_for, site, body)
+
+
+def test_expand_all_fails_when_the_page_changed(settings_for: SettingsFor, site: Site) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/nav-script", ExpandAllAction())
+        assert rendered.warnings == ("action_0_failed",)
+
+    scenario(settings_for, site, body)
+
+
+def test_a_post_started_by_an_action_fails_the_action(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(
+            stack,
+            f"{site.base}/form-click",
+            ClickAction(selector="#send"),
+            ClickAction(selector="#reveal"),
+        )
+        assert rendered.warnings == ("navigation_refused_non_get", "action_0_failed")
+        assert ">Reveal<" in rendered.html  # the second action did not run
+        assert rendered.final_url == f"{site.base}/form-click"
+        assert [s.method for s in site.seen(site.base, "/static")] == []
+
+    scenario(settings_for, site, body)
+
+
+def test_accept_cookies_twice_is_nothing_to_accept_the_second_time(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(
+            stack, f"{site.base}/consent", AcceptCookiesAction(), AcceptCookiesAction()
+        )
+        assert rendered.warnings == ()
+        assert f'<p id="state">{OPTED_IN}</p>' in rendered.html
+
+    scenario(settings_for, site, body)
+
+
+def _slow(seconds: float, *, refuse: bool = False) -> Callable[[str], Awaitable[None]]:
+    async def check(target: str) -> None:
+        await asyncio.sleep(seconds)
+        if refuse:
+            raise FetchError(ErrorCode.BLOCKED_BY_ROBOTS, "The site's robots.txt forbids it.")
+
+    return check
+
+
+@pytest.mark.parametrize("by_script", [False, True])
+def test_a_slow_navigation_check_is_waited_for(
+    settings_for: SettingsFor, site: Site, monkeypatch: pytest.MonkeyPatch, by_script: bool
+) -> None:
+    # The check takes longer than an element wait.
+    monkeypatch.setattr(text_extraction.browser_actions, "ELEMENT_WAIT_SECONDS", 0.5)
+    action: Action = (
+        EvaluateAction(script="location.href = '/static'")
+        if by_script
+        else ClickAction(selector="#go")
+    )
+
+    async def body(stack: Stack) -> None:
+        rendered = await render(
+            stack, f"{site.base}/actions", action, allow_evaluate=True, check=_slow(1.5)
+        )
+        assert rendered.warnings == ()
+        assert rendered.final_url == f"{site.base}/static"
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+
+    scenario(settings_for, site, body)
+
+
+@pytest.mark.parametrize("by_script", [False, True])
+def test_a_slow_refusal_keeps_the_page(
+    settings_for: SettingsFor, site: Site, monkeypatch: pytest.MonkeyPatch, by_script: bool
+) -> None:
+    monkeypatch.setattr(text_extraction.browser_actions, "ELEMENT_WAIT_SECONDS", 0.5)
+    action: Action = (
+        EvaluateAction(script="location.href = '/static'")
+        if by_script
+        else ClickAction(selector="#go")
+    )
+
+    async def body(stack: Stack) -> None:
+        rendered = await render(
+            stack,
+            f"{site.base}/actions",
+            action,
+            ClickAction(selector="#reveal"),
+            allow_evaluate=True,
+            check=_slow(1.5, refuse=True),
+        )
+        assert rendered.warnings == ("action_0_failed",)
+        assert rendered.final_url == f"{site.base}/actions"
+        assert SHOWN_EMPTY in rendered.html  # the page, not an error page; no later action
+        assert site.seen(site.base, "/static") == []
+
+    scenario(settings_for, site, body)
+
+
 def test_actions_respect_the_deadline(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
         loop = asyncio.get_running_loop()
@@ -399,5 +525,6 @@ def test_secrets_stay_out_of_logs_and_warnings(
 
     scenario(settings_for, site, body, browser_idle_wait_seconds=1)
     output = capsys.readouterr()
+    assert "browser_action_failed" in output.out + output.err  # the line was captured
     assert PRIVATE_TEXT not in output.out + output.err
     assert "a-private-script" not in output.out + output.err

@@ -57,7 +57,7 @@ class WaitForAction(_Action):
 
 
 class TypeAction(_Action):
-    """Type ``text`` into the element that matches ``selector``."""
+    """Type ``text`` into the element that matches ``selector``, replacing its value."""
 
     type: Literal["type"] = "type"
     selector: Selector

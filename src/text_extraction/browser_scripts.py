@@ -134,6 +134,12 @@ CONSENT_WAIT: Final = """({ opt, timeoutMs, again }) => new Promise((resolve) =>
   timer = setTimeout(() => finish('timeout'), timeoutMs);
   state.listeners.add(listener);
   if (again) {
+    // The engine has handled the banner already, or found none: a second run has nothing to
+    // do (it would answer with a failure, as it has no banner to work on).
+    if (state.lifecycle === 'done' || state.lifecycle === 'nothingDetected') {
+      finish('nothingDetected');
+      return;
+    }
     delete state.results[opt];
     window.autoconsentReceiveMessage({ type: opt });
   } else {
@@ -207,7 +213,9 @@ SCROLL_TO_END: Final = """() => {
 
 # Opens closed ``<details>`` and clicks up to ``limit`` visible elements with
 # ``aria-expanded="false"`` (those that are still closed when their turn comes: a click can
-# close another section). Answers how many it opened or clicked.
+# close another section). It leaves out what would take the reader to another page: links
+# (other than fragment-only and ``javascript:`` ones) and buttons that submit a form. Answers
+# how many it opened or clicked.
 EXPAND_ALL: Final = """(limit) => {
   let opened = 0;
   for (const details of document.querySelectorAll('details:not([open])')) {
@@ -220,7 +228,16 @@ EXPAND_ALL: Final = """(limit) => {
     return style.display !== 'none' && style.visibility !== 'hidden'
       && box.width > 0 && box.height > 0;
   };
-  const toggles = Array.from(document.querySelectorAll('[aria-expanded="false"]')).filter(visible);
+  const navigates = (element) => {
+    if (element.matches('a[href], area[href]')) {
+      const href = (element.getAttribute('href') || '').trim().toLowerCase();
+      return !(href.startsWith('#') || href.startsWith('javascript:'));
+    }
+    if (element.tagName === 'INPUT') return ['submit', 'image'].includes(element.type);
+    return element.tagName === 'BUTTON' && element.type === 'submit' && element.form !== null;
+  };
+  const toggles = Array.from(document.querySelectorAll('[aria-expanded="false"]'))
+    .filter((element) => visible(element) && !navigates(element));
   for (const toggle of toggles.slice(0, limit)) {
     if (toggle.getAttribute('aria-expanded') !== 'false' || toggle.disabled) continue;
     toggle.click();
@@ -228,3 +245,8 @@ EXPAND_ALL: Final = """(limit) => {
   }
   return opened;
 }"""
+
+# Marks the current document, and tells whether it is still the marked one (a navigation
+# replaces the window).
+MARK_DOCUMENT: Final = "() => { window.__textExtractionMarked = true; }"
+DOCUMENT_MARKED: Final = "() => window.__textExtractionMarked === true"

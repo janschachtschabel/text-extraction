@@ -66,6 +66,10 @@ CONSENT_SECONDS: Final = 3.0  # B11: best effort
 _READ_RESERVE_SECONDS: Final = 1.0
 _SCREENSHOT_RESERVE_SECONDS: Final = 3.0
 _CONTENT_ATTEMPTS: Final = 3
+# How long an action that may navigate waits for the navigation to reach the route handler,
+# and how often the actions look whether the navigations are over.
+_NAVIGATION_GRACE_SECONDS: Final = 0.1
+_NAVIGATION_POLL_SECONDS: Final = 0.02
 # The proxy's answers to a plain-HTTP request whose host it refuses outright.
 _PROXY_ANSWERS: Final = frozenset({(403, "blocked_address"), (502, "dns_error")})
 # Main-frame load failures that are not the target's: a navigation that a newer one replaced,
@@ -209,7 +213,15 @@ class _Render:
         self.settled = asyncio.Event()  # cleared while such a redirect is under way
         self.settled.set()
         self.first_navigation = True
-        self.acting = False  # the request's actions are running
+        # The request's actions have begun. From then on a navigation the check refuses is
+        # answered with an empty 204, never aborted: the page stays as it is (an abort would
+        # replace its document with an error page) until its HTML is read.
+        self.actions_started = False
+        # A navigation was refused (a non-GET one) while the actions ran: the action fails.
+        self.denied = False
+        # Main-frame navigations the route handler has seen after the first one and that have
+        # not committed or failed yet; the actions wait for them.
+        self.moving: set[Request] = set()
         self.deadline = 0.0
         self.checks: set[asyncio.Task[None]] = set()
 
@@ -217,6 +229,8 @@ class _Render:
         self.page.on("response", self._on_response)
         self.page.on("requestfailed", self._on_request_failed)
         self.page.on("download", self._on_download)
+        self.page.on("framenavigated", self._on_navigated)
+        self.page.on("requestfinished", self._on_request_finished)
         await self.page.add_init_script(NO_SPECULATION)
         await self.page.context.route("**/*", self._route)
 
@@ -277,25 +291,34 @@ class _Render:
         """Run the request's actions (before the reserve for reading the page), then give what
         they loaded a moment. A navigation the check refused meanwhile failed its action: the
         page stays as it was, so the refusal is no error of the render."""
-        self.acting = True
-        try:
-            self.warnings.extend(
-                await run_actions(
-                    self.page,
-                    actions,
-                    allow_evaluate=self.options.allow_evaluate,
-                    deadline=self.deadline - reserve,
-                    consent=run_consent,
-                    refused=lambda: self.refusal is not None,
-                )
+        self.actions_started = True
+        self.warnings.extend(
+            await run_actions(
+                self.page,
+                actions,
+                allow_evaluate=self.options.allow_evaluate,
+                deadline=self.deadline - reserve,
+                consent=run_consent,
+                refused=lambda: self.refusal is not None or self.denied,
+                settle=self._navigations_done,
             )
-        finally:
-            self.acting = False
+        )
         self.refusal = None
-        self.settled.set()
+        self.denied = False
         self.raise_kept()
         await self._idle(reserve)
         self.raise_kept()
+
+    async def _navigations_done(self, may_navigate: bool) -> None:
+        """Wait until the navigations an action started have reached a document (or were
+        refused): checks under way, requests not yet committed, redirects turned into
+        navigations. ``may_navigate``: the action can start one, so give it a moment to show
+        (a script's ``location.href`` reaches the route handler a few milliseconds later)."""
+        if may_navigate:
+            await asyncio.sleep(_NAVIGATION_GRACE_SECONDS)
+        # Polled: the state is spread over several events and sets.
+        while self.checks or self.moving or not self.settled.is_set():  # noqa: ASYNC110
+            await asyncio.sleep(_NAVIGATION_POLL_SECONDS)
 
     async def _goto(self, reserve: float) -> None:
         timeout = self.left(reserve)
@@ -478,6 +501,7 @@ class _Render:
                 self.rule_files.add(file)
 
     def _on_request_failed(self, request: Request) -> None:
+        self.moving.discard(request)
         if request in self.unanswered or not _is_main_document(request, self.page):
             return
         error = request.failure or ""
@@ -487,6 +511,14 @@ class _Render:
 
     def _on_download(self, _download: object) -> None:
         self.download = True
+        self.moving.clear()  # the navigation became a download: no document will commit
+
+    def _on_navigated(self, frame: Frame) -> None:
+        if frame is self.page.main_frame:
+            self.moving.clear()
+
+    def _on_request_finished(self, request: Request) -> None:
+        self.moving.discard(request)  # also an answer that commits nothing (204)
 
     async def _route(self, route: Route, request: Request) -> None:
         try:
@@ -504,6 +536,7 @@ class _Render:
                     upstream_status=self.last_status(),
                 )
             self.unanswered.add(request)
+            self.moving.discard(request)
             self.settled.set()
             with contextlib.suppress(*DRIVER_ERRORS):
                 await route.abort("failed")
@@ -526,22 +559,25 @@ class _Render:
                 return
             if self.first_navigation:
                 self.first_navigation = False
-            elif request.method != "GET" and not options.unblock:
-                # An empty answer keeps the current document (an abort would replace it with
-                # an error page); it is not a document answer of the render.
-                self.warnings.append("navigation_refused_non_get")
-                self.unanswered.add(request)
-                await route.fulfill(status=204)
-                return
-            elif not await self._checked(request.url):
-                if self.acting:
-                    # A navigation of an action: the page stays as it is (an abort would
-                    # replace its document with an error page); the action fails.
+            else:
+                self.moving.add(request)
+                if request.method != "GET" and not options.unblock:
+                    # An empty answer keeps the current document (an abort would replace it
+                    # with an error page); it is not a document answer of the render.
+                    self.warnings.append("navigation_refused_non_get")
                     self.unanswered.add(request)
+                    self.moving.discard(request)
+                    self.denied = self.denied or self.actions_started
                     await route.fulfill(status=204)
-                else:
-                    await route.abort("blockedbyclient")
-                return
+                    return
+                if not await self._checked(request.url):
+                    self.moving.discard(request)
+                    if self.actions_started:
+                        self.unanswered.add(request)
+                        await route.fulfill(status=204)
+                    else:
+                        await route.abort("blockedbyclient")
+                    return
         elif request.resource_type in options.blocked_resources or request.url in self.rule_files:
             await route.abort("blockedbyclient")
             return

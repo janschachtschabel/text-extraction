@@ -27,6 +27,7 @@ OPTED_OUT = "The visitor confirmed the selection without statistics."
 OPTED_IN = "The visitor accepted every cookie."
 REVEALED = "The button revealed this paragraph about the tides of the sea."
 DETAILS_TEXT = "The collapsed section explains how rivers reach the ocean."
+FRAGMENT_TEXT = "The section opened by the fragment link covers the history of the canal."
 ARIA_TEXT = "The toggled panel describes how clouds form above warm water."
 TYPED_ECHO = "The field received: "
 CHOSEN = "The chosen option is: "
@@ -128,7 +129,7 @@ def _actions_page() -> bytes:
   <option value="">none</option><option value="red">Red</option><option value="blue">Blue</option>
 </select>
 <p id="chosen"></p>
-<input id="field" aria-label="field"
+<input id="field" aria-label="field" value="prefilled"
   onkeydown="if (event.key === 'Enter')
     document.getElementById('echoed').textContent = {TYPED_ECHO!r} + this.value">
 <p id="echoed"></p>
@@ -287,6 +288,29 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(article(f"{banner}<p id='state'></p>", title="Consent"))
         elif path == "/actions":
             self._send(_actions_page())
+        elif path == "/nav-toggle":
+            markup = (
+                "<a id='menu' href='/static' aria-expanded='false'>Menu</a>"
+                "<a id='frag' href='#panel' aria-expanded='false' onclick=\""
+                "this.setAttribute('aria-expanded', 'true');"
+                "document.getElementById('panel').hidden = false; return false;\">Section</a>"
+                f"<div id='panel' hidden><p>{FRAGMENT_TEXT}</p></div>"
+                "<form action='/static' method='post'>"
+                "<button id='send' aria-expanded='false'>Send</button></form>"
+            )
+            self._send(page(markup, title="Navigating toggles"))
+        elif path == "/nav-script":
+            markup = (
+                "<button id='go' aria-expanded='false' onclick=\"location.href = '/static'\">"
+                "Open</button>"
+            )
+            self._send(page(markup, title="Script toggle"))
+        elif path == "/form-click":
+            markup = (
+                "<form action='/static' method='post'><button id='send'>Send</button></form>"
+                "<button id='reveal' onclick=\"this.textContent = 'clicked'\">Reveal</button>"
+            )
+            self._send(page(markup, title="Form"))
         elif path == "/tall":
             self._send(article("<div style='height: 20000px'></div>", title="Tall"))
         elif path == "/never-idle":

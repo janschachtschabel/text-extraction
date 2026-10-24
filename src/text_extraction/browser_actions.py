@@ -12,7 +12,7 @@ a selector. The module uses only the Playwright API, which Patchright shares.
 """
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Final, Protocol
 
 import structlog
@@ -33,7 +33,9 @@ from text_extraction.browser_options import (
     WaitForAction,
 )
 from text_extraction.browser_scripts import (
+    DOCUMENT_MARKED,
     EXPAND_ALL,
+    MARK_DOCUMENT,
     PAGE_HEIGHT,
     SCROLL_TO_END,
     SCROLL_VIEWPORT,
@@ -53,6 +55,10 @@ class _Failed(Exception):  # noqa: N818 - an action's failure, not a bug
     """The action could not do what it was asked to (no time left, a banner not handled)."""
 
 
+# Actions that can start a navigation (the route handler sees it a moment later).
+_MAY_NAVIGATE: Final = frozenset(
+    {"click", "press", "select", "expand_all", "accept_cookies", "evaluate"}
+)
 _FAILURES: Final[tuple[type[Exception], ...]] = (TimeoutError, _Failed, *DRIVER_ERRORS)
 
 
@@ -60,6 +66,10 @@ class ConsentRunner(Protocol):
     """``browser_render.run_consent``: handles the page's cookie banner, if there is one."""
 
     async def __call__(self, page: Page, opt: ConsentOpt, *, seconds: float) -> ConsentResult: ...
+
+
+async def _no_navigation(may_navigate: bool) -> None:
+    pass
 
 
 async def run_actions(
@@ -70,10 +80,14 @@ async def run_actions(
     deadline: float,
     consent: ConsentRunner,
     refused: Callable[[], bool] = lambda: False,
+    settle: Callable[[bool], Awaitable[None]] = _no_navigation,
 ) -> list[str]:
     """Run ``actions`` in ``page`` before ``deadline`` (``loop.time()``) and return the
-    warnings (``action_<index>_failed``). ``refused`` tells that the route check refused a
-    navigation meanwhile (the render keeps it); that fails the action that started it.
+    warnings (``action_<index>_failed``, the index counting from 0). ``refused`` tells that a
+    navigation was refused meanwhile (by the route check, which the render keeps, or because it
+    was not a GET); that fails the action that started it. ``settle(may_navigate)`` waits for
+    the navigations an action started to reach a document or be refused, so a slow check does
+    not end with the action's own time limit.
 
     Raises ``ValueError`` when an ``evaluate`` action comes without ``allow_evaluate``: the API
     refuses those requests with 403, so this is a guard against a caller's mistake, and
@@ -84,8 +98,14 @@ async def run_actions(
     for index, action in enumerate(actions):
         try:
             async with asyncio.timeout_at(deadline):
+                # expand_all must not take the reader to another page: it fails then.
+                if isinstance(action, ExpandAllAction):
+                    await page.evaluate(MARK_DOCUMENT)
                 await _run(page, action, deadline, consent)
+                await settle(action.type in _MAY_NAVIGATE)
                 await _loaded(page, deadline)
+                if isinstance(action, ExpandAllAction) and not await page.evaluate(DOCUMENT_MARKED):
+                    raise _Failed
             if refused():
                 raise _Failed
         except _FAILURES as error:
@@ -114,15 +134,21 @@ async def _run(page: Page, action: Action, deadline: float, consent: ConsentRunn
 
     match action:
         case ClickAction(selector=selector):
-            await page.locator(selector).first.click(timeout=wait_ms())
+            # Not waiting after the action: the time of a navigation it starts is not the
+            # element wait's (``settle`` waits for it, until the deadline).
+            await page.locator(selector).first.click(timeout=wait_ms(), no_wait_after=True)
         case TypeAction(selector=selector, text=text):
-            await page.locator(selector).first.press_sequentially(text, timeout=wait_ms())
+            field = page.locator(selector).first
+            await field.fill("", timeout=wait_ms())
+            await field.press_sequentially(text, timeout=wait_ms(), no_wait_after=True)
         case PressAction(key=key, selector=str() as selector):
-            await page.locator(selector).first.press(key, timeout=wait_ms())
+            await page.locator(selector).first.press(key, timeout=wait_ms(), no_wait_after=True)
         case PressAction(key=key):
             await page.keyboard.press(key)
         case SelectAction(selector=selector, value=value):
-            await page.locator(selector).first.select_option(value, timeout=wait_ms())
+            await page.locator(selector).first.select_option(
+                value, timeout=wait_ms(), no_wait_after=True
+            )
         case WaitForAction(selector=str() as selector):
             await page.locator(selector).first.wait_for(timeout=wait_ms())
         case WaitForAction(ms=int() as milliseconds):
