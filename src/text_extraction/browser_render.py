@@ -28,7 +28,12 @@ import structlog
 from playwright.async_api import APIResponse, Frame, Page, Request, Response, Route
 
 from text_extraction.browser_actions import run_actions
-from text_extraction.browser_driver import DRIVER_ERRORS, DRIVER_TIMEOUTS, ConsentOpt
+from text_extraction.browser_driver import (
+    DRIVER_ERRORS,
+    DRIVER_TIMEOUTS,
+    ConsentOpt,
+    ConsentResult,
+)
 from text_extraction.browser_options import AcceptCookiesAction, Action
 from text_extraction.browser_proxy import ProxyContext
 from text_extraction.browser_scripts import (
@@ -110,17 +115,20 @@ async def render_page(
         await render.end_checks()
 
 
-async def run_consent(page: Page, opt: ConsentOpt, *, seconds: float = CONSENT_SECONDS) -> bool:
+async def run_consent(
+    page: Page, opt: ConsentOpt, *, seconds: float = CONSENT_SECONDS
+) -> ConsentResult:
     """Run autoconsent with ``opt`` in the page's frames (B11), for at most ``seconds``.
-    Best effort: True when a banner was handled in any frame, never an error."""
+    Best effort, never an error. ``done``: a banner was handled in any frame; ``nothing``: no
+    frame has a banner; ``failed``: a banner was found but not handled, or the time ran out."""
     if seconds <= 0:
-        return False
+        return "failed"
     frames = [frame for frame in page.frames if not frame.is_detached()][:10]
     args = {"rulesJson": consent_rules_json(), "config": consent_config(opt)}
     # The page's own wait ends a little earlier, so its outcome still comes back in time.
     milliseconds = round(max(seconds - 0.2, 0.0) * 1000)
 
-    async def in_frame(frame: Frame) -> bool:
+    async def in_frame(frame: Frame) -> ConsentResult:
         try:
             installed = await frame.evaluate(CONSENT_RELAY, args)
             if installed:
@@ -129,15 +137,19 @@ async def run_consent(page: Page, opt: ConsentOpt, *, seconds: float = CONSENT_S
                 CONSENT_WAIT, {"opt": opt, "timeoutMs": milliseconds, "again": not installed}
             )
         except DRIVER_ERRORS:
-            return False
-        return bool(outcome == "done")
+            return "nothing"  # the frame went away meanwhile
+        if outcome == "done":
+            return "done"
+        return "nothing" if outcome in ("nothingDetected", "none") else "failed"
 
     try:
         async with asyncio.timeout(seconds):
             results = await asyncio.gather(*(in_frame(frame) for frame in frames))
     except TimeoutError:
-        return False
-    return any(results)
+        return "failed"
+    if "done" in results:
+        return "done"
+    return "failed" if "failed" in results else "nothing"
 
 
 async def strip_hidden(page: Page) -> None:

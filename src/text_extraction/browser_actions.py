@@ -2,7 +2,7 @@
 
 ``run_actions`` runs them in order, each bounded by the time left to ``deadline``. The first
 action that fails (no such element within ``ELEMENT_WAIT_SECONDS``, the deadline, a script
-error, a navigation the route check refused, a cookie banner that was not there) stops the
+error, a navigation the route check refused, a cookie banner that could not be handled) stops the
 rest and adds the warning ``action_<index>_failed``: the page is extracted as it is then.
 A click that navigates is checked by the route handler like any navigation; the action waits
 for the new document's ``load``.
@@ -18,7 +18,7 @@ from typing import Final, Protocol
 import structlog
 from playwright.async_api import Page
 
-from text_extraction.browser_driver import DRIVER_ERRORS, ConsentOpt
+from text_extraction.browser_driver import DRIVER_ERRORS, ConsentOpt, ConsentResult
 from text_extraction.browser_options import (
     AcceptCookiesAction,
     Action,
@@ -50,16 +50,16 @@ _EXPAND_SETTLE_SECONDS: Final = 0.2  # for what the clicks reveal to be drawn
 
 
 class _Failed(Exception):  # noqa: N818 - an action's failure, not a bug
-    """The action could not do what it was asked to (no banner, not enough time)."""
+    """The action could not do what it was asked to (no time left, a banner not handled)."""
 
 
 _FAILURES: Final[tuple[type[Exception], ...]] = (TimeoutError, _Failed, *DRIVER_ERRORS)
 
 
 class ConsentRunner(Protocol):
-    """``browser_render.run_consent``: handles the page's cookie banner, True when it did."""
+    """``browser_render.run_consent``: handles the page's cookie banner, if there is one."""
 
-    async def __call__(self, page: Page, opt: ConsentOpt, *, seconds: float) -> bool: ...
+    async def __call__(self, page: Page, opt: ConsentOpt, *, seconds: float) -> ConsentResult: ...
 
 
 async def run_actions(
@@ -149,7 +149,8 @@ async def _run(page: Page, action: Action, deadline: float, consent: ConsentRunn
                 await asyncio.sleep(_EXPAND_SETTLE_SECONDS)
         case AcceptCookiesAction():
             seconds = min(CONSENT_SECONDS, deadline - loop.time())
-            if not await consent(page, "optIn", seconds=seconds):
+            # No banner is nothing to accept; one that could not be handled is a failure.
+            if await consent(page, "optIn", seconds=seconds) == "failed":
                 raise _Failed
         case EvaluateAction(script=script):
             # A function body, so the script may hold statements, `await` and `return`.

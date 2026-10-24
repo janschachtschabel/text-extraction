@@ -24,7 +24,14 @@ CUSTOM_CONSENT_RULES: Final[list[dict[str, Any]]] = [
         "detectCmp": [{"exists": "#cookiebanner"}],
         "detectPopup": [{"visible": "#cookiebanner"}],
         "optOut": [{"waitForThenClick": ".js-banner-button-confirm-selection"}],
-        "optIn": [{"waitForThenClick": ".js-banner-button-accept-all"}],
+        # The accept button's markup is unverified against a live Government Site Builder
+        # site, so the selector list is tolerant.
+        "optIn": [
+            {
+                "waitForThenClick": ".js-banner-button-accept-all, .js-banner-button-accept, "
+                '#cookiebanner button[name*="accept" i]'
+            }
+        ],
     },
 ]
 

@@ -275,22 +275,22 @@ def test_accept_cookies_opts_in(settings_for: SettingsFor, site: Site) -> None:
     scenario(settings_for, site, body)
 
 
-def test_accept_cookies_without_a_banner_is_a_failed_action(
+def test_accept_cookies_without_a_banner_is_nothing_to_accept(
     settings_for: SettingsFor, site: Site
 ) -> None:
     async def body(stack: Stack) -> None:
         rendered = await render(
             stack, f"{site.base}/actions", AcceptCookiesAction(), ClickAction(selector="#reveal")
         )
-        assert rendered.warnings == ("action_0_failed",)
-        assert SHOWN_EMPTY in rendered.html
+        assert rendered.warnings == ()
+        assert SHOWN in rendered.html  # the next action ran
 
     scenario(settings_for, site, body)
 
 
 def test_run_consent_reports_what_happened(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
-        results: dict[str, bool] = {}
+        results: dict[str, str] = {}
         for name, path, opt in [
             ("out", "/consent", "optOut"),
             ("in", "/consent", "optIn"),
@@ -303,7 +303,12 @@ def test_run_consent_reports_what_happened(settings_for: SettingsFor, site: Site
                 if name in ("out", "in"):
                     state = await pooled.page.text_content("#state")
                     assert state == (OPTED_OUT if name == "out" else OPTED_IN)
-        assert results == {"out": True, "in": True, "none_out": False, "none_in": False}
+        assert results == {
+            "out": "done",
+            "in": "done",
+            "none_out": "nothing",
+            "none_in": "nothing",
+        }
 
     scenario(settings_for, site, body)
 

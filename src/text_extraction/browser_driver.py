@@ -12,6 +12,9 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 type ConsentOpt = Literal["optOut", "optIn"]
+# What a consent run found: a banner it handled, no banner, or a banner it could not handle
+# (or did not finish in time).
+type ConsentResult = Literal["done", "nothing", "failed"]
 
 DRIVER_ERRORS: Final[tuple[type[Exception], ...]] = (PlaywrightError, PatchrightError)
 DRIVER_TIMEOUTS: Final[tuple[type[Exception], ...]] = (PlaywrightTimeout, PatchrightTimeout)
