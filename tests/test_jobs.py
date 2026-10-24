@@ -13,7 +13,7 @@ from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions, JobProgress
-from text_extraction.jobs import JobLost, JobStore
+from text_extraction.jobs import JobLost, JobStore, browser_lease_seconds
 from text_extraction.settings import Settings
 
 START = 1_000_000.0
@@ -29,12 +29,12 @@ SECRETS = BrowserSecrets(
 PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
 
 
-def scenario(test: Callable[[], Coroutine[Any, Any, None]]) -> Callable[[], None]:
+def scenario(test: Callable[..., Coroutine[Any, Any, None]]) -> Callable[..., None]:
     """Run an async test body on its own event loop (the suite has no async plugin)."""
 
     @wraps(test)
-    def run() -> None:
-        asyncio.run(test())
+    def run(*args: Any, **kwargs: Any) -> None:
+        asyncio.run(test(*args, **kwargs))
 
     return run
 
@@ -429,13 +429,37 @@ async def test_secrets_round_trip_and_ttl() -> None:
 
     assert await store.secrets(job_id) == SECRETS
     ttl = await valkey.ttl(f"job:{{{job_id}}}:secrets")
-    assert 2 * 30 + 10 + 60 - 5 <= ttl <= 2 * 30 + 10 + 60  # B6
+    # B6: the queue wait, then the browser lease (2 * the unblock deadline 60 + 10), plus 60.
+    assert 10 + 130 + 60 - 5 <= ttl <= 10 + 130 + 60
 
     await store.drop_secrets(job_id)
 
     assert await store.secrets(job_id) == BrowserSecrets()
     assert await valkey.exists(f"job:{{{job_id}}}:secrets") == 0
     assert await store.secrets("f" * 32) == BrowserSecrets()  # an unknown job has none
+
+
+@pytest.mark.parametrize(("browser", "unblock"), [(30, 60), (30, 180), (120, 60), (120, 10)])
+@scenario
+async def test_secrets_outlive_a_crashed_render_until_its_rerun(browser: int, unblock: int) -> None:
+    # M-2: a worker that dies at the claim gives the item back once the lease ends; the rerun
+    # must still find the secrets, also for an unblock render and for a long standard one.
+    valkey = FakeAsyncRedis()
+    settings = Settings(
+        auth_mode="none",
+        browser_timeout_seconds=browser,
+        browser_unblock_timeout_seconds=unblock,
+        browser_queue_wait_seconds=10,
+    )
+    store = JobStore(valkey, settings, clock=Clock())
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+
+    ttl = await valkey.ttl(f"job:{{{job_id}}}:secrets")
+
+    lease = browser_lease_seconds(settings)
+    assert lease == 2 * unblock + 10
+    assert ttl >= 10 + lease + 30  # claimed at the end of the queue wait, then a crash
+    assert ttl >= 10 + 2 * max(browser, unblock) + 30  # two whole renders
 
 
 @scenario

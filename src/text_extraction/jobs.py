@@ -17,9 +17,10 @@ All keys expire ``JOB_TTL_SECONDS`` after creation and again after completion. `
 Browser jobs (package 4) may have these as well:
 
 - ``job:{<id>}:secrets``  string: the caller's ``BrowserSecrets`` as JSON (actions, cookies,
-                          headers; B6). Kept ``2 * BROWSER_TIMEOUT_SECONDS +
-                          BROWSER_QUEUE_WAIT_SECONDS + 60`` seconds at most, and deleted by the
-                          worker once it has finished the item. No read of the job shows them.
+                          headers; B6). Kept ``BROWSER_QUEUE_WAIT_SECONDS + max(2 *
+                          BROWSER_TIMEOUT_SECONDS, browser lease) + 60`` seconds at most (the
+                          lease is ``browser_lease_seconds``), and deleted by the worker once it
+                          has finished the item. No read of the job shows them.
 - ``job:{<id>}:drafts``   hash: item index -> the fast ``Envelope[ExtractResult]`` of an ``auto``
                           item that moved to the browser (B5), with the job's remaining TTL;
                           deleted by the browser worker once the item has its outcome
@@ -193,6 +194,12 @@ class JobRecord:
     has_secrets: bool = False
 
 
+def browser_lease_seconds(settings: Settings) -> float:
+    """How long the browser worker holds an item: two of the longest render deadline (an
+    unblock render's; ``BROWSER_TIMEOUT_SECONDS`` is at most as long by default) plus 10 s."""
+    return 2 * settings.browser_unblock_timeout_seconds + 10
+
+
 def _key(job_id: str, kind: str) -> str:
     """``job:{<id>}:<kind>`` with the id in literal braces: a cluster hash tag."""
     return f"job:{{{job_id}}}:{kind}"
@@ -231,9 +238,12 @@ class JobStore:
         self._ttl_seconds = settings.job_ttl_seconds
         self._item_max_bytes = settings.job_item_max_bytes
         self._clock = clock
-        # B6: long enough for a sync request's wait in the queue and two renders.
+        # B6: long enough for a sync request's wait in the queue, then two renders or a worker
+        # that dies at the claim, whose item runs again once the browser lease has ended (M-2).
         self._secrets_ttl_seconds = math.ceil(
-            2 * settings.browser_timeout_seconds + settings.browser_queue_wait_seconds + 60
+            settings.browser_queue_wait_seconds
+            + max(2 * settings.browser_timeout_seconds, browser_lease_seconds(settings))
+            + 60
         )
         self._artifact_ttl_seconds = settings.artifact_ttl_seconds
         self._store_result = valkey.register_script(_STORE_RESULT)

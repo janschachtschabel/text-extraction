@@ -412,7 +412,9 @@ while `BROWSER_ENABLED` is false, are unchanged.
   cached while browser mode was off escalates only once its entry has expired.
 - **B6, caller secrets.** `actions`, `cookies` and `headers` are accepted by `/v1/extract` and
   `/v1/screenshot` only, not by `/v1/batch`. They are stored in `job:{<id>}:secrets` with a short
-  TTL (`2 × BROWSER_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + 60` s), never appear in
+  TTL (`BROWSER_QUEUE_WAIT_SECONDS + max(2 × BROWSER_TIMEOUT_SECONDS, lease) + 60` s, where the
+  browser lease is `2 × BROWSER_UNBLOCK_TIMEOUT_SECONDS + 10`: an item whose worker died at the
+  claim runs again with them once the lease has ended), never appear in
   `GET /v1/jobs` or the logs, and are deleted once the item has its outcome (R18). An item that
   is given back to run again (a refusal by the outbound gate, a Valkey error, a cancelled
   shutdown) keeps them for that run. A job whose secrets expired before the claim fails with

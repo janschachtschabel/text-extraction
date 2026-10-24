@@ -68,7 +68,13 @@ from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobLost, JobRecord, JobStore
+from text_extraction.jobs import (
+    SCREENSHOT_ARTIFACT,
+    JobLost,
+    JobRecord,
+    JobStore,
+    browser_lease_seconds,
+)
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
@@ -149,7 +155,7 @@ class BrowserRunner:
         self._pipeline = pipeline
         self._store = store
         self._guard = guard
-        self.lease_seconds = 2 * settings.browser_unblock_timeout_seconds + 10
+        self.lease_seconds = browser_lease_seconds(settings)
 
     async def run(
         self,
