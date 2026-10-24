@@ -107,7 +107,8 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-      {{- with $.Values.nodeSelector }}
+      {{- /* The pool's nodeSelector wins over the global one, key by key. */}}
+      {{- with merge (deepCopy ($worker.nodeSelector | default dict)) (deepCopy ($.Values.nodeSelector | default dict)) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}

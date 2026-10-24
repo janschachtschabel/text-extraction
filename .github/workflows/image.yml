@@ -97,6 +97,18 @@ jobs:
             -e AUTH_MODE=none -e BROWSER_ENABLED=true -e BROWSER_UNBLOCK_ENABLED=true \
             "$CHECK_TAG" text-extraction-browser-worker --check
 
+      # Chrome's .deb leaves no apt source or key behind, and the installer's curl is gone.
+      - name: Browser image has no extra apt source
+        if: matrix.variant == 'browser'
+        run: |
+          docker run --rm "$CHECK_TAG" sh -c '
+          if ls /etc/apt/sources.list.d/ /etc/apt/trusted.gpg.d/ 2>/dev/null | grep -i google; then
+            echo "Google apt source or key in the browser image" >&2; exit 1
+          fi
+          if command -v curl; then echo "curl in the browser image" >&2; exit 1; fi
+          test -x /opt/google/chrome/chrome
+          '
+
       - if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:

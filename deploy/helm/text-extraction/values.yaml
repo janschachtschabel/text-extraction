@@ -101,6 +101,8 @@ workers:
       limits:
         cpu: "1"
         memory: 1Gi
+    # Merged over the global `nodeSelector` for these pods; a key set here wins.
+    nodeSelector: {}
     # KEDA and the HPA are mutually exclusive: enabling both fails the render. With either one on,
     # `replicaCount` is ignored.
     autoscaling:
@@ -158,6 +160,10 @@ workers:
     # Size limit of the emptyDir at /tmp: browser profiles, Chrome's caches and Xvfb's socket.
     # The browsers use it instead of /dev/shm (--disable-dev-shm-usage).
     tmpSizeLimit: 2Gi
+    # Merged over the global `nodeSelector` for these pods; a key set here wins. The browser image
+    # exists for linux/amd64 only (Google Chrome stable), so the pods stay off other nodes.
+    nodeSelector:
+      kubernetes.io/arch: amd64
     # As for the extract workers. KEDA reads the pool `browser` gauges that API pods export with
     # JOBS_ENABLED=true and BROWSER_ENABLED=true. Keep at least one replica: a sync request
     # waits only BROWSER_QUEUE_WAIT_SECONDS (10) for a worker to take its page.

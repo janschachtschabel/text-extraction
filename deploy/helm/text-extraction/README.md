@@ -127,6 +127,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
 | `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
+| `workers.extract.nodeSelector` | `{}` | Merged over the global `nodeSelector` for the extract workers; a key set here wins. |
 | `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder, sized like the API: `CONVERT_CONCURRENCY` x about 450 MB plus the service. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
@@ -144,6 +145,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
 | `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4Gi | Placeholder for a browser with 4 pages plus the conversions. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
+| `workers.browser.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector` for the browser workers; a key set here wins. The browser image is linux/amd64 only (Google Chrome stable), so the default keeps its pods off arm64 nodes. Set the key to `null` to drop it. |
 | `workers.browser.autoscaling.keda.*` | as for the extract workers, `threshold` `8` | Scales on `max(text_extraction_queue_pending_items{pool="browser"})`; the API pods export it while `JOBS_ENABLED` and `BROWSER_ENABLED` are true. Keep `minReplicaCount` at 1 or more: a sync request waits only `BROWSER_QUEUE_WAIT_SECONDS` (10) for a worker. |
 | `workers.browser.autoscaling.hpa.*` | as for the extract workers | CPU-based. Mutually exclusive with KEDA. |
 | `networkPolicy.enabled` | `false` | Needs a CNI that enforces NetworkPolicy. |
@@ -176,7 +178,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `metrics.prometheusRule.labels` | `{}` | |
 | `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog`. |
 | `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract and browser) get `podAnnotations`, `nodeSelector` and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract and browser) get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.

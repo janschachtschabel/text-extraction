@@ -36,11 +36,21 @@ ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 # As root: the system libraries of both browsers, Chromium's headless shell into
-# /opt/ms-playwright and Chrome stable into /opt/google/chrome (from Google's .deb).
+# /opt/ms-playwright and Chrome stable into /opt/google/chrome (from Google's .deb). Chrome is
+# not pinned: every build installs the Chrome stable of that day. The headless shell is the one
+# the locked Playwright names.
+# Patchright's installer adds curl (only to download the .deb; nothing at runtime uses it) and
+# Chrome's .deb adds Google's apt source, its signing key and a cron job that re-adds the source:
+# all removed again, so the image has no extra apt source. curl goes only when nothing depends on it.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends xvfb \
     && playwright install --with-deps --only-shell chromium \
     && patchright install --with-deps chrome \
+    && rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources \
+        /etc/apt/trusted.gpg.d/google-chrome.gpg /usr/share/keyrings/google-chrome.gpg \
+        /etc/cron.daily/google-chrome \
+    && if [ "$(dpkg-query -W -f='${db:Status-Status}' curl 2>/dev/null)" = installed ]; then \
+        apt-mark auto curl && apt-get autoremove -y --purge; fi \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
 # The root filesystem is read-only in compose and Kubernetes, and the user has no home: Chrome's

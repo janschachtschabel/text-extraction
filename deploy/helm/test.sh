@@ -176,6 +176,17 @@ expect_render_fails "browser worker grace period follows config.BROWSER_UNBLOCK_
 expect_render_fails "extract worker grace period still checked" "workers.extract.terminationGracePeriodSeconds" \
   --set workers.extract.terminationGracePeriodSeconds=39
 
+# --- Node selection -----------------------------------------------------------------------------
+
+expect_contains "browser workers stay on amd64 nodes" "$browser" "kubernetes.io/arch: amd64"
+expect_absent "extract workers are not pinned to an arch" "$extract" "kubernetes.io/arch"
+selected="$(render --set nodeSelector.disk=ssd --set 'nodeSelector.kubernetes\.io/arch=arm64')"
+expect_contains "browser workers keep the global nodeSelector" "$(document "$selected" Deployment "$BROWSER")" "disk: ssd"
+expect_contains "the pool's nodeSelector wins over the global one" "$(document "$selected" Deployment "$BROWSER")" "kubernetes.io/arch: amd64"
+expect_contains "extract workers get the global nodeSelector" "$(document "$selected" Deployment "$EXTRACT")" "kubernetes.io/arch: arm64"
+expect_absent "the arch pin can be dropped" \
+  "$(document "$(render --set 'workers.browser.nodeSelector.kubernetes\.io/arch=null')" Deployment "$BROWSER")" "nodeSelector:"
+
 # --- Network policies and alerts ----------------------------------------------------------------
 
 policies="$(render --set networkPolicy.enabled=true)"

@@ -164,14 +164,25 @@ and the proxy stop. `text-extraction-browser-worker --check` launches each enabl
 exits 0 (1 when one does not start, 2 for invalid settings); it needs no Valkey, only valid settings
 (for example `AUTH_MODE=none`). The image build runs it. The image runs as uid 10001 with `HOME`,
 `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` under `/tmp`, so a read-only root filesystem with a writable
-`/tmp` is all Chrome needs; it uses `/tmp` instead of `/dev/shm`.
+`/tmp` is all Chrome needs; it uses `/tmp` instead of `/dev/shm`. The image is linux/amd64 only
+(the Helm chart pins the browser pods with `workers.browser.nodeSelector`). Its Chromium headless
+shell is the one the locked Playwright version names, but Google Chrome is not pinned: each image
+build installs the Chrome stable of that day, so two builds of the same commit can differ in
+Chrome's version.
 
 docker compose runs the API, one extract worker, one browser worker (image target `browser`,
 `/tmp` a 1 GiB tmpfs, `shm_size` 1 GiB) and a Valkey with a password (`VALKEY_PASSWORD`
 from `.env`, required). It sets `BROWSER_ENABLED=true` for all three and passes
 `BROWSER_UNBLOCK_ENABLED` (default false) from `.env` or the shell. Their stop grace periods are
-120 s (API), 45 s (extract worker) and 90 s (browser worker), which covers the shutdowns with
-unblock mode. The worker needs the same `API_KEYS` as the API while `AUTH_MODE` is
+120 s (API), 45 s (extract worker) and 90 s (browser worker). These are fixed in
+`docker-compose.yml` and cover the shutdowns, unblock mode included, only at the default timeouts:
+the API needs `SHUTDOWN_DRAIN_SECONDS` + its graceful phase (110 s with unblock mode), the extract
+worker `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, the browser worker
+`max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (see Response times). If `.env` raises
+`SHUTDOWN_DRAIN_SECONDS`, `EXTRACT_TIMEOUT_SECONDS`, `BROWSER_QUEUE_WAIT_SECONDS`,
+`BROWSER_TIMEOUT_SECONDS` or `BROWSER_UNBLOCK_TIMEOUT_SECONDS`, raise the `stop_grace_period` of the
+affected services to at least that plus a few seconds, or compose kills them before their graceful
+shutdown ends. The worker needs the same `API_KEYS` as the API while `AUTH_MODE` is
 `api_key`. docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
