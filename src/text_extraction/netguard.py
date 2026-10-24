@@ -97,6 +97,31 @@ def is_public_address(ip: IPv4Address | IPv6Address) -> bool:
     return ip.is_global
 
 
+async def resolve_allowed(
+    host: str, port: int, policy: AddressPolicy
+) -> list[IPv4Address | IPv6Address]:
+    """Resolve ``host`` and return its addresses, all of which the policy allows.
+
+    An IP literal is used as is. The answer is vetted as a whole: one forbidden address blocks
+    the lot, so a mixed DNS answer cannot smuggle a private address in. Raises
+    ``BlockedAddressError`` for a forbidden address and ``socket.gaierror`` when the name does not
+    resolve. Callers connect to the returned addresses, never to the name again.
+    """
+    addresses: list[IPv4Address | IPv6Address]
+    try:
+        addresses = [ip_address(host)]
+    except ValueError:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        addresses = [ip_address(info[4][0]) for info in infos]
+    if not addresses:
+        raise socket.gaierror(socket.EAI_NONAME, "no address found")
+    for address in addresses:
+        if not policy(address):
+            raise BlockedAddressError(f"connection to {host} blocked: address {address}")
+    return addresses
+
+
 class GuardedBackend(httpcore.AsyncNetworkBackend):
     """Network backend that connects only to addresses the policy allows.
 
@@ -120,13 +145,9 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
     ) -> httpcore.AsyncNetworkStream:
         try:
             async with asyncio.timeout(timeout):
-                addresses = await self._resolve(host, port)
+                addresses = await resolve_allowed(host, port, self._policy)
         except TimeoutError:
             raise httpcore.ConnectTimeout(f"DNS resolution of {host} timed out") from None
-
-        for address in addresses:  # vet everything first: a mixed answer is blocked
-            if not self._policy(address):
-                raise BlockedAddressError(f"connection to {host} blocked: address {address}")
 
         # Try the vetted addresses in order (the first may be IPv6 on a host without IPv6).
         last_error: Exception = BlockedAddressError(f"no address to connect to for {host}")
@@ -153,19 +174,6 @@ class GuardedBackend(httpcore.AsyncNetworkBackend):
 
     async def sleep(self, seconds: float) -> None:
         await self._inner.sleep(seconds)
-
-    @staticmethod
-    async def _resolve(host: str, port: int) -> list[IPv4Address | IPv6Address]:
-        try:
-            return [ip_address(host)]  # an IP literal is used as is
-        except ValueError:
-            pass
-        loop = asyncio.get_running_loop()
-        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-        addresses = [ip_address(info[4][0]) for info in infos]
-        if not addresses:
-            raise socket.gaierror(socket.EAI_NONAME, "no address found")
-        return addresses
 
 
 # httpcore exception -> httpx exception, most specific first (the first isinstance match wins).

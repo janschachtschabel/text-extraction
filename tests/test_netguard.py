@@ -16,6 +16,7 @@ from text_extraction.netguard import (
     GuardedTransport,
     InvalidUrlError,
     is_public_address,
+    resolve_allowed,
     validate_url,
 )
 
@@ -422,6 +423,47 @@ def test_transport_lets_a_dns_failure_surface_as_gaierror(
         monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", failing)
         async with httpx.AsyncClient(transport=GuardedTransport(is_public_address)) as client:
             await client.get("http://nope.invalid/")
+
+    with pytest.raises(socket.gaierror):
+        run(scenario)
+
+
+# --- resolve_allowed ---
+
+
+def test_resolve_allowed_returns_the_vetted_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> list[Addr]:
+        fake_getaddrinfo(
+            monkeypatch, asyncio.get_running_loop(), addrinfo("93.184.216.34", "2606:2800:220:1::1")
+        )
+        return await resolve_allowed("example.org", 443, is_public_address)
+
+    assert run(scenario) == [ip_address("93.184.216.34"), ip_address("2606:2800:220:1::1")]
+
+
+def test_resolve_allowed_uses_an_ip_literal_as_is() -> None:
+    assert run(lambda: resolve_allowed("93.184.216.34", 80, is_public_address)) == [
+        IPv4Address("93.184.216.34")
+    ]
+    with pytest.raises(BlockedAddressError):
+        run(lambda: resolve_allowed("169.254.169.254", 80, is_public_address))
+
+
+def test_resolve_allowed_blocks_a_mixed_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        fake_getaddrinfo(
+            monkeypatch, asyncio.get_running_loop(), addrinfo("93.184.216.34", "10.0.0.1")
+        )
+        await resolve_allowed("rebind.example", 80, is_public_address)
+
+    with pytest.raises(BlockedAddressError):
+        run(scenario)
+
+
+def test_resolve_allowed_passes_dns_failures_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario() -> None:
+        fake_getaddrinfo(monkeypatch, asyncio.get_running_loop(), [])
+        await resolve_allowed("empty.example", 80, is_public_address)
 
     with pytest.raises(socket.gaierror):
         run(scenario)
