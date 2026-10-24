@@ -119,6 +119,24 @@ def test_only_2xx_html_escalates_on_a_recommendation() -> None:
         assert not needs_browser(error_status, unblock=unblock)
 
 
+@pytest.mark.parametrize("cache", ["hit", "revalidated"])
+def test_a_stored_result_never_escalates(cache: str) -> None:
+    # B5: only the better of fast and rendered is stored, so a stored result is final; a fast
+    # result cached while browser mode was off waits for its entry to expire.
+    shell = envelope(
+        status="partial",
+        words=40,
+        q=quality(js_heavy=True, bot_challenge=True, browser_recommended=True, word_count=40),
+        code=ErrorCode.BOT_PROTECTION,
+    )
+    assert needs_browser(shell, unblock=True)
+    assert shell.data is not None
+    stored = shell.model_copy(update={"data": shell.data.model_copy(update={"cache": cache})})
+
+    assert not needs_browser(stored, unblock=False)
+    assert not needs_browser(stored, unblock=True)
+
+
 def test_browser_result_never_escalates() -> None:
     rendered = envelope(
         mode_used="browser",

@@ -37,9 +37,15 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     It does when the quality gate recommends a browser and the answer is 2xx HTML (a browser
     cannot do better on a text file or an error status). In unblock mode it also does when the
     page was refused as bot protection, or when the body of a 403/429/503 answer is a challenge.
+
+    A stored result (``cache`` ``hit`` or ``revalidated``) never escalates: only the better of the
+    fast and the rendered result is stored, so it is final. A fast result stored while browser
+    mode was off escalates only once its entry has expired.
     """
     result = envelope.data
     if result is None or result.mode_used != "fast" or result.quality is None:
+        return False
+    if result.cache in ("hit", "revalidated"):
         return False
     if result.quality.browser_recommended and _is_ok_html(result):
         return True

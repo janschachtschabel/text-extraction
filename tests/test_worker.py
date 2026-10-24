@@ -20,7 +20,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from tests.fakes import Answer, FakeFetcher, RefusingGate, fetched
-from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL
+from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
 from text_extraction import worker as worker_module
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
@@ -1044,6 +1044,48 @@ async def test_auto_item_needing_browser_moves_to_browser_pool_with_draft() -> N
     assert outcome_count(harness, "success") == 1
     # B5: a result that escalates is neither cached nor fingerprinted by the fast run.
     assert len(await harness.valkey.keys("res:*")) == 1
+
+
+@pytest.mark.parametrize("stored", ["hit", "revalidated"])
+@scenario
+async def test_a_stored_fast_winner_does_not_move(stored: str) -> None:
+    shell = page("example.org", 1)
+
+    async def answer(validators: Validators | None) -> FetchResult:
+        if validators is not None and validators.etag == '"v1"':
+            return fetched(shell, b"", status=304, headers={"etag": '"v1"'})
+        return fetched(shell, SHELL_WITH_WORDS, headers={"etag": '"v1"'})
+
+    ttl = 3600 if stored == "hit" else 0
+    harness = Harness({shell: answer}, browser_enabled=True, result_cache_ttl_seconds=ttl)
+    # What the browser worker stores when the fast result wins (B5); browser mode off stores
+    # the same entry.
+    off = make_settings(result_cache_ttl_seconds=ttl)
+    fetcher = cast(Fetcher, harness.fetcher)
+    seeding = Pipeline(
+        fetcher,
+        DomainGate(harness.valkey, off),
+        ComplianceChecker(fetcher, harness.valkey, off),
+        ResultCache(harness.valkey, off),
+        FingerprintStore(harness.valkey, off),
+        off,
+        CollectorRegistry(),
+    )
+    seed = await seeding.run(ExtractRequest(url=shell, compliance="enforce"), OWNER)
+    assert seed.data is not None
+    assert seed.data.quality is not None
+    assert seed.data.quality.browser_recommended
+    job_id = await harness.submit([shell])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert (item.result.data.cache, item.result.data.mode_used) == (stored, "fast")
+    assert await harness.completed(job_id)
+    assert (await harness.browser_queue.counts()).pending == 0
+    assert outcome_count(harness, "escalated") == 0
 
 
 @scenario

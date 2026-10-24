@@ -27,7 +27,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
 from text_extraction.extract_api import _store_result, extract
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
-from text_extraction.fetch import Fetcher
+from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobRecord, JobStore
 from text_extraction.pipeline import Pipeline, create_pipeline
@@ -1109,6 +1109,39 @@ def test_auto_escalates_and_returns_browser_result() -> None:
         assert seen.draft.data is not None
         assert seen.draft.data.mode_used == "fast"
         assert len(case.fetcher.page_calls()) == 1
+
+
+@pytest.mark.parametrize("stored", ["hit", "revalidated"])
+def test_a_stored_fast_winner_is_answered_without_a_browser_job(stored: str) -> None:
+    async def answer(validators: Validators | None) -> FetchResult:
+        if validators is not None and validators.etag == '"v1"':
+            return fetched(body=b"", status=304, headers={"etag": '"v1"'})
+        return fetched(body=SHELL_WITH_WORDS, headers={"etag": '"v1"'})
+
+    ttl = 3600 if stored == "hit" else 0
+    case = BrowserCase({PAGE: answer}, result_cache_ttl_seconds=ttl)
+    # The entry the browser worker stores when the fast result wins (B5): mode_used fast,
+    # browser_recommended true. A pipeline with browser mode off stores the same one.
+    seeding = create_pipeline(
+        browser_settings(browser_enabled=False, result_cache_ttl_seconds=ttl),
+        FakeAsyncRedis(server=case.server),
+        cast(Fetcher, case.fetcher),
+        CollectorRegistry(),
+    )
+    seed = asyncio.run(seeding.run(ExtractRequest(url=PAGE), USER))
+    assert seed.data is not None
+    assert seed.data.quality is not None
+    assert seed.data.quality.browser_recommended
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
+
+        body = response.json()
+        assert body["status"] == "partial"
+        assert body["data"]["cache"] == stored
+        assert body["data"]["mode_used"] == "fast"
+        assert BROWSER_UNAVAILABLE_WARNING not in body["data"]["warnings"]
+        assert worker.seen == []
+        assert case.keys("job*") == []
 
 
 def test_auto_with_browser_options_renders_without_a_fast_phase() -> None:

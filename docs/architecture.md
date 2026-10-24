@@ -403,7 +403,9 @@ while `BROWSER_ENABLED` is false, are unchanged.
   request returns its fast result with the warning `browser_unavailable` (its fingerprint is
   dropped); a sync `browser` request fails with `timeout`, retryable.
   An `auto` request with browser options always renders (R8); while browser mode is off it
-  answers 400 (R19).
+  answers 400 (R19). A stored result is final: a cache `hit` or `revalidated` result never
+  escalates, since only the better of both was stored. Accepted consequence: a fast result
+  cached while browser mode was off escalates only once its entry has expired.
 - **B6, caller secrets.** `actions`, `cookies` and `headers` are accepted by `/v1/extract` and
   `/v1/screenshot` only, not by `/v1/batch`. They are stored in `job:{<id>}:secrets` with a short
   TTL (`2 × BROWSER_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + 60` s), never appear in

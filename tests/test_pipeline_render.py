@@ -30,7 +30,7 @@ from text_extraction.compliance import ComplianceChecker
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.escalation import needs_browser
 from text_extraction.extract_models import ExtractRequest, ExtractResult
-from text_extraction.fetch import Fetcher, FetchError
+from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline
@@ -260,6 +260,23 @@ def test_auto_renders_js_heavy_page_and_keeps_the_better_result(
     assert data_of(second).cache == "hit"
     assert data_of(second).mode_used == winner
     assert len(harness.keys("fp:*")) == 1
+
+
+def test_a_revalidated_fast_winner_does_not_render_again() -> None:
+    async def answer(validators: Validators | None) -> FetchResult:
+        if validators is not None and validators.etag == '"v1"':
+            return fetched(body=b"", status=304, headers={"etag": '"v1"'})
+        return fetched(body=SHELL_WITH_WORDS, headers={"etag": '"v1"'})
+
+    renderer = FakeRenderer(rendered(SHELL), rendered(SHELL))
+    harness = RenderHarness({PAGE: answer}, renderer=renderer, result_cache_ttl_seconds=0)
+
+    first, second = harness.run_all({"mode": "auto"}, {"mode": "auto"})
+
+    assert data_of(first).mode_used == "fast"  # the fast result won and was stored
+    assert data_of(second).cache == "revalidated"
+    assert data_of(second).mode_used == "fast"
+    assert len(renderer.calls) == 1  # B5: a stored result is final
 
 
 def test_auto_with_draft_renders_without_fast_fetch() -> None:
