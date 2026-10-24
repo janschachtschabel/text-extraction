@@ -24,6 +24,7 @@ from tests.fakes import (
     RefusingGate,
     fetched,
 )
+from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.convert import convert_html
@@ -33,7 +34,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
-from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
 
@@ -65,9 +66,13 @@ class Harness:
         self.registry = CollectorRegistry()
         self.settings = make_settings(**overrides)
         fetcher = cast(Fetcher, self.fetcher)
+        the_gate = gate if gate is not None else DomainGate(self.valkey, self.settings)
+        # As create_outbound wires the real fetcher: every request is checked and reported.
+        self.fetcher.before_request = getattr(the_gate, "before_request", None)
+        self.fetcher.on_request_sent = getattr(the_gate, "mark_sent", None)
         self.pipeline = Pipeline(
             fetcher,
-            cast(DomainGate, gate) if gate is not None else DomainGate(self.valkey, self.settings),
+            cast(DomainGate, the_gate),
             ComplianceChecker(fetcher, self.valkey, self.settings),
             ResultCache(self.valkey, self.settings),
             FingerprintStore(self.valkey, self.settings),
@@ -170,6 +175,20 @@ def test_robots_block_fails_without_fetching_the_page() -> None:
     assert data.attempts == 0
     assert data.upstream_status is None
     assert harness.fetcher.page_calls() == []
+
+
+def test_a_cold_origin_that_blocks_the_page_does_not_wait_for_the_page_spacing() -> None:
+    harness = Harness(
+        {PAGE: fetched(), ROBOTS: fetched(ROBOTS, "User-agent: *\nDisallow: /")},
+        outbound_min_delay_ms=3000,
+    )
+
+    started = time.monotonic()
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
+    assert time.monotonic() - started < 2  # no page follows, so no spacing to keep before it
 
 
 def test_report_mode_fetches_and_reports() -> None:
@@ -440,7 +459,9 @@ def test_too_little_time_left_fails_without_fetching() -> None:
 
 
 def test_timeout_on_a_short_budget_is_not_the_hosts_fault() -> None:
-    error = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    error = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
     harness = Harness({PAGE: error}, extract_timeout_seconds=3, fetch_timeout_seconds=20)
 
     envelope = harness.run_once()
@@ -451,7 +472,9 @@ def test_timeout_on_a_short_budget_is_not_the_hosts_fault() -> None:
 
 
 def test_timeout_on_a_full_budget_counts_against_the_host() -> None:
-    error = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    error = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
     harness = Harness({PAGE: error}, fetch_timeout_seconds=2)
 
     harness.run_once()
@@ -515,6 +538,30 @@ def test_circuit_open() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.CONNECTION_ERROR
     assert envelope.error.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("refusal", "code"),
+    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.CONNECTION_ERROR)],
+)
+def test_gate_refusals_raise_when_asked(refusal: Exception, code: ErrorCode) -> None:
+    harness = Harness({PAGE: fetched()}, gate=RefusingGate(refusal))
+
+    async def raised() -> BaseException:
+        with pytest.raises(type(refusal)) as caught:
+            await harness.pipeline.run(ExtractRequest(url=PAGE), USER, gate_refusals="raise")
+        return caught.value
+
+    assert asyncio.run(raised()) is refusal  # unchanged, with its retry_after
+
+    envelope = harness.run_once()  # the default still answers with an envelope
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == code
+    # Both runs count as extractions that the gate refused.
+    assert harness.registry.get_sample_value(
+        "text_extraction_extract_total", {"mode": "auto", "outcome": code.value}
+    ) == pytest.approx(2)
 
 
 def test_invalid_url_is_a_failed_envelope() -> None:
@@ -601,6 +648,72 @@ def test_two_pipelines_share_one_registry() -> None:
 
     labels = {"mode": "auto", "outcome": "invalid_url"}
     assert registry.get_sample_value("text_extraction_extract_total", labels) == 2
+
+
+def test_the_outbound_fetcher_reports_sent_requests_to_its_gate() -> None:
+    valkey = FakeAsyncRedis()
+    gate, fetcher = create_outbound(make_settings(), valkey)
+
+    async def send() -> object:
+        hook = fetcher.on_request_sent
+        assert hook is not None
+        await hook("Example.ORG")
+        value: object = await valkey.zcard("out:starts:{example.org}")
+        await fetcher.aclose()
+        return value
+
+    assert fetcher.before_request == gate.before_request
+    assert fetcher.on_request_sent == gate.mark_sent
+    assert asyncio.run(send()) == 1
+
+
+def test_the_api_pipeline_uses_the_gate_its_fetcher_reports_to() -> None:
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+
+    gate = app.state.pipeline._gate
+    assert app.state.fetcher.before_request == gate.before_request
+    assert app.state.fetcher.on_request_sent == gate.mark_sent
+
+
+def test_a_cold_origins_files_and_page_go_out_back_to_back(httpserver: HTTPServer) -> None:
+    for path in ("/robots.txt", "/ai.txt", "/.well-known/tdmrep.json"):
+        httpserver.expect_request(path).respond_with_data("", status=404)
+    httpserver.expect_request("/page").respond_with_data(ARTICLE, content_type="text/html")
+    settings = make_settings(fetch_allow_private_networks=True, outbound_min_delay_ms=1000)
+    valkey = FakeAsyncRedis()
+    gate = DomainGate(valkey, settings)
+    confirmed: list[float] = []  # the turn's start as checked before each send
+    sent: list[float] = []  # the turn's start once the send was reported
+    sent_at: list[float] = []
+
+    async def latest() -> float:
+        key = "out:starts:{127.0.0.1}"
+        members = cast(list[tuple[bytes, float]], await valkey.zrange(key, 0, -1, withscores=True))
+        (score,) = [value for _, value in members]  # one turn: one token
+        return float(score)
+
+    async def on_sent(host: str) -> None:
+        sent_at.append(time.monotonic())
+        confirmed.append(await latest())
+        await gate.mark_sent(host)
+        sent.append(await latest())
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, before_request=gate.before_request, on_request_sent=on_sent)
+        pipeline = create_pipeline(settings, valkey, fetcher, CollectorRegistry(), gate=gate)
+        try:
+            return await pipeline.run(ExtractRequest(url=httpserver.url_for("/page")), USER)
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    assert envelope.status == "success"
+    assert len(sent) == 4  # three compliance files and the page, all in one turn
+    # A send never records a start earlier than the one its check recorded.
+    assert all(after >= before for before, after in zip(confirmed, sent, strict=True))
+    # First contact costs no spacing: the turn's own requests follow each other at once.
+    assert sent_at[-1] - sent_at[0] < 0.5
 
 
 def test_redirect_target_is_the_final_url() -> None:
@@ -756,6 +869,12 @@ class RecordingGate:
         self.events.append(("record", host))
         await self.gate.record(host, status=status, retry_after=retry_after)
 
+    async def before_request(self, host: str) -> None:
+        await self.gate.before_request(host)
+
+    async def mark_sent(self, host: str) -> None:
+        await self.gate.mark_sent(host)
+
 
 def recording_harness(
     answers: dict[str, Answer], **overrides: Any
@@ -846,7 +965,8 @@ def test_cross_origin_redirect_blocked_by_the_targets_robots() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
     assert target not in [url for url, _ in harness.fetcher.calls]
-    assert ("take", "other.example") not in gate.events
+    # The target's robots.txt is fetched in the target host's turn; the block gives it back.
+    assert gate.events[-2:] == [("take", "other.example"), ("give back", "other.example")]
     assert leases(harness) == 0
 
 
@@ -1008,7 +1128,9 @@ def test_a_cross_host_redirect_still_takes_the_new_hosts_turn() -> None:
 def test_a_hop_that_got_little_time_is_not_the_hosts_fault() -> None:
     target = f"{OTHER}/learn/page.html"
     other_robots = f"{OTHER}/robots.txt"
-    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    timed_out = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
 
     async def slow_robots(validators: Validators | None) -> FetchResult:
         await asyncio.sleep(1.4)  # the hop's turn comes with less than half the fetch budget left
@@ -1029,7 +1151,9 @@ def test_a_hop_that_got_little_time_is_not_the_hosts_fault() -> None:
 
 def test_a_hop_that_got_a_full_budget_counts_against_its_host() -> None:
     target = f"{OTHER}/learn/page.html"
-    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    timed_out = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
     harness = Harness({PAGE: Redirect(target), target: timed_out}, fetch_timeout_seconds=2)
 
     harness.run_once()
@@ -1042,7 +1166,9 @@ def test_a_hop_is_judged_by_what_is_left_of_the_chains_fetch_budget() -> None:
     # FETCH_TIMEOUT_SECONDS: a hop that starts late gets only the rest of it.
     target = f"{OTHER}/learn/page.html"
     other_robots = f"{OTHER}/robots.txt"
-    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    timed_out = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
 
     async def slow_robots(validators: Validators | None) -> FetchResult:
         await asyncio.sleep(1.4)  # leaves the hop 0.6 s of the chain's 2 s
@@ -1058,3 +1184,169 @@ def test_a_hop_is_judged_by_what_is_left_of_the_chains_fetch_budget() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.TIMEOUT
     assert harness.keys("out:fail:*") == []
+
+
+# --- compliance files inside the page's gate turn ---------------------------------------------
+
+
+def watch_requests(harness: Harness, gate: RecordingGate) -> list[int]:
+    """Note each request in ``gate.events`` as ("fetch", url) and return a one-item list that
+    ends up holding the most requests that were in flight at once."""
+    answer = harness.fetcher.fetch
+    in_flight = 0
+    most = [0]
+
+    async def fetch(url: str, **options: Any) -> FetchResult:
+        nonlocal in_flight
+        in_flight += 1
+        most[0] = max(most[0], in_flight)
+        gate.events.append(("fetch", url))
+        try:
+            await asyncio.sleep(0.01)
+            return await answer(url, **options)
+        finally:
+            in_flight -= 1
+
+    harness.fetcher.fetch = fetch  # type: ignore[method-assign]
+    return most
+
+
+@pytest.mark.parametrize("gate_refusals", ["fail", "raise"])  # POST /v1/extract, the worker
+def test_a_cold_origins_files_are_fetched_one_by_one_in_the_pages_turn(gate_refusals: str) -> None:
+    harness, gate = recording_harness({PAGE: fetched(PAGE)})
+    most = watch_requests(harness, gate)
+
+    async def twice() -> list[Envelope[ExtractResult]]:
+        request = ExtractRequest(url=PAGE, cache=False)
+        return [
+            await harness.pipeline.run(request, USER, gate_refusals=gate_refusals)  # type: ignore[arg-type]
+            for _ in range(2)
+        ]
+
+    first, second = asyncio.run(twice())
+
+    assert first.status == second.status == "success"
+    turn = [("take", "example.org")]
+    end = [("record", "example.org"), ("give back", "example.org")]
+    assert gate.events == [
+        *turn,
+        ("fetch", ROBOTS),
+        ("fetch", f"{ORIGIN}/.well-known/tdmrep.json"),
+        ("fetch", f"{ORIGIN}/ai.txt"),
+        ("fetch", PAGE),
+        *end,
+        # The files are cached now: the second turn fetches the page only.
+        *turn,
+        ("fetch", PAGE),
+        *end,
+    ]
+    assert most[0] == 1
+    assert leases(harness) == 0
+
+
+def test_a_refused_turn_fetches_no_compliance_file() -> None:
+    harness = Harness({PAGE: fetched(PAGE)}, gate=RefusingGate(OutboundBusy(3.0)))
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.RATE_LIMITED
+    assert harness.fetcher.calls == []
+
+
+def test_a_cross_host_redirects_files_are_fetched_in_the_targets_turn() -> None:
+    target = f"{OTHER}/learn/page.html"
+    harness, gate = recording_harness({PAGE: Redirect(target), target: fetched(target)})
+    most = watch_requests(harness, gate)
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "success"
+    assert gate.events == [
+        ("take", "example.org"),
+        ("fetch", ROBOTS),
+        ("fetch", f"{ORIGIN}/.well-known/tdmrep.json"),
+        ("fetch", f"{ORIGIN}/ai.txt"),
+        ("fetch", PAGE),
+        ("give back", "example.org"),
+        ("take", "other.example"),
+        ("fetch", f"{OTHER}/robots.txt"),
+        ("fetch", f"{OTHER}/.well-known/tdmrep.json"),
+        ("fetch", f"{OTHER}/ai.txt"),
+        ("record", "other.example"),
+        ("give back", "other.example"),
+    ]
+    # The fake fetcher follows the redirect inside the first fetch call, so that call counts as
+    # in flight while the target's files load: two, where the real fetcher has one.
+    assert most[0] == 2
+    assert leases(harness) == 0
+
+
+def test_two_cold_turns_sharing_the_file_load_still_space_their_pages() -> None:
+    page_starts: list[float] = []
+
+    async def page(validators: Validators | None) -> FetchResult:
+        page_starts.append(time.monotonic())  # after the gate's check and the send report
+        return fetched(PAGE)
+
+    async def slow_file(validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(0.3)  # slow compliance files: both turns wait for the one load
+        return fetched(ROBOTS, "Not found", status=404)
+
+    files = (ROBOTS, f"{ORIGIN}/.well-known/tdmrep.json", f"{ORIGIN}/ai.txt")
+    answers: dict[str, Answer] = {PAGE: page, **dict.fromkeys(files, slow_file)}
+    harness = Harness(answers, outbound_min_delay_ms=200)
+
+    async def both() -> list[Envelope[ExtractResult]]:
+        return list(await asyncio.gather(harness.run(cache=False), harness.run(cache=False)))
+
+    first, second = asyncio.run(both())
+
+    assert first.status == second.status == "success"
+    assert len(page_starts) == 2
+    assert abs(page_starts[1] - page_starts[0]) >= 0.19  # 200 ms, minus clock slack
+
+
+@pytest.mark.parametrize(
+    ("gate_wait", "counted"),
+    [(0.0, True), (0.7, False), (1.5, False)],  # 1.5: the deadline passes inside the gate's wait
+)
+def test_a_timeout_is_judged_by_the_time_the_host_had_after_the_gate(
+    httpserver: HTTPServer, gate_wait: float, counted: bool
+) -> None:
+    """The fetch's budget covers the gate's wait before the request is sent. A long wait
+    followed by a slow host is not the host's fault: what counts is the time left once the gate
+    let the request go (FETCH_TIMEOUT_SECONDS 1, so a fair share is 0.5 s)."""
+
+    def hang(request: Any) -> Any:
+        time.sleep(1.5)
+        return "late"
+
+    httpserver.expect_request("/slow").respond_with_handler(hang)
+    settings = make_settings(
+        fetch_allow_private_networks=True,
+        fetch_timeout_seconds=1,
+        compliance_default="ignore",
+        outbound_min_delay_ms=0,
+    )
+    valkey = FakeAsyncRedis()
+    gate = DomainGate(valkey, settings)
+
+    async def slow_gate(host: str) -> None:
+        await gate.before_request(host)
+        await asyncio.sleep(gate_wait)
+
+    async def scenario() -> tuple[Envelope[ExtractResult], list[Any]]:
+        fetcher = Fetcher(settings, before_request=slow_gate, on_request_sent=gate.mark_sent)
+        pipeline = create_pipeline(settings, valkey, fetcher, CollectorRegistry(), gate=gate)
+        try:
+            envelope = await pipeline.run(ExtractRequest(url=httpserver.url_for("/slow")), USER)
+        finally:
+            await fetcher.aclose()
+        return envelope, await valkey.keys("out:fail:*")
+
+    envelope, failures = asyncio.run(scenario())
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert (failures == [b"out:fail:{127.0.0.1}"]) is counted

@@ -1,12 +1,14 @@
 import asyncio
 import json
 import threading
+import time
 from dataclasses import replace
 from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
 from protego import Protego
+from pytest_httpserver import HTTPServer
 from redis.asyncio import Redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -22,6 +24,7 @@ from text_extraction.compliance import (
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.fetch import Fetcher, FetchError, FetchResult
+from text_extraction.outbound import OutboundBusy
 from text_extraction.settings import Settings
 
 ORIGIN = "https://example.org"
@@ -283,7 +286,9 @@ def test_robots_requested_with_limits() -> None:
     for url, options in fetcher.calls:
         # robots.txt is read from its first 500 KiB (RFC 9309); the others must fit.
         truncate = url == ROBOTS
-        assert options == {"max_bytes": 512_000, "timeout_seconds": 10, "truncate": truncate}
+        timeout = options.pop("timeout_seconds")
+        assert options == {"max_bytes": 512_000, "truncate": truncate}
+        assert 9 < timeout <= 10  # what is left of the 10 s the three files share
 
 
 def test_robots_origin_includes_scheme_and_port() -> None:
@@ -428,6 +433,9 @@ def test_valkey_outage_does_not_stop_the_checks() -> None:
         async def get(self, key: str) -> None:
             raise RedisConnectionError("down")
 
+        async def mget(self, keys: list[str]) -> None:
+            raise RedisConnectionError("down")
+
         async def set(self, key: str, value: str, **options: Any) -> None:
             raise RedisConnectionError("down")
 
@@ -436,8 +444,14 @@ def test_valkey_outage_does_not_stop_the_checks() -> None:
         cast(Fetcher, fetcher), cast(Redis, BrokenValkey()), Settings(auth_mode="none")
     )
 
-    report = asyncio.run(checker.before_fetch(PAGE, "enforce"))
+    async def scenario() -> tuple[ComplianceReport | None, ComplianceReport]:
+        return await checker.cached_before_fetch(PAGE, "enforce"), await checker.before_fetch(
+            PAGE, "enforce"
+        )
 
+    cached, report = asyncio.run(scenario())
+
+    assert cached is None  # nothing readable: the caller checks with requests
     assert report.robots == "disallowed"
 
 
@@ -966,13 +980,58 @@ def test_a_failed_shared_load_fails_every_waiter_and_is_retried() -> None:
     failing = False
     second = asyncio.run(scenario())
 
-    # The three file loads run in a task group, so the error arrives in an exception group.
-    assert all(
-        isinstance(outcome, ExceptionGroup) and outcome.subgroup(RuntimeError) is not None
-        for outcome in first
-    )
+    # The files load one after another: the error of the first ends the check as it is.
+    assert all(isinstance(outcome, RuntimeError) for outcome in first)
     assert attempts.count(ROBOTS) == 2  # once for the failed round, once for the retry
     assert all(isinstance(outcome, ComplianceReport) for outcome in second)
+
+
+def test_a_gate_refusal_in_a_shared_load_reaches_every_waiter_and_caches_nothing(
+    httpserver: HTTPServer,
+) -> None:
+    """The gate hook of the real fetcher refuses the request of the check that started the
+    load (``OutboundBusy``): every check that waits for the same load gets that refusal, nothing
+    is cached for the origin, and the next check loads the files again."""
+    httpserver.expect_request("/robots.txt").respond_with_data("User-agent: *\nDisallow: /docs/\n")
+    page = httpserver.url_for("/docs/page")
+    refuse = True
+    hosts: list[str] = []
+
+    async def gate(host: str) -> None:
+        hosts.append(host)
+        await asyncio.sleep(0.05)  # the other checks join the load meanwhile
+        if refuse:
+            raise OutboundBusy(retry_after=3)
+
+    valkey = FakeAsyncRedis()
+    settings = Settings(auth_mode="none")
+    fetcher = Fetcher(settings, policy=lambda ip: str(ip) == "127.0.0.1", before_request=gate)
+    checker = ComplianceChecker(fetcher, valkey, settings)
+
+    async def scenario() -> tuple[list[ComplianceReport | BaseException], list[Any]]:
+        outcomes = await asyncio.gather(
+            *(checker.before_fetch(page, "enforce") for _ in range(3)), return_exceptions=True
+        )
+        return outcomes, await valkey.keys("*")
+
+    async def again() -> ComplianceReport:
+        try:
+            return await checker.before_fetch(page, "enforce")
+        finally:
+            await fetcher.aclose()
+
+    outcomes, cached = asyncio.run(scenario())
+
+    assert all(isinstance(outcome, OutboundBusy) for outcome in outcomes)
+    assert [outcome.retry_after for outcome in outcomes] == [3, 3, 3]  # type: ignore[union-attr]
+    assert len(hosts) == 1  # one shared load, refused once
+    assert cached == []
+
+    refuse = False
+    report = asyncio.run(again())
+
+    assert report.robots == "disallowed"
+    assert len(hosts) == 4  # the refused robots.txt, then all three files loaded anew
 
 
 def test_rules_are_parsed_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1022,3 +1081,228 @@ def test_redirect_findings_keep_the_worst_answer_of_the_chain() -> None:
     assert merged.reasons == ["robots.txt disallows this URL for text-extraction."]
     assert merged.decision == "reported"
     assert compliance.with_redirect_findings(hop, first).tdm_reserved is True
+
+
+def test_origin_files_are_fetched_one_after_another() -> None:
+    checker, fetcher, _ = make_checker({})
+    answer_fetch = fetcher.fetch
+    in_flight = 0
+    most = 0
+
+    async def slow_fetch(url: str, **options: Any) -> FetchResult:
+        nonlocal in_flight, most
+        in_flight += 1
+        most = max(most, in_flight)
+        try:
+            await asyncio.sleep(0.02)
+            return await answer_fetch(url, **options)
+        finally:
+            in_flight -= 1
+
+    fetcher.fetch = slow_fetch  # type: ignore[method-assign]
+
+    asyncio.run(checker.before_fetch(PAGE, "enforce"))
+
+    assert fetcher.urls() == [ROBOTS, TDMREP, AI_TXT]
+    assert most == 1
+
+
+def test_cached_check_answers_only_from_the_cache() -> None:
+    checker, fetcher, _ = make_checker(robots_answer("User-agent: *\nDisallow: /docs/\n"))
+
+    async def scenario() -> tuple[object, list[str], ComplianceReport, ComplianceReport | None]:
+        cold = await checker.cached_before_fetch(PAGE, "enforce")
+        cold_calls = fetcher.urls()
+        checked = await checker.before_fetch(PAGE, "enforce")
+        warm = await checker.cached_before_fetch(PAGE, "enforce")
+        return cold, cold_calls, checked, warm
+
+    cold, cold_calls, checked, warm = asyncio.run(scenario())
+
+    assert cold is None
+    assert cold_calls == []
+    assert warm == checked
+    assert warm.robots == "disallowed"
+    assert fetcher.urls() == [ROBOTS, TDMREP, AI_TXT]  # the warm check fetched nothing
+
+
+def test_cached_check_in_ignore_mode_is_skipped() -> None:
+    checker, fetcher, _ = make_checker({})
+
+    report = asyncio.run(checker.cached_before_fetch(PAGE, "ignore"))
+
+    assert report is not None
+    assert report.decision == "skipped"
+    assert fetcher.calls == []
+
+
+def test_a_load_is_cancelled_with_its_last_waiter() -> None:
+    checker, fetcher, store = make_checker({})
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def hanging_fetch(url: str, **options: Any) -> FetchResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    fetcher.fetch = hanging_fetch  # type: ignore[method-assign]
+
+    async def scenario() -> tuple[bool, int]:
+        task = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        return cancelled.is_set(), len(await store.keys("cmp:*"))
+
+    # No request of the check outlives it (it ran in the caller's gate turn); nothing is cached.
+    assert asyncio.run(scenario()) == (True, 0)
+
+
+def test_a_cancelled_check_returns_only_after_its_request_has_ended() -> None:
+    checker, fetcher, _store = make_checker({})
+    started = asyncio.Event()
+    ended = asyncio.Event()
+
+    async def hanging_fetch(url: str, **options: Any) -> FetchResult:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.05)  # closing the connection takes a moment
+            ended.set()
+        raise AssertionError("unreachable")
+
+    fetcher.fetch = hanging_fetch  # type: ignore[method-assign]
+
+    async def scenario() -> bool:
+        task = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return ended.is_set()
+
+    # The caller gives its gate turn back right after: the request must be over by then.
+    assert asyncio.run(scenario()) is True
+
+
+def test_a_shared_load_survives_one_cancelled_waiter() -> None:
+    checker, fetcher, _ = make_checker({})
+    release = asyncio.Event()
+    answer_fetch = fetcher.fetch
+
+    async def gated_fetch(url: str, **options: Any) -> FetchResult:
+        await release.wait()
+        return await answer_fetch(url, **options)
+
+    fetcher.fetch = gated_fetch  # type: ignore[method-assign]
+
+    async def scenario() -> ComplianceReport:
+        first = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        second = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        first.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        return await second
+
+    report = asyncio.run(scenario())
+
+    assert report.robots == "allowed"  # robots.txt is a 404
+    assert fetcher.urls() == [ROBOTS, TDMREP, AI_TXT]
+
+
+def test_a_check_after_a_cancelled_load_loads_again() -> None:
+    checker, fetcher, _ = make_checker({})
+    answer_fetch = fetcher.fetch
+    hang = True
+    started = asyncio.Event()
+
+    async def fetch(url: str, **options: Any) -> FetchResult:
+        started.set()
+        if hang:
+            await asyncio.Event().wait()
+        return await answer_fetch(url, **options)
+
+    fetcher.fetch = fetch  # type: ignore[method-assign]
+
+    async def scenario() -> ComplianceReport:
+        nonlocal hang
+        first = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        await started.wait()
+        first.cancel()
+        hang = False
+        # Started before the cancelled load has ended: it must not inherit its cancellation.
+        second = asyncio.create_task(checker.before_fetch(PAGE, "enforce"))
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        return await second
+
+    assert asyncio.run(scenario()).robots == "allowed"
+
+
+def _hanging_checker(
+    monkeypatch: pytest.MonkeyPatch, *, overrun: float = 0.0
+) -> tuple[ComplianceChecker, FakeFetcher, FakeAsyncRedis]:
+    """A checker whose every file fetch hangs until its timeout (plus ``overrun``), then times
+    out; the shared budget is shortened to 0.3 s."""
+    monkeypatch.setattr(compliance, "_FILE_TIMEOUT_SECONDS", 0.3)
+    checker, fetcher, store = make_checker({})
+
+    async def hanging(url: str, **options: Any) -> FetchResult:
+        fetcher.calls.append((url, options))
+        await asyncio.sleep(options["timeout_seconds"] + overrun)
+        raise FetchError(ErrorCode.TIMEOUT, "timed out", retryable=True)
+
+    fetcher.fetch = hanging  # type: ignore[method-assign]
+    return checker, fetcher, store
+
+
+def test_the_three_files_share_one_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    checker, fetcher, _ = _hanging_checker(monkeypatch)
+
+    async def scenario() -> tuple[ComplianceReport, float]:
+        started = time.monotonic()
+        report = await checker.before_fetch(PAGE, "enforce")
+        return report, time.monotonic() - started
+
+    report, elapsed = asyncio.run(scenario())
+
+    assert elapsed < 0.45  # one budget for the three, not 0.3 s each
+    assert sum(options["timeout_seconds"] for _, options in fetcher.calls) <= 0.3 + 1e-6
+    # An unavailable robots.txt keeps its package-2 meaning: blocked under enforce.
+    assert report.robots == "unavailable"
+    assert blocking_code(report) is ErrorCode.BLOCKED_BY_ROBOTS
+    assert report.ai_txt == "absent"
+
+
+def test_a_spent_budget_sends_no_request_and_caches_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checker, fetcher, store = _hanging_checker(monkeypatch, overrun=0.05)
+
+    async def scenario() -> tuple[ComplianceReport, list[str]]:
+        report = await checker.before_fetch(PAGE, "report")
+        states = []
+        for kind in ("robots", "tdmrep", "ai"):
+            raw = await store.get(f"cmp:{kind}:{{https://example.org:443}}")
+            assert raw is not None
+            states.append(json.loads(raw)["state"])
+        return report, states
+
+    report, states = asyncio.run(scenario())
+
+    assert fetcher.urls() == [ROBOTS]  # robots.txt used the whole budget
+    assert states == ["unavailable"] * 3  # cached like a timeout
+    assert report.robots == "unavailable"
+    assert report.decision == "reported"
+    assert blocking_code(report) is None

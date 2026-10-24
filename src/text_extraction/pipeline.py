@@ -5,11 +5,17 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 1. ``resolve_mode``: the compliance mode that applies; a refused choice is a 403.
 2. ``validate_url``.
 3. Result cache: a fresh entry is served as it is (``cache: hit``).
-4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here.
-5. The fetch, inside the host's ``DomainGate`` slot, and its outcome reported to the gate. A
-   stale cache entry's validators are sent; a 304 or unchanged bytes reuse the stored result
-   (``cache: revalidated``). Each redirect target passes the compliance checks of step 4 before
-   it is requested, and one on another host waits for that host's slot instead.
+4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here. When the
+   origin's files are cached, this takes no request. Otherwise the host's ``DomainGate`` turn is
+   taken first and the missing files are fetched in it, one after another, before the page: so
+   every request to the host counts against its limits. The fetcher checks every request with
+   the gate (``DomainGate.before_request``): the turn's own requests go back to back, and each
+   keeps the spacing to the latest request of any other turn.
+5. The fetch, inside the host's ``DomainGate`` turn (the one of step 4, if taken), and its
+   outcome reported to the gate. A stale cache entry's validators are sent; a 304 or unchanged
+   bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
+   compliance checks of step 4 before it is requested; one on another host gives the first
+   host's turn back and takes the new host's, in which its missing files are fetched too.
 6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
 7. HTML and XHTML: decode, compliance after the fetch (headers, meta tags, ``noai``; may block),
    convert, strip domain boilerplate. ``text/plain``: decode, header checks, ``convert_plain``.
@@ -19,6 +25,8 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
 compliance mode (403) and a Valkey outage of the outbound gate (503) leave as ``ServiceError``.
+A caller that can retry later itself (the job worker) may ask for the gate's refusals
+(``OutboundBusy``, ``CircuitOpen``) to be raised instead of answered as envelopes.
 
 Only ``success`` and ``partial`` results are cached and fingerprinted: a bot challenge or an
 error page is nothing to serve again, nor to compare the next version of the page with.
@@ -74,7 +82,7 @@ from text_extraction.outbound import (
     parse_retry_after,
 )
 from text_extraction.quality import Quality, assess, quality_error
-from text_extraction.result_cache import CachedEntry, ResultCache, cache_key
+from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
 
@@ -160,6 +168,7 @@ class _Run:
     report: ComplianceReport
     cache: CacheState
     started: float
+    raise_refusals: bool = False
     deadline: asyncio.Timeout | None = None
     host: str | None = None
     final_url: str | None = None
@@ -294,15 +303,27 @@ class Pipeline:
         self._rules = load_boilerplate_rules()
         self._metrics = _metrics_for(registry)
 
-    async def run(self, req: ExtractRequest, principal: Principal) -> Envelope[ExtractResult]:
+    async def run(
+        self,
+        req: ExtractRequest,
+        principal: Principal,
+        *,
+        gate_refusals: Literal["fail", "raise"] = "fail",
+    ) -> Envelope[ExtractResult]:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
-        and an unavailable Valkey (503)."""
+        and an unavailable Valkey (503).
+
+        A refusal of the outbound gate is a ``rate_limited`` (busy) or ``connection_error``
+        (paused) envelope, retryable. With ``gate_refusals="raise"`` the ``OutboundBusy`` or
+        ``CircuitOpen`` propagates unchanged instead; the metrics count it under the same code.
+        """
         mode = resolve_mode(req.compliance, principal, self._settings)
         run = _Run(
             req=req,
             report=ComplianceReport(mode=mode, decision="skipped"),  # until it is checked
             cache="miss" if req.cache else "bypass",
             started=time.perf_counter(),
+            raise_refusals=gate_refusals == "raise",
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -312,6 +333,12 @@ class Pipeline:
             envelope.trace_id = current_trace_id()
             outcome = _outcome(envelope)
             return envelope
+        except OutboundBusy:
+            outcome = ErrorCode.RATE_LIMITED.value
+            raise
+        except CircuitOpen:
+            outcome = ErrorCode.CONNECTION_ERROR.value
+            raise
         finally:
             self._observe(run, outcome)
 
@@ -347,6 +374,8 @@ class Pipeline:
             run.upstream_status = error.upstream_status
             return run.failed(error.code, error.message, retryable=error.retryable)
         except OutboundBusy as busy:
+            if run.raise_refusals:
+                raise
             return run.failed(
                 ErrorCode.RATE_LIMITED,
                 "Too many requests to this site are waiting; "
@@ -354,6 +383,8 @@ class Pipeline:
                 retryable=True,
             )
         except CircuitOpen as paused:
+            if run.raise_refusals:
+                raise
             return run.failed(
                 ErrorCode.CONNECTION_ERROR,
                 "Requests to this site are paused after errors or a rate limit; "
@@ -393,14 +424,14 @@ class Pipeline:
         self, run: _Run, stored: _Stored | None
     ) -> Envelope[ExtractResult]:
         req = run.req
-        started = time.perf_counter()
-        report = await self._checker.before_fetch(req.url, run.report.mode)
-        run.compliance_ms += _ms(started)
-        run.report = report
-        if (code := blocking_code(report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
-
-        fetched = await self._fetch(run, stored.entry.validators if stored else None)
+        turn = _Turn(self._gate)
+        try:
+            run.report = await self._check_origin(run, req.url, turn)
+            if (code := blocking_code(run.report)) is not None:
+                return run.failed(code, _BLOCK_MESSAGES[code])
+            fetched = await self._fetch(run, stored.entry.validators if stored else None, turn)
+        finally:
+            await turn.give_back()  # `_fetch` gives it back as soon as the fetch ends
         if fetched.not_modified:
             if stored is None:
                 return run.failed(
@@ -452,16 +483,35 @@ class Pipeline:
             return await self._revalidated(run, stored, fetched)
         return await self._extract_content(run, stored, fetched, kind, text)
 
-    async def _fetch(self, run: _Run, validators: Validators | None) -> FetchResult:
+    async def _check_origin(self, run: _Run, url: str, turn: _Turn) -> ComplianceReport:
+        """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
+        turn of ``url``'s host, taken here (or kept, when ``turn`` holds it already), so the
+        origin's files are fetched under the host's limits. The wait for the turn counts as
+        fetch time, the checks as compliance time."""
+        mode = run.report.mode
+        started = time.perf_counter()
+        report = await self._checker.cached_before_fetch(url, mode)
+        if report is None:
+            host = urlsplit(url).hostname or ""
+            waited = time.perf_counter()
+            # The origin's Crawl-delay is not known yet; the request after this turn keeps it.
+            await turn.take(host, None)
+            run.fetch_ms += _ms(waited)
+            started += time.perf_counter() - waited
+            report = await self._checker.before_fetch(url, mode)
+        run.compliance_ms += _ms(started)
+        return report
+
+    async def _fetch(self, run: _Run, validators: Validators | None, turn: _Turn) -> FetchResult:
         """Fetch the target in its host's turn and report the outcome to the gate.
 
         A redirect target is checked against the compliance files of its origin before it is
         requested (a block ends the chain). A target on another host waits for that host's turn
         and the previous host's turn is given back first; one on the same host keeps the turn.
+        Missing files of the target's origin are fetched in the target's turn.
         The outcome is recorded for the host that gave it, judged against the time that host's
         request actually had.
         """
-        turn = _Turn(self._gate)
         checked = {run.req.url}
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
@@ -477,8 +527,14 @@ class Pipeline:
             if url not in checked:
                 checked.add(url)
                 check_started = time.perf_counter()
-                hop = await self._checker.before_fetch(url, run.report.mode)
-                hop_checks += time.perf_counter() - check_started
+                compliance_before = run.compliance_ms
+                fetch_before = run.fetch_ms
+                hop = await self._check_origin(run, url, turn)
+                # Counted below from hop_checks instead: the fetch time is what remains, and a
+                # wait for the target's turn is part of it.
+                waited = (run.fetch_ms - fetch_before) / 1000
+                hop_checks += time.perf_counter() - check_started - waited
+                run.compliance_ms, run.fetch_ms = compliance_before, fetch_before
                 run.report = with_redirect_findings(run.report, hop)
                 if (code := blocking_code(run.report)) is not None:
                     raise FetchError(code, _BLOCK_MESSAGES[code])
@@ -509,7 +565,11 @@ class Pipeline:
                     on_redirect=on_redirect,
                 )
             except FetchError as error:
-                if turn.answering is not None:
+                gate_timeout = error.code == ErrorCode.TIMEOUT and error.cleared_after is None
+                if turn.answering is not None and not gate_timeout:  # nothing sent: not the host's
+                    if error.cleared_after is not None:
+                        # The gate's wait before the send is not time the host had.
+                        budget = min(budget, chain_budget - error.cleared_after)
                     await self._record_failure(turn.answering, error, budget)
                 raise
             # Recorded while the turn is held, so a 429 pauses the host before the next turn.
@@ -546,8 +606,9 @@ class Pipeline:
         An error with a status (too large, too many redirects) still got an answer: that status
         counts. DNS and connection errors count as failures of the host. A timeout counts only
         when the request to this host had at least half of ``FETCH_TIMEOUT_SECONDS`` (``budget``,
-        the time left when its turn came): one cut short by the extraction's own deadline says
-        little about the host, and a redirect target only gets what the chain left over. Errors
+        the time left once the gate let the request go): one cut short by the extraction's own
+        deadline or by a long wait at the gate says little about the host, and a redirect target
+        only gets what the chain left over. Errors
         that say nothing about the host's health (a redirect to a blocked or invalid URL, an
         unsupported encoding) are not reported.
         """
@@ -715,19 +776,39 @@ class Pipeline:
         )
 
 
+def create_outbound(settings: Settings, valkey: Redis) -> tuple[DomainGate, Fetcher]:
+    """The per-host gate in ``valkey`` and a fetcher that announces every request it sends
+    (pages, redirect hops, compliance files) to that gate and reports its send, so each request
+    keeps the spacing to the other turns' real starts. Pass both to ``create_pipeline``;
+    ``aclose`` the fetcher last."""
+    gate = DomainGate(valkey, settings)
+    return gate, Fetcher(
+        settings, before_request=gate.before_request, on_request_sent=gate.mark_sent
+    )
+
+
 def create_pipeline(
     settings: Settings,
     valkey: Redis,
     fetcher: Fetcher,
     registry: CollectorRegistry,
     pool: ConversionPool | None = None,
+    *,
+    gate: DomainGate | None = None,
+    memory_guard: MemoryPressure | None = None,
 ) -> Pipeline:
-    """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``."""
+    """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
+
+    ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
+    without it a new gate is made, which then counts its spacing from the turn starts only.
+    With ``memory_guard`` the result cache skips its writes while Valkey's memory is high."""
+    if gate is None:
+        gate = DomainGate(valkey, settings)
     return Pipeline(
         fetcher,
-        DomainGate(valkey, settings),
+        gate,
         ComplianceChecker(fetcher, valkey, settings),
-        ResultCache(valkey, settings),
+        ResultCache(valkey, settings, guard=memory_guard),
         FingerprintStore(valkey, settings),
         settings,
         registry,

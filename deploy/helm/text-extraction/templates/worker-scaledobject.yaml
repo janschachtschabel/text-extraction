@@ -1,0 +1,23 @@
+{{- if and .Values.workers.extract.enabled .Values.workers.extract.autoscaling.keda.enabled }}
+{{- $keda := .Values.workers.extract.autoscaling.keda }}
+# Scales the extract workers on the queue length. The gauge comes from the API pods (they stay up
+# while the workers are scaled down) and needs JOBS_ENABLED=true there; max() because every API
+# pod reports the same queue.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "text-extraction.workerExtractName" . }}
+  labels:
+    {{- include "text-extraction.workerExtractLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: {{ include "text-extraction.workerExtractName" . }}
+  minReplicaCount: {{ $keda.minReplicaCount }}
+  maxReplicaCount: {{ $keda.maxReplicaCount }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ required "workers.extract.autoscaling.keda.serverAddress is required" $keda.serverAddress | quote }}
+        query: {{ printf `max(text_extraction_queue_pending_items{pool="extract", namespace="%s"})` .Release.Namespace | quote }}
+        threshold: {{ $keda.threshold | toString | quote }}
+{{- end }}

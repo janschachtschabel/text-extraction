@@ -530,3 +530,86 @@ def test_shutdown_drain_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHUTDOWN_DRAIN_SECONDS", "-1")
     with pytest.raises(ConfigError, match="shutdown_drain_seconds"):
         load_settings()
+
+
+def test_job_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.job_ttl_seconds == 86400
+    assert settings.job_item_max_bytes == 2_000_000
+
+    monkeypatch.setenv("JOB_TTL_SECONDS", "60")
+    monkeypatch.setenv("JOB_ITEM_MAX_BYTES", "10000")
+    settings = load_settings()
+    assert settings.job_ttl_seconds == 60
+    assert settings.job_item_max_bytes == 10_000
+
+    monkeypatch.setenv("JOB_TTL_SECONDS", "59")
+    with pytest.raises(ConfigError, match="job_ttl_seconds"):
+        load_settings()
+    monkeypatch.setenv("JOB_TTL_SECONDS", "60")
+    monkeypatch.setenv("JOB_ITEM_MAX_BYTES", "9999")
+    with pytest.raises(ConfigError, match="job_item_max_bytes"):
+        load_settings()
+
+
+def test_job_item_max_attempts_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().job_item_max_attempts == 5
+
+    monkeypatch.setenv("JOB_ITEM_MAX_ATTEMPTS", "1")
+    assert load_settings().job_item_max_attempts == 1
+
+    monkeypatch.setenv("JOB_ITEM_MAX_ATTEMPTS", "0")
+    with pytest.raises(ConfigError, match="job_item_max_attempts"):
+        load_settings()
+
+
+def test_scheduler_claim_scan_budget_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().scheduler_claim_scan_budget == 200
+
+    monkeypatch.setenv("SCHEDULER_CLAIM_SCAN_BUDGET", "1")
+    assert load_settings().scheduler_claim_scan_budget == 1
+
+    for value in ("0", "5001"):
+        monkeypatch.setenv("SCHEDULER_CLAIM_SCAN_BUDGET", value)
+        with pytest.raises(ConfigError, match="scheduler_claim_scan_budget"):
+            load_settings()
+
+
+def test_extract_max_background_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().extract_max_background == 32
+
+    monkeypatch.setenv("EXTRACT_MAX_BACKGROUND", "1")
+    assert load_settings().extract_max_background == 1
+
+    monkeypatch.setenv("EXTRACT_MAX_BACKGROUND", "0")
+    with pytest.raises(ConfigError, match="extract_max_background"):
+        load_settings()
+
+
+def test_request_max_body_bytes_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().request_max_body_bytes == 65536
+
+    monkeypatch.setenv("REQUEST_MAX_BODY_BYTES", "1024")
+    assert load_settings().request_max_body_bytes == 1024
+
+    monkeypatch.setenv("REQUEST_MAX_BODY_BYTES", "1023")
+    with pytest.raises(ConfigError, match="request_max_body_bytes"):
+        load_settings()
+
+
+def test_valkey_memory_guard_ratio_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().valkey_memory_guard_ratio == 0.8
+
+    monkeypatch.setenv("VALKEY_MEMORY_GUARD_RATIO", "1.0")
+    assert load_settings().valkey_memory_guard_ratio == 1.0
+
+    for value in ("0.09", "1.01"):
+        monkeypatch.setenv("VALKEY_MEMORY_GUARD_RATIO", value)
+        with pytest.raises(ConfigError, match="valkey_memory_guard_ratio"):
+            load_settings()

@@ -1,6 +1,9 @@
 {{- if .Values.metrics.prometheusRule.enabled }}
 {{- $fullName := include "text-extraction.fullname" . }}
 {{- $internal := include "text-extraction.internalServiceName" . }}
+{{- $workerInternal := include "text-extraction.workerExtractInternalServiceName" . }}
+{{- $ns := .Release.Namespace }}
+{{- $jobs := eq (include "text-extraction.jobsEnabled" .) "true" }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -37,4 +40,73 @@ spec:
           annotations:
             summary: text-extraction answers more than 5 % of requests with 5xx
             description: More than 5 % of the requests to {{ $fullName }} in namespace {{ .Release.Namespace }} ended in a 5xx status for 10 minutes.
+        # The memory gauges come from the API and worker pods (every pod reads the same Valkey),
+        # hence max(). `> 0` drops a Valkey without maxmemory, which has no limit to alert on.
+        - alert: TextExtractionValkeyMemoryHigh
+          expr: |
+            max(text_extraction_valkey_used_memory_bytes{namespace="{{ $ns }}", service=~"{{ $internal }}|{{ $workerInternal }}"})
+              /
+            max(text_extraction_valkey_max_memory_bytes{namespace="{{ $ns }}", service=~"{{ $internal }}|{{ $workerInternal }}"} > 0)
+              > {{ .Values.alerts.valkeyMemoryRatio }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Valkey is nearly full
+            description: Valkey of {{ $fullName }} in namespace {{ $ns }} has used more than {{ mulf .Values.alerts.valkeyMemoryRatio 100 }} % of its maxmemory for 10 minutes. New batches are refused (503) and result-cache writes are skipped until it drops; a full Valkey refuses every write.
+        {{- if $jobs }}
+        # The queue gauges come from the API pods (every pod reports the same queue), hence max().
+        # Counters appear with the first item a worker handles. `or vector(0)` makes "no completion
+        # yet" count as 0 on a fresh cluster instead of hiding the alert.
+        - alert: TextExtractionQueueBacklog
+          expr: |
+            max(text_extraction_queue_pending_items{namespace="{{ $ns }}", pool="extract"}) > {{ .Values.alerts.queueBacklogItems }}
+              and
+            (sum(increase(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"deferred|lost"}[15m])) or vector(0)) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: The job queue has a backlog and no item completes
+            description: More than {{ .Values.alerts.queueBacklogItems }} items have waited in the extract queue of {{ $fullName }} in namespace {{ $ns }} for 15 minutes while no worker completed an item.
+        {{- if .Values.workers.extract.enabled }}
+        # Needs kube-state-metrics. The `or vector(0)` also fires when the Deployment series is missing.
+        - alert: TextExtractionWorkersDown
+          expr: |
+            max(text_extraction_queue_pending_items{namespace="{{ $ns }}", pool="extract"}) > 0
+              and
+            (sum(kube_deployment_status_replicas_available{namespace="{{ $ns }}", deployment="{{ include "text-extraction.workerExtractName" . }}"}) or vector(0)) < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Items wait in the queue but no extract worker is available
+            description: Deployment {{ include "text-extraction.workerExtractName" . }} in namespace {{ $ns }} has had no available replica for 5 minutes while items are pending.
+        {{- end }}
+        # The denominator counts the items that recorded a result (not deferred, not lost). The
+        # numerator leaves out success and content_too_short: a partial result is not a failure.
+        - alert: TextExtractionJobItemFailures
+          expr: |
+            sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"success|content_too_short|deferred|lost"}[15m]))
+              /
+            sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"deferred|lost"}[15m]))
+              > 0.5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: More than half of the job items fail
+            description: More than 50 % of the job items of {{ $fullName }} in namespace {{ $ns }} failed for 15 minutes (partial results do not count). Target sites that are down or block the service count as failures.
+        # The last-success timestamp exists from the first successful read of a pod on. `or vector(0)`
+        # also fires when no API pod ever read the queue (for example Valkey down since the start).
+        - alert: TextExtractionQueueMetricsStale
+          expr: |
+            time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds{namespace="{{ $ns }}", pool="extract"}) or vector(0)) > 120
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: The queue gauges are stale
+            description: No API pod of {{ $fullName }} in namespace {{ $ns }} has read the job queue for more than 2 minutes, so the queue alerts and the KEDA scaler work on old or missing data.
+        {{- end }}
 {{- end }}

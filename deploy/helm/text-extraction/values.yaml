@@ -17,7 +17,9 @@ replicaCount: 2
 # reports not ready and keeps serving for SHUTDOWN_DRAIN_SECONDS (5), then lets requests in
 # flight finish for max(30, EXTRACT_TIMEOUT_SECONDS + 5) seconds (30), then stops the internal
 # port: 5 + 30 = 35 s at most, plus a 10 s margin = 45. Keep this above drain + graceful time:
-# raise it when you raise SHUTDOWN_DRAIN_SECONDS or EXTRACT_TIMEOUT_SECONDS.
+# raise it when you raise SHUTDOWN_DRAIN_SECONDS or EXTRACT_TIMEOUT_SECONDS. The render fails
+# when SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5) is above this value minus the
+# 10 s margin, using config.* or the defaults (5 and 25).
 terminationGracePeriodSeconds: 45
 
 # Non-secret settings. Each key becomes an environment variable of the same name
@@ -60,6 +62,62 @@ autoscaling:
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
 
+# Jobs (POST /v1/batch, GET /v1/jobs/{id}, slow POST /v1/extract) are executed by the workers below.
+jobs:
+  # Rendered as JOBS_ENABLED on the API pods. Unset (the default) means true while
+  # `workers.extract.enabled` is true and false without extract workers, so an API-only install
+  # answers 503 on the job routes instead of accepting jobs nobody works on. Set it to true or
+  # false to override. A `config.JOBS_ENABLED` entry is ignored: the chart sets the variable.
+  # Only API pods with JOBS_ENABLED=true export the queue gauges that KEDA and the alerts read.
+  enabled: null
+
+workers:
+  # Extract workers: they claim job items from the fair queue in Valkey and run the extraction
+  # pipeline. They serve only the internal port 9090 (/health, /ready, /metrics), have no ingress
+  # and use the same ConfigMap and Secrets as the API pods (API_KEYS is required while
+  # AUTH_MODE is api_key). `config.*` applies to them as well.
+  extract:
+    enabled: true
+    replicaCount: 2
+    # Job items one worker pod processes at once (WORKER_CONCURRENCY). Conversions are still
+    # capped by config.CONVERT_CONCURRENCY. Rendered into the pod env: a config.WORKER_CONCURRENCY
+    # entry is ignored.
+    concurrency: 8
+    # No drain wait (no Service sends traffic to a worker). On SIGTERM the worker stops claiming
+    # and gives items in flight max(30, EXTRACT_TIMEOUT_SECONDS + 5) seconds (30), plus a margin.
+    # The render fails when that is above this value minus 10 s (config.EXTRACT_TIMEOUT_SECONDS,
+    # default 25): raise this value with the timeout.
+    terminationGracePeriodSeconds: 45
+    # Placeholder values until package 11 measures real consumption. The memory limit follows
+    # CONVERT_CONCURRENCY x the peak of one conversion: a page at CONVERT_MAX_BYTES (5 MiB) peaks at
+    # about 450 MB, so 2 conversions plus the service itself need about 1Gi. Raise it with either.
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    # KEDA and the HPA are mutually exclusive: enabling both fails the render. With either one on,
+    # `replicaCount` is ignored.
+    autoscaling:
+      keda:
+        # Needs the KEDA operator and Prometheus scraping the API pods (metrics.serviceMonitor).
+        # The queue gauges come only from API pods with JOBS_ENABLED=true (see `jobs.enabled`):
+        # the scaler sees nothing, and the workers stay at minReplicaCount, if none has it.
+        enabled: false
+        # Prometheus that KEDA queries. Change it to your Prometheus Service.
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        # Pending queue items per worker replica.
+        threshold: 50
+        minReplicaCount: 1
+        maxReplicaCount: 10
+      hpa:
+        enabled: false
+        minReplicas: 2
+        maxReplicas: 10
+        targetCPUUtilizationPercentage: 70
+
 service:
   type: ClusterIP
   # Public API port. The ingress targets this port only.
@@ -78,7 +136,7 @@ ingress:
           pathType: Prefix
   tls: []
 
-# Single-replica Valkey for rate limits and other shared state.
+# Single-replica Valkey for rate limits, the result cache, jobs and the job queue.
 # Switch it off and set `externalValkey` to use a managed or shared Valkey/Redis.
 valkey:
   enabled: true
@@ -86,41 +144,98 @@ valkey:
     repository: valkey/valkey
     tag: 8.1-alpine
     pullPolicy: IfNotPresent
+  auth:
+    # Valkey requires a password. API and worker pods get VALKEY_PASSWORD from the Secret and
+    # VALKEY_URL=redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0 through Kubernetes env expansion.
+    enabled: true
+    # Name of your own Secret with the password. Without it the chart creates a Secret with a
+    # random 32-character alphanumeric password and keeps it across upgrades (lookup). Helm
+    # renders without a cluster (helm template, GitOps renderers) cannot look it up and would
+    # generate a new password on every render: use an existing Secret there.
+    # The password goes into a URL and is also what Valkey expects, verbatim. It must therefore be
+    # URL-safe: letters, digits and - . _ ~ only (for example `openssl rand -hex 24`). Do not
+    # percent-encode it: the client decodes %XX in the URL but Valkey would compare the encoded text.
+    existingSecret: ""
+    # Key inside the Secret (the chart-managed one uses it as well).
+    existingSecretKey: VALKEY_PASSWORD
+  # Memory Valkey may use for data (--maxmemory). The eviction policy is fixed to noeviction:
+  # jobs, queue and counters must never be evicted, a full Valkey refuses writes instead.
+  # 768mb is 60 % of the 1280Mi memory limit: maxmemory counts the data only, and the rest is for
+  # allocator fragmentation, client and replication buffers and the copy-on-write pages of the
+  # fork of an append-only-file rewrite or a background save. Keep it near 60 % of the limit.
+  # Sizing: job results are the bulk, about BATCH_MAX_URLS x the average result JSON per open
+  # batch (1,000 x ~80 KB = ~80 MB), plus as much again in the result cache, held for
+  # JOB_TTL_SECONDS / RESULT_STORE_TTL_SECONDS (24 h). At VALKEY_MEMORY_GUARD_RATIO (0.8) of
+  # maxmemory the API stops accepting batches (503) and all pods skip result-cache writes, so plan
+  # maxmemory for the batches you expect to be open at once with room to spare below 80 %.
+  maxmemory: 768mb
   persistence:
-    # false: data lives in an emptyDir and is lost on restart (fine for rate-limit counters).
+    # false: data lives in an emptyDir and is lost on restart (jobs and queued items are lost too).
     enabled: false
     size: 1Gi
     storageClass: ""
     existingClaim: ""
+  # Requests equal limits (Guaranteed QoS): Valkey holds all shared state, so the node must
+  # never evict it for memory pressure, and a request below the limit would let it grow into
+  # memory other pods need. Reserves 1.25Gi and half a CPU per release. Raise the memory limit
+  # and maxmemory together (60 %).
   resources:
     requests:
-      cpu: 50m
-      memory: 64Mi
+      cpu: 500m
+      memory: 1280Mi
     limits:
       cpu: 500m
-      memory: 256Mi
+      memory: 1280Mi
 
 # Used when valkey.enabled is false.
 externalValkey:
   # Plain URL, for example redis://valkey.example.org:6379/0. Do not put a password here.
   url: ""
   # For a URL that carries a password, reference a Secret instead. It takes precedence over `url`.
+  # The Secret holds the whole URL, so a password with reserved characters must be percent-encoded
+  # there (redis://:p%40ss@host:6379/0 means the password p@ss).
   existingSecret:
     name: ""
     key: VALKEY_URL
 
 metrics:
-  # Needs the Prometheus Operator CRDs. Scrapes the internal Service, port `internal`, path /metrics.
+  # Needs the Prometheus Operator CRDs. Scrapes the internal Services of the API pods and of the
+  # extract workers, port `internal`, path /metrics.
   serviceMonitor:
     enabled: false
     interval: 30s
     scrapeTimeout: 10s
     # Extra labels, for example the `release` label that your Prometheus selects on.
     labels: {}
-  # Needs the Prometheus Operator CRDs and kube-state-metrics (for TextExtractionDown).
+  # Needs the Prometheus Operator CRDs and kube-state-metrics (for TextExtractionDown and
+  # TextExtractionWorkersDown). The job alerts need the ServiceMonitor and JOBS_ENABLED=true.
   prometheusRule:
     enabled: false
     labels: {}
+
+# Thresholds of the alerts in metrics.prometheusRule.
+alerts:
+  # TextExtractionQueueBacklog fires above this many pending items while no item completes.
+  queueBacklogItems: 1000
+  # TextExtractionValkeyMemoryHigh fires while Valkey's used memory stays above this share of
+  # its maxmemory for 10 minutes. Keep it at or below config.VALKEY_MEMORY_GUARD_RATIO (0.8),
+  # from which the API refuses new batches.
+  valkeyMemoryRatio: 0.8
+
+# Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
+# limited: the API must reach arbitrary sites, so egress stays open.
+#   Valkey   accepts 6379 from the API and worker pods of this release only.
+#   API      accepts 8080 from anywhere and 9090 from `metricsFrom`.
+#   Workers  accept 9090 from `metricsFrom` only.
+# Probes of the kubelet run from the node and are normally allowed by the CNI.
+networkPolicy:
+  enabled: false
+  # Peers (NetworkPolicy `from` entries) allowed to scrape port 9090: Prometheus. The default is
+  # every pod of the release namespace. Example for Prometheus in another namespace:
+  #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: monitoring}}
+  # An empty list lets nobody reach 9090.
+  metricsFrom:
+    - podSelector: {}
 
 podAnnotations: {}
 nodeSelector: {}

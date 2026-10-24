@@ -8,10 +8,11 @@ metadata:
     {{- with .Values.metrics.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+# Selects the internal Services of the API pods and of the extract workers.
 spec:
   selector:
     matchLabels:
-      {{- include "text-extraction.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/part-of: {{ include "text-extraction.fullname" . }}
       app.kubernetes.io/component: internal
   namespaceSelector:
     matchNames:

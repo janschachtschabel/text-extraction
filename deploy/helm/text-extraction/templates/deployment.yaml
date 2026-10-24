@@ -62,23 +62,11 @@ spec:
               value: "8080"
             - name: INTERNAL_PORT
               value: "9090"
-            - name: VALKEY_URL
-              {{- if .Values.valkey.enabled }}
-              value: {{ include "text-extraction.valkeyUrl" . | quote }}
-              {{- else if .Values.externalValkey.existingSecret.name }}
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.externalValkey.existingSecret.name }}
-                  key: {{ .Values.externalValkey.existingSecret.key }}
-              {{- else }}
-              value: {{ required "externalValkey.url or externalValkey.existingSecret.name is required when valkey.enabled is false" .Values.externalValkey.url | quote }}
-              {{- end }}
-            {{- if include "text-extraction.hasApiKeys" . }}
-            - name: API_KEYS
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "text-extraction.secretName" . }}
-                  key: {{ .Values.secrets.existingSecretKey }}
+            - name: JOBS_ENABLED
+              value: {{ include "text-extraction.jobsEnabled" . | quote }}
+            {{- include "text-extraction.valkeyEnv" . | trim | nindent 12 }}
+            {{- with include "text-extraction.apiKeysEnv" . | trim }}
+            {{- . | nindent 12 }}
             {{- end }}
           livenessProbe:
             httpGet:

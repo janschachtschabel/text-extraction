@@ -62,7 +62,8 @@ Coding follows the **Superpowers** skills, vendored in `.claude/skills/`
 
 Python 3.13, uv, FastAPI, pydantic-settings, httpx, Playwright (Chromium), Trafilatura,
 extruct, MarkItDown, Docling, Presidio + spaCy, youtube-transcript-api, yt-dlp,
-faster-whisper, Taskiq on Valkey, OpenAI SDK (OpenAI-compatible endpoints), FastMCP,
+faster-whisper, own fair job queue on Valkey (Lua, leases), OpenAI SDK
+(OpenAI-compatible endpoints), FastMCP,
 structlog, prometheus-fastapi-instrumentator, OpenTelemetry (B3 propagator).
 Quality: ruff, mypy, pytest.
 
@@ -75,7 +76,7 @@ uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run mypy                  # type-check (strict)
 uv run pre-commit install    # install the git hooks
-docker compose up --build    # API + Valkey; needs .env (cp .env.example .env, set API_KEYS)
+docker compose up --build    # API, worker, Valkey; needs .env with API_KEYS, VALKEY_PASSWORD
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint text-extraction  # helm lint
 ```
 

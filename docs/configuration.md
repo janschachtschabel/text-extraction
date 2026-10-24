@@ -8,7 +8,9 @@ chart README has the [full values table](../deploy/helm/text-extraction/README.m
 
 Non-secret settings. In Helm, put a variable under `config.<NAME>` in the values; it lands in the
 chart's ConfigMap with the same name (values are strings). The chart overrides `PUBLIC_PORT`,
-`INTERNAL_PORT` and `VALKEY_URL`; values for them under `config` are ignored.
+`INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods (value `jobs.enabled`) and
+`WORKER_CONCURRENCY` on the workers (value `workers.extract.concurrency`); values for them under
+`config` are ignored.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -21,7 +23,9 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints. A secret when it carries a password, see below. |
+| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`. The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
+| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
+| `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` answers 503 `internal_error` (retryable), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
 | `FETCH_MAX_BYTES` | `20000000` | Largest response body the fetcher accepts, in bytes. Minimum 1024. |
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
@@ -45,7 +49,16 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
 | `CONVERT_MAX_BYTES` | `5242880` | Largest HTML or text body that is converted, in bytes (5 MiB; minimum 1024). A larger page fails with `too_large` (not retryable) before it is decoded. `FETCH_MAX_BYTES` stays the download limit. |
 | `CONVERT_CONCURRENCY` | `2` | Conversions (decoding, HTML conversion, metadata and licences, fingerprint) running at once in one pod, on a thread pool of their own; DNS lookups keep the default pool. A request waits for a free slot within its `EXTRACT_TIMEOUT_SECONDS`, else it fails with `timeout`. Python cannot stop a running thread: a conversion that outlives its request runs to its end and holds its slot until then, so this bound is what limits CPU and memory. Such a conversion also holds the shutdown up, because Python joins its worker threads when the process exits. That is usually seconds, but the worst case can run to the end of the grace period, where the pod is killed (Trafilatura is quadratic on repeated paragraphs: one 5.7 MB page took 125 s). That is harmless, because pods are stateless: the request it served has already been answered `timeout`. Peak memory is roughly `CONVERT_CONCURRENCY` times the peak of one page (about 450 MB for a 5 MB page), see the Helm memory limit. Minimum 1. |
-| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop to that host began). The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` once the outbound gate let its request go (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop's request passed the gate); a long wait at the gate followed by a slow host does not count. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. After it, the lifespan shutdown waits for extractions that became a job (`wait_seconds`) for up to `EXTRACT_TIMEOUT_SECONDS` + 7 s (5 s of grace after the deadline, then it cancels them and allows 2 s for their writes); see Response times. |
+| `JOB_TTL_SECONDS` | `86400` | How long a job (its status, URL list and results) stays in Valkey, in seconds. The time starts at creation and starts again when the job completes, so a caller has this long to fetch the results of a finished job. Minimum 60. |
+| `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
+| `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
+| `SCHEDULER_CLAIM_SCAN_BUDGET` | `200` | Client-domain pairs one claim of the job queue looks at, at most. A claim that finds nothing within the budget answers "try again in 0.05 s", and the next claim goes on where it stopped (a client whose domains the budget ran out in moves to the end of the rotation), so fairness holds across claims. Workers back off from 0.05 s up to 1 s while such answers repeat. It bounds the time one claim blocks Valkey when many domains are deferred or at their limit. Minimum 1, maximum 5000. |
+| `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. Helm: `workers.extract.concurrency`. |
+| `BATCH_MAX_URLS` | `1000` | Most URLs one `POST /v1/batch` may carry. More answers 422 `invalid_request`. A body over `BATCH_MAX_URLS` × (`MAX_URL_LENGTH` (2048) + 8) bytes plus 4 KiB answers 413 `invalid_request` before it is read whole or parsed (see `REQUEST_MAX_BODY_BYTES`). Minimum 1, maximum 100000. |
+| `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches one API key may have unfinished (queued or running) at a time. The next `POST /v1/batch` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
+| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
+| `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -63,7 +76,10 @@ The fetcher identifies itself on every outbound request with a fixed, honest use
 configurable. The robots.txt product token is `text-extraction`; robots.txt is read per RFC 9309
 (4xx and unfollowable redirects mean no rules; 5xx, 429 or a network error means "unavailable",
 which `enforce` treats as disallowed; a file over 500 KiB is parsed from its first 500 KiB). The
-compliance files of an origin are loaded once per pod for concurrent requests. Every redirect
+compliance files of an origin are loaded once per pod for concurrent requests, one after another
+and inside the page's outbound turn (see "Outbound limits per host"). The three share one time
+budget of 10 s: each gets what the ones before left, and one whose budget is spent is not requested
+and counts as unavailable, like a timeout (cached at most 300 s). Every redirect
 target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
 `enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
 `report` its findings join the report. Client trace headers
@@ -78,7 +94,18 @@ Keep these out of ConfigMaps, images and logs.
 | --- | --- | --- |
 | `API_KEYS` | JSON list of `{"name", "role", "sha256", "rate_limit_per_minute"}`. `role` is `user` or `admin`; `rate_limit_per_minute` is optional. Only the SHA-256 of a key is stored. | `secrets.apiKeys` (chart-managed Secret) or `secrets.existingSecret` + `secrets.existingSecretKey` |
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
-| `VALKEY_URL` | Only when the URL carries a password. | `externalValkey.existingSecret.name` + `.key`. Without a password use `externalValkey.url`; the in-chart Valkey (`valkey.enabled`) needs no secret. |
+| `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
+| `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
+
+**The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
+`openssl rand -hex 24`). The compose file and the Helm chart put the same value into
+`VALKEY_URL` (`redis://:<password>@host:6379/0`) and pass it to Valkey as `--requirepass`. The
+client percent-decodes the password in the URL (`p%40ss` is `p@ss`) but Valkey compares the text
+as it is, so a percent-encoded password never matches: do not encode it, choose a password that
+needs no encoding. This applies to the generated password (alphanumeric) and to
+`valkey.auth.existingSecret`. A `VALKEY_URL` you write yourself (`externalValkey.existingSecret`,
+or the variable on its own) carries the real password, and there reserved characters must be
+percent-encoded. In `.env` also avoid `$`, which compose treats as a variable.
 
 Generate a key with `openssl rand -hex 32` and compute its hash with
 `printf %s "$KEY" | sha256sum | cut -d' ' -f1`. Clients send the key as
@@ -97,7 +124,17 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
   without Valkey leave the load balancer, and so does a pod as soon as it gets SIGTERM.
 - `/metrics` is Prometheus text and is not reachable on 8080.
 
-docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
+The extract worker (`text-extraction-worker`) serves only port 9090, with the same three paths.
+Its `/ready` answers 200 once it has loaded the language model and its loops claim items, while
+Valkey answers. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
+items in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds to finish; a claim already sent
+when the signal arrives counts as in flight, so its item is processed too. An item still running
+then is cancelled, and its lease expires so that another worker runs it. There is no drain wait,
+since no Service sends traffic to the worker.
+
+docker compose runs the API, one extract worker and a Valkey with a password (`VALKEY_PASSWORD`
+from `.env`, required). The worker needs the same `API_KEYS` as the API while `AUTH_MODE` is
+`api_key`. docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
 
@@ -105,12 +142,28 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
 `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
-few milliseconds. Work that takes longer than about 30 s will run as a job in a later package. On
-SIGTERM `/ready` turns 503 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5);
-then the public port stops accepting connections and gives requests in flight
-`max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the internal port
-(`/health`, `/metrics`) stops last. The Helm chart's `terminationGracePeriodSeconds` (45) must
-stay above drain plus graceful time (35 s by default).
+few milliseconds. A caller that does not want to hold the connection sends `wait_seconds` (0-60):
+an extraction still running after that long continues in the pod and becomes a job (202,
+`GET /v1/jobs/{id}`); `JOBS_ENABLED=false` ignores `wait_seconds`. On SIGTERM `/ready` turns 503
+at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5); then the public port stops
+accepting connections and gives requests in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds
+(30 by default) to finish; then the app's own shutdown waits for extractions that became a job,
+for at most `EXTRACT_TIMEOUT_SECONDS` + 7 s (it cancels those still running 5 s after
+`EXTRACT_TIMEOUT_SECONDS` and gives the writes of their error results 2 s); the internal port
+(`/health`, `/metrics`) stops last. Such an extraction ends within `EXTRACT_TIMEOUT_SECONDS` of
+its start and runs while the graceful phase does, so normally the whole sequence fits in the Helm
+chart's `terminationGracePeriodSeconds` (45); its worst case does not, and then the pod is killed
+and the job's lease expires (the job then reports a lost extraction). The Helm value must stay
+above drain plus graceful time (35 s by default) plus a 10 s margin. The chart checks it when it
+renders: it fails if `SHUTDOWN_DRAIN_SECONDS + max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (from
+`config.*`, else the defaults 5 and 25) is above `terminationGracePeriodSeconds` minus 10, and
+likewise for `workers.extract.terminationGracePeriodSeconds` without the drain. Raise the grace
+period whenever you raise either setting.
+
+The in-chart Valkey reserves 1280Mi of memory (request equals limit) and runs with
+`--maxmemory 768mb --maxmemory-policy noeviction`, 60 % of the limit, which leaves room for
+fragmentation, client buffers and the fork of an append-only-file rewrite. Raise limit and
+`valkey.maxmemory` together.
 
 ## Headers
 
@@ -119,7 +172,7 @@ Read from the request:
 | Header | Use |
 | --- | --- |
 | `Authorization` | `Bearer <key>` when `AUTH_MODE=api_key`. |
-| `x-client-trace-id` | Client trace id; logged on every line of the request and used as `trace_id` in the response envelope. |
+| `x-client-trace-id` | Client trace id; logged on every line of the request and used as `trace_id` in the response envelope. A job keeps the trace id of the request that created it (batch or hand-over): the worker logs each of its items under it, and the items' result envelopes carry it. |
 | `b3`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled` | B3 trace context; logged on every line of the request. |
 
 Query strings are never logged.
@@ -136,21 +189,45 @@ with `Retry-After`. If Valkey is unavailable the request is refused with 503 (`i
 
 ## Outbound limits per host
 
-Every fetch of a target site passes a per-host gate. All state is in Valkey, so the pods share it.
+Every request to a target site passes a per-host gate: the page and its redirect hops, and the
+origin's compliance files (robots.txt, `tdmrep.json`, ai.txt). The files are fetched only when they
+are not cached (`COMPLIANCE_CACHE_SECONDS`), then one after another inside the turn of the page
+that needs them, before the page. A turn has at most one request in flight, so
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST` holds for every request. The spacing lies between the
+requests of different turns: the requests of one turn (the files, the page, a redirect hop on the
+same host) go back to back, so first contact costs no more than the files themselves. Two cold
+turns that share one file load still send their pages a spacing apart, since each page keeps the
+spacing to the other turn's latest request. The first turn on an origin does not know its
+`Crawl-delay` yet; the turns after it do and keep it. All state is in Valkey, so the pods share it.
 Hosts are compared lower-cased and in IDNA form. The braces around the host in the keys are
 literal (a cluster hash tag), so all keys of one host live in the same slot.
 
 | Key | Content | Lifetime |
 | --- | --- | --- |
 | `out:inflight:{<host>}` | Requests in flight: one entry per lease, scored by its expiry time. | A lease expires 120 s after it starts, so a crashed pod frees its slot by itself. |
-| `out:next:{<host>}` | Earliest start time of the next request. | Until the slot has passed. |
+| `out:next:{<host>}` | Earliest start time of the next request: the next turn to book. | Until the slot has passed. |
+| `out:starts:{<host>}` | Real starts per turn: one entry per turn token, scored by the latest real start of a request in that turn. Set when a request is let through, moved on (never back) when its headers have gone out; entries older than twice the longest spacing are dropped. | The longest spacing plus 60 s. |
 | `out:cooldown:{<host>}` | End of the pause after 429 or 503. | Until it ends. |
 | `out:fail:{<host>}` | Consecutive failures (connection error or 5xx). | 10 minutes, renewed on each failure. |
 | `out:circuit:{<host>}` | End of an open circuit. | Until it ends. |
 
 A request waits for a free lease (at most `OUTBOUND_MAX_CONCURRENCY_PER_HOST`) and for its spacing
-slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`.
-If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. A redirect to
+slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`
+and holds between the real starts of requests of different turns. A turn books its start and
+sleeps until it and until the spacing has passed since the latest request of any other turn.
+Right before each of its requests the fetcher asks the gate again: the request waits out whatever
+is left of the spacing since the latest request of the other turns (its own turn's requests do
+not count) and is recorded under its turn, in one atomic script. The fetcher reports every
+request once its headers have gone out, which moves its turn's start on to that moment. So a
+request held up between the check and the send (a busy pod) delays the other turns' requests
+instead of letting them follow closer; only a hold-up longer than the spacing itself can still
+bring two starts closer. A request to a host whose turn is not held is not checked; its report
+counts for every turn. One kind is sent today: a compliance file (robots.txt, `tdmrep.json`,
+ai.txt) whose request redirects to another host follows that redirect without a lease or spacing
+at the target, so it can come on top of the target's limits. That happens at most 3 times (once
+per file) per origin, per pod and per `COMPLIANCE_CACHE_SECONDS`.
+If a wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy; the wait
+before a request inside a turn counts against that fetch's time limit. A redirect to
 another host gives the first host's lease back and waits for a turn at the new host; the outcome
 counts for the host that answered. While a pause
 or an open circuit is set, requests to that host are refused at once. A 429 or 503 sets the pause to
@@ -161,3 +238,103 @@ answer below 500 other than 429 resets the count.
 
 Spacing, pauses and lease expiry use each pod's own clock, so the pods need NTP-synchronised
 clocks.
+
+## Job keys
+
+A job lives in four Valkey keys. The id is a literal cluster hash tag, so one job's keys share a
+slot.
+
+| Key | Content | Lifetime |
+| --- | --- | --- |
+| `job:{<id>}:meta` | Hash: kind, owner, owner role, options (JSON), state, counters, times, lease, and the trace id of the request that created the job. | `JOB_TTL_SECONDS` from creation, renewed on completion. |
+| `job:{<id>}:urls` | List of the job's URLs in input order. | As `meta`. |
+| `job:{<id>}:results` | Hash of item index to the result envelope (JSON). | As `meta`; set with the first result. |
+| `job:{<id>}:done` | Bitmap of the finished item indexes. | As `meta`; set with the first result. |
+
+A result is written once: storing the same index again changes nothing, so an item that is run a
+second time after a lost lease counts once. Times are epoch seconds from the pod's clock.
+
+Per API key (the job's owner) one more key lists the unfinished batches:
+`jobs:{owner:<name>}:open` is a set of job ids with a TTL of `JOB_TTL_SECONDS`, renewed on each
+batch. `POST /v1/batch` removes the ids of finished or expired jobs before it counts, and refuses
+the batch when the owner has `BATCH_MAX_OPEN_PER_CLIENT` open ones. The name is escaped (`%` as
+`%25`, `{` as `%7B`, `}` as `%7D`), so the braces always enclose exactly the name. No script
+touches this key together with a job key or a queue key.
+
+## Queue keys
+
+Batch items wait in a fair queue per worker pool (`extract` for the fast workers). The pool name is
+a literal cluster hash tag, so all keys of one pool share a slot. Client names (the API key name)
+and domains appear escaped in the keys (`%` as `%25`, `:` as `%3A`, tab as `%09`).
+
+| Key | Content |
+| --- | --- |
+| `q:{<pool>}:clients` | List of the clients with queued items, in rotation order. |
+| `q:{<pool>}:c:<client>:domains` | List of that client's domains with queued items, in rotation order. |
+| `q:{<pool>}:c:<client>:d:<domain>` | List of that client's items of that domain (`<job_id>:<index>:<attempts>`). |
+| `q:{<pool>}:notbefore` | Hash of domain to the time before which its items are not claimed (deferred). |
+| `q:{<pool>}:running` | Hash of domain to its number of leased items. |
+| `q:{<pool>}:leases` | Sorted set of leased items, scored by lease expiry. |
+| `q:{<pool>}:leased` | Hash of leased item to its client, domain and lease token. |
+| `q:{<pool>}:pending` | Number of queued items, claimable or deferred (leased items not counted). |
+
+A claim rotates the clients, then the domains of the client, so a small batch is not queued behind
+a large one. It skips a domain that is deferred or holds `OUTBOUND_MAX_CONCURRENCY_PER_HOST` leased
+items, and looks at no more than `SCHEDULER_CLAIM_SCAN_BUDGET` client-domain pairs. Before that, it
+takes back up to 20 expired leases: each item goes to the front of its domain with one more attempt.
+An item past `JOB_ITEM_MAX_ATTEMPTS` is handed out once more, marked exhausted: the worker records
+its failure and then completes it, and if the worker dies in between, the item comes back after its
+lease. Every lease has a token, so a worker whose lease was taken back cannot complete or defer the
+item under the next worker's lease. The keys have no TTL; the lists empty themselves as items are
+claimed.
+
+A worker leases an item for `EXTRACT_TIMEOUT_SECONDS * 2 + 10` seconds (60 by default) and runs it
+through the fast pipeline with the job's options, as the job's owner. When the outbound gate
+refuses the host (busy, or paused after errors or a 429), the item goes back to the front of its
+domain, which is not claimed before the gate's retry time; an item at `JOB_ITEM_MAX_ATTEMPTS` is
+stored with the gate's error (`rate_limited` or `connection_error`, retryable) instead. An item
+whose job has expired is dropped. While Valkey fails, a worker backs off for 1, 2, 4 … 30 s and
+then goes on; the item it held (an exhausted one too) is claimed again once its lease expires.
+
+## Metrics
+
+Every process exports Prometheus text on its internal port (`/metrics`, 9090). API pods and
+workers are separate processes with separate registries; a metric that both record (the job
+duration) has the same name, labels and buckets in each.
+
+The job system exports these besides the HTTP and extraction metrics:
+
+| Metric | Type | Labels | Exported by | Meaning |
+| --- | --- | --- | --- | --- |
+| `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. |
+| `text_extraction_queue_leased_items` | gauge | `pool` | API pods | Items of the pool that a worker has leased (also leases that expired and are not taken back yet). |
+| `text_extraction_queue_clients` | gauge | `pool` | API pods | Clients (API key names) with items waiting. |
+| `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
+| `text_extraction_valkey_used_memory_bytes` | gauge | none | API pods, workers | Valkey's `used_memory` (`INFO memory`), read every 5 s; exported from the first successful read on and left unchanged while Valkey fails. Every pod reads the same Valkey: use `max()`. |
+| `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
+| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job. |
+| `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
+| `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused) or `lost` (the job was gone). |
+| `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
+| `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |
+
+The queue gauges come from the API pods and not from the workers, because workers may scale to
+zero and the autoscaler (KEDA) must still see the backlog. Only API pods with `JOBS_ENABLED=true`
+export them, so KEDA and the queue alerts of the Helm chart need such API pods (the chart rejects
+KEDA with `jobs.enabled=false`). Every API pod reads the same queue, so
+**query them with `max()` over the pods** (for example
+`max(text_extraction_queue_pending_items{pool="extract"})`); `sum()` would multiply the backlog by
+the number of API pods, and `avg()` is only right while all pods have read it at the same moment.
+The same holds for `text_extraction_queue_leased_items` and `text_extraction_queue_clients`.
+`text_extraction_jobs_created_total` is per pod: use `sum()` over pods for the total.
+
+A pod reads the queue in the background every 5 seconds (collectors cannot wait for Valkey; the
+read is three size lookups, whatever the queue holds); the gauges are up to 5 s old. A pod exports no queue gauge until its first
+read has succeeded, so an empty series means "not known", never "empty queue". While Valkey fails
+the pod keeps exporting the last values and logs `queue_metrics_unavailable` once; it logs
+`queue_metrics_recovered` when the reads work again. To alert on stale data, use
+`time() - text_extraction_queue_metrics_last_success_timestamp_seconds > 60` (per pod; with
+`max()` over the series the alert fires only when no pod has read the queue lately). The Helm
+alert `TextExtractionQueueMetricsStale` uses `max()` and 120 s. With
+`JOBS_ENABLED=false` the pod does not
+read the queue and exports no queue gauge.

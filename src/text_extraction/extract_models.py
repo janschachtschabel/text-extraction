@@ -6,10 +6,12 @@ from pydantic import BaseModel, Field
 
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
+from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.fingerprint import Fingerprint
 from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.quality import Quality
+from text_extraction.tracing import current_trace_id
 
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
@@ -32,6 +34,16 @@ class ExtractRequest(BaseModel, extra="forbid"):
     )
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
+    )
+    wait_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=60,
+        description="Without it, the request answers when the extraction ends (the unchanged "
+        "default). With it, an extraction that is still running after this many seconds becomes "
+        "a job: the answer is then 202 with the job's id and `status_url`, and "
+        "`GET /v1/jobs/{id}` has the result. 0 hands over at once. Ignored when jobs are "
+        "disabled (`JOBS_ENABLED=false`).",
     )
 
 
@@ -67,3 +79,10 @@ class ExtractResult(BaseModel):
     fingerprint: Fingerprint | None
     cache: CacheState
     warnings: list[str]
+
+
+def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:
+    """A failed extraction envelope without data, with the trace id bound to the context (the
+    request's, or in a worker the trace id of the job's creator)."""
+    error = ErrorInfo(code=code, message=message, retryable=retryable)
+    return Envelope[ExtractResult](status="failed", error=error, trace_id=current_trace_id())

@@ -14,6 +14,14 @@ What it enforces, for the first request and every redirect hop alike:
 The caller may watch the chain with ``on_redirect``: it is awaited with each redirect target
 before that target is requested, and may raise ``FetchError`` to end the chain there.
 
+``before_request``, a constructor argument, is awaited with the host of every request (each
+redirect hop and every caller's, compliance files included) right before it is sent; the outbound
+gate waits out its spacing there (``DomainGate.before_request``) and may raise, which ends the
+fetch with that error and sends nothing. ``on_request_sent``, also a constructor argument, is
+awaited with the host right after the request's headers went out on the wire; the gate counts
+its spacing from that real send (``DomainGate.mark_sent``). That hook gets at most half a
+second; an error or a timeout of it is logged (host and error type) and does not fail the fetch.
+
 Failures of the target or the network are raised as ``FetchError`` with a code from
 ``ErrorCode``. A response with status >= 400 is not an error here: it is returned and the
 pipeline decides what it means.
@@ -29,6 +37,7 @@ import zlib
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookiejar import DefaultCookiePolicy
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -73,6 +82,8 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # Awaited with each redirect target before it is requested; raises ``FetchError`` to stop.
 RedirectHook = Callable[[str], Awaitable[None]]
+SentHook = Callable[[str], Awaitable[None]]
+_SENT_HOOK_TIMEOUT_SECONDS = 0.5  # the hook runs between the headers and the body: keep it short
 
 
 def _sendable(value: str | None) -> str | None:
@@ -122,18 +133,25 @@ class FetchResult:
     truncated: bool = False
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Limits:
-    """The limits of one ``fetch`` call."""
+    """The limits of one ``fetch`` call, and how far it got."""
 
     max_bytes: int
     truncate: bool
     deadline: float  # seconds for the whole call
     started: float  # time.monotonic() at the start
+    # Seconds from the start to the moment the latest request passed ``before_request``.
+    cleared_after: float | None = None
 
 
 class FetchError(Exception):
-    """The target could not be fetched. The message is safe to show to API callers."""
+    """The target could not be fetched. The message is safe to show to API callers.
+
+    ``cleared_after`` (timeouts only) is the seconds from the start of the fetch to the moment
+    the request that timed out passed ``before_request``, None when it had not got that far (the
+    deadline passed inside the gate's wait, so nothing was sent): the time
+    the host had is the call's deadline minus it."""
 
     def __init__(
         self,
@@ -142,12 +160,14 @@ class FetchError(Exception):
         *,
         retryable: bool = False,
         upstream_status: int | None = None,
+        cleared_after: float | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.retryable = retryable
         self.upstream_status = upstream_status
+        self.cleared_after = cleared_after
 
 
 class _Inflater:
@@ -248,10 +268,33 @@ def _host_of(url: str) -> str | None:
         return None
 
 
+def _sent_tracer(hook: SentHook, url: str) -> Callable[[str, dict[str, Any]], Awaitable[None]]:
+    """An httpcore ``trace`` callback that calls ``hook`` once the request headers are sent."""
+    host = urlsplit(url).hostname or ""
+
+    async def trace(event: str, _info: dict[str, Any]) -> None:
+        if not event.endswith(".send_request_headers.complete"):
+            return
+        try:
+            async with asyncio.timeout(_SENT_HOOK_TIMEOUT_SECONDS):
+                await hook(host)
+        except Exception as error:  # a report must never fail or stall the fetch
+            _log.warning("request_sent_hook_failed", host=host, error_type=type(error).__name__)
+
+    return trace
+
+
 class Fetcher:
     """Guarded HTTP client with redirect, size and time limits. Create once, ``aclose`` last."""
 
-    def __init__(self, settings: Settings, *, policy: AddressPolicy | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        policy: AddressPolicy | None = None,
+        before_request: SentHook | None = None,
+        on_request_sent: SentHook | None = None,
+    ) -> None:
         self._settings = settings
         if policy is None:
             policy = (
@@ -272,6 +315,18 @@ class Fetcher:
         # The shared client never stores cookies, so nothing leaks from one fetch() to the next.
         # Cookies live in a jar of their own per fetch() call, see ``_fetch``.
         self._client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+        self._before_request = before_request
+        self._on_request_sent = on_request_sent
+
+    @property
+    def before_request(self) -> SentHook | None:
+        """The hook awaited right before each request (see the module docstring)."""
+        return self._before_request
+
+    @property
+    def on_request_sent(self) -> SentHook | None:
+        """The hook awaited once each request's headers are sent (see the module docstring)."""
+        return self._on_request_sent
 
     async def fetch(
         self,
@@ -295,11 +350,10 @@ class Fetcher:
         if deadline <= 0:
             raise ValueError("timeout_seconds must be greater than 0")
         started = time.monotonic()
+        limits = _Limits(limit, truncate, deadline, started)
         try:
             async with asyncio.timeout(deadline):
-                return await self._fetch(
-                    url, validators, _Limits(limit, truncate, deadline, started), on_redirect
-                )
+                return await self._fetch(url, validators, limits, on_redirect)
         except FetchError:
             raise
         except (InvalidUrlError, httpx.InvalidURL) as error:
@@ -314,7 +368,10 @@ class Fetcher:
             ) from None
         except (TimeoutError, httpx.TimeoutException):
             raise FetchError(
-                ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True
+                ErrorCode.TIMEOUT,
+                "The fetch did not finish in time.",
+                retryable=True,
+                cleared_after=limits.cleared_after,
             ) from None
         except (httpx.HTTPError, OSError) as error:
             raise FetchError(
@@ -357,6 +414,12 @@ class Fetcher:
                 "GET", current, headers=headers, timeout=limits.deadline
             )
             cookies.set_cookie_header(request)
+            if self._on_request_sent is not None:
+                request.extensions["trace"] = _sent_tracer(self._on_request_sent, current)
+            limits.cleared_after = None  # a timeout inside the gate's wait sent nothing
+            if self._before_request is not None:
+                await self._before_request(urlsplit(current).hostname or "")
+            limits.cleared_after = time.monotonic() - limits.started
             async with contextlib.aclosing(await self._send(request)) as response:
                 cookies.extract_cookies(response)
                 status = response.status_code

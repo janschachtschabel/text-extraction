@@ -5,6 +5,10 @@ The pipeline calls this module three times per request:
 1. ``resolve_mode`` turns the caller's ``compliance`` option into the mode that applies.
 2. ``ComplianceChecker.before_fetch`` reads the three files of the target's origin (robots.txt,
    ``/.well-known/tdmrep.json``, ai.txt) and decides for the URL, before the page is fetched.
+   The files are fetched one after another, never in parallel: the pipeline calls this inside
+   the outbound gate turn of the page, so every request to the host counts against its limits.
+   ``cached_before_fetch`` decides from the cache alone (no request), or answers None while a
+   file is not cached; the pipeline asks it first and takes the turn only for what is missing.
 3. ``ComplianceChecker.after_fetch`` adds what only the page itself can tell: the
    ``tdm-reservation`` and ``tdm-policy`` headers, the same two ``<meta>`` tags and
    ``noai``/``noml`` in ``X-Robots-Tag`` or ``<meta name="robots">``.
@@ -36,7 +40,9 @@ literal cluster hash tag) holding JSON ``{"state", "body"}``. The state is ``fou
 the raw text), ``absent`` (4xx) or ``unavailable`` (5xx, 429 or a fetch error). The first two live
 ``compliance_cache_seconds``; ``unavailable`` lives at most five minutes, so a short outage of a
 site does not block it for a whole cache period. Concurrent checks of one origin in this process
-share one load of each file (cache read, fetch, cache write); other pods load their own.
+share one load of each file (cache read, fetch, cache write); other pods load their own. A load
+whose last waiting check is cancelled is cancelled too, so no request outlives the gate turn it
+ran in.
 Parsing a rules file runs in a worker thread, off the event loop.
 """
 
@@ -46,6 +52,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -71,7 +78,7 @@ ComplianceMode = Literal["enforce", "report", "ignore"]
 PRODUCT_TOKEN = "text-extraction"  # noqa: S105 - the robots.txt user-agent token, not a secret
 
 _FILE_MAX_BYTES = 512_000  # 500 KiB, RFC 9309's least parsing limit for robots.txt
-_FILE_TIMEOUT_SECONDS = 10
+_FILE_TIMEOUT_SECONDS = 10  # for the three files of an origin together
 # A cached "unavailable" answer is kept at most this long.
 _UNAVAILABLE_TTL_SECONDS = 300
 # Only the head of a page can carry the meta tags we read.
@@ -79,6 +86,9 @@ _META_SCAN_CHARS = 262_144
 _MAX_POLICY_CHARS = 2048
 # Parsed robots.txt / ai.txt files kept in this process.
 _RULES_CACHE_SIZE = 256
+_ROBOTS_PATH = "/robots.txt"
+_TDMREP_PATH = "/.well-known/tdmrep.json"
+_AI_TXT_PATH = "/ai.txt"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 _NOAI_DIRECTIVES = frozenset({"noai", "noml"})
@@ -243,6 +253,8 @@ class ComplianceChecker:
         self._rules_cache: OrderedDict[str, Protego | None] = OrderedDict()
         # Loads in flight by cache key; concurrent checks of one origin wait for the same one.
         self._loading: dict[str, asyncio.Task[_Entry]] = {}
+        # Checks waiting for each load in flight.
+        self._waiters: dict[asyncio.Task[_Entry], int] = {}
 
     async def before_fetch(self, url: str, mode: ComplianceMode) -> ComplianceReport:
         """Check robots.txt, TDMRep and ai.txt for ``url``; fetches nothing in ``ignore`` mode."""
@@ -250,17 +262,38 @@ class ComplianceChecker:
             return ComplianceReport(mode=mode, decision="skipped")
 
         origin = _origin(url)
-        async with asyncio.TaskGroup() as group:
-            robots_task = group.create_task(self._load("robots", origin, "/robots.txt"))
-            tdmrep_task = group.create_task(
-                self._load("tdmrep", origin, "/.well-known/tdmrep.json")
-            )
-            ai_task = group.create_task(self._load("ai", origin, "/ai.txt"))
+        # One time budget for the three files together (R23): a host where all of them hang
+        # costs _FILE_TIMEOUT_SECONDS, not three times that.
+        deadline = time.monotonic() + _FILE_TIMEOUT_SECONDS
+        robots = await self._load("robots", origin, _ROBOTS_PATH, deadline)
+        tdmrep = await self._load("tdmrep", origin, _TDMREP_PATH, deadline)
+        ai = await self._load("ai", origin, _AI_TXT_PATH, deadline)
+        return await self._judge(mode, url, robots, tdmrep, ai)
 
-        robots, ai = robots_task.result(), ai_task.result()
+    async def cached_before_fetch(self, url: str, mode: ComplianceMode) -> ComplianceReport | None:
+        """``before_fetch`` from the cache alone: None while any of the three files is not
+        cached (or the cache cannot be read). Fetches nothing."""
+        if mode == "ignore":
+            return ComplianceReport(mode=mode, decision="skipped")
+        origin = _origin(url)
+        # One round trip: the keys of an origin share a hash tag.
+        keys = [_cache_key(kind, origin) for kind in ("robots", "tdmrep", "ai")]
+        try:
+            raws = await self._valkey.mget(keys)
+        except (RedisError, OSError) as error:
+            _log.warning("compliance_cache_read_failed", error=type(error).__name__)
+            return None
+        robots, tdmrep, ai = (_parse_entry(raw) for raw in raws)
+        if robots is None or tdmrep is None or ai is None:
+            return None
+        return await self._judge(mode, url, robots, tdmrep, ai)
+
+    async def _judge(
+        self, mode: ComplianceMode, url: str, robots: _Entry, tdmrep: _Entry, ai: _Entry
+    ) -> ComplianceReport:
         report = ComplianceReport(mode=mode)
         report = self._apply_robots(report, robots, await self._rules(robots), url)
-        report = self._apply_tdmrep(report, tdmrep_task.result(), url)
+        report = self._apply_tdmrep(report, tdmrep, url)
         report = self._apply_ai_txt(report, ai, await self._rules(ai), url)
         return _decided(report)
 
@@ -375,35 +408,59 @@ class ComplianceChecker:
 
     # --- reading the origin files --------------------------------------------------------------
 
-    async def _load(self, kind: str, origin: _Origin, path: str) -> _Entry:
-        """The file's entry. Concurrent callers share one load; its error reaches them all."""
-        key = f"cmp:{kind}:{{{origin.key}}}"
+    async def _load(self, kind: str, origin: _Origin, path: str, deadline: float) -> _Entry:
+        """The file's entry. Concurrent callers share one load, within the time budget of the
+        caller that started it (``deadline``, monotonic); its error reaches them all."""
+        key = _cache_key(kind, origin)
         task = self._loading.get(key)
         if task is None:
-            task = asyncio.create_task(self._load_now(key, kind, origin.base + path))
+            task = asyncio.create_task(self._load_now(key, kind, origin.base + path, deadline))
             self._loading[key] = task
             task.add_done_callback(lambda done: self._forget_load(key, done))
-        # A cancelled caller must not cancel the load the others wait for.
-        return await asyncio.shield(task)
+        self._waiters[task] = self._waiters.get(task, 0) + 1
+        try:
+            # A cancelled caller must not cancel the load the others wait for ...
+            return await asyncio.shield(task)
+        finally:
+            self._waiters[task] -= 1
+            if not self._waiters[task]:
+                del self._waiters[task]
+                # ... but the last one does: its request ran in that caller's gate turn. A
+                # check that comes after starts a load of its own.
+                if not task.done():
+                    task.cancel()
+                    self._forget_load(key, task)
+                    # Wait until its request has ended: the caller gives its turn back next.
+                    # Nobody waits for its outcome any more, an error included.
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
 
     def _forget_load(self, key: str, task: asyncio.Task[_Entry]) -> None:
         if self._loading.get(key) is task:
             del self._loading[key]
 
-    async def _load_now(self, key: str, kind: str, file_url: str) -> _Entry:
+    async def _load_now(self, key: str, kind: str, file_url: str, deadline: float) -> _Entry:
         cached = await self._cache_get(key)
         if cached is not None:
             return cached
-        entry = await self._fetch_file(file_url, truncate=kind == "robots")
+        left = deadline - time.monotonic()
+        if left > 0:
+            entry = await self._fetch_file(file_url, truncate=kind == "robots", seconds=left)
+        else:
+            # The budget went to the files before: nothing is sent, as if this one timed out.
+            _log.info(
+                "compliance_file_unavailable", host=urlsplit(file_url).hostname, code="timeout"
+            )
+            entry = _Entry("unavailable")
         await self._cache_set(key, entry)
         return entry
 
-    async def _fetch_file(self, file_url: str, *, truncate: bool) -> _Entry:
+    async def _fetch_file(self, file_url: str, *, truncate: bool, seconds: float) -> _Entry:
         try:
             fetched = await self._fetcher.fetch(
                 file_url,
                 max_bytes=_FILE_MAX_BYTES,
-                timeout_seconds=_FILE_TIMEOUT_SECONDS,
+                timeout_seconds=min(seconds, _FILE_TIMEOUT_SECONDS),
                 truncate=truncate,
             )
         except FetchError as error:
@@ -434,16 +491,7 @@ class ComplianceChecker:
         except (RedisError, OSError) as error:
             _log.warning("compliance_cache_read_failed", error=type(error).__name__)
             return None
-        if raw is None:
-            return None
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return None  # unreadable entry: fetch again and overwrite it
-        if not isinstance(data, dict) or data.get("state") not in _CACHE_STATES:
-            return None
-        body = data.get("body", "")
-        return _Entry(data["state"], body) if isinstance(body, str) else None
+        return _parse_entry(raw)
 
     async def _cache_set(self, key: str, entry: _Entry) -> None:
         ttl = self._settings.compliance_cache_seconds
@@ -459,6 +507,24 @@ class ComplianceChecker:
 
 
 # --- helpers -------------------------------------------------------------------------------------
+
+
+def _cache_key(kind: str, origin: _Origin) -> str:
+    return f"cmp:{kind}:{{{origin.key}}}"
+
+
+def _parse_entry(raw: bytes | str | None) -> _Entry | None:
+    """A cached entry; None when there is none or it cannot be read (fetch again)."""
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None  # unreadable entry: fetch again and overwrite it
+    if not isinstance(data, dict) or data.get("state") not in _CACHE_STATES:
+        return None
+    body = data.get("body", "")
+    return _Entry(data["state"], body) if isinstance(body, str) else None
 
 
 def _origin(url: str) -> _Origin:

@@ -1,0 +1,68 @@
+name: e2e
+
+# End-to-end batch run (package 3 done-when): 1,000 URLs plus a second client's 20, across two
+# worker processes, against a local site farm on loopback addresses. No internet needed. Checks
+# that both jobs complete with no failed item and that no host saw more requests at once, or
+# closer together, than the outbound limits allow (tests/e2e/run_batch.py).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      # Valkey 7.2+ for the `#!lua` script flags of the queue scripts; no password needed here.
+      valkey:
+        image: valkey/valkey:8.1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # uv reads .python-version (3.13) and provisions its own managed Python.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      # Fails the job when a check fails. A fresh service container: the run needs an empty db.
+      - name: Run the batch
+        env:
+          VALKEY_URL: redis://127.0.0.1:6379/0
+        run: >-
+          uv run python -m tests.e2e.run_batch
+          --log-dir e2e-results
+          --summary-out e2e-results/summary.md
+
+      - name: Add the summary to the job summary
+        if: always()
+        run: |
+          if [ -f e2e-results/summary.md ]; then
+            cat e2e-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The logs of the API, both workers and the farm, and the farm's record of every request.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-results
+          path: e2e-results/
+          if-no-files-found: warn

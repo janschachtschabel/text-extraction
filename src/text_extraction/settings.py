@@ -79,8 +79,14 @@ class Settings(BaseSettings):
     api_keys: list[ApiKey] = []  # secret; JSON list in env API_KEYS
     api_keys_file: Path | None = None  # JSON file with the same shape, merged with API_KEYS
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
+    # Share of Valkey's maxmemory from which no new bulk is taken on: POST /v1/batch answers 503,
+    # slow extractions are not handed over to jobs, the result cache (API and workers) skips.
+    valkey_memory_guard_ratio: float = Field(default=0.8, ge=0.1, le=1.0)
     rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True
+    # Largest request body of the public API, in bytes; POST /v1/batch has its own bound, from
+    # BATCH_MAX_URLS. A larger body answers 413 before it is read whole.
+    request_max_body_bytes: int = Field(default=65536, ge=1024)
     # Total time budget of one fetch; at least the pipeline's 1 s minimum for a fetch.
     fetch_timeout_seconds: float = Field(default=20, ge=1)
     fetch_max_bytes: int = Field(default=20_000_000, ge=1024)  # response body limit
@@ -117,6 +123,24 @@ class Settings(BaseSettings):
     # Conversion budget: largest HTML/text body converted, and conversions at once per pod.
     convert_max_bytes: int = Field(default=5_242_880, ge=1024)  # 5 MiB
     convert_concurrency: int = Field(default=2, ge=1)
+    # Jobs: how long a job and its results stay in Valkey (renewed when it completes), and the
+    # largest stored result of one item as JSON; a bigger one is stored without its content.
+    job_ttl_seconds: int = Field(default=86400, ge=60)
+    job_item_max_bytes: int = Field(default=2_000_000, ge=10_000)
+    # Lost leases plus deferrals one job item may have; one more lost lease fails the item.
+    job_item_max_attempts: int = Field(default=5, ge=1)
+    # Client-domain pairs one queue claim looks at, at most, before it answers "try again soon".
+    scheduler_claim_scan_budget: int = Field(default=200, ge=1, le=5000)
+    # Job items one worker pod processes at once (conversions are still capped per pod).
+    worker_concurrency: int = Field(default=8, ge=1)
+    # Batch API: URLs in one batch, and unfinished batches one API key may have at a time.
+    batch_max_urls: int = Field(default=1000, ge=1, le=100_000)
+    batch_max_open_per_client: int = Field(default=5, ge=1)
+    # False: POST /v1/batch and GET /v1/jobs/{id} answer 503 (API pods without workers).
+    jobs_enabled: bool = True
+    # Extractions one pod keeps running after their request got a 202 (and requests waiting for
+    # theirs); above it a request keeps waiting inline.
+    extract_max_background: int = Field(default=32, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod

@@ -60,6 +60,30 @@ spec:
             - {{ ternary "60 1" "" .Values.valkey.persistence.enabled | quote }}
             - --appendonly
             - {{ ternary "yes" "no" .Values.valkey.persistence.enabled | quote }}
+            # Jobs, the queue and counters are state: refuse writes when full, never evict.
+            - --maxmemory
+            - {{ .Values.valkey.maxmemory | quote }}
+            - --maxmemory-policy
+            - noeviction
+            {{- if include "text-extraction.valkeyAuth" . }}
+            # Kubernetes expands $(VALKEY_PASSWORD) from the env below, not a shell.
+            - --requirepass
+            - "$(VALKEY_PASSWORD)"
+            {{- end }}
+          {{- if include "text-extraction.valkeyAuth" . }}
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "text-extraction.valkeySecretName" . }}
+                  key: {{ .Values.valkey.auth.existingSecretKey }}
+            # Read by valkey-cli, so the probes authenticate. They fail on a wrong password.
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "text-extraction.valkeySecretName" . }}
+                  key: {{ .Values.valkey.auth.existingSecretKey }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -72,13 +96,13 @@ spec:
               protocol: TCP
           livenessProbe:
             exec:
-              command: [valkey-cli, ping]
+              command: [sh, -c, 'test "$(valkey-cli ping)" = PONG']
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
           readinessProbe:
             exec:
-              command: [valkey-cli, ping]
+              command: [sh, -c, 'test "$(valkey-cli ping)" = PONG']
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 3

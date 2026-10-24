@@ -8,10 +8,15 @@ order:
    servers keep serving for ``SHUTDOWN_DRAIN_SECONDS`` (a second signal ends this wait early);
 2. the public server stops accepting connections and gives requests in flight
    ``graceful_shutdown_seconds`` to finish;
-3. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
+3. the public app's lifespan ends: it waits for extractions that became a job
+   (``wait_seconds``), at most ``EXTRACT_TIMEOUT_SECONDS`` + 7 s (5 s to end, then cancelled; 2 s
+   for the writes of the cancelled ones). Such an extraction ends within
+   ``EXTRACT_TIMEOUT_SECONDS`` of its start and runs while step 2 does, so normally this adds
+   nothing. If the pod is killed before, the job's lease expires and the job reports it lost;
+4. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
 
-``shutdown_seconds`` is the whole sequence at most; the Helm chart's
-``terminationGracePeriodSeconds`` (45) must stay above it.
+``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the Helm chart's
+``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it.
 """
 
 import asyncio
@@ -168,7 +173,9 @@ async def _run(settings: Settings) -> None:
         _log.info("valkey_closed")
 
 
-def main() -> None:
+def configured_settings() -> Settings:
+    """The settings from the environment, with logging set up from them. Invalid settings are
+    logged and end the process with ``EXIT_CONFIG_ERROR`` (2)."""
     try:
         settings = load_settings()
     except ConfigError as error:
@@ -177,4 +184,8 @@ def main() -> None:
         structlog.get_logger(__name__).error("invalid_configuration", message=str(error))
         sys.exit(EXIT_CONFIG_ERROR)
     configure_logging(settings.log_level, settings.log_format)
-    asyncio.run(_run(settings))
+    return settings
+
+
+def main() -> None:
+    asyncio.run(_run(configured_settings()))
