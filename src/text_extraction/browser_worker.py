@@ -6,8 +6,8 @@ exhausted items, result writes, metrics, ``/ready`` and the shutdown) with anoth
 another pipeline. This is the only module outside ``browser*.py`` that imports the browser
 modules, so the API and the extract worker never load Playwright or Patchright.
 
-**The runner** (``BrowserRunner``) leases an item for ``2 * BROWSER_UNBLOCK_TIMEOUT_SECONDS
-+ 10`` seconds. For each item it:
+**The runner** (``BrowserRunner``) leases an item for ``2 * max(BROWSER_TIMEOUT_SECONDS,
+BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
 
 1. reads the job's caller secrets (actions, cookies, headers; B6) and the item's draft (the
    fast result of an ``auto`` item the extract worker moved here; B5). A job created with

@@ -457,9 +457,27 @@ async def test_secrets_outlive_a_crashed_render_until_its_rerun(browser: int, un
     ttl = await valkey.ttl(f"job:{{{job_id}}}:secrets")
 
     lease = browser_lease_seconds(settings)
-    assert lease == 2 * unblock + 10
+    assert lease == 2 * max(browser, unblock) + 10
     assert ttl >= 10 + lease + 30  # claimed at the end of the queue wait, then a crash
     assert ttl >= 10 + 2 * max(browser, unblock) + 30  # two whole renders
+
+
+@pytest.mark.parametrize(
+    ("browser", "unblock", "lease"), [(30, 60, 130), (120, 60, 250), (120, 10, 250), (5, 180, 370)]
+)
+def test_the_browser_lease_covers_two_of_the_longest_render(
+    browser: int, unblock: int, lease: int
+) -> None:
+    # A standard render may be the longer one (BROWSER_TIMEOUT_SECONDS above the unblock
+    # deadline): a shorter lease would offer the item again while it is still rendering.
+    settings = Settings(
+        auth_mode="none",
+        browser_timeout_seconds=browser,
+        browser_unblock_timeout_seconds=unblock,
+    )
+
+    assert browser_lease_seconds(settings) == lease
+    assert browser_lease_seconds(settings) > 2 * browser
 
 
 @scenario

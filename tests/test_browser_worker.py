@@ -50,7 +50,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobKind, JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import JobStore, browser_lease_seconds
 from text_extraction.outbound import DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.render import ClearanceStore, Renderer
@@ -460,7 +460,7 @@ async def test_unblock_only_for_admin_ignore_jobs(
 @scenario
 async def test_lost_lease_and_exhausted_items_behave_as_extract_pool() -> None:
     harness = Harness(job_item_max_attempts=1)
-    assert harness.runner.lease_seconds == 2 * harness.settings.browser_unblock_timeout_seconds + 10
+    assert harness.runner.lease_seconds == browser_lease_seconds(harness.settings)
 
     # A lost lease: the item runs again, and only the first result counts.
     job_id = await harness.submit(BROWSER)
