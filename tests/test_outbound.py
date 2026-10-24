@@ -727,3 +727,30 @@ def test_mark_sent_never_moves_the_latest_start_back() -> None:
         return fake_time.sleeps
 
     assert asyncio.run(scenario()) == [0.5]  # spaced from 5 s, not from 2 s
+
+
+def test_the_wait_after_the_turn_respects_the_max_wait() -> None:
+    async def scenario() -> tuple[list[float], float]:
+        fake_time = FakeTime()
+        valkey = FakeAsyncRedis()
+        gate = make_gate(
+            fake_time,
+            valkey,
+            outbound_min_delay_ms=200,
+            outbound_max_crawl_delay_seconds=30,
+            outbound_max_wait_seconds=1,
+        )
+        async with gate.slot(HOST):  # the first turn on the host, booked without a Crawl-delay
+            pass
+        fake_time.now += 1
+        # The next request knows the Crawl-delay of 20 s: its turn is due at once by the booking,
+        # but the real-start check would wait 19 s more, beyond the 1 s it may wait.
+        with pytest.raises(OutboundBusy) as busy:
+            async with gate.slot(HOST, 20.0):
+                pytest.fail("the turn is 20 s away")
+        return fake_time.sleeps, busy.value.retry_after
+
+    sleeps, retry_after = asyncio.run(scenario())
+
+    assert sleeps == []
+    assert retry_after == pytest.approx(19.0)

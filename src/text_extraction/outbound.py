@@ -325,7 +325,8 @@ class DomainGate:
         real start of the latest request, and record this start as the latest.
 
         The extra wait after the turn is at most ``delay`` per request that started meanwhile;
-        at most ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` - 1 can, since each holds a lease.
+        at most ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` - 1 can, since each holds a lease. Like the
+        turn itself, it ends by ``deadline`` (``OutboundBusy`` otherwise).
         """
         margin_ms = _TTL_MARGIN_SECONDS * 1000
         now = self._clock()
@@ -337,7 +338,13 @@ class DomainGate:
             raise OutboundBusy(float(wait))
         if int(started):
             return
-        rest = float(wait)
+        await self._confirm_until(host, delay, deadline, float(wait))
+
+    async def _confirm_until(self, host: str, delay: float, deadline: float, rest: float) -> None:
+        """Sleep ``rest``, then record this start once ``delay`` has passed since the latest real
+        start, waiting out what is left. Raises ``OutboundBusy`` when a wait for the latest start
+        would end after ``deadline``."""
+        margin_ms = _TTL_MARGIN_SECONDS * 1000
         while True:
             if rest > 0:
                 await self._sleep(rest)
@@ -347,6 +354,8 @@ class DomainGate:
             if int(recorded):
                 return
             rest = float(remaining)
+            if self._clock() + rest > deadline:
+                raise OutboundBusy(rest)
 
     async def _count_failure(self, host: str, now: float) -> None:
         key = _key("fail", host)
