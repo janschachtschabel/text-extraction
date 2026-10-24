@@ -21,7 +21,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints. A secret when it carries a password, see below. |
+| `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
 | `FETCH_MAX_BYTES` | `20000000` | Largest response body the fetcher accepts, in bytes. Minimum 1024. |
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
@@ -49,6 +49,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `JOB_TTL_SECONDS` | `86400` | How long a job (its status, URL list and results) stays in Valkey, in seconds. The time starts at creation and starts again when the job completes, so a caller has this long to fetch the results of a finished job. Minimum 60. |
 | `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
 | `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
+| `SCHEDULER_CLAIM_SCAN_BUDGET` | `200` | Client-domain pairs one claim of the job queue looks at, at most. A claim that finds nothing within the budget answers "try again in 0.05 s", and the next claim goes on where it stopped, so fairness holds across claims. It bounds the time one claim blocks Valkey when many domains are deferred or at their limit. Minimum 1, maximum 5000. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -194,11 +195,15 @@ and domains appear escaped in the keys (`%` as `%25`, `:` as `%3A`, tab as `%09`
 | `q:{<pool>}:notbefore` | Hash of domain to the time before which its items are not claimed (deferred). |
 | `q:{<pool>}:running` | Hash of domain to its number of leased items. |
 | `q:{<pool>}:leases` | Sorted set of leased items, scored by lease expiry. |
-| `q:{<pool>}:leased` | Hash of leased item to its client and domain. |
+| `q:{<pool>}:leased` | Hash of leased item to its client, domain and lease token. |
 | `q:{<pool>}:pending` | Number of queued items, claimable or deferred (leased items not counted). |
 
 A claim rotates the clients, then the domains of the client, so a small batch is not queued behind
 a large one. It skips a domain that is deferred or holds `OUTBOUND_MAX_CONCURRENCY_PER_HOST` leased
-items. Before that, it takes back up to 20 expired leases: each item goes to the front of its domain
-with one more attempt, or fails once it is past `JOB_ITEM_MAX_ATTEMPTS`. The keys have no TTL; the
-lists empty themselves as items are claimed.
+items, and looks at no more than `SCHEDULER_CLAIM_SCAN_BUDGET` client-domain pairs. Before that, it
+takes back up to 20 expired leases: each item goes to the front of its domain with one more attempt.
+An item past `JOB_ITEM_MAX_ATTEMPTS` is handed out once more, marked exhausted: the worker records
+its failure and then completes it, and if the worker dies in between, the item comes back after its
+lease. Every lease has a token, so a worker whose lease was taken back cannot complete or defer the
+item under the next worker's lease. The keys have no TTL; the lists empty themselves as items are
+claimed.

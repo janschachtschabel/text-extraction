@@ -10,30 +10,41 @@ them. No script touches job keys (``job:{<id>}:…``).
 - ``q:{<pool>}:notbefore``            hash: domain -> epoch seconds before which it is not claimed
 - ``q:{<pool>}:running``              hash: domain -> number of leased items (no field: 0)
 - ``q:{<pool>}:leases``               sorted set: leased item -> lease expiry (epoch seconds)
-- ``q:{<pool>}:leased``               hash: leased item -> ``<client>\\t<domain>``
+- ``q:{<pool>}:leased``               hash: leased item -> ``<client>\\t<domain>\\t<lease token>``
 - ``q:{<pool>}:pending``              counter: items in the domain lists (claimable or deferred)
 
 An item is ``<job_id>:<index>:<attempts>``. In keys and values, ``<client>`` and ``<domain>`` are
 escaped (``%`` -> ``%25``, ``:`` -> ``%3A``, tab -> ``%09``): client names are free text and IPv6
 hosts contain colons, so unescaped names could make two lists share one key.
 
+Every lease gets a random token. ``complete`` and ``defer`` act only while the caller's token is
+the current one, so a worker whose lease was taken back cannot end the lease of the next worker.
+
 Invariants, kept by every script: a domain is in a client's rotation exactly while its list holds
 items, and a client is in ``clients`` exactly while it has domains. The keys carry no TTL; the
 lists empty themselves as items are claimed. Times are epoch seconds from the injected clock
 (every pod needs a synchronised clock), passed into the scripts, which never read Valkey's TIME.
+
+The scripts start with a ``#!lua`` line (Redis 7 / Valkey 7.2 script flags). In cluster mode the
+server then refuses any key outside the declared slot, and the read-only counting script runs
+under ``noeviction`` memory pressure and on replicas.
 """
 
 import re
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+import structlog
 from redis.asyncio import Redis
 
 from text_extraction.outbound import normalize_host
 from text_extraction.settings import Settings
+
+_log = structlog.get_logger(__name__)
 
 # The domain of a URL without a valid host.
 NO_DOMAIN = "-"
@@ -42,6 +53,8 @@ NO_DOMAIN = "-"
 _ENQUEUE_CHUNK = 500
 # Expired leases a claim takes back, at most, before it looks for an item.
 _RECLAIM_LIMIT = 20
+# The retry_in of a claim that spent its scan budget: the next claim goes on where it stopped.
+_SCAN_RETRY_SECONDS = 0.05
 
 _POOL = re.compile(r"[a-z0-9_-]{1,32}", re.ASCII)
 _ESCAPES = {"%": "%25", ":": "%3A", "\t": "%09"}
@@ -73,17 +86,19 @@ local function release(domain)
   end
 end
 
--- Ends the lease of an item; returns client and domain, or nil when it holds no lease.
-local function unlease(member)
-  if redis.call('ZREM', leases, member) == 0 then
-    return nil
-  end
+-- Ends the lease of an item when it is held under `token` (nil: under any token). Returns client
+-- and domain, or nil when there is no such lease; then nothing changes.
+local function unlease(member, token)
   local where = redis.call('HGET', leased, member)
-  redis.call('HDEL', leased, member)
   if not where then
     return nil
   end
-  local client, domain = string.match(where, '^(.*)\\t([^\\t]*)$')
+  local client, domain, holder = string.match(where, '^([^\\t]*)\\t([^\\t]*)\\t([^\\t]*)$')
+  if token and holder ~= token then
+    return nil
+  end
+  redis.call('ZREM', leases, member)
+  redis.call('HDEL', leased, member)
   release(domain)
   return client, domain
 end
@@ -103,7 +118,8 @@ end
 # ARGV = prefix, client, then pairs of domain and item. Appends the items in order; a new domain
 # joins the end of the client's rotation and a new client the end of ``clients``.
 _ENQUEUE = (
-    _PREAMBLE
+    "#!lua\n"
+    + _PREAMBLE
     + """
 local client = ARGV[2]
 local count = 0
@@ -121,122 +137,196 @@ return count
 """
 )
 
-# ARGV = prefix, now, lease expiry, max attempts, per-domain cap, reclaim limit.
+# ARGV = prefix, now, lease expiry, max attempts, per-domain cap, reclaim limit, scan budget,
+# lease token, scan retry.
 # 1. Takes back up to `reclaim limit` expired leases: each goes to the front of its list with
-#    attempts + 1, or into `exhausted` when that would exceed `max attempts`.
-# 2. Rotates `clients` once per client and, for each, its domains once per domain; skips a domain
-#    whose not-before lies in the future or that holds `cap` leases.
-# 3. Leases the first item of the first claimable domain. A list that becomes empty leaves its
-#    client's rotation, and a client without domains leaves `clients`.
-# Returns {claimed, retry_in, exhausted}: claimed is {item, client, domain} or empty; retry_in
-# (only when nothing was claimed) is the time until the earliest deferred domain frees, or ''; and
-# exhausted is a list of {item, client, domain}. Numbers go back as strings: Redis would cut a Lua
-# number to an integer.
+#    attempts + 1, capped at max attempts + 1 (exhausted: the caller fails it).
+# 2. Walks `clients` from the front and each client's domains from the front, reading them with
+#    LRANGE and their not-before and lease counts with HMGET. A domain is skipped while its
+#    not-before lies in the future or it holds `cap` leases. At most `scan budget` client-domain
+#    pairs are visited (a client without domains counts as one).
+# 3. Leases the first item of the first claimable domain (ZADD NX: a duplicate of a leased item
+#    is dropped). The visited heads of both rotations move to their ends, the claimed domain and
+#    client last; a list that became empty leaves its rotation.
+# A claim that finds nothing writes only when it ran out of budget (the visited heads move to
+# the ends, so the next claim goes on there) or found a stale rotation entry to drop.
+# Returns {claimed, retry_in}: claimed is {item, client, domain} or empty. retry_in, only when
+# nothing was claimed, is `scan retry` when the budget ran out, else the time until the earliest
+# deferred domain frees, or ''. Numbers go back as strings: Redis would cut a Lua number.
 _CLAIM = (
-    _PREAMBLE
+    "#!lua\n"
+    + _PREAMBLE
     + """
 local now = tonumber(ARGV[2])
 local expiry = ARGV[3]
 local max_attempts = tonumber(ARGV[4])
 local cap = tonumber(ARGV[5])
+local budget = tonumber(ARGV[7])
+local token = ARGV[8]
 
-local exhausted = {}
 local expired = redis.call('ZRANGEBYSCORE', leases, '-inf', ARGV[2], 'LIMIT', 0, ARGV[6])
 for _, member in ipairs(expired) do
-  local client, domain = unlease(member)
+  local client, domain = unlease(member, nil)
   if client then
     local job, index, attempts = string.match(member, '^(.*):(%d+):(%d+)$')
-    attempts = tonumber(attempts) + 1
-    local next_member = job .. ':' .. index .. ':' .. string.format('%d', attempts)
-    if attempts > max_attempts then
-      table.insert(exhausted, {next_member, client, domain})
-    else
-      requeue(client, domain, next_member)
+    attempts = math.min(tonumber(attempts) + 1, max_attempts + 1)
+    requeue(client, domain, job .. ':' .. index .. ':' .. string.format('%d', attempts))
+  else
+    redis.call('ZREM', leases, member)
+  end
+end
+
+-- Moves the first `count` entries of `key` (the values in `head`) to its end, leaving out the
+-- positions marked in `drop`.
+local function rotate(key, head, count, drop)
+  if count == 0 then
+    return
+  end
+  if count == 1 and not drop[1] then
+    redis.call('LMOVE', key, key, 'LEFT', 'RIGHT')
+    return
+  end
+  redis.call('LTRIM', key, count, -1)
+  local keep = {}
+  for i = 1, count do
+    if not drop[i] then
+      keep[#keep + 1] = head[i]
+    end
+  end
+  if #keep > 0 then
+    redis.call('RPUSH', key, unpack(keep))
+  end
+end
+
+-- Pops items until one can be leased; a duplicate of a leased item is dropped.
+local function lease_next(items)
+  while true do
+    local member = redis.call('LPOP', items)
+    if not member then
+      return nil
+    end
+    redis.call('DECR', pending)
+    if redis.call('ZADD', leases, 'NX', expiry, member) == 1 then
+      return member
     end
   end
 end
 
+local names = redis.call('LRANGE', clients, 0, budget - 1)
+local total = redis.call('LLEN', clients)
+local gone = {}
+local spent = 0
+local visited = 0
 local earliest = nil
-for _ = 1, redis.call('LLEN', clients) do
-  local client = redis.call('LMOVE', clients, clients, 'LEFT', 'RIGHT')
+for ci, client in ipairs(names) do
+  if spent >= budget then
+    break
+  end
   local domains = domains_key(client)
   local count = redis.call('LLEN', domains)
   if count == 0 then
-    redis.call('LREM', clients, -1, client)
-  end
-  for _ = 1, count do
-    local domain = redis.call('LMOVE', domains, domains, 'LEFT', 'RIGHT')
-    local free_at = tonumber(redis.call('HGET', notbefore, domain) or '0')
-    if free_at > now then
-      if earliest == nil or free_at < earliest then
-        earliest = free_at
-      end
-    else
-      if free_at > 0 then
-        redis.call('HDEL', notbefore, domain)
-      end
-      if tonumber(redis.call('HGET', running, domain) or '0') < cap then
-        local items = items_key(client, domain)
-        local member = redis.call('LPOP', items)
-        if member then
-          redis.call('DECR', pending)
-          redis.call('ZADD', leases, expiry, member)
-          redis.call('HSET', leased, member, client .. '\\t' .. domain)
-          redis.call('HINCRBY', running, domain, 1)
-          if redis.call('LLEN', items) == 0 then
-            redis.call('LREM', domains, -1, domain)
-            if redis.call('LLEN', domains) == 0 then
-              redis.call('LREM', clients, -1, client)
-            end
-          end
-          return {{member, client, domain}, '', exhausted}
+    gone[ci] = true
+    spent = spent + 1
+  else
+    local take = math.min(count, budget - spent)
+    local head = redis.call('LRANGE', domains, 0, take - 1)
+    local free_at = redis.call('HMGET', notbefore, unpack(head))
+    local held = redis.call('HMGET', running, unpack(head))
+    local empty = {}
+    for di, domain in ipairs(head) do
+      local wait = tonumber(free_at[di]) or 0
+      if wait > now then
+        if earliest == nil or wait < earliest then
+          earliest = wait
         end
-        redis.call('LREM', domains, -1, domain)
+      elseif (tonumber(held[di]) or 0) < cap then
+        local items = items_key(client, domain)
+        local member = lease_next(items)
+        if member then
+          redis.call('HSET', leased, member, client .. '\\t' .. domain .. '\\t' .. token)
+          redis.call('HINCRBY', running, domain, 1)
+          if free_at[di] then
+            redis.call('HDEL', notbefore, domain)
+          end
+          if redis.call('LLEN', items) == 0 then
+            empty[di] = true
+          end
+          rotate(domains, head, di, empty)
+          if redis.call('LLEN', domains) == 0 then
+            gone[ci] = true
+          end
+          rotate(clients, names, ci, gone)
+          return {{member, client, domain}, ''}
+        end
+        empty[di] = true
+      end
+    end
+    spent = spent + take
+    if take < count then
+      rotate(domains, head, take, empty)
+      rotate(clients, names, ci - 1, gone)
+      return {{}, ARGV[9]}
+    end
+    if next(empty) then
+      rotate(domains, head, take, empty)
+      if redis.call('LLEN', domains) == 0 then
+        gone[ci] = true
       end
     end
   end
+  visited = ci
+end
+if visited < total then
+  rotate(clients, names, visited, gone)
+  return {{}, ARGV[9]}
+end
+if next(gone) then
+  rotate(clients, names, visited, gone)
 end
 local retry_in = ''
 if earliest then
   retry_in = string.format('%.6f', earliest - now)
 end
-return {{}, retry_in, exhausted}
+return {{}, retry_in}
 """
 )
 
-# ARGV = prefix, item. Ends its lease; returns 1, or 0 when the item held no lease (it expired and
-# was taken back, or was completed already), in which case nothing changes.
+# ARGV = prefix, item, lease token. Ends that lease; returns 1, or 0 when the item is not leased
+# under that token (it expired and was taken back, or was completed already): nothing changes.
 _COMPLETE = (
-    _PREAMBLE
+    "#!lua\n"
+    + _PREAMBLE
     + """
-if unlease(ARGV[2]) then
+if unlease(ARGV[2], ARGV[3]) then
   return 1
 end
 return 0
 """
 )
 
-# ARGV = prefix, item, the item with attempts + 1, not-before. Ends the lease, moves the domain's
-# not-before to the later of its current value and the given one, and puts the item back at the
-# front of its list. Returns 0 and changes nothing when the item held no lease.
+# ARGV = prefix, item, lease token, the item with attempts + 1, not-before. Ends the lease, moves
+# the domain's not-before to the later of its current value and the given one, and puts the item
+# back at the front of its list. Returns 0 and changes nothing when the lease is not held.
 _DEFER = (
-    _PREAMBLE
+    "#!lua\n"
+    + _PREAMBLE
     + """
-local client, domain = unlease(ARGV[2])
+local client, domain = unlease(ARGV[2], ARGV[3])
 if not client then
   return 0
 end
-if tonumber(ARGV[4]) > tonumber(redis.call('HGET', notbefore, domain) or '0') then
-  redis.call('HSET', notbefore, domain, ARGV[4])
+if tonumber(ARGV[5]) > tonumber(redis.call('HGET', notbefore, domain) or '0') then
+  redis.call('HSET', notbefore, domain, ARGV[5])
 end
-requeue(client, domain, ARGV[3])
+requeue(client, domain, ARGV[4])
 return 1
 """
 )
 
-# ARGV = prefix. Returns {pending, leased, clients, distinct domains}; read only.
+# ARGV = prefix. Returns {pending, leased, clients, distinct domains}; writes nothing.
 _COUNTS = (
-    _PREAMBLE
+    "#!lua flags=no-writes\n"
+    + _PREAMBLE
     + """
 local seen = {}
 local domains = 0
@@ -257,28 +347,39 @@ return {queued, redis.call('ZCARD', leases), #names, domains}
 
 @dataclass(frozen=True)
 class QueueItem:
-    """One claimed batch item. ``attempts`` counts its lost leases plus its deferrals."""
+    """One claimed batch item. ``attempts`` counts its lost leases plus its deferrals.
+
+    ``lease`` identifies the claim that handed the item out: ``complete`` and ``defer`` act only
+    while that lease is still the item's current one.
+    """
 
     job_id: str
     index: int
     client: str
     domain: str
     attempts: int
+    lease: str = ""
 
 
 @dataclass(frozen=True)
 class Claim:
     """The answer to one claim.
 
-    ``item`` is the leased item, or None when nothing was claimable. ``exhausted`` holds items
-    whose lease was lost more than ``JOB_ITEM_MAX_ATTEMPTS`` times; they left the queue and the
-    caller fails them. ``retry_in`` is set only when nothing was claimable: the seconds until the
-    earliest deferred domain that still holds items frees, or None when no domain is deferred.
+    ``item`` is the leased item, or None when nothing was claimable.
+
+    ``exhausted`` is True when the item lost more leases (plus deferrals) than
+    ``JOB_ITEM_MAX_ATTEMPTS`` allows. It is leased like any other item: the caller records its
+    failure, then calls ``complete``. A caller that dies in between leaves the lease to expire,
+    and the item is offered again, still exhausted.
+
+    ``retry_in`` is set only when nothing was claimed. It is a short pause when the claim ran out
+    of its scan budget (the next claim goes on where it stopped). Otherwise it is the seconds until
+    the earliest deferred domain that still holds items frees, or None when no domain is deferred.
     """
 
     item: QueueItem | None
-    exhausted: list[QueueItem]
-    retry_in: float | None
+    exhausted: bool = False
+    retry_in: float | None = None
 
 
 @dataclass(frozen=True)
@@ -328,7 +429,7 @@ def _member(item: QueueItem, attempts: int) -> str:
     return f"{item.job_id}:{item.index}:{attempts}"
 
 
-def _item(entry: Sequence[Any]) -> QueueItem:
+def _item(entry: Sequence[Any], lease: str) -> QueueItem:
     """A QueueItem from a script's ``{item, client, domain}``."""
     member, client, domain = (_text(value) for value in entry)
     job_id, index, attempts = member.rsplit(":", 2)
@@ -338,6 +439,7 @@ def _item(entry: Sequence[Any]) -> QueueItem:
         client=_unescape(client),
         domain=_unescape(domain),
         attempts=int(attempts),
+        lease=lease,
     )
 
 
@@ -362,6 +464,7 @@ class FairQueue:
             raise ValueError(f"Invalid queue pool name: {pool!r}")
         self._settings = settings
         self._clock = clock
+        self._pool = pool
         self._prefix = f"q:{{{pool}}}:"
         self._keys = [
             self._prefix + name
@@ -386,7 +489,8 @@ class FairQueue:
         """Take back expired leases, then lease the next fair item for ``lease_seconds``."""
         now = self._clock()
         settings = self._settings
-        claimed, retry_in, exhausted = await self._claim(
+        lease = uuid.uuid4().hex
+        claimed, retry_in = await self._claim(
             keys=self._keys,
             args=[
                 self._prefix,
@@ -395,20 +499,22 @@ class FairQueue:
                 settings.job_item_max_attempts,
                 settings.outbound_max_concurrency_per_host,
                 _RECLAIM_LIMIT,
+                settings.scheduler_claim_scan_budget,
+                lease,
+                f"{_SCAN_RETRY_SECONDS:.6f}",
             ],
         )
+        if claimed:
+            item = _item(claimed, lease)
+            return Claim(item=item, exhausted=item.attempts > settings.job_item_max_attempts)
         retry = _text(retry_in)
-        return Claim(
-            item=_item(claimed) if claimed else None,
-            exhausted=[_item(entry) for entry in exhausted],
-            retry_in=float(retry) if retry else None,
-        )
+        return Claim(item=None, retry_in=float(retry) if retry else None)
 
     async def complete(self, item: QueueItem) -> bool:
         """End the item's lease. False when the lease had already expired and the item was
         taken back (another worker may run it again); the caller still stores its result."""
         done = await self._complete(
-            keys=self._keys, args=[self._prefix, _member(item, item.attempts)]
+            keys=self._keys, args=[self._prefix, _member(item, item.attempts), item.lease]
         )
         return bool(int(done))
 
@@ -416,14 +522,18 @@ class FairQueue:
         """Give the item back to the front of its domain with ``attempts + 1`` and keep the
         domain from being claimed before ``until`` (a later not-before already set stays).
 
-        Nothing changes when the lease was lost: the item is queued again already.
+        Nothing changes when the lease was lost: the item is queued again already. The caller
+        fails an item at ``JOB_ITEM_MAX_ATTEMPTS`` instead of deferring it; attempts never go
+        beyond that maximum plus one.
         """
+        attempts = min(item.attempts + 1, self._settings.job_item_max_attempts + 1)
         await self._defer(
             keys=self._keys,
             args=[
                 self._prefix,
                 _member(item, item.attempts),
-                _member(item, item.attempts + 1),
+                item.lease,
+                _member(item, attempts),
                 f"{until:.6f}",
             ],
         )
@@ -431,9 +541,9 @@ class FairQueue:
     async def counts(self) -> QueueCounts:
         """How many items are pending and leased, and how many clients and domains wait."""
         pending, leased, clients, domains = await self._counts(keys=self._keys, args=[self._prefix])
-        return QueueCounts(
-            pending=max(int(pending), 0),
-            leased=int(leased),
-            clients=int(clients),
-            domains=int(domains),
+        counts = QueueCounts(
+            pending=int(pending), leased=int(leased), clients=int(clients), domains=int(domains)
         )
+        if counts.pending < 0:
+            _log.warning("queue_counter_negative", pool=self._pool, pending=counts.pending)
+        return counts

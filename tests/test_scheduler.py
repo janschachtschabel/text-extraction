@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from fakeredis import FakeAsyncRedis
 from redis.asyncio import Redis
+from structlog.testing import capture_logs
 
 from text_extraction.scheduler import Claim, FairQueue, QueueCounts, QueueItem, domain_of
 from text_extraction.settings import Settings
@@ -162,7 +163,7 @@ async def test_cap_counts_leases_of_all_clients() -> None:
 
     assert (await claim_item(queue)).client == "A"
     claim = await queue.claim(LEASE)
-    assert claim == Claim(item=None, exhausted=[], retry_in=None)
+    assert claim == Claim(item=None, exhausted=False, retry_in=None)
 
 
 @scenario
@@ -285,11 +286,46 @@ async def test_lost_leases_beyond_max_attempts_are_exhausted() -> None:
         clock.now += LEASE
 
     claim = await queue.claim(LEASE)
-    assert claim.item is None
-    assert claim.exhausted == [
-        QueueItem(job_id=JOB_A, index=0, client="A", domain="a.example", attempts=3)
-    ]
-    assert await queue.claim(LEASE) == Claim(item=None, exhausted=[], retry_in=None)
+    assert claim.exhausted is True
+    assert claim.item is not None
+    item = claim.item
+    assert (item.job_id, item.index, item.client, item.domain) == (JOB_A, 0, "A", "a.example")
+    assert item.attempts == 3
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await running(valkey) == {"a.example": 1}
+
+    assert await queue.complete(item)
+    assert await queue.claim(LEASE) == Claim(item=None, exhausted=False, retry_in=None)
+    assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0, domains=0)
+    assert await running(valkey) == {}
+
+
+@scenario
+async def test_exhausted_item_is_offered_again_until_completed() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, job_item_max_attempts=1)
+    await queue.enqueue(JOB_A, "A", urls("a.example", 1))
+    for _ in range(2):
+        await claim_item(queue)
+        clock.now += LEASE
+    first = await queue.claim(LEASE)
+    assert first.exhausted
+    assert first.item is not None
+    assert first.item.attempts == 2
+
+    clock.now += LEASE  # the worker died before it recorded the failure
+    second = await queue.claim(LEASE)
+
+    assert second.exhausted
+    assert second.item is not None
+    assert (second.item.job_id, second.item.index) == (JOB_A, 0)
+    assert second.item.attempts == 2  # does not grow while it waits for its failure
+    assert second.item.lease != first.item.lease
+    assert await queue.complete(first.item) is False  # the old lease is fenced off
+    await queue.defer(first.item, clock.now + 30)
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+    assert await running(valkey) == {"a.example": 1}
+    assert await queue.complete(second.item) is True
     assert await queue.counts() == QueueCounts(pending=0, leased=0, clients=0, domains=0)
     assert await running(valkey) == {}
 
@@ -306,27 +342,43 @@ async def test_deferrals_count_towards_max_attempts() -> None:
     clock.now += LEASE
 
     claim = await queue.claim(LEASE)
-    assert [item.attempts for item in claim.exhausted] == [3]
+    assert claim.exhausted
+    assert claim.item is not None
+    assert claim.item.attempts == 3
+
+
+@scenario
+async def test_defer_of_an_exhausted_item_keeps_its_attempts() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, job_item_max_attempts=1)
+    await queue.enqueue(JOB_A, "A", urls("a.example", 1))
+    await defer_each(queue, 2, clock.now)
+    exhausted = await queue.claim(LEASE)
+    assert exhausted.exhausted
+    assert exhausted.item is not None
+
+    await queue.defer(exhausted.item, clock.now)
+
+    again = await queue.claim(LEASE)
+    assert again.exhausted
+    assert again.item is not None
+    assert again.item.attempts == 2
 
 
 @scenario
 async def test_reclaim_takes_at_most_twenty_expired_leases_per_claim() -> None:
     valkey, clock = await make_valkey(), Clock()
-    queue = make_queue(valkey, clock, job_item_max_attempts=1, outbound_max_concurrency_per_host=50)
+    queue = make_queue(valkey, clock, outbound_max_concurrency_per_host=50)
     await queue.enqueue(JOB_A, "A", urls("a.example", 25))
     for _ in range(25):
         await claim_item(queue)
     clock.now += LEASE
-    for _ in range(25):
-        await claim_item(queue)
-    clock.now += LEASE
 
-    first = await queue.claim(LEASE)
-    second = await queue.claim(LEASE)
-
-    assert len(first.exhausted) == 20
-    assert len(second.exhausted) == 5
-    assert {item.index for item in first.exhausted + second.exhausted} == set(range(25))
+    await claim_item(queue)
+    assert await queue.counts() == QueueCounts(pending=19, leased=6, clients=1, domains=1)
+    await claim_item(queue)
+    assert await queue.counts() == QueueCounts(pending=23, leased=2, clients=1, domains=1)
+    assert await running(valkey) == {"a.example": 2}
 
 
 @scenario
@@ -355,7 +407,7 @@ async def test_complete_of_an_expired_lease_not_yet_reclaimed_counts() -> None:
     clock.now += LEASE * 2
 
     assert await queue.complete(item) is True
-    assert await queue.claim(LEASE) == Claim(item=None, exhausted=[], retry_in=None)
+    assert await queue.claim(LEASE) == Claim(item=None, exhausted=False, retry_in=None)
     assert await running(valkey) == {}
 
 
@@ -422,6 +474,130 @@ async def test_client_and_domain_names_with_separators_stay_apart() -> None:
     }
     assert second == expected
     assert await queue.counts() == QueueCounts(pending=0, leased=3, clients=0, domains=0)
+
+
+@scenario
+async def test_duplicate_of_a_leased_item_is_dropped() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, outbound_max_concurrency_per_host=3)
+    await queue.enqueue(JOB_A, "A", urls("a.example", 2))
+    await queue.enqueue(JOB_A, "A", urls("a.example", 2))  # the same items once more
+
+    assert [(await claim_item(queue)).index for _ in range(2)] == [0, 1]
+    clock.now += 10
+    assert (await queue.claim(LEASE)).item is None
+
+    for index in range(2):  # the leases of the first copies keep their expiry
+        assert await valkey.zscore("q:{extract}:leases", f"{JOB_A}:{index}:0") == START + LEASE
+    assert await running(valkey) == {"a.example": 2}
+    assert await queue.counts() == QueueCounts(pending=0, leased=2, clients=0, domains=0)
+
+
+@scenario
+async def test_clients_rotate_while_hosts_are_at_their_cap() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, outbound_max_concurrency_per_host=2)
+    await queue.enqueue(JOB_A, "A", urls("a.example", 10) + urls("c.example", 10))
+    await queue.enqueue(JOB_B, "B", urls("b.example", 10))
+
+    order = [(await claim_item(queue)).domain for _ in range(6)]  # nothing is completed
+
+    assert order == ["a.example", "b.example", "c.example", "b.example", "a.example", "c.example"]
+    assert await queue.claim(LEASE) == Claim(item=None, exhausted=False, retry_in=None)
+    assert await running(valkey) == {"a.example": 2, "b.example": 2, "c.example": 2}
+
+
+async def defer_each(queue: FairQueue, count: int, until: float) -> None:
+    for _ in range(count):
+        await queue.defer(await claim_item(queue), until)
+
+
+@scenario
+async def test_claim_visits_at_most_the_scan_budget() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, scheduler_claim_scan_budget=5)
+    await queue.enqueue(JOB_A, "A", [f"https://d{n}.example/" for n in range(8)])
+    await defer_each(queue, 8, clock.now + 30)
+
+    for _ in range(3):
+        claim = await queue.claim(LEASE)
+        assert claim.item is None
+        assert claim.retry_in == pytest.approx(0.05)
+
+
+@scenario
+async def test_scan_budget_continues_with_the_next_domains() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, scheduler_claim_scan_budget=3)
+    await queue.enqueue(JOB_A, "A", [f"https://d{n}.example/" for n in range(5)])
+    await defer_each(queue, 5, clock.now + 30)
+    await queue.enqueue(JOB_B, "A", ["https://free.example/"])
+
+    assert (await queue.claim(LEASE)).item is None
+    item = await claim_item(queue)
+    assert (item.job_id, item.domain) == (JOB_B, "free.example")
+
+
+@scenario
+async def test_scan_budget_continues_with_the_next_clients() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, scheduler_claim_scan_budget=2)
+    for n in range(4):
+        await queue.enqueue(JOB_A, f"client-{n}", [f"https://d{n}.example/"])
+    await defer_each(queue, 4, clock.now + 30)
+    await queue.enqueue(JOB_B, "late", ["https://free.example/"])
+
+    assert (await queue.claim(LEASE)).item is None
+    assert (await queue.claim(LEASE)).item is None
+    assert (await claim_item(queue)).client == "late"
+
+
+@scenario
+async def test_orphan_client_and_empty_domain_are_dropped_on_a_claim() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock)
+    await queue.enqueue(JOB_A, "A", urls("a.example", 1))
+    await valkey.lpush("q:{extract}:clients", "ghost")
+    await valkey.lpush("q:{extract}:c:A:domains", "stray.example")
+
+    item = await claim_item(queue)
+
+    assert item.domain == "a.example"
+    assert await valkey.exists("q:{extract}:clients", "q:{extract}:c:A:domains") == 0
+    assert await queue.counts() == QueueCounts(pending=0, leased=1, clients=0, domains=0)
+
+
+@scenario
+async def test_orphan_client_and_empty_domain_are_dropped_on_an_idle_pass() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock)
+    await queue.enqueue(JOB_A, "A", urls("a.example", 1))
+    await defer_each(queue, 1, clock.now + 30)
+    await valkey.rpush("q:{extract}:clients", "ghost")
+    await valkey.rpush("q:{extract}:c:A:domains", "stray.example")
+
+    claim = await queue.claim(LEASE)
+
+    assert claim.item is None
+    assert claim.retry_in == pytest.approx(30)
+    assert await valkey.lrange("q:{extract}:clients", 0, -1) == [b"A"]
+    assert await valkey.lrange("q:{extract}:c:A:domains", 0, -1) == [b"a.example"]
+    clock.now += 30
+    assert (await claim_item(queue)).domain == "a.example"
+
+
+@scenario
+async def test_counts_report_a_negative_counter_with_a_warning() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock)
+    await valkey.set("q:{extract}:pending", -2)
+
+    with capture_logs() as logs:
+        counts = await queue.counts()
+
+    assert counts.pending == -2
+    assert [entry["event"] for entry in logs] == ["queue_counter_negative"]
+    assert logs[0]["log_level"] == "warning"
 
 
 @scenario

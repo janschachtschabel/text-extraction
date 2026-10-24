@@ -2,9 +2,11 @@
 
 import logging
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 import structlog
+from fakeredis import FakeAsyncRedis
 
 
 @pytest.fixture(scope="session")
@@ -15,6 +17,27 @@ def httpserver_listen_address() -> tuple[str, int]:
     127.0.0.1, so a mixed answer would be blocked before the request is sent.
     """
     return ("127.0.0.1", 0)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def fakeredis_accepts_script_flags() -> Iterator[None]:
+    """Strip the ``#!lua`` first line of a script before fakeredis loads it.
+
+    Redis 7 and Valkey read script flags from that line (the queue scripts use it). fakeredis
+    2.40 cannot parse it and would fail every such script, so under fakeredis the flags are
+    dropped; the scripts behave the same without them.
+    """
+    original = FakeAsyncRedis.register_script
+
+    def register_script(self: FakeAsyncRedis, script: Any) -> Any:
+        text = script.decode() if isinstance(script, bytes) else script
+        if text.startswith("#!"):
+            text = text.split("\n", 1)[1]
+        return original(self, text)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(FakeAsyncRedis, "register_script", register_script)
+        yield
 
 
 @pytest.fixture(autouse=True)

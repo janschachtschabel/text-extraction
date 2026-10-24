@@ -563,3 +563,16 @@ def test_job_item_max_attempts_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOB_ITEM_MAX_ATTEMPTS", "0")
     with pytest.raises(ConfigError, match="job_item_max_attempts"):
         load_settings()
+
+
+def test_scheduler_claim_scan_budget_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().scheduler_claim_scan_budget == 200
+
+    monkeypatch.setenv("SCHEDULER_CLAIM_SCAN_BUDGET", "1")
+    assert load_settings().scheduler_claim_scan_budget == 1
+
+    for value in ("0", "5001"):
+        monkeypatch.setenv("SCHEDULER_CLAIM_SCAN_BUDGET", value)
+        with pytest.raises(ConfigError, match="scheduler_claim_scan_budget"):
+            load_settings()
