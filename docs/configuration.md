@@ -8,7 +8,9 @@ chart README has the [full values table](../deploy/helm/text-extraction/README.m
 
 Non-secret settings. In Helm, put a variable under `config.<NAME>` in the values; it lands in the
 chart's ConfigMap with the same name (values are strings). The chart overrides `PUBLIC_PORT`,
-`INTERNAL_PORT` and `VALKEY_URL`; values for them under `config` are ignored.
+`INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods (value `jobs.enabled`) and
+`WORKER_CONCURRENCY` on the workers (value `workers.extract.concurrency`); values for them under
+`config` are ignored.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -50,10 +52,10 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
 | `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
 | `SCHEDULER_CLAIM_SCAN_BUDGET` | `200` | Client-domain pairs one claim of the job queue looks at, at most. A claim that finds nothing within the budget answers "try again in 0.05 s", and the next claim goes on where it stopped (a client whose domains the budget ran out in moves to the end of the rotation), so fairness holds across claims. Workers back off from 0.05 s up to 1 s while such answers repeat. It bounds the time one claim blocks Valkey when many domains are deferred or at their limit. Minimum 1, maximum 5000. |
-| `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. |
+| `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. Helm: `workers.extract.concurrency`. |
 | `BATCH_MAX_URLS` | `1000` | Most URLs one `POST /v1/batch` may carry. More answers 422 `invalid_request`, and so does a body over `BATCH_MAX_URLS` × (`MAX_URL_LENGTH` + 8) bytes plus 4 KiB, checked before the list is validated. Minimum 1, maximum 100000. |
 | `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches one API key may have unfinished (queued or running) at a time. The next `POST /v1/batch` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
-| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. |
+| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
 | `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
@@ -87,7 +89,18 @@ Keep these out of ConfigMaps, images and logs.
 | --- | --- | --- |
 | `API_KEYS` | JSON list of `{"name", "role", "sha256", "rate_limit_per_minute"}`. `role` is `user` or `admin`; `rate_limit_per_minute` is optional. Only the SHA-256 of a key is stored. | `secrets.apiKeys` (chart-managed Secret) or `secrets.existingSecret` + `secrets.existingSecretKey` |
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
-| `VALKEY_URL` | Only when the URL carries a password. | `externalValkey.existingSecret.name` + `.key`. Without a password use `externalValkey.url`; the in-chart Valkey (`valkey.enabled`) needs no secret. |
+| `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
+| `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
+
+**The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
+`openssl rand -hex 24`). The compose file and the Helm chart put the same value into
+`VALKEY_URL` (`redis://:<password>@host:6379/0`) and pass it to Valkey as `--requirepass`. The
+client percent-decodes the password in the URL (`p%40ss` is `p@ss`) but Valkey compares the text
+as it is, so a percent-encoded password never matches: do not encode it, choose a password that
+needs no encoding. This applies to the generated password (alphanumeric) and to
+`valkey.auth.existingSecret`. A `VALKEY_URL` you write yourself (`externalValkey.existingSecret`,
+or the variable on its own) carries the real password, and there reserved characters must be
+percent-encoded. In `.env` also avoid `$`, which compose treats as a variable.
 
 Generate a key with `openssl rand -hex 32` and compute its hash with
 `printf %s "$KEY" | sha256sum | cut -d' ' -f1`. Clients send the key as
@@ -114,7 +127,9 @@ when the signal arrives counts as in flight, so its item is processed too. An it
 then is cancelled, and its lease expires so that another worker runs it. There is no drain wait,
 since no Service sends traffic to the worker.
 
-docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
+docker compose runs the API, one extract worker and a Valkey with a password (`VALKEY_PASSWORD`
+from `.env`, required). The worker needs the same `API_KEYS` as the API while `AUTH_MODE` is
+`api_key`. docker compose assumes the default ports 8080 and 9090: its port mapping and health check are
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
 
@@ -264,7 +279,9 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |
 
 The queue gauges come from the API pods and not from the workers, because workers may scale to
-zero and the autoscaler (KEDA) must still see the backlog. Every API pod reads the same queue, so
+zero and the autoscaler (KEDA) must still see the backlog. Only API pods with `JOBS_ENABLED=true`
+export them, so KEDA and the queue alerts of the Helm chart need such API pods (the chart rejects
+KEDA with `jobs.enabled=false`). Every API pod reads the same queue, so
 **query them with `max()` over the pods** (for example
 `max(text_extraction_queue_pending_items{pool="extract"})`); `sum()` would multiply the backlog by
 the number of API pods, and `avg()` is only right while all pods have read it at the same moment.
@@ -277,6 +294,7 @@ read has succeeded, so an empty series means "not known", never "empty queue". W
 the pod keeps exporting the last values and logs `queue_metrics_unavailable` once; it logs
 `queue_metrics_recovered` when the reads work again. To alert on stale data, use
 `time() - text_extraction_queue_metrics_last_success_timestamp_seconds > 60` (per pod; with
-`max()` over the series the alert fires only when no pod has read the queue lately). With
+`max()` over the series the alert fires only when no pod has read the queue lately). The Helm
+alert `TextExtractionQueueMetricsStale` uses `max()` and 120 s. With
 `JOBS_ENABLED=false` the pod does not
 read the queue and exports no queue gauge.

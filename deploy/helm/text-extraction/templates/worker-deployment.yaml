@@ -1,0 +1,103 @@
+{{- if .Values.workers.extract.enabled }}
+{{- $worker := .Values.workers.extract }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "text-extraction.workerExtractName" . }}
+  labels:
+    {{- include "text-extraction.workerExtractLabels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-extract
+spec:
+  {{- if not (or $worker.autoscaling.keda.enabled $worker.autoscaling.hpa.enabled) }}
+  replicas: {{ $worker.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.secrets.apiKeys (not .Values.secrets.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "text-extraction.workerExtractSelectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $worker.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: {{ include "text-extraction.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - text-extraction-worker
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: internal
+              containerPort: 9090
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "text-extraction.fullname" . }}
+          env:
+            - name: INTERNAL_PORT
+              value: "9090"
+            - name: WORKER_CONCURRENCY
+              value: {{ $worker.concurrency | toString | quote }}
+            {{- include "text-extraction.valkeyEnv" . | trim | nindent 12 }}
+            {{- with include "text-extraction.apiKeysEnv" . | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: internal
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: internal
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

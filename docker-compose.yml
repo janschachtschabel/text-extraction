@@ -1,16 +1,32 @@
 # Reference setup for local runs. Production uses the Helm chart, not this file.
-# Start: cp .env.example .env, set API_KEYS, then `docker compose up -d --wait`.
+# Start: cp .env.example .env, set API_KEYS and VALKEY_PASSWORD, then `docker compose up -d --wait`.
+# VALKEY_PASSWORD has no default: compose stops with an error while it is empty or missing.
+
+# Shared by the API and the worker: same image, same settings, same hardening.
+x-app: &app
+  build: .
+  image: text-extraction:dev
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    # The password sits in a URL and is also the password Valkey checks: use letters and digits
+    # only (openssl rand -hex 24). Percent-encoding does not work, see docs/configuration.md.
+    VALKEY_URL: redis://:${VALKEY_PASSWORD:?set VALKEY_PASSWORD in .env}@valkey:6379/0
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  depends_on:
+    valkey:
+      condition: service_healthy
+
 services:
   api:
-    build: .
-    image: text-extraction:dev
+    <<: *app
     ports:
       - "8080:8080" # public API; the internal port 9090 is not published
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      VALKEY_URL: redis://valkey:6379/0
     healthcheck:
       test:
         - CMD
@@ -23,19 +39,41 @@ services:
       start_period: 10s
     # SIGTERM starts a 5 s drain and a graceful shutdown of up to 30 s (docs/configuration.md).
     stop_grace_period: 45s
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    depends_on:
-      valkey:
-        condition: service_healthy
+
+  # Extract worker: runs the items of batches and slow extractions. It serves only the internal
+  # port 9090 (not published) and needs the same API_KEYS as the API while AUTH_MODE is api_key.
+  worker:
+    <<: *app
+    command: ["text-extraction-worker"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/ready', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    # SIGTERM stops claiming and gives items in flight up to 30 s; no drain wait.
+    stop_grace_period: 45s
 
   valkey:
     image: valkey/valkey:8.1-alpine
+    # Jobs, the queue and counters are state: refuse writes when full, never evict.
+    command:
+      - --requirepass
+      - ${VALKEY_PASSWORD:?set VALKEY_PASSWORD in .env}
+      - --maxmemory
+      - 768mb
+      - --maxmemory-policy
+      - noeviction
+    environment:
+      # Read by valkey-cli, so the health check authenticates.
+      REDISCLI_AUTH: ${VALKEY_PASSWORD:?set VALKEY_PASSWORD in .env}
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      # `valkey-cli ping` exits 0 even when it is refused (NOAUTH, WRONGPASS): compare the answer.
+      test: ["CMD-SHELL", 'test "$$(valkey-cli ping)" = PONG']
       interval: 5s
       timeout: 3s
       retries: 5

@@ -23,10 +23,10 @@ uv run pre-commit install    # install the git hooks
 
 ## Quick start with Docker
 
-Requires Docker with Compose. Compose starts the API and a Valkey for its shared state.
+Requires Docker with Compose. Compose starts the API, an extract worker and a Valkey (with a password) for the shared state.
 
 ```bash
-cp .env.example .env         # set API_KEYS: the sha256 of your key, see the comments in the file
+cp .env.example .env         # set API_KEYS (the sha256 of your key) and VALKEY_PASSWORD (openssl rand -hex 24)
 docker compose up --build    # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \

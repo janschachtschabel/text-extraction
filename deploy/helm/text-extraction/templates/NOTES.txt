@@ -12,5 +12,18 @@ WARNING: AUTH_MODE is api_key but no API keys are configured. The pods will refu
 {{- end }}
 {{- if .Values.valkey.enabled }}
 
-Valkey runs in the chart (single replica, {{ ternary "persistent" "no persistence" .Values.valkey.persistence.enabled }}). Set valkey.enabled=false and externalValkey.* to use your own.
+Valkey runs in the chart (single replica, {{ ternary "persistent" "no persistence" .Values.valkey.persistence.enabled }}, maxmemory {{ .Values.valkey.maxmemory }}, noeviction). Set valkey.enabled=false and externalValkey.* to use your own.
+{{- if include "text-extraction.valkeyAuth" . }}
+Its password is in Secret {{ include "text-extraction.valkeySecretName" . }}, key {{ .Values.valkey.auth.existingSecretKey }}.
+{{- if not .Values.valkey.auth.existingSecret }}
+The chart generated it and keeps it across upgrades. A render without a cluster (helm template) cannot keep it: use valkey.auth.existingSecret there.
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.workers.extract.enabled }}
+
+Extract workers: {{ include "text-extraction.workerExtractName" . }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" .Values.workers.extract.autoscaling.hpa.enabled) .Values.workers.extract.autoscaling.keda.enabled }}); internal port 9090 on svc/{{ include "text-extraction.workerExtractInternalServiceName" . }}.
+{{- else }}
+
+No extract workers are deployed. Jobs are {{ ternary "enabled, so batches wait for workers that run elsewhere" "disabled: the batch and job routes answer 503" (eq (include "text-extraction.jobsEnabled" .) "true") }}.
 {{- end }}

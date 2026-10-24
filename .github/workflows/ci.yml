@@ -45,3 +45,18 @@ jobs:
           version: v3.19.0
 
       - run: helm lint deploy/helm/text-extraction
+
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Parses and interpolates docker-compose.yml. VALKEY_PASSWORD is required (no default), so
+      # the check also fails if someone removes the requirement. Dummy values, no real secrets.
+      - run: docker compose config -q
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+          API_KEYS: '[{"name":"ci","role":"admin","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]'
