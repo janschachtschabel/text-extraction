@@ -466,6 +466,46 @@ async def test_lost_lease_and_exhausted_items_behave_as_extract_pool() -> None:
 
 
 @scenario
+async def test_an_item_moved_twice_renders_once() -> None:
+    """Two extract holders of one item (a lost lease) both queued it here: once the first copy
+    has its result, the second is completed without another render."""
+    harness = Harness(FakeRenderer(rendered(ARTICLE)))
+    uncached = JobOptions(mode="auto", compliance="enforce", cache=False)  # no cache hit either
+    job_id = await harness.store.create("batch", USER, uncached, [PAGE])
+    await harness.store.put_draft(job_id, 0, await fast_draft(SHELL))
+    await harness.queue.enqueue_items(job_id, USER.name, [(0, PAGE)])
+    await harness.queue.enqueue_items(job_id, USER.name, [(0, PAGE)])
+
+    await harness.process_next()
+    await harness.process_next()
+
+    assert len(harness.renderer.calls) == 1
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    record = await harness.store.get(job_id)
+    assert record is not None
+    assert (record.state, record.progress.done, record.progress.success) == ("completed", 1, 1)
+    assert harness.outcome("success") == 1
+
+
+@scenario
+async def test_exhausted_item_drops_its_secrets() -> None:
+    harness = Harness(job_item_max_attempts=1)
+    job_id = await harness.submit(BROWSER, secrets=SECRETS)
+    for _ in range(2):
+        await harness.claim()
+        harness.clock.now += harness.runner.lease_seconds + 1
+    claim = await harness.claim()
+    assert claim.exhausted
+
+    await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
+
+    assert error_of(await harness.result(job_id)) == (ErrorCode.INTERNAL_ERROR, True)
+    assert (await harness.store.secrets(job_id)).empty()
+    assert harness.renderer.calls == []
+
+
+@scenario
 async def test_a_moved_item_finishes_its_job_in_the_browser_pool() -> None:
     """The extract worker moved item 1 (draft stored, queued with its index): the browser
     worker writes it, and the job completes."""

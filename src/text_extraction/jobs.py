@@ -389,6 +389,10 @@ class JobStore:
             for position, url in enumerate(urls)
         ]
 
+    async def has_result(self, job_id: str, index: int) -> bool:
+        """Whether item ``index`` has its result already (its ``done`` bit is set)."""
+        return bool(await self._valkey.getbit(_key(job_id, "done"), index))
+
     async def write_result(
         self, job_id: str, index: int, envelope: Envelope[ExtractResult]
     ) -> ResultWrite:

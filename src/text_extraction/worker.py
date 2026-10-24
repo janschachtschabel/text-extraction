@@ -27,7 +27,9 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 4. stores the result (only the first result of an item counts), then completes the item. An item
    whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
    it) still stores its result, but its repeat write or deferral is not counted in the metrics.
-   An item the runner moved is completed without a result (outcome ``escalated``).
+   An item the runner moved is completed without a result (outcome ``escalated``). A claimed
+   item that has its result already (a copy left by a lost lease or a double move) is completed
+   without running again. An exhausted item's caller secrets are deleted with its failure.
 
 **Auto escalation (B5).** With ``BROWSER_ENABLED``, an ``auto`` item whose fast result needs the
 browser (``escalation.needs_browser``; under unblock mode, for an admin's ``compliance: ignore``
@@ -102,6 +104,8 @@ _SCAN_BACKOFF_SECONDS = 0.05
 _MAX_VALKEY_BACKOFF_SECONDS = 30.0
 # Pause after an unexpected error in a loop, so a bug cannot spin it.
 _ERROR_PAUSE_SECONDS = 1.0
+# How long a shutdown waits for a cancelled start-up to unwind.
+_START_UNWIND_SECONDS = 5.0
 
 _LOST_MESSAGE = "The item was lost by a worker too often."
 _INTERNAL_MESSAGE = "Internal server error."
@@ -350,6 +354,12 @@ class Worker:
         url = await self._store.url(item.job_id, item.index) if job is not None else None
         if job is None or url is None:
             return await self._drop(item)
+        if await self._store.has_result(item.job_id, item.index):
+            # A copy of an item that has finished (it was rerun after a lost lease, or moved to
+            # this pool twice): its result stands, and the target is not asked again.
+            await self._queue.complete(item)
+            _log.debug("job_item_skipped", reason="has_result")
+            return None
         if job.state == "queued":
             try:
                 await self._store.mark_running(item.job_id)
@@ -392,7 +402,10 @@ class Worker:
         if job is None:
             return await self._drop(item)
         envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
-        return await self._finish(item, job, envelope)
+        outcome = await self._finish(item, job, envelope)
+        # The item never runs again: its caller secrets (a browser job's, B6) are done with.
+        await self._store.drop_secrets(item.job_id)
+        return outcome
 
     async def _finish(
         self, item: QueueItem, job: JobRecord, envelope: Envelope[ExtractResult]
@@ -473,8 +486,11 @@ async def _serve(
         for sig in _HANDLED_SIGNALS:
             loop.remove_signal_handler(sig)
         try:
-            # A start-up coroutine (the browser worker's) unwinds before its caller cleans up.
-            await asyncio.wait([starting])
+            # A start-up coroutine (the browser worker's) unwinds before its caller cleans up;
+            # one stuck in a driver call does not hold the shutdown for long.
+            await asyncio.wait([starting], timeout=_START_UNWIND_SECONDS)
+            if not starting.done():
+                _log.warning("worker_start_not_unwound", waited_seconds=_START_UNWIND_SECONDS)
         finally:
             if guard is not None:
                 await guard.stop()

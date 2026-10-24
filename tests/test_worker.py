@@ -2,6 +2,7 @@
 pipeline, with fakeredis (Lua), a fake fetcher, an injected clock and an injected sleep."""
 
 import asyncio
+import contextlib
 import os
 import signal
 import socket
@@ -20,6 +21,7 @@ from structlog.testing import capture_logs
 
 from tests.fakes import Answer, FakeFetcher, RefusingGate, fetched
 from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL
+from text_extraction import worker as worker_module
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.envelope import Envelope, ErrorCode
@@ -1151,3 +1153,66 @@ async def test_move_after_a_lost_lease_is_not_counted() -> None:
     assert outcome_count(harness, "escalated") == 1
     counts = await harness.queue.counts()
     assert (counts.pending, counts.leased) == (0, 0)
+    # Both holders queued it on ``browser``: the browser worker renders only the first copy
+    # (test_browser_worker.py, test_an_item_moved_twice_renders_once).
+    [member] = {*await browser_list(harness.valkey, "example.org")}
+    assert await browser_list(harness.valkey, "example.org") == [member, member]
+
+
+@scenario
+async def test_item_that_has_its_result_is_completed_without_running_again() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    uncached = JobOptions(compliance="enforce", cache=False)  # no cache hit either
+    job_id = await harness.store.create("batch", OWNER, uncached, [url])
+    await harness.queue.enqueue(job_id, OWNER.name, [url])
+    stale = (await harness.claim()).item
+    harness.clock.now += harness.lease_seconds + 1
+    current = (await harness.claim()).item
+    assert stale is not None
+    assert current is not None
+    await harness.worker.process(stale)  # writes the result although its lease is gone
+
+    await harness.worker.process(current)  # finds the result: no second fetch
+
+    assert [called for called, _ in harness.fetcher.calls if called == url] == [url]
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    record = await harness.store.get(job_id)
+    assert record is not None
+    assert (record.state, record.progress.done) == ("completed", 1)
+    assert outcome_count(harness, "success") == 1
+
+
+@scenario
+async def test_shutdown_waits_only_briefly_for_a_start_up_that_does_not_unwind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(worker_module, "_START_UNWIND_SECONDS", 0.2)
+    harness = Harness({}, worker_concurrency=1)
+    readiness = Readiness()
+    app = create_internal_app(
+        harness.settings, harness.valkey, harness.registry, readiness=readiness
+    )
+    internal = _server(app, "127.0.0.1", free_port())
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stuck() -> None:
+        started.set()
+        while not release.is_set():  # a driver call that swallows the cancellation
+            with contextlib.suppress(asyncio.CancelledError):
+                await release.wait()
+
+    with capture_logs() as logs:
+        serving = asyncio.create_task(
+            _serve(harness.worker, internal, readiness, graceful_seconds=1, startup=stuck)
+        )
+        await started.wait()
+        os.kill(os.getpid(), signal.SIGTERM)
+        async with asyncio.timeout(5):
+            await serving
+    release.set()
+
+    assert not readiness.ready
+    assert any(log["event"] == "worker_start_not_unwound" for log in logs)

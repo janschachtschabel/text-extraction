@@ -548,3 +548,16 @@ async def test_clear_lease_keeps_the_job_running_without_a_claim() -> None:
     assert (record.state, record.lease_until) == ("running", None)
     with pytest.raises(JobLost):
         await store.clear_lease("f" * 32)
+
+
+@scenario
+async def test_has_result_follows_the_done_bit() -> None:
+    store = make_store(FakeAsyncRedis())
+    job_id = await create_job(store)
+
+    assert not await store.has_result(job_id, 0)
+    await store.write_result(job_id, 1, success())
+
+    assert await store.has_result(job_id, 1)
+    assert not await store.has_result(job_id, 0)
+    assert not await store.has_result("f" * 32, 1)
