@@ -52,7 +52,7 @@ MAX_HOSTS: Final = 200  # hosts a context remembers
 MAX_REFUSALS: Final = 50  # refusals a context remembers
 CONNECT_TIMEOUT_SECONDS: Final = 10.0  # one address
 DNS_TIMEOUT_SECONDS: Final = 10.0  # the lookup of one host
-TUNNEL_GRACE_SECONDS: Final = 5.0  # added to BROWSER_UNBLOCK_TIMEOUT_SECONDS
+TUNNEL_GRACE_SECONDS: Final = 5.0  # added to the longest render deadline
 _CHUNK_BYTES: Final = 64 * 1024
 _SEND_TIMEOUT_SECONDS: Final = 2.0  # a client that does not read its refusal is dropped
 
@@ -267,6 +267,13 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
     return metrics
 
 
+def tunnel_lifetime(settings: Settings) -> float:
+    """Seconds a tunnel or plain connection may stay open: the longest render deadline
+    (``BROWSER_TIMEOUT_SECONDS`` or ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``) plus a grace."""
+    deadline = max(settings.browser_timeout_seconds, settings.browser_unblock_timeout_seconds)
+    return deadline + TUNNEL_GRACE_SECONDS
+
+
 class EgressProxy:
     """The local proxy of one browser process; see the module docstring.
 
@@ -296,9 +303,7 @@ class EgressProxy:
         self._max_bytes = settings.browser_max_bytes
         self._head_timeout = head_timeout
         self._tunnel_timeout = (
-            tunnel_timeout
-            if tunnel_timeout is not None
-            else settings.browser_unblock_timeout_seconds + TUNNEL_GRACE_SECONDS
+            tunnel_timeout if tunnel_timeout is not None else tunnel_lifetime(settings)
         )
         self._dns_timeout = dns_timeout
         self._max_connections = max_connections

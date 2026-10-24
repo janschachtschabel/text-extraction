@@ -391,7 +391,8 @@ while `BROWSER_ENABLED` is false, are unchanged.
   the fast mode's address check, dials the first allowed address, refuses non-public addresses
   with 403 and counts bytes per page (cap `BROWSER_MAX_BYTES`). It is a plain `CONNECT` tunnel
   and relays plain `http://` requests, so TLS stays end to end and Chromium's own TLS
-  fingerprint reaches the site. Launch flags: `--proxy-server` with a bypass list that sends even
+  fingerprint reaches the site. A connection lives at most the longer of `BROWSER_TIMEOUT_SECONDS`
+  and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`, plus 5 s. Launch flags: `--proxy-server` with a bypass list that sends even
   loopback through the proxy, `--disable-quic`, WebRTC limited to proxied UDP,
   `--disable-dev-shm-usage` and `--dns-prefetch-disable`. Each page has its own proxy
   credentials. Standard mode blocks service workers and refuses downloads. Speculation rules

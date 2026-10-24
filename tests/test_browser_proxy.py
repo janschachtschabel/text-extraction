@@ -10,7 +10,7 @@ import pytest
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
-from text_extraction.browser_proxy import EgressProxy, ProxyContext, host_header
+from text_extraction.browser_proxy import EgressProxy, ProxyContext, host_header, tunnel_lifetime
 from text_extraction.settings import Settings
 
 Addr = IPv4Address | IPv6Address
@@ -335,6 +335,23 @@ def test_the_default_policy_follows_the_private_network_setting() -> None:
             writer.close()
 
     run_scenario(scenario)
+
+
+@pytest.mark.parametrize(
+    ("browser", "unblock", "lifetime"), [(30, 60, 65), (120, 60, 125), (30, 180, 185)]
+)
+def test_a_tunnel_lives_as_long_as_the_longest_render(
+    browser: float, unblock: float, lifetime: float
+) -> None:
+    # M-3: a standard render may be the longer one; its tunnels (an HTTP/2 connection to the
+    # target too) must not end before its deadline.
+    settings = Settings(
+        auth_mode="none",
+        browser_timeout_seconds=browser,
+        browser_unblock_timeout_seconds=unblock,
+    )
+
+    assert tunnel_lifetime(settings) == lifetime
 
 
 def test_name_resolving_to_private_ip_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
