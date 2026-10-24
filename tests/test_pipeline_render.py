@@ -912,6 +912,38 @@ def test_clearance_cookies_loaded_and_stored_only_for_unblock() -> None:
     assert clearance.puts == [("example.org", [new])]  # not after the challenge stayed
 
 
+@pytest.mark.parametrize(
+    "secrets",
+    [
+        {"cookies": [{"name": "session", "value": "caller-secret"}]},
+        {"headers": {"Authorization": "Bearer caller-secret"}},
+        {"actions": [{"type": "click", "selector": "#login"}]},
+    ],
+    ids=["cookies", "headers", "actions"],
+)
+def test_an_unblock_render_with_secrets_stores_no_clearance(secrets: dict[str, Any]) -> None:
+    # B6: the render's cookies may be the caller's own or a session the caller's secrets opened;
+    # they must not reach the store that the next admin's unblock render of the host reads.
+    old = CookieData(name="cf_clearance", value="old", domain=".example.org", expires=2e9)
+    session = CookieData(name="session", value="caller-secret", domain="example.org")
+    clearance = FakeClearance({"example.org": [old]})
+    unblock = FakeRenderer(rendered(cookies=[old, session]))
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered()),
+        unblock_renderer=unblock,
+        clearance=clearance,
+        browser_unblock_enabled=True,
+    )
+
+    envelope = harness.run_once(mode="browser", principal=ADMIN, compliance="ignore", **secrets)
+
+    assert envelope.status == "success", envelope.error
+    assert data_of(envelope).unblocked is True
+    assert clearance.gets == ["example.org"]  # stored clearance is still used
+    assert unblock.calls[0].options.cookies[0] == old
+    assert clearance.puts == []
+
+
 def unblock_harness(*results: Any, **overrides: Any) -> RenderHarness:
     return RenderHarness(
         renderer=FakeRenderer(rendered()),

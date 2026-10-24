@@ -471,7 +471,9 @@ while `BROWSER_ENABLED` is false, are unchanged.
   - Clearance reuse: after a render whose last document was 2xx and not a challenge, the cookies
     of the host and its parent domain are stored in `unblock:cookies:{<host>}` (TTL at most
     `BROWSER_UNBLOCK_COOKIE_TTL_SECONDS`) and added by the next unblock render of that host. Only
-    unblock renders read them, and they are never shown. A render that got past a 403, 429 or 503
+    unblock renders read them, and they are never shown. A render with caller secrets (actions,
+    cookies or headers) stores none: its cookies may be the caller's own or a session they opened
+    (B6); it still reads the stored ones. A render that got past a 403, 429 or 503
     challenge keeps that answer out of the host's backoff.
   - Escalation: under unblock `auto` also escalates per B5. The result carries `unblocked: true`.
 - **B15, what unblock does not do.** No image or puzzle captcha solving and no paid or

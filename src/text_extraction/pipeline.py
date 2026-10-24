@@ -1113,11 +1113,14 @@ class Pipeline:
         )
         # B7: a stored screenshot is the answer; the page's quality is reported, not judged.
         envelope = Envelope(status="success", data=result) if screenshot else self._envelope(result)
+        # B6: with caller secrets the render's cookies may be the caller's own, or a session they
+        # opened; they never reach the store the next admin's unblock render reads.
         if (
             unblock
             and self._clearance is not None
             and rendered.cookies
             and not quality.bot_challenge
+            and not run.private
         ):
             await self._clearance.put(run.host or "", list(rendered.cookies))
         if run.comparing:
