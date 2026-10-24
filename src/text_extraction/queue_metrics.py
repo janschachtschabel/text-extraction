@@ -18,7 +18,8 @@ are synchronous). When Valkey fails the last values stay and the outage is logge
 
 import asyncio
 import contextlib
-from collections.abc import Iterable, Iterator
+import time
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Final, Protocol
 from weakref import WeakKeyDictionary
@@ -112,6 +113,11 @@ _GAUGES: Final = (
     ("text_extraction_queue_leased_items", "Items of the pool that a worker has leased."),
     ("text_extraction_queue_clients", "Clients with items waiting in the queue of the pool."),
 )
+_LAST_SUCCESS: Final = (
+    "text_extraction_queue_metrics_last_success_timestamp_seconds",
+    "Unix time of the last successful read of the queue of the pool. It stays unchanged while "
+    "Valkey fails, so time() minus it tells how stale the queue gauges are.",
+)
 
 
 class QueueGauges(Collector):
@@ -127,22 +133,26 @@ class QueueGauges(Collector):
         registry: CollectorRegistry,
         *,
         interval: float = REFRESH_SECONDS,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._queue = queue
         self._interval = interval
+        self._clock = clock
+        self._last_success: float | None = None
         self._counts: QueueCounts | None = None
         self._down = False
         self._task: asyncio.Task[None] | None = None
-        self._stopped = False
         registry.register(self)
 
     @property
-    def stopped(self) -> bool:
-        """True once ``stop`` has ended the refresh task."""
-        return self._stopped
+    def running(self) -> bool:
+        """True while the refresh task is running (started and not stopped)."""
+        return self._task is not None and not self._task.done()
 
     def describe(self) -> Iterable[GaugeMetricFamily]:
-        return [GaugeMetricFamily(name, doc, labels=["pool"]) for name, doc in _GAUGES]
+        return [
+            GaugeMetricFamily(name, doc, labels=["pool"]) for name, doc in (*_GAUGES, _LAST_SUCCESS)
+        ]
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
         counts = self._counts
@@ -153,6 +163,10 @@ class QueueGauges(Collector):
         for (name, doc), value in zip(_GAUGES, values, strict=True):
             family = GaugeMetricFamily(name, doc, labels=["pool"])
             family.add_metric([pool], value)
+            yield family
+        if self._last_success is not None:
+            family = GaugeMetricFamily(*_LAST_SUCCESS, labels=["pool"])
+            family.add_metric([pool], self._last_success)
             yield family
 
     async def refresh(self) -> None:
@@ -171,6 +185,7 @@ class QueueGauges(Collector):
                 )
             return
         self._counts = counts
+        self._last_success = self._clock()
         if self._down:
             self._down = False
             _log.info("queue_metrics_recovered", pool=self._queue.pool)
@@ -183,7 +198,6 @@ class QueueGauges(Collector):
     def start(self) -> None:
         """Start the refresh task in the running event loop; a second call does nothing."""
         if self._task is None:
-            self._stopped = False
             self._task = asyncio.create_task(self._run(), name="queue-gauges")
 
     async def stop(self) -> None:
@@ -194,4 +208,3 @@ class QueueGauges(Collector):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        self._stopped = True

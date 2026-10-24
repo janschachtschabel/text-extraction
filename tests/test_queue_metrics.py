@@ -15,6 +15,7 @@ from redis.exceptions import RedisError
 from structlog.testing import capture_logs
 
 from tests.test_jobs_api import ALICE, make_settings
+from text_extraction import jobs_api
 from text_extraction.app import create_public_app
 from text_extraction.queue_metrics import QueueGauges, job_duration_for
 from text_extraction.scheduler import FairQueue, QueueCounts
@@ -142,6 +143,41 @@ async def test_no_values_are_exported_when_valkey_is_down_from_the_start() -> No
     assert snapshot(registry) == (None, None, None)
 
 
+def last_success(registry: CollectorRegistry) -> float | None:
+    return registry.get_sample_value(
+        "text_extraction_queue_metrics_last_success_timestamp_seconds", POOL
+    )
+
+
+@scenario
+async def test_last_success_timestamp_is_exported_from_the_first_read_and_kept_while_down() -> None:
+    now = [1_700_000_000.0]
+    queue = FlakyQueue()
+    registry = CollectorRegistry()
+    gauges = QueueGauges(queue, registry, clock=lambda: now[0])
+    assert last_success(registry) is None  # no read yet
+
+    queue.down = True
+    await gauges.refresh()
+    assert last_success(registry) is None  # a failed first read is not a success
+
+    queue.down = False
+    await gauges.refresh()
+    assert last_success(registry) == 1_700_000_000.0
+
+    queue.down = True
+    now[0] += 120
+    await gauges.refresh()
+    await gauges.refresh()
+    assert last_success(registry) == 1_700_000_000.0  # unchanged: now - it shows the staleness
+    assert snapshot(registry) == (7, 2, 3)
+
+    queue.down = False
+    now[0] += 5
+    await gauges.refresh()
+    assert last_success(registry) == 1_700_000_125.0
+
+
 @scenario
 async def test_refresh_task_reads_at_most_every_interval_and_stops_cleanly() -> None:
     queue = FlakyQueue()
@@ -199,6 +235,27 @@ def test_jobs_created_counter() -> None:
     assert created(registry, "extract") == 0
 
 
+def test_batch_discarded_by_the_recount_is_not_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = CollectorRegistry()
+    app = create_public_app(make_settings(batch_max_open_per_client=1), FakeAsyncRedis(), registry)
+    urls = ["https://a.example/1"]
+    with TestClient(app) as client:
+        assert client.post("/v1/batch", json={"urls": urls}, headers=ALICE).status_code == 202
+        assert created(registry, "batch") == 1
+
+        # A concurrent request that passed the check before the other one was added: the
+        # pre-check sees no open batch, but the recount after the add finds the limit exceeded.
+        async def sees_none(*_args: Any, **_kwargs: Any) -> int:
+            return 0
+
+        monkeypatch.setattr(jobs_api, "_open_count", sees_none)
+        response = client.post("/v1/batch", json={"urls": urls}, headers=ALICE)
+
+        assert response.status_code == 429
+        assert response.json()["error"]["retryable"] is True
+    assert created(registry, "batch") == 1
+
+
 def test_enqueue_failure_is_not_counted() -> None:
     registry = CollectorRegistry()
     app = create_public_app(make_settings(), FakeAsyncRedis(), registry)
@@ -219,21 +276,29 @@ def test_job_duration_is_shared_with_the_worker_by_registry() -> None:
     assert job_duration_for(registry) is not job_duration_for(CollectorRegistry())
 
 
-def test_the_api_app_exports_the_queue_gauges_only_with_jobs_enabled() -> None:
+def test_the_api_app_runs_the_queue_gauges_between_startup_and_shutdown() -> None:
     registry = CollectorRegistry()
     app = create_public_app(make_settings(), FakeAsyncRedis(), registry)
+    gauges: QueueGauges = app.state.queue_gauges
+    assert not gauges.running  # created with the app, started by the lifespan
     with TestClient(app):
+        assert gauges.running
         deadline = time.monotonic() + 10
         while gauge(registry, "pending_items") is None and time.monotonic() < deadline:
             time.sleep(0.01)
         assert snapshot(registry) == (0, 0, 0)
-    assert app.state.queue_gauges.stopped
+    assert not gauges.running
 
-    disabled = CollectorRegistry()
-    off = create_public_app(make_settings(jobs_enabled=False), FakeAsyncRedis(), disabled)
-    with TestClient(off):
-        time.sleep(0.1)
-        assert snapshot(disabled) == (None, None, None)
+
+def test_the_api_app_does_not_run_the_queue_gauges_with_jobs_disabled() -> None:
+    registry = CollectorRegistry()
+    app = create_public_app(make_settings(jobs_enabled=False), FakeAsyncRedis(), registry)
+    gauges: QueueGauges = app.state.queue_gauges
+    with TestClient(app):
+        assert not gauges.running
+    assert not gauges.running
+    assert snapshot(registry) == (None, None, None)
+    assert last_success(registry) is None
 
 
 def test_gauges_are_described_when_the_collector_is_registered() -> None:

@@ -256,6 +256,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. |
 | `text_extraction_queue_leased_items` | gauge | `pool` | API pods | Items of the pool that a worker has leased (also leases that expired and are not taken back yet). |
 | `text_extraction_queue_clients` | gauge | `pool` | API pods | Clients (API key names) with items waiting. |
+| `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
 | `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job. |
 | `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused) or `lost` (the job was gone). |
@@ -274,5 +275,8 @@ A pod reads the queue in the background every 5 seconds (the read walks the clie
 is not done per scrape); the gauges are up to 5 s old. A pod exports no queue gauge until its first
 read has succeeded, so an empty series means "not known", never "empty queue". While Valkey fails
 the pod keeps exporting the last values and logs `queue_metrics_unavailable` once; it logs
-`queue_metrics_recovered` when the reads work again. With `JOBS_ENABLED=false` the pod does not
+`queue_metrics_recovered` when the reads work again. To alert on stale data, use
+`time() - text_extraction_queue_metrics_last_success_timestamp_seconds > 60` (per pod; with
+`max()` over the series the alert fires only when no pod has read the queue lately). With
+`JOBS_ENABLED=false` the pod does not
 read the queue and exports no queue gauge.
