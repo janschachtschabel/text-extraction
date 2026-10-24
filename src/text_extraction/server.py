@@ -76,14 +76,22 @@ class _Server(uvicorn.Server):
             self._readiness.mark_listening()
 
 
-def graceful_shutdown_seconds(settings: Settings) -> int:
-    """How long requests in flight may finish after SIGTERM: an extraction that has just started
-    can still end within its own deadline. While ``BROWSER_ENABLED``, a sync request may also
-    wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render (B13)."""
-    seconds = max(
+def extraction_graceful_seconds(settings: Settings) -> int:
+    """How long an extraction in flight may finish after SIGTERM: one that has just started can
+    still end within its own deadline. The workers use this bound; they never wait for another
+    pool."""
+    return max(
         MIN_GRACEFUL_SHUTDOWN_SECONDS,
         math.ceil(settings.extract_timeout_seconds + _SHUTDOWN_MARGIN_SECONDS),
     )
+
+
+def graceful_shutdown_seconds(settings: Settings) -> int:
+    """How long requests in flight to the API may finish after SIGTERM: an extraction that has
+    just started can still end within its own deadline. While ``BROWSER_ENABLED``, a sync request
+    may also wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render
+    (B13)."""
+    seconds = extraction_graceful_seconds(settings)
     if settings.browser_enabled:
         render = settings.browser_timeout_seconds
         if settings.browser_unblock_enabled:

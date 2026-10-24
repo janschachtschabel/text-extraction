@@ -48,7 +48,8 @@ async def screenshot(
     """Render a URL in the browser and capture it as a PNG, 1920 px wide.
 
     `data.screenshot` references the file: download it from its `url`
-    (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`. The page's
+    (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`; the download
+    needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise 503). The page's
     `quality` is reported but does not fail a stored screenshot. Outcomes of the target answer
     200 with `status: failed`, as for `/v1/extract`; without a browser worker in time the
     answer is `failed`/`timeout`, retryable. 400 while browser mode is off, 403 for an

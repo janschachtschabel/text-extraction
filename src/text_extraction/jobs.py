@@ -5,7 +5,8 @@ keys share a slot and a Lua script can touch all of them:
 
 - ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON), state, created_at,
                           finished_at, total, done, success, partial, failed, lease_until,
-                          trace_id (of the request that created the job, when it had one)
+                          trace_id (of the request that created the job, when it had one),
+                          secrets (``1`` when the job was created with caller secrets)
 - ``job:{<id>}:urls``     list: the URLs in input order
 - ``job:{<id>}:results``  hash: item index -> ``Envelope[ExtractResult]`` as JSON
 - ``job:{<id>}:done``     bitmap: bit ``index`` is set once that item has its result
@@ -183,6 +184,9 @@ class JobRecord:
     progress: JobProgress
     lease_until: float | None
     trace_id: str | None = None
+    # The job was created with caller secrets (B6); it stays set after they are gone, so the
+    # browser worker never renders the job without them.
+    has_secrets: bool = False
 
 
 def _key(job_id: str, kind: str) -> str:
@@ -265,16 +269,19 @@ class JobStore:
         }
         if trace_id is not None:
             meta["trace_id"] = trace_id
+        stored_secrets = secrets if secrets is not None and not secrets.empty() else None
+        if stored_secrets is not None:
+            meta["secrets"] = "1"
         async with self._valkey.pipeline(transaction=True) as pipe:
             pipe.hset(meta_key, mapping=meta)
             for start in range(0, len(urls), _URL_CHUNK):
                 pipe.rpush(urls_key, *urls[start : start + _URL_CHUNK])
             pipe.expire(meta_key, self._ttl_seconds)
             pipe.expire(urls_key, self._ttl_seconds)
-            if secrets is not None and not secrets.empty():
+            if stored_secrets is not None:
                 pipe.set(
                     _key(job_id, "secrets"),
-                    secrets.model_dump_json(),
+                    stored_secrets.model_dump_json(),
                     ex=min(self._secrets_ttl_seconds, self._ttl_seconds),
                 )
             await pipe.execute()
@@ -361,6 +368,7 @@ class JobStore:
             ),
             lease_until=float(lease_until) if lease_until is not None else None,
             trace_id=meta.get("trace_id"),
+            has_secrets=meta.get("secrets") == "1",
         )
 
     async def url(self, job_id: str, index: int) -> str | None:

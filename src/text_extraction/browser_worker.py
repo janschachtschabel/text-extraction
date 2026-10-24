@@ -10,7 +10,9 @@ modules, so the API and the extract worker never load Playwright or Patchright.
 + 10`` seconds. For each item it:
 
 1. reads the job's caller secrets (actions, cookies, headers; B6) and the item's draft (the
-   fast result of an ``auto`` item the extract worker moved here; B5);
+   fast result of an ``auto`` item the extract worker moved here; B5). A job created with
+   secrets whose secrets have expired (the item waited longer than their TTL) is not rendered:
+   the item fails with ``timeout``, retryable;
 2. rebuilds the request from the job's options and the secrets. A ``screenshot`` job renders in
    ``browser`` mode with ``screenshot`` and without metadata. The job's owner is the principal,
    so an admin owner's ``evaluate`` actions run, and unblock mode applies only to an admin's
@@ -60,9 +62,9 @@ from text_extraction.browser_proxy import EgressProxy
 from text_extraction.browser_unblock import PatchrightLauncher, UnblockRenderer, Xvfb
 from text_extraction.clearance import ValkeyClearance
 from text_extraction.conversion_pool import ConversionPool
-from text_extraction.envelope import Envelope
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobLost, JobRecord, JobStore
@@ -72,7 +74,12 @@ from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.render import ArtifactUnavailable
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
-from text_extraction.server import _Server, _server, configured_settings, graceful_shutdown_seconds
+from text_extraction.server import (
+    _Server,
+    _server,
+    configured_settings,
+    extraction_graceful_seconds,
+)
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
 from text_extraction.worker import (
@@ -87,6 +94,9 @@ _log = structlog.get_logger(__name__)
 POOL = "browser"
 # What a shutdown grants an item past its render deadline: closing the page, storing the result.
 _SHUTDOWN_MARGIN_SECONDS = 10
+SECRETS_EXPIRED_MESSAGE = (
+    "The request's browser options expired before a browser was free; send the request again."
+)
 # Failures after which an item is given back to run again; it still needs its secrets then.
 _GIVEN_BACK = (OutboundBusy, CircuitOpen, RedisError, OSError)
 
@@ -151,6 +161,12 @@ class BrowserRunner:
         finished = False  # the item gets its outcome now: its secrets are done with
         try:
             secrets = await self._store.secrets(job.id)
+            if job.has_secrets and secrets.empty():
+                # Their TTL ran out while the item waited: rendering without the caller's
+                # headers, cookies or actions would answer another request than the one sent.
+                finished = True
+                _log.info("job_secrets_expired")
+                return failed_extract(ErrorCode.TIMEOUT, SECRETS_EXPIRED_MESSAGE, retryable=True)
             draft = await self._store.draft(job.id, item.index)
             envelope = await self._pipeline.run(
                 _request(job, url, secrets),
@@ -261,7 +277,9 @@ def browser_graceful_seconds(settings: Settings) -> int:
     deadline = settings.browser_timeout_seconds
     if settings.browser_unblock_enabled:
         deadline = max(deadline, settings.browser_unblock_timeout_seconds)
-    return max(graceful_shutdown_seconds(settings), math.ceil(deadline + _SHUTDOWN_MARGIN_SECONDS))
+    return max(
+        extraction_graceful_seconds(settings), math.ceil(deadline + _SHUTDOWN_MARGIN_SECONDS)
+    )
 
 
 @dataclass(frozen=True)

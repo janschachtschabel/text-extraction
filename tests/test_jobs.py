@@ -561,3 +561,27 @@ async def test_has_result_follows_the_done_bit() -> None:
     assert await store.has_result(job_id, 1)
     assert not await store.has_result(job_id, 0)
     assert not await store.has_result("f" * 32, 1)
+
+
+async def _secrets_flag() -> None:
+    store = JobStore(FakeAsyncRedis(), Settings(auth_mode="none"))
+    options = JobOptions(compliance="enforce")
+    plain = await store.create("extract", OWNER, options, URLS[:1])
+    empty = await store.create("extract", OWNER, options, URLS[:1], secrets=BrowserSecrets())
+    carrying = await store.create(
+        "extract",
+        OWNER,
+        options,
+        URLS[:1],
+        secrets=BrowserSecrets(headers={"x-token": "header-secret-9"}),
+    )
+    records = [await store.get(job_id) for job_id in (plain, empty, carrying)]
+    assert [record.has_secrets if record else None for record in records] == [False, False, True]
+    await store.drop_secrets(carrying)
+    record = await store.get(carrying)
+    assert record is not None
+    assert record.has_secrets is True  # the flag outlives the secrets
+
+
+def test_has_secrets_is_recorded_and_outlives_the_secrets() -> None:
+    asyncio.run(_secrets_flag())

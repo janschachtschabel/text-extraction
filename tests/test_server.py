@@ -16,7 +16,13 @@ from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.server import _serve, _server, graceful_shutdown_seconds, shutdown_seconds
+from text_extraction.server import (
+    _serve,
+    _server,
+    extraction_graceful_seconds,
+    graceful_shutdown_seconds,
+    shutdown_seconds,
+)
 from text_extraction.settings import Settings
 
 SETTINGS = Settings(auth_mode="none")
@@ -161,3 +167,5 @@ def test_graceful_seconds_cover_browser_wait() -> None:
     assert graceful_shutdown_seconds(unblock) == 10 + 60 + 10
     slow = Settings(auth_mode="none", browser_enabled=True, extract_timeout_seconds=90)
     assert graceful_shutdown_seconds(slow) == 95  # the fast phase's own bound is larger
+    # Workers never wait for another pool: the extract worker keeps the extraction bound.
+    assert extraction_graceful_seconds(unblock) == 30

@@ -49,7 +49,7 @@ No error ends a loop.
 
 The process serves only the internal port (``/health``, ``/ready``, ``/metrics``). ``/ready``
 answers 200 once the loops run, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
-loops stop claiming, the items in flight get ``graceful_shutdown_seconds`` to finish (any still
+loops stop claiming, the items in flight get ``extraction_graceful_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
 internal server stops last. A claim already sent when the signal arrives is still processed
 within that time, since its item is leased to this worker already.
@@ -89,7 +89,7 @@ from text_extraction.server import (
     _Server,
     _server,
     configured_settings,
-    graceful_shutdown_seconds,
+    extraction_graceful_seconds,
 )
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
@@ -538,7 +538,7 @@ async def _run(settings: Settings) -> None:
     valkey = create_valkey(settings.valkey_url)
     registry = REGISTRY
     parts = build_worker(settings, valkey, registry)
-    graceful = graceful_shutdown_seconds(settings)
+    graceful = extraction_graceful_seconds(settings)
     readiness = Readiness()
     internal = _server(
         create_internal_app(settings, valkey, registry, readiness=readiness),

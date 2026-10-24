@@ -368,6 +368,34 @@ async def test_secrets_are_dropped_when_the_run_raises() -> None:
 
 
 @scenario
+async def test_expired_secrets_fail_the_item_without_a_render() -> None:
+    # A job whose request carried browser options never renders without them.
+    harness = Harness(FakeRenderer(rendered(ARTICLE)))
+    job_id = await harness.submit(BROWSER, secrets=SECRETS)
+    await harness.store.drop_secrets(job_id)  # their TTL ran out while the item was queued
+
+    await harness.process_next()
+
+    assert harness.renderer.calls == []
+    assert harness.fetcher.calls == []
+    result = await harness.result(job_id)
+    assert error_of(result) == (ErrorCode.TIMEOUT, True)
+    assert result.error is not None
+    assert "expired" in result.error.message
+
+
+@scenario
+async def test_job_without_secrets_renders_as_before() -> None:
+    harness = Harness(FakeRenderer(rendered(ARTICLE)))
+    job_id = await harness.submit(BROWSER)
+
+    await harness.process_next()
+
+    assert len(harness.renderer.calls) == 1
+    assert (await harness.result(job_id)).status == "success"
+
+
+@scenario
 async def test_deferred_item_keeps_its_secrets_for_its_next_run() -> None:
     harness = Harness(gate=RefusingGate(OutboundBusy(3.0)))
     job_id = await harness.submit(BROWSER, secrets=SECRETS)
