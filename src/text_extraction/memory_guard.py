@@ -40,11 +40,11 @@ REFRESH_SECONDS: Final = 5.0
 
 _USED: Final = (
     "text_extraction_valkey_used_memory_bytes",
-    "Memory Valkey uses for data (INFO memory used_memory), as last read by this API pod.",
+    "Memory Valkey uses for data (INFO memory used_memory), as last read by this pod.",
 )
 _MAX: Final = (
     "text_extraction_valkey_max_memory_bytes",
-    "Valkey's maxmemory (INFO memory maxmemory; 0: no limit), as last read by this API pod.",
+    "Valkey's maxmemory (INFO memory maxmemory; 0: no limit), as last read by this pod.",
 )
 
 

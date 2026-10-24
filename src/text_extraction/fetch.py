@@ -149,7 +149,8 @@ class FetchError(Exception):
     """The target could not be fetched. The message is safe to show to API callers.
 
     ``cleared_after`` (timeouts only) is the seconds from the start of the fetch to the moment
-    the request that timed out passed ``before_request``, None when none got that far: the time
+    the request that timed out passed ``before_request``, None when it had not got that far (the
+    deadline passed inside the gate's wait, so nothing was sent): the time
     the host had is the call's deadline minus it."""
 
     def __init__(
@@ -415,6 +416,7 @@ class Fetcher:
             cookies.set_cookie_header(request)
             if self._on_request_sent is not None:
                 request.extensions["trace"] = _sent_tracer(self._on_request_sent, current)
+            limits.cleared_after = None  # a timeout inside the gate's wait sent nothing
             if self._before_request is not None:
                 await self._before_request(urlsplit(current).hostname or "")
             limits.cleared_after = time.monotonic() - limits.started

@@ -459,7 +459,9 @@ def test_too_little_time_left_fails_without_fetching() -> None:
 
 
 def test_timeout_on_a_short_budget_is_not_the_hosts_fault() -> None:
-    error = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    error = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
     harness = Harness({PAGE: error}, extract_timeout_seconds=3, fetch_timeout_seconds=20)
 
     envelope = harness.run_once()
@@ -470,7 +472,9 @@ def test_timeout_on_a_short_budget_is_not_the_hosts_fault() -> None:
 
 
 def test_timeout_on_a_full_budget_counts_against_the_host() -> None:
-    error = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    error = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
     harness = Harness({PAGE: error}, fetch_timeout_seconds=2)
 
     harness.run_once()
@@ -1124,7 +1128,9 @@ def test_a_cross_host_redirect_still_takes_the_new_hosts_turn() -> None:
 def test_a_hop_that_got_little_time_is_not_the_hosts_fault() -> None:
     target = f"{OTHER}/learn/page.html"
     other_robots = f"{OTHER}/robots.txt"
-    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    timed_out = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
 
     async def slow_robots(validators: Validators | None) -> FetchResult:
         await asyncio.sleep(1.4)  # the hop's turn comes with less than half the fetch budget left
@@ -1145,7 +1151,9 @@ def test_a_hop_that_got_little_time_is_not_the_hosts_fault() -> None:
 
 def test_a_hop_that_got_a_full_budget_counts_against_its_host() -> None:
     target = f"{OTHER}/learn/page.html"
-    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    timed_out = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
     harness = Harness({PAGE: Redirect(target), target: timed_out}, fetch_timeout_seconds=2)
 
     harness.run_once()
@@ -1158,7 +1166,9 @@ def test_a_hop_is_judged_by_what_is_left_of_the_chains_fetch_budget() -> None:
     # FETCH_TIMEOUT_SECONDS: a hop that starts late gets only the rest of it.
     target = f"{OTHER}/learn/page.html"
     other_robots = f"{OTHER}/robots.txt"
-    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    timed_out = FetchError(
+        ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True, cleared_after=0.0
+    )
 
     async def slow_robots(validators: Validators | None) -> FetchResult:
         await asyncio.sleep(1.4)  # leaves the hop 0.6 s of the chain's 2 s
@@ -1297,7 +1307,10 @@ def test_two_cold_turns_sharing_the_file_load_still_space_their_pages() -> None:
     assert abs(page_starts[1] - page_starts[0]) >= 0.19  # 200 ms, minus clock slack
 
 
-@pytest.mark.parametrize(("gate_wait", "counted"), [(0.0, True), (0.7, False)])
+@pytest.mark.parametrize(
+    ("gate_wait", "counted"),
+    [(0.0, True), (0.7, False), (1.5, False)],  # 1.5: the deadline passes inside the gate's wait
+)
 def test_a_timeout_is_judged_by_the_time_the_host_had_after_the_gate(
     httpserver: HTTPServer, gate_wait: float, counted: bool
 ) -> None:

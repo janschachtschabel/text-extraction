@@ -565,7 +565,8 @@ class Pipeline:
                     on_redirect=on_redirect,
                 )
             except FetchError as error:
-                if turn.answering is not None:
+                gate_timeout = error.code == ErrorCode.TIMEOUT and error.cleared_after is None
+                if turn.answering is not None and not gate_timeout:  # nothing sent: not the host's
                     if error.cleared_after is not None:
                         # The gate's wait before the send is not time the host had.
                         budget = min(budget, chain_budget - error.cleared_after)
