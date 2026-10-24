@@ -52,12 +52,20 @@ class InfoData(BaseModel):
 
 
 async def _wait_for(background: set[asyncio.Task[Any]], seconds: float) -> None:
-    """Wait until ``background`` is empty or ``seconds`` have passed. Tasks that finish add or
-    remove members, so the set is looked at again after each round."""
+    """Wait until no task of ``background`` is running, or ``seconds`` have passed. Only tasks
+    that are not done are waited on, so a finished member that was not removed cannot make this
+    spin; the set is looked at again after each round because finishing tasks add the tasks
+    that store their results."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + seconds
-    while background and (remaining := deadline - loop.time()) > 0:
-        await asyncio.wait(list(background), timeout=remaining)
+    while (remaining := deadline - loop.time()) > 0:
+        running = [task for task in background if not task.done()]
+        if not running:
+            await asyncio.sleep(0)  # a finished task's done-callback may add a storing task
+            running = [task for task in background if not task.done()]
+            if not running:
+                return
+        await asyncio.wait(running, timeout=remaining)
 
 
 async def _finish_background(app: FastAPI) -> None:
@@ -67,9 +75,10 @@ async def _finish_background(app: FastAPI) -> None:
     settings: Settings = app.state.settings
     background: set[asyncio.Task[Any]] = app.state.background
     await _wait_for(background, settings.extract_timeout_seconds + _BACKGROUND_GRACE_SECONDS)
-    if background:
-        _log.warning("background_extractions_cancelled", count=len(background))
-        for task in list(background):
+    running = [task for task in background if not task.done()]
+    if running:
+        _log.warning("background_extractions_cancelled", count=len(running))
+        for task in running:
             task.cancel()
         await _wait_for(background, _CANCELLED_WRITE_SECONDS)
 

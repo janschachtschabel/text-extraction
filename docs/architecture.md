@@ -152,8 +152,9 @@ optional rate limit.
   computed, not stored, and a completed job never gets it. If Valkey fails when the job is
   created, the request keeps waiting and answers 200 with the envelope, not 503; if it fails when
   the result is stored, the lease expires and the lost view takes over. The shutdown waits up to
-  `EXTRACT_TIMEOUT_SECONDS` + 5 s for such tasks. Extract jobs do not count toward
-  `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`.
+  `EXTRACT_TIMEOUT_SECONDS` + 7 s for such tasks (after the graceful phase). Extract jobs do not count toward
+  `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`. A pod holds at most
+  `EXTRACT_MAX_BACKGROUND` (32) such tasks; beyond it a request keeps waiting inline and answers 200.
 - **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs; `S3_ENABLED`
   moves screenshots and large results to an S3-compatible store.
 

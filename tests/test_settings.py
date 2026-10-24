@@ -576,3 +576,15 @@ def test_scheduler_claim_scan_budget_setting(monkeypatch: pytest.MonkeyPatch) ->
         monkeypatch.setenv("SCHEDULER_CLAIM_SCAN_BUDGET", value)
         with pytest.raises(ConfigError, match="scheduler_claim_scan_budget"):
             load_settings()
+
+
+def test_extract_max_background_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().extract_max_background == 32
+
+    monkeypatch.setenv("EXTRACT_MAX_BACKGROUND", "1")
+    assert load_settings().extract_max_background == 1
+
+    monkeypatch.setenv("EXTRACT_MAX_BACKGROUND", "0")
+    with pytest.raises(ConfigError, match="extract_max_background"):
+        load_settings()

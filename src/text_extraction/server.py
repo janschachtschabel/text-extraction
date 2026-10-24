@@ -8,10 +8,15 @@ order:
    servers keep serving for ``SHUTDOWN_DRAIN_SECONDS`` (a second signal ends this wait early);
 2. the public server stops accepting connections and gives requests in flight
    ``graceful_shutdown_seconds`` to finish;
-3. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
+3. the public app's lifespan ends: it waits for extractions that became a job
+   (``wait_seconds``), at most ``EXTRACT_TIMEOUT_SECONDS`` + 7 s (5 s to end, then cancelled; 2 s
+   for the writes of the cancelled ones). Such an extraction ends within
+   ``EXTRACT_TIMEOUT_SECONDS`` of its start and runs while step 2 does, so normally this adds
+   nothing. If the pod is killed before, the job's lease expires and the job reports it lost;
+4. the internal server stops, so ``/health`` and ``/metrics`` answer until the end.
 
-``shutdown_seconds`` is the whole sequence at most; the Helm chart's
-``terminationGracePeriodSeconds`` (45) must stay above it.
+``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the Helm chart's
+``terminationGracePeriodSeconds`` (45) must stay above it. Step 3 is not part of it.
 """
 
 import asyncio

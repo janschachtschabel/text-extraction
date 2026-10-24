@@ -25,7 +25,8 @@ from functools import partial
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal, require_role
@@ -53,13 +54,22 @@ _CANCELLED_MESSAGE = "The extraction was cancelled."
 type _Background = set[asyncio.Task[Any]]
 
 
-@router.post("/v1/extract", dependencies=[Depends(rate_limited)])
+@router.post(
+    "/v1/extract",
+    dependencies=[Depends(rate_limited)],
+    response_model=Envelope[ExtractResult],
+    responses={
+        202: {
+            "model": Envelope[JobAccepted],
+            "description": "With `wait_seconds`: the extraction takes longer and became a job.",
+        }
+    },
+)
 async def extract(
     body: ExtractRequest,
     request: Request,
-    response: Response,
     principal: Annotated[Principal, Depends(require_role("user"))],
-) -> Envelope[ExtractResult] | Envelope[JobAccepted]:
+) -> Envelope[ExtractResult] | JSONResponse:
     """Fetch a URL and return its main content as Markdown, text or HTML.
 
     Every outcome of the target answers 200: `status` is `success`, `partial` (content, but
@@ -101,29 +111,38 @@ async def extract(
         compliance=compliance,
         cache=body.cache,
     )
-    job_id = await _hand_over(store, settings, principal, options, body.url)
+    job_id: str | None = None
+    # At the cap this pod holds no more extractions for jobs: the request waits for its own.
+    if len(background) <= settings.extract_max_background:
+        try:
+            job_id = await _hand_over(store, settings, principal, options, body.url)
+        except asyncio.CancelledError:
+            task.cancel()  # nobody is waiting for it any more, and no job is left
+            background.discard(task)
+            raise
     if job_id is None:
         try:
             return await task
         finally:
             background.discard(task)
     task.add_done_callback(partial(_store_when_done, background, store, job_id))
-    response.status_code = 202
     _log.info("extract_job_accepted", job_id=job_id)
-    return Envelope(
+    accepted = Envelope(
         status="success",
         data=JobAccepted(
             id=job_id, kind="extract", state="running", total=1, status_url=f"/v1/jobs/{job_id}"
         ),
         trace_id=current_trace_id(),
     )
+    return JSONResponse(status_code=202, content=accepted.model_dump(mode="json"))
 
 
 async def _hand_over(
     store: JobStore, settings: Settings, principal: Principal, options: JobOptions, url: str
 ) -> str | None:
     """Create the extract job and mark it running; its id, or None when Valkey fails (logged).
-    A job that was created but could not be marked is deleted again, if that works."""
+    A job that was created but could not be marked, or whose creator is cancelled, is deleted
+    again, if that works."""
     job_id: str | None = None
     try:
         job_id = await store.create("extract", principal, options, [url])
@@ -134,10 +153,18 @@ async def _hand_over(
             "extract_job_handover_failed", error_type=type(error).__name__, error=str(error)
         )
         if job_id is not None:
-            with contextlib.suppress(RedisError, OSError):  # else the job expires on its own
-                await store.delete(job_id)
+            await _delete_quietly(store, job_id)
         return None
+    except asyncio.CancelledError:
+        if job_id is not None:
+            await asyncio.shield(_delete_quietly(store, job_id))
+        raise
     return job_id
+
+
+async def _delete_quietly(store: JobStore, job_id: str) -> None:
+    with contextlib.suppress(RedisError, OSError):  # else the job expires on its own
+        await store.delete(job_id)
 
 
 def _failure(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

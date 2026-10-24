@@ -45,7 +45,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
 | `CONVERT_MAX_BYTES` | `5242880` | Largest HTML or text body that is converted, in bytes (5 MiB; minimum 1024). A larger page fails with `too_large` (not retryable) before it is decoded. `FETCH_MAX_BYTES` stays the download limit. |
 | `CONVERT_CONCURRENCY` | `2` | Conversions (decoding, HTML conversion, metadata and licences, fingerprint) running at once in one pod, on a thread pool of their own; DNS lookups keep the default pool. A request waits for a free slot within its `EXTRACT_TIMEOUT_SECONDS`, else it fails with `timeout`. Python cannot stop a running thread: a conversion that outlives its request runs to its end and holds its slot until then, so this bound is what limits CPU and memory. Such a conversion also holds the shutdown up, because Python joins its worker threads when the process exits. That is usually seconds, but the worst case can run to the end of the grace period, where the pod is killed (Trafilatura is quadratic on repeated paragraphs: one 5.7 MB page took 125 s). That is harmless, because pods are stateless: the request it served has already been answered `timeout`. Peak memory is roughly `CONVERT_CONCURRENCY` times the peak of one page (about 450 MB for a 5 MB page), see the Helm memory limit. Minimum 1. |
-| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop to that host began). The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop to that host began). The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, so raise the Helm value `terminationGracePeriodSeconds` (45) with it. After it, the lifespan shutdown waits for extractions that became a job (`wait_seconds`) for up to `EXTRACT_TIMEOUT_SECONDS` + 7 s (5 s of grace after the deadline, then it cancels them and allows 2 s for their writes); see Response times. |
 | `JOB_TTL_SECONDS` | `86400` | How long a job (its status, URL list and results) stays in Valkey, in seconds. The time starts at creation and starts again when the job completes, so a caller has this long to fetch the results of a finished job. Minimum 60. |
 | `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
 | `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
@@ -53,7 +53,8 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. |
 | `BATCH_MAX_URLS` | `1000` | Most URLs one `POST /v1/batch` may carry. More answers 422 `invalid_request`, and so does a body over `BATCH_MAX_URLS` × (`MAX_URL_LENGTH` + 8) bytes plus 4 KiB, checked before the list is validated. Minimum 1, maximum 100000. |
 | `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches one API key may have unfinished (queued or running) at a time. The next `POST /v1/batch` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
-| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. |
+| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. |
+| `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default) must stay below the Helm value `terminationGracePeriodSeconds` (45). Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -121,14 +122,19 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
 `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
-few milliseconds. A caller that does not want to hold the connection sends `wait_seconds` (0-60): an
-extraction still running after that long continues in the pod as a job (202, `GET /v1/jobs/{id}`;
-ignored with `JOBS_ENABLED=false`). Work that takes longer than about 30 s will run as a job in a later package. On
-SIGTERM `/ready` turns 503 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5);
-then the public port stops accepting connections and gives requests in flight
-`max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the internal port
-(`/health`, `/metrics`) stops last. The Helm chart's `terminationGracePeriodSeconds` (45) must
-stay above drain plus graceful time (35 s by default).
+few milliseconds. A caller that does not want to hold the connection sends `wait_seconds` (0-60):
+an extraction still running after that long continues in the pod and becomes a job (202,
+`GET /v1/jobs/{id}`); `JOBS_ENABLED=false` ignores `wait_seconds`. On SIGTERM `/ready` turns 503
+at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5); then the public port stops
+accepting connections and gives requests in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds
+(30 by default) to finish; then the app's own shutdown waits for extractions that became a job,
+for at most `EXTRACT_TIMEOUT_SECONDS` + 7 s (it cancels those still running 5 s after
+`EXTRACT_TIMEOUT_SECONDS` and gives the writes of their error results 2 s); the internal port
+(`/health`, `/metrics`) stops last. Such an extraction ends within `EXTRACT_TIMEOUT_SECONDS` of
+its start and runs while the graceful phase does, so normally the whole sequence fits in the Helm
+chart's `terminationGracePeriodSeconds` (45); its worst case does not, and then the pod is killed
+and the job's lease expires (the job then reports a lost extraction). The Helm value must stay
+above drain plus graceful time (35 s by default).
 
 ## Headers
 

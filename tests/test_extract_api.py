@@ -1,23 +1,28 @@
 import asyncio
+import contextlib
 import hashlib
 import json
+import threading
 import time
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
-from text_extraction.app import create_public_app
+from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
-from text_extraction.envelope import ErrorCode
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_models import ExtractRequest
+from text_extraction.extract_api import extract
+from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher
 from text_extraction.jobs import JobStore
 from text_extraction.pipeline import Pipeline, create_pipeline
@@ -159,6 +164,26 @@ def test_extract_is_in_openapi(client: TestClient) -> None:
     assert "wait_seconds" in client.get("/openapi.json").text
 
 
+def test_extract_200_schema_is_the_plain_envelope(client: TestClient) -> None:
+    """Package 2's contract: the 200 answer is `Envelope[ExtractResult]`; the 202 is declared
+    beside it."""
+    plain = FastAPI()
+
+    @plain.get("/plain")
+    async def plain_route() -> Envelope[ExtractResult]:
+        raise NotImplementedError
+
+    expected = plain.openapi()["components"]["schemas"]["Envelope_ExtractResult_"]
+    spec = client.get("/openapi.json").json()
+    responses = spec["paths"]["/v1/extract"]["post"]["responses"]
+
+    ok = responses["200"]["content"]["application/json"]["schema"]
+    assert ok == {"$ref": "#/components/schemas/Envelope_ExtractResult_"}
+    assert spec["components"]["schemas"]["Envelope_ExtractResult_"] == expected
+    accepted = responses["202"]["content"]["application/json"]["schema"]
+    assert accepted == {"$ref": "#/components/schemas/Envelope_JobAccepted_"}
+
+
 def test_lifespan_closes_the_fetcher(registry: CollectorRegistry) -> None:
     class ClosingFetcher:
         closed = False
@@ -178,71 +203,85 @@ def test_lifespan_closes_the_fetcher(registry: CollectorRegistry) -> None:
 
 
 # --- wait_seconds: the hand-over of a slow extraction to a job ------------------------------
+#
+# The pipeline stub below finishes when the test releases it (a threading.Event, since the app
+# runs in the test client's thread), so no test depends on how long a real sleep takes.
 
 
-class SlowPipeline:
-    """The real pipeline after a delay, or a failure of its own after it."""
+class GatedPipeline:
+    """The real pipeline once ``release`` is set, or a failure of its own then."""
 
-    def __init__(self, real: Pipeline, delay: float, fail: Exception | None = None) -> None:
+    def __init__(self, real: Pipeline, fail: Exception | None = None) -> None:
         self.real = real
-        self.delay = delay
         self.fail = fail
-        self.started = asyncio.Event()
+        self.release = threading.Event()
+        self.started = threading.Event()
+        self.tasks: list[asyncio.Task[Any]] = []
 
     async def run(self, req: ExtractRequest, principal: Principal, **kwargs: Any) -> Any:
+        task = asyncio.current_task()
+        assert task is not None
+        self.tasks.append(task)
         self.started.set()
-        await asyncio.sleep(self.delay)
+        while not self.release.is_set():  # noqa: ASYNC110 - set by another thread
+            await asyncio.sleep(0.005)
         if self.fail is not None:
             raise self.fail
         return await self.real.run(req, principal, **kwargs)
 
 
 class Handover:
-    """A public app on a fakeredis server whose pipeline answers after ``delay`` seconds."""
+    """A public app on a fakeredis server whose pipeline waits for ``pipeline.release``."""
 
-    def __init__(self, *, delay: float, fail: Exception | None = None, **overrides: Any) -> None:
+    def __init__(self, *, fail: Exception | None = None, **overrides: Any) -> None:
         self.settings = make_settings(**overrides)
         self.server = FakeServer()
         self.registry = CollectorRegistry()
-        self.app = create_public_app(
-            self.settings, FakeAsyncRedis(server=self.server), self.registry
-        )
+        valkey = FakeAsyncRedis(server=self.server)
+        self.app = create_public_app(self.settings, valkey, self.registry)
         fake = FakeFetcher({PAGE: fetched(body=ARTICLE)})
-        real = create_pipeline(
-            self.settings, self.app.state.valkey, cast(Fetcher, fake), self.registry
-        )
-        self.pipeline = SlowPipeline(real, delay, fail)
+        real = create_pipeline(self.settings, valkey, cast(Fetcher, fake), self.registry)
+        self.pipeline = GatedPipeline(real, fail)
         self.app.state.pipeline = self.pipeline
 
-    def keys(self, pattern: str) -> list[str]:
-        async def find() -> list[str]:
-            valkey = FakeAsyncRedis(server=self.server)
-            return sorted(
-                key.decode() if isinstance(key, bytes) else key
-                for key in await valkey.keys(pattern)
-            )
+    def release_later(self, seconds: float = 0.2) -> None:
+        """Release the pipeline from another thread, while the test thread is in a request."""
+        threading.Timer(seconds, self.pipeline.release.set).start()
 
-        return asyncio.run(find())
+    async def keys_async(self, pattern: str) -> list[str]:
+        valkey = FakeAsyncRedis(server=self.server)
+        return sorted(
+            key.decode() if isinstance(key, bytes) else key for key in await valkey.keys(pattern)
+        )
+
+    def keys(self, pattern: str) -> list[str]:
+        return asyncio.run(self.keys_async(pattern))
 
     def job_keys(self) -> list[str]:
         return [*self.keys("job*"), *self.keys("q:*")]
 
     def wait_for_job(self, client: TestClient, job_id: str, state: str = "completed") -> Any:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while True:
             body = client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
             if body["data"]["state"] == state or time.monotonic() > deadline:
                 return body
-            time.sleep(0.02)
+            time.sleep(0.01)
+
+    def wait_for_idle(self) -> None:
+        deadline = time.monotonic() + 30
+        while self.app.state.background and time.monotonic() < deadline:
+            time.sleep(0.01)
 
 
 @pytest.fixture
 def handover() -> Callable[..., Handover]:
-    return lambda delay=0.0, **kwargs: Handover(delay=delay, **kwargs)
+    return lambda **kwargs: Handover(**kwargs)
 
 
 def test_extract_without_wait_seconds_is_unchanged(handover: Callable[..., Handover]) -> None:
-    case = handover(0.2)
+    case = handover()
+    case.pipeline.release.set()
     with TestClient(case.app) as client:
         response = client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
 
@@ -254,9 +293,10 @@ def test_extract_without_wait_seconds_is_unchanged(handover: Callable[..., Hando
 
 
 def test_extract_finishing_within_wait_is_200(handover: Callable[..., Handover]) -> None:
-    case = handover(0.05)
+    case = handover()
+    case.pipeline.release.set()
     with TestClient(case.app) as client:
-        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 5}, headers=AUTH)
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 30}, headers=AUTH)
 
         assert response.status_code == 200
         assert response.json()["status"] == "success"
@@ -266,11 +306,11 @@ def test_extract_finishing_within_wait_is_200(handover: Callable[..., Handover])
 
 
 def test_slow_extract_hands_over_to_a_job(handover: Callable[..., Handover]) -> None:
-    case = handover(0.5)
+    case = handover()
     with TestClient(case.app) as client:
         response = client.post(
             "/v1/extract",
-            json={"url": PAGE, "wait_seconds": 0.1},
+            json={"url": PAGE, "wait_seconds": 0.05},
             headers={**AUTH, "x-client-trace-id": "t-9"},
         )
 
@@ -283,7 +323,10 @@ def test_slow_extract_hands_over_to_a_job(handover: Callable[..., Handover]) -> 
         assert accepted["state"] == "running"
         assert accepted["total"] == 1
         assert accepted["status_url"] == f"/v1/jobs/{accepted['id']}"
+        running = client.get(accepted["status_url"], headers=AUTH).json()["data"]
+        assert (running["state"], running["items"][0]["state"]) == ("running", "pending")
 
+        case.pipeline.release.set()
         final = case.wait_for_job(client, accepted["id"])
         assert final["status"] == "success"
         assert final["data"]["kind"] == "extract"
@@ -301,17 +344,19 @@ def test_slow_extract_hands_over_to_a_job(handover: Callable[..., Handover]) -> 
         assert item["result"]["data"]["title"]
         # An extract job is not a batch: it stays out of the owner's open set.
         assert case.keys("jobs:*") == []
+        case.wait_for_idle()
         assert case.app.state.background == set()
 
 
 def test_wait_seconds_zero_is_immediate_202(handover: Callable[..., Handover]) -> None:
-    case = handover(1.0)
+    case = handover()
     with TestClient(case.app) as client:
-        started = time.monotonic()
         response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
 
+        # The extraction is still held back by the test: the answer did not wait for it.
         assert response.status_code == 202
-        assert time.monotonic() - started < 0.9  # did not wait for the 1 s extraction
+        assert not case.pipeline.release.is_set()
+        case.pipeline.release.set()
         final = case.wait_for_job(client, response.json()["data"]["id"])
         assert final["data"]["items"][0]["result"]["status"] == "success"
 
@@ -325,7 +370,7 @@ def test_wait_seconds_is_bounded(client: TestClient, value: object) -> None:
 
 
 def test_forbidden_compliance_mode_is_403_not_a_job(handover: Callable[..., Handover]) -> None:
-    case = handover(0.2)
+    case = handover()
     with TestClient(case.app) as client:
         response = client.post(
             "/v1/extract",
@@ -335,15 +380,17 @@ def test_forbidden_compliance_mode_is_403_not_a_job(handover: Callable[..., Hand
 
         assert response.status_code == 403
         assert case.job_keys() == []
+        assert case.app.state.background == set()
 
 
 def test_a_failure_of_the_extraction_is_stored_as_internal_error(
     handover: Callable[..., Handover],
 ) -> None:
-    case = handover(0.2, fail=RuntimeError("boom"))
+    case = handover(fail=RuntimeError("boom"))
     with TestClient(case.app) as client:
         response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
         assert response.status_code == 202
+        case.pipeline.release.set()
 
         final = case.wait_for_job(client, response.json()["data"]["id"])
 
@@ -362,9 +409,10 @@ def test_a_service_error_of_the_extraction_keeps_its_code(
     unavailable = ServiceError(
         ErrorCode.INTERNAL_ERROR, "The backend is down.", 503, retryable=True
     )
-    case = handover(0.2, fail=unavailable)
+    case = handover(fail=unavailable)
     with TestClient(case.app) as client:
         response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        case.pipeline.release.set()
 
         final = case.wait_for_job(client, response.json()["data"]["id"])
 
@@ -380,17 +428,17 @@ def test_a_service_error_of_the_extraction_keeps_its_code(
 def test_failed_hand_over_keeps_waiting_and_answers_200(
     handover: Callable[..., Handover], monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
-    case = handover(0.3)
+    case = handover()
     store: JobStore = case.app.state.job_store
 
     async def down(*args: object, **kwargs: object) -> None:
+        # The extraction ends only now: the request has to be waiting for it, not answering 503.
+        case.pipeline.release.set()
         raise RedisConnectionError("valkey is down")
 
     monkeypatch.setattr(store, failing, down)
     with TestClient(case.app) as client, capture_logs() as logs:
-        response = client.post(
-            "/v1/extract", json={"url": PAGE, "wait_seconds": 0.05}, headers=AUTH
-        )
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
 
         assert response.status_code == 200
         assert response.json()["status"] == "success"
@@ -409,16 +457,15 @@ def test_failed_hand_over_still_returns_the_error_of_the_extraction(
     unavailable = ServiceError(
         ErrorCode.INTERNAL_ERROR, "The backend is down.", 503, retryable=True
     )
-    case = handover(0.3, fail=unavailable)
+    case = handover(fail=unavailable)
 
     async def down(*args: object, **kwargs: object) -> None:
+        case.pipeline.release.set()
         raise OSError("timed out")
 
     monkeypatch.setattr(case.app.state.job_store, "create", down)
     with TestClient(case.app) as client:
-        response = client.post(
-            "/v1/extract", json={"url": PAGE, "wait_seconds": 0.05}, headers=AUTH
-        )
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
 
         assert response.status_code == 503
         assert response.json()["error"]["message"] == "The backend is down."
@@ -427,7 +474,7 @@ def test_failed_hand_over_still_returns_the_error_of_the_extraction(
 def test_unstorable_result_is_logged_and_the_lost_view_takes_over(
     handover: Callable[..., Handover], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    case = handover(0.2)
+    case = handover()
     store: JobStore = case.app.state.job_store
 
     async def down(*args: object, **kwargs: object) -> None:
@@ -438,9 +485,8 @@ def test_unstorable_result_is_logged_and_the_lost_view_takes_over(
         response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
         assert response.status_code == 202
         job_id = response.json()["data"]["id"]
-        deadline = time.monotonic() + 10
-        while case.app.state.background and time.monotonic() < deadline:
-            time.sleep(0.02)
+        case.pipeline.release.set()
+        case.wait_for_idle()
 
         assert case.app.state.background == set()
         events = [log for log in logs if log["event"] == "extract_job_result_not_stored"]
@@ -462,12 +508,14 @@ def test_unstorable_result_is_logged_and_the_lost_view_takes_over(
 
 
 def test_shutdown_waits_for_background_extractions(handover: Callable[..., Handover]) -> None:
-    case = handover(0.6)
+    case = handover()
     with TestClient(case.app) as client:
         response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
         job_id = response.json()["data"]["id"]
         assert response.status_code == 202
         assert len(case.app.state.background) >= 1
+        # The extraction ends only after the shutdown has begun (the app is closed below).
+        case.release_later(0.2)
     # The lifespan has ended: the extraction ran to its end and its result is stored.
 
     async def read() -> Any:
@@ -485,15 +533,14 @@ def test_shutdown_waits_for_background_extractions(handover: Callable[..., Hando
 def test_shutdown_gives_up_after_the_extraction_deadline(
     handover: Callable[..., Handover], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    case = handover(60, extract_timeout_seconds=2)
-    monkeypatch.setattr("text_extraction.app._BACKGROUND_GRACE_SECONDS", 0.5)
+    case = handover()  # never released
+    monkeypatch.setattr("text_extraction.app._BACKGROUND_GRACE_SECONDS", 0)
+    # `extract_timeout_seconds` cannot be set below 2 s, but the shutdown reads it from here.
+    monkeypatch.setattr(case.settings, "extract_timeout_seconds", 0.1)
     with TestClient(case.app) as client:
         job_id = client.post(
             "/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH
         ).json()["data"]["id"]
-        started = time.monotonic()
-    # 2 s + 0.5 s grace instead of the 60 s the stub would take.
-    assert time.monotonic() - started < 10
     assert case.app.state.background == set()
     # The cancelled extraction left a retryable error in its job.
 
@@ -507,7 +554,8 @@ def test_shutdown_gives_up_after_the_extraction_deadline(
 
 
 def test_jobs_disabled_ignores_wait_seconds(handover: Callable[..., Handover]) -> None:
-    case = handover(0.3, jobs_enabled=False)
+    case = handover(jobs_enabled=False)
+    case.release_later(0.2)  # after the wait of 0.05 s would have run out
     with TestClient(case.app) as client:
         response = client.post(
             "/v1/extract", json={"url": PAGE, "wait_seconds": 0.05}, headers=AUTH
@@ -518,3 +566,100 @@ def test_jobs_disabled_ignores_wait_seconds(handover: Callable[..., Handover]) -
         assert response.json()["data"]["title"]
         assert case.job_keys() == []
         assert case.app.state.background == set()
+
+
+def test_background_cap_keeps_the_request_waiting(handover: Callable[..., Handover]) -> None:
+    case = handover(extract_max_background=1)
+    with TestClient(case.app) as client:
+        first = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        assert first.status_code == 202
+        case.release_later(0.2)  # the pod holds one background extraction: the cap
+
+        second = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+
+        assert second.status_code == 200
+        assert second.json()["status"] == "success"
+        assert len(case.keys("job:*:meta")) == 1  # only the first became a job
+        final = case.wait_for_job(client, first.json()["data"]["id"])
+        assert final["data"]["items"][0]["result"]["status"] == "success"
+
+
+@pytest.mark.parametrize("blocked", ["create", "mark_running"])
+def test_cancelled_hand_over_leaves_nothing_behind(
+    handover: Callable[..., Handover], monkeypatch: pytest.MonkeyPatch, blocked: str
+) -> None:
+    case = handover()
+    app = case.app
+    store: JobStore = app.state.job_store
+    reached = asyncio.Event
+
+    async def scenario() -> None:
+        entered = reached()
+
+        async def hang(*args: object, **kwargs: object) -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(store, blocked, hang)
+        state = SimpleNamespace(
+            settings=app.state.settings,
+            pipeline=app.state.pipeline,
+            job_store=store,
+            background=app.state.background,
+        )
+        request = cast(Request, SimpleNamespace(app=SimpleNamespace(state=state)))
+        principal = Principal(name="alice", role="user", rate_limit_per_minute=None)
+        body = ExtractRequest(url=PAGE, wait_seconds=0)
+        route = asyncio.create_task(extract(body, request, principal))
+        await entered.wait()
+        assert len(app.state.background) == 1
+        route.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await route
+
+        assert app.state.background == set()
+        # The extraction nobody waits for is cancelled, and no job is left (mark_running: the
+        # created job is deleted).
+        await asyncio.wait(case.pipeline.tasks, timeout=5)
+        assert case.pipeline.tasks[0].cancelled()
+        assert await case.keys_async("job*") == []
+        # The shutdown has nothing to wait for.
+        await asyncio.wait_for(_wait_for(app.state.background, 30), 1)
+
+    asyncio.run(scenario())
+
+
+def test_wait_for_ignores_finished_tasks() -> None:
+    async def scenario() -> float:
+        done = asyncio.create_task(asyncio.sleep(0))
+        await done
+        stale = {done}  # finished, but never removed: it must not make the wait spin
+        started = time.monotonic()
+        await asyncio.wait_for(_wait_for(stale, 30), 1)
+        return time.monotonic() - started
+
+    assert asyncio.run(scenario()) < 1
+
+
+def test_wait_for_returns_when_the_running_tasks_end() -> None:
+    async def scenario() -> None:
+        release = asyncio.Event()
+        background = {asyncio.create_task(release.wait())}
+        waiting = asyncio.create_task(_wait_for(background, 30))
+        await asyncio.sleep(0.01)
+        assert not waiting.done()
+        release.set()
+        await asyncio.wait_for(waiting, 1)
+
+    asyncio.run(scenario())
+
+
+def test_wait_for_stops_at_its_deadline() -> None:
+    async def scenario() -> None:
+        hang = asyncio.create_task(asyncio.Event().wait())
+        await asyncio.wait_for(_wait_for({hang}, 0.05), 1)
+        hang.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await hang
+
+    asyncio.run(scenario())

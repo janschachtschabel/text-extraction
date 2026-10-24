@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     batch_max_open_per_client: int = Field(default=5, ge=1)
     # False: POST /v1/batch and GET /v1/jobs/{id} answer 503 (API pods without workers).
     jobs_enabled: bool = True
+    # Extractions one pod keeps running after their request got a 202 (and requests waiting for
+    # theirs); above it a request keeps waiting inline.
+    extract_max_background: int = Field(default=32, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod
