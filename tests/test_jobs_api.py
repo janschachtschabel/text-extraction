@@ -20,8 +20,9 @@ from tests.fakes import ARTICLE, ORIGIN, PAGE, Answer, FakeFetcher, fetched
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.envelope import ErrorCode
+from text_extraction.extract_models import ExtractRequest
 from text_extraction.fetch import Fetcher, FetchError
-from text_extraction.job_models import MAX_BATCH_URLS, BatchRequest
+from text_extraction.job_models import MAX_BATCH_URLS, BatchRequest, JobOptions
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import create_batch
 from text_extraction.netguard import MAX_URL_LENGTH
@@ -658,3 +659,118 @@ def test_missing_content_length_is_bounded_by_the_model(api: Api) -> None:
 
 def test_model_limit_matches_the_setting_maximum() -> None:
     assert Settings.model_fields["batch_max_urls"].metadata[-1].le == MAX_BATCH_URLS
+
+
+# --- extract jobs whose pod stopped (P1) -------------------------------------------------------
+
+LOST_MESSAGE = "The pod running this extraction stopped."
+ALICE_PRINCIPAL = Principal(name="alice", role="user", rate_limit_per_minute=None)
+
+
+def start_extract_job(api: Api, *, lease_seconds: float, age_seconds: float = 0) -> str:
+    """An `extract` job as the sync-to-job hand-over leaves it: running with a lease that began
+    ``age_seconds`` ago."""
+
+    async def create(valkey: FakeAsyncRedis) -> str:
+        store = JobStore(valkey, api.settings, clock=lambda: time.time() - age_seconds)
+        options = JobOptions(compliance="enforce")
+        job_id = await store.create("extract", ALICE_PRINCIPAL, options, [PAGE])
+        await store.mark_running(job_id, lease_seconds=lease_seconds)
+        return job_id
+
+    return api.run(create)
+
+
+def stored(api: Api, job_id: str, kind: str, field: str) -> bytes | str | None:
+    async def read(valkey: FakeAsyncRedis) -> bytes | str | None:
+        return await valkey.hget(f"job:{{{job_id}}}:{kind}", field)
+
+    return api.run(read)
+
+
+def test_lost_running_job_reports_internal_error(api: Api) -> None:
+    job_id = start_extract_job(api, lease_seconds=35, age_seconds=100)
+
+    response = api.job(job_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    view = body["data"]
+    assert view["kind"] == "extract"
+    assert view["state"] == "completed"
+    assert view["finished_at"] is not None
+    assert view["progress"] == {"total": 1, "done": 1, "success": 0, "partial": 0, "failed": 1}
+    assert view["next_offset"] is None
+    item = view["items"][0]
+    assert (item["index"], item["url"], item["state"]) == (0, PAGE, "done")
+    assert item["result"]["status"] == "failed"
+    assert item["result"]["data"] is None
+    assert item["result"]["error"] == {
+        "code": "internal_error",
+        "message": LOST_MESSAGE,
+        "retryable": True,
+        "details": None,
+    }
+    assert body["status"] == "failed"
+    assert body["error"] == {
+        "code": "internal_error",
+        "message": "All 1 items failed.",
+        "retryable": True,
+        "details": None,
+    }
+    # The synthetic result is a view: nothing was stored (P1).
+    assert stored(api, job_id, "results", "0") is None
+    assert stored(api, job_id, "meta", "state") == b"running"
+
+
+def test_running_job_with_a_live_lease_is_shown_as_it_is(api: Api) -> None:
+    job_id = start_extract_job(api, lease_seconds=35)
+
+    view = api.job(job_id).json()["data"]
+
+    assert view["state"] == "running"
+    assert view["progress"]["done"] == 0
+    assert view["items"][0]["state"] == "pending"
+    assert view["items"][0]["result"] is None
+
+
+def test_completed_job_with_a_past_lease_shows_its_stored_result(api: Api) -> None:
+    job_id = start_extract_job(api, lease_seconds=35, age_seconds=100)
+
+    async def finish(valkey: FakeAsyncRedis) -> None:
+        registry = CollectorRegistry()
+        fetcher = cast(Fetcher, FakeFetcher({PAGE: fetched(body=ARTICLE)}))
+        pipeline = create_pipeline(api.settings, valkey, fetcher, registry)
+        envelope = await pipeline.run(ExtractRequest(url=PAGE), ALICE_PRINCIPAL)
+        write = await JobStore(valkey, api.settings).write_result(job_id, 0, envelope)
+        assert write == "last"
+
+    api.run(finish)
+
+    body = api.job(job_id).json()
+
+    assert body["status"] == "success"
+    assert body["data"]["state"] == "completed"
+    assert body["data"]["progress"]["success"] == 1
+    result = body["data"]["items"][0]["result"]
+    assert result["status"] == "success"
+    assert result["data"]["title"]
+
+
+def test_lost_job_is_visible_to_its_owner_and_admins_only(api: Api) -> None:
+    job_id = start_extract_job(api, lease_seconds=35, age_seconds=100)
+
+    assert api.job(job_id, BOB).status_code == 404
+    assert api.job(job_id, ROOT).json()["data"]["items"][0]["result"]["error"]["message"] == (
+        LOST_MESSAGE
+    )
+
+
+def test_running_batch_without_a_lease_is_never_lost(api: Api) -> None:
+    job_id = api.batch([PAGE, OTHER_PAGE]).json()["data"]["id"]
+    api.work({PAGE: fetched(body=ARTICLE)}, items=1)
+
+    view = api.job(job_id).json()["data"]
+
+    assert view["state"] == "running"
+    assert [item["state"] for item in view["items"]].count("pending") == 1

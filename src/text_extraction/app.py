@@ -3,8 +3,9 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any
 
+import structlog
 from fastapi import Depends, FastAPI
 from prometheus_client import REGISTRY, CollectorRegistry
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -27,11 +28,20 @@ from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 from text_extraction.tracing import TraceMiddleware, current_trace_id
 
+_log = structlog.get_logger(__name__)
+
 SERVICE_NAME = "text-extraction"
 DESCRIPTION = (
     "Turns web pages, files, audio and video into clean text or Markdown, "
     "with a fast HTTP mode and a browser mode."
 )
+
+
+# Seconds on top of ``EXTRACT_TIMEOUT_SECONDS`` that the shutdown waits for extractions that
+# were handed over to a job.
+_BACKGROUND_GRACE_SECONDS = 5.0
+# What the shutdown waits for the result writes of extractions it had to cancel.
+_CANCELLED_WRITE_SECONDS = 2.0
 
 
 class InfoData(BaseModel):
@@ -41,14 +51,38 @@ class InfoData(BaseModel):
     role: Role
 
 
+async def _wait_for(background: set[asyncio.Task[Any]], seconds: float) -> None:
+    """Wait until ``background`` is empty or ``seconds`` have passed. Tasks that finish add or
+    remove members, so the set is looked at again after each round."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while background and (remaining := deadline - loop.time()) > 0:
+        await asyncio.wait(list(background), timeout=remaining)
+
+
+async def _finish_background(app: FastAPI) -> None:
+    """Let extractions that were handed over to a job (``wait_seconds``) end and store their
+    results. Those still running after ``EXTRACT_TIMEOUT_SECONDS`` + the grace are cancelled; their
+    jobs then get a retryable ``internal_error``, or, if that write fails, lose their lease."""
+    settings: Settings = app.state.settings
+    background: set[asyncio.Task[Any]] = app.state.background
+    await _wait_for(background, settings.extract_timeout_seconds + _BACKGROUND_GRACE_SECONDS)
+    if background:
+        _log.warning("background_extractions_cancelled", count=len(background))
+        for task in list(background):
+            task.cancel()
+        await _wait_for(background, _CANCELLED_WRITE_SECONDS)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request; close the fetcher's connections and
-    the conversion pool last."""
+    """Load the language model before the first request; wait for extractions handed over to a
+    job; close the fetcher's connections and the conversion pool last."""
     await asyncio.to_thread(load_language_model)
     try:
         yield
     finally:
+        await _finish_background(app)
         fetcher: Fetcher = app.state.fetcher
         pool: ConversionPool = app.state.conversion_pool
         await fetcher.aclose()
@@ -62,7 +96,8 @@ def create_public_app(
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
-    ``app.state.job_queue`` back the batch and job routes.
+    ``app.state.job_queue`` back the batch and job routes; ``app.state.background`` holds the
+    tasks of extractions handed over to a job, which the shutdown waits for.
     """
     app = FastAPI(
         title="Text Extraction API",
@@ -80,6 +115,7 @@ def create_public_app(
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
+    app.state.background = set()
     install_error_handlers(app)
     app.include_router(extract_router)
     app.include_router(jobs_router)

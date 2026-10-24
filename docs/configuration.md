@@ -121,7 +121,9 @@ written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edi
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
 `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
-few milliseconds. Work that takes longer than about 30 s will run as a job in a later package. On
+few milliseconds. A caller that does not want to hold the connection sends `wait_seconds` (0-60): an
+extraction still running after that long continues in the pod as a job (202, `GET /v1/jobs/{id}`;
+ignored with `JOBS_ENABLED=false`). Work that takes longer than about 30 s will run as a job in a later package. On
 SIGTERM `/ready` turns 503 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5);
 then the public port stops accepting connections and gives requests in flight
 `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) to finish; the internal port

@@ -86,7 +86,7 @@ refusing a turn gives `rate_limited` (busy) or `connection_error` (host paused),
 
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
-| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode`, `format`, `actions`, `pii`, `links`, `metadata`, `screenshot`, `chunking`, `compliance` | sync, job after `wait_seconds` (default 25) |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode`, `format`, `actions`, `pii`, `links`, `metadata`, `screenshot`, `chunking`, `compliance` | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1) |
 | `POST /v1/extract/file` | Upload (multipart) → text/Markdown | sync, job for large files |
 | `POST /v1/screenshot` | Full page or viewport PNG, 1920×1080 | sync, job fallback |
 | `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
@@ -139,6 +139,21 @@ optional rate limit.
   `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_INPUT_TOKENS`.
 - **Batch:** one sub-queue per domain, round-robin over domains with free capacity;
   fair shares between clients.
+- **Sync-to-job (P1):** `POST /v1/extract` without `wait_seconds` always answers when the
+  extraction ends (at most `EXTRACT_TIMEOUT_SECONDS`, 25 s). With `wait_seconds` the extraction
+  runs as a task in the API pod and the route waits that long. If it is still running, the route
+  creates an `extract` job with one URL (state `running`, lease of `EXTRACT_TIMEOUT_SECONDS` + 10 s)
+  and answers 202; the same task goes on and a done-callback stores its envelope as item 0.
+  The job only stores the result: nothing is routed through a worker, which would add a hop to
+  every request and make workers mandatory (package 4 sends browser work to its own pool).
+  A pod that dies mid-run leaves the lease to expire, and `GET /v1/jobs/{id}` then shows a job
+  that is still `running` past its `lease_until` as completed, with item 0 `failed` /
+  `internal_error`, retryable ("The pod running this extraction stopped."); this view is
+  computed, not stored, and a completed job never gets it. If Valkey fails when the job is
+  created, the request keeps waiting and answers 200 with the envelope, not 503; if it fails when
+  the result is stored, the lease expires and the lost view takes over. The shutdown waits up to
+  `EXTRACT_TIMEOUT_SECONDS` + 5 s for such tasks. Extract jobs do not count toward
+  `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`.
 - **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs; `S3_ENABLED`
   moves screenshots and large results to an S3-compatible store.
 

@@ -33,6 +33,16 @@ class ExtractRequest(BaseModel, extra="forbid"):
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
     )
+    wait_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=60,
+        description="Without it, the request answers when the extraction ends (the unchanged "
+        "default). With it, an extraction that is still running after this many seconds becomes "
+        "a job: the answer is then 202 with the job's id and `status_url`, and "
+        "`GET /v1/jobs/{id}` has the result. 0 hands over at once. Ignored when jobs are "
+        "disabled (`JOBS_ENABLED=false`).",
+    )
 
 
 class Timings(BaseModel):

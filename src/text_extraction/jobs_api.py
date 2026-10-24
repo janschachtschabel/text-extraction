@@ -11,7 +11,10 @@ touches this key, so it shares no slot with a job or a queue.
 
 import asyncio
 import re
+import time
 from collections import Counter
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import structlog
@@ -24,9 +27,11 @@ from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
+from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
+    JobItem,
     JobOptions,
     JobProgress,
     JobView,
@@ -50,6 +55,8 @@ DEFAULT_PAGE_SIZE = 100
 _BODY_ALLOWANCE = 4096
 # JSON quotes and a comma around each URL.
 _BYTES_AROUND_URL = 8
+
+_LOST_MESSAGE = "The pod running this extraction stopped."
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
@@ -257,6 +264,40 @@ async def _all_failed_error(store: JobStore, record: JobRecord) -> ErrorInfo:
     )
 
 
+def _is_lost(record: JobRecord) -> bool:
+    """A job that is still ``running`` after its lease ran out: the pod that ran its extraction
+    stopped before it stored the result (P1). A completed job keeps its past ``lease_until``
+    and is not lost."""
+    return (
+        record.state == "running"
+        and record.lease_until is not None
+        and record.lease_until < time.time()
+    )
+
+
+def _lost_view(record: JobRecord, items: list[JobItem]) -> tuple[JobRecord, list[JobItem]]:
+    """The record and items of a lost job as the API shows them (nothing is stored): every item
+    without a result is done and failed with a retryable ``internal_error``, and the job is
+    completed, at the time its lease ran out."""
+    error = ErrorInfo(code=ErrorCode.INTERNAL_ERROR, message=_LOST_MESSAGE, retryable=True)
+    lost = Envelope[ExtractResult](status="failed", error=error)
+    shown = [
+        item if item.state == "done" else item.model_copy(update={"state": "done", "result": lost})
+        for item in items
+    ]
+    total = record.progress.total
+    progress = JobProgress(
+        total=total,
+        done=total,
+        success=record.progress.success,
+        partial=record.progress.partial,
+        failed=total - record.progress.success - record.progress.partial,
+    )
+    ended = record.lease_until if record.lease_until is not None else time.time()
+    finished_at = datetime.fromtimestamp(ended, tz=UTC)
+    return replace(record, state="completed", finished_at=finished_at, progress=progress), shown
+
+
 @router.get(
     "/v1/jobs/{job_id}", dependencies=[Depends(_require_jobs_enabled), Depends(rate_limited)]
 )
@@ -286,8 +327,21 @@ async def get_job(
             raise _not_found()
         total = record.progress.total
         items = await store.items(job_id, offset, limit) if offset < total else []
+        lost = _is_lost(record)
+        if lost:
+            record, items = _lost_view(record, items)
         status = _envelope_status(record)
-        failure = await _all_failed_error(store, record) if status == "failed" else None
+        failure: ErrorInfo | None = None
+        if status == "failed":
+            failure = (
+                ErrorInfo(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=f"All {total} items failed.",
+                    retryable=True,
+                )
+                if lost
+                else await _all_failed_error(store, record)
+            )
     except (RedisError, OSError) as error:
         _log_unavailable(error)
         raise _unavailable() from None
