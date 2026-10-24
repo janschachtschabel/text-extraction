@@ -128,13 +128,9 @@ def test_min_delay_spaces_requests() -> None:
 
 
 def test_concurrent_requests_get_distinct_slots() -> None:
-    async def scenario() -> list[float]:
-        fake_time = FakeTime()
-        waits: list[float] = []
-
-        async def record_only(seconds: float) -> None:
-            waits.append(seconds)  # the clock stays put, so all three decide at the same time
-
+    async def scenario() -> tuple[list[float], list[float]]:
+        # The clock moves only once all three sleep, so all three book at the same moment.
+        clock = VirtualClock()
         gate = DomainGate(
             FakeAsyncRedis(),
             Settings(
@@ -142,18 +138,22 @@ def test_concurrent_requests_get_distinct_slots() -> None:
                 outbound_max_concurrency_per_host=3,
                 outbound_min_delay_ms=1000,
             ),
-            clock=fake_time.clock,
-            sleep=record_only,
+            clock=clock.clock,
+            sleep=clock.sleep,
         )
+        starts: list[float] = []
 
         async def one() -> None:
             async with gate.slot(HOST):
-                pass
+                starts.append(clock.now - START)
 
-        await asyncio.gather(one(), one(), one())
-        return waits
+        await clock.run(*(asyncio.create_task(one()) for _ in range(3)))
+        return clock.sleeps, starts
 
-    assert sorted(asyncio.run(scenario())) == [1.0, 2.0]
+    waits, starts = asyncio.run(scenario())
+
+    assert sorted(waits) == [1.0, 2.0]
+    assert starts == [0.0, 1.0, 2.0]
 
 
 @pytest.mark.parametrize(
@@ -572,3 +572,158 @@ def test_hosts_are_lower_cased_idna() -> None:
         return keys
 
     assert asyncio.run(scenario()) == {"out:circuit:{xn--bcher-kva.example}"}
+
+
+class VirtualClock:
+    """A clock that moves only when every task waits on a sleep: then it jumps to the earliest
+    wake-up. ``late`` makes the n-th sleep (counted from 0) wake that many seconds late, as a
+    stalled event loop would."""
+
+    def __init__(self, late: dict[int, float] | None = None) -> None:
+        self.now = START
+        self.sleeps: list[float] = []
+        self._late = late or {}
+        self._sleepers: list[tuple[float, int, asyncio.Future[None]]] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        extra = self._late.get(len(self.sleeps), 0.0)
+        self.sleeps.append(seconds)
+        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._sleepers.append((self.now + seconds + extra, len(self.sleeps), future))
+        await future
+
+    async def run(self, *tasks: asyncio.Task[None]) -> None:
+        """Run the tasks to the end, moving the clock whenever they all sleep."""
+        while not all(task.done() for task in tasks):
+            for _ in range(50):  # let every task get as far as it can without time passing
+                await asyncio.sleep(0)
+            if self._sleepers:
+                self._sleepers.sort(key=lambda sleeper: sleeper[:2])
+                wake_at, _, future = self._sleepers.pop(0)
+                self.now = max(self.now, wake_at)
+                future.set_result(None)
+        for task in tasks:
+            task.result()
+
+
+def _spaced_starts(late: dict[int, float]) -> tuple[list[float], list[float]]:
+    """Three requests, the last two concurrent; returns their real starts and the sleeps."""
+
+    async def scenario() -> tuple[list[float], list[float]]:
+        clock = VirtualClock(late)
+        gate = DomainGate(
+            FakeAsyncRedis(),
+            Settings(
+                auth_mode="none",
+                outbound_max_concurrency_per_host=2,
+                outbound_min_delay_ms=1000,
+                outbound_max_wait_seconds=10,
+            ),
+            clock=clock.clock,
+            sleep=clock.sleep,
+        )
+        starts: list[float] = []
+
+        async def request() -> None:
+            async with gate.slot(HOST):
+                starts.append(clock.now - START)
+
+        await clock.run(asyncio.create_task(request()))
+        second = asyncio.create_task(request())
+        await asyncio.sleep(0)  # the second books its turn first
+        await clock.run(second, asyncio.create_task(request()))
+        return starts, clock.sleeps
+
+    return asyncio.run(scenario())
+
+
+def test_a_late_waker_does_not_shorten_the_gap_after_it() -> None:
+    # The second request's sleep wakes 0.5 s late: its real start is 1.5 s. The third booked
+    # 2.0 s, but must not start before 1.5 s + the 1 s delay.
+    starts, _ = _spaced_starts({0: 0.5})
+
+    assert starts == [0.0, 1.5, 2.5]
+
+
+def test_requests_on_time_wait_no_longer_than_their_turn() -> None:
+    starts, sleeps = _spaced_starts({})
+
+    assert starts == [0.0, 1.0, 2.0]
+    assert sleeps == [1.0, 2.0]  # no extra wait once a booked turn has come
+
+
+class CountingRedis(FakeAsyncRedis):
+    """Counts the script calls whose first key is ``out:last``: the start confirmations."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.confirms = 0
+
+    async def evalsha(self, sha: str, numkeys: int, *keys_and_args: Any) -> Any:
+        if str(keys_and_args[0]).startswith("out:last:"):
+            self.confirms += 1
+        return await super().evalsha(sha, numkeys, *keys_and_args)
+
+
+def test_a_turn_that_is_due_costs_no_extra_round_trip() -> None:
+    async def scenario() -> tuple[int, list[float]]:
+        fake_time = FakeTime()
+        valkey = CountingRedis()
+        gate = make_gate(fake_time, valkey, outbound_min_delay_ms=1000)
+        for _ in range(3):
+            async with gate.slot(HOST):
+                pass
+            fake_time.now += 5  # the next request comes after its turn
+        return valkey.confirms, fake_time.sleeps
+
+    assert asyncio.run(scenario()) == (0, [])
+
+
+def test_a_request_sent_late_moves_the_next_start_on() -> None:
+    async def scenario() -> list[float]:
+        clock = VirtualClock()
+        gate = DomainGate(
+            FakeAsyncRedis(),
+            Settings(auth_mode="none", outbound_min_delay_ms=1000, outbound_max_wait_seconds=10),
+            clock=clock.clock,
+            sleep=clock.sleep,
+        )
+        starts: list[float] = []
+
+        async def first() -> None:
+            async with gate.slot(HOST):
+                starts.append(clock.now - START)
+                await clock.sleep(0.5)  # a stall between the turn and the real send
+                await gate.mark_sent(HOST)
+
+        async def second() -> None:
+            async with gate.slot(HOST):
+                starts.append(clock.now - START)
+
+        one = asyncio.create_task(first())
+        await asyncio.sleep(0)
+        await clock.run(one, asyncio.create_task(second()))
+        return starts
+
+    # The first request went out at 0.5 s: the second may not start before 1.5 s.
+    assert asyncio.run(scenario()) == [0.0, 1.5]
+
+
+def test_mark_sent_never_moves_the_latest_start_back() -> None:
+    async def scenario() -> list[float]:
+        fake_time = FakeTime()
+        valkey = FakeAsyncRedis()
+        gate = make_gate(fake_time, valkey, outbound_min_delay_ms=1000)
+        fake_time.now = START + 5
+        await gate.mark_sent(HOST)
+        fake_time.now = START + 2  # another pod's late report of an earlier send
+        await gate.mark_sent(HOST)
+        fake_time.now = START + 5.5
+        async with gate.slot(HOST):
+            pass
+        return fake_time.sleeps
+
+    assert asyncio.run(scenario()) == [0.5]  # spaced from 5 s, not from 2 s

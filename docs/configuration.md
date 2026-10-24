@@ -191,13 +191,20 @@ literal (a cluster hash tag), so all keys of one host live in the same slot.
 | Key | Content | Lifetime |
 | --- | --- | --- |
 | `out:inflight:{<host>}` | Requests in flight: one entry per lease, scored by its expiry time. | A lease expires 120 s after it starts, so a crashed pod frees its slot by itself. |
-| `out:next:{<host>}` | Earliest start time of the next request. | Until the slot has passed. |
+| `out:next:{<host>}` | Earliest start time of the next request: the next turn to book. | Until the slot has passed. |
+| `out:last:{<host>}` | Real start time of the latest request: set when its turn begins, moved on when its headers have gone out. | The longest spacing plus 60 s. |
 | `out:cooldown:{<host>}` | End of the pause after 429 or 503. | Until it ends. |
 | `out:fail:{<host>}` | Consecutive failures (connection error or 5xx). | 10 minutes, renewed on each failure. |
 | `out:circuit:{<host>}` | End of an open circuit. | Until it ends. |
 
 A request waits for a free lease (at most `OUTBOUND_MAX_CONCURRENCY_PER_HOST`) and for its spacing
-slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`.
+slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`
+and holds between real request starts: a request books its turn and sleeps until it, then, right
+before it is sent, waits out whatever is left of the spacing since the latest real start. The
+fetcher reports every request once its headers have gone out, which moves the latest start on to
+that moment. So a request held up between its turn and the send (a busy pod) delays the one after
+it instead of letting it follow closer; only a hold-up longer than the spacing itself can still
+bring two starts closer.
 If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. A redirect to
 another host gives the first host's lease back and waits for a turn at the new host; the outcome
 counts for the host that answered. While a pause

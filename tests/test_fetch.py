@@ -635,3 +635,46 @@ def test_redirect_hook_can_stop_the_chain(httpserver: HTTPServer) -> None:
 
     assert error.code is ErrorCode.BLOCKED_BY_ROBOTS
     assert [request.path for request, _ in httpserver.log] == ["/a"]
+
+
+def test_each_request_is_reported_once_it_is_sent(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/old").respond_with_data(
+        "", status=301, headers={"Location": "/new"}
+    )
+    httpserver.expect_request("/new").respond_with_data("<p>moved</p>", content_type="text/html")
+    fetcher = make_fetcher()
+    sent: list[str] = []
+
+    async def on_sent(host: str) -> None:
+        sent.append(host)
+
+    fetcher.on_request_sent = on_sent
+
+    async def scenario() -> FetchResult:
+        try:
+            return await fetcher.fetch(httpserver.url_for("/old"))
+        finally:
+            await fetcher.aclose()
+
+    result = run(scenario)
+
+    assert result.status == 200
+    assert sent == ["127.0.0.1", "127.0.0.1"]  # the redirect hop too
+
+
+def test_a_failing_send_report_does_not_fail_the_fetch(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/page").respond_with_data("<p>hi</p>", content_type="text/html")
+    fetcher = make_fetcher()
+
+    async def broken(host: str) -> None:
+        raise OSError("valkey is down")
+
+    fetcher.on_request_sent = broken
+
+    async def scenario() -> FetchResult:
+        try:
+            return await fetcher.fetch(httpserver.url_for("/page"))
+        finally:
+            await fetcher.aclose()
+
+    assert run(scenario).status == 200

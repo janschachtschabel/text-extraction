@@ -747,10 +747,15 @@ def create_pipeline(
     registry: CollectorRegistry,
     pool: ConversionPool | None = None,
 ) -> Pipeline:
-    """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``."""
+    """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
+
+    Every request of ``fetcher`` (pages, redirect hops, compliance files) reports its send to the
+    gate, so the spacing counts from the real send."""
+    gate = DomainGate(valkey, settings)
+    fetcher.on_request_sent = gate.mark_sent
     return Pipeline(
         fetcher,
-        DomainGate(valkey, settings),
+        gate,
         ComplianceChecker(fetcher, valkey, settings),
         ResultCache(valkey, settings),
         FingerprintStore(valkey, settings),

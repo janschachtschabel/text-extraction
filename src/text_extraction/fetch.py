@@ -14,6 +14,11 @@ What it enforces, for the first request and every redirect hop alike:
 The caller may watch the chain with ``on_redirect``: it is awaited with each redirect target
 before that target is requested, and may raise ``FetchError`` to end the chain there.
 
+``Fetcher.on_request_sent``, when set, is awaited with the host of every request (each redirect
+hop and every caller's, compliance files included) right after its headers went out on the wire.
+The outbound gate uses it to count its spacing from the real send (``DomainGate.mark_sent``). An
+error of the hook is logged and does not fail the fetch.
+
 Failures of the target or the network are raised as ``FetchError`` with a code from
 ``ErrorCode``. A response with status >= 400 is not an error here: it is returned and the
 pipeline decides what it means.
@@ -29,6 +34,7 @@ import zlib
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from http.cookiejar import DefaultCookiePolicy
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -73,6 +79,7 @@ _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 # Awaited with each redirect target before it is requested; raises ``FetchError`` to stop.
 RedirectHook = Callable[[str], Awaitable[None]]
+SentHook = Callable[[str], Awaitable[None]]
 
 
 def _sendable(value: str | None) -> str | None:
@@ -248,6 +255,21 @@ def _host_of(url: str) -> str | None:
         return None
 
 
+def _sent_tracer(hook: SentHook, url: str) -> Callable[[str, dict[str, Any]], Awaitable[None]]:
+    """An httpcore ``trace`` callback that calls ``hook`` once the request headers are sent."""
+    host = urlsplit(url).hostname or ""
+
+    async def trace(event: str, _info: dict[str, Any]) -> None:
+        if not event.endswith(".send_request_headers.complete"):
+            return
+        try:
+            await hook(host)
+        except Exception as error:  # a report must never fail the fetch
+            _log.warning("request_sent_hook_failed", host=host, error_type=type(error).__name__)
+
+    return trace
+
+
 class Fetcher:
     """Guarded HTTP client with redirect, size and time limits. Create once, ``aclose`` last."""
 
@@ -272,6 +294,7 @@ class Fetcher:
         # The shared client never stores cookies, so nothing leaks from one fetch() to the next.
         # Cookies live in a jar of their own per fetch() call, see ``_fetch``.
         self._client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+        self.on_request_sent: SentHook | None = None
 
     async def fetch(
         self,
@@ -357,6 +380,8 @@ class Fetcher:
                 "GET", current, headers=headers, timeout=limits.deadline
             )
             cookies.set_cookie_header(request)
+            if self.on_request_sent is not None:
+                request.extensions["trace"] = _sent_tracer(self.on_request_sent, current)
             async with contextlib.aclosing(await self._send(request)) as response:
                 cookies.extract_cookies(response)
                 status = response.status_code

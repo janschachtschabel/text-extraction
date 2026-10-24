@@ -627,6 +627,20 @@ def test_two_pipelines_share_one_registry() -> None:
     assert registry.get_sample_value("text_extraction_extract_total", labels) == 2
 
 
+def test_the_pipelines_fetcher_reports_sent_requests_to_the_gate() -> None:
+    valkey = FakeAsyncRedis()
+    fetcher = FakeFetcher({})
+    create_pipeline(make_settings(), valkey, cast(Fetcher, fetcher), CollectorRegistry())
+
+    async def send() -> object:
+        hook = fetcher.on_request_sent  # type: ignore[attr-defined]
+        await hook("Example.ORG")
+        value: object = await valkey.get("out:last:{example.org}")
+        return value
+
+    assert asyncio.run(send()) is not None
+
+
 def test_redirect_target_is_the_final_url() -> None:
     final = f"{ORIGIN}/learn/moved.html"
     harness = Harness({PAGE: replace(fetched(), final_url=final, redirects=[final])})

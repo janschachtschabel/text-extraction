@@ -4,10 +4,20 @@ Every fetch of a target site goes through ``DomainGate.slot(host, crawl_delay)``
 outcome with ``DomainGate.record(...)``. All state lives in Valkey, so all pods share it:
 
 - ``out:inflight:{host}``  requests in flight: a sorted set of lease tokens scored by expiry time
-- ``out:next:{host}``      earliest start time of the next request
+- ``out:next:{host}``      earliest start time of the next request (the next turn to book)
+- ``out:last:{host}``      real start time of the latest request
 - ``out:cooldown:{host}``  end of the pause after 429/503
 - ``out:fail:{host}``      consecutive failures (connection error or 5xx)
 - ``out:circuit:{host}``   end of an open circuit
+
+The spacing works in two steps. A request books the next turn (``out:next``) and sleeps until
+it. Before it is sent, it checks against the real start of the latest request (``out:last``) and
+waits out the rest of the delay; then it records its own start there. A request whose turn is now
+and that is far enough from the latest start is recorded in the same script, so it costs no extra
+round trip. Once the request has really gone out, the fetcher reports it (``mark_sent``), which
+moves ``out:last`` on to that moment: a request held up between its turn and the send (a busy
+event loop) then delays the next one instead of letting it follow closer behind. Only a stall
+longer than the delay itself can still bring two starts closer.
 
 The braces around the host are literal: a cluster hash tag, so the keys of one host share a slot.
 Times are epoch seconds from the injected clock, not from Valkey, so tests are deterministic.
@@ -43,23 +53,47 @@ _POLL_SECONDS = 0.05
 # Cleanup margin on top of the real end time of a slot, pause or open circuit.
 _TTL_MARGIN_SECONDS = 60
 
-# KEYS[1] = out:next:{host}; ARGV = now, delay, max_wait (seconds).
-# Takes the next free start time if it is at most max_wait away and moves the key on by delay.
-# Returns {1, wait} when granted, {0, wait} when the wait would be too long (nothing changes).
+# KEYS[1] = out:next:{host}, KEYS[2] = out:last:{host}; ARGV = now, delay, max_wait (seconds),
+# TTL margin (ms).
+# Books the next free start time if it is at most max_wait away and moves out:next on by delay.
+# A turn that is now, at least delay after the latest real start, starts at once: out:last is set
+# to now. Returns {1, wait, started} when granted (started = 1: recorded, else confirm after the
+# wait), {0, wait, 0} when the wait would be too long (nothing changes).
 # Numbers go back as strings: Redis would cut a Lua number to an integer.
 _RESERVE_SLOT = """
 local now = tonumber(ARGV[1])
 local delay = tonumber(ARGV[2])
 local max_wait = tonumber(ARGV[3])
+local margin = tonumber(ARGV[4])
 local free_at = tonumber(redis.call('GET', KEYS[1]) or '0')
 local start = math.max(now, free_at)
 local wait = start - now
 if wait > max_wait then
-  return {0, string.format('%.6f', wait)}
+  return {0, string.format('%.6f', wait), 0}
 end
-local ttl_ms = math.ceil((wait + delay) * 1000) + tonumber(ARGV[4])
+local ttl_ms = math.ceil((wait + delay) * 1000) + margin
 redis.call('SET', KEYS[1], string.format('%.6f', start + delay), 'PX', string.format('%d', ttl_ms))
-return {1, string.format('%.6f', wait)}
+if wait <= 0 and now >= tonumber(redis.call('GET', KEYS[2]) or '0') + delay then
+  local last_ttl = string.format('%d', math.ceil(delay * 1000) + margin)
+  redis.call('SET', KEYS[2], string.format('%.6f', now), 'PX', last_ttl)
+  return {1, '0', 1}
+end
+return {1, string.format('%.6f', wait), 0}
+"""
+
+# KEYS[1] = out:last:{host}; ARGV = now, delay (seconds), TTL margin (ms).
+# Records now as the latest real start when it is at least delay after the one stored. Returns
+# {1, 0} when recorded, {0, rest} with the seconds still to wait otherwise (nothing changes).
+_CONFIRM_START = """
+local now = tonumber(ARGV[1])
+local delay = tonumber(ARGV[2])
+local rest = tonumber(redis.call('GET', KEYS[1]) or '0') + delay - now
+if rest > 0 then
+  return {0, string.format('%.6f', rest)}
+end
+local ttl_ms = string.format('%d', math.ceil(delay * 1000) + tonumber(ARGV[3]))
+redis.call('SET', KEYS[1], string.format('%.6f', now), 'PX', ttl_ms)
+return {1, '0'}
 """
 
 # KEYS[1] = out:inflight:{host}; ARGV = now, limit, token, expires_at, key_ttl_ms.
@@ -72,6 +106,15 @@ if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then
 end
 redis.call('ZADD', KEYS[1], ARGV[4], ARGV[3])
 redis.call('PEXPIRE', KEYS[1], ARGV[5])
+return 1
+"""
+
+# KEYS[1] = out:last:{host}; ARGV = now, ttl_ms. Moves the latest real start on to now; it never
+# goes back (another pod may report an earlier send later).
+_MARK_SENT = """
+if tonumber(ARGV[1]) > tonumber(redis.call('GET', KEYS[1]) or '0') then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+end
 return 1
 """
 
@@ -155,6 +198,8 @@ class DomainGate:
         self._clock = clock
         self._sleep = sleep
         self._reserve_slot = valkey.register_script(_RESERVE_SLOT)
+        self._confirm_start = valkey.register_script(_CONFIRM_START)
+        self._mark_sent = valkey.register_script(_MARK_SENT)
         self._acquire_lease_script = valkey.register_script(_ACQUIRE_LEASE)
         self._extend_pause = valkey.register_script(_EXTEND_PAUSE)
         # Releases that outlive a cancelled caller; kept so the tasks are not garbage collected.
@@ -182,6 +227,18 @@ class DomainGate:
             # exist in Valkey although the caller never saw the answer. Removing it is harmless
             # when it does not.
             await self._release_lease(host, token)
+
+    async def mark_sent(self, host: str) -> None:
+        """Report that a request to ``host`` has just gone out: the next request's spacing
+        counts from now (the fetcher calls this; see the module docstring)."""
+        settings = self._settings
+        longest = max(
+            settings.outbound_min_delay_ms / 1000, settings.outbound_max_crawl_delay_seconds
+        )
+        ttl_ms = math.ceil(longest * 1000) + _TTL_MARGIN_SECONDS * 1000
+        await self._mark_sent(
+            keys=[_key("last", normalize_host(host))], args=[f"{self._clock():.6f}", ttl_ms]
+        )
 
     async def record(self, host: str, *, status: int | None, retry_after: float | None) -> None:
         """Report how a fetch ended: ``status`` is None for a connection failure.
@@ -264,15 +321,32 @@ class DomainGate:
             )
 
     async def _wait_for_start(self, host: str, deadline: float, delay: float) -> None:
+        """Book the next turn, sleep until it, then wait until ``delay`` has passed since the
+        real start of the latest request, and record this start as the latest.
+
+        The extra wait after the turn is at most ``delay`` per request that started meanwhile;
+        at most ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` - 1 can, since each holds a lease.
+        """
+        margin_ms = _TTL_MARGIN_SECONDS * 1000
         now = self._clock()
-        granted, wait = await self._reserve_slot(
-            keys=[_key("next", host)],
-            args=[now, delay, max(deadline - now, 0.0), _TTL_MARGIN_SECONDS * 1000],
+        granted, wait, started = await self._reserve_slot(
+            keys=[_key("next", host), _key("last", host)],
+            args=[now, delay, max(deadline - now, 0.0), margin_ms],
         )
         if not int(granted):
             raise OutboundBusy(float(wait))
-        if float(wait) > 0:
-            await self._sleep(float(wait))
+        if int(started):
+            return
+        rest = float(wait)
+        while True:
+            if rest > 0:
+                await self._sleep(rest)
+            recorded, remaining = await self._confirm_start(
+                keys=[_key("last", host)], args=[self._clock(), delay, margin_ms]
+            )
+            if int(recorded):
+                return
+            rest = float(remaining)
 
     async def _count_failure(self, host: str, now: float) -> None:
         key = _key("fail", host)
