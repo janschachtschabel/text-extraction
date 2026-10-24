@@ -31,6 +31,14 @@ waiting and leaves the job to the worker. A task that gives up releases the job 
 and releasing exclude each other (both are synchronous), so a job answered with 202 is never
 deleted, and a job being deleted is never answered with 202.
 
+``text_extraction_browser_dispatch_total{outcome}`` counts how each dispatch ended
+(``DISPATCH_OUTCOMES``): ``rendered`` (the worker's result came back), ``not_claimed`` (no worker
+claimed the item within ``BROWSER_QUEUE_WAIT_SECONDS``), ``no_result`` (claimed, but no result
+by the render deadline + 5 s, or the job was gone), ``handed_over`` (the request answered 202 and
+the worker writes the job's result) and ``backend_error`` (Valkey failed while submitting or
+waiting). ``not_claimed``, ``no_result`` and ``backend_error`` answer an ``auto`` request with its
+fast result (``browser_unavailable``) and a ``browser`` request with ``timeout`` (or 503).
+
 Logs carry job ids only, never a URL, header, cookie or action.
 """
 
@@ -41,6 +49,7 @@ from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import structlog
+from prometheus_client import CollectorRegistry
 from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
@@ -49,6 +58,7 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobLost, JobStore
+from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
@@ -63,6 +73,10 @@ _POLL_MAX_SECONDS = 0.5
 _RESULT_MARGIN_SECONDS = 5
 
 type BrowserJobKind = Literal["extract", "screenshot"]
+
+# The outcomes of ``text_extraction_browser_dispatch_total``; see the module docstring.
+DISPATCH_OUTCOMES = ("rendered", "not_claimed", "no_result", "handed_over", "backend_error")
+_BACKEND_ERRORS = (RedisError, OSError, JobLost)
 
 
 def live_client(principal: Principal) -> str:
@@ -156,8 +170,9 @@ class Handover:
 
 class BrowserDispatcher:
     """Puts sync browser requests on the ``browser`` pool and waits for their results; see the
-    module docstring. ``queue`` is the ``browser`` pool's queue. ``clock`` (monotonic seconds)
-    and ``sleep`` can be replaced in tests."""
+    module docstring. ``queue`` is the ``browser`` pool's queue; ``registry`` gets the dispatch
+    counter (a registry of its own when None). ``clock`` (monotonic seconds) and ``sleep`` can
+    be replaced in tests."""
 
     def __init__(
         self,
@@ -165,6 +180,7 @@ class BrowserDispatcher:
         queue: FairQueue,
         settings: Settings,
         *,
+        registry: CollectorRegistry | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -173,6 +189,12 @@ class BrowserDispatcher:
         self._settings = settings
         self._clock = clock
         self._sleep = sleep
+        self._outcomes = dispatch_counter_for(
+            registry if registry is not None else CollectorRegistry(), DISPATCH_OUTCOMES
+        )
+
+    def _count(self, outcome: str) -> None:
+        self._outcomes.labels(outcome=outcome).inc()
 
     async def submit(
         self,
@@ -207,12 +229,15 @@ class BrowserDispatcher:
             if draft is not None:
                 await self._store.put_draft(job_id, 0, draft)
             await self._queue.enqueue_items(job_id, live_client(principal), [(0, req.url)])
-        except BaseException:
+        except BaseException as error:
+            if isinstance(error, _BACKEND_ERRORS):
+                self._count("backend_error")
             if created:  # also on cancellation: no job is left that nobody waits for
                 await asyncio.shield(self.abandon(job_id))
             raise
         if not created:
             await self._clear_lease(job_id)
+            self._count("handed_over")  # the P1 job, answered with 202 already
         _log.info("browser_job_queued", job_id=job_id, kind=kind, reused=not created)
         return job_id
 
@@ -221,7 +246,19 @@ class BrowserDispatcher:
     ) -> Envelope[ExtractResult] | None:
         """The result of the job's item 0, or None when no worker claimed it within
         ``BROWSER_QUEUE_WAIT_SECONDS``, it had no result within the render deadline + 5 s after
-        the claim, the job is gone, or ``detached()`` turned true. Valkey errors propagate."""
+        the claim, the job is gone, or ``detached()`` turned true. Valkey errors propagate.
+        Each call counts its outcome once."""
+        try:
+            outcome, result = await self._wait(job_id, unblock=unblock, detached=detached)
+        except (RedisError, OSError):
+            self._count("backend_error")
+            raise
+        self._count(outcome)
+        return result
+
+    async def _wait(
+        self, job_id: str, *, unblock: bool, detached: Callable[[], bool]
+    ) -> tuple[str, Envelope[ExtractResult] | None]:
         settings = self._settings
         render_seconds = (
             settings.browser_unblock_timeout_seconds
@@ -234,23 +271,24 @@ class BrowserDispatcher:
         while not detached():
             record = await self._store.get(job_id)
             if record is None:
-                return None
+                return "no_result", None
             if record.state == "completed":
                 items = await self._store.items(job_id, 0, 1)
-                return items[0].result if items else None
+                result = items[0].result if items else None
+                return ("rendered" if result is not None else "no_result"), result
             now = self._clock()
             if record.state == "running" and claimed_at is None:
                 claimed_at = now
             if claimed_at is None:
                 if now - started >= settings.browser_queue_wait_seconds:
                     _log.info("browser_job_not_claimed", job_id=job_id)
-                    return None
+                    return "not_claimed", None
             elif now - claimed_at >= render_seconds + _RESULT_MARGIN_SECONDS:
                 _log.info("browser_job_no_result", job_id=job_id)
-                return None
+                return "no_result", None
             await self._sleep(interval)
             interval = min(interval + _POLL_STEP_SECONDS, _POLL_MAX_SECONDS)
-        return None
+        return "handed_over", None
 
     async def _clear_lease(self, job_id: str) -> None:
         """End a reused job's P1 lease, after its item is queued: a pod that dies before leaves

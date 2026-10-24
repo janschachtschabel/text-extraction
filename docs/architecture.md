@@ -511,7 +511,8 @@ content). The first request of an HTTP redirect hop to another host leaves befor
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
 duration, extraction outcome by error code and mode, browser pool usage (pages in use, pages by
-outcome, render seconds, launches, proxy refusals), LLM calls,
+outcome, render seconds, launches, proxy refusals), sync browser dispatches by outcome (API pods:
+rendered, not claimed, no result, handed over, backend error), LLM calls,
 tokens and failures, rate-limit rejections. Alert rules ship in the Helm chart
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.

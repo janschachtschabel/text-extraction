@@ -11,6 +11,8 @@
 - ``text_extraction_job_duration_seconds{kind}``: observed by whichever process writes the last
   result of a job. The definition lives here so that the worker and the API cannot drift apart;
   each process has its own registry.
+- ``text_extraction_browser_dispatch_total{outcome}``: how the sync requests of this pod that
+  went to the browser workers ended (``browser_dispatch.DISPATCH_OUTCOMES``).
 
 A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``
 seconds, not once per scrape, since collectors are synchronous; the collector only reports the
@@ -100,6 +102,28 @@ def job_metrics_for(registry: CollectorRegistry) -> JobMetrics:
         metrics = JobMetrics(created=created, duration=job_duration_for(registry))
         _JOB_METRICS[registry] = metrics
     return metrics
+
+
+# One counter per registry, as for the job metrics.
+_DISPATCH: WeakKeyDictionary[CollectorRegistry, Counter] = WeakKeyDictionary()
+
+
+def dispatch_counter_for(registry: CollectorRegistry, outcomes: Iterable[str]) -> Counter:
+    """``text_extraction_browser_dispatch_total{outcome}`` in ``registry``, every one of
+    ``outcomes`` exported as 0 from the start."""
+    counter = _DISPATCH.get(registry)
+    if counter is None:
+        counter = Counter(
+            "text_extraction_browser_dispatch_total",
+            "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
+            "not_claimed, no_result, handed_over or backend_error.",
+            ["outcome"],
+            registry=registry,
+        )
+        _DISPATCH[registry] = counter
+    for outcome in outcomes:
+        counter.labels(outcome=outcome)
+    return counter
 
 
 class _CountedQueue(Protocol):

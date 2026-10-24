@@ -9,11 +9,12 @@ from typing import Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from prometheus_client import CollectorRegistry
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from tests.fakes import PAGE
 from text_extraction.auth import Principal
-from text_extraction.browser_dispatch import BrowserDispatcher, Handover
+from text_extraction.browser_dispatch import DISPATCH_OUTCOMES, BrowserDispatcher, Handover
 from text_extraction.browser_options import ArtifactRef, BrowserCookie, ClickAction
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
@@ -58,12 +59,32 @@ class Parts:
         self.store = JobStore(self.valkey, settings)
         self.queue = FairQueue(self.valkey, settings, "browser")
         self.time = time
+        self.registry = CollectorRegistry()
         if time is None:
-            self.dispatcher = BrowserDispatcher(self.store, self.queue, settings)
+            self.dispatcher = BrowserDispatcher(
+                self.store, self.queue, settings, registry=self.registry
+            )
         else:
             self.dispatcher = BrowserDispatcher(
-                self.store, self.queue, settings, clock=time.clock, sleep=time.sleep
+                self.store,
+                self.queue,
+                settings,
+                registry=self.registry,
+                clock=time.clock,
+                sleep=time.sleep,
             )
+
+    def outcomes(self) -> dict[str, float]:
+        """The non-zero samples of ``text_extraction_browser_dispatch_total`` by outcome."""
+        counts: dict[str, float] = {}
+        for outcome in DISPATCH_OUTCOMES:
+            value = self.registry.get_sample_value(
+                "text_extraction_browser_dispatch_total", {"outcome": outcome}
+            )
+            assert value is not None  # every outcome is exported from the start
+            if value:
+                counts[outcome] = value
+        return counts
 
     async def job_keys(self) -> list[str]:
         return sorted(
@@ -420,3 +441,80 @@ def test_a_released_handover_cannot_be_detached_and_back() -> None:
     assert detached.detach() is True
     assert detached.release() is False
     assert detached.detached is True
+
+
+# --- the dispatch metric (M-10) ----------------------------------------------------------------
+
+
+def test_dispatch_outcomes_are_the_documented_ones() -> None:
+    assert DISPATCH_OUTCOMES == (
+        "rendered",
+        "not_claimed",
+        "no_result",
+        "handed_over",
+        "backend_error",
+    )
+    assert Parts().outcomes() == {}
+
+
+@scenario
+async def test_a_rendered_result_is_counted() -> None:
+    parts = Parts()
+    job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    worker = asyncio.create_task(fake_worker(parts, rendered_result()))
+
+    await asyncio.wait_for(
+        parts.dispatcher.wait(job_id, unblock=False, detached=never_detached), 10
+    )
+    await worker
+
+    assert parts.outcomes() == {"rendered": 1}
+
+
+@scenario
+async def test_an_unclaimed_item_and_a_missing_result_are_counted_apart() -> None:
+    time = FakeTime()
+    parts = Parts(time=time)
+    unclaimed = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    await parts.dispatcher.wait(unclaimed, unblock=False, detached=never_detached)
+    silent = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    await parts.store.mark_running(silent)
+    await parts.dispatcher.wait(silent, unblock=False, detached=never_detached)
+    gone = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    await parts.store.delete(gone)
+    await parts.dispatcher.wait(gone, unblock=False, detached=never_detached)
+
+    assert parts.outcomes() == {"not_claimed": 1, "no_result": 2}
+
+
+@scenario
+async def test_a_hand_over_is_counted() -> None:
+    parts = Parts(time=FakeTime())
+    job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+    await parts.dispatcher.wait(job_id, unblock=False, detached=lambda: True)  # the 202
+    p1 = await parts.store.create("extract", USER, JobOptions(compliance="enforce"), [PAGE])
+    await parts.dispatcher.submit(
+        "extract", ExtractRequest(url=PAGE), USER, "enforce", job_id=p1, draft=fast_draft()
+    )  # the P1 job of a request answered 202 during its fast phase
+
+    assert parts.outcomes() == {"handed_over": 2}
+
+
+@scenario
+async def test_valkey_errors_of_submit_and_wait_are_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parts = Parts()
+    job_id = await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+
+    async def down(*args: object, **kwargs: object) -> None:
+        raise RedisConnectionError("valkey is down")
+
+    monkeypatch.setattr(parts.store, "get", down)
+    with pytest.raises(RedisConnectionError):
+        await parts.dispatcher.wait(job_id, unblock=False, detached=never_detached)
+    monkeypatch.setattr(parts.queue, "enqueue_items", down)
+    with pytest.raises(RedisConnectionError):
+        await parts.dispatcher.submit("extract", ExtractRequest(url=PAGE), USER, "enforce")
+
+    assert parts.outcomes() == {"backend_error": 2}

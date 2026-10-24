@@ -1590,3 +1590,20 @@ def test_a_cookie_chromium_would_refuse_is_422_without_its_value() -> None:
         assert response.json()["error"]["code"] == "invalid_request"
         assert COOKIE_SECRET not in response.text
         assert case.keys("job*") == []
+
+
+def test_the_api_exports_its_sync_dispatch_outcomes() -> None:
+    case = BrowserCase({PAGE: fetched(body=SHELL_WITH_WORDS)}, browser_queue_wait_seconds=0.3)
+    with TestClient(case.app) as client:
+        client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)  # no worker: fast answer
+        with case.worker():
+            client.post("/v1/extract", json={"url": PAGE, "mode": "browser"}, headers=AUTH)
+
+        def outcome(name: str) -> float | None:
+            return case.registry.get_sample_value(
+                "text_extraction_browser_dispatch_total", {"outcome": name}
+            )
+
+        assert outcome("not_claimed") == 1
+        assert outcome("rendered") == 1
+        assert outcome("no_result") == 0  # exported from the start

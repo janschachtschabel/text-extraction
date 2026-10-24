@@ -160,7 +160,7 @@ def create_public_app(
     if settings.browser_enabled:
         app.state.browser_queue = FairQueue(valkey, settings, "browser")
         app.state.browser_dispatcher = BrowserDispatcher(
-            app.state.job_store, app.state.browser_queue, settings
+            app.state.job_store, app.state.browser_queue, settings, registry=registry
         )
         queues.append(app.state.browser_queue)
     app.state.job_metrics = job_metrics_for(registry)
