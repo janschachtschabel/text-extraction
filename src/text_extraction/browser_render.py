@@ -348,8 +348,7 @@ class _Render:
             result = await run_consent(
                 self.page, "optOut", seconds=min(CONSENT_SECONDS, self.left(reserve))
             )
-            if result == "done":
-                await self._after_consent(reserve)
+            await self._after_consent(reserve, grace=result == "done")
             self.raise_kept()
         if actions:
             await self._run_actions(actions, reserve)
@@ -370,14 +369,22 @@ class _Render:
             with contextlib.suppress(*DRIVER_ERRORS):
                 await self.page.wait_for_load_state("networkidle", timeout=idle * 1000)
 
-    async def _after_consent(self, reserve: float) -> None:
+    async def _after_consent(self, reserve: float, *, grace: bool) -> None:
         """A handled banner may reload the page (MediaWiki's saves its choice that way): wait
-        for the reload, which goes through the navigation check, to reach its document."""
+        for the reload to reach its document, then for the network to go idle as after any
+        load. A banner that was handled (``grace``) gets a moment to start the reload; with
+        none under way this costs nothing, and it also covers a consent result lost because
+        the reload destroyed the frame first. The reload goes through the navigation check; one
+        it refuses (the host's outbound limit, say) fails the render, as for any navigation
+        outside the actions."""
+        answers = len(self.answers)
         with contextlib.suppress(TimeoutError):
             async with asyncio.timeout(max(self.left(reserve), 0.0)):
-                await self._navigations_done(True)
+                await self._navigations_done(grace)
         with contextlib.suppress(*DRIVER_ERRORS):
             await self.page.wait_for_load_state("load", timeout=max(self.left(reserve), 0.1) * 1000)
+        if len(self.answers) > answers:
+            await self._idle(reserve)
 
     async def _run_actions(self, actions: tuple[Action, ...], reserve: float) -> None:
         """Run the request's actions (before the reserve for reading the page), then give what

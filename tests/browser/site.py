@@ -174,13 +174,75 @@ if (match) {{
     const other = make('div', 'oo-ui-processDialog-actions-other', foot);
     button(other, 'Alle Cookies akzeptieren', () => choose('all'));
     const detailed = (foot2) => {{
+      const categories = make('div', 'oo-ui-window-body', foot2.parentNode);
+      const required = make('input', '', categories);
+      required.type = 'checkbox';
+      required.checked = true;
+      required.disabled = true;
+      const optional = make('input', '', categories);
+      optional.type = 'checkbox';
+      optional.checked = true;  // this wiki preselects its statistics category
       const primary = make('div', 'oo-ui-processDialog-actions-primary', foot2);
-      button(primary, 'Speichern', () => choose('necessary'));
+      button(primary, 'Speichern', () => choose(optional.checked ? 'statistics' : 'necessary'));
     }};
     button(other, 'Einstellungen verwalten', () => dialog('detailed', 'Manage cookies', detailed));
   }});
 }}"""
     return article(f"<p id='state'></p><script>{script}</script>", title="Dante")
+
+
+_FIXED = "position: fixed; inset: 0; z-index: 9999; background: white"
+# Pages with one dialog each, for what the fallback must remove or leave: the case name, the
+# dialog's markup and its text (a unique sentence the test looks for in the result).
+OVERLAY_CASES: dict[str, tuple[str, str, bool]] = {
+    # name: (markup, text, removed)
+    "static": (
+        "<div role='dialog'><p>{text}</p></div>",
+        "Notes on cookies: this dialog sits in the flow of the page and is not an overlay.",
+        False,
+    ),
+    "long": (
+        f"<div role='dialog' style='{_FIXED}'><p>{{text}}</p><p>{'cookie ' * 320}</p></div>",
+        "A long dialog about cookies, which is the page itself.",
+        False,
+    ),
+    "main": (
+        f"<div role='dialog' style='{_FIXED}'><main><p>{{text}}</p></main></div>",
+        "A dialog with the main content that happens to mention cookies.",
+        False,
+    ),
+    "privacy": (
+        f"<div role='dialog' style='{_FIXED}'><p>{{text}}</p></div>",
+        "Datenschutz und Impressum stehen in der Kopfzeile dieser Seite.",
+        False,
+    ),
+    "newsletter": (
+        f"<div role='dialog' style='{_FIXED}'><p>{{text}}</p><button>Subscribe</button></div>",
+        "By subscribing you consent to receive one email a week from us.",
+        False,
+    ),
+    "hidden": (
+        f"<div role='dialog' style='{_FIXED}; display: none'><p>{{text}}</p></div>",
+        "A cookie dialog that was dismissed and is kept hidden for later.",
+        False,
+    ),
+    "root": (
+        f"<div id='BorlabsCookieBox' style='{_FIXED}'><p>{{text}}</p></div>",
+        "Wir nutzen Dienste von Partnern, um die Seite zu verbessern.",
+        True,
+    ),
+    "wording": (
+        f"<div role='dialog' style='{_FIXED}'><p>{{text}}</p>"
+        "<button>Alle akzeptieren</button><button>Einstellungen</button></div>",
+        "Wir bitten um Ihre Einwilligung zur Verarbeitung Ihrer Daten.",
+        True,
+    ),
+}
+
+
+def _overlay_case_page(case: str) -> bytes:
+    markup, text, _ = OVERLAY_CASES[case]
+    return article(markup.format(text=text), title="Overlay case")
 
 
 def _overlay_page() -> bytes:
@@ -401,7 +463,13 @@ class _Handler(BaseHTTPRequestHandler):
             )
             self._send(page(markup, title="Form"))
         elif path == "/mw-consent":
+            if "delay" in self.path and "cookieconsent_dialog_dismissed" in (
+                self.headers.get("cookie") or ""
+            ):
+                time.sleep(1)  # the reload answers late
             self._send(_mw_consent_page())
+        elif path == "/overlay-case":
+            self._send(_overlay_case_page(self.path.partition("case=")[2]))
         elif path == "/overlay":
             self._send(_overlay_page())
         elif path == "/tall":

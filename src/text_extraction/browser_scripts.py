@@ -17,6 +17,7 @@ from duckduckgo_autoconsent import bundle, rules_json
 _MW_SIMPLE = ".cookie-consent-simple-dialog"
 _MW_DETAILED = ".cookie-consent-detailed-dialog"
 _MW_LINK = "a.oo-ui-buttonElement-button"
+_MW_OPTIONAL = f'{_MW_DETAILED} input[type="checkbox"]:checked:not(:disabled)'
 # The n-th button of the simple dialog's "other" actions, whether the buttons are the container's
 # children or sit in wrappers.
 _MW_OTHER = (
@@ -56,6 +57,12 @@ CUSTOM_CONSENT_RULES: Final[list[dict[str, Any]]] = [
         "optOut": [
             {"waitForThenClick": _MW_OTHER.format(2)},
             {"waitFor": _MW_DETAILED},
+            # Optional categories are off by default; make sure of it before saving.
+            {
+                "if": {"exists": _MW_OPTIONAL},
+                "then": [{"click": _MW_OPTIONAL, "all": True}],
+                "else": [],
+            },
             {"waitForThenClick": f"{_MW_DETAILED} .oo-ui-processDialog-actions-primary {_MW_LINK}"},
         ],
     },
@@ -277,20 +284,41 @@ EXPAND_ALL: Final = """(limit) => {
 MARK_DOCUMENT: Final = "() => { window.__textExtractionMarked = true; }"
 DOCUMENT_MARKED: Final = "() => window.__textExtractionMarked === true"
 
-# Removes what a banner left over that autoconsent could not close: fixed or sticky overlays
-# that are dialogs (``role=dialog``, ``role=alertdialog``, ``aria-modal=true``) or known CMP
-# roots, whose text is about cookies or consent, and that are not the page itself (under
-# ``max_words`` words, no ``main`` or ``article`` inside). A dialog about anything else stays.
-# Then the scroll lock they set goes: the classes that say a modal is open on ``html`` and
-# ``body``, and an ``overflow: hidden`` on them. Answers how many overlays it removed.
+# Removes what a banner left over that autoconsent could not close: visible, fixed or sticky
+# overlays that are dialogs (``role=dialog``, ``role=alertdialog``, ``aria-modal=true``) about
+# cookies or consent, or known CMP roots, that are not the page itself (under ``maxWords`` words
+# of visible text, no ``main``, ``article`` or ``role=main`` inside). A dialog counts as being
+# about cookies when its text names cookies, or names consent (consent, Einwilligung,
+# Zustimmung, privacy settings) and one of its buttons says accept, reject or settings. A
+# dialog about anything else stays, and so does one that is not visible (``strip_hidden``
+# drops those). Then the scroll lock they set goes: the classes that say a modal is open on
+# ``html`` and ``body``, and an ``overflow: hidden`` on them. Answers how many overlays it
+# removed. (``#usercentrics-root`` is left out: its dialog sits in a shadow root, which the
+# page's HTML does not contain.)
 STRIP_CONSENT_OVERLAYS: Final = """(maxWords) => {
-  const roots = ['#onetrust-consent-sdk', '#CybotCookiebotDialog', '#usercentrics-root',
-    '#cookiebanner', '#cookie-banner', '#cookie-consent', '.cookie-consent-dialog',
-    '.cc-window', '#cmpwrapper', '#sp_message_container'];
+  const roots = ['#onetrust-consent-sdk', '#CybotCookiebotDialog', '#cookiebanner',
+    '#cookie-banner', '#cookie-consent', '.cookie-consent-dialog', '.cc-window', '#cmpwrapper',
+    '[id^="sp_message_container"]', '#BorlabsCookieBox', '.cmplz-cookiebanner',
+    '#tarteaucitronRoot', '#cookie-notice', '#CookieConsent', '#cmpbox', '.klaro',
+    '#iubenda-cs-banner', '#didomi-host'];
   const dialogs = '[role="dialog"], [role="alertdialog"], [aria-modal="true"]';
-  const topics = [/(^|[^a-z])cookies?([^a-z]|$)/i, /consent/i, /einwilligung/i, /zustimmung/i,
-    /datenschutzeinstellung/i, /privacy (settings|preferences)/i];
-  const about = (text) => topics.some((topic) => topic.test(text));
+  const cookies = /cookie/i;
+  const consent = new RegExp('consent|einwilligung|zustimmung|datenschutz-?einstellung'
+    + '|privacy (settings|preferences)', 'i');
+  const wording = new RegExp('akzeptieren|ablehnen|zustimmen|einstellungen|accept|reject'
+    + '|decline|preferences', 'i');
+  const visible = (element) => {
+    const box = element.getBoundingClientRect();
+    if (box.width <= 0 || box.height <= 0) return false;
+    if (typeof element.checkVisibility === 'function')
+      return element.checkVisibility({ checkVisibilityCSS: true, visibilityProperty: true });
+    return element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+  };
+  const labels = (element) => Array.from(element.querySelectorAll(
+    'button, a, [role="button"], input[type="button"], input[type="submit"]'))
+    .map((button) => button.value || button.textContent || '').join(' ');
+  const aboutCookies = (element, text) =>
+    cookies.test(text) || (consent.test(text) && wording.test(labels(element)));
   const overlaid = (element) => {
     for (let node = element; node && node !== document.body; node = node.parentElement) {
       const position = getComputedStyle(node).position;
@@ -299,13 +327,16 @@ STRIP_CONSENT_OVERLAYS: Final = """(maxWords) => {
     return false;
   };
   const words = (text) => (text.trim() ? text.trim().split(/[ \\n\\t\\r]+/).length : 0);
+  const known = new Set(document.querySelectorAll(roots.join(', ')));
   let removed = 0;
   for (const element of Array.from(document.querySelectorAll(`${dialogs}, ${roots.join(', ')}`))) {
     if (!element.isConnected || element === document.body || element === document.documentElement)
       continue;
-    const text = element.textContent || '';
-    if (!overlaid(element) || !about(text) || words(text) >= maxWords) continue;
-    if (element.querySelector('main, article')) continue;
+    if (!visible(element) || element.querySelector('main, article, [role="main"]')) continue;
+    const text = element.innerText || '';
+    if (words(text) >= maxWords) continue;
+    if (!known.has(element) && !aboutCookies(element, text)) continue;
+    if (!overlaid(element)) continue;
     element.remove();
     removed += 1;
   }

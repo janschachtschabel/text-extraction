@@ -19,6 +19,7 @@ from tests.browser.site import (
     HIDDEN_TAB,
     NEWSLETTER_TEXT,
     OPTED_OUT,
+    OVERLAY_CASES,
     OVERLAY_TEXT,
     SCRIPT_TEXT,
     SHOWN_CHILD,
@@ -29,6 +30,8 @@ from tests.browser.site import (
 )
 from tests.fakes import FakeArtifacts
 from text_extraction import __version__
+from text_extraction.browser_driver import evaluate_in_main_world
+from text_extraction.browser_scripts import CONSENT_WAIT
 from text_extraction.envelope import ErrorCode
 from text_extraction.fetch import FetchError
 from text_extraction.render import CookieData, Rendered, RenderOptions
@@ -407,6 +410,41 @@ def test_overlay_about_cookies_is_removed_and_other_dialogs_stay(
         assert NEWSLETTER_TEXT in rendered.html
         assert "<body>" in rendered.html  # no scroll lock left on it
         assert "consent_overlay_removed" in rendered.warnings
+
+    scenario(settings_for, site, body)
+
+
+@pytest.mark.parametrize("case", sorted(OVERLAY_CASES))
+def test_overlay_fallback_keeps_what_it_should(
+    settings_for: SettingsFor, site: Site, case: str
+) -> None:
+    _, text, removed = OVERLAY_CASES[case]
+
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/overlay-case?case={case}")
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+        assert ("consent_overlay_removed" in rendered.warnings) is removed
+        # A hidden dialog is no overlay, but the hidden-element strip drops its text.
+        assert (text in rendered.html) is (not removed and case != "hidden")
+
+    scenario(settings_for, site, body)
+
+
+def test_a_lost_consent_result_still_waits_for_the_reload(
+    settings_for: SettingsFor, site: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def lost(target: Any, expression: str, arg: Any = None) -> Any:
+        outcome = await evaluate_in_main_world(target, expression, arg)
+        if expression == CONSENT_WAIT:  # the reload destroyed the frame before the answer
+            raise PlaywrightError("Execution context was destroyed")
+        return outcome
+
+    async def body(stack: Stack) -> None:
+        monkeypatch.setattr(text_extraction.browser_render, "evaluate_in_main_world", lost)
+        rendered = await render(stack, f"{site.base}/mw-consent?delay=1", seconds=25)
+        assert "Cookie consent: necessary" in rendered.html
+        assert COOKIE_DIALOG_TEXT not in rendered.html
+        assert rendered.warnings == ()
 
     scenario(settings_for, site, body)
 
