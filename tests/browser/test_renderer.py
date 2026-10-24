@@ -231,6 +231,23 @@ def test_private_subresources_are_refused_and_page_still_renders(
     scenario(settings_for, site, body)
 
 
+def test_a_cookie_chromium_accepts_is_set_and_sent_as_given(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    # M-5: the request model refuses only what Chromium refuses; real session cookies with
+    # spaces, commas, backslashes or quotes reach the site unchanged.
+    value = 'a b, c\\d "e"'
+    cookies = [{"name": "partner session", "value": value}]
+
+    async def body(stack: Stack) -> None:
+        envelope = await run_pipeline(stack, url=f"{site.base}/static", cookies=cookies)
+        assert envelope.status == "success", envelope.error
+        (seen,) = site.seen(site.base, "/static")
+        assert f"partner session={value}" in seen.headers.get("cookie", "")
+
+    scenario(settings_for, site, body)
+
+
 def test_caller_headers_reach_target_host_only(settings_for: SettingsFor, site: Site) -> None:
     url = f"{site.base}/third-party"
     options = RenderOptions(

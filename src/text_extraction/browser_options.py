@@ -123,21 +123,30 @@ Action = Annotated[
 
 
 _TOKEN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-# RFC 6265 cookie-value: cookie-octets (printable ASCII but space, DQUOTE, comma, semicolon and
-# backslash), optionally in one pair of double quotes. Chromium refuses anything else.
-_COOKIE_OCTETS = r"[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*"
-_COOKIE_VALUE = re.compile(f'{_COOKIE_OCTETS}|"{_COOKIE_OCTETS}"')
-_COOKIE_NAME_MESSAGE = "a cookie name must be a token (letters, digits and !#$%&'*+-.^_`|~)"
-_COOKIE_VALUE_MESSAGE = (
-    "a cookie value may hold printable ASCII except space, double quote, comma, semicolon and "
-    "backslash, optionally in double quotes (RFC 6265)"
+_PRINTABLE_ASCII = re.compile(r"[\x20-\x7e]*")
+# What Chromium's add_cookies refuses (probed on build 1243): a control character (also NUL,
+# TAB, CR, LF) or DEL, a semicolon, a space at either end, a "=" in the name, and a name and
+# value of more than 4096 UTF-8 bytes together. Anything else it sets as given.
+_COOKIE_REFUSED = re.compile(r"[\x00-\x1f\x7f;]")
+MAX_COOKIE_BYTES = 4096
+_COOKIE_NAME_MESSAGE = (
+    "a cookie name must not hold a control character, a semicolon or an equals sign, nor "
+    "start or end with a space"
 )
+_COOKIE_VALUE_MESSAGE = (
+    "a cookie value must not hold a control character or a semicolon, nor start or end with a space"
+)
+_COOKIE_SIZE_MESSAGE = f"a cookie's name and value are at most {MAX_COOKIE_BYTES} bytes together"
+
+
+def _cookie_part_ok(text: str) -> bool:
+    return _COOKIE_REFUSED.search(text) is None and text == text.strip(" ")
 
 
 class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True):
     """A cookie to set before the page loads. ``domain`` defaults to the request URL's host.
-    ``name`` is a token and ``value`` follows RFC 6265, as Chromium requires; an error message
-    never shows the value."""
+    ``name`` and ``value`` are checked against what Chromium refuses, so such a cookie is a
+    422 and not a failed render; an error message never shows the value."""
 
     name: str = Field(min_length=1, max_length=256)
     value: str = Field(max_length=4096, repr=False)
@@ -148,20 +157,25 @@ class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True):
 
     @field_validator("name")
     @classmethod
-    def _token_name(cls, name: str) -> str:
-        if not _TOKEN.fullmatch(name):
+    def _chromium_name(cls, name: str) -> str:
+        if not _cookie_part_ok(name) or "=" in name:
             raise ValueError(_COOKIE_NAME_MESSAGE)
         return name
 
     @field_validator("value")
     @classmethod
-    def _cookie_octets(cls, value: str) -> str:
-        if not _COOKIE_VALUE.fullmatch(value):
+    def _chromium_value(cls, value: str) -> str:
+        if not _cookie_part_ok(value):
             raise ValueError(_COOKIE_VALUE_MESSAGE)
         return value
 
+    @model_validator(mode="after")
+    def _chromium_size(self) -> Self:
+        if len(self.name.encode()) + len(self.value.encode()) > MAX_COOKIE_BYTES:
+            raise ValueError(_COOKIE_SIZE_MESSAGE)
+        return self
 
-_PRINTABLE_ASCII = re.compile(r"[\x20-\x7e]*")
+
 # Set by the browser itself or by the connection; a caller must not override them.
 _REFUSED_HEADERS = frozenset(
     {
@@ -240,9 +254,9 @@ ACTIONS_DESCRIPTION = (
 )
 COOKIES_DESCRIPTION = (
     "Cookies to set before the page loads, at most 50. A `domain` must be the URL's host or a "
-    "parent domain of it. `name` is a token and `value` follows RFC 6265 (printable ASCII "
-    "except space, double quote, comma, semicolon and backslash, optionally in double quotes); "
-    "anything else answers 422. Never logged or shown in a job."
+    "parent domain of it. Name and value must not hold a control character or a semicolon, "
+    "nor start or end with a space, the name no `=`, and both together are at most 4096 "
+    "bytes (what Chromium refuses); otherwise 422. Never logged or shown in a job."
 )
 HEADERS_DESCRIPTION = (
     "Extra request headers, at most 20 (for example `Authorization` for a partner's logged-in "

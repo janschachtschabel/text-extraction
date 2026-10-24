@@ -264,7 +264,7 @@ def test_cookie_domain_must_match_request_host(url: str, domain: str | None, val
 
 
 def test_cookie_limits() -> None:
-    BrowserCookie(name="n" * 256, value="v" * 4096)
+    BrowserCookie(name="n" * 256, value="v" * 3840)  # 4096 bytes together, as Chromium allows
     for name, value in (("n" * 257, "v"), ("n", "v" * 4097)):
         with pytest.raises(ValidationError):
             BrowserCookie(name=name, value=value)
@@ -280,37 +280,69 @@ def test_cookie_limits() -> None:
     )
 
 
+def _short_id(value: object) -> str:
+    return repr(value)[:24]
+
+
+# What Chromium 1243's add_cookies refuses ("Invalid cookie"), probed against the real browser.
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("sid", "a;b"),  # ends the cookie early
-        ("sid", "line\x01"),  # a control character
-        ("sid", "tab\there"),
-        ("sid", "two words"),  # a space
-        ("sid", 'quo"te'),  # a DQUOTE inside
-        ("sid", '"open'),  # an unmatched DQUOTE
-        ("sid", "back\\slash"),
-        ("sid", "com,ma"),
-        ("sid", "caf\u00e9"),  # not ASCII
-        ("a b", "x"),  # a name is a token
-        ("a;b", "x"),
-        ("a=b", "x"),
-        ("n\x7f", "x"),
+        ("sid", "a;b-secret"),  # ends the cookie early
+        ("sid", "nul\x00-secret"),
+        ("sid", "line\x01-secret"),
+        ("sid", "tab\t-secret"),
+        ("sid", "cr\r-secret"),
+        ("sid", "lf\n-secret"),
+        ("sid", "del\x7f-secret"),
+        ("sid", " lead-secret"),  # a space at either end
+        ("sid", "trail-secret "),
+        ("sid", " "),
+        ("a;b", "v-secret"),
+        ("a=b", "v-secret"),  # the first = ends a name
+        ("a\tb", "v-secret"),
+        ("a\x00b", "v-secret"),
+        ("n\x7f", "v-secret"),
+        (" sid", "v-secret"),
+        ("sid ", "v-secret"),
+        ("n", "x" * 4096),  # name and value over 4096 bytes together
+        ("n" * 256, "x" * 3841),
+        ("n", "\u00e9" * 2048),  # counted in UTF-8 bytes
     ],
+    ids=_short_id,
 )
-def test_cookie_name_and_value_follow_rfc_6265(name: str, value: str) -> None:
-    # M-5: Chromium refuses such cookies, which ended as a retryable internal_error.
+def test_cookies_chromium_refuses_are_rejected_without_their_value(name: str, value: str) -> None:
+    # M-5: these made add_cookies fail, which ended as a retryable internal_error.
     with pytest.raises(ValidationError) as info:
         BrowserCookie(name=name, value=value)
-    assert value not in str(info.value) or value == "x"
+    shown = str(info.value)
+    assert "secret" not in shown
+    assert value.strip() == "" or value not in shown
 
 
 @pytest.mark.parametrize(
-    "value",
-    ["", "abc", "a=b", "eyJhbGciOi.J9-_~", '"quoted"', '""', "!#$%&'()*+-./:<=>?@[]^_`{|}~"],
+    ("name", "value"),
+    [
+        ("sid", ""),
+        ("sid", "two words"),  # a space inside
+        ("sid", "com,ma"),
+        ("sid", "back\\slash"),
+        ("sid", 'quo"te'),
+        ("sid", '"quoted value"'),
+        ("sid", "a=b=c"),
+        ("sid", "caf\u00e9 \u00a0nbsp"),
+        ("sid", "{json:[1,2]}"),
+        ("a b", "v"),  # a space inside a name
+        ("n,m", "v"),
+        ("n(m):x", "v"),
+        ("n", "x" * 4095),  # 4096 bytes together
+        ("n", "\u00e9" * 2047),
+    ],
+    ids=_short_id,
 )
-def test_cookie_values_of_cookie_octets_are_accepted(value: str) -> None:
-    assert BrowserCookie(name="sid", value=value).value == value
+def test_cookies_chromium_accepts_are_accepted(name: str, value: str) -> None:
+    cookie = BrowserCookie(name=name, value=value)
+    assert (cookie.name, cookie.value) == (name, value)
 
 
 def test_screenshot_request_shares_the_limits_of_extract_request() -> None:
