@@ -135,7 +135,9 @@ optional rate limit.
 
 - **Browser actions:** `click`, `scroll`, `wait_for`, `type`, `press`, `select`,
   `expand_all`, presets `infinite_scroll`, `accept_cookies`; `cookies` and `headers`
-  for logged-in pages; max 20 actions; `evaluate` admin-only. Stealth (Patchright) opt-in, admin-only.
+  for logged-in pages (headers go only to the requested URL's host and port, also across
+  redirects: requests that carry them are fetched without following redirects, and a redirect
+  of the page becomes a checked navigation); max 20 actions; `evaluate` admin-only. Stealth (Patchright) opt-in, admin-only.
 - **DOM metadata:** extruct (JSON-LD, microdata, RDFa, OpenGraph) + Trafilatura. License
   normalized (e.g. `CC-BY-SA-4.0`) with source and confidence; author, dates, canonical,
   language, LRMI educational fields, images with alt text.

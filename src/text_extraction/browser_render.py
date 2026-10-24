@@ -5,7 +5,8 @@ up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle, the consent opt-
 ``run_consent``), then hidden elements are removed (``strip_hidden``) and the DOM is read; the
 screenshot comes last. Every request passes the route handler: a main-frame navigation after the
 first is sent only after the pipeline's ``NavigationCheck`` (a non-GET one not at all), blocked
-resource types are not loaded, and the caller's headers go only to the request URL's site.
+resource types are not loaded, and the caller's headers go only to the request URL's site,
+also across redirects (``_Render._with_headers``).
 
 The module uses only the Playwright API, which Patchright shares; errors of both drivers are
 caught (``DRIVER_ERRORS``). Logs carry hosts and codes only, never a URL, header or cookie.
@@ -14,14 +15,15 @@ caught (``DRIVER_ERRORS``). Logs carry hosts and codes only, never a URL, header
 import asyncio
 import contextlib
 import contextvars
+import json
 import struct
 from typing import Final, Literal
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PatchrightTimeout
+from playwright.async_api import APIResponse, Frame, Page, Request, Response, Route
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Frame, Page, Request, Response, Route
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from text_extraction.browser_proxy import ProxyContext
@@ -62,6 +64,10 @@ _PROXY_ANSWERS: Final = frozenset({(403, "blocked_address"), (502, "dns_error")}
 # Main-frame load failures that are not the target's: a navigation that a newer one replaced,
 # or one the route handler aborted (its reason is kept separately).
 _NOT_FAILURES: Final = ("net::ERR_ABORTED", "net::ERR_BLOCKED_BY_CLIENT")
+# Redirects of a document that carries the caller's headers, followed one by one (as fetch does).
+_MAX_HOPS: Final = 10
+# Not passed on from a response fetched for the browser: its body arrives decoded and whole.
+_NOT_PASSED: Final = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 
 
 async def render_page(
@@ -165,12 +171,21 @@ class _Render:
         # render task's own context, as if the render had called it.
         task = asyncio.current_task()
         self.context = task.get_context() if task is not None else contextvars.copy_context()
-        self.answers: list[Response] = []  # main-frame document responses, in order
+        # Main-frame document responses in order, each with the redirects turned into navigations
+        # that led to it.
+        self.answers: list[tuple[Response, tuple[str, ...]]] = []
         self.warnings: list[str] = []
         self.refusal: BaseException | None = None  # of the navigation check
         self.failure: tuple[str, str] | None = None  # (URL, error) of a failed document load
         self.download = False
-        self.unanswered: set[Request] = set()  # refused navigations answered with 204
+        # Navigations answered by the route handler itself (a refused non-GET one, a redirect
+        # step of a document with caller headers): not document answers of the render.
+        self.unanswered: set[Request] = set()
+        # URLs whose redirects were turned into navigations, for the next document answer.
+        self.hops: list[str] = []
+        self.hop_count = 0
+        self.settled = asyncio.Event()  # cleared while such a redirect is under way
+        self.settled.set()
         self.first_navigation = True
         self.deadline = 0.0
         self.checks: set[asyncio.Task[None]] = set()
@@ -196,7 +211,7 @@ class _Render:
             raise self._load_error(*self.failure)
 
     def last_status(self) -> int | None:
-        return self.answers[-1].status if self.answers else None
+        return self.answers[-1][0].status if self.answers else None
 
     def left(self, reserve: float = 0.0) -> float:
         return self.deadline - self.loop.time() - reserve
@@ -241,9 +256,28 @@ class _Render:
                 await self.page.wait_for_load_state(
                     "load", timeout=max(self.left(reserve), 0.1) * 1000
                 )
+        await self._settle(reserve)
         self.raise_kept()
 
+    async def _settle(self, reserve: float = 0.0) -> None:
+        """Wait until a redirect turned into a navigation has reached its document."""
+        if self.settled.is_set():
+            return
+        try:
+            async with asyncio.timeout(max(self.left(reserve), 0.0)):
+                await self.settled.wait()
+        except TimeoutError:
+            raise FetchError(
+                ErrorCode.TIMEOUT,
+                "The page did not finish loading in time.",
+                retryable=True,
+                upstream_status=self.last_status(),
+            ) from None
+        with contextlib.suppress(*DRIVER_ERRORS):
+            await self.page.wait_for_load_state("load", timeout=max(self.left(reserve), 0.1) * 1000)
+
     async def _content(self) -> str:
+        await self._settle()
         for _ in range(_CONTENT_ATTEMPTS):
             try:
                 return await self.page.content()
@@ -325,7 +359,7 @@ class _Render:
         """The document answers, without the redirects among them (their URLs become the
         ``redirects`` of the answer they led to)."""
         found: list[MainResponse] = []
-        for answer in self.answers:
+        for answer, before in self.answers:
             request = answer.request
             if request.redirected_to is not None:
                 continue
@@ -343,7 +377,7 @@ class _Render:
                     headers=dict(headers),
                     content_type=media,
                     charset=charset,
-                    redirects=tuple(reversed(hops)),
+                    redirects=(*before, *reversed(hops)),
                 )
             )
         return found
@@ -368,8 +402,10 @@ class _Render:
         if _is_main_document(response.request, self.page) and (
             response.request not in self.unanswered
         ):
-            self.answers.append(response)
+            self.answers.append((response, tuple(self.hops)))
+            self.hops.clear()
             self.failure = None  # a later document arrived after all
+            self.settled.set()
 
     def _on_request_failed(self, request: Request) -> None:
         if not _is_main_document(request, self.page):
@@ -377,6 +413,7 @@ class _Render:
         error = request.failure or ""
         if not any(error.startswith(code) for code in _NOT_FAILURES):
             self.failure = (request.url, error)
+            self.settled.set()
 
     def _on_download(self, _download: object) -> None:
         self.download = True
@@ -394,7 +431,8 @@ class _Render:
             and request.resource_type == "document"
             and request.is_navigation_request()
         ):
-            if frame.page is not self.page:  # a popup or a new tab: never loaded
+            main = frame.page is self.page
+            if not main:  # a popup or a new tab: never loaded
                 await route.abort("blockedbyclient")
                 return
             if self.first_navigation:
@@ -412,15 +450,58 @@ class _Render:
         elif request.resource_type in options.blocked_resources:
             await route.abort("blockedbyclient")
             return
+        else:
+            main = False
         if options.headers and site(request.url) == options.header_host:
-            headers = {
-                name: value
-                for name, value in (await request.all_headers()).items()
-                if not name.startswith(":")
-            }
-            await route.continue_(headers={**headers, **options.headers})
+            await self._with_headers(route, request, main=main)
             return
         await route.continue_()
+
+    async def _with_headers(self, route: Route, request: Request, *, main: bool) -> None:
+        """Send a request on the caller's site with the caller's headers, without letting them
+        follow a redirect elsewhere.
+
+        A header override of ``route.continue_`` would go along with every redirect hop of the
+        request, whatever its host. So the request is fetched through the page's own proxy
+        context (``route.fetch``, redirects not followed) and its answer handed to the browser.
+        A redirect of the main document becomes a navigation to its target, which the route
+        handler sees like any other: checked first, with the headers only on the caller's site.
+        Any other redirect is handed over as it is; the browser follows it without the headers.
+        """
+        headers = {
+            name: value
+            for name, value in (await request.all_headers()).items()
+            if not name.startswith(":")
+        }
+        try:
+            answer = await route.fetch(
+                headers={**headers, **self.options.headers},
+                max_redirects=0,
+                timeout=max(self.left(), 0.1) * 1000,
+            )
+        except DRIVER_TIMEOUTS:
+            await route.abort("timedout")
+            return
+        except DRIVER_ERRORS:  # refused by the proxy, or the target did not answer
+            await route.abort("failed")
+            return
+        target = _redirect_target(request.url, answer) if main else None
+        if target is None:
+            await route.fulfill(
+                response=answer,
+                headers={k: v for k, v in answer.headers.items() if k not in _NOT_PASSED},
+            )
+            return
+        self.unanswered.add(request)
+        if self.hop_count >= _MAX_HOPS:
+            self.failure = (request.url, "net::ERR_TOO_MANY_REDIRECTS")
+            self.settled.set()
+            await route.abort("failed")
+            return
+        self.hop_count += 1
+        self.hops.append(request.url)
+        self.settled.clear()
+        await route.fulfill(status=200, content_type="text/html", body=_hop_page(target))
 
     async def _checked(self, url: str) -> bool:
         """Run the navigation check; False (and the error kept) when it refuses."""
@@ -440,6 +521,7 @@ class _Render:
         except Exception as error:
             if self.refusal is None:
                 self.refusal = error
+            self.settled.set()
             return False
         finally:
             self.checks.discard(task)
@@ -520,6 +602,21 @@ def _refusal_error(reasons: set[str], status: int | None = None) -> FetchError:
         retryable=True,
         upstream_status=status,
     )
+
+
+def _redirect_target(url: str, answer: APIResponse) -> str | None:
+    """The absolute http(s) URL a 3xx answer redirects to; None for any other answer."""
+    location = answer.headers.get("location")
+    if not 300 <= answer.status < 400 or not location:
+        return None
+    target = urljoin(url, location)
+    return target if urlsplit(target).scheme in ("http", "https") else None
+
+
+def _hop_page(target: str) -> str:
+    """A document that goes on to ``target`` at once, replacing itself in the history."""
+    literal = json.dumps(target).replace("<", "\\u003c").replace(">", "\\u003e")
+    return f"<!doctype html><meta charset='utf-8'><script>location.replace({literal});</script>"
 
 
 def _frame_of(request: Request) -> Frame | None:

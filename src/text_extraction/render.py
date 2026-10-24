@@ -65,8 +65,12 @@ class RenderOptions:
     """How to render one page.
 
     ``cookies`` are set before the first navigation; their domains are resolved. ``headers``
-    are added only to requests whose ``site`` equals ``header_host`` (B2 step 5). Resource types
-    in ``blocked_resources`` are not loaded (B3)."""
+    are added only to requests whose ``site`` equals ``header_host`` (B2 step 5), and never
+    follow a redirect elsewhere: such a request is fetched through the page's proxy context
+    without following redirects, a redirect of the main document becomes a navigation that is
+    checked like any other (with the headers again only on that site), and any other redirect
+    is followed by the browser without them. Resource types in ``blocked_resources`` are not
+    loaded (B3)."""
 
     actions: tuple[Action, ...] = field(default=(), repr=False)
     cookies: tuple[CookieData, ...] = field(default=(), repr=False)

@@ -78,7 +78,10 @@ class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         "URL's host or a parent domain of it.",
     )
     headers: Headers = Field(
-        default={}, repr=False, description="Extra request headers, at most 20."
+        default={},
+        repr=False,
+        description="Extra request headers, at most 20. They are sent only to the requested "
+        "URL's host and port, never to other sites, also not across a redirect.",
     )
     compliance: ComplianceMode | None = Field(
         default=None,

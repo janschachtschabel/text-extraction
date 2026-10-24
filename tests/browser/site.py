@@ -169,6 +169,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(b"", status=302, headers={"Location": "/static"})
         elif path == "/redirect-third":
             self._send(b"", status=302, headers={"Location": f"{site.third}/echo-headers"})
+        elif path == "/redirect-same":
+            self._send(b"", status=302, headers={"Location": "/echo-headers"})
         elif path == "/redirect-js":
             self._send(page("<p>Moving on.</p><script>location.href = '/static';</script>"))
         elif path == "/meta-refresh":

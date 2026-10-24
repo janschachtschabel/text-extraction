@@ -209,24 +209,62 @@ def test_caller_headers_reach_target_host_only(settings_for: SettingsFor, site: 
     scenario(settings_for, site, body)
 
 
-@pytest.mark.xfail(
-    reason="Playwright re-applies route.continue_ header overrides to every HTTP redirect hop "
-    "of that request, so a cross-site redirect of the document carries the caller's headers",
-    strict=True,
-)
 def test_caller_headers_do_not_follow_a_redirect_to_another_site(
     settings_for: SettingsFor, site: Site
 ) -> None:
     url = f"{site.base}/redirect-third"
     options = RenderOptions(headers={"x-partner-token": "s3cret"}, header_host=site_key(url))
+    checked: list[str] = []
+
+    async def check(target: str) -> None:
+        checked.append(target)
 
     async def body(stack: Stack) -> None:
-        rendered = await render(stack, url, options)
-        assert rendered.final_url == f"{site.third}/echo-headers"
+        rendered = await render(stack, url, options, check=check)
+        target = f"{site.third}/echo-headers"
+        assert [(r.url, r.status, r.redirects) for r in rendered.responses] == [
+            (target, 200, (url,))
+        ]
+        assert rendered.final_url == target
+        assert checked == [target]  # the hop is checked before it is sent
         (own,) = site.seen(site.base, "/redirect-third")
         assert own.headers["x-partner-token"] == "s3cret"
         (other,) = site.seen(site.third, "/echo-headers")
         assert "x-partner-token" not in other.headers
+
+    scenario(settings_for, site, body)
+
+
+def test_caller_headers_stay_on_a_same_site_redirect(settings_for: SettingsFor, site: Site) -> None:
+    url = f"{site.base}/redirect-same"
+    options = RenderOptions(headers={"x-partner-token": "s3cret"}, header_host=site_key(url))
+
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, url, options)
+        target = f"{site.base}/echo-headers"
+        assert [(r.url, r.status, r.redirects) for r in rendered.responses] == [
+            (target, 200, (url,))
+        ]
+        assert "x-partner-token: s3cret" in rendered.html
+        assert [s.headers.get("x-partner-token") for s in site.seen(site.base)] == [
+            "s3cret",
+            "s3cret",
+        ]
+
+    scenario(settings_for, site, body)
+
+
+def test_requests_with_caller_headers_still_pass_the_egress_proxy(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    url = f"{site.forbidden}/static"
+    options = RenderOptions(headers={"x-partner-token": "s3cret"}, header_host=site_key(url))
+
+    async def body(stack: Stack) -> None:
+        with pytest.raises(FetchError) as caught:
+            await render(stack, url, options)
+        assert caught.value.code is ErrorCode.BLOCKED_URL
+        assert site.seen(site.forbidden) == []
 
     scenario(settings_for, site, body)
 

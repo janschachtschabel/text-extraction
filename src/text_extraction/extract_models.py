@@ -73,7 +73,9 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
     headers: Headers = Field(
         default={},
         repr=False,
-        description="Extra request headers for the browser, at most 20. Not with `mode: fast`.",
+        description="Extra request headers for the browser, at most 20. They are sent only to "
+        "the requested URL's host and port, never to other sites, also not across a redirect. "
+        "Not with `mode: fast`.",
     )
     screenshot: bool = Field(
         default=False, description="Also capture a screenshot. Not with `mode: fast`."
