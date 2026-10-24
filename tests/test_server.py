@@ -101,23 +101,30 @@ def test_ready_follows_the_public_listener_and_drains_on_sigterm() -> None:
 
     async def scenario() -> dict[str, object]:
         seen: dict[str, object] = {}
-        serving = asyncio.create_task(_serve(public, internal, readiness, drain_seconds=2.0))
+        # A drain far longer than any probe below: nothing races against its end. The
+        # second signal cuts it short.
+        serving = asyncio.create_task(_serve(public, internal, readiness, drain_seconds=60.0))
         async with httpx.AsyncClient(trust_env=False) as client:
-            # Before the public listener is up, /ready must never say ready.
+            # /ready is asked first: once it says ready, the public listener must already
+            # answer. Asking /ping first would let the server finish starting in between.
             early: list[int | None] = []
             deadline = time.monotonic() + 20
-            while await status_of(client, ping_url) != 200:
-                assert time.monotonic() < deadline, "the public server did not start"
-                early.append(await status_of(client, ready_url))
+            while (ready := await status_of(client, ready_url)) != 200:
+                assert time.monotonic() < deadline, "the service never became ready"
+                early.append(ready)
                 await asyncio.sleep(0.05)
             seen["early"] = early
-            seen["ready"] = await status_of(client, ready_url)
+            seen["ping_once_ready"] = await status_of(client, ping_url)
 
             os.kill(os.getpid(), signal.SIGTERM)
-            await asyncio.sleep(0.5)
-            seen["draining_ready"] = await status_of(client, ready_url)
+            deadline = time.monotonic() + 20
+            while (draining := await status_of(client, ready_url)) == 200:
+                assert time.monotonic() < deadline, "/ready did not follow SIGTERM"
+                await asyncio.sleep(0.05)
+            seen["draining_ready"] = draining
             seen["draining_ping"] = await status_of(client, ping_url)
 
+            os.kill(os.getpid(), signal.SIGTERM)  # a second signal ends the drain early
             async with asyncio.timeout(30):
                 await serving
             seen["after_ping"] = await status_of(client, ping_url)
@@ -127,9 +134,8 @@ def test_ready_follows_the_public_listener_and_drains_on_sigterm() -> None:
 
     early = seen["early"]
     assert isinstance(early, list)
-    assert 503 in early
-    assert 200 not in early
-    assert seen["ready"] == 200
+    assert 503 in early  # the internal listener was up, the public one still starting
+    assert seen["ping_once_ready"] == 200
     assert seen["draining_ready"] == 503  # out of the load balancer first ...
     assert seen["draining_ping"] == 200  # ... while requests are still served
     assert seen["after_ping"] is None
