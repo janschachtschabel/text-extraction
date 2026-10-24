@@ -29,7 +29,7 @@ from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pipeline import create_pipeline
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
-from text_extraction.worker import Worker
+from text_extraction.worker import ExtractRunner, Worker
 
 KEYS = {"alice": "alice-key-raw-secret", "bob": "bob-key-raw-secret", "root": "root-key-raw-secret"}
 ROLES = {"alice": "user", "bob": "user", "root": "admin"}
@@ -91,11 +91,17 @@ class Api:
         async def process(valkey: FakeAsyncRedis) -> int:
             registry = CollectorRegistry()
             fetcher = cast(Fetcher, FakeFetcher(answers or {PAGE: fetched(body=ARTICLE)}))
+            store = JobStore(valkey, self.settings)
             worker = Worker(
                 self.settings,
                 valkey,
-                create_pipeline(self.settings, valkey, fetcher, registry),
-                JobStore(valkey, self.settings),
+                ExtractRunner(
+                    create_pipeline(self.settings, valkey, fetcher, registry),
+                    store,
+                    self.settings,
+                    None,
+                ),
+                store,
                 FairQueue(valkey, self.settings),
                 registry,
             )

@@ -62,7 +62,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `BROWSER_ENABLED` | `false` | Switch browser mode on. Off, `mode: browser` answers `status: failed` and `mode: auto` keeps the fast result with the warning `browser_unavailable`. The image of an API pod has no browser; it needs the browser worker image. |
 | `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. 5 to 120. |
 | `BROWSER_QUEUE_WAIT_SECONDS` | `10` | Longest wait for a free browser slot, in seconds. 0 to 60. |
-| `BROWSER_CONCURRENCY` | `4` | Pages one pod renders at the same time. Minimum 1. |
+| `BROWSER_CONCURRENCY` | `4` | Pages one browser worker pod (`text-extraction-browser-worker`) renders at the same time, standard and unblock mode together; also its number of job slots (`WORKER_CONCURRENCY` does not apply there). Minimum 1. |
 | `BROWSER_IDLE_WAIT_SECONDS` | `8` | Longest time a page is given to become quiet (no network traffic) after it has loaded, in seconds. 0 to 30. |
 | `BROWSER_RECYCLE_AFTER_PAGES` | `200` | Pages a browser process renders before it is restarted, to bound its memory. Minimum 1. |
 | `BROWSER_MAX_BYTES` | `50000000` | Largest total of all responses one page may load, in bytes. Minimum 1000000. |

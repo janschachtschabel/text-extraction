@@ -87,7 +87,7 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.escalation import better, needs_browser, unblock_applies
+from text_extraction.escalation import better, needs_browser, unblock_for
 from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
@@ -408,8 +408,7 @@ class Pipeline:
             raise_refusals=gate_refusals == "raise",
             cacheable=cacheable,
             private=private,
-            # Unblock mode is for admins only, even where the operator's default is ``ignore``.
-            unblock=principal.role == "admin" and unblock_applies(mode, self._settings),
+            unblock=unblock_for(principal, mode, self._settings),
             admin=principal.role == "admin",
             draft=draft if req.mode == "auto" else None,
             artifacts=artifacts,

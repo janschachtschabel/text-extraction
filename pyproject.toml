@@ -30,6 +30,7 @@ dependencies = [
 [project.scripts]
 text-extraction = "text_extraction.server:main"
 text-extraction-worker = "text_extraction.worker:main"
+text-extraction-browser-worker = "text_extraction.browser_worker:main"
 
 [project.optional-dependencies]
 browser = [

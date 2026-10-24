@@ -19,6 +19,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from tests.fakes import Answer, FakeFetcher, RefusingGate, fetched
+from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.envelope import Envelope, ErrorCode
@@ -36,7 +37,7 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
 from text_extraction.settings import Settings
-from text_extraction.worker import Worker, _serve, build_worker, main
+from text_extraction.worker import ExtractRunner, Worker, _serve, build_worker, main
 
 START = 1_000_000.0
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -118,10 +119,18 @@ class Harness:
         )
         self.store = JobStore(self.valkey, self.settings, clock=self.clock)
         self.queue = (make_queue or default_queue)(self.valkey, self.settings, self.clock)
+        # The browser pool's queue, which escalating ``auto`` items move to (B5).
+        self.browser_queue = FairQueue(self.valkey, self.settings, "browser", clock=self.clock)
+        self.runner = ExtractRunner(
+            self.pipeline,
+            self.store,
+            self.settings,
+            self.browser_queue if self.settings.browser_enabled else None,
+        )
         self.worker = Worker(
             self.settings,
             self.valkey,
-            self.pipeline,
+            self.runner,
             self.store,
             self.queue,
             self.registry,
@@ -926,7 +935,12 @@ async def test_worker_stores_results_but_skips_cache_writes_while_memory_is_high
         harness.registry,
     )
     harness.worker = Worker(
-        settings, valkey, pipeline, harness.store, harness.queue, harness.registry
+        settings,
+        valkey,
+        ExtractRunner(pipeline, harness.store, settings, None),
+        harness.store,
+        harness.queue,
+        harness.registry,
     )
     job_id = await harness.submit([url])
 
@@ -942,7 +956,9 @@ def test_worker_process_wires_one_guard_into_cache_and_registry() -> None:
     registry = CollectorRegistry()
     parts = build_worker(make_settings(), FakeAsyncRedis(), registry)
     try:
-        assert parts.worker._pipeline._cache._guard is parts.guard
+        runner = parts.worker._runner
+        assert isinstance(runner, ExtractRunner)
+        assert runner._pipeline._cache._guard is parts.guard
         assert parts.guard in registry._collector_to_names
         assert "text_extraction_valkey_used_memory_bytes" in registry._names_to_collectors
     finally:
@@ -973,3 +989,165 @@ async def test_serve_runs_the_guard_while_the_worker_runs() -> None:
         await serving
 
     assert not guard.running
+
+
+# --- auto escalation to the browser pool (B5) --------------------------------------------------
+
+
+ADMIN = Principal(name="root", role="admin", rate_limit_per_minute=None)
+
+
+async def browser_list(valkey: FakeAsyncRedis, domain: str, client: str = "alice") -> list[str]:
+    raw = await valkey.lrange(f"q:{{browser}}:c:{client}:d:{domain}", 0, -1)
+    return [os.fsdecode(value) for value in raw]
+
+
+@scenario
+async def test_existing_worker_tests_pass_with_extract_runner() -> None:
+    """The harness above runs every package-3 scenario through the ``ExtractRunner``; its lease
+    is the extract pool's."""
+    harness = Harness()
+
+    assert isinstance(harness.worker._runner, ExtractRunner)
+    assert harness.runner.lease_seconds == harness.settings.extract_timeout_seconds * 2 + 10
+    assert harness.worker._lease_seconds == harness.runner.lease_seconds
+
+
+@scenario
+async def test_auto_item_needing_browser_moves_to_browser_pool_with_draft() -> None:
+    plain, shell = page("example.org", 0), page("example.org", 1)
+    harness = Harness({plain: fetched(plain), shell: fetched(shell, SHELL)}, browser_enabled=True)
+    job_id = await harness.submit([plain, shell])
+
+    for _ in range(2):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    # Completed in ``extract`` without a result ...
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    first, second = await harness.items(job_id)
+    assert first.state == "done"
+    assert (second.state, second.result) == ("pending", None)
+    assert not await harness.completed(job_id)
+    # ... and queued in ``browser`` with the same index, under the job's client.
+    assert await browser_list(harness.valkey, "example.org") == [f"{job_id}:1:0"]
+    draft = await harness.store.draft(job_id, 1)
+    assert draft is not None
+    assert draft.data is not None
+    assert (draft.data.mode_used, draft.data.url) == ("fast", shell)
+    assert draft.data.quality is not None
+    assert draft.data.quality.browser_recommended
+    assert await harness.store.draft(job_id, 0) is None
+    assert outcome_count(harness, "escalated") == 1
+    assert outcome_count(harness, "success") == 1
+    # B5: a result that escalates is neither cached nor fingerprinted by the fast run.
+    assert len(await harness.valkey.keys("res:*")) == 1
+
+
+@scenario
+async def test_no_move_when_browser_disabled() -> None:
+    shell = page("example.org", 1)
+    harness = Harness({shell: fetched(shell, SHELL)})
+    job_id = await harness.submit([shell])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.mode_used == "fast"
+    assert await harness.completed(job_id)
+    assert (await harness.browser_queue.counts()).pending == 0
+    assert await harness.store.draft(job_id, 0) is None
+    assert outcome_count(harness, "escalated") == 0
+
+
+@pytest.mark.parametrize("mode", ["fast", "browser"])
+@scenario
+async def test_only_auto_items_move(mode: str) -> None:
+    shell = page("example.org", 1)
+    harness = Harness({shell: fetched(shell, SHELL)}, browser_enabled=True)
+    options = JobOptions(mode=mode, compliance="enforce")  # type: ignore[arg-type]
+    job_id = await harness.store.create("batch", OWNER, options, [shell])
+    await harness.queue.enqueue(job_id, OWNER.name, [shell])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert await harness.completed(job_id)
+    assert (await harness.browser_queue.counts()).pending == 0
+
+
+@pytest.mark.parametrize(
+    ("owner", "compliance", "unblock_enabled", "moves"),
+    [
+        (ADMIN, "ignore", True, True),
+        (ADMIN, "ignore", False, False),
+        (ADMIN, "enforce", True, False),
+        # R9: unblock needs an admin owner, even where the operator's default is ``ignore``.
+        (OWNER, "ignore", True, False),
+    ],
+)
+@scenario
+async def test_bot_wall_moves_only_for_admin_ignore_jobs_with_unblock(
+    owner: Principal, compliance: str, unblock_enabled: bool, moves: bool
+) -> None:
+    wall = page("example.org", 2)
+    harness = Harness(
+        {wall: fetched(wall, CHALLENGE_PAGE, status=403)},
+        browser_enabled=True,
+        browser_unblock_enabled=unblock_enabled,
+        compliance_default=compliance,
+    )
+    options = JobOptions(mode="auto", compliance=compliance)  # type: ignore[arg-type]
+    job_id = await harness.store.create("batch", owner, options, [wall])
+    await harness.queue.enqueue(job_id, owner.name, [wall])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert (await harness.browser_queue.counts()).pending == (1 if moves else 0)
+    assert await harness.completed(job_id) is not moves
+    if not moves:  # the fast answer stays: the bot wall's 403, not a refused compliance mode
+        [item] = await harness.items(job_id)
+        assert error_of(item)[0] == ErrorCode.TARGET_HTTP_ERROR
+
+
+@scenario
+async def test_move_of_an_expired_job_drops_the_item() -> None:
+    harness = Harness(browser_enabled=True)
+    shell = page("example.org", 1)
+
+    class Expiring:
+        """Runs the real pipeline on a shell page, while the job expires meanwhile."""
+
+        async def run(self, req: ExtractRequest, principal: Principal, **kwargs: Any) -> Any:
+            await harness.store.delete(job_id)
+            return await real.run(req, principal, **kwargs)
+
+    real = Harness({shell: fetched(shell, SHELL)}, browser_enabled=True).pipeline
+    harness.runner._pipeline = Expiring()  # type: ignore[assignment]
+    job_id = await harness.submit([shell])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert (await harness.browser_queue.counts()).pending == 0
+    assert (await harness.queue.counts()).leased == 0
+    assert outcome_count(harness, "lost") == 1
+
+
+@scenario
+async def test_move_after_a_lost_lease_is_not_counted() -> None:
+    shell = page("example.org", 1)
+    harness = Harness({shell: fetched(shell, SHELL)}, browser_enabled=True)
+    await harness.submit([shell])
+    stale = (await harness.claim()).item
+    harness.clock.now += harness.lease_seconds + 1
+    current = (await harness.claim()).item
+    assert stale is not None
+    assert current is not None
+
+    await harness.worker.process(current)
+    await harness.worker.process(stale)  # wakes up late and moves it as well
+
+    assert outcome_count(harness, "escalated") == 1
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)

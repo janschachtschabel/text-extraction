@@ -8,6 +8,7 @@ import pytest
 from fakeredis import FakeAsyncRedis
 
 from text_extraction.auth import Principal
+from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
 from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
@@ -19,6 +20,13 @@ START = 1_000_000.0
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 OPTIONS = JobOptions(mode="fast", format="text", metadata=False, links=True, compliance="report")
 URLS = [f"https://example.org/page-{n}" for n in range(5)]
+BROWSER_OPTIONS = JobOptions(mode="browser", compliance="enforce")
+SECRETS = BrowserSecrets(
+    actions=[ClickAction(type="click", selector="#more")],
+    cookies=[BrowserCookie(name="session", value="cookie-secret-1")],
+    headers={"authorization": "Bearer header-secret-1"},
+)
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256))
 
 
 def scenario(test: Callable[[], Coroutine[Any, Any, None]]) -> Callable[[], None]:
@@ -371,13 +379,24 @@ async def test_running_job_with_expired_lease() -> None:
 async def test_all_job_keys_share_one_hash_tag() -> None:
     valkey = FakeAsyncRedis()
     store = make_store(valkey)
-    job_id = await create_job(store)
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+    await store.put_draft(job_id, 0, success())
+    await store.put_artifact(job_id, "screenshot.png", PNG)
     await store.write_result(job_id, 0, success())
 
     keys = sorted([key.decode() async for key in valkey.scan_iter(match="job:*")])
 
     assert keys == sorted(
-        f"job:{{{job_id}}}:{kind}" for kind in ("meta", "urls", "results", "done")
+        f"job:{{{job_id}}}:{kind}"
+        for kind in (
+            "meta",
+            "urls",
+            "results",
+            "done",
+            "secrets",
+            "drafts",
+            "artifact:screenshot.png",
+        )
     )
     assert {re.search(r"\{([^}]*)\}", key).group(1) for key in keys} == {job_id}  # type: ignore[union-attr]
 
@@ -395,3 +414,137 @@ async def test_create_keeps_the_creators_trace_id() -> None:
     assert traced_record.trace_id == "trace-42"
     assert plain_record is not None
     assert plain_record.trace_id is None
+
+
+# --- browser jobs: secrets, drafts and artifacts -------------------------------------------------
+
+
+@scenario
+async def test_secrets_round_trip_and_ttl() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(
+        valkey, browser_timeout_seconds=30, browser_queue_wait_seconds=10, job_ttl_seconds=86400
+    )
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+
+    assert await store.secrets(job_id) == SECRETS
+    ttl = await valkey.ttl(f"job:{{{job_id}}}:secrets")
+    assert 2 * 30 + 10 + 60 - 5 <= ttl <= 2 * 30 + 10 + 60  # B6
+
+    await store.drop_secrets(job_id)
+
+    assert await store.secrets(job_id) == BrowserSecrets()
+    assert await valkey.exists(f"job:{{{job_id}}}:secrets") == 0
+    assert await store.secrets("f" * 32) == BrowserSecrets()  # an unknown job has none
+
+
+@scenario
+async def test_empty_secrets_store_no_key() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create(
+        "extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=BrowserSecrets()
+    )
+
+    assert await valkey.exists(f"job:{{{job_id}}}:secrets") == 0
+    assert (await store.secrets(job_id)).empty()
+
+
+@scenario
+async def test_secrets_not_in_job_view() -> None:
+    store = make_store(FakeAsyncRedis())
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+    await store.write_result(job_id, 0, success())
+
+    record = await store.get(job_id)
+    items = await store.items(job_id, 0, 10)
+
+    shown = repr(record) + "".join(item.model_dump_json() for item in items)
+    for secret in ("cookie-secret-1", "header-secret-1", "#more", "authorization"):
+        assert secret not in shown
+    assert "cookie-secret-1" not in repr(await store.secrets(job_id))  # not even in a repr
+
+
+@scenario
+async def test_draft_round_trip() -> None:
+    valkey = FakeAsyncRedis()
+    clock = Clock()
+    store = make_store(valkey, clock, job_ttl_seconds=600)
+    job_id = await create_job(store)
+    clock.now += 100
+    draft = success(URLS[1], "A draft of the page")
+
+    await store.put_draft(job_id, 1, draft)
+
+    assert await store.draft(job_id, 1) == draft
+    assert await store.draft(job_id, 0) is None
+    assert await store.draft("f" * 32, 1) is None
+    # The drafts live as long as the job: they take its remaining TTL.
+    assert 0 < await valkey.ttl(f"job:{{{job_id}}}:drafts") <= 600
+
+
+@scenario
+async def test_draft_of_an_expired_job_raises_job_lost() -> None:
+    store = make_store(FakeAsyncRedis())
+    with pytest.raises(JobLost):
+        await store.put_draft("f" * 32, 0, success())
+
+
+@scenario
+async def test_artifact_round_trip_and_ttl() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, artifact_ttl_seconds=3600)
+    job_id = await create_job(store, kind="screenshot")
+
+    expires_at = await store.put_artifact(job_id, "screenshot.png", PNG)
+
+    assert await store.artifact(job_id, "screenshot.png") == PNG
+    assert await store.artifact(job_id, "other.png") is None
+    assert await store.artifact("f" * 32, "screenshot.png") is None
+    assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:screenshot.png") <= 3600
+    assert expires_at.timestamp() == START + 3600
+    assert expires_at.utcoffset() is not None
+
+
+@scenario
+async def test_artifact_needs_a_job_and_a_safe_name() -> None:
+    store = make_store(FakeAsyncRedis())
+    job_id = await create_job(store)
+
+    with pytest.raises(JobLost):
+        await store.put_artifact("f" * 32, "screenshot.png", PNG)
+    for name in ("../meta", "Screenshot.PNG", "", "a" * 65, "x:y"):
+        with pytest.raises(ValueError, match="artifact name"):
+            await store.put_artifact(job_id, name, PNG)
+        with pytest.raises(ValueError, match="artifact name"):
+            await store.artifact(job_id, name)
+
+
+@scenario
+async def test_delete_removes_secrets_drafts_and_artifacts() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+    await store.put_draft(job_id, 0, success())
+    await store.put_artifact(job_id, "screenshot.png", PNG)
+    await store.write_result(job_id, 0, success())
+
+    await store.delete(job_id)
+
+    assert [key async for key in valkey.scan_iter(match="job:*")] == []
+
+
+@scenario
+async def test_clear_lease_keeps_the_job_running_without_a_claim() -> None:
+    clock = Clock()
+    store = make_store(FakeAsyncRedis(), clock)
+    job_id = await create_job(store)
+    await store.mark_running(job_id, lease_seconds=30)
+
+    await store.clear_lease(job_id)
+
+    record = await store.get(job_id)
+    assert record is not None
+    assert (record.state, record.lease_until) == ("running", None)
+    with pytest.raises(JobLost):
+        await store.clear_lease("f" * 32)

@@ -6,6 +6,7 @@ the browser calls them. ``unblock_applies`` says whether unblock mode may be use
 
 from typing import Literal
 
+from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult
@@ -65,3 +66,10 @@ def better(
 def unblock_applies(mode: ComplianceMode, settings: Settings) -> bool:
     """Unblock mode needs the compliance checks switched off and the operator's consent."""
     return mode == "ignore" and settings.browser_unblock_enabled
+
+
+def unblock_for(principal: Principal, mode: ComplianceMode, settings: Settings) -> bool:
+    """Whether unblock mode applies to a request of ``principal`` under the resolved ``mode``:
+    ``unblock_applies``, and for admins only, even where the operator's default is ``ignore``
+    (R9). A job's items run with its owner as the principal."""
+    return principal.role == "admin" and unblock_applies(mode, settings)

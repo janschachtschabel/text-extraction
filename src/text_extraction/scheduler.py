@@ -474,10 +474,15 @@ class FairQueue:
 
     async def enqueue(self, job_id: str, client: str, urls: list[str]) -> None:
         """Queue the items ``0 … len(urls) - 1`` of a job for ``client``, in index order."""
+        await self.enqueue_items(job_id, client, list(enumerate(urls)))
+
+    async def enqueue_items(self, job_id: str, client: str, items: list[tuple[int, str]]) -> None:
+        """Queue the given ``(index, url)`` items of a job for ``client``, in the given order:
+        an item that moves to this pool from another one keeps its index."""
         token = _escape(client)
-        for start in range(0, len(urls), _ENQUEUE_CHUNK):
+        for start in range(0, len(items), _ENQUEUE_CHUNK):
             args: list[str] = [self._prefix, token]
-            for index, url in enumerate(urls[start : start + _ENQUEUE_CHUNK], start):
+            for index, url in items[start : start + _ENQUEUE_CHUNK]:
                 args += [_escape(domain_of(url)), f"{job_id}:{index}:0"]
             await self._enqueue(keys=self._keys, args=args)
 
