@@ -114,6 +114,29 @@ CONSENT_WAIT: Final = """({ opt, timeoutMs, again }) => new Promise((resolve) =>
   else if (finished.includes(state.lifecycle)) finish(state.lifecycle);
 })"""
 
+# An init script (it runs in every document before the page's own scripts): removes each
+# speculation rules script as soon as it is in the document, before Chromium acts on it. A
+# prefetched or prerendered document is fetched outside the page's requests, and a navigation
+# to it would use it without passing the route handler and the navigation check (probed with
+# Chromium 153; no launch flag turned this off). Rules from a ``Speculation-Rules`` header
+# are refused in the route handler instead.
+NO_SPECULATION: Final = """(() => {
+  const drop = (node) => {
+    if (node.nodeName === 'SCRIPT'
+        && (node.getAttribute('type') || '').trim().toLowerCase() === 'speculationrules') {
+      node.remove();
+    }
+  };
+  new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        drop(node);
+        if (node.querySelectorAll) node.querySelectorAll('script').forEach(drop);
+      }
+    }
+  }).observe(document, { childList: true, subtree: true });
+})();"""
+
 # Removes what a reader cannot see, while the page can still compute styles: the static HTML
 # keeps inactive tabs and panels that a converter cannot tell from visible text.
 # - ``display: none`` hides a whole subtree (no descendant can show itself again);

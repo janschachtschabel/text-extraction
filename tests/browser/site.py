@@ -7,6 +7,7 @@ tell what the browser sent and to whom.
 """
 
 import contextlib
+import json
 import threading
 import time
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ SHOWN_CHILD = "A visible child inside a hidden parent stays on the page."
 OPTED_OUT = "The visitor confirmed the selection without statistics."
 CHALLENGE_TEXT = "Checking your browser before accessing the site."
 FORM_TEXT = "The form on this page posts itself as soon as the page has loaded."
+# The page /speculation and /speculation-header speculate on, and then navigate to.
+SPECULATED = "/static?via=speculation"
 PDF = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n"
 PIXEL = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
@@ -169,6 +172,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(b"", status=302, headers={"Location": "/static"})
         elif path == "/redirect-third":
             self._send(b"", status=302, headers={"Location": f"{site.third}/echo-headers"})
+        elif path == "/loop":
+            self._send(b"", status=302, headers={"Location": "/loop"})
         elif path == "/redirect-same":
             self._send(b"", status=302, headers={"Location": "/echo-headers"})
         elif path == "/redirect-js":
@@ -259,6 +264,29 @@ class _Handler(BaseHTTPRequestHandler):
                     page(f"<p>{CHALLENGE_TEXT}</p>{script}", title="Just a moment..."),
                     status=503,
                 )
+        elif path in ("/speculation", "/speculation-header"):
+            # Speculation rules fetch documents outside the page's requests; the page then
+            # navigates to the speculated URL, which must still pass the navigation check.
+            rules = json.dumps(
+                {
+                    "prefetch": [{"source": "list", "urls": [SPECULATED]}],
+                    "prerender": [{"source": "list", "urls": [SPECULATED]}],
+                }
+            )
+            inline = f"<script type='speculationrules'>{rules}</script>"
+            later = (
+                f"<script>setTimeout(() => {{ location.href = '{SPECULATED}'; }}, 300);</script>"
+            )
+            if path == "/speculation":
+                self._send(article(inline + later, title="Speculation"))
+            else:
+                headers = {"Speculation-Rules": '"/rules.json"'}
+                self._send(article(later, title="Speculation"), headers=headers)
+        elif path == "/rules.json":
+            listed = {"prefetch": [{"source": "list", "urls": [SPECULATED]}]}
+            self._send(
+                json.dumps(listed).encode(), content_type="application/speculationrules+json"
+            )
         elif path == "/download.pdf":
             self._send(
                 PDF,

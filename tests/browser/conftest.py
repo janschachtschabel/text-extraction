@@ -22,18 +22,13 @@ from urllib.parse import urlsplit
 
 import pytest
 from fakeredis import FakeAsyncRedis
-from playwright.async_api import Browser, BrowserContext, async_playwright
+from playwright.async_api import Browser, async_playwright
 from prometheus_client import CollectorRegistry
 
 from tests.browser.site import Site
 from tests.fakes import FakeArtifacts, FakeFetcher
 from text_extraction.auth import Principal
-from text_extraction.browser import (
-    BrowserPool,
-    ChromiumRenderer,
-    PageProxy,
-    PlaywrightLauncher,
-)
+from text_extraction.browser import BrowserPool, ChromiumRenderer, PlaywrightLauncher
 from text_extraction.browser_proxy import EgressProxy, _Refusal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.envelope import Envelope
@@ -42,7 +37,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline
-from text_extraction.render import ArtifactSink, RenderOptions
+from text_extraction.render import ArtifactSink
 from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
 
@@ -116,15 +111,12 @@ class RecordingLauncher(PlaywrightLauncher):
         self.browsers: list[Browser] = []
         self.launch_delay = 0.0  # seconds before each launch
 
-    async def open(
-        self, browser: Browser | None, proxy: PageProxy, options: RenderOptions
-    ) -> tuple[Browser | None, BrowserContext]:
-        if browser is None and self.launch_delay:
+    async def _launch(self, proxy_url: str) -> Browser:
+        if self.launch_delay:
             await asyncio.sleep(self.launch_delay)
-        opened, context = await super().open(browser, proxy, options)
-        if opened is not None and opened is not browser:
-            self.browsers.append(opened)
-        return opened, context
+        browser = await super()._launch(proxy_url)
+        self.browsers.append(browser)
+        return browser
 
 
 @dataclass

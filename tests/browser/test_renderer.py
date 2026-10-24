@@ -6,7 +6,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
+from playwright.async_api import Browser, BrowserContext
+from playwright.async_api import Error as PlaywrightError
 
+import text_extraction.browser_render
 from tests.browser.conftest import Stack, open_stack, run_pipeline
 from tests.browser.site import (
     ARTICLE_TEXT,
@@ -16,6 +19,7 @@ from tests.browser.site import (
     OPTED_OUT,
     SCRIPT_TEXT,
     SHOWN_CHILD,
+    SPECULATED,
     VISIBLE_TAB,
     XHR_TEXT,
     Site,
@@ -269,6 +273,64 @@ def test_requests_with_caller_headers_still_pass_the_egress_proxy(
     scenario(settings_for, site, body)
 
 
+def test_redirect_loop_is_a_target_error(settings_for: SettingsFor, site: Site) -> None:
+    url = f"{site.base}/loop"
+    with_headers = RenderOptions(headers={"x-partner-token": "s3cret"}, header_host=site_key(url))
+
+    async def body(stack: Stack) -> None:
+        for options in (with_headers, RenderOptions()):  # hops of our own, and Chromium's
+            with pytest.raises(FetchError) as caught:
+                await render(stack, url, options)
+            assert caught.value.code is ErrorCode.TARGET_HTTP_ERROR
+            assert not caught.value.retryable
+        assert len(site.seen(site.base, "/loop")) <= 11 + 21  # ten hops of ours, 20 of Chromium
+
+    scenario(settings_for, site, body)
+
+
+def test_a_fault_in_the_route_handler_ends_the_render_at_once(
+    settings_for: SettingsFor, site: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = f"{site.base}/static"
+    options = RenderOptions(headers={"x-partner-token": "s3cret"}, header_host=site_key(url))
+
+    def broken(_url: str) -> str:
+        raise RuntimeError("a bug")
+
+    async def body(stack: Stack) -> None:
+        monkeypatch.setattr(text_extraction.browser_render, "site", broken)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(FetchError) as caught:
+            await render(stack, url, options, seconds=15)
+        assert caught.value.code is ErrorCode.INTERNAL_ERROR
+        assert caught.value.retryable
+        assert loop.time() - started < 5  # not left hanging until the deadline
+        assert site.seen(site.base) == []
+
+    scenario(settings_for, site, body)
+
+
+@pytest.mark.parametrize("path", ["/speculation", "/speculation-header"])
+def test_speculated_documents_still_pass_the_check(
+    settings_for: SettingsFor, site: Site, path: str
+) -> None:
+    checked: list[str] = []
+
+    async def check(target: str) -> None:
+        checked.append(target)
+
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}{path}", check=check)
+        target = f"{site.base}{SPECULATED}"
+        assert checked == [target]
+        assert rendered.final_url == target
+        assert [s.path for s in site.seen(site.base) if "sec-purpose" in s.headers] == []
+        assert site.seen(site.base, "/rules.json") == []
+
+    scenario(settings_for, site, body, browser_idle_wait_seconds=3)
+
+
 def test_hidden_tabs_are_stripped(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
         rendered = await render(stack, f"{site.base}/hidden-tabs")
@@ -482,6 +544,50 @@ def test_launch_given_up_by_its_render_leaves_no_browser(
         stack.launcher.launch_delay = 0.0
         rendered = await render(stack, f"{site.base}/static")
         assert ARTICLE_TEXT.split(".")[0] in rendered.html
+
+    scenario(settings_for, site, body)
+
+
+def test_a_launch_whose_context_fails_closes_its_browser(
+    settings_for: SettingsFor, site: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failing(self: Browser, **kwargs: Any) -> BrowserContext:
+        raise PlaywrightError("no context")
+
+    async def body(stack: Stack) -> None:
+        (first,) = stack.launcher.browsers
+        await first.close()  # the next page relaunches
+        with monkeypatch.context() as patch:
+            patch.setattr(Browser, "new_context", failing)
+            with pytest.raises(FetchError) as caught:
+                await render(stack, f"{site.base}/static")
+        assert caught.value.code is ErrorCode.INTERNAL_ERROR
+        _, failed = stack.launcher.browsers
+        assert not failed.is_connected()
+
+        rendered = await render(stack, f"{site.base}/static")
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+
+    scenario(settings_for, site, body)
+
+
+def test_a_hanging_close_does_not_hold_the_render_past_its_deadline(
+    settings_for: SettingsFor, site: Site, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    close = BrowserContext.close
+
+    async def hanging(self: BrowserContext, **kwargs: Any) -> None:
+        await asyncio.sleep(30)
+
+    async def body(stack: Stack) -> None:
+        loop = asyncio.get_running_loop()
+        with monkeypatch.context() as patch:
+            patch.setattr(BrowserContext, "close", hanging)
+            started = loop.time()
+            rendered = await render(stack, f"{site.base}/static", seconds=3)
+            assert loop.time() - started < 3  # the close waits a moment, then goes on alone
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+        assert BrowserContext.close is close
 
     scenario(settings_for, site, body)
 

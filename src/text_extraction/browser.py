@@ -11,7 +11,10 @@ pages end) and after the browser went away (crashed, killed). The pages that wer
 fail alone; the renderer turns that into ``internal_error``, retryable. A semaphore lets
 ``BROWSER_CONCURRENCY`` pages run at once; pools of both drivers can share one (``slots``).
 Each page gets its own browser context with its own proxy credentials, so the proxy counts and
-caps its bytes, and the context and its proxy context are always closed with the page.
+caps its bytes, and the context and its proxy context are always closed with the page. Closing
+never holds a render past its deadline: a page waits ``_CLOSE_WAIT_SECONDS`` for its context,
+then the close goes on in the background (bounded by ``CLOSE_SECONDS``), as does closing a
+recycled browser; ``stop`` waits for them.
 
 **Launcher.** What differs between the drivers (Playwright here, Patchright for unblock mode)
 is how a browser is launched and how a page's context is opened: a ``Launcher``. The pool, the
@@ -63,20 +66,24 @@ type Driver = Literal["playwright", "patchright"]
 _RENDER_ERRORS: Final[tuple[type[Exception], ...]] = (*DRIVER_ERRORS, FetchError)
 LOCALE: Final = "de-DE"
 CLOSE_SECONDS: Final = 5.0  # closing a context or a browser
-# Of a render's deadline: what closing the page may take.
+# Of a render's deadline: what closing the page may take. A page waits a little less for its
+# context to close; a longer close finishes in the background.
 _CLOSE_RESERVE_SECONDS: Final = 0.5
+_CLOSE_WAIT_SECONDS: Final = 0.4
 _RENDER_BUCKETS: Final = (0.5, 1, 2, 3, 5, 8, 10, 15, 20, 30, 45, 60, 90)
 
 
 def chromium_args(proxy_url: str) -> list[str]:
     """The B4 launch flags: everything through the proxy (loopback too), no QUIC, no WebRTC
-    UDP outside the proxy, no /dev/shm."""
+    UDP outside the proxy, no /dev/shm, and no DNS prefetching (with a fixed proxy Chromium
+    resolves no names itself, as probed; the flag keeps it so)."""
     return [
         f"--proxy-server={proxy_url}",
         "--proxy-bypass-list=<-loopback>",
         "--disable-quic",
         "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
         "--disable-dev-shm-usage",
+        "--dns-prefetch-disable",
     ]
 
 
@@ -123,16 +130,26 @@ class PlaywrightLauncher:
     async def open(
         self, browser: Browser | None, proxy: PageProxy, options: RenderOptions
     ) -> tuple[Browser | None, BrowserContext]:
+        launched = browser is None
         if browser is None:
             browser = await self._launch(proxy.server)
-        context = await browser.new_context(
-            viewport={"width": VIEWPORT["width"], "height": VIEWPORT["height"]},
-            service_workers="block",
-            accept_downloads=False,
-            locale=LOCALE,
-            user_agent=self.user_agent,
-            proxy={"server": proxy.server, "username": proxy.username, "password": proxy.password},
-        )
+        try:
+            context = await browser.new_context(
+                viewport={"width": VIEWPORT["width"], "height": VIEWPORT["height"]},
+                service_workers="block",
+                accept_downloads=False,
+                locale=LOCALE,
+                user_agent=self.user_agent,
+                proxy={
+                    "server": proxy.server,
+                    "username": proxy.username,
+                    "password": proxy.password,
+                },
+            )
+        except BaseException:
+            if launched:  # nobody else holds it
+                await _close_quietly(browser)
+            raise
         return browser, context
 
     async def stop(self) -> None:
@@ -150,10 +167,14 @@ class PlaywrightLauncher:
             args=chromium_args(proxy_url),
         )
         if not self.user_agent:
-            # B8: Chromium's own user agent, with our product token and contact added.
-            session = await browser.new_browser_cdp_session()
-            version = await session.send("Browser.getVersion")
-            await session.detach()
+            try:
+                # B8: Chromium's own user agent, with our product token and contact added.
+                session = await browser.new_browser_cdp_session()
+                version = await session.send("Browser.getVersion")
+                await session.detach()
+            except BaseException:
+                await _close_quietly(browser)
+                raise
             self.user_agent = f"{version['userAgent']} {USER_AGENT}"
         return browser
 
@@ -258,7 +279,8 @@ class BrowserPool:
         self._lock = asyncio.Lock()
         self._current: _Slot | None = None
         self._open: set[_Slot] = set()  # launched and not closed yet
-        self._discards: set[asyncio.Task[None]] = set()  # launches whose caller went away
+        # Closes that go on alone, and launches whose caller went away (closed when done).
+        self._background: set[asyncio.Future[None]] = set()
         self._stopped = False
 
     @property
@@ -287,7 +309,7 @@ class BrowserPool:
             self._current = None
             for slot in list(self._open):
                 await self._close_browser(slot)
-        await asyncio.gather(*self._discards, return_exceptions=True)
+        await asyncio.gather(*self._background, return_exceptions=True)
         await self._launcher.stop()
 
     @asynccontextmanager
@@ -323,14 +345,20 @@ class BrowserPool:
             finally:
                 if pooled is not None:
                     pooled._closing = True
-                if context is not None:
-                    await _close_context(context)
-                traffic.close()
-                if slot is not None:
-                    await self._release(slot)
-                self._metrics.in_use.labels(driver=driver).dec()
-                self._metrics.pages.labels(driver=driver, outcome=outcome).inc()
-                self._metrics.seconds.labels(driver=driver).observe(time.perf_counter() - started)
+                try:
+                    if context is not None:
+                        # A close that takes longer goes on alone (asyncio.wait never cancels).
+                        closing = self._in_background(_close_context(context))
+                        await asyncio.wait({closing}, timeout=_CLOSE_WAIT_SECONDS)
+                finally:
+                    traffic.close()
+                    if slot is not None:
+                        self._release(slot)
+                    self._metrics.in_use.labels(driver=driver).dec()
+                    self._metrics.pages.labels(driver=driver, outcome=outcome).inc()
+                    self._metrics.seconds.labels(driver=driver).observe(
+                        time.perf_counter() - started
+                    )
 
     def _page_proxy(self, traffic: ProxyContext) -> PageProxy:
         return PageProxy(self._proxy.url, traffic.username, traffic.password)
@@ -351,16 +379,16 @@ class BrowserPool:
                     else "start"
                 )
                 new, context = await self._launch(proxy, options, reason)
-                if slot is not None and not slot.dead and slot.in_flight == 0:
-                    await self._close_browser(slot)
                 if new is not None:
                     self._take(new)
+                if slot is not None and not slot.dead and slot.in_flight == 0:
+                    self._close_later(slot)
                 return new, context
             self._take(slot)
         try:
             _, context = await self._launcher.open(slot.browser, proxy, options)
         except BaseException:
-            await self._release(slot)
+            self._release(slot)
             raise
         return slot, context
 
@@ -373,9 +401,7 @@ class BrowserPool:
         try:
             browser, context = await asyncio.shield(launch)
         except asyncio.CancelledError:
-            discard = asyncio.ensure_future(_discard_launch(launch))
-            self._discards.add(discard)
-            discard.add_done_callback(self._discards.discard)
+            self._in_background(_discard_launch(launch))
             raise
         self._metrics.launches.labels(driver=self.driver, reason=reason).inc()
         _log.info("browser_launched", driver=self.driver, reason=reason)
@@ -393,10 +419,25 @@ class BrowserPool:
         if slot.pages >= self._settings.browser_recycle_after_pages:
             slot.retiring = True
 
-    async def _release(self, slot: _Slot) -> None:
+    def _release(self, slot: _Slot) -> None:
         slot.in_flight -= 1
         if slot.in_flight == 0 and slot is not self._current:
-            await self._close_browser(slot)
+            self._close_later(slot)
+
+    def _in_background(self, work: Awaitable[None]) -> "asyncio.Future[None]":
+        """Run ``work`` on its own, held until it is done; ``stop`` waits for it."""
+        task = asyncio.ensure_future(work)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        return task
+
+    def _close_later(self, slot: _Slot) -> None:
+        """Close a browser without waiting for it: a page is ending, or a new one launched."""
+        if slot.closing:
+            return
+        slot.closing = True
+        self._open.discard(slot)
+        self._in_background(_close_quietly(slot.browser))
 
     def _disconnected(self, slot: _Slot) -> None:
         self._open.discard(slot)
@@ -409,9 +450,7 @@ class BrowserPool:
             return
         slot.closing = True
         self._open.discard(slot)
-        with contextlib.suppress(*DRIVER_ERRORS, TimeoutError):
-            async with asyncio.timeout(CLOSE_SECONDS):
-                await slot.browser.close()
+        await _close_quietly(slot.browser)
 
 
 async def _discard_launch(
@@ -424,9 +463,13 @@ async def _discard_launch(
         return
     await _close_context(context)
     if browser is not None:
-        with contextlib.suppress(*DRIVER_ERRORS, TimeoutError):
-            async with asyncio.timeout(CLOSE_SECONDS):
-                await browser.close()
+        await _close_quietly(browser)
+
+
+async def _close_quietly(browser: Browser) -> None:
+    with contextlib.suppress(*DRIVER_ERRORS, TimeoutError):
+        async with asyncio.timeout(CLOSE_SECONDS):
+            await browser.close()
 
 
 async def _close_context(context: BrowserContext) -> None:

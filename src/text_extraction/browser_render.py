@@ -6,7 +6,8 @@ up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle, the consent opt-
 screenshot comes last. Every request passes the route handler: a main-frame navigation after the
 first is sent only after the pipeline's ``NavigationCheck`` (a non-GET one not at all), blocked
 resource types are not loaded, and the caller's headers go only to the request URL's site,
-also across redirects (``_Render._with_headers``).
+also across redirects (``_Render._with_headers``). Speculation rules are removed or refused
+(``NO_SPECULATION``): a document they prefetch would be used without passing the handler.
 
 The module uses only the Playwright API, which Patchright shares; errors of both drivers are
 caught (``DRIVER_ERRORS``). Logs carry hosts and codes only, never a URL, header or cookie.
@@ -16,10 +17,12 @@ import asyncio
 import contextlib
 import contextvars
 import json
+import re
 import struct
 from typing import Final, Literal
 from urllib.parse import urljoin, urlsplit
 
+import structlog
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PatchrightTimeout
 from playwright.async_api import APIResponse, Frame, Page, Request, Response, Route
@@ -30,6 +33,7 @@ from text_extraction.browser_proxy import ProxyContext
 from text_extraction.browser_scripts import (
     CONSENT_RELAY,
     CONSENT_WAIT,
+    NO_SPECULATION,
     PAGE_HEIGHT,
     STRIP_HIDDEN,
     consent_bundle,
@@ -47,6 +51,8 @@ from text_extraction.render import (
     site,
 )
 from text_extraction.settings import Settings
+
+_log = structlog.get_logger(__name__)
 
 type ConsentOpt = Literal["optOut", "optIn"]
 
@@ -68,6 +74,8 @@ _NOT_FAILURES: Final = ("net::ERR_ABORTED", "net::ERR_BLOCKED_BY_CLIENT")
 _MAX_HOPS: Final = 10
 # Not passed on from a response fetched for the browser: its body arrives decoded and whole.
 _NOT_PASSED: Final = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+# The strings of a structured-field list, as in ``Speculation-Rules: "/a.json", "/b.json"``.
+_SF_STRING: Final = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 
 async def render_page(
@@ -88,9 +96,9 @@ async def render_page(
     render unchanged; a failure of the target is a ``FetchError`` that carries the status of
     the last document answer seen."""
     render = _Render(page, url, check, options, settings, traffic)
-    await render.install()
     try:
         async with asyncio.timeout_at(deadline):
+            await render.install()
             return await render.run(deadline)
     except TimeoutError:
         render.raise_kept()
@@ -176,11 +184,15 @@ class _Render:
         self.answers: list[tuple[Response, tuple[str, ...]]] = []
         self.warnings: list[str] = []
         self.refusal: BaseException | None = None  # of the navigation check
+        self.fault: FetchError | None = None  # the route handler's own failure
         self.failure: tuple[str, str] | None = None  # (URL, error) of a failed document load
         self.download = False
         # Navigations answered by the route handler itself (a refused non-GET one, a redirect
-        # step of a document with caller headers): not document answers of the render.
+        # step of a document with caller headers, one it aborted): not document answers or
+        # load failures of the render.
         self.unanswered: set[Request] = set()
+        # Speculation rules files named by documents' ``Speculation-Rules`` headers: refused.
+        self.rule_files: set[str] = set()
         # URLs whose redirects were turned into navigations, for the next document answer.
         self.hops: list[str] = []
         self.hop_count = 0
@@ -194,6 +206,7 @@ class _Render:
         self.page.on("response", self._on_response)
         self.page.on("requestfailed", self._on_request_failed)
         self.page.on("download", self._on_download)
+        await self.page.add_init_script(NO_SPECULATION)
         await self.page.context.route("**/*", self._route)
 
     async def end_checks(self) -> None:
@@ -204,9 +217,11 @@ class _Render:
 
     def raise_kept(self) -> None:
         """End the render with what went wrong in the page meanwhile: the check's refusal of a
-        navigation, or a document that did not load."""
+        navigation, a failure of the route handler, or a document that did not load."""
         if self.refusal is not None:
             raise self.refusal
+        if self.fault is not None:
+            raise self.fault
         if self.failure is not None:
             raise self._load_error(*self.failure)
 
@@ -399,6 +414,8 @@ class _Render:
     # --- events
 
     def _on_response(self, response: Response) -> None:
+        if response.request.resource_type == "document":
+            self._note_rule_files(response)
         if _is_main_document(response.request, self.page) and (
             response.request not in self.unanswered
         ):
@@ -407,8 +424,15 @@ class _Render:
             self.failure = None  # a later document arrived after all
             self.settled.set()
 
+    def _note_rule_files(self, response: Response) -> None:
+        header = response.headers.get("speculation-rules")
+        if header:
+            for found in _SF_STRING.finditer(header):
+                file = urljoin(response.url, found.group(1)).partition("#")[0]
+                self.rule_files.add(file)
+
     def _on_request_failed(self, request: Request) -> None:
-        if not _is_main_document(request, self.page):
+        if request in self.unanswered or not _is_main_document(request, self.page):
             return
         error = request.failure or ""
         if not any(error.startswith(code) for code in _NOT_FAILURES):
@@ -419,8 +443,24 @@ class _Render:
         self.download = True
 
     async def _route(self, route: Route, request: Request) -> None:
-        with contextlib.suppress(*DRIVER_ERRORS):  # the page may close meanwhile
+        try:
             await self._decide(route, request)
+        except DRIVER_ERRORS:  # the page may close meanwhile
+            pass
+        except Exception as error:
+            # A fault of ours: end the request (it would hang until the deadline) and the render.
+            _log.error("browser_route_failed", error=type(error).__name__)
+            if self.fault is None:
+                self.fault = FetchError(
+                    ErrorCode.INTERNAL_ERROR,
+                    "The browser failed. Try again.",
+                    retryable=True,
+                    upstream_status=self.last_status(),
+                )
+            self.unanswered.add(request)
+            self.settled.set()
+            with contextlib.suppress(*DRIVER_ERRORS):
+                await route.abort("failed")
 
     async def _decide(self, route: Route, request: Request) -> None:
         options = self.options
@@ -447,12 +487,12 @@ class _Render:
             elif not await self._checked(request.url):
                 await route.abort("blockedbyclient")
                 return
-        elif request.resource_type in options.blocked_resources:
+        elif request.resource_type in options.blocked_resources or request.url in self.rule_files:
             await route.abort("blockedbyclient")
             return
         else:
             main = False
-        if options.headers and site(request.url) == options.header_host:
+        if options.headers and options.header_host and site(request.url) == options.header_host:
             await self._with_headers(route, request, main=main)
             return
         await route.continue_()
