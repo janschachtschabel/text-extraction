@@ -4,12 +4,17 @@
 up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle, the consent opt-out (B11,
 ``run_consent``; the ``accept_cookies`` action opts in instead), the request's actions
 (``browser_actions.run_actions``), then hidden elements are removed (``strip_hidden``) and the
-DOM is read; the screenshot comes last. Every request passes the route handler: a main-frame
-navigation after the first is sent only after the pipeline's ``NavigationCheck`` (a non-GET one
-not at all), blocked resource types are not loaded, and the caller's headers go only to the
-request URL's site, also across redirects (``_Render._with_headers``). Speculation rules are
-removed or refused (``NO_SPECULATION``), and prefetch requests are refused (``_is_speculative``):
-a document they fetch would be used without passing the handler.
+DOM is read; the screenshot comes last. A renderer can add a step after the load
+(``after_load``: the unblock renderer waits out a bot challenge there).
+
+Every request passes the route handler: a main-frame navigation after the first is sent only
+after the pipeline's ``NavigationCheck`` (a non-GET one not at all), blocked resource types are
+not loaded, and the caller's headers go only to the request URL's site, also across redirects
+(``_Render._with_headers``). Speculation rules are removed or refused (``NO_SPECULATION``), and
+prefetch requests are refused (``_is_speculative``): a document they fetch would be used
+without passing the handler. Under Patchright, init scripts such as ``NO_SPECULATION`` arrive
+as a script tag Patchright puts at the top of each document it intercepts; they still run
+before the page's own scripts.
 
 The module uses only the Playwright API, which Patchright shares; errors of both drivers are
 caught (``DRIVER_ERRORS``). Logs carry hosts and codes only, never a URL, header or cookie.
@@ -21,6 +26,8 @@ import contextvars
 import json
 import re
 import struct
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Final
 from urllib.parse import urljoin, urlsplit
 
@@ -33,6 +40,7 @@ from text_extraction.browser_driver import (
     DRIVER_TIMEOUTS,
     ConsentOpt,
     ConsentResult,
+    evaluate_in_main_world,
 )
 from text_extraction.browser_options import AcceptCookiesAction, Action
 from text_extraction.browser_proxy import ProxyContext
@@ -83,6 +91,28 @@ _NOT_PASSED: Final = frozenset({"content-encoding", "content-length", "transfer-
 _SPECULATIVE_PURPOSES: Final = ("prefetch", "prerender")
 # The strings of a structured-field list, as in ``Speculation-Rules: "/a.json", "/b.json"``.
 _SF_STRING: Final = re.compile(r'"((?:[^"\\]|\\.)*)"')
+_LOAD_WAIT_SECONDS: Final = 2.0  # for a document under way before it is read
+
+
+@dataclass(frozen=True)
+class Loaded:
+    """What the step after the load (``render_page``'s ``after_load``) has of the render."""
+
+    page: Page
+    deadline: float  # ``loop.time()``: the step ends before it (the read reserve stays free)
+    # The HTML of the page's current document, once loaded (a navigation under way is
+    # followed; a redirect turned into a navigation is waited for).
+    read: Callable[[], Awaitable[str]]
+    # The hosts the page has contacted so far (through the egress proxy).
+    hosts: Callable[[], frozenset[str]]
+    # Raises what went wrong in the page meanwhile: a navigation the check refused, a fault of
+    # the route handler, a document that did not load.
+    raise_kept: Callable[[], None]
+
+
+# Runs after the load and the network-idle wait, before the consent step and the actions, and
+# returns the render's warnings it adds.
+type AfterLoad = Callable[[Loaded], Awaitable[Sequence[str]]]
 
 
 async def render_page(
@@ -94,6 +124,7 @@ async def render_page(
     deadline: float,
     settings: Settings,
     traffic: ProxyContext | None = None,
+    after_load: AfterLoad | None = None,
 ) -> Rendered:
     """Load ``url`` in ``page`` and read it (B2), all before ``deadline`` (``loop.time()``).
 
@@ -101,8 +132,8 @@ async def render_page(
     the warning ``browser_bytes_capped``, and its refusals tell a document the proxy refused
     (``blocked_url``) from one the target failed to deliver. An error of ``check`` ends the
     render unchanged; a failure of the target is a ``FetchError`` that carries the status of
-    the last document answer seen."""
-    render = _Render(page, url, check, options, settings, traffic)
+    the last document answer seen. ``after_load`` is a renderer's own step after the load."""
+    render = _Render(page, url, check, options, settings, traffic, after_load)
     try:
         async with asyncio.timeout_at(deadline):
             await render.install()
@@ -134,11 +165,14 @@ async def run_consent(
 
     async def in_frame(frame: Frame) -> ConsentResult:
         try:
-            installed = await frame.evaluate(CONSENT_RELAY, args)
+            # In the main world: the rules' own snippets read the page's globals there.
+            installed = await evaluate_in_main_world(frame, CONSENT_RELAY, args)
             if installed:
-                await frame.evaluate(consent_bundle())
-            outcome = await frame.evaluate(
-                CONSENT_WAIT, {"opt": opt, "timeoutMs": milliseconds, "again": not installed}
+                await evaluate_in_main_world(frame, consent_bundle())
+            outcome = await evaluate_in_main_world(
+                frame,
+                CONSENT_WAIT,
+                {"opt": opt, "timeoutMs": milliseconds, "again": not installed},
             )
         except DRIVER_ERRORS:
             return "nothing"  # the frame went away meanwhile
@@ -180,8 +214,10 @@ class _Render:
         options: RenderOptions,
         settings: Settings,
         traffic: ProxyContext | None,
+        after_load: AfterLoad | None = None,
     ) -> None:
         self.page = page
+        self.after_load = after_load
         self.url = url
         self.check = check
         self.options = options
@@ -264,6 +300,14 @@ class _Render:
             return self._rendered("", None, None, ())
         await self._idle(reserve)
         self.raise_kept()
+        if self.after_load is not None:
+            loaded = Loaded(
+                self.page, self.deadline - reserve, self._read_loaded, self._hosts, self.raise_kept
+            )
+            self.warnings.extend(await self.after_load(loaded))
+            self.raise_kept()
+            if self.download:
+                return self._rendered("", None, None, ())
         actions = self.options.actions
         # The accept_cookies action is the opt-in, which an earlier opt-out would make moot.
         opts_in = any(isinstance(action, AcceptCookiesAction) for action in actions)
@@ -359,6 +403,17 @@ class _Render:
             ) from None
         with contextlib.suppress(*DRIVER_ERRORS):
             await self.page.wait_for_load_state("load", timeout=max(self.left(reserve), 0.1) * 1000)
+
+    async def _read_loaded(self) -> str:
+        """The current document's HTML once it has loaded (for ``Loaded.read``)."""
+        with contextlib.suppress(*DRIVER_ERRORS):
+            await self.page.wait_for_load_state(
+                "load", timeout=max(min(_LOAD_WAIT_SECONDS, self.left()), 0.1) * 1000
+            )
+        return await self._content()
+
+    def _hosts(self) -> frozenset[str]:
+        return self.traffic.hosts if self.traffic is not None else frozenset()
 
     async def _content(self) -> str:
         await self._settle()

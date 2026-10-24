@@ -34,7 +34,8 @@ text-extraction-worker = "text_extraction.worker:main"
 [project.optional-dependencies]
 browser = [
     "duckduckgo-autoconsent-py>=16",
-    "patchright>=1.64",
+    # Pinned to a release at least 14 days old (supply-chain caution, ruling R16).
+    "patchright==1.63.0",
     "playwright>=1.64",
 ]
 
@@ -55,7 +56,7 @@ dev = [
     "httpx2>=2.16.0",
     "pytest-httpserver>=1.2.0",
     "playwright>=1.64",
-    "patchright>=1.64",
+    "patchright==1.63.0",  # as in the extra `browser`
     "duckduckgo-autoconsent-py>=16",
 ]
 

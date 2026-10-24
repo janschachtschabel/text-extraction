@@ -18,9 +18,15 @@ recycled browser; ``stop`` waits for them.
 
 **Launcher.** What differs between the drivers (Playwright here, Patchright for unblock mode)
 is how a browser is launched and how a page's context is opened: a ``Launcher``. The pool, the
-recycling and the crash handling are shared.
+recycling and the crash handling are shared. A ``persistent`` launcher (Patchright's) opens
+each page in a persistent context, which is its own browser: the pool then launches one for
+every page (launch reason ``page``), outside its lock so launches run side by side, and a page
+whose browser goes away fails alone as before. Pools of both drivers share one semaphore, so
+``BROWSER_CONCURRENCY`` caps the pages of both.
 
-**Renderer.** ``ChromiumRenderer`` takes a page from the pool and runs ``render_page`` in it.
+**Renderer.** ``ChromiumRenderer`` takes a page from the pool and runs ``render_page`` in it;
+the unblock renderer (``browser_unblock.py``) is one with other options and a step after the
+load.
 
 Logs carry hosts and codes only, never a URL, header, cookie or script.
 """
@@ -46,7 +52,7 @@ from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
 from text_extraction.browser_driver import DRIVER_ERRORS
 from text_extraction.browser_proxy import EgressProxy, ProxyContext
-from text_extraction.browser_render import VIEWPORT, render_page
+from text_extraction.browser_render import VIEWPORT, AfterLoad, render_page
 from text_extraction.envelope import ErrorCode
 from text_extraction.fetch import USER_AGENT, FetchError
 from text_extraction.render import (
@@ -103,6 +109,8 @@ class Launcher(Protocol):
     driver: Driver
     # What the pages send as User-Agent; known once a browser was launched.
     user_agent: str
+    # Every context is a browser of its own (``open`` always returns None as the browser).
+    persistent: bool
 
     async def open(
         self, browser: Browser | None, proxy: PageProxy, options: RenderOptions
@@ -111,6 +119,11 @@ class Launcher(Protocol):
         first (behind ``proxy.server``) and returned with the context. A launcher whose
         contexts own their browser (a persistent context) returns None: the pool then shares
         nothing and launches for every page."""
+        ...
+
+    async def release(self, context: BrowserContext) -> None:
+        """Called once the pool closed ``context`` (or gave up closing it): free what the
+        launcher keeps for it (a persistent context's profile)."""
         ...
 
     async def stop(self) -> None:
@@ -122,6 +135,7 @@ class PlaywrightLauncher:
     """Headless Chromium through Playwright, the standard mode's browser (B3, B4, B8)."""
 
     driver: Driver = "playwright"
+    persistent = False
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -152,6 +166,9 @@ class PlaywrightLauncher:
                 await _close_quietly(browser)
             raise
         return browser, context
+
+    async def release(self, context: BrowserContext) -> None:
+        pass
 
     async def stop(self) -> None:
         driver, self._driver = self._driver, None
@@ -206,7 +223,7 @@ class _Metrics:
         )
         self.launches = Counter(
             "text_extraction_browser_launches_total",
-            "Browser launches by reason: start, recycle, crash.",
+            "Browser launches by reason: start, recycle, crash, page (one per page).",
             ["driver", "reason"],
             registry=registry,
         )
@@ -247,8 +264,13 @@ class PooledPage:
 
     @property
     def crashed(self) -> bool:
-        """Whether the page's renderer or browser went away while it was open."""
-        return self._crashed or (self._slot is not None and self._slot.dead)
+        """Whether the page's renderer or browser went away while it was open (a page the
+        pool did not close is closed: its browser went away, and the events may still come)."""
+        return (
+            self._crashed
+            or (self._slot is not None and self._slot.dead)
+            or (not self._closing and self.page.is_closed())
+        )
 
     def _on_crash(self, _page: Page) -> None:
         self._crashed = True
@@ -299,7 +321,7 @@ class BrowserPool:
         try:
             async with self._lock:
                 _, context = await self._launch(self._page_proxy(traffic), RenderOptions(), "start")
-            await _close_context(context)
+            await self._close_context(context)
         finally:
             traffic.close()
 
@@ -349,7 +371,7 @@ class BrowserPool:
                 try:
                     if context is not None:
                         # A close that takes longer goes on alone (asyncio.wait never cancels).
-                        closing = self._in_background(_close_context(context))
+                        closing = self._in_background(self._close_context(context))
                         await asyncio.wait({closing}, timeout=_CLOSE_WAIT_SECONDS)
                 finally:
                     traffic.close()
@@ -368,7 +390,10 @@ class BrowserPool:
         self, proxy: PageProxy, options: RenderOptions
     ) -> tuple[_Slot | None, BrowserContext]:
         """A context in the current browser, or in a new one when there is none (yet), when
-        it was recycled or when it went away."""
+        it was recycled or when it went away. A persistent launcher's context brings its own
+        browser: nothing is shared, so nothing waits for the lock."""
+        if self._launcher.persistent:
+            return await self._launch(proxy, options, "page")
         async with self._lock:
             slot = self._current
             if slot is None or slot.dead or slot.retiring:
@@ -402,7 +427,7 @@ class BrowserPool:
         try:
             browser, context = await asyncio.shield(launch)
         except asyncio.CancelledError:
-            self._in_background(_discard_launch(launch))
+            self._in_background(self._discard_launch(launch))
             raise
         self._metrics.launches.labels(driver=self.driver, reason=reason).inc()
         _log.info("browser_launched", driver=self.driver, reason=reason)
@@ -453,18 +478,24 @@ class BrowserPool:
         self._open.discard(slot)
         await _close_quietly(slot.browser)
 
+    async def _close_context(self, context: BrowserContext) -> None:
+        """Close a page's context, then let the launcher free what it kept for it."""
+        try:
+            await _close_context(context)
+        finally:
+            await self._launcher.release(context)
 
-async def _discard_launch(
-    launch: "asyncio.Future[tuple[Browser | None, BrowserContext]]",
-) -> None:
-    """Close what a launch nobody waits for any more opened, once it is done."""
-    try:
-        browser, context = await launch
-    except BaseException:
-        return
-    await _close_context(context)
-    if browser is not None:
-        await _close_quietly(browser)
+    async def _discard_launch(
+        self, launch: "asyncio.Future[tuple[Browser | None, BrowserContext]]"
+    ) -> None:
+        """Close what a launch nobody waits for any more opened, once it is done."""
+        try:
+            browser, context = await launch
+        except BaseException:
+            return
+        await self._close_context(context)
+        if browser is not None:
+            await _close_quietly(browser)
 
 
 async def _close_quietly(browser: Browser) -> None:
@@ -508,7 +539,10 @@ def _cookie_param(cookie: CookieData) -> "SetCookieParam":
 
 
 class ChromiumRenderer:
-    """The standard mode's ``Renderer``: a page from the pool, loaded by ``render_page``."""
+    """The standard mode's ``Renderer``: a page from the pool, loaded by ``render_page``.
+
+    A subclass may change the options of every render (``_options``) and add a step after the
+    load (``_after_load``)."""
 
     def __init__(self, pool: BrowserPool, settings: Settings) -> None:
         self._pool = pool
@@ -518,9 +552,16 @@ class ChromiumRenderer:
     def user_agent(self) -> str:
         return self._pool.user_agent
 
+    def _options(self, options: RenderOptions) -> RenderOptions:
+        return options
+
+    def _after_load(self) -> AfterLoad | None:
+        return None
+
     async def render(
         self, url: str, check: NavigationCheck, options: RenderOptions, *, deadline: float
     ) -> Rendered:
+        options = self._options(options)
         try:
             async with contextlib.AsyncExitStack() as stack:
                 # Waiting for a free page and launching count against the deadline; closing
@@ -541,6 +582,7 @@ class ChromiumRenderer:
                         deadline=deadline - _CLOSE_RESERVE_SECONDS,
                         settings=self._settings,
                         traffic=pooled.traffic,
+                        after_load=self._after_load(),
                     )
                 except _RENDER_ERRORS as error:
                     if not pooled.crashed:

@@ -47,6 +47,8 @@ jobs:
 
       - run: uv sync --locked
       - run: uv run playwright install --with-deps --only-shell chromium
+      # Unblock mode's tests run Patchright with its own Chromium (no Google Chrome in CI).
+      - run: uv run patchright install --with-deps chromium
       - run: uv run pytest -m browser -q
 
   helm:

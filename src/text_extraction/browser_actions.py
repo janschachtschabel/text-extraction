@@ -18,7 +18,12 @@ from typing import Final, Protocol
 import structlog
 from playwright.async_api import Page
 
-from text_extraction.browser_driver import DRIVER_ERRORS, ConsentOpt, ConsentResult
+from text_extraction.browser_driver import (
+    DRIVER_ERRORS,
+    ConsentOpt,
+    ConsentResult,
+    evaluate_in_main_world,
+)
 from text_extraction.browser_options import (
     AcceptCookiesAction,
     Action,
@@ -179,8 +184,9 @@ async def _run(page: Page, action: Action, deadline: float, consent: ConsentRunn
             if await consent(page, "optIn", seconds=seconds) == "failed":
                 raise _Failed
         case EvaluateAction(script=script):
-            # A function body, so the script may hold statements, `await` and `return`.
-            await page.evaluate(f"async () => {{\n{script}\n}}")
+            # A function body, so the script may hold statements, `await` and `return`. It runs
+            # where the page's own scripts run, so it sees their globals.
+            await evaluate_in_main_world(page, f"async () => {{\n{script}\n}}")
 
 
 async def _loaded(page: Page, deadline: float) -> None:

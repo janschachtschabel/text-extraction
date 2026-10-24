@@ -34,6 +34,7 @@ CHOSEN = "The chosen option is: "
 LAZY_ITEMS = 30  # the list on /actions stops growing here
 CHALLENGE_TEXT = "Checking your browser before accessing the site."
 FORM_TEXT = "The form on this page posts itself as soon as the page has loaded."
+PAGE_GLOBAL = "A value the page's own script keeps in a global variable."
 # The page /speculation and /speculation-header speculate on, and then navigate to.
 SPECULATED = "/static?via=speculation"
 PDF = b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n"
@@ -348,6 +349,47 @@ class _Handler(BaseHTTPRequestHandler):
                     page(f"<p>{CHALLENGE_TEXT}</p>{script}", title="Just a moment..."),
                     status=503,
                 )
+        elif path == "/checkbox":
+            # A checkbox challenge: a widget frame from the second port (standing in for
+            # Turnstile) whose box sets the clearance cookie and tells the page, which reloads.
+            if "cf_clearance=ok" in (self.headers.get("cookie") or ""):
+                self._send(article(title="Cleared"))
+            else:
+                query = "?stubborn=1" if "stubborn=1" in self.path else ""
+                widget = (
+                    f"<iframe id='widget' src='{site.third}/turnstile{query}' "
+                    "width='300' height='65' style='border: 0'></iframe>"
+                    "<script>window.addEventListener('message', (event) => {"
+                    "if (event.data === 'cleared') location.reload(); });</script>"
+                )
+                self._send(
+                    page(f"<p>{CHALLENGE_TEXT}</p>{widget}", title="Just a moment..."),
+                    status=403,
+                )
+        elif path == "/turnstile":
+            clear = (
+                ""
+                if "stubborn=1" in self.path
+                else "document.cookie = 'cf_clearance=ok; path=/';"
+                "parent.postMessage('cleared', '*');"
+            )
+            box = (
+                "<label style='display: block; padding: 20px'>"
+                "<input type='checkbox' id='box' onclick=\"fetch('/turnstile-clicked');"
+                f'{clear}"> Verify you are human</label>'
+            )
+            self._send(page(box, title="Widget"))
+        elif path == "/turnstile-clicked":
+            self._send(b"{}", content_type="application/json")
+        elif path == "/navigator":
+            script = (
+                "<script>document.getElementById('webdriver').textContent ="
+                " 'webdriver=' + navigator.webdriver;</script>"
+            )
+            self._send(article(f"<p id='webdriver'></p>{script}", title="Navigator"))
+        elif path == "/global":
+            script = f"<script>window.pageGlobal = {PAGE_GLOBAL!r};</script>"
+            self._send(article(f"<p id='out'></p>{script}", title="Global"))
         elif path in ("/speculation", "/speculation-header"):
             # Speculation rules fetch documents outside the page's requests; the page then
             # navigates to the speculated URL, which must still pass the navigation check.

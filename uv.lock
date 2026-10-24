@@ -757,21 +757,21 @@ wheels = [
 
 [[package]]
 name = "patchright"
-version = "1.64.2"
+version = "1.63.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "greenlet" },
     { name = "pyee" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/4f/85a72d6ce8f49d7241d4d876880f7ac7595e90b49ad2c5f9d2d5a04fedfe/patchright-1.64.2-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:a1e3b1eebdaa3f66c472aba6d277f589c1f885ca7149a88c3e2e28a8982386f2", size = 44498833, upload-time = "2026-10-22T19:54:28.642Z" },
-    { url = "https://files.pythonhosted.org/packages/80/1a/d03526d13eca26f057f55fd7f47a5495c9138e2883a0fa7cc30575338ca4/patchright-1.64.2-py3-none-macosx_11_0_arm64.whl", hash = "sha256:c36a071c259f6e99f5b69ec5a2c4993ea3c274b04d324eed914e5937b0d7c218", size = 43145100, upload-time = "2026-10-22T19:54:31.86Z" },
-    { url = "https://files.pythonhosted.org/packages/57/d3/a505cd32ed5c73f1910deff202eb1bf66687f0bc095af03901d4d034ef16/patchright-1.64.2-py3-none-macosx_11_0_universal2.whl", hash = "sha256:7771a19f12656aa9a1f817475ae57f38c7b4fd6616d4c3fea89fdf60eac20c84", size = 44498835, upload-time = "2026-10-22T19:54:35.092Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/76/0dd1fbe35c279e52d4e0e1414592381eb938a79345ea2dd008597259ac6a/patchright-1.64.2-py3-none-manylinux1_x86_64.whl", hash = "sha256:808f97f4813772474e333d569337e30ef6bcf641e9fd98a25b49ac15d8770605", size = 48461798, upload-time = "2026-10-22T19:54:38.583Z" },
-    { url = "https://files.pythonhosted.org/packages/54/5d/e5da55a16f40daca201ee7b0db277f6748bc084ca7d9aacbe37d711130d3/patchright-1.64.2-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:eec87f61800b2733182c4d1104c2344dd4df997bfb26ca3a80de5f8130619447", size = 48140862, upload-time = "2026-10-22T19:54:42.21Z" },
-    { url = "https://files.pythonhosted.org/packages/17/f7/9e07f8d5e8afddefb426e868e9deb67526fa0880ddc99e38eabcae0193a5/patchright-1.64.2-py3-none-win32.whl", hash = "sha256:cec5b2c2946ff662be63c1c6b94de8ec1bc96e3478cd512742e535357a995b53", size = 38791699, upload-time = "2026-10-22T19:54:46.113Z" },
-    { url = "https://files.pythonhosted.org/packages/df/00/4499f5ddc048fcc1672cbfaee41f08ea21adf3a4f9418d1af64c22cf5394/patchright-1.64.2-py3-none-win_amd64.whl", hash = "sha256:46d2a444d5c97bab24243521fe4a515fc6fd9433ff6536aee87f8bc3ab250cad", size = 38791701, upload-time = "2026-10-22T19:54:49.673Z" },
-    { url = "https://files.pythonhosted.org/packages/2c/85/b4c176316a8da67f27049558d54a17dbe8d7599c3428510aedde2b249919/patchright-1.64.2-py3-none-win_arm64.whl", hash = "sha256:b472d3394d7ed5c31307ee4dff11813c8e90dbe5345c9357e8967d5a8826bdc9", size = 34683740, upload-time = "2026-10-22T19:54:52.941Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/b1/b30a9c6f9c077d68836055c6ef6be38441f3588213ec69218fa068e77ada/patchright-1.63.0-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:74878ef6abaceabf630cf0e9fb40b6e3158fd1a02509b89bbe46e626a3c999b8", size = 44270755, upload-time = "2026-09-20T12:14:03.692Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/aa/5be5f58aff4abab91094f7aa29a2da67e05c3d7bf7eae50845bc79df4323/patchright-1.63.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b1093a9788ea7e76cd9329619d04e10b7b97b89e4e6f6895489d6c7134f1ccc7", size = 42937029, upload-time = "2026-09-20T12:14:06.884Z" },
+    { url = "https://files.pythonhosted.org/packages/15/91/453d0acc3eb9353bb874b48367fef2673af87aea49235ebd93243bb5dfb6/patchright-1.63.0-py3-none-macosx_11_0_universal2.whl", hash = "sha256:b3d2b1baae00b22f93837b0429cad7b250c51b3b46a4de0e5db0db0c4d48edc0", size = 44270759, upload-time = "2026-09-20T12:14:09.515Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/41/71d4fc9ca8ce35dc16e9f325ae1f6ae2a7e5ffa45bcea85af276473b1833/patchright-1.63.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:1c08a30d0fbd4b76d27fc5b254687ec6311e3da65b6451f55eac1c8ebe81fc15", size = 48209506, upload-time = "2026-09-20T12:14:12.816Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/13/42034b3d31e6dc7a5fb698361163c413b8ba47b59ab34cfe95a0e8ece14a/patchright-1.63.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2f0b285cc3fc482b818560e30ee811486bb2eb7bcfb3522dbf75b703ef3cc24d", size = 47895054, upload-time = "2026-09-20T12:14:16.499Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/30/f4d5e282a566b41a7b4e7b671c1982bc3c7127ce7e640c7ed3cfc41aae80/patchright-1.63.0-py3-none-win32.whl", hash = "sha256:e28eca0e6424b2e84b2c8af6b06ee89d8764e5b675061a934d9a99fc3ae441ea", size = 38598431, upload-time = "2026-09-20T12:14:19.177Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/25/cd96cc46503ac0e433b0f57dac8a4fa6a9bec9ac229b0aa96fe8e4d37433/patchright-1.63.0-py3-none-win_amd64.whl", hash = "sha256:cbeb9c7f552d96ced0922ad2fc4bd5fca817a97fb2eeabc13d1bfadf95efac1a", size = 38598436, upload-time = "2026-09-20T12:14:21.961Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/88/1addae3bfa94d156b5a80c0cb9c913679fdaf0eb687d71442f1fb467fc81/patchright-1.63.0-py3-none-win_arm64.whl", hash = "sha256:a1ddf092b330b9b47fb1a4db63563be4906c295cb386233aac71b92b7338c24a", size = 34515901, upload-time = "2026-09-20T12:14:24.763Z" },
 ]
 
 [[package]]
@@ -937,14 +937,14 @@ wheels = [
 
 [[package]]
 name = "pyee"
-version = "14.0.0"
+version = "13.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1d/f1/fdedc2c75c3e31a330659c85e5793bb18b3397981fbf0844c6dee5b18926/pyee-14.0.0.tar.gz", hash = "sha256:76dd0f4314ecd27f02dc73589dea7fd3853f9b6176d8ef9b122860657e3602de", size = 98760, upload-time = "2026-08-13T04:26:11.021Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8b/04/e7c1fe4dc78a6fdbfd6c337b1c3732ff543b8a397683ab38378447baa331/pyee-13.0.1.tar.gz", hash = "sha256:0b931f7c14535667ed4c7e0d531716368715e860b988770fc7eb8578d1f67fc8", size = 31655, upload-time = "2026-02-14T21:12:28.044Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/12/5347938b1f9a6453f0dbdfcc3e2388a1320ef9b9ec17fbefbc4ab647ea98/pyee-14.0.0-py3-none-any.whl", hash = "sha256:3ac2d3229a9677f7de2c33d7f52fe25b638a46b19c413fea2edc8c6d0a644e4d", size = 15553, upload-time = "2026-08-13T04:26:09.916Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/c4/b4d4827c93ef43c01f599ef31453ccc1c132b353284fc6c87d535c233129/pyee-13.0.1-py3-none-any.whl", hash = "sha256:af2f8fede4171ef667dfded53f96e2ed0d6e6bd7ee3bb46437f77e3b57689228", size = 15659, upload-time = "2026-02-14T21:12:26.263Z" },
 ]
 
 [[package]]
@@ -1259,7 +1259,7 @@ requires-dist = [
     { name = "jstyleson", specifier = ">=0.0.2" },
     { name = "lxml", specifier = ">=6.1.3" },
     { name = "numpy", specifier = ">=2.0" },
-    { name = "patchright", marker = "extra == 'browser'", specifier = ">=1.64" },
+    { name = "patchright", marker = "extra == 'browser'", specifier = "==1.63.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.64" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
     { name = "prometheus-fastapi-instrumentator", specifier = ">=8.1.0" },
@@ -1279,7 +1279,7 @@ dev = [
     { name = "fakeredis", extras = ["lua"], specifier = ">=2.40.0" },
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "mypy" },
-    { name = "patchright", specifier = ">=1.64" },
+    { name = "patchright", specifier = "==1.63.0" },
     { name = "playwright", specifier = ">=1.64" },
     { name = "pre-commit" },
     { name = "pytest" },
