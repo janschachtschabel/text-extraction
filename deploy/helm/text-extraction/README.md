@@ -169,7 +169,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | --- | --- | --- |
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
-| `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
+| `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
 | `TextExtractionQueueBacklog` | `max(text_extraction_queue_pending_items{pool="extract"})` above `alerts.queueBacklogItems` (1000) while `sum(increase(text_extraction_job_items_total{outcome!~"deferred\|lost"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` | `max(text_extraction_queue_pending_items{pool="extract"}) > 0` and no available worker replica (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
 | `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`; the denominator is every item that recorded a result (all but `deferred`/`lost`) | 15 m |

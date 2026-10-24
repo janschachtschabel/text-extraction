@@ -1,6 +1,7 @@
 {{- if .Values.metrics.prometheusRule.enabled }}
 {{- $fullName := include "text-extraction.fullname" . }}
 {{- $internal := include "text-extraction.internalServiceName" . }}
+{{- $workerInternal := include "text-extraction.workerExtractInternalServiceName" . }}
 {{- $ns := .Release.Namespace }}
 {{- $jobs := eq (include "text-extraction.jobsEnabled" .) "true" }}
 apiVersion: monitoring.coreos.com/v1
@@ -39,13 +40,13 @@ spec:
           annotations:
             summary: text-extraction answers more than 5 % of requests with 5xx
             description: More than 5 % of the requests to {{ $fullName }} in namespace {{ .Release.Namespace }} ended in a 5xx status for 10 minutes.
-        # The memory gauges come from the API pods (every pod reads the same Valkey), hence max().
-        # `> 0` drops a Valkey without maxmemory, which has no limit to alert on.
+        # The memory gauges come from the API and worker pods (every pod reads the same Valkey),
+        # hence max(). `> 0` drops a Valkey without maxmemory, which has no limit to alert on.
         - alert: TextExtractionValkeyMemoryHigh
           expr: |
-            max(text_extraction_valkey_used_memory_bytes{namespace="{{ $ns }}", service="{{ $internal }}"})
+            max(text_extraction_valkey_used_memory_bytes{namespace="{{ $ns }}", service=~"{{ $internal }}|{{ $workerInternal }}"})
               /
-            max(text_extraction_valkey_max_memory_bytes{namespace="{{ $ns }}", service="{{ $internal }}"} > 0)
+            max(text_extraction_valkey_max_memory_bytes{namespace="{{ $ns }}", service=~"{{ $internal }}|{{ $workerInternal }}"} > 0)
               > {{ .Values.alerts.valkeyMemoryRatio }}
           for: 10m
           labels:

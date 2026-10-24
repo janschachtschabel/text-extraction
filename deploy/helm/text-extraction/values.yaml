@@ -166,7 +166,7 @@ valkey:
   # Sizing: job results are the bulk, about BATCH_MAX_URLS x the average result JSON per open
   # batch (1,000 x ~80 KB = ~80 MB), plus as much again in the result cache, held for
   # JOB_TTL_SECONDS / RESULT_STORE_TTL_SECONDS (24 h). At VALKEY_MEMORY_GUARD_RATIO (0.8) of
-  # maxmemory the API pods stop accepting batches (503) and skip result-cache writes, so plan
+  # maxmemory the API stops accepting batches (503) and all pods skip result-cache writes, so plan
   # maxmemory for the batches you expect to be open at once with room to spare below 80 %.
   maxmemory: 768mb
   persistence:

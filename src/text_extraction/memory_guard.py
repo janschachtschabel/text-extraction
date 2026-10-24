@@ -1,4 +1,4 @@
-"""Valkey memory guard of the API pods.
+"""Valkey memory guard of the API and worker pods.
 
 Valkey runs with ``noeviction``: when it is full it refuses writes, and with them the rate
 limiter, the outbound gate and the job reads stop working. Results of job items are the bulk of
@@ -7,16 +7,19 @@ what fills it, so the API stops taking on new bulk while Valkey is nearly full:
 - ``POST /v1/batch`` answers 503 ``internal_error`` (retryable);
 - ``POST /v1/extract`` with ``wait_seconds`` does not hand a slow extraction over to a job and
   keeps waiting for it inline;
-- the result cache of the API pod skips its writes.
+- the result cache skips its writes, on the API pods and on the workers (whose cache writes are
+  the second copy of every batch result, the larger share of a flood).
 
-Workers keep storing the results of the items they have, so accepted jobs still complete.
+Workers keep storing the results of the items they have in the job store, so accepted jobs still
+complete.
 
 A background task reads ``INFO memory`` every ``interval`` seconds (``used_memory`` and
 ``maxmemory``); the guard holds while ``used_memory`` is at least ``VALKEY_MEMORY_GUARD_RATIO`` of
 ``maxmemory``. Without a ``maxmemory`` (0) there is no guard. When the read fails the last values
 stay and the outage is logged once. The values are exported as
 ``text_extraction_valkey_used_memory_bytes`` and ``text_extraction_valkey_max_memory_bytes`` from
-the first successful read on.
+the first successful read on; API pods and workers export them alike (one Valkey: use
+``max()`` over the pods).
 """
 
 import asyncio

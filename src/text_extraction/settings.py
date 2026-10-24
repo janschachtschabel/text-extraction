@@ -79,8 +79,8 @@ class Settings(BaseSettings):
     api_keys: list[ApiKey] = []  # secret; JSON list in env API_KEYS
     api_keys_file: Path | None = None  # JSON file with the same shape, merged with API_KEYS
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
-    # Share of Valkey's maxmemory from which API pods take on no new bulk: POST /v1/batch answers
-    # 503, slow extractions are not handed over to jobs, the result cache skips its writes.
+    # Share of Valkey's maxmemory from which no new bulk is taken on: POST /v1/batch answers 503,
+    # slow extractions are not handed over to jobs, the result cache (API and workers) skips.
     valkey_memory_guard_ratio: float = Field(default=0.8, ge=0.1, le=1.0)
     rate_limit_per_minute: int = Field(default=60, ge=1)
     rate_limit_enabled: bool = True

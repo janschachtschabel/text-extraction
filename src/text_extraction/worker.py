@@ -19,6 +19,10 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
    whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
    it) still stores its result, but its repeat write or deferral is not counted in the metrics.
 
+While Valkey's memory is at ``VALKEY_MEMORY_GUARD_RATIO`` of its maximum (``memory_guard.py``,
+read every 5 s from the start to the end of the process), the result cache skips its writes; the
+results still go to the job.
+
 A Valkey error, an ``OSError`` (a Valkey call timing out) or the gate's 503 backs the loop off
 for 1, 2, 4 … 30 s; the lease of the item in hand then expires and the item is claimed again.
 No error ends a loop.
@@ -50,8 +54,10 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
+from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore
+from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
@@ -317,14 +323,22 @@ class Worker:
 
 
 async def _serve(
-    worker: Worker, internal: _Server, readiness: Readiness, *, graceful_seconds: float
+    worker: Worker,
+    internal: _Server,
+    readiness: Readiness,
+    *,
+    graceful_seconds: float,
+    guard: MemoryGuard | None = None,
 ) -> None:
     """Serve the internal app, load the language model, then run the worker until a signal and
-    shut down in the order the module describes."""
+    shut down in the order the module describes. ``guard``'s task runs from the start to the end
+    of this call, so it is stopped before the caller closes the Valkey client."""
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in _HANDLED_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
+    if guard is not None:
+        guard.start()
     internal_task = asyncio.create_task(internal.serve())
     stopping = asyncio.create_task(stop.wait())
     starting = asyncio.create_task(asyncio.to_thread(load_language_model))
@@ -357,21 +371,46 @@ async def _serve(
         internal.should_exit = True
         for sig in _HANDLED_SIGNALS:
             loop.remove_signal_handler(sig)
+        if guard is not None:
+            await guard.stop()
 
 
-async def _run(settings: Settings) -> None:
-    valkey = create_valkey(settings.valkey_url)
+@dataclass(frozen=True)
+class WorkerParts:
+    """What one worker process runs on: the worker, its memory guard, and the fetcher and
+    conversion pool to close at the end."""
+
+    worker: Worker
+    guard: MemoryGuard
+    fetcher: Fetcher
+    pool: ConversionPool
+
+
+def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry) -> WorkerParts:
+    """The worker of a worker process. Its result cache skips writes while the memory guard
+    reports Valkey as nearly full (the job store's result writes are not guarded, so accepted
+    jobs complete); the guard's gauges are exported from ``registry``."""
+    guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, fetcher = create_outbound(settings, valkey)
     pool = ConversionPool(settings.convert_concurrency)
-    registry = REGISTRY
+    pipeline = create_pipeline(
+        settings, valkey, fetcher, registry, pool, gate=gate, memory_guard=guard
+    )
     worker = Worker(
         settings,
         valkey,
-        create_pipeline(settings, valkey, fetcher, registry, pool, gate=gate),
+        pipeline,
         JobStore(valkey, settings),
         FairQueue(valkey, settings),
         registry,
     )
+    return WorkerParts(worker=worker, guard=guard, fetcher=fetcher, pool=pool)
+
+
+async def _run(settings: Settings) -> None:
+    valkey = create_valkey(settings.valkey_url)
+    registry = REGISTRY
+    parts = build_worker(settings, valkey, registry)
     graceful = graceful_shutdown_seconds(settings)
     readiness = Readiness()
     internal = _server(
@@ -381,10 +420,12 @@ async def _run(settings: Settings) -> None:
         graceful,
     )
     try:
-        await _serve(worker, internal, readiness, graceful_seconds=graceful)
+        await _serve(
+            parts.worker, internal, readiness, graceful_seconds=graceful, guard=parts.guard
+        )
     finally:
-        await fetcher.aclose()
-        pool.shutdown()
+        await parts.fetcher.aclose()
+        parts.pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

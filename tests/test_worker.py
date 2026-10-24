@@ -29,13 +29,14 @@ from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import JobLost, JobStore, ResultWrite
+from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
 from text_extraction.settings import Settings
-from text_extraction.worker import Worker, _serve, main
+from text_extraction.worker import Worker, _serve, build_worker, main
 
 START = 1_000_000.0
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -900,3 +901,75 @@ async def test_worker_without_a_stored_trace_id_binds_none() -> None:
     [item] = await harness.items(job_id)
     assert item.result is not None
     assert item.result.trace_id is None
+
+
+# --- the Valkey memory guard in the worker process (R31) ---------------------------------------
+
+
+class HighGuard:
+    high = True
+
+
+@scenario
+async def test_worker_stores_results_but_skips_cache_writes_while_memory_is_high() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    valkey, settings = harness.valkey, harness.settings
+    fetcher = cast(Fetcher, harness.fetcher)
+    pipeline = Pipeline(
+        fetcher,
+        DomainGate(valkey, settings),
+        ComplianceChecker(fetcher, valkey, settings),
+        ResultCache(valkey, settings, guard=HighGuard()),
+        FingerprintStore(valkey, settings),
+        settings,
+        harness.registry,
+    )
+    harness.worker = Worker(
+        settings, valkey, pipeline, harness.store, harness.queue, harness.registry
+    )
+    job_id = await harness.submit([url])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "success"  # the job's result write is not guarded
+    assert await valkey.keys("res:*") == []  # the cache's second copy is skipped
+
+
+def test_worker_process_wires_one_guard_into_cache_and_registry() -> None:
+    registry = CollectorRegistry()
+    parts = build_worker(make_settings(), FakeAsyncRedis(), registry)
+    try:
+        assert parts.worker._pipeline._cache._guard is parts.guard
+        assert parts.guard in registry._collector_to_names
+        assert "text_extraction_valkey_used_memory_bytes" in registry._names_to_collectors
+    finally:
+        parts.pool.shutdown()
+
+
+@scenario
+async def test_serve_runs_the_guard_while_the_worker_runs() -> None:
+    harness = Harness({}, worker_concurrency=1)
+    guard = MemoryGuard(harness.valkey, 0.8, CollectorRegistry(), interval=0.01)
+    readiness = Readiness()
+    app = create_internal_app(
+        harness.settings, harness.valkey, harness.registry, readiness=readiness
+    )
+    internal = _server(app, "127.0.0.1", free_port())
+
+    serving = asyncio.create_task(
+        _serve(harness.worker, internal, readiness, graceful_seconds=1, guard=guard)
+    )
+    deadline = time.monotonic() + 20
+    while not readiness.ready:
+        assert time.monotonic() < deadline, "the worker never started"
+        await asyncio.sleep(0.01)
+    assert guard.running
+
+    os.kill(os.getpid(), signal.SIGTERM)
+    async with asyncio.timeout(20):
+        await serving
+
+    assert not guard.running
