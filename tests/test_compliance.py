@@ -282,8 +282,8 @@ def test_robots_requested_with_limits() -> None:
     assert set(fetcher.urls()) == {ROBOTS, TDMREP, AI_TXT}
     for url, options in fetcher.calls:
         # robots.txt is read from its first 500 KiB (RFC 9309); the others must fit.
-        truncating = {"truncate": True} if url == ROBOTS else {}
-        assert options == {"max_bytes": 512_000, "timeout_seconds": 10, **truncating}
+        truncate = url == ROBOTS
+        assert options == {"max_bytes": 512_000, "timeout_seconds": 10, "truncate": truncate}
 
 
 def test_robots_origin_includes_scheme_and_port() -> None:

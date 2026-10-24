@@ -20,7 +20,7 @@ import math
 import signal
 import socket
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 
 import structlog
 import uvicorn
@@ -121,10 +121,13 @@ async def _serve(
 
     for sig in _HANDLED_SIGNALS:
         loop.add_signal_handler(sig, on_signal)
-    tasks = [asyncio.create_task(server.serve()) for server in (public, internal)]
+    public_task = asyncio.create_task(public.serve())
+    internal_task = asyncio.create_task(internal.serve())
     waiting = asyncio.create_task(asked.wait())
     try:
-        await asyncio.wait([*tasks, waiting], return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait(
+            [public_task, internal_task, waiting], return_when=asyncio.FIRST_COMPLETED
+        )
         readiness.mark_draining()
         if asked.is_set():
             _log.info("shutdown_requested", drain_seconds=drain_seconds)
@@ -132,19 +135,13 @@ async def _serve(
                 async with asyncio.timeout(drain_seconds):
                     await hurry.wait()
         public.should_exit = True
-        await _finish(tasks[:1])
+        await public_task  # raises a failure of the server itself
         internal.should_exit = True
-        await _finish(tasks[1:])
+        await internal_task
     finally:
         waiting.cancel()
         for sig in _HANDLED_SIGNALS:
             loop.remove_signal_handler(sig)
-
-
-async def _finish(tasks: Sequence[asyncio.Task[None]]) -> None:
-    """Wait for the server tasks; a server's own failure is raised."""
-    for task in tasks:
-        await task
 
 
 async def _run(settings: Settings) -> None:

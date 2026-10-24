@@ -49,7 +49,7 @@ import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from typing import Any, Literal
+from typing import Literal
 from urllib.parse import urlsplit
 
 import structlog
@@ -399,13 +399,12 @@ class ComplianceChecker:
         return entry
 
     async def _fetch_file(self, file_url: str, *, truncate: bool) -> _Entry:
-        options: dict[str, Any] = {"truncate": True} if truncate else {}
         try:
             fetched = await self._fetcher.fetch(
                 file_url,
                 max_bytes=_FILE_MAX_BYTES,
                 timeout_seconds=_FILE_TIMEOUT_SECONDS,
-                **options,
+                truncate=truncate,
             )
         except FetchError as error:
             # The fetcher also raises for some answers it did read: a 404 page over the size limit,
