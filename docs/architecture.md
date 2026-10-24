@@ -38,7 +38,8 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
    `COMPLIANCE_ALLOW_OVERRIDE`. Every result carries a `compliance` block. The origin files are
    cached in Valkey; files that are missing are fetched one after another inside the outbound
    turn of the page that needs them, before the page (R22), so they count against the host's
-   limits like any request.
+   limits like any request. The page then waits out the spacing since the latest real start,
+   its own turn's files included (R24).
 3. **Fetch (fast):** httpx, HTTP/2, byte cap, conditional requests (ETag, Last-Modified).
    Per-domain outbound limits in Valkey (parallelism, delay, `Crawl-delay`, backoff on
    429/503, circuit breaker). A turn has at most one request in flight, so the parallelism
@@ -230,6 +231,11 @@ the delay since the latest real start before it is sent, and the fetcher reports
 once its headers are on the wire, so a request held up by a busy event loop delays the next one
 instead of letting it follow closer. The compliance files ride in the page's gate turn, fetched
 one after another before the page, so the concurrency limit holds for every request a host sees.
+Fix round 1 (R24) tightened both: the three files share one 10 s budget, and once a turn has
+fetched or awaited files it confirms the spacing against the latest real start before it sends
+the page, bounded by `OUTBOUND_MAX_WAIT_SECONDS`. So on a cold origin the page starts one spacing
+after the last file (about 1 s more on first contact at the defaults, once per cache period), and
+two cold turns that shared one file load cannot send their pages back to back.
 
 **Done when (package 3):** `tests/e2e/run_batch.py` (workflow `e2e`) runs 1,000 URLs (400 on one
 host, 600 over nine) plus a second client's 20 URLs on the busiest host, across two workers,

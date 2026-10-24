@@ -8,7 +8,9 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here. When the
    origin's files are cached, this takes no request. Otherwise the host's ``DomainGate`` turn is
    taken first and the missing files are fetched in it, one after another, before the page: so
-   every request to the host counts against its limits, and the spacing lies between turns.
+   every request to the host counts against its limits. Before the page, the turn waits out the
+   spacing since the latest real start once more (``DomainGate.confirm_start``), so its page
+   keeps the spacing to the files and to any other turn's request.
 5. The fetch, inside the host's ``DomainGate`` turn (the one of step 4, if taken), and its
    outcome reported to the gate. A stale cache entry's validators are sent; a 304 or unchanged
    bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
@@ -490,12 +492,21 @@ class Pipeline:
         started = time.perf_counter()
         report = await self._checker.cached_before_fetch(url, mode)
         if report is None:
+            host = urlsplit(url).hostname or ""
             waited = time.perf_counter()
             # The origin's Crawl-delay is not known yet; the request after this turn keeps it.
-            await turn.take(urlsplit(url).hostname or "", None)
+            await turn.take(host, None)
             run.fetch_ms += _ms(waited)
             started += time.perf_counter() - waited
             report = await self._checker.before_fetch(url, mode)
+            if blocking_code(report) is None:
+                # The turn fetched the files, or waited for another turn's load of them: the
+                # page waits out the spacing since the latest real start, now with the
+                # Crawl-delay. A blocked page is not sent, so it has no spacing to keep.
+                waited = time.perf_counter()
+                await self._gate.confirm_start(host, report.crawl_delay)
+                run.fetch_ms += _ms(waited)
+                started += time.perf_counter() - waited
         run.compliance_ms += _ms(started)
         return report
 

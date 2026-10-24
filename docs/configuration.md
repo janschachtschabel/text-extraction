@@ -191,10 +191,11 @@ Every request to a target site passes a per-host gate: the page and its redirect
 origin's compliance files (robots.txt, `tdmrep.json`, ai.txt). The files are fetched only when they
 are not cached (`COMPLIANCE_CACHE_SECONDS`), then one after another inside the turn of the page
 that needs them, before the page. A turn has at most one request in flight, so
-`OUTBOUND_MAX_CONCURRENCY_PER_HOST` holds for every request. The spacing lies between turns: on
-first contact the files and the page follow each other without a gap, and the next turn starts
-the spacing after the last of them was sent. The first turn on an
-origin does not know its `Crawl-delay` yet; the turn after it does and keeps it. All state is in
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST` holds for every request. The files follow each other without
+a gap; the page then waits out the spacing since the latest real start, the turn's own files
+included, so on first contact the page starts one spacing after the last file was sent (the
+spacing already uses the `Crawl-delay` that robots.txt just gave). Two cold turns that share one
+file load therefore still start their pages a spacing apart. All state is in
 Valkey, so the pods share it.
 Hosts are compared lower-cased and in IDNA form. The braces around the host in the keys are
 literal (a cluster hash tag), so all keys of one host live in the same slot.

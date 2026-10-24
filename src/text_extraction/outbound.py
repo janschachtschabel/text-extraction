@@ -228,6 +228,17 @@ class DomainGate:
             # when it does not.
             await self._release_lease(host, token)
 
+    async def confirm_start(self, host: str, crawl_delay: float | None = None) -> None:
+        """Inside a turn held at ``host``: wait until the spacing has passed since the latest
+        real start, and record this start as the latest; the same check a turn makes when it
+        wakes. A turn that did other requests first (the origin's compliance files) or waited
+        for another turn's (a shared load) calls it before its page, so the page cannot follow
+        another turn's request closer than the spacing. Raises ``OutboundBusy`` when that wait
+        would be longer than ``outbound_max_wait_seconds``."""
+        host = normalize_host(host)
+        deadline = self._clock() + self._settings.outbound_max_wait_seconds
+        await self._confirm_until(host, self._spacing(crawl_delay), deadline, 0.0)
+
     async def mark_sent(self, host: str) -> None:
         """Report that a request to ``host`` has just gone out: the next request's spacing
         counts from now (the fetcher calls this; see the module docstring)."""

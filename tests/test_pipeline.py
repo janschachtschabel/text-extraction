@@ -172,6 +172,20 @@ def test_robots_block_fails_without_fetching_the_page() -> None:
     assert harness.fetcher.page_calls() == []
 
 
+def test_a_cold_origin_that_blocks_the_page_does_not_wait_for_the_page_spacing() -> None:
+    harness = Harness(
+        {PAGE: fetched(), ROBOTS: fetched(ROBOTS, "User-agent: *\nDisallow: /")},
+        outbound_min_delay_ms=3000,
+    )
+
+    started = time.monotonic()
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
+    assert time.monotonic() - started < 2  # no page follows, so no spacing to keep before it
+
+
 def test_report_mode_fetches_and_reports() -> None:
     harness = Harness({PAGE: fetched(), ROBOTS: fetched(ROBOTS, "User-agent: *\nDisallow: /")})
 
@@ -794,6 +808,9 @@ class RecordingGate:
         self.events.append(("record", host))
         await self.gate.record(host, status=status, retry_after=retry_after)
 
+    async def confirm_start(self, host: str, crawl_delay: float | None = None) -> None:
+        await self.gate.confirm_start(host, crawl_delay)
+
 
 def recording_harness(
     answers: dict[str, Answer], **overrides: Any
@@ -803,6 +820,13 @@ def recording_harness(
     harness = Harness(answers, gate=gate, **overrides)
     harness.valkey = valkey
     return harness, gate
+
+
+def warm_compliance_cache(harness: Harness) -> None:
+    """Load the origin's compliance files into the cache, as an earlier request would have, so
+    the request under test takes no cold turn (which waits a spacing before its page)."""
+    asyncio.run(harness.pipeline._checker.before_fetch(PAGE, "enforce"))
+    harness.fetcher.calls.clear()
 
 
 def leases(harness: Harness) -> int:
@@ -994,6 +1018,7 @@ def test_a_same_host_redirect_keeps_the_turn_it_already_holds() -> None:
         {PAGE: Redirect(MOVED), MOVED: fetched(MOVED)},
         outbound_min_delay_ms=1000,
     )
+    warm_compliance_cache(harness)  # a cold turn waits a spacing before its page
 
     started = time.monotonic()
     envelope = harness.run_once()
@@ -1015,6 +1040,7 @@ def test_a_same_host_redirect_does_not_wait_for_the_crawl_delay_again() -> None:
         {PAGE: Redirect(MOVED), MOVED: fetched(MOVED), ROBOTS: robots},
         outbound_min_delay_ms=1000,
     )
+    warm_compliance_cache(harness)  # a cold turn waits a spacing before its page
 
     started = time.monotonic()
     envelope = harness.run_once()
@@ -1193,3 +1219,27 @@ def test_a_cross_host_redirects_files_are_fetched_in_the_targets_turn() -> None:
     # in flight while the target's files load: two, where the real fetcher has one.
     assert most[0] == 2
     assert leases(harness) == 0
+
+
+def test_two_cold_turns_sharing_the_file_load_still_space_their_pages() -> None:
+    harness = Harness({PAGE: fetched(PAGE)}, outbound_min_delay_ms=200)
+    answer = harness.fetcher.fetch
+    page_starts: list[float] = []
+
+    async def fetch(url: str, **options: Any) -> FetchResult:
+        if url == PAGE:
+            page_starts.append(time.monotonic())
+        else:
+            await asyncio.sleep(0.3)  # slow compliance files: both turns wait for the one load
+        return await answer(url, **options)
+
+    harness.fetcher.fetch = fetch  # type: ignore[method-assign]
+
+    async def both() -> list[Envelope[ExtractResult]]:
+        return list(await asyncio.gather(harness.run(cache=False), harness.run(cache=False)))
+
+    first, second = asyncio.run(both())
+
+    assert first.status == second.status == "success"
+    assert len(page_starts) == 2
+    assert abs(page_starts[1] - page_starts[0]) >= 0.19  # 200 ms, minus clock slack
