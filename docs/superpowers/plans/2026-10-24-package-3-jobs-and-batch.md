@@ -23,7 +23,7 @@
 - `docs/packages.md` row 3.
 - `CLAUDE.md` rules 2 and 4.
 
-**Pending decision (Jan):** taskiq-redis 1.2.4 queues are plain FIFO. Its stream broker reclaims stale messages only when new ones arrive (`listen()` skips the reclaim when `xreadgroup` returns nothing). This plan therefore implements the fair queue itself and does **not** use Taskiq. Task 8 replaces "Taskiq on Valkey" in `CLAUDE.md`, `docs/architecture.md` and `docs/packages.md`. If Jan chooses Taskiq, Tasks 2 and 3 change and the rest stays.
+**Decision (Jan, 2026-10-24): own scheduler, no Taskiq.** taskiq-redis 1.2.4 queues are plain FIFO. Its stream broker reclaims stale messages only when new ones arrive (`listen()` skips the reclaim when `xreadgroup` returns nothing). So the fair queue is implemented here, and Task 8 replaces "Taskiq on Valkey" in `CLAUDE.md`, `docs/architecture.md` and `docs/packages.md`. Jan approved this plan on 2026-10-24.
 
 ## Global Constraints
 
