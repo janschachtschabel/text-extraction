@@ -8,9 +8,9 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here. When the
    origin's files are cached, this takes no request. Otherwise the host's ``DomainGate`` turn is
    taken first and the missing files are fetched in it, one after another, before the page: so
-   every request to the host counts against its limits. Before the page, the turn waits out the
-   spacing since the latest real start once more (``DomainGate.confirm_start``), so its page
-   keeps the spacing to the files and to any other turn's request.
+   every request to the host counts against its limits. The fetcher checks every request with
+   the gate (``DomainGate.before_request``): the turn's own requests go back to back, and each
+   keeps the spacing to the latest request of any other turn.
 5. The fetch, inside the host's ``DomainGate`` turn (the one of step 4, if taken), and its
    outcome reported to the gate. A stale cache entry's validators are sent; a 304 or unchanged
    bytes reuse the stored result (``cache: revalidated``). Each redirect target passes the
@@ -499,14 +499,6 @@ class Pipeline:
             run.fetch_ms += _ms(waited)
             started += time.perf_counter() - waited
             report = await self._checker.before_fetch(url, mode)
-            if blocking_code(report) is None:
-                # The turn fetched the files, or waited for another turn's load of them: the
-                # page waits out the spacing since the latest real start, now with the
-                # Crawl-delay. A blocked page is not sent, so it has no spacing to keep.
-                waited = time.perf_counter()
-                await self._gate.confirm_start(host, report.crawl_delay)
-                run.fetch_ms += _ms(waited)
-                started += time.perf_counter() - waited
         run.compliance_ms += _ms(started)
         return report
 
@@ -780,11 +772,14 @@ class Pipeline:
 
 
 def create_outbound(settings: Settings, valkey: Redis) -> tuple[DomainGate, Fetcher]:
-    """The per-host gate in ``valkey`` and a fetcher that reports every request it sends (pages,
-    redirect hops, compliance files) to that gate, so the spacing counts from the real send. Pass
-    both to ``create_pipeline``; ``aclose`` the fetcher last."""
+    """The per-host gate in ``valkey`` and a fetcher that announces every request it sends
+    (pages, redirect hops, compliance files) to that gate and reports its send, so each request
+    keeps the spacing to the other turns' real starts. Pass both to ``create_pipeline``;
+    ``aclose`` the fetcher last."""
     gate = DomainGate(valkey, settings)
-    return gate, Fetcher(settings, on_request_sent=gate.mark_sent)
+    return gate, Fetcher(
+        settings, before_request=gate.before_request, on_request_sent=gate.mark_sent
+    )
 
 
 def create_pipeline(

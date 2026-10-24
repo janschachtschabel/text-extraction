@@ -4,7 +4,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from datetime import UTC, datetime
 from email.utils import format_datetime
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
@@ -629,6 +629,7 @@ def _spaced_starts(late: dict[int, float]) -> tuple[list[float], list[float]]:
 
         async def request() -> None:
             async with gate.slot(HOST):
+                await gate.before_request(HOST)
                 starts.append(clock.now - START)
 
         await clock.run(asyncio.create_task(request()))
@@ -656,14 +657,15 @@ def test_requests_on_time_wait_no_longer_than_their_turn() -> None:
 
 
 class CountingRedis(FakeAsyncRedis):
-    """Counts the script calls whose first key is ``out:last``: the start confirmations."""
+    """Counts the script calls whose first key is ``out:starts``: the start confirmations and
+    the send reports."""
 
     def __init__(self) -> None:
         super().__init__()
         self.confirms = 0
 
     async def evalsha(self, sha: str, numkeys: int, *keys_and_args: Any) -> Any:
-        if str(keys_and_args[0]).startswith("out:last:"):
+        if str(keys_and_args[0]).startswith("out:starts:"):
             self.confirms += 1
         return await super().evalsha(sha, numkeys, *keys_and_args)
 
@@ -673,13 +675,17 @@ def test_a_turn_that_is_due_costs_no_extra_round_trip() -> None:
         fake_time = FakeTime()
         valkey = CountingRedis()
         gate = make_gate(fake_time, valkey, outbound_min_delay_ms=1000)
-        for _ in range(3):
+        for n in range(3):
+            if n == 1:
+                valkey.confirms = 0  # the first calls also load the scripts
             async with gate.slot(HOST):
-                pass
+                await gate.before_request(HOST)
+                await gate.mark_sent(HOST)
             fake_time.now += 5  # the next request comes after its turn
         return valkey.confirms, fake_time.sleeps
 
-    assert asyncio.run(scenario()) == (0, [])
+    # Per turn: the request's own confirmation and its send report, no check of the turn's own.
+    assert asyncio.run(scenario()) == (4, [])
 
 
 def test_a_request_sent_late_moves_the_next_start_on() -> None:
@@ -695,12 +701,14 @@ def test_a_request_sent_late_moves_the_next_start_on() -> None:
 
         async def first() -> None:
             async with gate.slot(HOST):
+                await gate.before_request(HOST)
                 starts.append(clock.now - START)
-                await clock.sleep(0.5)  # a stall between the turn and the real send
+                await clock.sleep(0.5)  # a stall between the check and the real send
                 await gate.mark_sent(HOST)
 
         async def second() -> None:
             async with gate.slot(HOST):
+                await gate.before_request(HOST)
                 starts.append(clock.now - START)
 
         one = asyncio.create_task(first())
@@ -741,7 +749,8 @@ def test_the_wait_after_the_turn_respects_the_max_wait() -> None:
             outbound_max_wait_seconds=1,
         )
         async with gate.slot(HOST):  # the first turn on the host, booked without a Crawl-delay
-            pass
+            await gate.before_request(HOST)
+            await gate.mark_sent(HOST)
         fake_time.now += 1
         # The next request knows the Crawl-delay of 20 s: its turn is due at once by the booking,
         # but the real-start check would wait 19 s more, beyond the 1 s it may wait.
@@ -754,3 +763,231 @@ def test_the_wait_after_the_turn_respects_the_max_wait() -> None:
 
     assert sleeps == []
     assert retry_after == pytest.approx(19.0)
+
+
+# --- R25: spacing between the requests of different turns, back to back within a turn ---------
+
+
+def r25_gate(clock: VirtualClock, **overrides: object) -> DomainGate:
+    values: dict[str, object] = {
+        "auth_mode": "none",
+        "outbound_max_concurrency_per_host": 2,
+        "outbound_min_delay_ms": 1000,
+        "outbound_max_wait_seconds": 10,
+    }
+    values.update(overrides)
+    return DomainGate(
+        FakeAsyncRedis(),
+        Settings(**values),  # type: ignore[arg-type]
+        clock=clock.clock,
+        sleep=clock.sleep,
+    )
+
+
+async def send(gate: DomainGate, clock: VirtualClock, starts: list[float], took: float) -> None:
+    """One request in the current turn: confirmed, sent, answered after ``took`` seconds."""
+    await gate.before_request(HOST)
+    starts.append(round(clock.now - START, 6))
+    await gate.mark_sent(HOST)
+    if took:
+        await clock.sleep(took)
+
+
+def test_the_requests_of_one_turn_go_back_to_back() -> None:
+    # A cold origin: three compliance files and the page, each answered after 0.3 s.
+    async def scenario() -> tuple[list[float], list[float]]:
+        clock = VirtualClock()
+        gate = r25_gate(clock)
+        starts: list[float] = []
+
+        async def turn() -> None:
+            async with gate.slot(HOST):
+                for _ in range(4):
+                    await send(gate, clock, starts, 0.3)
+
+        await clock.run(asyncio.create_task(turn()))
+        return starts, clock.sleeps
+
+    starts, sleeps = asyncio.run(scenario())
+
+    # First contact costs no spacing: the delay lies only between different turns.
+    assert starts == [0.0, 0.3, 0.6, 0.9]
+    assert sleeps == [0.3, 0.3, 0.3, 0.3]
+
+
+def test_another_turns_request_keeps_the_spacing_to_them() -> None:
+    async def scenario() -> tuple[list[float], list[float]]:
+        clock = VirtualClock()
+        gate = r25_gate(clock)
+        first: list[float] = []
+        second: list[float] = []
+
+        async def turn_a() -> None:
+            async with gate.slot(HOST):
+                await send(gate, clock, first, 0.3)
+                await send(gate, clock, first, 0.3)
+                await send(gate, clock, first, 0.0)
+
+        async def turn_b() -> None:
+            async with gate.slot(HOST):  # booked 1.0 s after A's turn
+                await send(gate, clock, second, 0.0)
+
+        a = asyncio.create_task(turn_a())
+        await asyncio.sleep(0)
+        await clock.run(a, asyncio.create_task(turn_b()))
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert first == [0.0, 0.3, 0.6]
+    assert second == [1.6]  # 1 s after A's latest request, not after A's turn start
+
+
+def test_a_turn_waits_for_a_request_another_turn_sent_in_between() -> None:
+    async def scenario() -> tuple[list[float], list[float]]:
+        clock = VirtualClock()
+        gate = r25_gate(clock)
+        first: list[float] = []
+        second: list[float] = []
+
+        async def turn_a() -> None:
+            async with gate.slot(HOST):
+                await send(gate, clock, first, 1.2)  # a slow answer
+                await send(gate, clock, first, 0.0)
+
+        async def turn_b() -> None:
+            async with gate.slot(HOST):
+                await send(gate, clock, second, 0.0)
+
+        a = asyncio.create_task(turn_a())
+        await asyncio.sleep(0)
+        await clock.run(a, asyncio.create_task(turn_b()))
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert second == [1.0]
+    assert first == [0.0, 2.0]  # B sent at 1.0 s, so A's next request waits until 2.0 s
+
+
+def test_a_late_report_never_moves_a_turns_start_back() -> None:
+    async def scenario() -> tuple[float | None, list[float]]:
+        clock = VirtualClock()
+        gate = r25_gate(clock)
+        valkey = gate._valkey
+        starts: list[float] = []
+        score: float | None = None
+
+        async def turn_a() -> None:
+            nonlocal score
+            async with gate.slot(HOST):
+                clock.now = START + 5
+                await send(gate, clock, starts, 0.0)
+                clock.now = START + 2  # a late report of an earlier send, as from a slow pod
+                await gate.mark_sent(HOST)
+                key = f"out:starts:{{{HOST}}}"
+                members = cast(
+                    list[tuple[bytes, float]], await valkey.zrange(key, 0, -1, withscores=True)
+                )
+                (score,) = [value for _, value in members]
+
+        async def turn_b() -> None:
+            async with gate.slot(HOST):
+                await send(gate, clock, starts, 0.0)
+
+        await clock.run(asyncio.create_task(turn_a()))
+        clock.now = START + 5.5
+        await clock.run(asyncio.create_task(turn_b()))
+        return score, starts
+
+    score, starts = asyncio.run(scenario())
+
+    assert score == START + 5
+    assert starts == [5.0, 6.0]  # spaced from 5 s, not from 2 s
+
+
+def test_a_request_outside_any_turn_counts_for_every_turn() -> None:
+    async def scenario() -> list[float]:
+        clock = VirtualClock()
+        gate = r25_gate(clock)
+        starts: list[float] = []
+        await gate.mark_sent(HOST)  # sent without a turn: recorded under a fresh token
+
+        async def turn() -> None:
+            async with gate.slot(HOST):
+                await send(gate, clock, starts, 0.0)
+
+        await clock.run(asyncio.create_task(turn()))
+        return starts
+
+    assert asyncio.run(scenario()) == [1.0]
+
+
+def test_a_request_to_another_host_is_not_confirmed_in_this_turn() -> None:
+    async def scenario() -> list[float]:
+        clock = VirtualClock()
+        gate = r25_gate(clock)
+
+        async def turn() -> None:
+            async with gate.slot(HOST):
+                await gate.before_request("other.example")  # not this turn's host: no wait
+
+        await clock.run(asyncio.create_task(turn()))
+        return clock.sleeps
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_the_confirm_before_a_request_respects_the_max_wait() -> None:
+    async def scenario() -> tuple[float, list[float]]:
+        clock = VirtualClock()
+        gate = r25_gate(
+            clock,
+            outbound_min_delay_ms=200,
+            outbound_max_wait_seconds=1,
+            outbound_max_crawl_delay_seconds=30,
+        )
+        starts: list[float] = []
+        retry_after = 0.0
+
+        async def turn_a() -> None:
+            async with gate.slot(HOST):
+                await clock.sleep(0.3)
+                await send(gate, clock, starts, 0.0)
+
+        async def turn_b() -> None:
+            nonlocal retry_after
+            async with gate.slot(HOST, 20.0):  # due at 0.2 s: nothing was sent yet
+                await clock.sleep(0.3)
+                # A sent at 0.3 s; with a Crawl-delay of 20 s this request would wait 19.8 s.
+                with pytest.raises(OutboundBusy) as busy:
+                    await gate.before_request(HOST)
+                retry_after = busy.value.retry_after
+
+        a = asyncio.create_task(turn_a())
+        await asyncio.sleep(0)
+        await clock.run(a, asyncio.create_task(turn_b()))
+        return retry_after, starts
+
+    retry_after, starts = asyncio.run(scenario())
+
+    assert starts == [0.3]
+    assert retry_after == pytest.approx(19.8)
+
+
+def test_the_starts_set_stays_small() -> None:
+    async def scenario() -> int:
+        clock = VirtualClock()
+        gate = r25_gate(clock, outbound_max_crawl_delay_seconds=5)
+        starts: list[float] = []
+
+        async def turn() -> None:
+            async with gate.slot(HOST):
+                await send(gate, clock, starts, 0.0)
+
+        for _ in range(60):
+            await clock.run(asyncio.create_task(turn()))
+        return int(await gate._valkey.zcard(f"out:starts:{{{HOST}}}"))
+
+    # One start per second over 60 s; only the last few delays' worth are kept.
+    assert asyncio.run(scenario()) <= 12

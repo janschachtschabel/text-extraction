@@ -14,11 +14,13 @@ What it enforces, for the first request and every redirect hop alike:
 The caller may watch the chain with ``on_redirect``: it is awaited with each redirect target
 before that target is requested, and may raise ``FetchError`` to end the chain there.
 
-``on_request_sent``, a constructor argument, is awaited with the host of every request (each
-redirect hop and every caller's, compliance files included) right after its headers went out on
-the wire. The outbound gate uses it to count its spacing from the real send
-(``DomainGate.mark_sent``). The hook gets at most half a second; an error or a timeout of it is
-logged (host and error type) and does not fail the fetch.
+``before_request``, a constructor argument, is awaited with the host of every request (each
+redirect hop and every caller's, compliance files included) right before it is sent; the outbound
+gate waits out its spacing there (``DomainGate.before_request``) and may raise, which ends the
+fetch with that error and sends nothing. ``on_request_sent``, also a constructor argument, is
+awaited with the host right after the request's headers went out on the wire; the gate counts
+its spacing from that real send (``DomainGate.mark_sent``). That hook gets at most half a
+second; an error or a timeout of it is logged (host and error type) and does not fail the fetch.
 
 Failures of the target or the network are raised as ``FetchError`` with a code from
 ``ErrorCode``. A response with status >= 400 is not an error here: it is returned and the
@@ -281,6 +283,7 @@ class Fetcher:
         settings: Settings,
         *,
         policy: AddressPolicy | None = None,
+        before_request: SentHook | None = None,
         on_request_sent: SentHook | None = None,
     ) -> None:
         self._settings = settings
@@ -303,7 +306,13 @@ class Fetcher:
         # The shared client never stores cookies, so nothing leaks from one fetch() to the next.
         # Cookies live in a jar of their own per fetch() call, see ``_fetch``.
         self._client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+        self._before_request = before_request
         self._on_request_sent = on_request_sent
+
+    @property
+    def before_request(self) -> SentHook | None:
+        """The hook awaited right before each request (see the module docstring)."""
+        return self._before_request
 
     @property
     def on_request_sent(self) -> SentHook | None:
@@ -396,6 +405,8 @@ class Fetcher:
             cookies.set_cookie_header(request)
             if self._on_request_sent is not None:
                 request.extensions["trace"] = _sent_tracer(self._on_request_sent, current)
+            if self._before_request is not None:
+                await self._before_request(urlsplit(current).hostname or "")
             async with contextlib.aclosing(await self._send(request)) as response:
                 cookies.extract_cookies(response)
                 status = response.status_code

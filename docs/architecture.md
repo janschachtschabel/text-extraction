@@ -38,13 +38,13 @@ Images: `api` (slim), `browser-worker` (Chromium), `docling-worker`, `nlp-worker
    `COMPLIANCE_ALLOW_OVERRIDE`. Every result carries a `compliance` block. The origin files are
    cached in Valkey; files that are missing are fetched one after another inside the outbound
    turn of the page that needs them, before the page (R22), so they count against the host's
-   limits like any request. The page then waits out the spacing since the latest real start,
-   its own turn's files included (R24).
+   limits like any request. The files and the page of one turn go back to back (R25).
 3. **Fetch (fast):** httpx, HTTP/2, byte cap, conditional requests (ETag, Last-Modified).
    Per-domain outbound limits in Valkey (parallelism, delay, `Crawl-delay`, backoff on
    429/503, circuit breaker). A turn has at most one request in flight, so the parallelism
-   limit holds for every request a host sees; the delay lies between the real starts of turns
-   (R21: a request that woke late delays the next instead of letting it follow closer).
+   limit holds for every request a host sees. The delay lies between the real starts of
+   requests of different turns, back to back within a turn (R25); a request that was sent late
+   delays the other turns' next request instead of letting it follow closer (R21).
 4. **Quality gate (auto mode):** fewer than 500 visible characters while the page runs
    JavaScript, a bot challenge, or a soft-404 → browser worker.
    `quality.py` reports `js_heavy`, `bot_challenge`, `soft_404` and `login_wall`; a bot
@@ -225,31 +225,40 @@ eviction would drop gate, lease or job keys silently, while noeviction fails wri
 Its memory request equals its limit, 1280Mi (Guaranteed QoS), so maxmemory is 60 % of the limit
 and leaves room for fragmentation, buffers and the AOF fork. Package 11 measures real sizes.
 
-**Outbound limits under load (R21, R22).** The end-to-end run (`tests/e2e`) found two gaps in the
-package-2 gate and fixed them. Spacing now counts from real request starts: a request waits out
-the delay since the latest real start before it is sent, and the fetcher reports each request
-once its headers are on the wire, so a request held up by a busy event loop delays the next one
-instead of letting it follow closer. The compliance files ride in the page's gate turn, fetched
-one after another before the page, so the concurrency limit holds for every request a host sees.
-Fix round 1 (R24) tightened both: the three files share one 10 s budget, and once a turn has
-fetched or awaited files it confirms the spacing against the latest real start before it sends
-the page, bounded by `OUTBOUND_MAX_WAIT_SECONDS`. So on a cold origin the page starts one spacing
-after the last file (about 1 s more on first contact at the defaults, once per cache period), and
-two cold turns that shared one file load cannot send their pages back to back.
+**Outbound limits under load (R21, R22, R25).** The end-to-end run (`tests/e2e`) found two gaps
+in the package-2 gate and fixed them. Spacing counts from real request starts, and the fetcher
+reports each request once its headers are on the wire, so a request held up by a busy event loop
+delays the next one instead of letting it follow closer (R21). The compliance files ride in the
+page's gate turn, fetched one after another before the page, so the concurrency limit holds for
+every request a host sees (R22). Fix round 1 (R24) gave the three files one 10 s budget.
+
+R25 sets where the spacing lies: between the requests of different turns, not inside a turn.
+`out:starts:{host}` holds one entry per turn token, scored by that turn's latest real start
+(`ZADD GT`, so a late report never moves it back; old entries are trimmed). Before every request
+of a turn, each compliance file and the page, the fetcher asks the gate, which waits out what is
+left of the delay since the latest start of the other turns (the two highest scores, skipping
+the turn's own token) and records the request under the token, atomically per host and bounded by
+`OUTBOUND_MAX_WAIT_SECONDS`. The token travels in a context variable set while the turn is held,
+so a shared compliance load runs under the turn that started it. First contact therefore costs
+no more than R22 did: the files and the page go back to back. Two cold turns in one pod that
+share one file load still send their pages at least the delay apart. Two pods may each load a
+cold origin's files once; that is accepted (no cross-pod lock), and those loads keep the spacing
+to each other's requests too.
 
 Taking the turn before the files changes two answers on a cold origin (one whose files are not
 cached). A busy host (no lease or no slot within `OUTBOUND_MAX_WAIT_SECONDS`, an open circuit or a
 pause) now answers `rate_limited` or `connection_error` before robots.txt is read, where package
 2 could answer `blocked_by_robots` first; a page that robots.txt disallows is still answered
-`blocked_by_robots` without its own request and without the extra wait before the page. A
-cross-host redirect to a cold origin takes a turn at the target for its files, so even a target
-that robots.txt then blocks has used one spacing slot there.
+`blocked_by_robots` without its own request. A cross-host redirect to a cold origin takes a turn
+at the target for its files, so even a target that robots.txt then blocks has used one booked
+spacing slot there.
 
 **Done when (package 3):** `tests/e2e/run_batch.py` (workflow `e2e`) runs 1,000 URLs (400 on one
 host, 600 over nine) plus a second client's 20 URLs on the busiest host, across two workers,
 against a local site farm. Both jobs complete with no failed item. Every host sees at most 2
-requests at once and page starts at least 180 ms apart (200 ms minus 10 %). The compliance files
-never overlap. The second client finishes first.
+requests at once and page starts at least 180 ms apart (200 ms minus 10 %). Each compliance file
+is loaded at most once per worker, and two loads of one file never overlap. The second client
+finishes first.
 
 ## Observability
 

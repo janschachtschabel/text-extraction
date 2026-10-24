@@ -36,10 +36,16 @@ def allow_loopback_only(ip: Addr) -> bool:
     return ip == LOOPBACK
 
 
-def make_fetcher(*, on_request_sent: SentHook | None = None, **settings: Any) -> Fetcher:
+def make_fetcher(
+    *,
+    before_request: SentHook | None = None,
+    on_request_sent: SentHook | None = None,
+    **settings: Any,
+) -> Fetcher:
     return Fetcher(
         Settings(auth_mode="none", **settings),
         policy=allow_loopback_only,
+        before_request=before_request,
         on_request_sent=on_request_sent,
     )
 
@@ -672,6 +678,61 @@ def test_each_request_is_reported_once_it_is_sent(httpserver: HTTPServer) -> Non
 
     assert result.status == 200
     assert sent == ["127.0.0.1", "127.0.0.1"]  # the redirect hop too
+
+
+def test_each_request_is_announced_before_it_is_sent(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/old").respond_with_data(
+        "", status=301, headers={"Location": "/new"}
+    )
+    httpserver.expect_request("/new").respond_with_data("<p>moved</p>", content_type="text/html")
+    events: list[tuple[str, str, int]] = []
+
+    async def before(host: str) -> None:
+        events.append(("before", host, len(httpserver.log)))
+
+    async def sent(host: str) -> None:
+        events.append(("sent", host, len(httpserver.log)))
+
+    fetcher = make_fetcher(before_request=before, on_request_sent=sent)
+
+    async def scenario() -> FetchResult:
+        try:
+            return await fetcher.fetch(httpserver.url_for("/old"))
+        finally:
+            await fetcher.aclose()
+
+    assert run(scenario).status == 200
+    host = "127.0.0.1"
+    # Each hop: announced, then sent; the server has seen only the hops before it.
+    assert [(kind, name) for kind, name, _ in events] == [
+        ("before", host),
+        ("sent", host),
+        ("before", host),
+        ("sent", host),
+    ]
+    assert [seen for kind, _, seen in events if kind == "before"] == [0, 1]
+
+
+def test_a_refusal_before_the_request_sends_nothing(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/page").respond_with_data("<p>hi</p>", content_type="text/html")
+
+    class RefusedError(Exception):
+        pass
+
+    async def refuse(host: str) -> None:
+        raise RefusedError
+
+    fetcher = make_fetcher(before_request=refuse)
+
+    async def scenario() -> FetchResult:
+        try:
+            return await fetcher.fetch(httpserver.url_for("/page"))
+        finally:
+            await fetcher.aclose()
+
+    with pytest.raises(RefusedError):  # the gate's OutboundBusy reaches the caller unchanged
+        run(scenario)
+    assert httpserver.log == []
 
 
 def test_a_failing_send_report_does_not_fail_the_fetch(httpserver: HTTPServer) -> None:

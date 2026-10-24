@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any
+from urllib.parse import urlsplit
 
 from text_extraction.fetch import FetchError, FetchResult, Validators
 
@@ -76,16 +77,24 @@ class FakeFetcher:
     """Canned answers by URL; anything else (robots.txt, tdmrep.json, ai.txt) is a 404.
 
     ``calls`` has one entry per request, redirect hops included (with the options of the
-    ``fetch`` call they belong to)."""
+    ``fetch`` call they belong to). ``before_request`` and ``on_request_sent``, when set, are
+    awaited with each request's host as the real fetcher does, before the request is noted."""
 
     def __init__(self, answers: dict[str, Answer]) -> None:
         self.answers = answers
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.before_request: Callable[[str], Awaitable[None]] | None = None
+        self.on_request_sent: Callable[[str], Awaitable[None]] | None = None
 
     async def fetch(self, url: str, **options: Any) -> FetchResult:
         current = url
         hops: list[str] = []
         while True:
+            host = urlsplit(current).hostname or ""
+            if self.before_request is not None:
+                await self.before_request(host)
+            if self.on_request_sent is not None:
+                await self.on_request_sent(host)
             self.calls.append((current, options))
             answer = self.answers.get(current, fetched(current, "Not found", status=404))
             if not isinstance(answer, Redirect):

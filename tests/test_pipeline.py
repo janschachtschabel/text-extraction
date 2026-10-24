@@ -66,9 +66,13 @@ class Harness:
         self.registry = CollectorRegistry()
         self.settings = make_settings(**overrides)
         fetcher = cast(Fetcher, self.fetcher)
+        the_gate = gate if gate is not None else DomainGate(self.valkey, self.settings)
+        # As create_outbound wires the real fetcher: every request is checked and reported.
+        self.fetcher.before_request = getattr(the_gate, "before_request", None)
+        self.fetcher.on_request_sent = getattr(the_gate, "mark_sent", None)
         self.pipeline = Pipeline(
             fetcher,
-            cast(DomainGate, gate) if gate is not None else DomainGate(self.valkey, self.settings),
+            cast(DomainGate, the_gate),
             ComplianceChecker(fetcher, self.valkey, self.settings),
             ResultCache(self.valkey, self.settings),
             FingerprintStore(self.valkey, self.settings),
@@ -650,44 +654,48 @@ def test_the_outbound_fetcher_reports_sent_requests_to_its_gate() -> None:
         hook = fetcher.on_request_sent
         assert hook is not None
         await hook("Example.ORG")
-        value: object = await valkey.get("out:last:{example.org}")
+        value: object = await valkey.zcard("out:starts:{example.org}")
         await fetcher.aclose()
         return value
 
+    assert fetcher.before_request == gate.before_request
     assert fetcher.on_request_sent == gate.mark_sent
-    assert asyncio.run(send()) is not None
+    assert asyncio.run(send()) == 1
 
 
 def test_the_api_pipeline_uses_the_gate_its_fetcher_reports_to() -> None:
     app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
 
-    assert app.state.fetcher.on_request_sent == app.state.pipeline._gate.mark_sent
+    gate = app.state.pipeline._gate
+    assert app.state.fetcher.before_request == gate.before_request
+    assert app.state.fetcher.on_request_sent == gate.mark_sent
 
 
-def test_a_page_is_reported_sent_after_its_turn_has_confirmed_the_start(
-    httpserver: HTTPServer,
-) -> None:
+def test_a_cold_origins_files_and_page_go_out_back_to_back(httpserver: HTTPServer) -> None:
     for path in ("/robots.txt", "/ai.txt", "/.well-known/tdmrep.json"):
         httpserver.expect_request(path).respond_with_data("", status=404)
     httpserver.expect_request("/page").respond_with_data(ARTICLE, content_type="text/html")
-    settings = make_settings(fetch_allow_private_networks=True, outbound_min_delay_ms=100)
+    settings = make_settings(fetch_allow_private_networks=True, outbound_min_delay_ms=1000)
     valkey = FakeAsyncRedis()
     gate = DomainGate(valkey, settings)
-    confirmed: list[float] = []  # latest start the gate recorded, before each send
-    sent: list[float] = []  # latest start once the fetcher reported the send
+    confirmed: list[float] = []  # the turn's start as checked before each send
+    sent: list[float] = []  # the turn's start once the send was reported
+    sent_at: list[float] = []
 
-    async def last() -> float:
-        value = await valkey.get("out:last:{127.0.0.1}")
-        assert value is not None
-        return float(value)
+    async def latest() -> float:
+        key = "out:starts:{127.0.0.1}"
+        members = cast(list[tuple[bytes, float]], await valkey.zrange(key, 0, -1, withscores=True))
+        (score,) = [value for _, value in members]  # one turn: one token
+        return float(score)
 
     async def on_sent(host: str) -> None:
-        confirmed.append(await last())
+        sent_at.append(time.monotonic())
+        confirmed.append(await latest())
         await gate.mark_sent(host)
-        sent.append(await last())
+        sent.append(await latest())
 
     async def scenario() -> Envelope[ExtractResult]:
-        fetcher = Fetcher(settings, on_request_sent=on_sent)
+        fetcher = Fetcher(settings, before_request=gate.before_request, on_request_sent=on_sent)
         pipeline = create_pipeline(settings, valkey, fetcher, CollectorRegistry(), gate=gate)
         try:
             return await pipeline.run(ExtractRequest(url=httpserver.url_for("/page")), USER)
@@ -697,11 +705,11 @@ def test_a_page_is_reported_sent_after_its_turn_has_confirmed_the_start(
     envelope = asyncio.run(scenario())
 
     assert envelope.status == "success"
-    assert len(sent) == 4  # three compliance files and the page
-    # The send never records a start earlier than the one its turn confirmed.
+    assert len(sent) == 4  # three compliance files and the page, all in one turn
+    # A send never records a start earlier than the one its check recorded.
     assert all(after >= before for before, after in zip(confirmed, sent, strict=True))
-    # The page went out at least the spacing after the last file.
-    assert confirmed[3] - sent[2] >= 0.1 - 0.005
+    # First contact costs no spacing: the turn's own requests follow each other at once.
+    assert sent_at[-1] - sent_at[0] < 0.5
 
 
 def test_redirect_target_is_the_final_url() -> None:
@@ -857,8 +865,11 @@ class RecordingGate:
         self.events.append(("record", host))
         await self.gate.record(host, status=status, retry_after=retry_after)
 
-    async def confirm_start(self, host: str, crawl_delay: float | None = None) -> None:
-        await self.gate.confirm_start(host, crawl_delay)
+    async def before_request(self, host: str) -> None:
+        await self.gate.before_request(host)
+
+    async def mark_sent(self, host: str) -> None:
+        await self.gate.mark_sent(host)
 
 
 def recording_harness(
@@ -869,13 +880,6 @@ def recording_harness(
     harness = Harness(answers, gate=gate, **overrides)
     harness.valkey = valkey
     return harness, gate
-
-
-def warm_compliance_cache(harness: Harness) -> None:
-    """Load the origin's compliance files into the cache, as an earlier request would have, so
-    the request under test takes no cold turn (which waits a spacing before its page)."""
-    asyncio.run(harness.pipeline._checker.before_fetch(PAGE, "enforce"))
-    harness.fetcher.calls.clear()
 
 
 def leases(harness: Harness) -> int:
@@ -1067,7 +1071,6 @@ def test_a_same_host_redirect_keeps_the_turn_it_already_holds() -> None:
         {PAGE: Redirect(MOVED), MOVED: fetched(MOVED)},
         outbound_min_delay_ms=1000,
     )
-    warm_compliance_cache(harness)  # a cold turn waits a spacing before its page
 
     started = time.monotonic()
     envelope = harness.run_once()
@@ -1089,7 +1092,6 @@ def test_a_same_host_redirect_does_not_wait_for_the_crawl_delay_again() -> None:
         {PAGE: Redirect(MOVED), MOVED: fetched(MOVED), ROBOTS: robots},
         outbound_min_delay_ms=1000,
     )
-    warm_compliance_cache(harness)  # a cold turn waits a spacing before its page
 
     started = time.monotonic()
     envelope = harness.run_once()
@@ -1271,18 +1273,19 @@ def test_a_cross_host_redirects_files_are_fetched_in_the_targets_turn() -> None:
 
 
 def test_two_cold_turns_sharing_the_file_load_still_space_their_pages() -> None:
-    harness = Harness({PAGE: fetched(PAGE)}, outbound_min_delay_ms=200)
-    answer = harness.fetcher.fetch
     page_starts: list[float] = []
 
-    async def fetch(url: str, **options: Any) -> FetchResult:
-        if url == PAGE:
-            page_starts.append(time.monotonic())
-        else:
-            await asyncio.sleep(0.3)  # slow compliance files: both turns wait for the one load
-        return await answer(url, **options)
+    async def page(validators: Validators | None) -> FetchResult:
+        page_starts.append(time.monotonic())  # after the gate's check and the send report
+        return fetched(PAGE)
 
-    harness.fetcher.fetch = fetch  # type: ignore[method-assign]
+    async def slow_file(validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(0.3)  # slow compliance files: both turns wait for the one load
+        return fetched(ROBOTS, "Not found", status=404)
+
+    files = (ROBOTS, f"{ORIGIN}/.well-known/tdmrep.json", f"{ORIGIN}/ai.txt")
+    answers: dict[str, Answer] = {PAGE: page, **dict.fromkeys(files, slow_file)}
+    harness = Harness(answers, outbound_min_delay_ms=200)
 
     async def both() -> list[Envelope[ExtractResult]]:
         return list(await asyncio.gather(harness.run(cache=False), harness.run(cache=False)))

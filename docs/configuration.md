@@ -191,12 +191,12 @@ Every request to a target site passes a per-host gate: the page and its redirect
 origin's compliance files (robots.txt, `tdmrep.json`, ai.txt). The files are fetched only when they
 are not cached (`COMPLIANCE_CACHE_SECONDS`), then one after another inside the turn of the page
 that needs them, before the page. A turn has at most one request in flight, so
-`OUTBOUND_MAX_CONCURRENCY_PER_HOST` holds for every request. The files follow each other without
-a gap; the page then waits out the spacing since the latest real start, the turn's own files
-included, so on first contact the page starts one spacing after the last file was sent (the
-spacing already uses the `Crawl-delay` that robots.txt just gave). Two cold turns that share one
-file load therefore still start their pages a spacing apart. All state is in
-Valkey, so the pods share it.
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST` holds for every request. The spacing lies between the
+requests of different turns: the requests of one turn (the files, the page, a redirect hop on the
+same host) go back to back, so first contact costs no more than the files themselves. Two cold
+turns that share one file load still send their pages a spacing apart, since each page keeps the
+spacing to the other turn's latest request. The first turn on an origin does not know its
+`Crawl-delay` yet; the turns after it do and keep it. All state is in Valkey, so the pods share it.
 Hosts are compared lower-cased and in IDNA form. The braces around the host in the keys are
 literal (a cluster hash tag), so all keys of one host live in the same slot.
 
@@ -204,20 +204,25 @@ literal (a cluster hash tag), so all keys of one host live in the same slot.
 | --- | --- | --- |
 | `out:inflight:{<host>}` | Requests in flight: one entry per lease, scored by its expiry time. | A lease expires 120 s after it starts, so a crashed pod frees its slot by itself. |
 | `out:next:{<host>}` | Earliest start time of the next request: the next turn to book. | Until the slot has passed. |
-| `out:last:{<host>}` | Real start time of the latest request: set when its turn begins, moved on when its headers have gone out. | The longest spacing plus 60 s. |
+| `out:starts:{<host>}` | Real starts per turn: one entry per turn token, scored by the latest real start of a request in that turn. Set when a request is let through, moved on (never back) when its headers have gone out; entries older than twice the longest spacing are dropped. | The longest spacing plus 60 s. |
 | `out:cooldown:{<host>}` | End of the pause after 429 or 503. | Until it ends. |
 | `out:fail:{<host>}` | Consecutive failures (connection error or 5xx). | 10 minutes, renewed on each failure. |
 | `out:circuit:{<host>}` | End of an open circuit. | Until it ends. |
 
 A request waits for a free lease (at most `OUTBOUND_MAX_CONCURRENCY_PER_HOST`) and for its spacing
 slot. The spacing is `max(OUTBOUND_MIN_DELAY_MS, min(Crawl-delay, OUTBOUND_MAX_CRAWL_DELAY_SECONDS))`
-and holds between real request starts: a request books its turn and sleeps until it, then, right
-before it is sent, waits out whatever is left of the spacing since the latest real start. The
-fetcher reports every request once its headers have gone out, which moves the latest start on to
-that moment. So a request held up between its turn and the send (a busy pod) delays the one after
-it instead of letting it follow closer; only a hold-up longer than the spacing itself can still
-bring two starts closer.
-If the wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy. A redirect to
+and holds between the real starts of requests of different turns. A turn books its start and
+sleeps until it and until the spacing has passed since the latest request of any other turn.
+Right before each of its requests the fetcher asks the gate again: the request waits out whatever
+is left of the spacing since the latest request of the other turns (its own turn's requests do
+not count) and is recorded under its turn, in one atomic script. The fetcher reports every
+request once its headers have gone out, which moves its turn's start on to that moment. So a
+request held up between the check and the send (a busy pod) delays the other turns' requests
+instead of letting them follow closer; only a hold-up longer than the spacing itself can still
+bring two starts closer. A request to a host whose turn is not held (none is sent today) is not
+checked; its report counts for every turn.
+If a wait would exceed `OUTBOUND_MAX_WAIT_SECONDS` the request is refused as busy; the wait
+before a request inside a turn counts against that fetch's time limit. A redirect to
 another host gives the first host's lease back and waits for a turn at the new host; the outcome
 counts for the host that answered. While a pause
 or an open circuit is set, requests to that host are refused at once. A 429 or 503 sets the pause to
