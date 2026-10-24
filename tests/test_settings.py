@@ -530,3 +530,24 @@ def test_shutdown_drain_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SHUTDOWN_DRAIN_SECONDS", "-1")
     with pytest.raises(ConfigError, match="shutdown_drain_seconds"):
         load_settings()
+
+
+def test_job_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.job_ttl_seconds == 86400
+    assert settings.job_item_max_bytes == 2_000_000
+
+    monkeypatch.setenv("JOB_TTL_SECONDS", "60")
+    monkeypatch.setenv("JOB_ITEM_MAX_BYTES", "10000")
+    settings = load_settings()
+    assert settings.job_ttl_seconds == 60
+    assert settings.job_item_max_bytes == 10_000
+
+    monkeypatch.setenv("JOB_TTL_SECONDS", "59")
+    with pytest.raises(ConfigError, match="job_ttl_seconds"):
+        load_settings()
+    monkeypatch.setenv("JOB_TTL_SECONDS", "60")
+    monkeypatch.setenv("JOB_ITEM_MAX_BYTES", "9999")
+    with pytest.raises(ConfigError, match="job_item_max_bytes"):
+        load_settings()

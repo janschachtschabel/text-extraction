@@ -117,6 +117,10 @@ class Settings(BaseSettings):
     # Conversion budget: largest HTML/text body converted, and conversions at once per pod.
     convert_max_bytes: int = Field(default=5_242_880, ge=1024)  # 5 MiB
     convert_concurrency: int = Field(default=2, ge=1)
+    # Jobs: how long a job and its results stay in Valkey (renewed when it completes), and the
+    # largest stored result of one item as JSON; a bigger one is stored without its content.
+    job_ttl_seconds: int = Field(default=86400, ge=60)
+    job_item_max_bytes: int = Field(default=2_000_000, ge=10_000)
 
     @field_validator("log_level", mode="before")
     @classmethod
