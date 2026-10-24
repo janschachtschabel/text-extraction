@@ -553,6 +553,46 @@ async def test_scan_budget_continues_with_the_next_clients() -> None:
 
 
 @scenario
+async def test_client_with_more_domains_than_the_budget_does_not_starve_others() -> None:
+    valkey, clock = await make_valkey(), Clock()
+    queue = make_queue(valkey, clock, scheduler_claim_scan_budget=3)
+    await queue.enqueue(JOB_A, "A", [f"https://d{n}.example/" for n in range(5)])
+    await defer_each(queue, 5, clock.now + 600)
+    await queue.enqueue(JOB_B, "B", ["https://free.example/"])
+
+    served = None
+    for attempt in range(3):
+        claim = await queue.claim(LEASE)
+        if claim.item is not None:
+            served = (attempt, claim.item.client)
+            break
+
+    assert served == (1, "B")
+
+
+@scenario
+async def test_scan_incomplete_tells_a_budget_answer_from_a_full_idle_pass() -> None:
+    clock = Clock()
+    for domains, incomplete, retry_in in ((4, True, 0.05), (3, False, 30)):
+        valkey = await make_valkey()
+        queue = make_queue(valkey, clock, scheduler_claim_scan_budget=3)
+        await queue.enqueue(JOB_A, "A", [f"https://d{n}.example/" for n in range(domains)])
+        await defer_each(queue, domains, clock.now + 30)
+
+        claim = await queue.claim(LEASE)
+
+        assert claim.item is None
+        assert claim.scan_incomplete is incomplete
+        assert claim.retry_in == pytest.approx(retry_in)
+
+    await queue.enqueue(JOB_B, "B", ["https://free.example/"])  # 4 pairs now, budget 3
+    assert (await queue.claim(LEASE)).scan_incomplete is True
+    claimed = await queue.claim(LEASE)
+    assert claimed.item is not None
+    assert claimed.scan_incomplete is False
+
+
+@scenario
 async def test_orphan_client_and_empty_domain_are_dropped_on_a_claim() -> None:
     valkey, clock = await make_valkey(), Clock()
     queue = make_queue(valkey, clock)

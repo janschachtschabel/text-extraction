@@ -144,15 +144,17 @@ return count
 # 2. Walks `clients` from the front and each client's domains from the front, reading them with
 #    LRANGE and their not-before and lease counts with HMGET. A domain is skipped while its
 #    not-before lies in the future or it holds `cap` leases. At most `scan budget` client-domain
-#    pairs are visited (a client without domains counts as one).
+#    pairs are visited (a client without domains counts as one). A client whose domains the
+#    budget ran out in moves to the end of `clients` with the visited ones.
 # 3. Leases the first item of the first claimable domain (ZADD NX: a duplicate of a leased item
 #    is dropped). The visited heads of both rotations move to their ends, the claimed domain and
 #    client last; a list that became empty leaves its rotation.
 # A claim that finds nothing writes only when it ran out of budget (the visited heads move to
 # the ends, so the next claim goes on there) or found a stale rotation entry to drop.
-# Returns {claimed, retry_in}: claimed is {item, client, domain} or empty. retry_in, only when
-# nothing was claimed, is `scan retry` when the budget ran out, else the time until the earliest
-# deferred domain frees, or ''. Numbers go back as strings: Redis would cut a Lua number.
+# Returns {claimed, retry_in, incomplete}: claimed is {item, client, domain} or empty. retry_in,
+# only when nothing was claimed, is `scan retry` when the budget ran out (incomplete = 1), else
+# the time until the earliest deferred domain frees, or ''. Numbers go back as strings: Redis
+# would cut a Lua number.
 _CLAIM = (
     "#!lua\n"
     + _PREAMBLE
@@ -256,16 +258,18 @@ for ci, client in ipairs(names) do
             gone[ci] = true
           end
           rotate(clients, names, ci, gone)
-          return {{member, client, domain}, ''}
+          return {{member, client, domain}, '', 0}
         end
         empty[di] = true
       end
     end
     spent = spent + take
     if take < count then
+      -- The client's domain head has moved on; the client goes to the end of the rotation like
+      -- one that was visited completely, so it cannot hold the scan on its own domains.
       rotate(domains, head, take, empty)
-      rotate(clients, names, ci - 1, gone)
-      return {{}, ARGV[9]}
+      rotate(clients, names, ci, gone)
+      return {{}, ARGV[9], 1}
     end
     if next(empty) then
       rotate(domains, head, take, empty)
@@ -278,7 +282,7 @@ for ci, client in ipairs(names) do
 end
 if visited < total then
   rotate(clients, names, visited, gone)
-  return {{}, ARGV[9]}
+  return {{}, ARGV[9], 1}
 end
 if next(gone) then
   rotate(clients, names, visited, gone)
@@ -287,7 +291,7 @@ local retry_in = ''
 if earliest then
   retry_in = string.format('%.6f', earliest - now)
 end
-return {{}, retry_in}
+return {{}, retry_in, 0}
 """
 )
 
@@ -372,14 +376,21 @@ class Claim:
     failure, then calls ``complete``. A caller that dies in between leaves the lease to expire,
     and the item is offered again, still exhausted.
 
-    ``retry_in`` is set only when nothing was claimed. It is a short pause when the claim ran out
-    of its scan budget (the next claim goes on where it stopped). Otherwise it is the seconds until
+    ``scan_incomplete`` is True when nothing was claimed because the claim ran out of
+    ``SCHEDULER_CLAIM_SCAN_BUDGET`` before it had looked at every client and domain. The next
+    claim goes on where this one stopped, so ``retry_in`` is short (0.05 s). Many blocked domains
+    give this answer on every claim, so a caller backs off exponentially on consecutive
+    ``scan_incomplete`` answers: 0.05 s, doubling, capped at its idle sleep (1 s), and back to
+    0.05 s once an item is claimed. The queue keeps no scan progress beyond the rotations.
+
+    ``retry_in`` is set only when nothing was claimed. After a full pass it is the seconds until
     the earliest deferred domain that still holds items frees, or None when no domain is deferred.
     """
 
     item: QueueItem | None
     exhausted: bool = False
     retry_in: float | None = None
+    scan_incomplete: bool = False
 
 
 @dataclass(frozen=True)
@@ -490,7 +501,7 @@ class FairQueue:
         now = self._clock()
         settings = self._settings
         lease = uuid.uuid4().hex
-        claimed, retry_in = await self._claim(
+        claimed, retry_in, incomplete = await self._claim(
             keys=self._keys,
             args=[
                 self._prefix,
@@ -508,7 +519,11 @@ class FairQueue:
             item = _item(claimed, lease)
             return Claim(item=item, exhausted=item.attempts > settings.job_item_max_attempts)
         retry = _text(retry_in)
-        return Claim(item=None, retry_in=float(retry) if retry else None)
+        return Claim(
+            item=None,
+            retry_in=float(retry) if retry else None,
+            scan_incomplete=bool(int(incomplete)),
+        )
 
     async def complete(self, item: QueueItem) -> bool:
         """End the item's lease. False when the lease had already expired and the item was
