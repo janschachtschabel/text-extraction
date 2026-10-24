@@ -34,16 +34,18 @@ with browser secrets (actions, cookies, headers) touch neither; screenshot reque
 cache, since their artifact belongs to one job.
 
 With a ``Renderer`` (the browser worker only; docs/architecture.md, "Browser worker"), ``browser``
-requests, screenshots and ``auto`` items with a draft are rendered instead of fetched, and an
-``auto`` request renders when its fast result needs the browser (``escalation.needs_browser``).
-A render runs step 4 for the request URL, takes the host's turn and holds it until the render
-ends. Each later main-frame navigation is checked before the browser sends it; the HTTP redirect
-hops and the document answers are checked when the render returns, before any content is used.
-The rendered HTML then goes through step 7 (compliance after the fetch, conversion) and step 8.
-An ``auto`` result that will escalate is neither cached nor fingerprinted; of the fast result
-(or draft) and the render, only the better one is (``escalation.better``). Rendered results
-store no validators, so they are never revalidated. Unblock mode (admins, ``compliance:
-ignore``, ``BROWSER_UNBLOCK_ENABLED``) uses the unblock renderer and its clearance cookies.
+requests, screenshots, requests with browser options and ``auto`` items with a draft are rendered
+instead of fetched, and an ``auto`` request renders when its fast result needs the browser
+(``escalation.needs_browser``). A render runs step 4 for the request URL, takes the host's turn and
+holds it until the render ends. Each later main-frame navigation is checked before the browser
+sends it; the HTTP redirect hops and the document answers are checked when the render returns,
+before any content is used. The rendered HTML then goes through step 7 (compliance after the fetch,
+conversion) and step 8. An ``auto`` result that will escalate is neither cached nor fingerprinted;
+of the fast result (or draft) and the render, only the better one is (``escalation.better``).
+Rendered results store no validators, so they are never revalidated. Unblock mode (admins,
+``compliance: ignore``, ``BROWSER_UNBLOCK_ENABLED``) uses the unblock renderer and its clearance
+cookies.
+
 A body over ``CONVERT_MAX_BYTES`` fails with ``too_large`` before it is decoded. CPU-bound steps
 run on the ``ConversionPool`` (``CONVERT_CONCURRENCY`` threads); waiting for a slot counts
 against the deadline. The deadline cannot stop a running thread, but every step bounds its
@@ -882,10 +884,11 @@ class Pipeline:
         return None
 
     def _renders_first(self, run: _Run) -> bool:
-        """``browser``, a screenshot and an ``auto`` item with a draft render without a fast
-        fetch; ``auto`` otherwise renders only when its fast result needs it."""
+        """``browser``, a screenshot, browser options (actions, cookies, headers: the fast fetch
+        could not use them) and an ``auto`` item with a draft render without a fast fetch;
+        ``auto`` otherwise renders only when its fast result needs it."""
         req = run.req
-        wants = req.mode == "browser" or req.screenshot or run.draft is not None
+        wants = req.mode == "browser" or req.screenshot or run.private or run.draft is not None
         return wants and self._renderer_for(run) is not None
 
     async def _rendered(

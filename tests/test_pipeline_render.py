@@ -296,6 +296,22 @@ def test_auto_keeps_a_better_draft_and_stores_it() -> None:
     assert len(harness.keys("fp:*")) == 1
 
 
+def test_auto_with_browser_options_always_renders() -> None:
+    renderer = FakeRenderer(rendered())
+    harness = RenderHarness({PAGE: fetched()}, renderer=renderer)  # fast would be enough
+
+    envelope = harness.run_once(
+        mode="auto", actions=[{"type": "click", "selector": "#more"}], cache=True
+    )
+
+    assert envelope.status == "success"
+    assert data_of(envelope).mode_used == "browser"
+    assert data_of(envelope).cache == "bypass"
+    assert harness.fetcher.page_calls() == []  # rendered directly, like a screenshot
+    (call,) = renderer.calls
+    assert [action.type for action in call.options.actions] == ["click"]
+
+
 # --- later navigations and redirects ----------------------------------------------------------
 
 
