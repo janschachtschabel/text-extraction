@@ -18,11 +18,13 @@ from duckduckgo_autoconsent import bundle, rules_json
 CUSTOM_CONSENT_RULES: Final[list[dict[str, Any]]] = [
     {
         # German federal sites built with the Government Site Builder use their own banner.
-        # "Confirm selection" keeps the optional (statistics) toggle off: an opt-out.
+        # "Confirm selection" keeps the optional (statistics) toggle off: an opt-out; "Accept
+        # all" is the opt-in.
         "name": "GovernmentSiteBuilder",
         "detectCmp": [{"exists": "#cookiebanner"}],
         "detectPopup": [{"visible": "#cookiebanner"}],
         "optOut": [{"waitForThenClick": ".js-banner-button-confirm-selection"}],
+        "optIn": [{"waitForThenClick": ".js-banner-button-accept-all"}],
     },
 ]
 
@@ -70,7 +72,7 @@ def consent_config(opt: str) -> dict[str, Any]:
 # Installs the host side of autoconsent once per document; False when it is there already.
 CONSENT_RELAY: Final = """({ rulesJson, config }) => {
   if (window.__textExtractionConsent) return false;
-  const state = { listeners: new Set(), lifecycle: null };
+  const state = { listeners: new Set(), lifecycle: null, results: {} };
   window.__textExtractionConsent = state;
   window.autoconsentSendMessage = (message) => {
     if (message.type === 'init') {
@@ -80,6 +82,8 @@ CONSENT_RELAY: Final = """({ rulesJson, config }) => {
       }), 0);
     } else if (message.type === 'report' && message.state) {
       state.lifecycle = message.state.lifecycle;
+    } else if (message.type === 'optOutResult' || message.type === 'optInResult') {
+      state.results[message.type.slice(0, -'Result'.length)] = Boolean(message.result);
     }
     for (const listener of state.listeners) listener(message);
     return Promise.resolve();
@@ -87,7 +91,11 @@ CONSENT_RELAY: Final = """({ rulesJson, config }) => {
   return true;
 }"""
 
-# Waits for the outcome of an opt-out or opt-in. ``again``: the engine runs already (an
+# Waits for the outcome of an opt-out or opt-in and answers one of: 'done' (the banner was
+# handled), 'failed' (it was found but could not be handled), 'nothingDetected', 'timeout' or
+# 'none' (no engine in this document). The engine reports twice, as a result message and as
+# lifecycle states, and in either order: both are read the same way, and ``done`` only counts
+# when the result of this very action was a success. ``again``: the engine runs already (an
 # earlier run on this document), so it is asked to act now.
 CONSENT_WAIT: Final = """({ opt, timeoutMs, again }) => new Promise((resolve) => {
   const state = window.__textExtractionConsent;
@@ -95,13 +103,21 @@ CONSENT_WAIT: Final = """({ opt, timeoutMs, again }) => new Promise((resolve) =>
     resolve('none');
     return;
   }
-  const finished = ['done', 'nothingDetected', 'optOutSucceeded', 'optOutFailed',
-    'optInSucceeded', 'optInFailed'];
+  const verdict = (lifecycle) => {
+    if (lifecycle === 'nothingDetected') return 'nothingDetected';
+    if (lifecycle === opt + 'Succeeded') return 'done';
+    if (lifecycle === opt + 'Failed') return 'failed';
+    if (lifecycle === 'done' && state.results[opt] !== undefined)
+      return state.results[opt] ? 'done' : 'failed';
+    return null;
+  };
   let timer = null;
   const listener = (message) => {
     if (message.type === opt + 'Result') finish(message.result ? 'done' : 'failed');
-    else if (message.type === 'report' && finished.includes(message.state.lifecycle))
-      finish(message.state.lifecycle);
+    else if (message.type === 'report' && message.state) {
+      const outcome = verdict(message.state.lifecycle);
+      if (outcome) finish(outcome);
+    }
   };
   const finish = (outcome) => {
     clearTimeout(timer);
@@ -110,8 +126,13 @@ CONSENT_WAIT: Final = """({ opt, timeoutMs, again }) => new Promise((resolve) =>
   };
   timer = setTimeout(() => finish('timeout'), timeoutMs);
   state.listeners.add(listener);
-  if (again) window.autoconsentReceiveMessage({ type: opt });
-  else if (finished.includes(state.lifecycle)) finish(state.lifecycle);
+  if (again) {
+    delete state.results[opt];
+    window.autoconsentReceiveMessage({ type: opt });
+  } else {
+    const outcome = verdict(state.lifecycle);
+    if (outcome) finish(outcome);
+  }
 })"""
 
 # An init script (it runs in every document before the page's own scripts): removes each
@@ -166,4 +187,37 @@ PAGE_HEIGHT: Final = """() => {
   if (!b || !d) return 0;
   return Math.max(b.scrollHeight, d.scrollHeight, b.offsetHeight, d.offsetHeight,
     b.clientHeight, d.clientHeight);
+}"""
+
+# Scrolls down by one viewport height.
+SCROLL_VIEWPORT: Final = "() => { window.scrollBy(0, window.innerHeight); }"
+
+# Scrolls to the bottom of the document.
+SCROLL_TO_END: Final = """() => {
+  const d = document.documentElement;
+  window.scrollTo(0, Math.max(document.body ? document.body.scrollHeight : 0, d.scrollHeight));
+}"""
+
+# Opens closed ``<details>`` and clicks up to ``limit`` visible elements with
+# ``aria-expanded="false"`` (those that are still closed when their turn comes: a click can
+# close another section). Answers how many it opened or clicked.
+EXPAND_ALL: Final = """(limit) => {
+  let opened = 0;
+  for (const details of document.querySelectorAll('details:not([open])')) {
+    details.open = true;
+    opened += 1;
+  }
+  const visible = (element) => {
+    const style = getComputedStyle(element);
+    const box = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden'
+      && box.width > 0 && box.height > 0;
+  };
+  const toggles = Array.from(document.querySelectorAll('[aria-expanded="false"]')).filter(visible);
+  for (const toggle of toggles.slice(0, limit)) {
+    if (toggle.getAttribute('aria-expanded') !== 'false' || toggle.disabled) continue;
+    toggle.click();
+    opened += 1;
+  }
+  return opened;
 }"""

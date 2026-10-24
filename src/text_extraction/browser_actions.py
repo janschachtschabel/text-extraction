@@ -1,0 +1,162 @@
+"""The page actions of a render (the request's ``actions``), run after the consent step.
+
+``run_actions`` runs them in order, each bounded by the time left to ``deadline``. The first
+action that fails (no such element within ``ELEMENT_WAIT_SECONDS``, the deadline, a script
+error, a navigation the route check refused, a cookie banner that was not there) stops the
+rest and adds the warning ``action_<index>_failed``: the page is extracted as it is then.
+A click that navigates is checked by the route handler like any navigation; the action waits
+for the new document's ``load``.
+
+Action text, values and scripts are secrets (``browser_options``): nothing here logs them, or
+a selector. The module uses only the Playwright API, which Patchright shares.
+"""
+
+import asyncio
+from collections.abc import Callable, Sequence
+from typing import Final, Protocol
+
+import structlog
+from playwright.async_api import Page
+
+from text_extraction.browser_driver import DRIVER_ERRORS, ConsentOpt
+from text_extraction.browser_options import (
+    AcceptCookiesAction,
+    Action,
+    ClickAction,
+    EvaluateAction,
+    ExpandAllAction,
+    InfiniteScrollAction,
+    PressAction,
+    ScrollAction,
+    SelectAction,
+    TypeAction,
+    WaitForAction,
+)
+from text_extraction.browser_scripts import (
+    EXPAND_ALL,
+    PAGE_HEIGHT,
+    SCROLL_TO_END,
+    SCROLL_VIEWPORT,
+)
+
+_log = structlog.get_logger(__name__)
+
+# How long a locator waits for its element to show up (and to be clickable) before the action
+# fails; the time left of the render caps it.
+ELEMENT_WAIT_SECONDS: Final = 5.0
+CONSENT_SECONDS: Final = 3.0  # as the consent step at the start of a render (B11)
+EXPAND_LIMIT: Final = 50  # of elements with aria-expanded="false" that expand_all clicks
+_EXPAND_SETTLE_SECONDS: Final = 0.2  # for what the clicks reveal to be drawn
+
+
+class _Failed(Exception):  # noqa: N818 - an action's failure, not a bug
+    """The action could not do what it was asked to (no banner, not enough time)."""
+
+
+_FAILURES: Final[tuple[type[Exception], ...]] = (TimeoutError, _Failed, *DRIVER_ERRORS)
+
+
+class ConsentRunner(Protocol):
+    """``browser_render.run_consent``: handles the page's cookie banner, True when it did."""
+
+    async def __call__(self, page: Page, opt: ConsentOpt, *, seconds: float) -> bool: ...
+
+
+async def run_actions(
+    page: Page,
+    actions: Sequence[Action],
+    *,
+    allow_evaluate: bool,
+    deadline: float,
+    consent: ConsentRunner,
+    refused: Callable[[], bool] = lambda: False,
+) -> list[str]:
+    """Run ``actions`` in ``page`` before ``deadline`` (``loop.time()``) and return the
+    warnings (``action_<index>_failed``). ``refused`` tells that the route check refused a
+    navigation meanwhile (the render keeps it); that fails the action that started it.
+
+    Raises ``ValueError`` when an ``evaluate`` action comes without ``allow_evaluate``: the API
+    refuses those requests with 403, so this is a guard against a caller's mistake, and
+    nothing has run by then."""
+    if not allow_evaluate and any(isinstance(action, EvaluateAction) for action in actions):
+        raise ValueError("an evaluate action needs allow_evaluate")
+    warnings: list[str] = []
+    for index, action in enumerate(actions):
+        try:
+            async with asyncio.timeout_at(deadline):
+                await _run(page, action, deadline, consent)
+                await _loaded(page, deadline)
+            if refused():
+                raise _Failed
+        except _FAILURES as error:
+            # Only the kind of failure is logged: the message could carry a selector or text.
+            _log.info(
+                "browser_action_failed",
+                index=index,
+                action=action.type,
+                error=type(error).__name__,
+            )
+            warnings.append(f"action_{index}_failed")
+            break
+    return warnings
+
+
+async def _run(page: Page, action: Action, deadline: float, consent: ConsentRunner) -> None:
+    loop = asyncio.get_running_loop()
+
+    def wait_ms() -> float:
+        """For a driver call: the element wait, or less when the deadline is near. Never 0
+        (the drivers read that as no limit)."""
+        return max(min(ELEMENT_WAIT_SECONDS, deadline - loop.time()), 0.001) * 1000
+
+    async def pause(milliseconds: int) -> None:
+        await asyncio.sleep(milliseconds / 1000)
+
+    match action:
+        case ClickAction(selector=selector):
+            await page.locator(selector).first.click(timeout=wait_ms())
+        case TypeAction(selector=selector, text=text):
+            await page.locator(selector).first.press_sequentially(text, timeout=wait_ms())
+        case PressAction(key=key, selector=str() as selector):
+            await page.locator(selector).first.press(key, timeout=wait_ms())
+        case PressAction(key=key):
+            await page.keyboard.press(key)
+        case SelectAction(selector=selector, value=value):
+            await page.locator(selector).first.select_option(value, timeout=wait_ms())
+        case WaitForAction(selector=str() as selector):
+            await page.locator(selector).first.wait_for(timeout=wait_ms())
+        case WaitForAction(ms=int() as milliseconds):
+            if milliseconds / 1000 > deadline - loop.time():
+                raise _Failed
+            await pause(milliseconds)
+        case WaitForAction():
+            raise _Failed  # neither (the model refuses this)
+        case ScrollAction(times=times, pause_ms=pause_ms):
+            for _ in range(times):
+                await page.evaluate(SCROLL_VIEWPORT)
+                await pause(pause_ms)
+        case InfiniteScrollAction(max_scrolls=max_scrolls, pause_ms=pause_ms):
+            height = int(await page.evaluate(PAGE_HEIGHT) or 0)
+            for _ in range(max_scrolls):
+                await page.evaluate(SCROLL_TO_END)
+                await pause(pause_ms)
+                grown = int(await page.evaluate(PAGE_HEIGHT) or 0)
+                if grown <= height:
+                    break
+                height = grown
+        case ExpandAllAction():
+            if await page.evaluate(EXPAND_ALL, EXPAND_LIMIT):
+                await asyncio.sleep(_EXPAND_SETTLE_SECONDS)
+        case AcceptCookiesAction():
+            seconds = min(CONSENT_SECONDS, deadline - loop.time())
+            if not await consent(page, "optIn", seconds=seconds):
+                raise _Failed
+        case EvaluateAction(script=script):
+            # A function body, so the script may hold statements, `await` and `return`.
+            await page.evaluate(f"async () => {{\n{script}\n}}")
+
+
+async def _loaded(page: Page, deadline: float) -> None:
+    """Wait for a navigation the action started to reach ``load``; at once when there is none."""
+    left = deadline - asyncio.get_running_loop().time()
+    await page.wait_for_load_state("load", timeout=max(left, 0.001) * 1000)

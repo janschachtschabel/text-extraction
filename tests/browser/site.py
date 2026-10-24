@@ -24,6 +24,13 @@ HIDDEN_TAB = "The hidden tab talks about something nobody can see on the page ri
 HIDDEN_LEAF = "A hidden leaf of text that only sits in the markup."
 SHOWN_CHILD = "A visible child inside a hidden parent stays on the page."
 OPTED_OUT = "The visitor confirmed the selection without statistics."
+OPTED_IN = "The visitor accepted every cookie."
+REVEALED = "The button revealed this paragraph about the tides of the sea."
+DETAILS_TEXT = "The collapsed section explains how rivers reach the ocean."
+ARIA_TEXT = "The toggled panel describes how clouds form above warm water."
+TYPED_ECHO = "The field received: "
+CHOSEN = "The chosen option is: "
+LAZY_ITEMS = 30  # the list on /actions stops growing here
 CHALLENGE_TEXT = "Checking your browser before accessing the site."
 FORM_TEXT = "The form on this page posts itself as soon as the page has loaded."
 # The page /speculation and /speculation-header speculate on, and then navigate to.
@@ -100,6 +107,53 @@ def _handler_for(site: Site) -> type[BaseHTTPRequestHandler]:
 
     Handler.site = site
     return Handler
+
+
+def _actions_page() -> bytes:
+    """Controls for the page actions: a button that reveals text, a ``<details>``, an
+    ``aria-expanded`` toggle, a select, an input that echoes on Enter, a link, and a list that
+    grows by ten items each time the page is scrolled to its end, up to ``LAZY_ITEMS``."""
+    body = f"""
+<h1>Actions</h1>
+<button id="reveal" onclick="document.getElementById('shown').textContent = {REVEALED!r}">
+  Reveal</button>
+<p id="shown"></p>
+<details id="more"><summary>More</summary><p>{DETAILS_TEXT}</p></details>
+<button id="toggle" aria-expanded="false"
+  onclick="this.setAttribute('aria-expanded', 'true');
+    document.getElementById('panel').hidden = false;">Toggle</button>
+<div id="panel" hidden><p>{ARIA_TEXT}</p></div>
+<select id="choice"
+  onchange="document.getElementById('chosen').textContent = {CHOSEN!r} + this.value">
+  <option value="">none</option><option value="red">Red</option><option value="blue">Blue</option>
+</select>
+<p id="chosen"></p>
+<input id="field" aria-label="field"
+  onkeydown="if (event.key === 'Enter')
+    document.getElementById('echoed').textContent = {TYPED_ECHO!r} + this.value">
+<p id="echoed"></p>
+<a id="go" href="/static">Go to the article</a>
+<div id="list"></div>
+<script>
+let count = 0;
+function more() {{
+  const list = document.getElementById('list');
+  for (let i = 0; i < 10 && count < {LAZY_ITEMS}; i++) {{
+    count += 1;
+    const item = document.createElement('div');
+    item.className = 'item';
+    item.style.height = '200px';
+    item.textContent = 'Item ' + count;
+    list.append(item);
+  }}
+}}
+more();
+window.addEventListener('scroll', () => {{
+  if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 50)
+    setTimeout(more, 50);
+}});
+</script>"""
+    return page(body, title="Actions")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -224,9 +278,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "<button class='js-banner-button-confirm-selection' "
                 "onclick=\"document.getElementById('cookiebanner').remove();"
                 f"document.getElementById('state').textContent = {OPTED_OUT!r};\">"
-                "Confirm selection</button></div>"
+                "Confirm selection</button>"
+                "<button class='js-banner-button-accept-all' "
+                "onclick=\"document.getElementById('cookiebanner').remove();"
+                f"document.getElementById('state').textContent = {OPTED_IN!r};\">"
+                "Accept all</button></div>"
             )
             self._send(article(f"{banner}<p id='state'></p>", title="Consent"))
+        elif path == "/actions":
+            self._send(_actions_page())
         elif path == "/tall":
             self._send(article("<div style='height: 20000px'></div>", title="Tall"))
         elif path == "/never-idle":
@@ -282,6 +342,16 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 headers = {"Speculation-Rules": '"/rules.json"'}
                 self._send(article(later, title="Speculation"), headers=headers)
+        elif path == "/prefetch-link":
+            link = f"<link rel='prefetch' href='{SPECULATED}'>"
+            self._send(article(head=link, title="Prefetch link"))
+        elif path == "/accept-rules":
+            script = (
+                "<script>fetch('/api', {headers: {Accept: 'application/speculationrules+json'}})"
+                ".then(() => 'delivered', () => 'refused').then(outcome => {"
+                "document.getElementById('outcome').textContent = outcome; });</script>"
+            )
+            self._send(article(f"<p id='outcome'>pending</p>{script}", title="Rules by Accept"))
         elif path == "/rules.json":
             listed = {"prefetch": [{"source": "list", "urls": [SPECULATED]}]}
             self._send(

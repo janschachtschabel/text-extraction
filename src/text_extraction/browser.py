@@ -44,8 +44,9 @@ from playwright.async_api import (
 )
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 
+from text_extraction.browser_driver import DRIVER_ERRORS
 from text_extraction.browser_proxy import EgressProxy, ProxyContext
-from text_extraction.browser_render import DRIVER_ERRORS, VIEWPORT, render_page
+from text_extraction.browser_render import VIEWPORT, render_page
 from text_extraction.envelope import ErrorCode
 from text_extraction.fetch import USER_AGENT, FetchError
 from text_extraction.render import (

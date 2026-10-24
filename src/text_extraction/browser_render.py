@@ -2,12 +2,14 @@
 
 ``render_page`` loads a page in the steps of B2 within one deadline: ``goto`` until ``load``,
 up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle, the consent opt-out (B11,
-``run_consent``), then hidden elements are removed (``strip_hidden``) and the DOM is read; the
-screenshot comes last. Every request passes the route handler: a main-frame navigation after the
-first is sent only after the pipeline's ``NavigationCheck`` (a non-GET one not at all), blocked
-resource types are not loaded, and the caller's headers go only to the request URL's site,
-also across redirects (``_Render._with_headers``). Speculation rules are removed or refused
-(``NO_SPECULATION``): a document they prefetch would be used without passing the handler.
+``run_consent``; the ``accept_cookies`` action opts in instead), the request's actions
+(``browser_actions.run_actions``), then hidden elements are removed (``strip_hidden``) and the
+DOM is read; the screenshot comes last. Every request passes the route handler: a main-frame
+navigation after the first is sent only after the pipeline's ``NavigationCheck`` (a non-GET one
+not at all), blocked resource types are not loaded, and the caller's headers go only to the
+request URL's site, also across redirects (``_Render._with_headers``). Speculation rules are
+removed or refused (``NO_SPECULATION``), and prefetch requests are refused (``_is_speculative``):
+a document they fetch would be used without passing the handler.
 
 The module uses only the Playwright API, which Patchright shares; errors of both drivers are
 caught (``DRIVER_ERRORS``). Logs carry hosts and codes only, never a URL, header or cookie.
@@ -19,16 +21,15 @@ import contextvars
 import json
 import re
 import struct
-from typing import Final, Literal
+from typing import Final
 from urllib.parse import urljoin, urlsplit
 
 import structlog
-from patchright.async_api import Error as PatchrightError
-from patchright.async_api import TimeoutError as PatchrightTimeout
 from playwright.async_api import APIResponse, Frame, Page, Request, Response, Route
-from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import TimeoutError as PlaywrightTimeout
 
+from text_extraction.browser_actions import run_actions
+from text_extraction.browser_driver import DRIVER_ERRORS, DRIVER_TIMEOUTS, ConsentOpt
+from text_extraction.browser_options import AcceptCookiesAction, Action
 from text_extraction.browser_proxy import ProxyContext
 from text_extraction.browser_scripts import (
     CONSENT_RELAY,
@@ -54,11 +55,6 @@ from text_extraction.settings import Settings
 
 _log = structlog.get_logger(__name__)
 
-type ConsentOpt = Literal["optOut", "optIn"]
-
-# The errors of both drivers' API (Patchright is a fork with its own classes).
-DRIVER_ERRORS: Final[tuple[type[Exception], ...]] = (PlaywrightError, PatchrightError)
-DRIVER_TIMEOUTS: Final[tuple[type[Exception], ...]] = (PlaywrightTimeout, PatchrightTimeout)
 VIEWPORT: Final = {"width": 1920, "height": 1080}
 CONSENT_SECONDS: Final = 3.0  # B11: best effort
 # Of a render's deadline: what reading the DOM (and taking the screenshot) needs after the waits.
@@ -74,6 +70,8 @@ _NOT_FAILURES: Final = ("net::ERR_ABORTED", "net::ERR_BLOCKED_BY_CLIENT")
 _MAX_HOPS: Final = 10
 # Not passed on from a response fetched for the browser: its body arrives decoded and whole.
 _NOT_PASSED: Final = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+# Values of the ``Sec-Purpose`` request header (``prefetch;anonymous-client-ip`` and the like).
+_SPECULATIVE_PURPOSES: Final = ("prefetch", "prerender")
 # The strings of a structured-field list, as in ``Speculation-Rules: "/a.json", "/b.json"``.
 _SF_STRING: Final = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -199,6 +197,7 @@ class _Render:
         self.settled = asyncio.Event()  # cleared while such a redirect is under way
         self.settled.set()
         self.first_navigation = True
+        self.acting = False  # the request's actions are running
         self.deadline = 0.0
         self.checks: set[asyncio.Task[None]] = set()
 
@@ -237,19 +236,54 @@ class _Render:
         await self._goto(reserve)
         if self.download:
             return self._rendered("", None, None, ())
-        idle = min(self.settings.browser_idle_wait_seconds, self.left(reserve))
-        if idle > 0:
-            with contextlib.suppress(*DRIVER_ERRORS):
-                await self.page.wait_for_load_state("networkidle", timeout=idle * 1000)
+        await self._idle(reserve)
         self.raise_kept()
-        if self.settings.browser_autoconsent:
+        actions = self.options.actions
+        # The accept_cookies action is the opt-in, which an earlier opt-out would make moot.
+        opts_in = any(isinstance(action, AcceptCookiesAction) for action in actions)
+        if self.settings.browser_autoconsent and not opts_in:
             await run_consent(self.page, "optOut", seconds=min(CONSENT_SECONDS, self.left(reserve)))
             self.raise_kept()
+        if actions:
+            await self._run_actions(actions, reserve)
+            if self.download:
+                return self._rendered("", None, None, ())
         await strip_hidden(self.page)
         html = await self._content()
         screenshot, size = await self._screenshot() if self.options.screenshot else (None, None)
         self.raise_kept()
         return self._rendered(html, screenshot, size, await self._cookies())
+
+    async def _idle(self, reserve: float) -> None:
+        """Wait up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle."""
+        idle = min(self.settings.browser_idle_wait_seconds, self.left(reserve))
+        if idle > 0:
+            with contextlib.suppress(*DRIVER_ERRORS):
+                await self.page.wait_for_load_state("networkidle", timeout=idle * 1000)
+
+    async def _run_actions(self, actions: tuple[Action, ...], reserve: float) -> None:
+        """Run the request's actions (before the reserve for reading the page), then give what
+        they loaded a moment. A navigation the check refused meanwhile failed its action: the
+        page stays as it was, so the refusal is no error of the render."""
+        self.acting = True
+        try:
+            self.warnings.extend(
+                await run_actions(
+                    self.page,
+                    actions,
+                    allow_evaluate=self.options.allow_evaluate,
+                    deadline=self.deadline - reserve,
+                    consent=run_consent,
+                    refused=lambda: self.refusal is not None,
+                )
+            )
+        finally:
+            self.acting = False
+        self.refusal = None
+        self.settled.set()
+        self.raise_kept()
+        await self._idle(reserve)
+        self.raise_kept()
 
     async def _goto(self, reserve: float) -> None:
         timeout = self.left(reserve)
@@ -464,6 +498,9 @@ class _Render:
 
     async def _decide(self, route: Route, request: Request) -> None:
         options = self.options
+        if _is_speculative(request):
+            await route.abort("blockedbyclient")
+            return
         frame = _frame_of(request)
         if (
             frame is not None
@@ -485,7 +522,13 @@ class _Render:
                 await route.fulfill(status=204)
                 return
             elif not await self._checked(request.url):
-                await route.abort("blockedbyclient")
+                if self.acting:
+                    # A navigation of an action: the page stays as it is (an abort would
+                    # replace its document with an error page); the action fails.
+                    self.unanswered.add(request)
+                    await route.fulfill(status=204)
+                else:
+                    await route.abort("blockedbyclient")
                 return
         elif request.resource_type in options.blocked_resources or request.url in self.rule_files:
             await route.abort("blockedbyclient")
@@ -657,6 +700,19 @@ def _hop_page(target: str) -> str:
     """A document that goes on to ``target`` at once, replacing itself in the history."""
     literal = json.dumps(target).replace("<", "\\u003c").replace(">", "\\u003e")
     return f"<!doctype html><meta charset='utf-8'><script>location.replace({literal});</script>"
+
+
+def _is_speculative(request: Request) -> bool:
+    """A prefetch or prerender, or the fetch of a speculation rules file. Such a document is
+    fetched outside the page's navigations, and a later navigation would use it without passing
+    the navigation check. ``NO_SPECULATION`` and the refusal of ``Speculation-Rules`` header
+    files stop most; this is the net under them (it does not depend on the order of events)."""
+    headers = request.headers
+    purpose = f"{headers.get('sec-purpose', '')} {headers.get('purpose', '')}".lower()
+    return (
+        any(part.startswith(_SPECULATIVE_PURPOSES) for part in purpose.split())
+        or "application/speculationrules+json" in headers.get("accept", "").lower()
+    )
 
 
 def _frame_of(request: Request) -> Frame | None:

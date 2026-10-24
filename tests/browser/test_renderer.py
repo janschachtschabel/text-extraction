@@ -331,6 +331,28 @@ def test_speculated_documents_still_pass_the_check(
     scenario(settings_for, site, body, browser_idle_wait_seconds=3)
 
 
+def test_prefetch_requests_are_refused(settings_for: SettingsFor, site: Site) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/prefetch-link")
+        await asyncio.sleep(0.5)  # a prefetch starts after the load
+        assert ARTICLE_TEXT.split(".")[0] in rendered.html
+        assert [s.path for s in site.seen(site.base) if "sec-purpose" in s.headers] == []
+        assert site.seen(site.base, "/static") == []
+
+    scenario(settings_for, site, body)
+
+
+def test_requests_that_ask_for_speculation_rules_are_refused(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}/accept-rules")
+        assert '<p id="outcome">refused</p>' in rendered.html
+        assert site.seen(site.base, "/api") == []
+
+    scenario(settings_for, site, body)
+
+
 def test_hidden_tabs_are_stripped(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
         rendered = await render(stack, f"{site.base}/hidden-tabs")
