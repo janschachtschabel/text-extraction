@@ -895,7 +895,10 @@ class Pipeline:
         self, run: _Run, *, earlier: Envelope[ExtractResult] | None
     ) -> Envelope[ExtractResult]:
         """Render the page; with an ``earlier`` result (the draft or this run's fast result),
-        keep the better of both and store only that one."""
+        keep the better of both and store only that one. A screenshot is never compared: its
+        rendered result carries the artifact."""
+        if run.req.screenshot:
+            earlier = None
         run.comparing = earlier is not None
         rendered = await self._guarded(run, self._render_and_extract(run))
         if earlier is None:
@@ -967,8 +970,12 @@ class Pipeline:
     ) -> Rendered:
         """Take the host's turn and render. Each later main-frame navigation is checked before
         it is sent: its URL, its origin's compliance files (a block refuses it) and the turn of
-        its host, which moves along. The checks count as render time."""
-        await turn.take(run.host or "", run.report.crawl_delay)
+        its host, which moves along with that host's own crawl delay. The checks count as render
+        time. A failed render is reported to the gate for the host whose turn is held, as a
+        failed fetch is: a status the renderer saw, or a timeout or connection error."""
+        host = normalize_host(run.host or "")
+        crawl_delays = {host: run.report.crawl_delay}  # by host, as the turns are
+        await turn.take(host, crawl_delays[host])
         loop = asyncio.get_running_loop()
         when = run.deadline.when() if run.deadline is not None else None
         if when is None:  # pragma: no cover - the run always has a deadline
@@ -981,8 +988,8 @@ class Pipeline:
 
         async def check(url: str) -> None:
             check_target(url)
-            host = urlsplit(url).hostname or ""
-            check_address(host, self._settings)
+            target = urlsplit(url).hostname or ""
+            check_address(target, self._settings)
             if url not in checked:
                 checked.add(url)
                 compliance_ms, fetch_ms = run.compliance_ms, run.fetch_ms
@@ -991,11 +998,18 @@ class Pipeline:
                 run.report = with_redirect_findings(run.report, hop)
                 if (code := blocking_code(run.report)) is not None:
                     raise FetchError(code, _BLOCK_MESSAGES[code])
-            await turn.take(host, run.report.crawl_delay)
+                crawl_delays[normalize_host(target)] = hop.crawl_delay
+            await turn.take(target, crawl_delays.get(normalize_host(target)))
 
         started = time.perf_counter()
+        budget = deadline - loop.time()  # what the render had, for `_record_failure`
         try:
             return await renderer.render(run.req.url, check, options, deadline=deadline)
+        except FetchError as error:
+            # Recorded while the turn is held, so a 429 pauses the host before the next turn.
+            if turn.answering is not None:
+                await self._record_failure(turn.answering, error, budget)
+            raise
         finally:
             run.render_ms += _ms(started)
 
@@ -1019,6 +1033,7 @@ class Pipeline:
                     continue
                 checked.add(url)
                 check_target(url)
+                check_address(urlsplit(url).hostname or "", self._settings)
                 run.report = with_redirect_findings(
                     run.report, await self._check_origin(run, url, turn)
                 )

@@ -147,11 +147,13 @@ class RecordingGate:
     def __init__(self, gate: DomainGate) -> None:
         self.gate = gate
         self.events: list[tuple[str, str]] = []
+        self.crawl_delays: list[tuple[str, float | None]] = []  # of each turn taken
 
     @asynccontextmanager
     async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
         async with self.gate.slot(host, crawl_delay):
             self.events.append(("take", host))
+            self.crawl_delays.append((host, crawl_delay))
             try:
                 yield
             finally:

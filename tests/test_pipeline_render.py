@@ -312,6 +312,23 @@ def test_auto_with_browser_options_always_renders() -> None:
     assert [action.type for action in call.options.actions] == ["click"]
 
 
+def test_a_screenshot_is_never_compared_with_a_draft() -> None:
+    drafting = RenderHarness({PAGE: fetched()})  # a fine fast result with many words
+    draft = drafting.run_once(mode="auto")
+    assert draft.status == "success"
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(SHORT_PAGE, screenshot=PNG, screenshot_size=(1920, 1080)))
+    )
+    artifacts = FakeArtifacts()
+
+    envelope = harness.run_once(mode="auto", screenshot=True, artifacts=artifacts, draft=draft)
+
+    data = data_of(envelope)
+    assert data.mode_used == "browser"
+    assert data.screenshot is not None
+    assert len(artifacts.screenshots) == 1
+
+
 # --- later navigations and redirects ----------------------------------------------------------
 
 
@@ -489,6 +506,88 @@ def test_turn_is_held_during_render_and_released_after(outcome: str) -> None:
     assert seen["leases"] >= 1
     assert seen["held after"] == []
     assert seen["leases after"] == 0
+
+
+@pytest.mark.parametrize(
+    ("error", "recorded", "paused"),
+    [
+        (FetchError(ErrorCode.TIMEOUT, "The page did not load.", retryable=True), True, False),
+        (FetchError(ErrorCode.CONNECTION_ERROR, "Reset.", retryable=True), True, False),
+        (
+            FetchError(ErrorCode.TIMEOUT, "Still waiting.", retryable=True, upstream_status=429),
+            True,
+            True,
+        ),
+        (FetchError(ErrorCode.CONVERSION_FAILED, "The page kept navigating."), False, False),
+    ],
+    ids=["timeout", "connection_error", "timeout-after-429", "not-the-hosts-fault"],
+)
+def test_a_failed_render_is_reported_to_the_gate(
+    error: FetchError, recorded: bool, paused: bool
+) -> None:
+    harness = RenderHarness(renderer=FakeRenderer(error))
+
+    envelope = harness.run_once(mode="browser")
+
+    assert code_of(envelope) == error.code
+    assert data_of(envelope).upstream_status == error.upstream_status
+    records = [event for event in harness.gate.events if event[0] == "record"]
+    assert records == ([("record", "example.org")] if recorded else [])
+    # Recorded inside the turn, before it was given back.
+    if recorded:
+        assert harness.gate.events.index(records[0]) < harness.gate.events.index(
+            ("give back", "example.org")
+        )
+    assert bool(harness.keys("out:cooldown:*")) is paused
+
+
+def test_a_navigation_refused_by_the_check_is_not_reported_to_the_gate() -> None:
+    harness = RenderHarness(
+        {ROBOTS: fetched(ROBOTS, DISALLOW_PRIVATE)},
+        renderer=FakeRenderer(rendered(), navigations=[MOVED]),
+    )
+
+    envelope = harness.run_once(mode="browser")
+
+    assert code_of(envelope) == ErrorCode.BLOCKED_BY_ROBOTS
+    assert ("record", "example.org") not in harness.gate.events
+
+
+def test_a_navigation_back_takes_the_hosts_own_crawl_delay() -> None:
+    target = f"{OTHER}/learn/page.html"
+    renderer = FakeRenderer(
+        rendered(responses=[response(PAGE), response(target), response(PAGE)]),
+        navigations=[target, PAGE],  # A -> B -> A
+    )
+    harness = RenderHarness(
+        {ROBOTS: fetched(ROBOTS, "User-agent: *\nCrawl-delay: 0.1\n")}, renderer=renderer
+    )
+
+    envelope = harness.run_once(mode="browser")
+
+    assert envelope.status == "success"
+    assert renderer.sent == [target, PAGE]
+    # A's first turn was taken for its robots.txt load, before its delay was known, and is
+    # kept for the page; back on A, the turn has A's own delay, not B's.
+    assert harness.gate.crawl_delays == [
+        ("example.org", None),
+        ("other.example", None),
+        ("example.org", 0.1),
+    ]
+    assert harness.gate.held() == []
+
+
+def test_http_redirect_hop_to_a_private_address_is_blocked_url() -> None:
+    hop = "http://10.0.0.5/hop"
+    renderer = FakeRenderer(rendered(url=NEXT, responses=[response(NEXT, redirects=[PAGE, hop])]))
+    harness = RenderHarness(renderer=renderer)
+
+    envelope = harness.run_once(mode="browser")
+
+    assert code_of(envelope) == ErrorCode.BLOCKED_URL
+    assert data_of(envelope).content is None
+    assert all("10.0.0.5" not in url for url in harness.fetched_urls())
+    assert harness.leases() == 0
 
 
 # --- screenshots --------------------------------------------------------------------------------

@@ -108,7 +108,12 @@ class Renderer(Protocol):
     ) -> Rendered:
         """Load ``url`` and return the rendered page. ``deadline`` is ``loop.time()`` based:
         the render returns (or raises ``FetchError`` with ``timeout``) before it. A failure of
-        the target or the browser is a ``FetchError``; an error of ``check`` propagates."""
+        the target or the browser is a ``FetchError``; an error of ``check`` propagates.
+
+        When a main-frame answer was seen before the failure, the ``FetchError`` carries its
+        status as ``upstream_status``: the pipeline reports it to the outbound gate, so a 429
+        or 503 still pauses the host. A ``timeout`` or ``connection_error`` counts towards the
+        host's circuit breaker."""
         ...
 
 
