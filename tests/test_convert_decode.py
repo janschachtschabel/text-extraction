@@ -233,3 +233,35 @@ def test_decode_undeclared_latin1_page_with_one_utf8_looking_pair_stays_windows_
     page = "<p>Straße\xa0Nr. 5, Größe: groß, Übung für alle, schön und süß.</p>"
 
     assert decode_html(page.encode("cp1252"), None) == page
+
+
+def test_decode_utf8_header_beats_a_stale_latin1_meta_declaration() -> None:
+    page = (
+        b'<html><head><meta charset="iso-8859-1"></head><body>'
+        + ("<p>" + GERMAN + "</p>").encode() * 5
+        + b"<p>K\xf6ln</p></body></html>"
+    )
+
+    text = decode_html(page, "utf-8")
+
+    assert "Größe und Maße" in text
+    assert "KÃ¶ln" not in text
+    assert text.count("�") == 1
+
+
+def test_decode_latin1_header_yields_to_mostly_utf8_bytes() -> None:
+    # Apache's default ISO-8859-1 header on a UTF-8 page that holds one stray byte.
+    page = ("<p>" + GERMAN + "</p>").encode() * 5 + b"<p>K\xf6ln</p>"
+
+    text = decode_html(page, "iso-8859-1")
+
+    assert "Größe und Maße" in text
+    assert "KÃ¶ln" not in text
+    assert text.count("�") == 1
+
+
+def test_decode_latin1_meta_still_wins_over_a_wrong_utf8_header() -> None:
+    # The bytes are not nearly UTF-8: every umlaut is an invalid sequence, so the meta decides.
+    page = '<meta charset="iso-8859-1"><p>Größe, Käse, Übung, schön, Straße, Köln</p>'
+
+    assert decode_html(page.encode("cp1252"), "utf-8") == page

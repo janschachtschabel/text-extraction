@@ -125,7 +125,7 @@ def parse_retry_after(value: str | None, *, now: float) -> float | None:
         return None
 
 
-def _normalize_host(host: str) -> str:
+def normalize_host(host: str) -> str:
     """Lower-case IDNA form, so every spelling of a host shares one set of keys."""
     name = host.strip().rstrip(".").lower()
     try:
@@ -168,7 +168,7 @@ class DomainGate:
         more than ``outbound_max_wait_seconds`` away. The lease is released on every exit,
         including cancellation at any point.
         """
-        host = _normalize_host(host)
+        host = normalize_host(host)
         await self._refuse_while_paused(host)
         deadline = self._clock() + self._settings.outbound_max_wait_seconds
         delay = self._spacing(crawl_delay)
@@ -188,7 +188,7 @@ class DomainGate:
 
         ``retry_after`` is the parsed ``Retry-After`` header in seconds (see ``parse_retry_after``).
         """
-        host = _normalize_host(host)
+        host = normalize_host(host)
         settings = self._settings
         now = self._clock()
         if status in (429, 503):

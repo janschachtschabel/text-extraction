@@ -948,3 +948,90 @@ def test_waiting_for_a_conversion_slot_counts_against_the_deadline(
     assert second not in conversions  # timed out waiting, never converted
     assert first.error is not None
     assert first.error.code == ErrorCode.TIMEOUT
+
+
+def test_a_same_host_redirect_keeps_the_turn_it_already_holds() -> None:
+    harness, gate = recording_harness(
+        {PAGE: Redirect(MOVED), MOVED: fetched(MOVED)},
+        outbound_min_delay_ms=1000,
+    )
+
+    started = time.monotonic()
+    envelope = harness.run_once()
+    elapsed = time.monotonic() - started
+
+    assert envelope.status == "success"
+    assert data_of(envelope).final_url == MOVED
+    assert gate.events == [
+        ("take", "example.org"),
+        ("record", "example.org"),
+        ("give back", "example.org"),
+    ]
+    assert elapsed < 0.9  # no second spacing slot at the same host
+
+
+def test_a_same_host_redirect_does_not_wait_for_the_crawl_delay_again() -> None:
+    robots = fetched(ROBOTS, "User-agent: *\nCrawl-delay: 2\n")
+    harness, gate = recording_harness(
+        {PAGE: Redirect(MOVED), MOVED: fetched(MOVED), ROBOTS: robots},
+        outbound_min_delay_ms=1000,
+    )
+
+    started = time.monotonic()
+    envelope = harness.run_once()
+    elapsed = time.monotonic() - started
+
+    assert envelope.status == "success"
+    assert [name for name, _ in gate.events] == ["take", "record", "give back"]
+    assert elapsed < 1.9
+
+
+def test_a_cross_host_redirect_still_takes_the_new_hosts_turn() -> None:
+    target = f"{OTHER}/learn/page.html"
+    harness, gate = recording_harness(
+        {PAGE: Redirect(target), target: fetched(target)},
+        outbound_min_delay_ms=1000,
+    )
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "success"
+    assert gate.events == [
+        ("take", "example.org"),
+        ("give back", "example.org"),
+        ("take", "other.example"),
+        ("record", "other.example"),
+        ("give back", "other.example"),
+    ]
+
+
+def test_a_hop_that_got_little_time_is_not_the_hosts_fault() -> None:
+    target = f"{OTHER}/learn/page.html"
+    other_robots = f"{OTHER}/robots.txt"
+    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+
+    async def slow_robots(validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(1.4)  # the hop's turn comes with less than half the fetch budget left
+        return fetched(other_robots, "Not found", status=404)
+
+    harness = Harness(
+        {PAGE: Redirect(target), target: timed_out, other_robots: slow_robots},
+        extract_timeout_seconds=2,
+        fetch_timeout_seconds=2,
+    )
+
+    envelope = harness.run_once()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert harness.keys("out:fail:*") == []
+
+
+def test_a_hop_that_got_a_full_budget_counts_against_its_host() -> None:
+    target = f"{OTHER}/learn/page.html"
+    timed_out = FetchError(ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True)
+    harness = Harness({PAGE: Redirect(target), target: timed_out}, fetch_timeout_seconds=2)
+
+    harness.run_once()
+
+    assert harness.keys("out:fail:*") == [b"out:fail:{other.example}"]

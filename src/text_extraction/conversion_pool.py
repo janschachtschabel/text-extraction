@@ -9,7 +9,8 @@ A caller first waits for a free slot, then its function runs at once. The wait i
 await, so the request's deadline also covers it, and no work is queued that nobody waits for any
 more. Python cannot stop a running thread: a caller whose deadline passes gets its timeout, but
 the thread finishes its work and keeps its slot until then. Bounded concurrency is the
-containment; ``CONVERT_MAX_BYTES`` bounds the work of each call.
+containment; ``CONVERT_MAX_BYTES`` bounds the work of each call, and with it how long a
+shutdown can be held up by a conversion that is already running (see ``shutdown``).
 """
 
 import asyncio
@@ -42,7 +43,13 @@ class ConversionPool:
         return await asyncio.wrap_future(future)
 
     def shutdown(self) -> None:
-        """Stop taking work; threads that still run finish in the background."""
+        """Stop taking work and drop what is still queued, without waiting here.
+
+        A conversion that is already running is not stopped and not abandoned either:
+        ``concurrent.futures`` joins its worker threads when the interpreter exits, so the
+        process ends only once that conversion is done (or the pod is killed at the end of its
+        grace period). ``CONVERT_MAX_BYTES`` is what bounds that wait.
+        """
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _release(self, loop: asyncio.AbstractEventLoop, _future: Future[Any]) -> None:

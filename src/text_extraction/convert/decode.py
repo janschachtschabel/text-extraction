@@ -14,8 +14,9 @@ into mojibake or an error. Two corrections follow browsers and the real web:
 
 A UTF-8 declaration (byte order mark, header or meta) is kept when a few bytes are not valid
 UTF-8: the bad sequences become U+FFFD, as in browsers, and the rest of the page keeps its
-umlauts. Only another declaration that decodes the bytes cleanly (a meta tag that contradicts a
-UTF-8 header) wins over it.
+umlauts. A meta tag that contradicts a UTF-8 header wins only when the bytes are nothing like
+UTF-8 (see ``_mostly_utf8``); a Latin-1 family declaration yields to nearly-UTF-8 bytes just as
+it yields to valid ones.
 
 The guess is strict UTF-8; then UTF-8 with replacement when the bytes are UTF-8 but for a few
 stray bytes (at most ``_MAX_STRAY_SEQUENCES`` invalid sequences, and at least
@@ -191,7 +192,9 @@ def _utf8_text(data: bytes) -> str | None:
 
 def _declared(data: bytes, codec: str) -> str | None:
     if codec in _LATIN_FAMILY:
-        text = _utf8_text(data)
+        # A Latin-1 declaration yields to bytes that are UTF-8, or nearly: a page with a stray
+        # byte in it is still a UTF-8 page, and reading it as windows-1252 is pure mojibake.
+        text = _utf8_text(data) or _mostly_utf8(data)
         if text is not None:
             return text
     return _decode(data, codec)
@@ -259,6 +262,11 @@ def _decode_html(data: bytes, content_type_charset: str | None) -> str:
     if header and (text := _declared(data, header)) is not None:
         return text
     if (text := _from_bom(data)) is not None:
+        return text
+    # A UTF-8 declaration the bytes nearly keep beats a contradicting meta declaration: a stale
+    # `<meta charset=iso-8859-1>` must not turn the page into mojibake. A meta declaration that
+    # decodes bytes which are nothing like UTF-8 still wins, below.
+    if header == "utf-8" and (text := _mostly_utf8(data)) is not None:
         return text
     meta = _meta_codec(data)
     if meta and (text := _declared(data, meta)) is not None:

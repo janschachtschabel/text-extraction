@@ -1,4 +1,6 @@
 import asyncio
+import subprocess
+import sys
 import threading
 import time
 
@@ -105,3 +107,31 @@ def test_a_cancelled_caller_keeps_the_slot_until_its_thread_is_done() -> None:
         pool.shutdown()
 
     assert order == ["first done", "second ran"]
+
+
+def test_a_running_conversion_delays_the_interpreter_exit() -> None:
+    """What `shutdown` cannot do: concurrent.futures joins its threads at exit, so a conversion
+    that is already running holds the process until it ends. The docstring says so."""
+    program = """
+import asyncio, time
+from text_extraction.conversion_pool import ConversionPool
+
+pool = ConversionPool(1)
+
+
+async def main() -> None:
+    asyncio.ensure_future(pool.run(time.sleep, 2.0))
+    await asyncio.sleep(0.2)
+    pool.shutdown()
+
+
+asyncio.run(main())
+"""
+    started = time.monotonic()
+    completed = subprocess.run(  # noqa: S603 - our own interpreter and program text
+        [sys.executable, "-c", program], check=True, capture_output=True, timeout=60
+    )
+    elapsed = time.monotonic() - started
+
+    assert completed.stderr == b""
+    assert elapsed > 1.5  # the sleeping conversion is joined, not abandoned

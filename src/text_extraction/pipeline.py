@@ -66,7 +66,13 @@ from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
 from text_extraction.netguard import InvalidUrlError, validate_url
-from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy, parse_retry_after
+from text_extraction.outbound import (
+    CircuitOpen,
+    DomainGate,
+    OutboundBusy,
+    normalize_host,
+    parse_retry_after,
+)
 from text_extraction.quality import Quality, assess, quality_error
 from text_extraction.result_cache import CachedEntry, ResultCache, cache_key
 from text_extraction.settings import Settings
@@ -211,23 +217,33 @@ class _Turn:
     """The outbound gate's turn for the host being fetched; it moves along a redirect chain.
 
     ``answering`` is the host whose answer the fetch waits for: None while no turn is held (a
-    redirect target is being checked, or its turn is being waited for)."""
+    redirect target on another host is being checked, or its turn is being waited for)."""
 
     def __init__(self, gate: DomainGate) -> None:
         self._gate = gate
         self._held: contextlib.AsyncExitStack | None = None
+        self._host: str | None = None  # host of the turn held
         self.answering: str | None = None
 
+    def holds(self, host: str) -> bool:
+        """Whether the turn held (if any) is this host's: a redirect that stays on the host
+        keeps it, and waits for no further spacing slot or crawl delay."""
+        return self._held is not None and normalize_host(host) == self._host
+
     async def take(self, host: str, crawl_delay: float | None) -> None:
-        """Give back the turn held, if any, then wait for a turn at ``host``."""
+        """Wait for a turn at ``host``; a turn already held for it is kept. A turn at another
+        host is given back first, so we never hold two at once."""
+        if self.holds(host):
+            return
         await self.give_back()
         held = contextlib.AsyncExitStack()
         await held.enter_async_context(self._gate.slot(host, crawl_delay))
         self._held = held
-        self.answering = host
+        self._host = normalize_host(host)
+        self.answering = self._host
 
     async def give_back(self) -> None:
-        held, self._held = self._held, None
+        held, self._held, self._host = self._held, None, None
         self.answering = None
         if held is not None:
             await held.aclose()
@@ -440,18 +456,22 @@ class Pipeline:
         """Fetch the target in its host's turn and report the outcome to the gate.
 
         A redirect target is checked against the compliance files of its origin before it is
-        requested (a block ends the chain), and a target on another host waits for that host's
-        turn; the previous host's turn is given back first. The outcome is recorded for the host
-        that gave it.
+        requested (a block ends the chain). A target on another host waits for that host's turn
+        and the previous host's turn is given back first; one on the same host keeps the turn.
+        The outcome is recorded for the host that gave it, judged against the time that host's
+        request actually had.
         """
         turn = _Turn(self._gate)
         checked = {run.req.url}
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
+        budget = 0.0  # seconds the request at `turn.answering` has, for `_record_failure`
 
         async def on_redirect(url: str) -> None:
-            nonlocal hop_checks
-            turn.answering = None  # until the target's turn is taken, no answer is the host's
+            nonlocal hop_checks, budget
+            host = urlsplit(url).hostname or ""
+            if not turn.holds(host):
+                turn.answering = None  # until the target's turn is taken, no answer is its host's
             if url not in checked:
                 checked.add(url)
                 check_started = time.perf_counter()
@@ -460,7 +480,9 @@ class Pipeline:
                 run.report = with_redirect_findings(run.report, hop)
                 if (code := blocking_code(run.report)) is not None:
                     raise FetchError(code, _BLOCK_MESSAGES[code])
-            await turn.take(urlsplit(url).hostname or "", run.report.crawl_delay)
+            await turn.take(host, run.report.crawl_delay)
+            # The hop starts now, so this is its budget, whatever the whole chain started with.
+            budget = self._fetch_budget(run)
 
         try:
             await turn.take(run.host or "", run.report.crawl_delay)
@@ -477,7 +499,7 @@ class Pipeline:
                 fetched = await self._fetcher.fetch(
                     run.req.url,
                     validators=validators,
-                    timeout_seconds=budget,
+                    timeout_seconds=budget,  # the whole chain's budget; a hop gets what is left
                     on_redirect=on_redirect,
                 )
             except FetchError as error:
@@ -517,10 +539,11 @@ class Pipeline:
 
         An error with a status (too large, too many redirects) still got an answer: that status
         counts. DNS and connection errors count as failures of the host. A timeout counts only
-        when the fetch had at least half of ``FETCH_TIMEOUT_SECONDS``: one cut short by the
-        request's own deadline says little about the host. Errors that say nothing about the
-        host's health (a redirect to a blocked or invalid URL, an unsupported encoding) are not
-        reported.
+        when the request to this host had at least half of ``FETCH_TIMEOUT_SECONDS`` (``budget``,
+        the time left when its turn came): one cut short by the extraction's own deadline says
+        little about the host, and a redirect target only gets what the chain left over. Errors
+        that say nothing about the host's health (a redirect to a blocked or invalid URL, an
+        unsupported encoding) are not reported.
         """
         fair_budget = budget >= self._settings.fetch_timeout_seconds * _FAIR_BUDGET_SHARE
         if error.upstream_status is not None:
