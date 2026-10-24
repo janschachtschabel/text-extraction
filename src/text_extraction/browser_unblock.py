@@ -8,8 +8,11 @@ module (it needs the extra ``browser``); the pipeline uses the renderer only for
 build), headful under Xvfb unless ``BROWSER_UNBLOCK_HEADLESS``, ``no_viewport`` with a 1920 by
 1080 window, Chrome's own user agent and no extra headers. Its profile is a fresh temporary
 directory, removed once the pool has closed the context (``release``; the context's ``close``
-event comes before Chrome has exited and stopped writing to it), and, for any left, when the
-launcher stops. The B4 flags stay, and
+event comes before Chrome has exited and stopped writing to it). After a crash Chrome's other
+processes go on for a while and may write to it again, even after it was removed: for 30 s
+one background sweep removes again every profile released (the pause doubling from 1 s; a
+profile still there then: warning ``browser_profile_left``), and the launcher's ``stop``
+removes any left. The B4 flags stay, and
 the context's ``proxy`` holds the page's own egress-proxy credentials: every byte still passes
 the proxy, which refuses private addresses and counts the page's bytes.
 
@@ -55,7 +58,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, cast
 from urllib.parse import urlsplit
@@ -90,6 +93,11 @@ _POLL_SECONDS: Final = 1.0
 _CLOSE_SECONDS: Final = 5.0
 _REMOVE_ATTEMPTS: Final = 5
 _REMOVE_PAUSE_SECONDS: Final = 0.5
+# After those, a released profile is removed again in the background for this long, the pause
+# doubling from the first: a crashed browser's processes may still write to it.
+_LATER_FIRST_PAUSE_SECONDS: Final = 1.0
+_LATER_MAX_PAUSE_SECONDS: Final = 8.0
+_LATER_SECONDS: Final = 30.0
 _BOX_WAIT_MS: Final = 500  # for the checkbox inside a widget frame to be found
 _MIN_WIDGET_PX: Final = 10  # a frame smaller than this is no visible widget
 # Where on a widget frame its checkbox sits when the box itself cannot be found inside it.
@@ -124,6 +132,8 @@ class PatchrightLauncher:
         self._starting = asyncio.Lock()
         self._profiles: set[Path] = set()  # created and not removed yet
         self._of_context: dict[BrowserContext, Path] = {}
+        self._watched: dict[Path, _Watched] = {}  # released within _LATER_SECONDS
+        self._sweep: asyncio.Task[None] | None = None  # one for all watched profiles
         self.user_agent = ""
 
     async def open(
@@ -131,6 +141,7 @@ class PatchrightLauncher:
     ) -> tuple[Browser | None, BrowserContext]:
         profile = Path(tempfile.mkdtemp(prefix=PROFILE_PREFIX, dir=self._profile_root))
         self._profiles.add(profile)
+        self._watched.pop(profile, None)  # a name used again: its own again
         try:
             context = await self._launch(profile, proxy)
         except BaseException:
@@ -160,8 +171,13 @@ class PatchrightLauncher:
             with contextlib.suppress(*DRIVER_ERRORS):
                 await driver.stop()
         self._of_context.clear()
+        sweep, self._sweep = self._sweep, None
+        if sweep is not None:
+            sweep.cancel()
+            await asyncio.gather(sweep, return_exceptions=True)
+        self._watched.clear()
         for profile in list(self._profiles):
-            await self._remove(profile)
+            await self._removed_soon(profile)
 
     async def _launch(self, profile: Path, proxy: PageProxy) -> BrowserContext:
         driver = await self._started()
@@ -185,16 +201,63 @@ class PatchrightLauncher:
             return self._driver
 
     async def _remove(self, profile: Path) -> None:
-        """Remove ``profile`` (in a thread: a profile holds many small files). A browser that
-        went away by itself may still be ending, and write to it once more: then again, a
-        little later. What is left is removed by ``stop``."""
+        """Remove ``profile``, then have the sweep remove it again for ``_LATER_SECONDS`` (the
+        caller does not wait): a browser that went away by itself (a crash) may still be
+        ending, its processes writing to it once more. What is left then is removed by
+        ``stop``."""
+        await self._removed_soon(profile)
+        now = asyncio.get_running_loop().time()
+        self._watched[profile] = _Watched(
+            now + _LATER_SECONDS, now + _LATER_FIRST_PAUSE_SECONDS, _LATER_FIRST_PAUSE_SECONDS
+        )
+        if self._sweep is None or self._sweep.done():
+            self._sweep = asyncio.create_task(self._swept())
+
+    async def _removed_soon(self, profile: Path) -> bool:
+        """Remove ``profile`` (in a thread: a profile holds many small files), a few times
+        within two seconds; whether it is gone."""
         for attempt in range(_REMOVE_ATTEMPTS):
             if attempt:
                 await asyncio.sleep(_REMOVE_PAUSE_SECONDS)
-            if not await asyncio.to_thread(_removed, profile):
-                continue
-            self._profiles.discard(profile)
-            return
+            if await asyncio.to_thread(_removed, profile):
+                self._profiles.discard(profile)
+                return True
+        return False
+
+    async def _swept(self) -> None:
+        """Remove the watched profiles again as each one's pause ends, until their windows
+        are over."""
+        loop = asyncio.get_running_loop()
+        while self._watched:
+            due = min(watched.due for watched in self._watched.values())
+            await asyncio.sleep(max(0.0, due - loop.time()))
+            for profile, watched in list(self._watched.items()):
+                # Not when its name was opened again meanwhile, nor before its pause ends.
+                if self._watched.get(profile) is not watched or watched.due > loop.time():
+                    continue
+                gone = await asyncio.to_thread(_removed, profile)
+                if self._watched.get(profile) is not watched:
+                    continue
+                if gone:
+                    self._profiles.discard(profile)
+                else:
+                    self._profiles.add(profile)  # written again: for ``stop`` if it stays
+                if loop.time() < watched.until:
+                    watched.pause = min(watched.pause * 2, _LATER_MAX_PAUSE_SECONDS)
+                    watched.due = min(loop.time() + watched.pause, watched.until)
+                    continue
+                del self._watched[profile]
+                if not gone:
+                    _log.warning("browser_profile_left", driver=self.driver)
+
+
+@dataclass
+class _Watched:
+    """A released profile the sweep removes again: when next, and until when."""
+
+    until: float
+    due: float
+    pause: float
 
 
 def _removed(profile: Path) -> bool:

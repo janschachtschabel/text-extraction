@@ -35,6 +35,7 @@ from tests.browser.site import (
     Site,
 )
 from tests.fakes import FakeFetcher
+from text_extraction import browser_unblock
 from text_extraction.auth import Principal
 from text_extraction.browser import BrowserPool, ChromiumRenderer, PageProxy, PlaywrightLauncher
 from text_extraction.browser_options import EvaluateAction
@@ -60,6 +61,8 @@ _SHELL_GLOB = (
     "/opt/pw-browsers/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"
 )
 CHALLENGE_SECONDS = 10.0
+# The launcher's inline attempts and its background window for a profile, with a margin.
+PROFILE_LEFT_SECONDS = 2.0 + browser_unblock._LATER_SECONDS + 3.0
 # Host names the test proxy dials as 127.0.0.1: a site with a parent domain for cookies.
 ALIASED = ("example.test", "www.example.test", "learn.example.test")
 
@@ -612,7 +615,9 @@ def test_browser_crash_fails_the_page_alone(run_unblock: Any, site: Site) -> Non
             stack.metric("text_extraction_browser_pages_total", driver="patchright", outcome="ok")
             == 1
         )
-        assert await wait_until(lambda: not any(stack.profiles.iterdir()))
+        # The crashed browser's other processes may still write to its profile for a while:
+        # it goes within the launcher's background window.
+        assert await wait_until(lambda: not any(stack.profiles.iterdir()), PROFILE_LEFT_SECONDS)
 
     run_unblock(body, browser_idle_wait_seconds=10)
 

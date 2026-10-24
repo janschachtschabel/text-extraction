@@ -466,7 +466,11 @@ while `BROWSER_ENABLED` is false, are unchanged.
   - Driver: Patchright with Google Chrome (`BROWSER_UNBLOCK_CHANNEL`; `chromium` uses
     Patchright's own build), headful under Xvfb unless `BROWSER_UNBLOCK_HEADLESS`, one persistent
     context in a fresh temporary profile per page, a 1920×1080 window, Chrome's own user agent
-    and no extra headers. Patchright is pinned to the newest release at least 14 days old
+    and no extra headers. The profile is removed when the page ends. After a crash Chrome's
+    remaining processes may write to it for a while, even after its removal, so one background
+    sweep removes every released profile again for 30 s, the pause doubling from 1 s (warning
+    `browser_profile_left` for one still there then); the worker's shutdown removes any left.
+    Patchright is pinned to the newest release at least 14 days old
     (1.63.0; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
     the stable of that day.
   - What changes: robots and TDM are not checked (that is `ignore`); nothing is blocked; service
