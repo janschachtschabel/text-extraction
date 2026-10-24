@@ -91,6 +91,7 @@ from text_extraction.escalation import better, needs_browser, unblock_for
 from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
+from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
 from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.outbound import (
@@ -858,7 +859,14 @@ class Pipeline:
             )
             result = result.model_copy(update={"fingerprint": fingerprint})
             envelope = envelope.model_copy(update={"data": result})
-        if run.cacheable and envelope.status != "failed" and result.fingerprint is not None:
+        # A draft stored without its content (over JOB_ITEM_MAX_BYTES) is not served again.
+        complete = CONTENT_NOT_STORED_WARNING not in result.warnings
+        if (
+            run.cacheable
+            and envelope.status != "failed"
+            and result.fingerprint is not None
+            and complete
+        ):
             await self._cache.put(
                 cache_key(run.req.url, _cache_options(run.req, run.report.mode)),
                 CachedEntry(

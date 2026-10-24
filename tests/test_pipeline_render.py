@@ -32,6 +32,7 @@ from text_extraction.escalation import needs_browser
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
+from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline
 from text_extraction.render import ArtifactSink, ClearanceStore, CookieData, Renderer
@@ -311,6 +312,25 @@ def test_auto_keeps_a_better_draft_and_stores_it() -> None:
     assert data.fingerprint is not None
     assert len(harness.keys("res:*")) == 1
     assert len(harness.keys("fp:*")) == 1
+
+
+def test_a_draft_stored_without_its_content_is_never_cached() -> None:
+    # M-6: a draft over JOB_ITEM_MAX_BYTES lost its content; if it wins, it must not be served
+    # from the cache as a success without content.
+    drafting = RenderHarness({PAGE: fetched(body=SHELL_WITH_WORDS)})
+    draft = drafting.run_once(mode="auto")
+    assert draft.data is not None
+    stripped = draft.data.model_copy(
+        update={"content": None, "warnings": [*draft.data.warnings, CONTENT_NOT_STORED_WARNING]}
+    )
+    draft = draft.model_copy(update={"data": stripped})
+    harness = RenderHarness(renderer=FakeRenderer(rendered(SHELL)))
+
+    envelope = harness.run_once(mode="auto", draft=draft)
+
+    assert data_of(envelope).mode_used == "fast"  # the draft won
+    assert CONTENT_NOT_STORED_WARNING in data_of(envelope).warnings
+    assert harness.keys("res:*") == []
 
 
 def test_auto_with_browser_options_always_renders() -> None:

@@ -125,7 +125,9 @@ async def extract(
 
     `mode: browser`, `screenshot`, browser options and an `auto` page that needs a browser are
     rendered by a browser worker. Such a request can take the fast phase plus
-    `BROWSER_QUEUE_WAIT_SECONDS` and the render (`BROWSER_TIMEOUT_SECONDS` + 5 s).
+    `BROWSER_QUEUE_WAIT_SECONDS` and the render (`BROWSER_TIMEOUT_SECONDS` + 5 s). Its result
+    comes back through a job item: one over `JOB_ITEM_MAX_BYTES` (2 MB by default) as JSON
+    answers without `content`, with the warning `content_not_stored_too_large`.
 
     With `wait_seconds`, an extraction that takes longer becomes a job: 202 with the job's id
     and `status_url` (`GET /v1/jobs/{id}`). Without it the request always waits for the result.
