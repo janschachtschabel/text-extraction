@@ -3,6 +3,9 @@ name: live
 # Live regression: runs the service against real URLs (needs the internet) and checks the
 # share of URLs that yield usable text. Not part of ci.yml: it is slow and depends on third-party
 # sites. Start it by hand, label a pull request `live`, or wait for the weekly run.
+#
+# The browser worker runs next to the API with browser mode on and unblock mode off: the gate
+# measures standard behaviour, which is what a partner gets without the admin exception.
 on:
   workflow_dispatch:
     inputs:
@@ -14,7 +17,7 @@ on:
       min_ok_rate:
         description: Fail below this ok rate, in percent
         type: string
-        default: "68"
+        default: "80"
   pull_request:
     types: [labeled, synchronize, opened, reopened]
   schedule:
@@ -40,12 +43,13 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'live')
           && (github.event.action != 'labeled' || github.event.label.name == 'live'))
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Three runs: the gate, the smoke report and wlo_200 forced through the browser.
+    timeout-minutes: 90
     env:
-      # The gate: wlo_200 at the 68 % fast baseline. Only a manual run can pick others; the
-      # smoke set is never a gate.
+      # The gate: wlo_200 in auto mode at the 80 % browser baseline (measured on 4,000 URLs,
+      # 2026-09-28). Only a manual run can pick others; the smoke set is never a gate.
       URL_SET: ${{ inputs.url_set || 'wlo_200' }}
-      MIN_OK_RATE: ${{ inputs.min_ok_rate || '68' }}
+      MIN_OK_RATE: ${{ inputs.min_ok_rate || '80' }}
     services:
       valkey:
         image: valkey/valkey:8.1-alpine
@@ -66,30 +70,44 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv sync --locked
+      # The browser worker runs from the source checkout, so the browser extra is installed.
+      - run: uv sync --locked --extra browser
 
-      - name: Start the service
+      # The standard browser of the worker: Playwright's headless Chromium. Unblock mode (Chrome
+      # and Xvfb) is off here, so nothing more is installed.
+      - run: uv run playwright install --with-deps --only-shell chromium
+
+      # Browser mode is on for the API and the worker; unblock mode stays off. The browser worker
+      # serves /ready on its own internal port, since the API holds 9090.
+      - name: Start the service and the browser worker
         env:
           AUTH_MODE: none
           RATE_LIMIT_ENABLED: "false"
           VALKEY_URL: redis://127.0.0.1:6379/0
+          BROWSER_ENABLED: "true"
+          BROWSER_UNBLOCK_ENABLED: "false"
         run: |
           mkdir -p results
           nohup uv run text-extraction > results/server.log 2>&1 &
+          INTERNAL_PORT=9091 nohup uv run text-extraction-browser-worker \
+            > results/browser-worker.log 2>&1 &
           for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:9090/ready > /dev/null 2>&1 \
-              && curl -sS -o /dev/null http://127.0.0.1:8080/ 2>/dev/null; then
-              echo "service is ready"
+              && curl -sS -o /dev/null http://127.0.0.1:8080/ 2>/dev/null \
+              && curl -fsS http://127.0.0.1:9091/ready > /dev/null 2>&1; then
+              echo "service and browser worker are ready"
               exit 0
             fi
             sleep 2
           done
-          echo "service did not become ready within 120 s" >&2
+          echo "service and browser worker did not become ready within 120 s" >&2
           tail -n 50 results/server.log >&2
+          tail -n 50 results/browser-worker.log >&2
           exit 1
 
-      # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke).
-      - name: Run ${{ env.URL_SET }}
+      # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke). Always
+      # in auto mode, the mode of production.
+      - name: Run ${{ env.URL_SET }} in auto mode
         run: |
           gate=(--min-ok-rate "$MIN_OK_RATE")
           if [ "$URL_SET" = smoke ]; then
@@ -97,18 +115,31 @@ jobs:
           fi
           uv run python -m tests.live.run_live \
             --urls "tests/live/urls/${URL_SET}.csv" \
-            --out "results/live_${URL_SET}.jsonl" \
-            --summary-out "results/summary_${URL_SET}.md" \
+            --mode auto \
+            --out "results/live_${URL_SET}_auto.jsonl" \
+            --summary-out "results/summary_${URL_SET}_auto.md" \
             "${gate[@]}"
 
-      # Report only: the smoke set is a watchlist of hard pages, its ok rate is no gate.
-      - name: Run smoke (report only)
+      # Reports only, no gate: the smoke set is a watchlist of hard pages, and wlo_200 with every
+      # URL forced through the browser shows what the fast path leaves out (per domain, fast
+      # against browser). The smoke report is skipped when the run above was the smoke set.
+      - name: Run smoke in auto mode (report only)
         if: always() && env.URL_SET != 'smoke'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/smoke.csv \
-            --out results/live_smoke.jsonl \
-            --summary-out results/summary_smoke.md
+            --mode auto \
+            --out results/live_smoke_auto.jsonl \
+            --summary-out results/summary_smoke_auto.md
+
+      - name: Run wlo_200 in browser mode (report only)
+        if: always()
+        run: |
+          uv run python -m tests.live.run_live \
+            --urls tests/live/urls/wlo_200.csv \
+            --mode browser \
+            --out results/live_wlo_200_browser.jsonl \
+            --summary-out results/summary_wlo_200_browser.md
 
       - name: Add the summaries to the job summary
         if: always()
@@ -125,4 +156,5 @@ jobs:
           path: |
             results/*.jsonl
             results/server.log
+            results/browser-worker.log
           if-no-files-found: warn

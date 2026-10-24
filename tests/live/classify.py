@@ -1,8 +1,8 @@
 """Bucket classifier of the live regression harness.
 
 Maps one answer of ``POST /v1/extract`` to the bucket the summary counts it in. The mapping
-reads the result envelope only: ``status``, ``error.code``, ``data.word_count`` and
-``data.compliance.decision``.
+reads the result envelope only: ``status``, ``error.code``, ``data.word_count``,
+``data.compliance.decision`` and, for the summary only, ``data.mode_used``.
 """
 
 from dataclasses import dataclass
@@ -81,6 +81,7 @@ class EnvelopeFields:
     error_code: str | None
     word_count: int | None
     compliance_decision: str | None
+    mode_used: str | None
 
 
 def read_envelope(payload: object) -> EnvelopeFields | None:
@@ -93,12 +94,14 @@ def read_envelope(payload: object) -> EnvelopeFields | None:
     code = error.get("code")
     words = data.get("word_count")
     decision = compliance.get("decision")
+    mode_used = data.get("mode_used")
     return EnvelopeFields(
         status=payload["status"],
         error_code=code if isinstance(code, str) else None,
         # bool is an int in Python; a flag is no word count.
         word_count=words if isinstance(words, int) and not isinstance(words, bool) else None,
         compliance_decision=decision if isinstance(decision, str) else None,
+        mode_used=mode_used if isinstance(mode_used, str) else None,
     )
 
 

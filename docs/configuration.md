@@ -51,7 +51,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `FINGERPRINT_TTL_SECONDS` | `2592000` | How long the last text fingerprint of a URL is kept for change detection (`changed`, `similarity_to_previous`). 30 days by default. 0 stores no fingerprints, so nothing is reported as changed. |
 | `CONVERT_MAX_BYTES` | `5242880` | Largest HTML or text body that is converted, in bytes (5 MiB; minimum 1024). A larger page fails with `too_large` (not retryable) before it is decoded. `FETCH_MAX_BYTES` stays the download limit. |
 | `CONVERT_CONCURRENCY` | `2` | Conversions (decoding, HTML conversion, metadata and licences, fingerprint) running at once in one pod, on a thread pool of their own; DNS lookups keep the default pool. A request waits for a free slot within its `EXTRACT_TIMEOUT_SECONDS`, else it fails with `timeout`. Python cannot stop a running thread: a conversion that outlives its request runs to its end and holds its slot until then, so this bound is what limits CPU and memory. Such a conversion also holds the shutdown up, because Python joins its worker threads when the process exits. That is usually seconds, but the worst case can run to the end of the grace period, where the pod is killed (Trafilatura is quadratic on repeated paragraphs: one 5.7 MB page took 125 s). That is harmless, because pods are stateless: the request it served has already been answered `timeout`. Peak memory is roughly `CONVERT_CONCURRENCY` times the peak of one page (about 450 MB for a 5 MB page), see the Helm memory limit. Minimum 1. |
-| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` once the outbound gate let its request go (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop's request passed the gate); a long wait at the gate followed by a slow host does not count. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds, with browser mode longer (see `BROWSER_ENABLED`); the Helm chart derives the API pods' `terminationGracePeriodSeconds` from it when that value is unset, and a value you set must cover it (see Response times). After it, the lifespan shutdown waits for extractions that became a job (`wait_seconds`) for up to `EXTRACT_TIMEOUT_SECONDS` + 7 s (5 s of grace after the deadline, then it cancels them and allows 2 s for their writes); see Response times. |
+| `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` once the outbound gate let its request go (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop's request passed the gate); a long wait at the gate followed by a slow host does not count. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) with `BROWSER_ENABLED=false`; with it on, at least `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds, because a sync request may wait for a browser after its fast phase (75 s by default, 105 s with unblock mode; see `BROWSER_ENABLED` and Response times); the Helm chart derives the API pods' `terminationGracePeriodSeconds` from it when that value is unset, and a value you set must cover it (see Response times). After it, the lifespan shutdown waits for extractions that became a job (`wait_seconds`) for up to `EXTRACT_TIMEOUT_SECONDS` + 7 s (5 s of grace after the deadline, then it cancels them and allows 2 s for their writes); see Response times. |
 | `JOB_TTL_SECONDS` | `86400` | How long a job (its status, URL list and results) stays in Valkey, in seconds. The time starts at creation and starts again when the job completes, so a caller has this long to fetch the results of a finished job. Minimum 60. |
 | `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). Minimum 10000. |
 | `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
@@ -227,6 +227,41 @@ The in-chart Valkey reserves 1280Mi of memory (request equals limit) and runs wi
 fragmentation, client buffers and the fork of an append-only-file rewrite. Raise limit and
 `valkey.maxmemory` together.
 
+## Browser mode
+
+Browser mode needs three things: `BROWSER_ENABLED=true` on the API pods, the extract workers and the
+browser workers (the Helm chart and docker compose set it everywhere together), at least one browser
+worker (`text-extraction-browser-worker`, image `text-extraction-browser`) and Valkey. Screenshots
+also need `JOBS_ENABLED=true`: the PNG is a job artifact. How it works is in
+[architecture.md](architecture.md) ("Browser worker").
+
+The request fields it adds (all in the OpenAPI spec):
+
+| Field | Where | Meaning |
+| --- | --- | --- |
+| `mode` | `POST /v1/extract`, `POST /v1/batch` | `fast`, `auto` (default) or `browser`. Batches take it too but no browser options. |
+| `actions` | `POST /v1/extract`, `POST /v1/screenshot` | Up to 20 page actions. `evaluate` is for admins. A click that starts a download discards the page. |
+| `cookies`, `headers` | same | Session cookies and extra headers for logged-in pages. Headers go only to the requested URL's host and port. Never logged or shown in a job. |
+| `screenshot`, `full_page` | `POST /v1/extract` | `data.screenshot` references the PNG for `GET /v1/jobs/{id}/artifacts/screenshot.png`, kept for `ARTIFACT_TTL_SECONDS`. |
+| `compliance: ignore` | all | Admins only. Together with `BROWSER_UNBLOCK_ENABLED` it switches on unblock mode. |
+
+The Helm keys, with the variables they render (the full table is in the
+[chart README](../deploy/helm/text-extraction/README.md#values)):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.browser.enabled` | `true` | Deploys the browser workers; renders `BROWSER_ENABLED` into every pod. |
+| `workers.browser.unblock` | `false` | Renders `BROWSER_UNBLOCK_ENABLED` into every pod. Needs `workers.browser.enabled`. |
+| `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY` on the browser workers. |
+| `workers.browser.replicaCount` | `2` | Replicas, unless KEDA or HPA scale them. |
+| `workers.browser.terminationGracePeriodSeconds` | `150` | See Response times. |
+| `workers.browser.resources`, `workers.browser.tmpSizeLimit` | 1 / 2Gi to 2 / 4Gi, `2Gi` | Sized for four pages. |
+| `workers.browser.nodeSelector` | `kubernetes.io/arch: amd64` | The image exists for linux/amd64 only. |
+| `workers.browser.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `browser` queue or on CPU. |
+| `workers.browser.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-browser`, chart version | The browser image. |
+
+All other browser variables go under `config.<NAME>` like any other setting.
+
 ## Headers
 
 Read from the request:
@@ -376,9 +411,20 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
 | `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, and an `extract` or `screenshot` job when a sync request that waits for the browser answers 202 with its browser job. |
 | `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
-| `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused) or `lost` (the job was gone). |
+| `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |
 | `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |
+
+The browser worker adds these (its own registry; `driver` is `playwright` for the standard browser
+and `patchright` for unblock mode):
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `text_extraction_browser_pages_in_use` | gauge | `driver` | Browser pages open now. |
+| `text_extraction_browser_pages_total` | counter | `driver`, `outcome` | Pages by outcome: `ok`, `error` (the target or a refusal), `crash`, `timeout`. |
+| `text_extraction_browser_render_seconds` | histogram | `driver` | Seconds a page was open. |
+| `text_extraction_browser_launches_total` | counter | `driver`, `reason` | Browser launches: `start`, `recycle`, `crash`, `page` (unblock: one per page). |
+| `text_extraction_browser_proxy_refused_total` | counter | `reason` | Requests the egress proxy refused: `blocked_address`, `bytes_cap`, `dns_error`, `connect_error`, `bad_request`, `auth`. |
 
 The queue gauges come from the API pods and not from the workers, because workers may scale to
 zero and the autoscaler (KEDA) must still see the backlog. Only API pods with `JOBS_ENABLED=true`
