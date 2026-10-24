@@ -179,6 +179,41 @@ def test_navigation_to_metadata_ip_is_refused(settings_for: SettingsFor, site: S
     scenario(settings_for, site, body)
 
 
+@pytest.mark.parametrize("path", ["/redirect-private", "/redirect-private-https"])
+def test_a_document_redirect_to_a_forbidden_address_is_refused(
+    settings_for: SettingsFor, site: Site, path: str
+) -> None:
+    # M-9, R6: Chromium follows a 3xx of the document itself, so only the egress proxy sees the
+    # hop. Plain HTTP gets the proxy's 403; HTTPS a failed CONNECT tunnel. Both are blocked_url.
+    async def body(stack: Stack) -> None:
+        envelope = await run_pipeline(stack, url=f"{site.base}{path}")
+        assert envelope.status == "failed"
+        assert envelope.error is not None
+        assert envelope.error.code is ErrorCode.BLOCKED_URL
+        assert site.seen(site.forbidden) == []
+        assert (
+            stack.metric("text_extraction_browser_proxy_refused_total", reason="blocked_address")
+            >= 1
+        )
+
+    scenario(settings_for, site, body)
+
+
+def test_an_https_document_on_a_forbidden_address_is_refused(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    # R6 over HTTPS: the CONNECT is refused before any TLS; Chromium reports a failed tunnel.
+    url = site.forbidden.replace("http://", "https://", 1) + "/static"
+
+    async def body(stack: Stack) -> None:
+        with pytest.raises(FetchError) as caught:
+            await render(stack, url)
+        assert caught.value.code is ErrorCode.BLOCKED_URL
+        assert site.seen(site.forbidden) == []
+
+    scenario(settings_for, site, body)
+
+
 def test_private_subresources_are_refused_and_page_still_renders(
     settings_for: SettingsFor, site: Site
 ) -> None:

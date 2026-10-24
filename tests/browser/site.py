@@ -387,6 +387,11 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/meta-refresh":
             head = "<meta http-equiv='refresh' content='0; url=/static'>"
             self._send(page("<p>Moving on.</p>", head=head))
+        elif path == "/redirect-private":  # an HTTP redirect only the egress proxy sees
+            self._send(b"", status=302, headers={"Location": f"{site.forbidden}/static"})
+        elif path == "/redirect-private-https":  # the same through a CONNECT tunnel
+            target = site.forbidden.replace("http://", "https://", 1)
+            self._send(b"", status=302, headers={"Location": f"{target}/static"})
         elif path == "/to-private":
             script = "<script>location.href = 'http://169.254.169.254/latest/meta-data/';</script>"
             self._send(page(f"<p>Moving on.</p>{script}"))
