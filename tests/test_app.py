@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from collections.abc import Iterator
 
@@ -219,3 +220,12 @@ def test_graceful_shutdown_outlasts_the_extract_timeout() -> None:
     assert graceful_shutdown_seconds(Settings(auth_mode="none")) == 30
     assert graceful_shutdown_seconds(Settings(auth_mode="none", extract_timeout_seconds=60)) == 65
     assert graceful_shutdown_seconds(Settings(auth_mode="none", extract_timeout_seconds=40.2)) == 46
+
+
+def test_public_app_shuts_its_conversion_pool_down_on_exit(registry: CollectorRegistry) -> None:
+    app = create_public_app(make_settings(), FakeAsyncRedis(), registry)
+    with TestClient(app):
+        pass
+
+    with pytest.raises(RuntimeError, match="shutdown"):
+        asyncio.run(app.state.conversion_pool.run(int, "1"))

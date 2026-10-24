@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 
 from text_extraction import __version__
 from text_extraction.auth import Principal, Role, require_role
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
 from text_extraction.extract_api import router as extract_router
@@ -39,13 +40,16 @@ class InfoData(BaseModel):
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request; close the fetcher's connections last."""
+    """Load the language model before the first request; close the fetcher's connections and
+    the conversion pool last."""
     await asyncio.to_thread(load_language_model)
     try:
         yield
     finally:
         fetcher: Fetcher = app.state.fetcher
+        pool: ConversionPool = app.state.conversion_pool
         await fetcher.aclose()
+        pool.shutdown()
 
 
 def create_public_app(
@@ -66,7 +70,10 @@ def create_public_app(
     app.state.valkey = valkey
     app.state.rate_limiter = RateLimiter(valkey, settings.rate_limit_per_minute)
     app.state.fetcher = Fetcher(settings)
-    app.state.pipeline = create_pipeline(settings, valkey, app.state.fetcher, registry)
+    app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
+    app.state.pipeline = create_pipeline(
+        settings, valkey, app.state.fetcher, registry, app.state.conversion_pool
+    )
     install_error_handlers(app)
     app.include_router(extract_router)
 

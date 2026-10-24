@@ -22,8 +22,10 @@ compliance mode (403) and a Valkey outage of the outbound gate (503) leave as ``
 
 Only ``success`` and ``partial`` results are cached and fingerprinted: a bot challenge or an
 error page is nothing to serve again, nor to compare the next version of the page with.
-CPU-bound steps run in a worker thread; the deadline cannot stop such a thread, but every
-step bounds its own cost.
+A body over ``CONVERT_MAX_BYTES`` fails with ``too_large`` before it is decoded. CPU-bound steps
+run on the ``ConversionPool`` (``CONVERT_CONCURRENCY`` threads); waiting for a slot counts
+against the deadline. The deadline cannot stop a running thread, but every step bounds its
+own cost.
 """
 
 import asyncio
@@ -55,6 +57,7 @@ from text_extraction.compliance import (
     with_page_findings,
     with_redirect_findings,
 )
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
@@ -262,13 +265,16 @@ class Pipeline:
         fingerprints: FingerprintStore,
         settings: Settings,
         registry: CollectorRegistry,
+        pool: ConversionPool | None = None,
     ) -> None:
+        """``pool`` runs the CPU-bound steps; without one the pipeline makes its own."""
         self._fetcher = fetcher
         self._gate = gate
         self._checker = checker
         self._cache = cache
         self._fingerprints = fingerprints
         self._settings = settings
+        self._pool = pool if pool is not None else ConversionPool(settings.convert_concurrency)
         self._rules = load_boilerplate_rules()
         self._metrics = _metrics_for(registry)
 
@@ -405,12 +411,20 @@ class Pipeline:
                 f"Content type {fetched.content_type or 'unknown'} is not supported in fast mode.",
             )
 
+        limit = self._settings.convert_max_bytes
+        if len(fetched.content) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The page has {len(fetched.content)} bytes, more than the {limit} bytes "
+                "that are converted.",
+            )
+
         started = time.perf_counter()
-        text = await asyncio.to_thread(decode_html, fetched.content, fetched.charset)
+        text = await self._pool.run(decode_html, fetched.content, fetched.charset)
         run.convert_ms += _ms(started)
         started = time.perf_counter()
         page = text if kind == "html" else None
-        run.report = await asyncio.to_thread(self._checker.after_fetch, run.report, fetched, page)
+        run.report = await self._pool.run(self._checker.after_fetch, run.report, fetched, page)
         run.compliance_ms += _ms(started)
         if (code := blocking_code(run.report)) is not None:
             return run.failed(code, _BLOCK_MESSAGES[code])
@@ -561,7 +575,7 @@ class Pipeline:
     ) -> Envelope[ExtractResult]:
         started = time.perf_counter()
         try:
-            processed = await asyncio.to_thread(self._process, run.req, fetched, kind, text)
+            processed = await self._pool.run(self._process, run.req, fetched, kind, text)
         except Exception as error:  # a page that breaks a converter fails alone
             # Traceback without locals (see logging.py); the host only, never the URL.
             _log.error(
@@ -604,7 +618,7 @@ class Pipeline:
     def _process(
         self, req: ExtractRequest, fetched: FetchResult, kind: Literal["html", "text"], text: str
     ) -> _Processed:
-        """Convert and judge the decoded page. CPU-bound: runs in a worker thread."""
+        """Convert and judge the decoded page. CPU-bound: runs on the conversion pool."""
         final_url = fetched.final_url
         metadata: PageMetadata | None = None
         links: list[Link] | None = None
@@ -673,7 +687,11 @@ class Pipeline:
 
 
 def create_pipeline(
-    settings: Settings, valkey: Redis, fetcher: Fetcher, registry: CollectorRegistry
+    settings: Settings,
+    valkey: Redis,
+    fetcher: Fetcher,
+    registry: CollectorRegistry,
+    pool: ConversionPool | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``."""
     return Pipeline(
@@ -684,6 +702,7 @@ def create_pipeline(
         FingerprintStore(valkey, settings),
         settings,
         registry,
+        pool,
     )
 
 

@@ -496,3 +496,19 @@ def test_extract_timeout_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXTRACT_TIMEOUT_SECONDS", "0")
     with pytest.raises(ConfigError, match="extract_timeout_seconds"):
         load_settings()
+
+
+def test_conversion_budget_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.convert_max_bytes == 5_242_880
+    assert settings.convert_concurrency == 2
+
+    monkeypatch.setenv("CONVERT_MAX_BYTES", "1023")
+    with pytest.raises(ConfigError, match="convert_max_bytes"):
+        load_settings()
+
+    monkeypatch.setenv("CONVERT_MAX_BYTES", "1024")
+    monkeypatch.setenv("CONVERT_CONCURRENCY", "0")
+    with pytest.raises(ConfigError, match="convert_concurrency"):
+        load_settings()

@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ from tests.fakes import (
 )
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
+from text_extraction.convert import convert_html
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult
@@ -860,3 +862,85 @@ def test_redirect_to_a_paused_host_gives_every_lease_back() -> None:
     assert target not in [url for url, _ in harness.fetcher.calls]
     assert gate.events == [("take", "example.org"), ("give back", "example.org")]
     assert leases(harness) == 0
+
+
+# --- conversion budget ------------------------------------------------------------------------
+
+
+def test_a_page_over_the_conversion_limit_fails_before_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_decoding(data: bytes, charset: str | None) -> str:
+        raise AssertionError("an oversized page is not decoded")
+
+    monkeypatch.setattr("text_extraction.pipeline.decode_html", no_decoding)
+    body = ARTICLE + "<!--" + "x" * 3000 + "-->"
+    harness = Harness({PAGE: fetched(body=body)}, convert_max_bytes=2048)
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TOO_LARGE
+    assert envelope.error.retryable is False
+    data = data_of(envelope)
+    assert data.upstream_status == 200
+    assert data.content is None
+
+
+def test_a_page_at_the_conversion_limit_is_converted() -> None:
+    harness = Harness({PAGE: fetched()}, convert_max_bytes=len(ARTICLE.encode()))
+
+    assert harness.run_once().status == "success"
+
+
+def test_conversion_runs_on_the_conversion_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    threads: list[str] = []
+    real_convert = convert_html
+
+    def recording_convert(*args: Any) -> Any:
+        threads.append(threading.current_thread().name)
+        return real_convert(*args)
+
+    monkeypatch.setattr("text_extraction.pipeline.convert_html", recording_convert)
+    harness = Harness({PAGE: fetched()})
+
+    assert harness.run_once().status == "success"
+    assert len(threads) == 1
+    assert threads[0].startswith("convert")
+
+
+def test_waiting_for_a_conversion_slot_counts_against_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+    conversions: list[str] = []
+    real_convert = convert_html
+
+    def slow_convert(html: str, url: str, fmt: Any) -> Any:
+        conversions.append(url)
+        release.wait(30)
+        return real_convert(html, url, fmt)
+
+    monkeypatch.setattr("text_extraction.pipeline.convert_html", slow_convert)
+    second = f"{ORIGIN}/learn/second.html"
+    harness = Harness(
+        {PAGE: fetched(), second: fetched(second)},
+        convert_concurrency=1,
+        extract_timeout_seconds=2,
+    )
+
+    async def scenario() -> tuple[Envelope[ExtractResult], Envelope[ExtractResult]]:
+        first = asyncio.ensure_future(harness.run())
+        await asyncio.sleep(0.5)  # the first request now holds the only slot
+        waiting = await harness.run(url=second)
+        release.set()
+        return await first, waiting
+
+    first, waiting = asyncio.run(scenario())
+
+    assert waiting.error is not None
+    assert waiting.error.code == ErrorCode.TIMEOUT
+    assert second not in conversions  # timed out waiting, never converted
+    assert first.error is not None
+    assert first.error.code == ErrorCode.TIMEOUT

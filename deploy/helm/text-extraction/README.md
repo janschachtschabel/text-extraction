@@ -70,11 +70,12 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
 | `config.RATE_LIMIT_ENABLED` | `"true"` | Inbound rate limit per API key. |
 | `config.RATE_LIMIT_PER_MINUTE` | `"60"` | Default limit per key. |
+| `config.CONVERT_CONCURRENCY` | `"2"` | Conversions at once per pod. The memory limit is sized for it. |
 | `config.*` | | Any further non-secret setting is added here. |
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
 | `secrets.existingSecretKey` | `API_KEYS` | Key inside that Secret. |
-| `resources` | requests 100m / 256Mi, limits 1 / 512Mi | Placeholder until package 11 measures real consumption. |
+| `resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption. The memory limit is about `CONVERT_CONCURRENCY` x 450 MB (one 5 MiB page) plus the service; raise it with `CONVERT_CONCURRENCY` or `CONVERT_MAX_BYTES`. |
 | `autoscaling.enabled` | `false` | |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |

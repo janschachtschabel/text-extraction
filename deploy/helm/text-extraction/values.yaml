@@ -27,6 +27,8 @@ config:
   AUTH_MODE: api_key
   RATE_LIMIT_ENABLED: "true"
   RATE_LIMIT_PER_MINUTE: "60"
+  # Conversions at once per pod; the memory limit below is sized for it.
+  CONVERT_CONCURRENCY: "2"
 
 # Secrets. API_KEYS is a JSON list of {"name", "role", "sha256", "rate_limit_per_minute"} objects.
 # Set `apiKeys` for a chart-managed Secret, or point `existingSecret` at your own Secret.
@@ -37,14 +39,16 @@ secrets:
   # Key inside the existing Secret.
   existingSecretKey: API_KEYS
 
-# Placeholder values until package 11 measures real consumption.
+# Placeholder values until package 11 measures real consumption. The memory limit follows
+# CONVERT_CONCURRENCY x the peak of one conversion: a page at CONVERT_MAX_BYTES (5 MiB) peaks at
+# about 450 MB, so 2 conversions plus the service itself need about 1Gi. Raise it with either.
 resources:
   requests:
     cpu: 100m
     memory: 256Mi
   limits:
     cpu: "1"
-    memory: 512Mi
+    memory: 1Gi
 
 autoscaling:
   enabled: false

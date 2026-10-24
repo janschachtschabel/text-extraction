@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     fingerprint_ttl_seconds: int = Field(default=2_592_000, ge=0)  # 30 days
     # Time budget of one POST /v1/extract, from compliance checks to the finished result.
     extract_timeout_seconds: float = Field(default=25, gt=0)
+    # Conversion budget: largest HTML/text body converted, and conversions at once per pod.
+    convert_max_bytes: int = Field(default=5_242_880, ge=1024)  # 5 MiB
+    convert_concurrency: int = Field(default=2, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod
