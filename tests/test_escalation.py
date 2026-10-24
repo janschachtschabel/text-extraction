@@ -39,13 +39,15 @@ def envelope(
     mode_used: Literal["fast", "browser"] = "fast",
     words: int = 800,
     q: Quality | None = None,
+    content_type: str | None = "text/html",
+    upstream_status: int | None = 200,
     **extra: Any,
 ) -> Envelope[ExtractResult]:
     result = ExtractResult(
         url="https://example.org/",
         final_url="https://example.org/",
-        upstream_status=200,
-        content_type="text/html",
+        upstream_status=upstream_status,
+        content_type=content_type,
         mode_used=mode_used,
         attempts=1,
         language=None,
@@ -79,6 +81,42 @@ def test_js_heavy_fast_result_needs_browser() -> None:
     assert needs_browser(shell, unblock=True)
     assert not needs_browser(envelope(q=quality()), unblock=False)
     assert not needs_browser(envelope(q=quality()), unblock=True)
+
+
+def soft_404_quality() -> Quality:
+    return quality(soft_404=True, browser_recommended=True, word_count=8)
+
+
+def test_only_2xx_html_escalates_on_a_recommendation() -> None:
+    html = envelope(status="failed", code=ErrorCode.LIKELY_ERROR_PAGE, q=soft_404_quality())
+    xhtml = envelope(
+        status="failed",
+        code=ErrorCode.LIKELY_ERROR_PAGE,
+        q=soft_404_quality(),
+        content_type="application/xhtml+xml; charset=utf-8",
+    )
+    text = envelope(
+        status="failed",
+        code=ErrorCode.LIKELY_ERROR_PAGE,
+        q=soft_404_quality(),
+        content_type="text/plain",
+    )
+    no_type = envelope(
+        status="failed", code=ErrorCode.LIKELY_ERROR_PAGE, q=soft_404_quality(), content_type=None
+    )
+    error_status = envelope(
+        status="failed",
+        code=ErrorCode.LIKELY_ERROR_PAGE,
+        q=soft_404_quality(),
+        upstream_status=404,
+    )
+
+    for unblock in (False, True):
+        assert needs_browser(html, unblock=unblock)
+        assert needs_browser(xhtml, unblock=unblock)
+        assert not needs_browser(text, unblock=unblock)
+        assert not needs_browser(no_type, unblock=unblock)
+        assert not needs_browser(error_status, unblock=unblock)
 
 
 def test_browser_result_never_escalates() -> None:

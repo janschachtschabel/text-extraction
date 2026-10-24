@@ -24,7 +24,7 @@ Selector = Annotated[str, Field(min_length=1, max_length=500)]
 
 
 class _Action(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
 class ClickAction(_Action):
@@ -61,7 +61,7 @@ class TypeAction(_Action):
 
     type: Literal["type"] = "type"
     selector: Selector
-    text: str = Field(max_length=1000)
+    text: str = Field(max_length=1000, repr=False)
 
 
 class PressAction(_Action):
@@ -77,7 +77,7 @@ class SelectAction(_Action):
 
     type: Literal["select"] = "select"
     selector: Selector
-    value: str = Field(max_length=500)
+    value: str = Field(max_length=500, repr=False)
 
 
 class ExpandAllAction(_Action):
@@ -104,7 +104,7 @@ class EvaluateAction(_Action):
     """Run JavaScript in the page. Admins only (the API enforces it)."""
 
     type: Literal["evaluate"] = "evaluate"
-    script: str = Field(min_length=1, max_length=10_000)
+    script: str = Field(min_length=1, max_length=10_000, repr=False)
 
 
 Action = Annotated[
@@ -122,7 +122,7 @@ Action = Annotated[
 ]
 
 
-class BrowserCookie(BaseModel, extra="forbid"):
+class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True):
     """A cookie to set before the page loads. ``domain`` defaults to the request URL's host."""
 
     name: str = Field(min_length=1, max_length=256)
@@ -196,7 +196,7 @@ def check_cookie_domains(url: str, cookies: list[BrowserCookie]) -> None:
             raise ValueError("a cookie domain must be the URL's host or a parent domain of it")
 
 
-class BrowserSecrets(BaseModel):
+class BrowserSecrets(BaseModel, hide_input_in_errors=True):
     """The parts of a request that may carry secrets (session cookies, token headers); they stay
     out of ``repr``."""
 

@@ -26,7 +26,7 @@ from text_extraction.tracing import current_trace_id
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
 
-class ExtractRequest(BaseModel, extra="forbid"):
+class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
     """Body of ``POST /v1/extract``."""
 
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to extract.")

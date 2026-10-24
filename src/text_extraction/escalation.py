@@ -14,6 +14,8 @@ from text_extraction.settings import Settings
 # Added to a fast result that stays as the answer because the browser could not be used.
 BROWSER_UNAVAILABLE_WARNING = "browser_unavailable"
 
+_HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
+
 _STATUS_RANK: dict[Literal["success", "partial", "failed"], int] = {
     "failed": 0,
     "partial": 1,
@@ -21,17 +23,24 @@ _STATUS_RANK: dict[Literal["success", "partial", "failed"], int] = {
 }
 
 
+def _is_ok_html(result: ExtractResult) -> bool:
+    media_type = (result.content_type or "").split(";", 1)[0].strip().lower()
+    status = result.upstream_status
+    return media_type in _HTML_TYPES and status is not None and 200 <= status < 300
+
+
 def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     """Whether a fast result should be tried again in the browser.
 
     Only a fast result of a page that was fetched and assessed (``quality`` is set) can escalate.
-    It does when the quality gate recommends a browser. In unblock mode it also does when the
+    It does when the quality gate recommends a browser and the answer is 2xx HTML (a browser
+    cannot do better on a text file or an error status). In unblock mode it also does when the
     page was refused as bot protection, or when the body of a 403/429/503 answer is a challenge.
     """
     result = envelope.data
     if result is None or result.mode_used != "fast" or result.quality is None:
         return False
-    if result.quality.browser_recommended:
+    if result.quality.browser_recommended and _is_ok_html(result):
         return True
     if not unblock:
         return False

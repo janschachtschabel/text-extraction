@@ -16,6 +16,8 @@ from text_extraction.browser_models import (
     InfiniteScrollAction,
     ScreenshotRequest,
     ScrollAction,
+    SelectAction,
+    TypeAction,
     WaitForAction,
     screenshot_view,
     validate_headers,
@@ -360,3 +362,37 @@ def test_old_cached_results_still_validate() -> None:
     assert result.screenshot is None
     assert result.unblocked is False
     assert result.timings.render_ms == 0
+
+
+def test_secret_values_stay_out_of_repr_and_validation_errors() -> None:
+    secret = "s3cr3t-value-123"  # noqa: S105 - a marker, not a credential
+    shown = [
+        repr(TypeAction(selector="input", text=secret)),
+        repr(SelectAction(selector="select", value=secret)),
+        repr(EvaluateAction(script=f"alert('{secret}')")),
+        repr(BrowserCookie(name="sid", value=secret)),
+        repr(
+            BrowserSecrets(cookies=[BrowserCookie(name="sid", value=secret)], headers={"x": secret})
+        ),
+        repr(ExtractRequest(url=URL, mode="browser", headers={"x-token": secret})),
+        repr(ScreenshotRequest(url=URL, headers={"x-token": secret})),
+    ]
+    errors: list[str] = []
+    bad_cookie: Any = {"name": "sid", "value": secret, "domain": "other.org"}
+    for build in (
+        lambda: ExtractRequest(url=URL, mode="browser", headers={"host": secret}),
+        lambda: ExtractRequest(url=URL, mode="fast", headers={"x-token": secret}),
+        lambda: ExtractRequest(url=URL, mode="browser", cookies=[bad_cookie]),
+        lambda: ScreenshotRequest(url=URL, headers={"x-token": "\n" + secret}),
+        lambda: ScreenshotRequest(url=URL, cookies=[bad_cookie]),
+        lambda: BrowserCookie(name="", value=secret),
+        lambda: BrowserSecrets(headers={"cookie": secret}),
+        lambda: ACTIONS.validate_python([{"type": "type", "selector": "", "text": secret}]),
+    ):
+        with pytest.raises(ValidationError) as info:
+            build()
+        errors.append(str(info.value))
+
+    assert len(errors) == 8
+    for text in shown + errors:
+        assert secret not in text
