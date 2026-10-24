@@ -1,0 +1,146 @@
+"""The JavaScript the renderers run in a page, and the consent rules.
+
+Consent (B11) uses DuckDuckGo's autoconsent (``duckduckgo-autoconsent-py``, MPL-2.0, used
+unmodified): its bundle is evaluated in the page's main world, so the rules' own snippets run
+there and no ``eval`` messages need an answer (``isMainWorld``). The bundle talks to its host
+through ``window.autoconsentSendMessage``; ``CONSENT_RELAY`` is that host inside the page: it
+answers ``init`` with the configuration and the rules, and hands every message to the waiters
+``CONSENT_WAIT`` registers. Nothing goes back to Python but the outcome.
+"""
+
+import json
+from functools import cache
+from typing import Any, Final
+
+from duckduckgo_autoconsent import bundle, rules_json
+
+# Banners autoconsent's rule set does not know, in its declarative rule format.
+CUSTOM_CONSENT_RULES: Final[list[dict[str, Any]]] = [
+    {
+        # German federal sites built with the Government Site Builder use their own banner.
+        # "Confirm selection" keeps the optional (statistics) toggle off: an opt-out.
+        "name": "GovernmentSiteBuilder",
+        "detectCmp": [{"exists": "#cookiebanner"}],
+        "detectPopup": [{"visible": "#cookiebanner"}],
+        "optOut": [{"waitForThenClick": ".js-banner-button-confirm-selection"}],
+    },
+]
+
+# autoconsent's configuration (``normalizeConfig``); ``autoAction`` is set per run. One retry,
+# 500 ms after the first look: the render runs it after the load and the network-idle wait. A
+# second retry would wait for a DOM mutation as well, which a quiet page never makes, so every
+# page without a banner would use up the whole 3-second budget.
+_CONSENT_CONFIG: Final[dict[str, Any]] = {
+    "enabled": True,
+    "disabledCmps": [],
+    "enablePrehide": False,
+    "enableCosmeticRules": True,
+    "enableGeneratedRules": True,
+    "enableHeuristicDetection": False,
+    "detectRetries": 1,
+    "isMainWorld": True,
+    "logs": {
+        "lifecycle": False,
+        "rulesteps": False,
+        "detectionsteps": False,
+        "evals": False,
+        "errors": False,
+        "messages": False,
+        "waits": False,
+    },
+}
+
+
+@cache
+def consent_bundle() -> str:
+    """autoconsent's engine (evaluated as is)."""
+    return str(bundle())
+
+
+@cache
+def consent_rules_json() -> str:
+    """autoconsent's rules plus ``CUSTOM_CONSENT_RULES``, as one JSON array."""
+    return json.dumps(json.loads(rules_json()) + CUSTOM_CONSENT_RULES)
+
+
+def consent_config(opt: str) -> dict[str, Any]:
+    return {**_CONSENT_CONFIG, "autoAction": opt}
+
+
+# Installs the host side of autoconsent once per document; False when it is there already.
+CONSENT_RELAY: Final = """({ rulesJson, config }) => {
+  if (window.__textExtractionConsent) return false;
+  const state = { listeners: new Set(), lifecycle: null };
+  window.__textExtractionConsent = state;
+  window.autoconsentSendMessage = (message) => {
+    if (message.type === 'init') {
+      // The engine sends `init` before it has installed its receiver.
+      setTimeout(() => window.autoconsentReceiveMessage({
+        type: 'initResp', config, rules: { autoconsent: JSON.parse(rulesJson) },
+      }), 0);
+    } else if (message.type === 'report' && message.state) {
+      state.lifecycle = message.state.lifecycle;
+    }
+    for (const listener of state.listeners) listener(message);
+    return Promise.resolve();
+  };
+  return true;
+}"""
+
+# Waits for the outcome of an opt-out or opt-in. ``again``: the engine runs already (an
+# earlier run on this document), so it is asked to act now.
+CONSENT_WAIT: Final = """({ opt, timeoutMs, again }) => new Promise((resolve) => {
+  const state = window.__textExtractionConsent;
+  if (!state || typeof window.autoconsentReceiveMessage !== 'function') {
+    resolve('none');
+    return;
+  }
+  const finished = ['done', 'nothingDetected', 'optOutSucceeded', 'optOutFailed',
+    'optInSucceeded', 'optInFailed'];
+  let timer = null;
+  const listener = (message) => {
+    if (message.type === opt + 'Result') finish(message.result ? 'done' : 'failed');
+    else if (message.type === 'report' && finished.includes(message.state.lifecycle))
+      finish(message.state.lifecycle);
+  };
+  const finish = (outcome) => {
+    clearTimeout(timer);
+    state.listeners.delete(listener);
+    resolve(outcome);
+  };
+  timer = setTimeout(() => finish('timeout'), timeoutMs);
+  state.listeners.add(listener);
+  if (again) window.autoconsentReceiveMessage({ type: opt });
+  else if (finished.includes(state.lifecycle)) finish(state.lifecycle);
+})"""
+
+# Removes what a reader cannot see, while the page can still compute styles: the static HTML
+# keeps inactive tabs and panels that a converter cannot tell from visible text.
+# - ``display: none`` hides a whole subtree (no descendant can show itself again);
+# - ``visibility: hidden`` is inherited but a descendant can set it back to visible, so only
+#   leaves go (a fully hidden subtree goes leaf by leaf, leaving empty wrappers);
+# - elements that are never rendered (scripts, the styles that do the hiding, ...) stay.
+STRIP_HIDDEN: Final = """() => {
+  if (!document.body) return 0;
+  const keep = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'TEMPLATE', 'NOSCRIPT', 'TITLE',
+    'HEAD']);
+  let removed = 0;
+  for (const element of Array.from(document.body.querySelectorAll('*'))) {
+    if (!element.isConnected || keep.has(element.tagName)) continue;
+    const style = getComputedStyle(element);
+    if (style.display === 'none'
+        || (style.visibility === 'hidden' && element.children.length === 0)) {
+      element.remove();
+      removed += 1;
+    }
+  }
+  return removed;
+}"""
+
+# The height of the whole document in CSS pixels, as Playwright measures a full-page capture.
+PAGE_HEIGHT: Final = """() => {
+  const b = document.body, d = document.documentElement;
+  if (!b || !d) return 0;
+  return Math.max(b.scrollHeight, d.scrollHeight, b.offsetHeight, d.offsetHeight,
+    b.clientHeight, d.clientHeight);
+}"""

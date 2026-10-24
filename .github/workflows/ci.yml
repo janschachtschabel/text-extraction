@@ -32,6 +32,23 @@ jobs:
       - run: uv run mypy
       - run: uv run pytest -q
 
+  # Real Chromium against a local test site (tests/browser, marker `browser`).
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+      - run: uv run playwright install --with-deps --only-shell chromium
+      - run: uv run pytest -m browser -q
+
   helm:
     runs-on: ubuntu-latest
     timeout-minutes: 15

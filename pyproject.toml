@@ -31,6 +31,13 @@ dependencies = [
 text-extraction = "text_extraction.server:main"
 text-extraction-worker = "text_extraction.worker:main"
 
+[project.optional-dependencies]
+browser = [
+    "duckduckgo-autoconsent-py>=16",
+    "patchright>=1.64",
+    "playwright>=1.64",
+]
+
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
@@ -47,6 +54,9 @@ dev = [
     "fakeredis[lua]>=2.40.0",
     "httpx2>=2.16.0",
     "pytest-httpserver>=1.2.0",
+    "playwright>=1.64",
+    "patchright>=1.64",
+    "duckduckgo-autoconsent-py>=16",
 ]
 
 [tool.ruff]
@@ -67,12 +77,14 @@ python_version = "3.13"
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["extruct.*", "jstyleson", "lxml.*", "py3langid.*"]
+module = ["duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "py3langid.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # tests/live needs a running service and the internet: only run_live.py runs it, by hand or in CI.
 # tests/e2e starts its own processes: only run_batch.py runs it (.github/workflows/e2e.yml).
-addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e"
+# Browser tests need Chromium: `pytest -m browser` runs them (CI job `browser`).
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser'"
+markers = ["browser: needs a real Chromium (run with `-m browser`)"]
 xfail_strict = true

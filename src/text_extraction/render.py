@@ -101,7 +101,10 @@ class Rendered:
 class Renderer(Protocol):
     """Renders a page in a browser."""
 
-    user_agent: str
+    @property
+    def user_agent(self) -> str:
+        """The User-Agent the browser sends."""
+        ...
 
     async def render(
         self, url: str, check: NavigationCheck, options: RenderOptions, *, deadline: float
