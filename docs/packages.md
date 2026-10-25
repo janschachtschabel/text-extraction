@@ -11,6 +11,19 @@ Per package:
 4. `verification-before-completion`: tests, ruff and mypy green and the "done when"
    criterion below met; then `finishing-a-development-branch` opens and merges the PR.
 
+## Status
+
+| # | Package | State | Pull request | Done-when evidence |
+| --- | --- | --- | --- | --- |
+| 0 | Repo foundation | merged 2026-10-23 | #3 | CI green |
+| 1 | Service skeleton | merged 2026-10-23 | #4 | compose stub endpoint, `helm lint` |
+| 2 | Fast extraction | merged 2026-10-24 | #5, #6 | `wlo_200` fast 78.5 % (baseline 68 %) |
+| 3 | Jobs and batch | merged 2026-10-24 | #7 | 1,000-URL batch across 2 workers (`batch` job in CI) |
+| 4 | Browser worker | merged 2026-10-25 | #8 | `wlo_200` auto 83.0 % (baseline 80 %) |
+| 5 | Documents and OCR | merged 2026-10-25 | #9, #10 | corpus converts, scans yield text (CI `documents`); `wlo_200` auto 84.0 % in an A/B run against package 4 (83.0 %) |
+| 6 | Audio and video | next | | |
+| 7-11 | | open | | |
+
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |
 | 0 | Repo foundation | uv project (Python 3.13), ruff, mypy, pytest, pre-commit, GitHub Actions (lint, test), `.dockerignore`, commands in `CLAUDE.md` | CI green on an empty app |
