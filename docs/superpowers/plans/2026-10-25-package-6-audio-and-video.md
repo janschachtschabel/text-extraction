@@ -14,7 +14,7 @@
 
 **Tech Stack:** existing, plus:
 - API image: `yt-dlp` (Unlicense; extra `default` without `deno`), `youtube-transcript-api` (MIT).
-- ASR image only (extra `asr`): `faster-whisper` (MIT) with `ctranslate2` (MIT), `av` (PyAV, BSD-3; its wheels bundle an LGPL FFmpeg), `yt-dlp[default,deno]` (Deno, MIT, solves YouTube's player challenges for audio downloads), `openai` (Apache-2.0) for the external backend. Whisper models (MIT) on a PVC, never in the image. No Debian `ffmpeg` (built with `--enable-gpl`).
+- ASR image only (extra `asr`): `faster-whisper` (MIT) with `ctranslate2` (MIT), `av` (PyAV, BSD-3; its wheels bundle an LGPL FFmpeg), `yt-dlp[deno]` plus `yt-dlp-ejs` pinned explicitly (Deno, MIT, with the EJS challenge scripts solves YouTube's player challenges for audio downloads; never the `default` extra, it pulls in GPL `mutagen`; Task 9 checks the `yt-dlp-ejs` licence), `openai` (Apache-2.0) for the external backend. Whisper models (MIT) on a PVC, never in the image. No Debian `ffmpeg` (built with `--enable-gpl`).
 
 **Spec:**
 - `docs/architecture.md`: Overview (asr-worker, model volume), pipeline step 5 ("Video/audio"), feature note "Audio/video" (tiers, `transcribe: true` always a job, `transcript_source`), error codes `no_transcript_available`, `media_too_long`, `transcription_failed`, "Jobs and the fair queue" (asr pool reuses it), "Documents and OCR" (F3 children, F12 inputs and budget, F14 worker pattern, F15 models).
@@ -158,7 +158,7 @@ Runs through Remote Control in a fresh clone folder (`C:\Users\jan\te-pkg6-verif
 
 **Files:**
 - Create: `src/text_extraction/media/pool.py`, `src/text_extraction/media/child.py`, `src/text_extraction/media/select.py`
-- Modify: `pyproject.toml`, `uv.lock` (`yt-dlp[default]`, `youtube-transcript-api`), `src/text_extraction/app.py`, `src/text_extraction/worker.py`, `src/text_extraction/browser_worker.py` (start the media pool and its `EgressProxy` before `/ready`, stop them at shutdown)
+- Modify: `pyproject.toml`, `uv.lock` (`yt-dlp` without extras, since `default` pulls in GPL `mutagen`; `youtube-transcript-api`), `src/text_extraction/app.py`, `src/text_extraction/worker.py`, `src/text_extraction/browser_worker.py` (start the media pool and its `EgressProxy` before `/ready`, stop them at shutdown)
 - Test: `tests/test_media_select.py`, `tests/test_media_child.py`
 
 **Interfaces:**
