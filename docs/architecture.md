@@ -570,7 +570,10 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   answers the text layer with the warning `ocr_unavailable` (an image, which has none, fails
   `timeout`, retryable). With `wait_seconds` it becomes a 202 job. `POST /v1/extract/file`
   defaults to `wait_seconds: 25`, so an upload that needs longer answers 202 with its job. The
-  sync contract of `/v1/extract` and the ~30 s rule both hold.
+  sync contract of `/v1/extract` holds, but not the ~30 s job rule: a sync request that needs OCR
+  can take `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` (25 + 20 = 45 s by default),
+  the fast phase and then the wait for the worker. Callers that need a shorter bound send
+  `wait_seconds` or lower `DOCLING_SYNC_WAIT_SECONDS` (at 0 a sync request does not wait).
 - **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false`, compose
   profile `docling`; it needs an image of about 2 GB and about 2 GiB of models. Without it a
   scan keeps its text layer (`ocr_unavailable`), and images and OpenDocument files answer
@@ -799,7 +802,12 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   warning `document_fetched_directly` and `mode_used: "fast"`. Its validators are not stored (they
   fit the request URL only). With secrets it stays `unsupported_content_type`: the fetcher must
   not send the caller's cookies or headers. Built in the fix round of Task 6, which the plan had
-  left without an owner.
+  left without an owner. The render ends on a download only when the first navigation became one
+  or the after-load hook or an action started one: then it reads no HTML. A download that an
+  iframe started (its URL was an iframe's navigation only), or that the page started while it
+  went idle or its consent banner was handled, leaves the page in the main frame: the page's
+  HTML is the result, `download_url` is None and the download's answer is not among the
+  render's document answers.
 - **F19, metrics.** `text_extraction_document_conversions_total{converter, kind, outcome}`,
   `text_extraction_document_conversion_seconds{converter}` and
   `text_extraction_document_pages_total{converter}`, recorded where the conversions run (the

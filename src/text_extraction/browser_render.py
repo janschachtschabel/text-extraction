@@ -271,8 +271,14 @@ class _Render:
         self.refusal: BaseException | None = None  # of the navigation check
         self.fault: FetchError | None = None  # the route handler's own failure
         self.failure: tuple[str, str] | None = None  # (URL, error) of a failed document load
-        self.download = False
+        # Downloads the page itself started (not one of its iframes), and the URL of the last.
+        self.downloads = 0
         self.download_url: str | None = None  # of the download event
+        self.downloaded: set[str] = set()  # their URLs
+        # URLs of the document navigations of the page's main frame and of its iframes: a
+        # download whose URL only an iframe navigated to is the iframe's.
+        self.main_documents: set[str] = set()
+        self.frame_documents: set[str] = set()
         # Navigations answered by the route handler itself (a refused non-GET one, a redirect
         # step of a document with caller headers, one it aborted): not document answers or
         # load failures of the render.
@@ -329,21 +335,25 @@ class _Render:
         return self.deadline - self.loop.time() - reserve
 
     async def run(self, deadline: float) -> Rendered:
+        """Render the page and read its HTML, or end on a download (F18): one the first
+        navigation became, or one that the after-load hook or the actions started. A download
+        while the page went idle or its consent banner was handled leaves the page in the main
+        frame, so the page is read and the download dropped."""
         self.deadline = deadline
         reserve = _SCREENSHOT_RESERVE_SECONDS if self.options.screenshot else _READ_RESERVE_SECONDS
-        await self._goto(reserve)
-        if self.download:
-            return self._rendered("", None, None, ())
+        if await self._goto(reserve):
+            return self._ended_on_download()
         await self._idle(reserve)
         self.raise_kept()
         if self.after_load is not None:
             loaded = Loaded(
                 self.page, self.deadline - reserve, self._read_loaded, self._hosts, self.raise_kept
             )
+            downloads = self.downloads
             self.warnings.extend(await self.after_load(loaded))
             self.raise_kept()
-            if self.download:
-                return self._rendered("", None, None, ())
+            if self.downloads > downloads:
+                return self._ended_on_download()
         actions = self.options.actions
         # The accept_cookies action is the opt-in, which an earlier opt-out would make moot.
         opts_in = any(isinstance(action, AcceptCookiesAction) for action in actions)
@@ -354,9 +364,10 @@ class _Render:
             await self._after_consent(reserve, grace=result == "done")
             self.raise_kept()
         if actions:
+            downloads = self.downloads
             await self._run_actions(actions, reserve)
-            if self.download:
-                return self._rendered("", None, None, ())
+            if self.downloads > downloads:
+                return self._ended_on_download()
         if self.settings.browser_autoconsent and await strip_consent_overlays(self.page):
             self.warnings.append("consent_overlay_removed")
         await strip_hidden(self.page)
@@ -422,7 +433,8 @@ class _Render:
         while self.checks or self.moving or not self.settled.is_set():  # noqa: ASYNC110
             await asyncio.sleep(_NAVIGATION_POLL_SECONDS)
 
-    async def _goto(self, reserve: float) -> None:
+    async def _goto(self, reserve: float) -> bool:
+        """Navigate to the URL; True when the navigation became a download."""
         timeout = self.left(reserve)
         if timeout <= 0:
             raise FetchError(
@@ -432,9 +444,8 @@ class _Render:
             await self.page.goto(self.url, wait_until="load", timeout=timeout * 1000)
         except DRIVER_ERRORS as error:
             self.raise_kept()
-            if self.download or "Download is starting" in str(error):
-                self.download = True  # its event may come after the error
-                return
+            if self.downloads or "Download is starting" in str(error):
+                return True  # its event may come after the error
             if "interrupted by another navigation" not in str(error):
                 raise self._goto_error(error) from None
             # A script or meta refresh replaced the document before it loaded.
@@ -444,6 +455,7 @@ class _Render:
                 )
         await self._settle(reserve)
         self.raise_kept()
+        return self.downloads > 0
 
     async def _settle(self, reserve: float = 0.0) -> None:
         """Wait until a redirect turned into a navigation has reached its document."""
@@ -517,14 +529,19 @@ class _Render:
         """The cookies the request URL would get: its host's and its parent domains'."""
         return tuple(cookie_data(cookie) for cookie in await self.page.context.cookies([self.url]))
 
+    def _ended_on_download(self) -> Rendered:
+        return self._rendered("", None, None, (), download=True)
+
     def _rendered(
         self,
         html: str,
         screenshot: bytes | None,
         size: tuple[int, int] | None,
         cookies: tuple[CookieData, ...],
+        *,
+        download: bool = False,
     ) -> Rendered:
-        responses = self._main_responses()
+        responses = self._main_responses(download=download)
         self._refused_document(responses)
         warnings = list(self.warnings)
         if self.traffic is not None and self.traffic.capped:
@@ -538,28 +555,30 @@ class _Render:
             warnings=tuple(dict.fromkeys(warnings)),
             hosts=self.traffic.hosts if self.traffic is not None else frozenset(),
             cookies=cookies,
-            download_url=self._download_url(responses),
+            download_url=self._download_url(responses) if download else None,
         )
 
     def _download_url(self, responses: list[MainResponse]) -> str | None:
-        """The download's URL. Its event may come after the navigation's error: then the last
-        document answer's URL when that is no HTML (the download's own answer), else the URL
-        the render went to (a first navigation that became the download)."""
-        if not self.download:
-            return None
+        """The URL of the download the render ended on. Its event may come after the
+        navigation's error: then the last document answer's URL when that is no HTML (the
+        download's own answer), else the URL the render went to (a first navigation that became
+        the download)."""
         if self.download_url is not None:
             return self.download_url
         if responses and responses[-1].content_type not in _HTML_TYPES:
             return responses[-1].url
         return self.url
 
-    def _main_responses(self) -> list[MainResponse]:
+    def _main_responses(self, *, download: bool) -> list[MainResponse]:
         """The document answers, without the redirects among them (their URLs become the
-        ``redirects`` of the answer they led to)."""
+        ``redirects`` of the answer they led to). Unless the render ended on a download,
+        without the answers that became downloads: the main frame kept its page."""
         found: list[MainResponse] = []
         for answer, before in self.answers:
             request = answer.request
             if request.redirected_to is not None:
+                continue
+            if not download and answer.url in self.downloaded:
                 continue
             hops: list[str] = []
             previous = request.redirected_from
@@ -599,6 +618,7 @@ class _Render:
     def _on_response(self, response: Response) -> None:
         if response.request.resource_type == "document":
             self._note_rule_files(response)
+            self._note_document(response.request, response.url)  # also a redirect's target
         if _is_main_document(response.request, self.page) and (
             response.request not in self.unanswered
         ):
@@ -624,9 +644,23 @@ class _Render:
             self.settled.set()
 
     def _on_download(self, download: Download) -> None:
-        self.download = True
-        self.download_url = download.url
+        url = download.url
+        if url in self.frame_documents and url not in self.main_documents:
+            return  # an iframe's download: the page stays
+        self.downloads += 1
+        self.download_url = url
+        self.downloaded.add(url)
         self.moving.clear()  # the navigation became a download: no document will commit
+
+    def _note_document(self, request: Request, url: str) -> None:
+        """Note the URL of a document navigation as the main frame's or an iframe's."""
+        frame = _frame_of(request)
+        if frame is None or frame.page is not self.page or not request.is_navigation_request():
+            return
+        if frame.parent_frame is None:
+            self.main_documents.add(url)
+        else:
+            self.frame_documents.add(url)
 
     def _on_navigated(self, frame: Frame) -> None:
         if frame is self.page.main_frame:
@@ -662,6 +696,8 @@ class _Render:
             await route.abort("blockedbyclient")
             return
         frame = _frame_of(request)
+        if request.resource_type == "document":
+            self._note_document(request, request.url)
         if (
             frame is not None
             and frame.parent_frame is None

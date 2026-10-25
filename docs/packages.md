@@ -30,5 +30,7 @@ Package 5 note (Jan, D2): a sync request that needs OCR waits up to `DOCLING_SYN
 (20 s) for the Docling worker and then answers its text layer with the warning `ocr_unavailable`
 (an image fails `timeout`, retryable); with `wait_seconds` it becomes a 202 job.
 `POST /v1/extract/file` defaults to `wait_seconds: 25`, so a slower upload answers 202 with its
-job. The sync contract of `POST /v1/extract` and the ~30 s rule stay as they are. Details in
-[architecture.md](architecture.md), "Documents and OCR".
+job. The sync contract of `POST /v1/extract` stays; a sync request that needs OCR can take up to
+`EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` (25 + 20 = 45 s by default), more than the
+~30 s of the job rule, because it waits for the worker only when the document turns out to need
+OCR. Details in [architecture.md](architecture.md), "Documents and OCR".
