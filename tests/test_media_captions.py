@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -291,3 +292,51 @@ def test_json3_odd_events_are_tolerated() -> None:
     cues = parse_captions(body, "json3")
 
     assert [(c.start, c.text) for c in cues] == [(1.0, "ok")]
+
+
+def test_nested_ttml_paragraphs_are_linear() -> None:
+    depth = 20_000
+    body = (
+        b'<tt xmlns="http://www.w3.org/ns/ttml"><body><div>'
+        + b'<p begin="0s" end="1s">a' * depth
+        + b"</p>" * depth
+        + b"</div></body></tt>"
+    )
+
+    started = time.monotonic()
+    cues = parse_captions(body, "ttml")
+
+    assert time.monotonic() - started < 2.0
+    assert len(cues) == 1  # a <p> inside a <p> is no cue of its own
+    assert cues[0].text == "a" * depth
+
+
+def test_deeply_nested_ttml_structure_is_refused() -> None:
+    depth = 2_000
+    body = (
+        b'<tt xmlns="http://www.w3.org/ns/ttml"><body>'
+        + b"<div>" * depth
+        + b'<p begin="0s" end="1s">a</p>'
+        + b"</div>" * depth
+        + b"</body></tt>"
+    )
+
+    with pytest.raises(CaptionError, match="nested"):
+        parse_captions(body, "ttml")
+
+
+def test_many_line_cues_are_linear() -> None:
+    lines = b"a\n" * 100_000
+    body = (
+        b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n"
+        + lines
+        + b"\n00:00:01.000 --> 00:00:02.000\n"
+        + lines
+    )
+
+    started = time.monotonic()
+    cues = parse_captions(body, "vtt", max_bytes=len(body))
+
+    assert time.monotonic() - started < 2.0
+    assert len(cues) == 2
+    assert len(cues[1].text.split()) == 100_000 - 4  # at most 4 repeated lines are dropped

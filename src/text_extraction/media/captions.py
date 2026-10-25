@@ -45,6 +45,10 @@ CaptionFormat = Literal["vtt", "srt", "ttml", "json3"]
 
 DEFAULT_MAX_BYTES: Final = 5_000_000  # MEDIA_SUBTITLE_MAX_BYTES
 TRANSITION_SECONDS: Final = 0.1
+# Rolling captions repeat one or two lines; a longer overlap is not looked for (the search
+# would be quadratic in the lines of a hostile cue).
+MAX_REPEATED_LINES: Final = 4
+MAX_TTML_DEPTH: Final = 64  # of elements around the paragraphs; real files nest 5 or 6 deep
 
 _BOMS: Final = (
     (codecs.BOM_UTF32_LE, "utf-32"),  # before UTF-16 LE, whose BOM is a prefix of this one
@@ -194,9 +198,7 @@ def _ttml(text: str) -> Iterator[_Raw]:
     if _local(root.tag) != "tt":
         raise CaptionError("The track is not TTML (its root element is not <tt>).")
     frame_rate = _frame_rate(root)
-    for paragraph in root.iter():
-        if _local(paragraph.tag) != "p":
-            continue
+    for paragraph in _paragraphs(root):
         begin = _ttml_time(paragraph.get("begin"), frame_rate)
         if begin is None:
             continue
@@ -205,6 +207,20 @@ def _ttml(text: str) -> Iterator[_Raw]:
             duration = _ttml_time(paragraph.get("dur"), frame_rate)
             end = begin + (duration or 0.0)
         yield begin, end, _ttml_lines(paragraph)
+
+
+def _paragraphs(root: Element) -> Iterator[Element]:
+    """The ``<p>`` elements in document order. A ``<p>`` inside a ``<p>`` is invalid TTML and no
+    cue of its own: its text belongs to the outer one, so nothing is read twice."""
+    stack = [(root, 0)]
+    while stack:
+        element, depth = stack.pop()
+        if _local(element.tag) == "p":
+            yield element
+            continue
+        if depth > MAX_TTML_DEPTH:
+            raise CaptionError("The TTML track is nested too deeply.")
+        stack.extend((child, depth + 1) for child in reversed(element))
 
 
 def _ttml_lines(paragraph: Element) -> list[str]:
@@ -281,7 +297,11 @@ def _to_cues(raw: Iterable[_Raw]) -> list[Cue]:
         if not lines:
             continue
         repeated = max(
-            (n for n in range(1, min(len(lines), len(previous)) + 1) if lines[:n] == previous[-n:]),
+            (
+                n
+                for n in range(1, min(len(lines), len(previous), MAX_REPEATED_LINES) + 1)
+                if lines[:n] == previous[-n:]
+            ),
             default=0,
         )
         previous = lines
