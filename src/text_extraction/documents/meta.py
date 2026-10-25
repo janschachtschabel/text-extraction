@@ -193,13 +193,26 @@ _METADATA_TYPE = re.compile(rb"/Type\s*/Metadata\b")
 _PACKET_PREAMBLE = re.compile(rb"\s*(?:<\?xpacket[^>]{0,200}\?>\s*)?")
 _OBJECT_DICTIONARY_BYTES = 1 << 16  # looked at after ``N G obj``
 _TYPE_WINDOW_BYTES = 256  # before the ``stream`` keyword of a packet found by search
-_MAX_OBJECT_STARTS = 8
+# A hostile body is full of look-alikes: every search below looks at a few hits at most.
+_MAX_ROOTS = 3  # ``/Root`` references tried, newest first
+_MAX_HITS = 32  # of one object search
 
 
-def _object_starts(body: bytes, number: bytes, generation: bytes) -> list[int]:
-    """Offsets just after ``N G obj`` for the last few definitions of an object."""
-    pattern = rb"(?<![0-9])" + number + rb"\s+" + generation + rb"\s+obj\b"
-    return [match.end() for match in re.finditer(pattern, body)][-_MAX_OBJECT_STARTS:]
+def _last_definition(body: bytes, number: bytes, generation: bytes) -> int | None:
+    """The offset just after the last ``N G obj`` in the file (the newest definition), found
+    by searching backwards for the usual spelling with single spaces. None when there is none
+    among the last ``_MAX_HITS`` look-alikes (``11 0 obj`` when ``1 0 obj`` is wanted)."""
+    needle = b"%b %b obj" % (number, generation)
+    end = len(body)
+    for _ in range(_MAX_HITS):
+        found = body.rfind(needle, 0, end)
+        if found < 0:
+            return None
+        after = found + len(needle)
+        if not body[found - 1 : found].isdigit() and not body[after : after + 1].isalnum():
+            return after
+        end = found
+    return None
 
 
 def _packet_at(body: bytes, start: int) -> bytes | None:
@@ -207,41 +220,53 @@ def _packet_at(body: bytes, start: int) -> bytes | None:
     return body[start : end + len(_XMP_END)] if end >= 0 else None
 
 
+def _root_references(body: bytes) -> Iterator[tuple[bytes, bytes]]:
+    """``(number, generation)`` of the trailer's ``/Root``, newest first."""
+    end = len(body)
+    for _ in range(_MAX_ROOTS):
+        found = body.rfind(b"/Root", 0, end)
+        if found < 0:
+            return
+        match = _ROOT_REFERENCE.match(body, found)
+        if match:
+            yield match[1], match[2]
+        end = found
+
+
 def _catalog_packets(body: bytes) -> Iterator[bytes]:
-    """The packet in the stream that the catalog's ``/Metadata N G R`` points to (newest
-    definition first). Fails to find one when the catalog sits in an object stream."""
-    for root in reversed(list(_ROOT_REFERENCE.finditer(body))[-_MAX_OBJECT_STARTS:]):
-        for root_start in reversed(_object_starts(body, *root.groups())):
-            reference = _METADATA_REFERENCE.search(
-                body, root_start, root_start + _OBJECT_DICTIONARY_BYTES
-            )
-            if reference is None:
-                continue
-            for start in reversed(_object_starts(body, *reference.groups())):
-                window = body[start : start + _MAX_XMP_BYTES + _OBJECT_DICTIONARY_BYTES]
-                stream = window.find(b"stream")
-                packet_start = window.find(_XMP_START, stream)
-                if stream < 0 or packet_start < 0 or not _METADATA_TYPE.search(window, 0, stream):
-                    continue
-                if _PACKET_PREAMBLE.fullmatch(window, stream + 6, packet_start):
-                    packet = _packet_at(window, packet_start)
-                    if packet:
-                        yield packet
+    """The packet in the stream that the catalog's ``/Metadata N G R`` points to. Finds none
+    when the catalog sits in an object stream or the file spells ``N G obj`` unusually."""
+    for root in _root_references(body):
+        root_start = _last_definition(body, *root)
+        if root_start is None:
+            continue
+        reference = _METADATA_REFERENCE.search(
+            body, root_start, root_start + _OBJECT_DICTIONARY_BYTES
+        )
+        start = _last_definition(body, *reference.groups()) if reference else None
+        if start is None:
+            continue
+        window = body[start : start + _MAX_XMP_BYTES + _OBJECT_DICTIONARY_BYTES]
+        stream = window.find(b"stream")
+        packet_start = window.find(_XMP_START, stream)
+        if stream < 0 or packet_start < 0 or not _METADATA_TYPE.search(window, 0, stream):
+            continue
+        if _PACKET_PREAMBLE.fullmatch(window, stream + 6, packet_start):
+            packet = _packet_at(window, packet_start)
+            if packet:
+                yield packet
 
 
 def _typed_packets(body: bytes) -> Iterator[bytes]:
     """Packets whose stream says ``/Type /Metadata`` and starts with the packet, newest first:
     the fallback where the catalog cannot be read. A packet inside another kind of stream (the
     XMP of an embedded JPEG) is not the document's."""
-    starts = []
-    position = 0
+    end = len(body)
     for _ in range(_MAX_XMP_PACKETS):
-        found = body.find(_XMP_START, position)
-        if found < 0:
-            break
-        starts.append(found)
-        position = found + len(_XMP_START)
-    for start in reversed(starts):
+        start = body.rfind(_XMP_START, 0, end)
+        if start < 0:
+            return
+        end = start
         keyword = body.rfind(b"stream", max(0, start - 256), start)
         if keyword < 0 or not _PACKET_PREAMBLE.fullmatch(body, keyword + 6, start):
             continue

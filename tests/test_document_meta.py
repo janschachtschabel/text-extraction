@@ -1,11 +1,14 @@
 import io
+import time
+import tracemalloc
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from pytest_httpserver import HTTPServer
 
-from text_extraction.documents.meta import _pdf_date, document_metadata
+from text_extraction.documents.meta import _pdf_date, _xmp_packets, document_metadata
 from text_extraction.documents.types import DocumentKind
 from text_extraction.metadata import PageMetadata
 
@@ -340,3 +343,69 @@ def test_values_are_clipped() -> None:
     assert result.title is not None
     assert len(result.title) == 1000
     assert len(result.keywords) == 50
+
+
+# --- hostile bodies: the XMP lookup stays cheap -------------------------------------------------
+
+HOSTILE_SIZE = 20 << 20
+
+
+def padded(head: bytes, filler: bytes) -> bytes:
+    return head + filler * ((HOSTILE_SIZE - len(head)) // len(filler))
+
+
+def many_roots_and_definitions() -> bytes:
+    """8 trailers, each naming a root that is defined 8 times, each pointing at its own
+    /Metadata object that does not exist."""
+    head = b""
+    for root in range(1, 9):
+        for definition in range(8):
+            head += b"%d 0 obj\n<< /Type /Catalog /Metadata %d 0 R >>\nendobj\n" % (
+                root,
+                1000 + root * 10 + definition,
+            )
+        head += b"trailer << /Root %d 0 R >>\n" % root
+    return padded(head, b"% filler line of a large file\n")
+
+
+HOSTILE_BODIES: dict[str, Callable[[], bytes]] = {
+    "root-references": lambda: padded(b"%PDF-1.7\n", b"/Root 1 0 R "),
+    "object-keywords": lambda: padded(b"%PDF-1.7\n", b"1 0 obj "),
+    "other-objects": lambda: padded(b"/Root 1 0 R ", b"11 0 obj "),
+    "roots-times-definitions": many_roots_and_definitions,
+    "packet-starts": lambda: padded(b"%PDF-1.7\n", b"<x:xmpmeta "),
+    "plain-padding": lambda: padded(corpus("xmp-cc-by-sa.pdf")[:-6], b" "),
+}
+
+
+@pytest.mark.parametrize("name", list(HOSTILE_BODIES))
+def test_xmp_lookup_in_a_hostile_body_is_quick_and_finds_nothing(name: str) -> None:
+    body = HOSTILE_BODIES[name]()
+    started = time.perf_counter()
+
+    packets = list(_xmp_packets(body))
+
+    assert time.perf_counter() - started < 3
+    if name != "plain-padding":
+        assert packets == []
+
+
+@pytest.mark.parametrize("name", ["root-references", "object-keywords", "roots-times-definitions"])
+def test_xmp_lookup_in_a_hostile_body_needs_little_memory(name: str) -> None:
+    body = HOSTILE_BODIES[name]()
+    tracemalloc.start()
+    try:
+        list(_xmp_packets(body))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 16 << 20
+
+
+def test_a_large_document_still_finds_its_xmp_through_the_catalog() -> None:
+    body = padded(corpus("xmp-cc-by-sa.pdf")[:-6], b"% padding\n") + b"\n%%EOF\n"
+
+    result = meta(body, "pdf")
+
+    assert result.title == "Lizenzierte Handreichung"
