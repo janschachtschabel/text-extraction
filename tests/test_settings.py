@@ -52,6 +52,23 @@ SETTING_ENV_VARS = (
     "SCREENSHOT_MAX_BYTES",
     "SCREENSHOT_MAX_HEIGHT_PX",
     "ARTIFACT_TTL_SECONDS",
+    "DOCUMENT_MAX_BYTES",
+    "DOCUMENT_MAX_PAGES",
+    "DOCUMENT_MAX_UNCOMPRESSED_BYTES",
+    "DOCUMENT_CONCURRENCY",
+    "DOCUMENT_MEMORY_LIMIT_MB",
+    "DOCLING_ENABLED",
+    "DOCLING_TIMEOUT_SECONDS",
+    "DOCLING_SYNC_WAIT_SECONDS",
+    "DOCLING_INPUT_TTL_SECONDS",
+    "DOCLING_INPUT_BUDGET_BYTES",
+    "DOCLING_MAX_OPEN_PER_CLIENT",
+    "DOCLING_CONCURRENCY",
+    "DOCLING_THREADS",
+    "DOCLING_MAX_PAGES",
+    "DOCLING_MEMORY_LIMIT_MB",
+    "DOCLING_OCR_LANGUAGES",
+    "DOCLING_MODELS_PATH",
 )
 
 
@@ -421,6 +438,7 @@ def test_fetch_settings_from_environment(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("AUTH_MODE", "none")
     monkeypatch.setenv("FETCH_TIMEOUT_SECONDS", "1")
     monkeypatch.setenv("FETCH_MAX_BYTES", "2048")
+    monkeypatch.setenv("DOCUMENT_MAX_BYTES", "2048")  # at most FETCH_MAX_BYTES
     monkeypatch.setenv("FETCH_MAX_REDIRECTS", "0")
     monkeypatch.setenv("FETCH_ALLOW_PRIVATE_NETWORKS", "true")
 
@@ -737,3 +755,113 @@ def test_invalid_browser_blocked_resources_is_a_config_error(
 
     with pytest.raises(ConfigError, match="browser_blocked_resources"):
         load_settings()
+
+
+def test_document_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.document_max_bytes == 20_000_000
+    assert settings.document_max_pages == 100
+    assert settings.document_max_uncompressed_bytes == 200_000_000
+    assert settings.document_concurrency == 2
+    assert settings.document_memory_limit_mb == 2048
+    assert settings.docling_enabled is False
+    assert settings.docling_timeout_seconds == 300
+    assert settings.docling_sync_wait_seconds == 20
+    assert settings.docling_input_ttl_seconds == 3600
+    assert settings.docling_input_budget_bytes == 200_000_000
+    assert settings.docling_max_open_per_client == 5
+    assert settings.docling_concurrency == 1
+    assert settings.docling_threads == 4
+    assert settings.docling_max_pages == 100
+    assert settings.docling_memory_limit_mb == 6144
+    assert settings.docling_ocr_languages == "deu,eng"
+    assert settings.docling_models_path == Path("/models")
+
+
+@pytest.mark.parametrize(
+    ("name", "good", "bad"),
+    [
+        ("DOCUMENT_MAX_BYTES", ["1024", "20000000"], ["1023", "0", "-1"]),
+        ("DOCUMENT_MAX_PAGES", ["1", "500"], ["0", "-1"]),
+        ("DOCUMENT_CONCURRENCY", ["1", "8"], ["0"]),
+        ("DOCUMENT_MEMORY_LIMIT_MB", ["256", "4096"], ["255", "0"]),
+        ("DOCLING_TIMEOUT_SECONDS", ["30", "1800"], ["29", "1801"]),
+        ("DOCLING_SYNC_WAIT_SECONDS", ["0", "25"], ["-1", "26"]),
+        ("DOCLING_INPUT_TTL_SECONDS", ["600", "7200"], ["599", "0"]),
+        ("DOCLING_MAX_OPEN_PER_CLIENT", ["1", "50"], ["0"]),
+        ("DOCLING_INPUT_BUDGET_BYTES", ["20000000", "1000000000"], ["1023", "0"]),
+    ],
+)
+def test_document_setting_bounds(
+    monkeypatch: pytest.MonkeyPatch, name: str, good: list[str], bad: list[str]
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    for value in good:
+        monkeypatch.setenv(name, value)
+        load_settings()
+    for value in bad:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ConfigError, match=name.lower()):
+            load_settings()
+
+
+def test_document_max_bytes_cannot_exceed_fetch_max_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCUMENT_MAX_BYTES", "30000000")
+    monkeypatch.setenv("FETCH_MAX_BYTES", "20000000")
+
+    with pytest.raises(ConfigError, match="DOCUMENT_MAX_BYTES") as error:
+        load_settings()
+
+    assert "30000000" not in str(error.value)
+    assert "20000000" not in str(error.value)
+
+
+def test_document_max_bytes_cannot_exceed_the_input_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document larger than the budget of all inputs could never be queued for OCR."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCLING_INPUT_BUDGET_BYTES", "10000000")
+
+    with pytest.raises(ConfigError, match="DOCLING_INPUT_BUDGET_BYTES"):
+        load_settings()
+    monkeypatch.setenv("DOCUMENT_MAX_BYTES", "10000000")
+    assert load_settings().docling_input_budget_bytes == 10_000_000
+
+
+def test_document_max_bytes_may_equal_fetch_max_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCUMENT_MAX_BYTES", "5000000")
+    monkeypatch.setenv("FETCH_MAX_BYTES", "5000000")
+
+    assert load_settings().document_max_bytes == 5_000_000
+
+
+@pytest.mark.parametrize("value", ["deu,eng", "eng", "deu_frak,eng", "chi_sim,chi_tra,eng"])
+def test_docling_ocr_languages_accepts_tesseract_codes(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCLING_OCR_LANGUAGES", value)
+
+    assert load_settings().docling_ocr_languages == value
+
+
+@pytest.mark.parametrize(
+    "value", ["deu;rm -rf", "", "de", "deu,", ",eng", "deu eng", "DEU", "deu,,eng", "deu+eng"]
+)
+def test_docling_ocr_languages_validated(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCLING_OCR_LANGUAGES", value)
+
+    with pytest.raises(ConfigError, match="docling_ocr_languages") as error:
+        load_settings()
+
+    if value:
+        assert value not in str(error.value)

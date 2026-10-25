@@ -51,7 +51,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Worker pools, in the order their objects are rendered. Each has a `workers.<pool>` block. */}}
 {{- define "text-extraction.workerPools" -}}
-extract browser
+extract browser docling
 {{- end -}}
 
 {{/* Names and labels of the worker objects of a pool; call with (list $ "<pool>"). The pod name
@@ -79,21 +79,31 @@ app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 {{- end -}}
 
 {{/* Image of a pool's workers; call with (list $ "<pool>"). Extract workers run the API image;
-browser workers their own, with image.tag and then the appVersion as the default tag. */}}
+browser and Docling workers their own, with image.tag and then the appVersion as the default tag. */}}
 {{- define "text-extraction.workerImage" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
-{{- if eq $pool "browser" -}}
-{{- $image := $root.Values.workers.browser.image -}}
+{{- if or (eq $pool "browser") (eq $pool "docling") -}}
+{{- $image := (index $root.Values.workers $pool).image -}}
 {{- printf "%s:%s" $image.repository ($image.tag | default $root.Values.image.tag | default $root.Chart.AppVersion) -}}
 {{- else -}}
 {{- include "text-extraction.image" $root -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Command of a pool's workers. */}}
+{{/* Entry point of a pool's workers. The pods pass it as args: the image's ENTRYPOINT (tini, which
+reaps orphaned children) stays PID 1. */}}
 {{- define "text-extraction.workerCommand" -}}
-{{- if eq . "browser" -}}text-extraction-browser-worker{{- else -}}text-extraction-worker{{- end -}}
+{{- if eq . "browser" -}}text-extraction-browser-worker
+{{- else if eq . "docling" -}}text-extraction-docling-worker
+{{- else -}}text-extraction-worker{{- end -}}
+{{- end -}}
+
+{{/* The concurrency variable of a pool's workers (from workers.<pool>.concurrency). */}}
+{{- define "text-extraction.workerConcurrencyVar" -}}
+{{- if eq . "browser" -}}BROWSER_CONCURRENCY
+{{- else if eq . "docling" -}}DOCLING_CONCURRENCY
+{{- else -}}WORKER_CONCURRENCY{{- end -}}
 {{- end -}}
 
 {{/* BROWSER_ENABLED and BROWSER_UNBLOCK_ENABLED ("true"/"false") of every pod, from the browser
@@ -106,12 +116,109 @@ worker toggles. */}}
 {{- ternary "true" "false" (and (.Values.workers.browser.enabled | default false) (.Values.workers.browser.unblock | default false)) -}}
 {{- end -}}
 
-{{/* The browser switches as env entries. They come after envFrom, so they override config.*. */}}
-{{- define "text-extraction.browserEnv" -}}
+{{/* DOCLING_ENABLED ("true"/"false") of every pod, from the Docling worker toggle. */}}
+{{- define "text-extraction.doclingEnabled" -}}
+{{- ternary "true" "false" (.Values.workers.docling.enabled | default false) -}}
+{{- end -}}
+
+{{/* The browser and Docling switches as env entries. They come after envFrom, so they override
+config.*. */}}
+{{- define "text-extraction.switchEnv" -}}
 - name: BROWSER_ENABLED
   value: {{ include "text-extraction.browserEnabled" . | quote }}
 - name: BROWSER_UNBLOCK_ENABLED
   value: {{ include "text-extraction.browserUnblockEnabled" . | quote }}
+- name: DOCLING_ENABLED
+  value: {{ include "text-extraction.doclingEnabled" . | quote }}
+{{- end -}}
+
+{{/* The models volume of the Docling workers: the existing claim, or the chart-managed one. The
+chart mounts it at /models (DOCLING_MODELS_PATH). */}}
+{{- define "text-extraction.doclingModelsClaim" -}}
+{{- with .Values.workers.docling.models.persistence.existingClaim -}}
+{{- . -}}
+{{- else -}}
+{{- printf "%s-docling-models" (include "text-extraction.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* The env entries of a pool's workers; call with (list $ "<pool>"). They come after envFrom,
+so they override config.*. The Docling workers read the models from /models; the extract and
+browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
+{{- define "text-extraction.workerEnv" -}}
+{{- $root := index . 0 -}}
+{{- $pool := index . 1 -}}
+- name: INTERNAL_PORT
+  value: "9090"
+- name: {{ include "text-extraction.workerConcurrencyVar" $pool }}
+  value: {{ (index $root.Values.workers $pool).concurrency | toString | quote }}
+{{- if eq $pool "docling" }}
+- name: DOCLING_MODELS_PATH
+  value: /models
+{{- else }}
+{{- $worker := index $root.Values.workers $pool }}
+{{- with include "text-extraction.documentMemoryEnv" (list $root $worker.resources $worker.documentParentReserveMiB (printf "workers.%s.resources" $pool)) | trim }}
+{{ . }}
+{{- end }}
+{{- end }}
+{{ include "text-extraction.switchEnv" $root }}
+{{ include "text-extraction.valkeyEnv" $root | trim }}
+{{- with include "text-extraction.apiKeysEnv" $root | trim }}
+{{ . }}
+{{- end }}
+{{- end -}}
+
+{{/* A Kubernetes memory quantity (2Gi, 1536Mi, 2G, 2147483648, ...) in whole MiB. */}}
+{{- define "text-extraction.memoryMiB" -}}
+{{- $quantity := toString . -}}
+{{- $mib := 0.0 -}}
+{{- if hasSuffix "Ti" $quantity -}}
+{{- $mib = mulf (trimSuffix "Ti" $quantity | float64) 1048576.0 -}}
+{{- else if hasSuffix "Gi" $quantity -}}
+{{- $mib = mulf (trimSuffix "Gi" $quantity | float64) 1024.0 -}}
+{{- else if hasSuffix "Mi" $quantity -}}
+{{- $mib = trimSuffix "Mi" $quantity | float64 -}}
+{{- else if hasSuffix "Ki" $quantity -}}
+{{- $mib = divf (trimSuffix "Ki" $quantity | float64) 1024.0 -}}
+{{- else if hasSuffix "T" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "T" $quantity | float64) 1000000000000.0) 1048576.0 -}}
+{{- else if hasSuffix "G" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "G" $quantity | float64) 1000000000.0) 1048576.0 -}}
+{{- else if hasSuffix "M" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "M" $quantity | float64) 1000000.0) 1048576.0 -}}
+{{- else if hasSuffix "k" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "k" $quantity | float64) 1000.0) 1048576.0 -}}
+{{- else -}}
+{{- $mib = divf ($quantity | float64) 1048576.0 -}}
+{{- end -}}
+{{- floor $mib | int -}}
+{{- end -}}
+
+{{/* DOCUMENT_MEMORY_LIMIT_MB of a pod with a DocumentPool (the API, the extract and browser
+workers), as an env entry; call with (list $ <resources> <reserve MiB> "<values path of the
+resources>"). Each of the DOCUMENT_CONCURRENCY conversion children gets an even share of the
+container's memory limit after the reserve for the rest of the pod: floor((limit MiB - reserve)
+/ DOCUMENT_CONCURRENCY).
+Nothing when config.DOCUMENT_MEMORY_LIMIT_MB is set (it wins, through envFrom) or the container
+has no memory limit (the default, 2048, applies). The cgroup's OOM killer counts every process
+of the container: with the children's address space within the limit, a child hits its own
+RLIMIT_AS (too_large) before the pod is killed. */}}
+{{- define "text-extraction.documentMemoryEnv" -}}
+{{- $root := index . 0 -}}
+{{- $resources := index . 1 | default dict -}}
+{{- $reserve := index . 2 | float64 -}}
+{{- $path := index . 3 -}}
+{{- $limit := dig "limits" "memory" "" $resources -}}
+{{- if and $limit (not (hasKey $root.Values.config "DOCUMENT_MEMORY_LIMIT_MB")) -}}
+{{- $limitMiB := include "text-extraction.memoryMiB" $limit | float64 -}}
+{{- $children := include "text-extraction.configNumber" (list $root "DOCUMENT_CONCURRENCY" 2) | float64 -}}
+{{- $share := divf (subf $limitMiB $reserve) $children | floor | int -}}
+{{- if lt $share 256 -}}
+{{- fail (printf "%s.limits.memory (%v) leaves %v MiB for each of the DOCUMENT_CONCURRENCY (%v) conversion children after the reserve (%v MiB), below the minimum of 256: raise the limit, lower config.DOCUMENT_CONCURRENCY or the reserve, or set config.DOCUMENT_MEMORY_LIMIT_MB." $path $limit $share $children $reserve) -}}
+{{- end }}
+- name: DOCUMENT_MEMORY_LIMIT_MB
+  value: {{ $share | toString | quote }}
+{{- end -}}
 {{- end -}}
 
 {{/* A number setting from config.*, else its default; call with (list $ "<NAME>" <default>). */}}
@@ -124,11 +231,13 @@ worker toggles. */}}
 {{- end -}}
 {{- end -}}
 
-{{/* Shutdown budgets, as in server.py and browser_worker.py. extraction: max(30,
-EXTRACT_TIMEOUT_SECONDS + 5). API: that, and while BROWSER_ENABLED at least
-EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10. Browser worker:
+{{/* Shutdown budgets, as in server.py, browser_worker.py and docling_worker.py. extraction:
+max(30, EXTRACT_TIMEOUT_SECONDS + 5). API: that, while BROWSER_ENABLED at least
+EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10, and while
+DOCLING_ENABLED at least EXTRACT_TIMEOUT_SECONDS + DOCLING_SYNC_WAIT_SECONDS + 5. Browser worker:
 max(extraction, render deadline + 10). The render deadline is BROWSER_TIMEOUT_SECONDS, with unblock
-mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. */}}
+mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. Docling worker: a fixed 30 s
+(docling_worker.GRACEFUL_SECONDS). */}}
 {{- define "text-extraction.extractionGracefulSeconds" -}}
 {{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
 {{- maxf 30.0 (ceil (addf $timeout 5.0)) -}}
@@ -150,8 +259,15 @@ mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. */}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
 {{- $seconds = maxf $seconds (ceil (addf $timeout $wait $render 10.0)) -}}
 {{- end -}}
+{{- if eq (include "text-extraction.doclingEnabled" .) "true" -}}
+{{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
+{{- $wait := include "text-extraction.configNumber" (list . "DOCLING_SYNC_WAIT_SECONDS" 20) | float64 -}}
+{{- $seconds = maxf $seconds (ceil (addf $timeout $wait 5.0)) -}}
+{{- end -}}
 {{- $seconds -}}
 {{- end -}}
+
+{{- define "text-extraction.doclingGracefulSeconds" -}}30{{- end -}}
 
 {{- define "text-extraction.browserGracefulSeconds" -}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
@@ -274,13 +390,20 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and .Values.workers.browser.unblock (not .Values.workers.browser.enabled) -}}
 {{- fail "workers.browser.unblock needs workers.browser.enabled=true: unblock mode runs in the browser workers." -}}
 {{- end -}}
+{{- $docling := .Values.workers.docling -}}
+{{- if and $docling.enabled (not $jobs) -}}
+{{- fail "workers.docling.enabled needs JOBS_ENABLED=true on the API pods: OCR runs as a job of the pool docling. Do not set jobs.enabled=false with Docling workers." -}}
+{{- end -}}
+{{- if and $docling.enabled (not $docling.models.download) (not $docling.models.persistence.existingClaim) -}}
+{{- fail "workers.docling.models.download=false needs workers.docling.models.persistence.existingClaim: a volume that already holds the models. A new volume stays empty without the download." -}}
+{{- end -}}
 {{- /* Shutdown budgets (see text-extraction.apiGracefulSeconds), plus a 10 s margin before the kill. */ -}}
 {{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
 {{- $drain := include "text-extraction.configNumber" (list . "SHUTDOWN_DRAIN_SECONDS" 5) | float64 -}}
 {{- $apiGraceful := include "text-extraction.apiGracefulSeconds" . | float64 -}}
 {{- $apiGrace := include "text-extraction.apiGracePeriodSeconds" . | float64 -}}
 {{- if gt (addf $drain $apiGraceful) (subf $apiGrace 10.0) -}}
-{{- fail (printf "terminationGracePeriodSeconds (%v) is too short for the API pods: SHUTDOWN_DRAIN_SECONDS (%v) + the graceful shutdown (%v s: max(30, EXTRACT_TIMEOUT_SECONDS + 5), with browser workers at least EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + the render deadline + 10) + a 10 s margin must fit. Raise it, leave it unset (the chart then computes it) or lower the timeouts." .Values.terminationGracePeriodSeconds $drain $apiGraceful) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%v) is too short for the API pods: SHUTDOWN_DRAIN_SECONDS (%v) + the graceful shutdown (%v s: max(30, EXTRACT_TIMEOUT_SECONDS + 5), with browser workers at least EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + the render deadline + 10, with Docling workers at least EXTRACT_TIMEOUT_SECONDS + DOCLING_SYNC_WAIT_SECONDS + 5) + a 10 s margin must fit. Raise it, leave it unset (the chart then computes it) or lower the timeouts." .Values.terminationGracePeriodSeconds $drain $apiGraceful) -}}
 {{- end -}}
 {{- $extractionGraceful := include "text-extraction.extractionGracefulSeconds" . | float64 -}}
 {{- if and .Values.workers.extract.enabled (gt $extractionGraceful (subf (float64 .Values.workers.extract.terminationGracePeriodSeconds) 10.0)) -}}
@@ -289,5 +412,9 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- $browserGraceful := include "text-extraction.browserGracefulSeconds" . | float64 -}}
 {{- if and .Values.workers.browser.enabled (gt $browserGraceful (subf (float64 .Values.workers.browser.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.browser.terminationGracePeriodSeconds (%v) is too short: the browser workers give renders in flight %v s (max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10); the deadline is BROWSER_TIMEOUT_SECONDS, with unblock mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS) + a 10 s margin must fit. Raise it or lower the timeouts." .Values.workers.browser.terminationGracePeriodSeconds $browserGraceful) -}}
+{{- end -}}
+{{- $doclingGraceful := include "text-extraction.doclingGracefulSeconds" . | float64 -}}
+{{- if and $docling.enabled (gt $doclingGraceful (subf (float64 $docling.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.docling.terminationGracePeriodSeconds (%v) is too short: the Docling workers give conversions in flight %v s + a 10 s margin must fit." $docling.terminationGracePeriodSeconds $doclingGraceful) -}}
 {{- end -}}
 {{- end -}}

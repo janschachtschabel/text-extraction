@@ -596,6 +596,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(
                 json.dumps(listed).encode(), content_type="application/speculationrules+json"
             )
+        elif path == "/download-frame":  # an iframe of the page downloads a file
+            self._send(article("<iframe src='/download.pdf'></iframe>", title="Download frame"))
+        elif path == "/download-later":  # the page's script downloads a file once it has loaded
+            script = (
+                "<script>addEventListener('load', () => setTimeout(() => "
+                "{ location.href = '/download.pdf'; }, 50));</script>"
+            )
+            self._send(article(script, title="Download later"))
+        elif path == "/download-link":
+            link = "<a id='worksheet' href='/download.pdf'>Worksheet</a>"
+            self._send(article(link, title="Download link"))
         elif path == "/download.pdf":
             self._send(
                 PDF,

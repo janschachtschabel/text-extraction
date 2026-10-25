@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from collections.abc import Callable, Coroutine
 from functools import wraps
@@ -6,6 +7,7 @@ from typing import Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from pydantic import BaseModel
 
 from text_extraction.auth import Principal
 from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
@@ -13,7 +15,7 @@ from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions, JobProgress
-from text_extraction.jobs import JobLost, JobStore, browser_lease_seconds
+from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore, browser_lease_seconds
 from text_extraction.settings import Settings
 
 START = 1_000_000.0
@@ -666,3 +668,272 @@ async def _secrets_flag() -> None:
 
 def test_has_secrets_is_recorded_and_outlives_the_secrets() -> None:
     asyncio.run(_secrets_flag())
+
+
+# --- inputs and URL-less items (ruling F12) ---------------------------------------------------
+
+
+class Meta(BaseModel):
+    kind: str
+    name: str | None = None
+
+
+@scenario
+async def test_input_is_stored_read_and_deleted() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none"))
+    job_id = await store.create("file", OWNER, OPTIONS, [None])
+
+    await store.put_input(job_id, 0, PNG, Meta(kind="png", name="a.png"), 600)
+
+    assert await store.get_input(job_id, 0, Meta) == (PNG, Meta(kind="png", name="a.png"))
+    assert await store.get_input(job_id, 1, Meta) is None
+    assert 0 < await valkey.ttl(f"job:{{{job_id}}}:input:0") <= 600
+    await store.delete_input(job_id, 0)
+    assert await store.get_input(job_id, 0, Meta) is None
+
+
+@scenario
+async def test_input_never_outlives_its_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none", job_ttl_seconds=300))
+    job_id = await store.create("file", OWNER, OPTIONS, [None])
+
+    await store.put_input(job_id, 0, PNG, Meta(kind="png"), 3600)
+
+    assert 0 < await valkey.ttl(f"job:{{{job_id}}}:input:0") <= 300
+
+
+@scenario
+async def test_input_of_a_gone_job_is_not_stored() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none"))
+
+    with pytest.raises(JobLost):
+        await store.put_input("f" * 32, 0, PNG, Meta(kind="png"), 600)
+
+    assert await valkey.keys("*") == []
+
+
+@scenario
+async def test_delete_and_shorten_remove_the_input() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none"))
+    deleted = await store.create("file", OWNER, OPTIONS, [None])
+    shortened = await store.create("file", OWNER, OPTIONS, [None])
+    for job_id in (deleted, shortened):
+        await store.put_input(job_id, 0, PNG, Meta(kind="png"), 600)
+
+    await store.delete(deleted)
+    await store.shorten(shortened, 30)
+
+    assert await store.get_input(deleted, 0, Meta) is None
+    assert await store.get_input(shortened, 0, Meta) is None
+
+
+@scenario
+async def test_an_upload_item_has_no_url() -> None:
+    store = JobStore(FakeAsyncRedis(), Settings(auth_mode="none"))
+    job_id = await store.create("file", OWNER, OPTIONS, [None])
+
+    (item,) = await store.items(job_id, 0, 10)
+    assert item.url is None
+    assert await store.url(job_id, 0) == ""  # the item exists, without a URL
+    assert await store.url(job_id, 1) is None
+
+
+@scenario
+async def test_open_docling_jobs_count_only_unfinished_ones() -> None:
+    clock = Clock()
+    store = JobStore(FakeAsyncRedis(), Settings(auth_mode="none"), clock=clock)
+    open_job, done_job, gone_job = [
+        await store.create("extract", OWNER, OPTIONS, [URLS[0]]) for _ in range(3)
+    ]
+    for job_id in (open_job, done_job, gone_job):
+        assert await store.add_docling_job("alice", job_id) >= 1
+    await store.write_result(done_job, 0, Envelope[ExtractResult](status="failed"))
+    await store.delete(gone_job)
+
+    assert await store.open_docling_jobs("alice") == 1
+    assert await store.open_docling_jobs("bob") == 0
+    await store.drop_docling_job("alice", open_job)
+    assert await store.open_docling_jobs("alice") == 0
+
+
+# --- rolling upgrades: the stored options of package 4 ------------------------------------------
+
+# The options a package-4 pod knows (``JobOptions`` there is ``extra="forbid"``).
+PACKAGE_4_OPTIONS = {
+    "mode",
+    "format",
+    "metadata",
+    "links",
+    "compliance",
+    "cache",
+    "screenshot",
+    "full_page",
+}
+
+
+async def stored_options(valkey: FakeAsyncRedis, job_id: str) -> dict[str, Any]:
+    raw = await valkey.hget(f"job:{{{job_id}}}:meta", "options")
+    assert raw is not None
+    parsed: dict[str, Any] = json.loads(raw)
+    return parsed
+
+
+@scenario
+async def test_default_ocr_is_not_stored_so_older_pods_read_the_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("batch", OWNER, JobOptions(compliance="enforce"), URLS[:1])
+
+    assert set(await stored_options(valkey, job_id)) == PACKAGE_4_OPTIONS
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options.ocr == "auto"
+
+
+@scenario
+async def test_an_ocr_choice_is_stored() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    options = JobOptions(compliance="enforce", ocr="always")
+    job_id = await store.create("batch", OWNER, options, URLS[:1])
+
+    assert (await stored_options(valkey, job_id))["ocr"] == "always"
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options == options
+
+
+@scenario
+async def test_a_job_an_older_pod_stored_reads_with_ocr_auto() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await create_job(store)
+    old = {"mode": "fast", "format": "text", "metadata": False, "links": True}
+    old.update({"compliance": "report", "cache": True, "screenshot": False, "full_page": True})
+    await valkey.hset(f"job:{{{job_id}}}:meta", "options", json.dumps(old))
+
+    record = await store.get(job_id)
+
+    assert record is not None
+    assert record.options == OPTIONS
+    assert record.options.ocr == "auto"
+
+
+# --- the input budget (DOCLING_INPUT_BUDGET_BYTES) ----------------------------------------------
+
+BUDGET = 10_000
+BUDGET_TOTAL = "inputs:{budget}:total"
+BUDGET_EXPIRY = "inputs:{budget}:expiry"
+
+
+class InputMeta(BaseModel):
+    kind: str = "pdf"
+
+
+def budget_store(valkey: FakeAsyncRedis) -> JobStore:
+    return make_store(valkey, docling_input_budget_bytes=BUDGET, document_max_bytes=BUDGET)
+
+
+async def budget_used(valkey: FakeAsyncRedis) -> int:
+    return int(await valkey.get(BUDGET_TOTAL) or 0)
+
+
+def input_size(body: bytes) -> int:
+    return len(body) + len(InputMeta().model_dump_json())
+
+
+@scenario
+async def test_inputs_over_the_budget_are_refused() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    first, second = await create_job(store), await create_job(store)
+
+    await store.put_input(first, 0, b"x" * 6_000, InputMeta(), 600)
+    with pytest.raises(InputBudgetExceeded):
+        await store.put_input(second, 0, b"y" * 6_000, InputMeta(), 600)
+
+    assert await store.get_input(second, 0, InputMeta) is None  # nothing was stored
+    assert await budget_used(valkey) == input_size(b"x" * 6_000)
+    await store.put_input(second, 1, b"z" * 3_000, InputMeta(), 600)  # what is left still fits
+
+
+@scenario
+async def test_a_deleted_input_gives_its_bytes_back() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    first, second, third = [await create_job(store) for _ in range(3)]
+    for job_id in (first, second, third):
+        await store.put_input(job_id, 0, b"x" * 9_000, InputMeta(), 600)
+        assert await budget_used(valkey) == input_size(b"x" * 9_000)
+        if job_id == first:
+            await store.delete_input(job_id, 0)  # the item has its outcome
+        elif job_id == second:
+            await store.delete(job_id)  # a sync job answered
+        else:
+            await store.shorten(job_id, 60)  # a sync job with a screenshot
+
+    assert await budget_used(valkey) == 0
+    assert await valkey.zcard(BUDGET_EXPIRY) == 0
+
+
+@scenario
+async def test_an_input_that_expired_leaves_the_budget() -> None:
+    """An input whose TTL ran out is not deleted by anyone: the next write prunes it by its
+    expiry, so the budget does not leak."""
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    first, second = await create_job(store), await create_job(store)
+    await store.put_input(first, 0, b"x" * 9_000, InputMeta(), 600)
+    # Its TTL runs out: the key is gone, and its expiry lies in the past.
+    await valkey.delete(f"job:{{{first}}}:input:0")
+    await valkey.zadd(BUDGET_EXPIRY, {f"{first}:0": 1})
+
+    await store.put_input(second, 0, b"y" * 9_000, InputMeta(), 600)
+
+    assert await budget_used(valkey) == input_size(b"y" * 9_000)
+    assert await valkey.zrange(BUDGET_EXPIRY, 0, -1) == [f"{second}:0".encode()]
+
+
+@scenario
+async def test_a_replaced_input_counts_once() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    job_id = await create_job(store)
+
+    await store.put_input(job_id, 0, b"x" * 6_000, InputMeta(), 600)
+    await store.put_input(job_id, 0, b"y" * 7_000, InputMeta(), 600)  # an upload's, then OCR's
+
+    assert await budget_used(valkey) == input_size(b"y" * 7_000)
+
+
+@scenario
+async def test_a_lost_job_takes_nothing_from_the_budget() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+
+    with pytest.raises(JobLost):
+        await store.put_input("0" * 32, 0, b"x" * 9_000, InputMeta(), 600)
+
+    assert await budget_used(valkey) == 0
+
+
+@scenario
+async def test_the_budget_holds_under_concurrent_writes() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    jobs = [await create_job(store) for _ in range(10)]
+
+    outcomes = await asyncio.gather(
+        *(store.put_input(job_id, 0, b"x" * 2_000, InputMeta(), 600) for job_id in jobs),
+        return_exceptions=True,
+    )
+
+    stored = [outcome for outcome in outcomes if outcome is None]
+    refused = [outcome for outcome in outcomes if isinstance(outcome, InputBudgetExceeded)]
+    assert len(stored) == BUDGET // input_size(b"x" * 2_000)
+    assert len(stored) + len(refused) == len(jobs)
+    assert await budget_used(valkey) <= BUDGET

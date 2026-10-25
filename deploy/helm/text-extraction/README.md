@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR (off by default), and an optional single-replica Valkey (with a password).
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -17,6 +17,8 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | Deployment, ConfigMap | always | Stateless pods. Non-secret settings come from the ConfigMap through `envFrom`. |
 | Worker Deployment `<release>-text-extraction-worker-extract` | `workers.extract.enabled` | Runs `text-extraction-worker`: claims job items of the pool `extract` from the queue in Valkey. Serves only port 9090. Same image, ConfigMap and Secrets as the API. |
 | Worker Deployment `<release>-text-extraction-worker-browser` | `workers.browser.enabled` | Runs `text-extraction-browser-worker` from the browser image (`workers.browser.image`): claims the items of the pool `browser` and renders them in Chromium, in unblock mode in Google Chrome under Xvfb. Serves only port 9090. Same ConfigMap and Secrets as the API. |
+| Worker Deployment `<release>-text-extraction-worker-docling` | `workers.docling.enabled` | Runs `text-extraction-docling-worker` from the Docling image (`workers.docling.image`): claims the items of the pool `docling` (scans, broken text layers, images, OpenDocument files) and converts them with Docling and Tesseract. An init container downloads the models first. Serves only port 9090. Same ConfigMap and Secrets as the API. See [Docling workers](#docling-workers-and-the-models-volume). |
+| PersistentVolumeClaim `<release>-text-extraction-docling-models` | `workers.docling.enabled` and no `workers.docling.models.persistence.existingClaim` | The models volume of the Docling workers, `ReadWriteMany` by default. |
 | Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
 | ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`. |
 | HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
@@ -37,6 +39,9 @@ to `workers.browser.tmpSizeLimit`, 2Gi: browser profiles, Chrome's caches and it
 browsers use it instead of `/dev/shm`). The probes use the internal
 port: `/health` for liveness and `/ready` for readiness. `/ready` answers 200 only once the public
 port listens and turns 503 as soon as SIGTERM arrives, so no preStop hook is needed.
+The images start `tini` as PID 1, which forwards signals and reaps orphaned child processes (for
+example a `tesseract` whose conversion child was killed). The worker containers therefore pass
+their entry point as `args`, never as `command`, which would replace the image's `ENTRYPOINT`.
 
 ## Configuration
 
@@ -47,11 +52,28 @@ variables of the same name. The chart overrides `config.PUBLIC_PORT` (8080), `co
 
 Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`) on the API pods,
 `WORKER_CONCURRENCY` (from `workers.extract.concurrency`) on the extract workers,
-`BROWSER_CONCURRENCY` (from `workers.browser.concurrency`) on the browser workers, and
-`BROWSER_ENABLED` (from `workers.browser.enabled`) and `BROWSER_UNBLOCK_ENABLED` (from
-`workers.browser.unblock`) on the API, extract worker and browser worker pods: entries for them
-under `config` are ignored. So browser mode is on exactly when the chart deploys browser workers,
-and a browser worker never runs with `BROWSER_ENABLED=false`.
+`BROWSER_CONCURRENCY` (from `workers.browser.concurrency`) on the browser workers,
+`DOCLING_CONCURRENCY` (from `workers.docling.concurrency`) and `DOCLING_MODELS_PATH` (`/models`,
+the mount of the models volume) on the Docling workers, and `BROWSER_ENABLED` (from
+`workers.browser.enabled`), `BROWSER_UNBLOCK_ENABLED` (from `workers.browser.unblock`) and
+`DOCLING_ENABLED` (from `workers.docling.enabled`) on every pod (API, extract, browser and Docling
+workers): entries for them under `config` are ignored. So browser mode and OCR are on exactly when
+the chart deploys their workers.
+
+`config.FETCH_MAX_BYTES` (the download limit) and `config.DOCUMENT_MAX_BYTES` (the largest
+document and upload) are both 20000000 by default: lower them together. A `DOCUMENT_MAX_BYTES`
+above `FETCH_MAX_BYTES` makes every pod exit with code 2 at start-up.
+
+The API, extract and browser pods convert documents (MarkItDown) in `DOCUMENT_CONCURRENCY` (2)
+child processes, each with an address-space limit of `DOCUMENT_MEMORY_LIMIT_MB`. The chart
+renders that limit from the container's memory limit: `floor((limits.memory in MiB -
+documentParentReserveMiB) / DOCUMENT_CONCURRENCY)`, 768 MiB for every pod with the defaults
+(`(2048 - 512) / 2` for the API and extract pods, `(4096 - 2560) / 2` for the browser pods, whose
+reserve covers Chromium). So a child runs out of memory and answers `too_large` before the
+container's OOM killer ends the pod; the children also raise their `oom_score_adj` to 1000, so
+the kernel picks them before the server when the pod runs out anyway. A share below 256 MiB fails
+the render. `config.DOCUMENT_MEMORY_LIMIT_MB` wins when set; without a memory limit the
+service's default (2048) applies.
 
 > **Warning:** never put secrets into `config:`. It becomes a ConfigMap, which is stored and shown
 > in clear text. Use `secrets.*` and `externalValkey.existingSecret.*` for secrets.
@@ -106,7 +128,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
 | `replicaCount` | `2` | Ignored when `autoscaling.enabled`. |
-| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). Unset, the chart computes it from `config.*` or the defaults: 45 without browser workers, 90 with them, 120 with unblock mode. A value set here that does not fit fails the render. |
+| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). With Docling workers it is also at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` + 5 + 10 (a sync request waits for OCR after its fast phase). Unset, the chart computes it from `config.*` or the defaults: 45 without browser or Docling workers, 65 with Docling workers only, 90 with browser workers, 120 with unblock mode. A value set here that does not fit fails the render. |
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
@@ -114,11 +136,13 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.RATE_LIMIT_PER_MINUTE` | `"60"` | Default limit per key. |
 | `config.CONVERT_CONCURRENCY` | `"2"` | Conversions at once per pod. The memory limit is sized for it. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
+| `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.*` | | Any further non-secret setting is added here. |
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
 | `secrets.existingSecretKey` | `API_KEYS` | Key inside that Secret. |
-| `resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption. The memory limit is about `CONVERT_CONCURRENCY` x 450 MB (one 5 MiB page) plus the service; raise it with `CONVERT_CONCURRENCY` or `CONVERT_MAX_BYTES`. |
+| `resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
+| `documentParentReserveMiB` | `512` | MiB of the API container's memory limit kept for everything but the document conversion children; the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
@@ -128,7 +152,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
 | `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
 | `workers.extract.nodeSelector` | `{}` | Merged over the global `nodeSelector` for the extract workers; a key set here wins. |
-| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder, sized like the API: `CONVERT_CONCURRENCY` x about 450 MB plus the service. |
+| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
+| `workers.extract.documentParentReserveMiB` | `512` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
 | `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica. |
@@ -144,10 +169,26 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
 | `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4Gi | Placeholder for a browser with 4 pages plus the conversions. |
+| `workers.browser.documentParentReserveMiB` | `2560` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages, so each document conversion child gets `(4096 - 2560) / 2` = 768 MiB. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
 | `workers.browser.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector` for the browser workers; a key set here wins. The browser image is linux/amd64 only (Google Chrome stable), so the default keeps its pods off arm64 nodes. Set the key to `null` to drop it. |
 | `workers.browser.autoscaling.keda.*` | as for the extract workers, `threshold` `8` | Scales on `max(text_extraction_queue_pending_items{pool="browser"})`; the API pods export it while `JOBS_ENABLED` and `BROWSER_ENABLED` are true. Keep `minReplicaCount` at 1 or more: a sync request waits only `BROWSER_QUEUE_WAIT_SECONDS` (10) for a worker. |
 | `workers.browser.autoscaling.hpa.*` | as for the extract workers | CPU-based. Mutually exclusive with KEDA. |
+| `workers.docling.enabled` | `false` | Deploy the Docling workers (OCR). Also renders `DOCLING_ENABLED` into every pod: false keeps scans at their text layer (`ocr_unavailable`), images and OpenDocument files answer `unsupported_content_type`, `ocr: "always"` answers 400. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
+| `workers.docling.image.repository` | `ghcr.io/janschachtschabel/text-extraction-docling` | Docling worker image (Docling, CPU torch, Tesseract; no models; linux/amd64). |
+| `workers.docling.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
+| `workers.docling.replicaCount` | `1` | Ignored with KEDA or HPA. |
+| `workers.docling.concurrency` | `1` | `DOCLING_CONCURRENCY`: documents per pod at once, each in a child process of its own. |
+| `workers.docling.terminationGracePeriodSeconds` | `60` | Conversions in flight get 30 s after SIGTERM, then the children are killed and their items run again after their lease. The render fails below 40. |
+| `workers.docling.resources` | requests 1 / 3Gi, limits 4 / 8Gi | Placeholder for one conversion with the layout and table models (`DOCLING_MEMORY_LIMIT_MB` 6144) and `DOCLING_THREADS` (4) threads. |
+| `workers.docling.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector`; the Docling image is built for linux/amd64 only. |
+| `workers.docling.autoscaling.keda.*` | as for the extract workers, `threshold` `4`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="docling"})`; the API pods export it while `JOBS_ENABLED` and `DOCLING_ENABLED` are true. With no replica a sync request answers without OCR after `DOCLING_SYNC_WAIT_SECONDS` and batch items wait. |
+| `workers.docling.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
+| `workers.docling.models.download` | `true` | An init container runs `text-extraction-docling-worker --download-models` with the volume mounted writable. `false` needs `persistence.existingClaim` (a pre-filled volume), or the render fails. |
+| `workers.docling.models.persistence.size` | `5Gi` | The models take about 335 MiB (9 files); the download stages a full copy beside the old one when the manifest changes, so about 670 MiB at once. 5Gi leaves room for later models; 1Gi suffices today. |
+| `workers.docling.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
+| `workers.docling.models.persistence.storageClass` | `""` | Cluster default when empty. |
+| `workers.docling.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
 | `networkPolicy.enabled` | `false` | Needs a CNI that enforces NetworkPolicy. |
 | `networkPolicy.metricsFrom` | `[{podSelector: {}}]` | Peers (`from` entries) allowed to scrape port 9090: by default every pod of the release namespace. |
 | `service.type` | `ClusterIP` | Type of the public Service. |
@@ -162,7 +203,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `valkey.auth.enabled` | `true` | Valkey requires a password. |
 | `valkey.auth.existingSecret` | `""` | Your own Secret with the password; without it the chart generates one. The password must be URL-safe, see [Valkey password](#valkey-password). |
 | `valkey.auth.existingSecretKey` | `VALKEY_PASSWORD` | Key inside that Secret (also used for the chart-managed one). |
-| `valkey.maxmemory` | `768mb` | `--maxmemory`. The eviction policy is fixed to `noeviction`. Size it for the batches open at once (about `BATCH_MAX_URLS` × the average result, plus as much in the result cache); from `VALKEY_MEMORY_GUARD_RATIO` (0.8) of it the API refuses new batches. |
+| `valkey.maxmemory` | `768mb` | `--maxmemory`. The eviction policy is fixed to `noeviction`. Size it for the batches open at once (about `BATCH_MAX_URLS` × the average result, plus as much in the result cache) and, with Docling workers, for the documents queued for OCR and slow uploads, at most `DOCLING_INPUT_BUDGET_BYTES` (200000000) in all; from `VALKEY_MEMORY_GUARD_RATIO` (0.8) of it the API refuses new batches and nothing more is queued for OCR. With Docling workers and the default maxmemory, the install notes say so. |
 | `valkey.persistence.enabled` | `false` | `false`: `emptyDir`, data (jobs, queued items, counters) is lost on restart. `true`: PVC and append-only file. |
 | `valkey.persistence.size` | `1Gi` | |
 | `valkey.persistence.storageClass` | `""` | Cluster default when empty. |
@@ -176,9 +217,10 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `metrics.serviceMonitor.labels` | `{}` | For example the `release` label your Prometheus selects on. |
 | `metrics.prometheusRule.enabled` | `false` | Needs the Prometheus Operator CRDs and kube-state-metrics. |
 | `metrics.prometheusRule.labels` | `{}` | |
-| `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog`. |
+| `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog` for the pools `extract` and `browser`. |
+| `alerts.doclingQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `docling` (an item takes minutes). |
 | `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract and browser) get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling) get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.
@@ -190,16 +232,19 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
-| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
+| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000; for `docling` `alerts.doclingQueueBacklogItems`, 100) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
 | `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
-`TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the browser pool's
-alerts need `workers.browser.enabled` (without it there is no browser queue). The item counter has
-no `pool` label, so the pools are told apart by the scrape target: the browser pool counts the
-series of the browser workers' internal Service, the extract pool all others. The queue gauges come from the API
+`TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the alerts of the
+pools `browser` and `docling` need `workers.browser.enabled` or `workers.docling.enabled` (without
+it there is no such queue). For the pool `docling` the two alerts are the Docling backlog and
+"Docling workers down" (for example models missing on the volume: the workers exit before
+`/ready`). The item counter has no `pool` label, so the pools are told apart by the scrape target:
+the browser and docling pools count the series of their workers' internal Service, the extract
+pool all others. The queue gauges come from the API
 pods and every pod reports the same queue, so the rules use `max()`, never `sum()`. The counter
 `text_extraction_job_items_total` appears with the first item a worker handles and the kube-state
 series can be missing, so the rules use `or vector(0)` where "nothing yet" has to count as 0:
@@ -223,9 +268,10 @@ With `networkPolicy.enabled` the chart creates a policy for Valkey, the API and 
 pool, all for ingress only (the API and the workers must reach arbitrary sites, so egress stays
 open):
 
-- Valkey accepts port 6379 from the API and worker pods (extract and browser) of this release only.
+- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling) of this release
+  only.
 - The API accepts port 8080 from anywhere and port 9090 from `networkPolicy.metricsFrom`.
-- The extract and browser workers accept port 9090 from `networkPolicy.metricsFrom` only.
+- The extract, browser and Docling workers accept port 9090 from `networkPolicy.metricsFrom` only.
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
 Prometheus in another namespace add for example
@@ -234,10 +280,34 @@ kubelet come from the node, which CNIs normally allow. With the default `metrics
 in another namespace is cut off from port 9090 and KEDA and the alerts lose their data; NOTES.txt
 warns when `networkPolicy` and the ServiceMonitor are both on with the default.
 
+## Docling workers and the models volume
+
+OCR is off by default (`workers.docling.enabled: false`): the Docling image is about 2 GB and the
+models take about 335 MiB on a volume. With it on:
+
+- The PVC `<release>-text-extraction-docling-models` (or `models.persistence.existingClaim`) is
+  mounted at `/models` (`DOCLING_MODELS_PATH`): Docling's layout and table models in `docling/`,
+  Tesseract's data in `tessdata/` (`TESSDATA_PREFIX`). The image holds no models.
+- The init container `models` runs `text-extraction-docling-worker --download-models` with the
+  volume mounted writable. It downloads the files of the manifest
+  (`src/text_extraction/documents/models.toml`, pinned URLs), checks each SHA-256, moves them into
+  place and writes a marker; with the marker present it does nothing. It needs egress to
+  `raw.githubusercontent.com` and `huggingface.co` (or an `HTTPS_PROXY` in `config`). Init
+  containers of several replicas that start at once each stage their own copy; one may fail and
+  restart, then it finds the marker.
+- The worker mounts the volume read-only. Before `/ready` it checks the files and converts a
+  built-in scan; without the models it exits with code 1 and logs `docling_models_missing` with
+  the path.
+- Air-gapped: fill a volume with `--download-models` elsewhere (or copy a filled one), then set
+  `models.persistence.existingClaim` and `models.download: false`.
+- The volume must be writable by uid/gid 10001 for the download (`fsGroup` 10001 covers most
+  volume types; some NFS provisioners ignore it).
+
 ## Local checks
 
 ```bash
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.docling.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

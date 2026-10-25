@@ -33,7 +33,8 @@ def _is_ok_html(result: ExtractResult) -> bool:
 def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     """Whether a fast result should be tried again in the browser.
 
-    Only a fast result of a page that was fetched and assessed (``quality`` is set) can escalate.
+    Only a fast result of a page that was fetched and assessed (``quality`` is set) can escalate,
+    never a document's.
     It does when the quality gate recommends a browser and the answer is 2xx HTML (a browser
     cannot do better on a text file or an error status). In unblock mode it also does when the
     page was refused as bot protection, or when the body of a 403/429/503 answer is a challenge.
@@ -44,6 +45,8 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     """
     result = envelope.data
     if result is None or result.mode_used != "fast" or result.quality is None:
+        return False
+    if result.document is not None:  # a browser renders no better PDF (ruling F9)
         return False
     if result.cache in ("hit", "revalidated"):
         return False

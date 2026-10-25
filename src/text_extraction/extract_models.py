@@ -18,6 +18,7 @@ from text_extraction.browser_options import (
 )
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
+from text_extraction.documents.types import DocumentInfo, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.fingerprint import Fingerprint
 from text_extraction.metadata import PageMetadata
@@ -85,6 +86,12 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="Screenshot of the whole page; `false`: the first viewport only. Not with "
         "`mode: fast`.",
     )
+    ocr: OcrOption = Field(
+        default="auto",
+        description="OCR of documents. `auto`: scans, broken text layers and images are read "
+        "with OCR where the service has it. `never`: no OCR. `always`: every PDF is read with "
+        "OCR. Pages that are not documents ignore it.",
+    )
 
     @model_validator(mode="after")
     def _browser_options(self) -> Self:
@@ -118,11 +125,11 @@ class Timings(BaseModel):
 class ExtractResult(BaseModel):
     """What one extraction produced; on failure as much of it as was known."""
 
-    url: str
+    url: str | None  # None for an upload
     final_url: str | None
     upstream_status: int | None  # of the response the content came from
     content_type: str | None
-    mode_used: Literal["fast", "browser"]
+    mode_used: Literal["fast", "browser", "upload"]
     attempts: int  # fetches of the target in this request
     language: str | None
     word_count: int
@@ -136,10 +143,24 @@ class ExtractResult(BaseModel):
     links: list[Link] | None
     fingerprint: Fingerprint | None
     cache: CacheState
-    warnings: list[str]
+    warnings: list[str] = Field(
+        description="What did not go as asked, while the result still answers: "
+        "`browser_unavailable` (no browser worker took the page: the fast result), "
+        "`action_<index>_failed` (a browser action, counted from 0), "
+        "`navigation_refused_non_get`, `consent_overlay_removed`, `screenshot_clipped`, "
+        "`browser_bytes_capped`, `challenge_checkbox_clicked`, `challenge_not_cleared`, "
+        "`browser_profile_left` (browser mode); `ocr_unavailable` (a document that needed OCR "
+        "answers its text layer, or nothing), `pages_truncated` (pages after the page limit "
+        "were cut), `pages_partial` (OCR stopped at its time limit or skipped a page: the pages "
+        "it read), `document_fetched_directly` (a render ended on a file, which was fetched "
+        "and converted in fast mode) (documents); `content_not_stored_too_large` (a job item "
+        "stored without its content). Converter notes may follow."
+    )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
     unblocked: bool = False  # the page was loaded in unblock mode
+    # Documents only; the default keeps results cached before documents valid.
+    document: DocumentInfo | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

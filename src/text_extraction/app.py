@@ -17,16 +17,23 @@ from text_extraction.auth import Principal, Role, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.docling_dispatch import DoclingDispatcher, docling_queue
+from text_extraction.documents.pool import DocumentPool
+from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
 from text_extraction.extract_api import router as extract_router
 from text_extraction.fetch import Fetcher
+from text_extraction.file_api import PATH as UPLOAD_PATH
+from text_extraction.file_api import router as file_router
+from text_extraction.file_api import upload_body_limit
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
+from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
@@ -91,11 +98,14 @@ async def _finish_background(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request; start the memory guard and the queue
+    """Load the language model before the first request, and start the document pool's
+    children meanwhile when asked to (``start_documents``); start the memory guard and the queue
     gauges; wait for extractions handed over to a job; stop the guard and the gauges (their
     tasks read Valkey, whose client the server closes after the lifespan); close the fetcher's
-    connections and the conversion pool last."""
-    await asyncio.to_thread(load_language_model)
+    connections, the conversion pool and the document pool last."""
+    documents: DocumentPool = app.state.document_pool
+    starts = [documents.start()] if app.state.start_documents else []
+    await asyncio.gather(asyncio.to_thread(load_language_model), *starts)
     guard: MemoryGuard = app.state.memory_guard
     gauges: QueueGauges = app.state.queue_gauges
     guard.start()
@@ -113,18 +123,30 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool: ConversionPool = app.state.conversion_pool
         await fetcher.aclose()
         pool.shutdown()
+        await documents.shutdown()
 
 
 def create_public_app(
-    settings: Settings, valkey: Redis, registry: CollectorRegistry = REGISTRY
+    settings: Settings,
+    valkey: Redis,
+    registry: CollectorRegistry = REGISTRY,
+    *,
+    start_documents: bool = False,
 ) -> FastAPI:
     """Build the public app. Metrics are collected in ``registry`` but not exposed here.
+
+    ``app.state.document_pool`` holds the MarkItDown children of the pipeline. With
+    ``start_documents`` (the server's choice) the lifespan starts them, so they are ready before
+    the server listens and ``/ready`` answers 200; otherwise (tests) the first document starts
+    them. The lifespan shuts them down either way.
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
     ``app.state.job_queue`` back the batch and job routes; with ``BROWSER_ENABLED``,
     ``app.state.browser_queue`` is the ``browser`` pool's queue and
-    ``app.state.browser_dispatcher`` sends sync requests there (both None otherwise);
+    ``app.state.browser_dispatcher`` sends sync requests there (both None otherwise); while the
+    service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), ``app.state.docling_queue`` and
+    ``app.state.docling_dispatcher`` do the same for documents that need OCR;
     ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
@@ -143,6 +165,8 @@ def create_public_app(
     app.state.memory_guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, app.state.fetcher = create_outbound(settings, valkey)
     app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
+    app.state.document_pool = create_document_pool(settings)
+    app.state.start_documents = start_documents
     app.state.pipeline = create_pipeline(
         settings,
         valkey,
@@ -151,6 +175,7 @@ def create_public_app(
         app.state.conversion_pool,
         gate=gate,
         memory_guard=app.state.memory_guard,
+        document_pool=app.state.document_pool,
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
@@ -163,11 +188,20 @@ def create_public_app(
             app.state.job_store, app.state.browser_queue, settings, registry=registry
         )
         queues.append(app.state.browser_queue)
+    app.state.docling_queue = None
+    app.state.docling_dispatcher = None
+    if ocr_available(settings):
+        app.state.docling_queue = docling_queue(valkey, settings)
+        app.state.docling_dispatcher = DoclingDispatcher(
+            app.state.job_store, app.state.docling_queue, settings, registry=registry
+        )
+        queues.append(app.state.docling_queue)
     app.state.job_metrics = job_metrics_for(registry)
     app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()
     install_error_handlers(app)
     app.include_router(extract_router)
+    app.include_router(file_router)
     app.include_router(screenshot_router)
     app.include_router(jobs_router)
 
@@ -188,7 +222,10 @@ def create_public_app(
     app.add_middleware(
         BodyLimitMiddleware,
         default_limit=settings.request_max_body_bytes,
-        path_limits={"/v1/batch": batch_body_limit(settings)},
+        path_limits={
+            "/v1/batch": batch_body_limit(settings),
+            UPLOAD_PATH: upload_body_limit(settings),
+        },
     )
     Instrumentator(registry=registry).instrument(app)
     # Added last, so it is the outermost middleware and sees every request.

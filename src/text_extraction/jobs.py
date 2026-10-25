@@ -3,11 +3,13 @@
 A job lives in four keys; the braces around the id are a literal cluster hash tag, so one job's
 keys share a slot and a Lua script can touch all of them:
 
-- ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON), state, created_at,
-                          finished_at, total, done, success, partial, failed, lease_until,
-                          trace_id (of the request that created the job, when it had one),
-                          secrets (``1`` when the job was created with caller secrets)
-- ``job:{<id>}:urls``     list: the URLs in input order
+- ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON; ``ocr`` only when it
+                          is not ``auto``), state, created_at, finished_at, total, done,
+                          success, partial, failed, lease_until, trace_id (of the request that
+                          created the job, when it had one), secrets (``1`` when the job was
+                          created with caller secrets)
+- ``job:{<id>}:urls``     list: the URLs in input order; an empty string for an uploaded file's
+                          item, which has no URL (kind ``file``)
 - ``job:{<id>}:results``  hash: item index -> ``Envelope[ExtractResult]`` as JSON
 - ``job:{<id>}:done``     bitmap: bit ``index`` is set once that item has its result
 
@@ -26,6 +28,37 @@ Browser jobs (package 4) may have these as well:
 - ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
+Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR) have:
+
+- ``job:{<id>}:input:<index>`` hash: ``body`` (the bytes) and ``meta`` (JSON: what the consumer
+                          needs to know about them); TTL ``DOCLING_INPUT_TTL_SECONDS`` at most,
+                          never longer than the job's. No read of the job shows it; the worker
+                          deletes it once the item has its outcome, and ``delete`` and
+                          ``shorten`` delete the input of item 0 (the only item of a sync job).
+
+``jobs:{owner:<owner>}:docling`` is a set of an owner's Docling jobs (``add_docling_job``); a job
+that is completed or gone leaves it when it is counted (``open_docling_jobs``).
+
+All inputs together stay within ``DOCLING_INPUT_BUDGET_BYTES`` (Valkey's memory: a full Valkey
+under ``noeviction`` refuses the writes of the job store, the queue and the rate limiter). Three
+keys of their own hash tag account for it:
+
+- ``inputs:{budget}:size``   hash: ``<id>:<index>`` -> the input's bytes (body and meta)
+- ``inputs:{budget}:expiry`` sorted set: ``<id>:<index>`` scored by when its input expires
+                          (Valkey's own clock, in ms)
+- ``inputs:{budget}:total``  string: the sum of ``size``
+
+``put_input`` first reserves the input's bytes in one script on these keys: it prunes the
+reservations whose expiry has passed (an input that expired by its TTL, which nobody deletes),
+then reserves, or refuses with ``InputBudgetExceeded`` when the total would exceed the budget.
+Check and reservation are one atomic step, so concurrent writers never pass the budget
+together. Only then is the input written; a write that fails gives the reservation back.
+Deleting an input (``delete_input``, ``delete``, ``shorten``) gives it back too. The budget's
+keys are not in a job's slot, so reservation and write are two scripts: one script on keys of
+two hash tags would not run on a Valkey cluster. A pod that dies between them leaves a
+reservation that its expiry prunes, never a leak. A reservation lasts the requested TTL even
+where the job's shorter life cuts the input's: it then counts a little longer, never shorter.
+
 A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
 then; one with a screenshot is kept only as long as the screenshot (``shorten``).
 
@@ -33,16 +66,20 @@ Times are epoch seconds from the injected clock (every pod needs a synchronised 
 as numbers and handed out as UTC datetimes, except ``lease_until``, which stays a number.
 """
 
+import asyncio
+import contextlib
 import math
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from pydantic import BaseModel
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal, Role
 from text_extraction.browser_options import BrowserSecrets
@@ -71,6 +108,12 @@ _URL_CHUNK = 1000
 
 # The keys of a job: the four of every job, and those of browser jobs.
 _KINDS = ("meta", "urls", "results", "done", "secrets", "drafts")
+
+# The input of item 0 (the only item of a sync job), which ``delete`` and ``shorten`` remove.
+_FIRST_INPUT = "input:0"
+# An item without a URL (an upload) is stored with this in the URL list.
+_NO_URL = ""
+_OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
 
 # The files a job can have; ``delete`` removes them by name.
 SCREENSHOT_ARTIFACT = "screenshot.png"
@@ -152,6 +195,74 @@ end
 return 1
 """
 
+# KEYS = meta, input; ARGV = body, meta JSON, ttl in ms. Stores the input for the ttl, but never
+# longer than the job lives; returns 1, or -1 when the job is gone (nothing is written).
+_PUT_INPUT = """
+local remaining = redis.call('PTTL', KEYS[1])
+if remaining == -2 then
+  return -1
+end
+local ttl = tonumber(ARGV[3])
+if remaining > 0 and remaining < ttl then
+  ttl = remaining
+end
+redis.call('DEL', KEYS[2])
+redis.call('HSET', KEYS[2], 'body', ARGV[1], 'meta', ARGV[2])
+redis.call('PEXPIRE', KEYS[2], ttl)
+return 1
+"""
+
+# KEYS = the budget's size, expiry and total; ARGV = member (``<id>:<index>``), bytes, ttl in ms,
+# budget. Prunes the reservations that have expired, then reserves ``bytes`` for the member (a
+# member reserved already counts once, with its new size) and returns 1, or returns 0 when the
+# total would exceed the budget (nothing is reserved). Valkey's clock decides the expiry, as for
+# the TTL of the input itself.
+_RESERVE_INPUT = """
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local total = tonumber(redis.call('GET', KEYS[3]) or '0')
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
+for _, member in ipairs(expired) do
+  total = total - tonumber(redis.call('HGET', KEYS[1], member) or '0')
+  redis.call('HDEL', KEYS[1], member)
+  redis.call('ZREM', KEYS[2], member)
+end
+local size = tonumber(ARGV[2])
+local previous = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
+local reserved = 0
+if total - previous + size <= tonumber(ARGV[4]) then
+  total = total - previous + size
+  redis.call('HSET', KEYS[1], ARGV[1], size)
+  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[3]), ARGV[1])
+  reserved = 1
+end
+if total > 0 then
+  redis.call('SET', KEYS[3], total)
+else
+  redis.call('DEL', KEYS[3])
+end
+return reserved
+"""
+
+# KEYS = the budget's size, expiry and total; ARGV = members. Gives their reservations back.
+_RELEASE_INPUTS = """
+local total = tonumber(redis.call('GET', KEYS[3]) or '0')
+for _, member in ipairs(ARGV) do
+  local size = redis.call('HGET', KEYS[1], member)
+  if size then
+    total = total - tonumber(size)
+    redis.call('HDEL', KEYS[1], member)
+    redis.call('ZREM', KEYS[2], member)
+  end
+end
+if total > 0 then
+  redis.call('SET', KEYS[3], total)
+else
+  redis.call('DEL', KEYS[3])
+end
+return 1
+"""
+
 # KEYS = meta, artifact; ARGV = data, ttl in seconds. Returns 1, or -1 when the job is gone.
 _PUT_ARTIFACT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -160,6 +271,14 @@ end
 redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
 return 1
 """
+
+
+# The keys of the input budget, in the order the scripts take them.
+_BUDGET_KEYS = ("inputs:{budget}:size", "inputs:{budget}:expiry", "inputs:{budget}:total")
+
+
+class InputBudgetExceeded(Exception):  # noqa: N818 - a refusal, not an error of ours
+    """Storing the input would take all inputs over ``DOCLING_INPUT_BUDGET_BYTES``."""
 
 
 class JobLost(Exception):  # noqa: N818 - public name fixed by the plan
@@ -200,6 +319,20 @@ def browser_lease_seconds(settings: Settings) -> float:
     return 2 * longest + 10
 
 
+def docling_lease_seconds(settings: Settings) -> float:
+    """How long the Docling worker holds an item: two conversions (``DOCLING_TIMEOUT_SECONDS``)
+    plus 10 s (ruling F14)."""
+    return 2 * settings.docling_timeout_seconds + 10
+
+
+def owner_key(owner: str, name: str) -> str:
+    """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
+    escaped, so a name cannot break the hash tag."""
+    for char, code in _OWNER_ESCAPES.items():
+        owner = owner.replace(char, code)
+    return f"jobs:{{owner:{owner}}}:{name}"
+
+
 def _key(job_id: str, kind: str) -> str:
     """``job:{<id>}:<kind>`` with the id in literal braces: a cluster hash tag."""
     return f"job:{{{job_id}}}:{kind}"
@@ -214,6 +347,18 @@ def _artifact_key(job_id: str, name: str) -> str:
     if not valid_artifact_name(name):
         raise ValueError(f"Invalid artifact name: {name!r}")
     return _key(job_id, f"artifact:{name}")
+
+
+def _options_json(options: JobOptions) -> str:
+    """The stored form of a job's options. ``ocr`` is left out while it is the default
+    (``auto``): pods of a release before it parse the options strictly, and during a rolling
+    upgrade they read the jobs that new pods create."""
+    return options.model_dump_json(exclude={"ocr"} if options.ocr == "auto" else None)
+
+
+def _budget_member(job_id: str, index: int) -> str:
+    """The name of an input in the input budget."""
+    return f"{job_id}:{index}"
 
 
 def _epoch(value: float) -> str:
@@ -249,21 +394,27 @@ class JobStore:
         self._mark_running = valkey.register_script(_MARK_RUNNING)
         self._put_draft = valkey.register_script(_PUT_DRAFT)
         self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
+        self._put_input = valkey.register_script(_PUT_INPUT)
+        self._reserve_input = valkey.register_script(_RESERVE_INPUT)
+        self._release_inputs = valkey.register_script(_RELEASE_INPUTS)
+        self._input_budget = settings.docling_input_budget_bytes
 
     async def create(
         self,
         kind: JobKind,
         owner: Principal,
         options: JobOptions,
-        urls: list[str],
+        urls: Sequence[str | None],
         *,
         trace_id: str | None = None,
         secrets: BrowserSecrets | None = None,
     ) -> str:
-        """Store a new job in state ``queued`` and return its id. ``trace_id`` is the creating
-        request's. ``secrets`` (B6) are stored apart from the job, for a short time only."""
+        """Store a new job in state ``queued`` and return its id. ``urls`` has one entry per
+        item, None for an uploaded file. ``trace_id`` is the creating request's. ``secrets``
+        (B6) are stored apart from the job, for a short time only."""
         if not urls:
-            raise ValueError("A job needs at least one URL")
+            raise ValueError("A job needs at least one URL (None for an uploaded file)")
+        stored_urls = [_NO_URL if url is None else url for url in urls]
         job_id = uuid.uuid4().hex
         meta_key = _key(job_id, "meta")
         urls_key = _key(job_id, "urls")
@@ -271,7 +422,7 @@ class JobStore:
             "kind": kind,
             "owner": owner.name,
             "owner_role": owner.role,
-            "options": options.model_dump_json(),
+            "options": _options_json(options),
             "state": "queued",
             "created_at": _epoch(self._clock()),
             "total": len(urls),
@@ -287,8 +438,8 @@ class JobStore:
             meta["secrets"] = "1"
         async with self._valkey.pipeline(transaction=True) as pipe:
             pipe.hset(meta_key, mapping=meta)
-            for start in range(0, len(urls), _URL_CHUNK):
-                pipe.rpush(urls_key, *urls[start : start + _URL_CHUNK])
+            for start in range(0, len(stored_urls), _URL_CHUNK):
+                pipe.rpush(urls_key, *stored_urls[start : start + _URL_CHUNK])
             pipe.expire(meta_key, self._ttl_seconds)
             pipe.expire(urls_key, self._ttl_seconds)
             if stored_secrets is not None:
@@ -301,24 +452,28 @@ class JobStore:
         return job_id
 
     async def delete(self, job_id: str) -> None:
-        """Remove all keys of the job, its secrets, drafts and files too. A job that is gone
-        already is not an error."""
+        """Remove all keys of the job, its secrets, drafts, files and the input of item 0 too
+        (its bytes leave the input budget). A job that is gone already is not an error."""
         await self._valkey.delete(
             *(_key(job_id, kind) for kind in _KINDS),
             *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
+            _key(job_id, _FIRST_INPUT),
         )
+        await self._release(job_id, 0)
 
     async def shorten(self, job_id: str, seconds: int) -> None:
         """Let the job and its files expire within ``seconds`` (never later than they would)
-        and delete its secrets and drafts: a sync answer's screenshot job, which only the
-        artifact route still reads. A job that is gone already is not an error."""
+        and delete its secrets, drafts and the input of item 0: a sync answer's screenshot job,
+        which only the artifact route still reads. A job that is gone already is not an
+        error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
             for kind in ("meta", "urls", "results", "done"):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
             for name in ARTIFACT_NAMES:
                 pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
-            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"))
+            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"), _key(job_id, _FIRST_INPUT))
             await pipe.execute()
+        await self._release(job_id, 0)
 
     async def secrets(self, job_id: str) -> BrowserSecrets:
         """The caller's browser secrets of the job; empty when it had none or they are gone."""
@@ -352,6 +507,88 @@ class JobStore:
         if raw is None:
             return None
         return Envelope[ExtractResult].model_validate_json(raw)
+
+    async def put_input(
+        self, job_id: str, index: int, body: bytes, meta: BaseModel, ttl: int
+    ) -> None:
+        """Keep the bytes of item ``index`` with ``meta`` (stored as JSON) for ``ttl`` seconds,
+        but never longer than the job; a later input of the item replaces it. Raises
+        ``InputBudgetExceeded`` when all inputs would exceed ``DOCLING_INPUT_BUDGET_BYTES``, and
+        ``JobLost`` when the job is gone; nothing is stored then."""
+        encoded = meta.model_dump_json()
+        member = _budget_member(job_id, index)
+        reserved = await self._reserve_input(
+            keys=list(_BUDGET_KEYS),
+            args=[member, len(body) + len(encoded.encode()), ttl * 1000, self._input_budget],
+        )
+        if not reserved:
+            raise InputBudgetExceeded
+        try:
+            outcome = await self._put_input(
+                keys=[_key(job_id, "meta"), _key(job_id, f"input:{index}")],
+                args=[body, encoded, ttl * 1000],
+            )
+        except BaseException:
+            await asyncio.shield(self._release(job_id, index))
+            raise
+        if outcome == _NOT_FOUND:
+            await self._release(job_id, index)
+            raise JobLost(job_id)
+
+    async def get_input[M: BaseModel](
+        self, job_id: str, index: int, model: type[M]
+    ) -> tuple[bytes, M] | None:
+        """The bytes of item ``index`` and their meta as ``model``, or None when there are none
+        (never stored, deleted or expired)."""
+        body, meta = await self._valkey.hmget(_key(job_id, f"input:{index}"), ["body", "meta"])
+        if body is None or meta is None:
+            return None
+        raw = body.encode() if isinstance(body, str) else bytes(body)
+        return raw, model.model_validate_json(meta)
+
+    async def delete_input(self, job_id: str, index: int) -> None:
+        """Delete the bytes of item ``index`` (it has its outcome); they leave the input
+        budget."""
+        await self._valkey.delete(_key(job_id, f"input:{index}"))
+        await self._release(job_id, index)
+
+    async def _release(self, job_id: str, index: int) -> None:
+        """Give the reservation of an input back (after the input is gone). A Valkey failure
+        leaves it to its expiry."""
+        with contextlib.suppress(RedisError, OSError):
+            await self._release_inputs(
+                keys=list(_BUDGET_KEYS), args=[_budget_member(job_id, index)]
+            )
+
+    async def add_docling_job(self, owner: str, job_id: str) -> int:
+        """Count the job as one of the owner's Docling jobs; how many the set holds afterwards,
+        finished ones that were not counted out yet included."""
+        key = owner_key(owner, "docling")
+        async with self._valkey.pipeline(transaction=True) as pipe:
+            pipe.sadd(key, job_id)
+            pipe.expire(key, self._ttl_seconds)
+            pipe.scard(key)
+            size: int = (await pipe.execute())[-1]
+        return size
+
+    async def drop_docling_job(self, owner: str, job_id: str) -> None:
+        """Count the job out of the owner's Docling jobs."""
+        await self._valkey.srem(owner_key(owner, "docling"), job_id)
+
+    async def open_docling_jobs(self, owner: str) -> int:
+        """The owner's unfinished Docling jobs. Jobs that are completed or gone are counted
+        out."""
+        key = owner_key(owner, "docling")
+        ids = [reply_text(raw) for raw in await self._valkey.smembers(key)]
+        records = await asyncio.gather(*(self.get(job_id) for job_id in ids))
+        finished = [
+            job_id
+            for job_id, record in zip(ids, records, strict=True)
+            if record is None or record.state == "completed"
+        ]
+        if finished:
+            await self._valkey.srem(key, *finished)
+        return len(ids) - len(finished)
 
     async def put_artifact(self, job_id: str, name: str, data: bytes) -> datetime:
         """Store a file of the job for ``ARTIFACT_TTL_SECONDS`` and return when it expires.
@@ -401,7 +638,8 @@ class JobStore:
         )
 
     async def url(self, job_id: str, index: int) -> str | None:
-        """The URL at ``index``, or None when there is none."""
+        """The URL at ``index``, ``""`` for an uploaded file's item, or None when the job has no
+        such item."""
         if index < 0:
             return None
         raw = await self._valkey.lindex(_key(job_id, "urls"), index)
@@ -420,7 +658,7 @@ class JobStore:
         return [
             JobItem(
                 index=offset + position,
-                url=reply_text(url),
+                url=reply_text(url) or None,
                 state="done" if results[position] is not None else "pending",
                 result=(
                     Envelope[ExtractResult].model_validate_json(results[position])

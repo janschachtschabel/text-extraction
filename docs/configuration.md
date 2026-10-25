@@ -25,7 +25,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`. The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
+| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so has `POST /v1/extract/file`: `DOCUMENT_MAX_BYTES` + 64 KiB. The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
 | `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` answers 503 `internal_error` (retryable), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
@@ -80,7 +80,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `SCREENSHOT_MAX_BYTES` | `10485760` | Largest screenshot file, in bytes (10 MiB). Minimum 1. |
 | `SCREENSHOT_MAX_HEIGHT_PX` | `16384` | Tallest screenshot, in pixels; a longer page is cut. 1080 to 32768. |
 | `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download (`GET /v1/jobs/{id}/artifacts/screenshot.png`), in seconds. The download is a job route: it needs `JOBS_ENABLED=true` (otherwise 503), so a deployment that takes screenshots keeps jobs on. Minimum 60. |
-| `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default, 80 s with browser mode, 110 s with unblock mode) must stay below the API pods' `terminationGracePeriodSeconds` minus a 10 s margin; the Helm chart computes it from both unless you set it (45, 90 or 120 s), see Response times. Minimum 0. |
+| `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default, 55 s with OCR only, 80 s with browser mode, 110 s with unblock mode) must stay below the API pods' `terminationGracePeriodSeconds` minus a 10 s margin; the Helm chart computes it from both unless you set it (45, 65, 90 or 120 s), see Response times. Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
 taken over the normalised URL: lower-case scheme and host, no fragment, no default port (80 for
@@ -187,6 +187,22 @@ shutdown ends. The worker needs the same `API_KEYS` as the API while `AUTH_MODE`
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
 
+The Docling worker (`text-extraction-docling-worker`, image `text-extraction-docling`) serves only
+port 9090 as well. Its `/ready` answers 200 once it has checked the models under
+`DOCLING_MODELS_PATH`, started its conversion children and converted a built-in scan; without the
+models it exits with code 1 (log `docling_models_missing`). On SIGTERM it stops claiming and gives
+the conversions in flight 30 s, then kills its children; their leases expire and the items run
+again. The image runs as uid 10001 with `HOME` under `/tmp` and `TESSDATA_PREFIX=/models/tessdata`,
+and holds no models: they come from a volume (Helm: a PVC filled by an init container; compose:
+the volume `docling-models` filled by the one-shot service `docling-models`). All images start
+`tini` as PID 1, which forwards signals and reaps orphaned child processes.
+
+docker compose starts the Docling worker only with the profile `docling`:
+`docker compose --profile docling up -d --wait` with `DOCLING_ENABLED=true` in `.env` (compose
+passes `DOCLING_ENABLED` from `.env` or the shell to every service, default false). The service
+`docling-models` runs `--download-models` into the volume first (it needs the internet once), then
+`docling-worker` mounts it read-only; its stop grace period is 45 s.
+
 ## Response times
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
@@ -208,15 +224,18 @@ While `BROWSER_ENABLED`, the graceful phase is at least
 `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds (75 s by
 default, 105 s with unblock mode; the render deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock
 mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`), because a sync request may wait for
-a browser worker and its render after the fast phase.
+a browser worker and its render after the fast phase. While `DOCLING_ENABLED`, it is also at least
+`EXTRACT_TIMEOUT_SECONDS + DOCLING_SYNC_WAIT_SECONDS + 5` seconds (50 s by default), because a
+sync request with a document that needs OCR waits for the Docling worker after its fast phase.
 
 The grace periods in the Helm chart, each with a 10 s margin:
 
 | Pods | Value | Default | Must cover |
 | --- | --- | --- | --- |
-| API | `terminationGracePeriodSeconds` | unset: computed, 45 s without browser workers, 90 s with them, 120 s with unblock mode | `SHUTDOWN_DRAIN_SECONDS` + the graceful phase above |
+| API | `terminationGracePeriodSeconds` | unset: computed, 45 s without browser or Docling workers, 65 s with Docling workers only, 90 s with browser workers, 120 s with unblock mode | `SHUTDOWN_DRAIN_SECONDS` + the graceful phase above |
 | Extract workers | `workers.extract.terminationGracePeriodSeconds` | 45 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (30 s) |
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
+| Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -261,6 +280,56 @@ The Helm keys, with the variables they render (the full table is in the
 | `workers.browser.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-browser`, chart version | The browser image. |
 
 All other browser variables go under `config.<NAME>` like any other setting.
+
+## Documents and OCR
+
+Documents (PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, ODF and images) are converted to text by
+child processes of the pod that holds the bytes (MarkItDown); OCR and ODF files need the Docling
+worker. Docling is off by default: without it a scan keeps its text layer and an image answers
+`unsupported_content_type`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOCUMENT_MAX_BYTES` | `20000000` | Largest document that is converted, in bytes (also the largest upload). At least 1024 and at most `FETCH_MAX_BYTES`: a larger value makes the service exit with code 2 at start-up, so lower `DOCUMENT_MAX_BYTES` too when you lower `FETCH_MAX_BYTES`. A larger document fails with `too_large` (not retryable). |
+| `DOCUMENT_MAX_PAGES` | `100` | Pages of a PDF that are converted; later pages are cut (warning `pages_truncated`). Minimum 1. |
+| `DOCUMENT_MAX_UNCOMPRESSED_BYTES` | `200000000` | Largest total size of all entries of a ZIP-based document (DOCX, PPTX, XLSX, EPUB, ODT, ODS, ODP) once unpacked, in bytes. A document over it, with more than 10,000 entries or with an entry that unpacks to over 100 times its size fails with `too_large`. Minimum 1024. |
+| `DOCUMENT_CONCURRENCY` | `2` | Conversion child processes per pod; each converts one document at a time. A request waits for a free one within its time budget. Minimum 1. |
+| `DOCUMENT_MEMORY_LIMIT_MB` | `2048` | Address space limit (`RLIMIT_AS`) of one conversion child, in MiB. A child that exceeds it answers `too_large`. Minimum 256. Keep `DOCUMENT_CONCURRENCY` x this below the container's memory limit minus what the process itself needs; the Helm chart renders it that way from the memory limit (768 with the defaults) unless set in `config`. |
+| `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod. |
+| `DOCLING_TIMEOUT_SECONDS` | `300` | Time budget of one Docling conversion, in seconds; the conversion child is killed after it. Docling itself stops at 0.9 of it and answers the pages it read (warning `pages_partial`). 30 to 1800. |
+| `DOCLING_SYNC_WAIT_SECONDS` | `20` | How long a synchronous request that needs OCR waits for the Docling worker, in seconds. Then it answers the text layer with the warning `ocr_unavailable` (an image fails with `timeout`, retryable). 0 to 25. |
+| `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker, or of an upload that became a job (`wait_seconds`), stay in Valkey, in seconds; never longer than the job. They are deleted when the item is done. Minimum 600. |
+| `DOCLING_INPUT_BUDGET_BYTES` | `200000000` | The most bytes the inputs of all jobs may hold in Valkey at once: documents queued for the Docling worker and uploads that became a job (`wait_seconds`), across all pods. A document that would exceed it is not queued: a sync request answers its text layer with `ocr_unavailable` (an image fails with `rate_limited`, retryable), a batch item keeps its text layer the same way, and a slow upload stays synchronous instead of becoming a job. Counted as `input_budget` in `text_extraction_docling_dispatch_total`. Inputs leave it when their item is done or their TTL ends. Plan Valkey's `maxmemory` for it (see the chart's `valkey.maxmemory`). At least 1024 and at least `DOCUMENT_MAX_BYTES`, or the service exits with code 2 at start-up. |
+| `DOCLING_MAX_OPEN_PER_CLIENT` | `5` | Unfinished Docling jobs one API key may have. Beyond it nothing is queued for OCR and the request answers without it (`ocr_unavailable`). Minimum 1. |
+| `DOCLING_CONCURRENCY` | `1` | Documents one Docling worker pod converts at once, each in a child process of its own. Minimum 1. |
+| `DOCLING_THREADS` | `4` | CPU threads of one Docling conversion. Minimum 1. |
+| `DOCLING_MAX_PAGES` | `100` | Pages of a document the Docling worker converts; later pages are cut (warning `pages_truncated`). Minimum 1. |
+| `DOCLING_MEMORY_LIMIT_MB` | `6144` | Address space limit of one Docling conversion child, in MiB. Minimum 256. |
+| `DOCLING_OCR_LANGUAGES` | `deu,eng` | Tesseract language codes for OCR, comma-separated, lower case with underscores (`deu_frak` is valid). Their `.traineddata` files must be in `tessdata/` under `DOCLING_MODELS_PATH`. Anything else makes the service exit with code 2. |
+| `DOCLING_MODELS_PATH` | `/models` | Volume with the OCR models: Docling's layout and table models in `docling/`, Tesseract's data in `tessdata/`. The image holds no models; the Docling worker mounts the volume read-only. |
+
+The request field `ocr` (`auto`, `never` or `always`; default `auto`) is part of
+`POST /v1/extract`, `POST /v1/batch` and the form of `POST /v1/extract/file`. `auto` reads scans, broken text layers and images with
+OCR where it is enabled, `never` uses the text layer only, `always` also reads every PDF with OCR.
+
+`FETCH_MAX_BYTES` and `DOCUMENT_MAX_BYTES` are both 20000000 by default: lower them together.
+
+OCR needs `DOCLING_ENABLED=true` on every pod, `JOBS_ENABLED=true` on the API pods, at least one
+Docling worker and its models volume. The Helm keys (the full table is in the
+[chart README](../deploy/helm/text-extraction/README.md#docling-workers-and-the-models-volume)):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.docling.enabled` | `false` | Deploys the Docling workers and the models PVC; renders `DOCLING_ENABLED` into every pod. Needs jobs on the API pods. |
+| `workers.docling.concurrency` | `1` | `DOCLING_CONCURRENCY` on the Docling workers. |
+| `workers.docling.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. |
+| `workers.docling.terminationGracePeriodSeconds` | `60` | See Response times. |
+| `workers.docling.resources` | 1 / 3Gi to 4 / 8Gi | Sized for one conversion. |
+| `workers.docling.nodeSelector` | `kubernetes.io/arch: amd64` | The image is built for linux/amd64 only. |
+| `workers.docling.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `docling` queue or on CPU. |
+| `workers.docling.models.download` | `true` | An init container fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.docling.models.persistence.*` | `5Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`DOCLING_MODELS_PATH`), read-only in the worker. |
+| `workers.docling.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-docling`, chart version | The Docling image. |
 
 ## Headers
 
@@ -343,7 +412,7 @@ slot.
 
 | Key | Content | Lifetime |
 | --- | --- | --- |
-| `job:{<id>}:meta` | Hash: kind, owner, owner role, options (JSON), state, counters, times, lease, and the trace id of the request that created the job. | `JOB_TTL_SECONDS` from creation, renewed on completion. |
+| `job:{<id>}:meta` | Hash: kind, owner, owner role, options (JSON; `ocr` only when it is not `auto`, so pods of an older release read the job during a rolling upgrade), state, counters, times, lease, and the trace id of the request that created the job. | `JOB_TTL_SECONDS` from creation, renewed on completion. |
 | `job:{<id>}:urls` | List of the job's URLs in input order. | As `meta`. |
 | `job:{<id>}:results` | Hash of item index to the result envelope (JSON). | As `meta`; set with the first result. |
 | `job:{<id>}:done` | Bitmap of the finished item indexes. | As `meta`; set with the first result. |
@@ -357,6 +426,16 @@ batch. `POST /v1/batch` removes the ids of finished or expired jobs before it co
 the batch when the owner has `BATCH_MAX_OPEN_PER_CLIENT` open ones. The name is escaped (`%` as
 `%25`, `{` as `%7B`, `}` as `%7D`), so the braces always enclose exactly the name. No script
 touches this key together with a job key or a queue key.
+
+The bytes of an item (an upload, a document queued for OCR) are kept in
+`job:{<id>}:input:<index>` (a hash of `body` and `meta`) for `DOCLING_INPUT_TTL_SECONDS` at most,
+and deleted when the item is done. All of them together stay within `DOCLING_INPUT_BUDGET_BYTES`,
+accounted in three keys of the hash tag `{budget}`: `inputs:{budget}:size` (hash of
+`<id>:<index>` to the input's bytes), `inputs:{budget}:expiry` (sorted set of the same members,
+scored by when the input expires, in Valkey's milliseconds) and `inputs:{budget}:total` (their
+sum). A script on these keys checks and reserves an input's bytes in one step before the input is
+written; it also removes the reservations whose expiry has passed, so an input that expires by
+its TTL leaves the budget without anyone deleting it. Deleting an input gives its bytes back.
 
 ## Queue keys
 
@@ -403,15 +482,19 @@ The job system exports these besides the HTTP and extraction metrics:
 
 | Metric | Type | Labels | Exported by | Meaning |
 | --- | --- | --- | --- | --- |
-| `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. Pools: `extract`, and `browser` while `BROWSER_ENABLED`. |
+| `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. Pools: `extract`, `browser` while `BROWSER_ENABLED`, and `docling` while `DOCLING_ENABLED`. |
 | `text_extraction_queue_leased_items` | gauge | `pool` | API pods | Items of the pool that a worker has leased (also leases that expired and are not taken back yet). |
 | `text_extraction_queue_clients` | gauge | `pool` | API pods | Clients (API key names) with items waiting. |
 | `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
 | `text_extraction_valkey_used_memory_bytes` | gauge | none | API pods, workers | Valkey's `used_memory` (`INFO memory`), read every 5 s; exported from the first successful read on and left unchanged while Valkey fails. Every pod reads the same Valkey: use `max()`. |
 | `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
-| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, and an `extract` or `screenshot` job when a sync request that waits for the browser answers 202 with its browser job. |
+| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser or the Docling worker answers 202 with that job. |
 | `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
 | `text_extraction_browser_dispatch_total` | counter | `outcome` (`rendered`, `not_claimed`, `no_result`, `handed_over`, `backend_error`) | API pods (with `BROWSER_ENABLED`) | Sync requests (`POST /v1/extract`, `POST /v1/screenshot`) the pod sent to the browser workers, by how the wait ended: `rendered` (the worker's result came back), `not_claimed` (no worker took the page within `BROWSER_QUEUE_WAIT_SECONDS`), `no_result` (taken, but no result by the render deadline + 5 s, or the job was gone), `handed_over` (answered 202; the worker writes the job's result) or `backend_error` (Valkey failed). `not_claimed`, `no_result` and `backend_error` answer `auto` with its fast result and the warning `browser_unavailable`, and `browser` and screenshots with `timeout` (or 503): alert on their rate to see sync requests that silently fell back to fast mode. Every outcome is exported as 0 from the start. Use `sum()` over pods. |
+| `text_extraction_docling_dispatch_total` | counter | `outcome` (`answered`, `not_claimed`, `no_result`, `handed_over`, `backend_error`, `memory_guard`, `open_limit`, `input_budget`) | API pods and extract workers (with `DOCLING_ENABLED` and `JOBS_ENABLED`) | Sync requests (`POST /v1/extract`, `POST /v1/extract/file`) that needed OCR, by how the hand-over to the Docling workers ended: `answered` (the worker's result came back), `not_claimed` (no worker claimed the item within `DOCLING_SYNC_WAIT_SECONDS`), `no_result` (claimed, but no result in time, or the job was gone), `handed_over` (answered 202, or the document joined the request's own job), `backend_error` (Valkey failed), `memory_guard` (Valkey's memory guard was high), `open_limit` (the key had `DOCLING_MAX_OPEN_PER_CLIENT` unfinished Docling jobs) or `input_budget` (the inputs of all jobs would exceed `DOCLING_INPUT_BUDGET_BYTES`); the last three dispatch nothing. Extract workers count the batch items they could not move to the Docling workers (`memory_guard`, `input_budget`). Every outcome but `answered` and `handed_over` answers without OCR (`ocr_unavailable`, or a retryable failure for an image). Every outcome is exported as 0 from the start. Use `sum()` over pods. |
+| `text_extraction_document_conversions_total` | counter | `converter` (`markitdown`, `docling`), `kind` (`pdf`, `docx`, ...), `outcome` (`success` or the error code) | API pods, workers (extract, browser, docling) | Document conversions, where they run: MarkItDown in API pods (URLs and uploads) and in the extract and browser workers, Docling in the Docling workers. |
+| `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
+| `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |
 | `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |

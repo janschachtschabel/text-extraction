@@ -244,7 +244,8 @@ def test_429_is_retryable_and_pauses_the_host() -> None:
 
 
 def test_unsupported_content_type() -> None:
-    harness = Harness({PAGE: fetched(body=b"%PDF-1.7", content_type="application/pdf")})
+    # PDFs convert since package 5 (test_pipeline_documents.py); a GIF still does not.
+    harness = Harness({PAGE: fetched(body=b"GIF89a", content_type="image/gif")})
 
     envelope = harness.run_once()
 
@@ -252,7 +253,7 @@ def test_unsupported_content_type() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
     data = data_of(envelope)
-    assert data.content_type == "application/pdf"
+    assert data.content_type == "image/gif"
     assert data.upstream_status == 200
     assert data.content is None
 

@@ -7,11 +7,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
+from text_extraction.documents.types import OcrOption
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.netguard import MAX_URL_LENGTH
 
-JobKind = Literal["extract", "batch", "screenshot"]
+JobKind = Literal["extract", "batch", "screenshot", "file"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
 
@@ -50,6 +51,10 @@ class BatchRequest(BaseModel, extra="forbid"):
     cache: bool = Field(
         default=True, description="Use the result cache; `false` neither reads nor stores."
     )
+    ocr: OcrOption = Field(
+        default="auto",
+        description="As for `/v1/extract`: `auto`, `never` or `always` OCR for documents.",
+    )
 
 
 class JobOptions(BaseModel, extra="forbid"):
@@ -64,6 +69,7 @@ class JobOptions(BaseModel, extra="forbid"):
     cache: bool = True
     screenshot: bool = False
     full_page: bool = True
+    ocr: OcrOption = "auto"
 
     @model_validator(mode="after")
     def _screenshot_needs_browser(self) -> Self:
@@ -86,7 +92,7 @@ class JobItem(BaseModel):
     """One URL of a job; ``result`` is set once its state is ``done``."""
 
     index: int
-    url: str
+    url: str | None  # None for an uploaded file
     state: ItemState
     result: Envelope[ExtractResult] | None
 

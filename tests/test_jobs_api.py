@@ -23,7 +23,7 @@ from text_extraction.envelope import ErrorCode
 from text_extraction.extract_models import ExtractRequest
 from text_extraction.fetch import Fetcher, FetchError
 from text_extraction.job_models import MAX_BATCH_URLS, BatchRequest, JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.jobs_api import create_batch
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pipeline import create_pipeline
@@ -799,6 +799,19 @@ def test_batch_stores_the_trace_id_of_its_request(api: Api) -> None:
     assert record.trace_id == "trace-b"
 
 
+def stored_job(api: Api, job_id: str) -> JobRecord | None:
+    return api.run(lambda valkey: JobStore(valkey, api.settings).get(job_id))
+
+
+def test_batch_stores_the_ocr_option_in_the_job_options(api: Api) -> None:
+    chosen = api.batch([PAGE], ocr="never").json()["data"]["id"]
+    default = api.batch([PAGE]).json()["data"]["id"]
+
+    records = [stored_job(api, chosen), stored_job(api, default)]
+
+    assert [record.options.ocr for record in records if record is not None] == ["never", "auto"]
+
+
 def test_job_whose_lease_was_cleared_is_never_lost(api: Api) -> None:
     # An extract job whose item moved to the browser pool (Task 8): its P1 lease is cleared.
     job_id = start_extract_job(api, lease_seconds=35, age_seconds=100)
@@ -830,6 +843,20 @@ def test_batch_browser_mode_goes_to_browser_pool(make_api: Callable[..., Api]) -
     # auto stays in the extract pool: the extract worker moves what needs the browser (B5).
     assert api.batch([PAGE]).status_code == 202
     assert queue_counts(api, "extract").pending == 1
+
+
+def test_batch_ocr_always_while_docling_off_is_400(make_api: Callable[..., Api]) -> None:
+    api = make_api()
+    response = api.batch([PAGE], ocr="always")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "OCR is not enabled on this service."
+    assert api.keys("job*") == []
+
+    enabled = make_api(docling_enabled=True)
+    assert enabled.batch([PAGE], ocr="always").status_code == 202
 
 
 def test_batch_browser_mode_disabled_is_400(api: Api) -> None:

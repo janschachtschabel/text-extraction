@@ -1,0 +1,28 @@
+# Reviewed exceptions of the licence gate (scripts/check_licenses.py).
+#
+# [[allow]]: a distribution the gate flags (GPL, AGPL or LGPL found in its metadata) although its
+#   licence is fine, at one version: name, version, license (what it really is), reason. A new
+#   version is flagged again until it is reviewed.
+# [[not_installed]]: packages of uv.lock that no Linux environment installs (another platform's
+#   dependencies), with the licence from their PyPI metadata: name, license, reason, optional
+#   version. The gate checks that every package the lock reaches is installed or listed here.
+
+[[not_installed]]
+name = "colorama"
+license = "BSD-3-Clause"
+reason = "Windows only: a dependency of pytest under sys_platform == 'win32'"
+
+[[not_installed]]
+name = "pyreadline3"
+license = "BSD"
+reason = "Windows only: a dependency of humanfriendly under sys_platform == 'win32'"
+
+[[not_installed]]
+name = "httpx2-jsfetch"
+license = "BSD-3-Clause"
+reason = "Emscripten only: a dependency of httpx2 under sys_platform == 'emscripten'"
+
+[[not_installed]]
+name = "pywin32"
+license = "PSF-2.0"
+reason = "Windows only: a dependency of docling-parse (extra docling) under sys_platform == 'win32'"

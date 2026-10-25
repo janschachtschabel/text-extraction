@@ -1,0 +1,77 @@
+# The model files of the Docling worker, as `text-extraction-docling-worker --download-models`
+# puts them under DOCLING_MODELS_PATH (ruling F15). Each file is fetched from its `url`, which
+# names a fixed commit, and must have exactly `size` bytes and this SHA-256; otherwise nothing
+# is put in place. A change of this file (its SHA-256) makes the next run download again.
+#
+# Paths are relative to DOCLING_MODELS_PATH: Docling's models under `docling/` (its
+# `artifacts_path`, one folder per Hugging Face repository, named `<owner>--<name>`), Tesseract's
+# data under `tessdata/` (TESSDATA_PREFIX). To add or update a file: download it from a URL at a
+# commit, then record `sha256sum` and the byte size here. The licences are in NOTICE.
+
+# Tesseract's best LSTM models (Apache-2.0), tesseract-ocr/tessdata_best at commit e12c65a
+# (2024-03-09; the three files last changed in ed5410b, 2018-02-01).
+[[files]]
+path = "tessdata/deu.traineddata"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/deu.traineddata"
+sha256 = "8407331d6aa0229dc927685c01a7938fc5a641d1a9524f74838cdac599f0d06e"
+size = 8628461
+
+[[files]]
+path = "tessdata/eng.traineddata"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata"
+sha256 = "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba"
+size = 15400601
+
+[[files]]
+path = "tessdata/osd.traineddata"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/osd.traineddata"
+sha256 = "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff"
+size = 10562727
+
+# Tesseract's `tsv` output config (Apache-2.0): with TESSDATA_PREFIX (or --tessdata-dir) on the
+# volume, Tesseract reads its configs from tessdata/configs, and Docling asks for `tsv` output.
+# tesseract-ocr/tessconfigs at commit 3decf1c (2019-10-23), the submodule tessdata_best e12c65a
+# names (tessdata_best's `configs` is a link into it).
+[[files]]
+path = "tessdata/configs/tsv"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessconfigs/3decf1c8252ba6dbeef0bf908f4b0aab7f18d113/configs/tsv"
+sha256 = "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04"
+size = 22
+
+# The layout model "heron" (Apache-2.0), docling-project/docling-layout-heron at commit 8f39ad3
+# (`main` as of 2026-02-09), the revision Docling 2.137.0 names. Docling's default Transformers
+# engine reads these three files from <artifacts_path>/docling-project--docling-layout-heron.
+
+[[files]]
+path = "docling/docling-project--docling-layout-heron/config.json"
+url = "https://huggingface.co/docling-project/docling-layout-heron/resolve/8f39ad3c0b4c58e9c2d2c84a38465abf757272d8/config.json"
+sha256 = "fdea30805ce2f5666b147fca941dcdd27ad468e27d6ed21902207d3da056a97d"
+size = 3268
+
+[[files]]
+path = "docling/docling-project--docling-layout-heron/preprocessor_config.json"
+url = "https://huggingface.co/docling-project/docling-layout-heron/resolve/8f39ad3c0b4c58e9c2d2c84a38465abf757272d8/preprocessor_config.json"
+sha256 = "cd38cd59999e7a95d68e487fbe5132df3d4e5c32a0836add57e6126ba0c4eaf1"
+size = 444
+
+[[files]]
+path = "docling/docling-project--docling-layout-heron/model.safetensors"
+url = "https://huggingface.co/docling-project/docling-layout-heron/resolve/8f39ad3c0b4c58e9c2d2c84a38465abf757272d8/model.safetensors"
+sha256 = "00333a43451945aaf89db8ca9c0a17e75d1537c17db60fdb91aa95f4c7929e0c"
+size = 171658996
+
+# TableFormer (CDLA-Permissive-2.0), docling-project/docling-models at tag v2.3.0, commit fc0f2d4
+# (2025-07-23), the revision Docling 2.137.0 names. Only the fast mode (TableFormerMode.FAST, as
+# docling_convert.py uses it): its config and the one tableformer_*.safetensors next to it.
+
+[[files]]
+path = "docling/docling-project--docling-models/model_artifacts/tableformer/fast/tm_config.json"
+url = "https://huggingface.co/docling-project/docling-models/resolve/fc0f2d45e2218ea24bce5045f58a389aed16dc23/model_artifacts/tableformer/fast/tm_config.json"
+sha256 = "dca6762508dddfae6d57d6cb4ef822c6000119dff0f3b6489db7413118c2622a"
+size = 7060
+
+[[files]]
+path = "docling/docling-project--docling-models/model_artifacts/tableformer/fast/tableformer_fast.safetensors"
+url = "https://huggingface.co/docling-project/docling-models/resolve/fc0f2d45e2218ea24bce5045f58a389aed16dc23/model_artifacts/tableformer/fast/tableformer_fast.safetensors"
+sha256 = "3119563aab5a7c96fda4d621119b63fd8806272b86c30936d15507616422f718"
+size = 145453276

@@ -6,13 +6,16 @@
   visible. Every API pod reads the same queue, so a query takes ``max()`` over pods (``sum()``
   would count the backlog once per pod).
 - ``text_extraction_jobs_created_total{kind}``: jobs accepted by this pod (``batch``,
-  ``extract`` or ``screenshot``). A sync request's browser job counts once it is handed over to
-  the caller (202), like a P1 job.
+  ``extract``, ``screenshot`` or ``file``). A sync request's browser or Docling job counts once
+  it is handed over to the caller (202), like a P1 job.
 - ``text_extraction_job_duration_seconds{kind}``: observed by whichever process writes the last
   result of a job. The definition lives here so that the worker and the API cannot drift apart;
   each process has its own registry.
 - ``text_extraction_browser_dispatch_total{outcome}``: how the sync requests of this pod that
   went to the browser workers ended (``browser_dispatch.DISPATCH_OUTCOMES``).
+- ``text_extraction_docling_dispatch_total{outcome}``: how the dispatch of this pod's sync
+  requests with a document that needs OCR ended (``docling_dispatch.DOCLING_OUTCOMES``). The queue
+  gauges have pool ``docling`` while the service has OCR.
 
 A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``
 seconds, not once per scrape, since collectors are synchronous; the collector only reports the
@@ -93,34 +96,45 @@ def job_metrics_for(registry: CollectorRegistry) -> JobMetrics:
         created = Counter(
             "text_extraction_jobs_created_total",
             "Jobs accepted by this pod, by kind: batch (POST /v1/batch), extract (a slow "
-            "POST /v1/extract handed over to a job) or screenshot (a slow POST /v1/screenshot).",
+            "POST /v1/extract handed over to a job), screenshot (a slow POST /v1/screenshot) or "
+            "file (a slow POST /v1/extract/file).",
             ["kind"],
             registry=registry,
         )
-        for kind in ("batch", "extract", "screenshot"):
+        for kind in ("batch", "extract", "screenshot", "file"):
             created.labels(kind=kind)  # export 0 from the start, so rate() sees the first job
         metrics = JobMetrics(created=created, duration=job_duration_for(registry))
         _JOB_METRICS[registry] = metrics
     return metrics
 
 
-# One counter per registry, as for the job metrics.
-_DISPATCH: WeakKeyDictionary[CollectorRegistry, Counter] = WeakKeyDictionary()
+# One counter per registry and pool, as for the job metrics.
+_DISPATCH: WeakKeyDictionary[CollectorRegistry, dict[str, Counter]] = WeakKeyDictionary()
+_DISPATCH_HELP: Final = {
+    "browser": "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
+    "not_claimed, no_result, handed_over or backend_error.",
+    "docling": "Documents of this pod that needed OCR, by how their dispatch to the Docling "
+    "workers ended: answered, not_claimed, no_result, handed_over, backend_error (sync "
+    "requests), memory_guard, open_limit or input_budget (nothing dispatched; batch items count "
+    "memory_guard and input_budget).",
+}
 
 
-def dispatch_counter_for(registry: CollectorRegistry, outcomes: Iterable[str]) -> Counter:
-    """``text_extraction_browser_dispatch_total{outcome}`` in ``registry``, every one of
+def dispatch_counter_for(
+    registry: CollectorRegistry, outcomes: Iterable[str], *, pool: str = "browser"
+) -> Counter:
+    """``text_extraction_<pool>_dispatch_total{outcome}`` in ``registry``, every one of
     ``outcomes`` exported as 0 from the start."""
-    counter = _DISPATCH.get(registry)
+    counters = _DISPATCH.setdefault(registry, {})
+    counter = counters.get(pool)
     if counter is None:
         counter = Counter(
-            "text_extraction_browser_dispatch_total",
-            "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
-            "not_claimed, no_result, handed_over or backend_error.",
+            f"text_extraction_{pool}_dispatch_total",
+            _DISPATCH_HELP.get(pool, f"Sync requests this pod sent to the {pool} workers."),
             ["outcome"],
             registry=registry,
         )
-        _DISPATCH[registry] = counter
+        counters[pool] = counter
     for outcome in outcomes:
         counter.labels(outcome=outcome)
     return counter

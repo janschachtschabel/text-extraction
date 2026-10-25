@@ -31,6 +31,7 @@ from tests.browser.site import (
 from tests.fakes import FakeArtifacts
 from text_extraction import __version__
 from text_extraction.browser_driver import evaluate_in_main_world
+from text_extraction.browser_options import ClickAction
 from text_extraction.browser_scripts import CONSENT_WAIT
 from text_extraction.envelope import ErrorCode
 from text_extraction.fetch import FetchError
@@ -588,15 +589,51 @@ def test_form_post_navigation_is_refused(settings_for: SettingsFor, site: Site) 
     scenario(settings_for, site, body)
 
 
-def test_download_is_reported_as_non_html(settings_for: SettingsFor, site: Site) -> None:
+def test_download_is_reported_with_its_url(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
-        rendered = await render(stack, f"{site.base}/download.pdf")
-        assert [(r.url, r.content_type) for r in rendered.responses] == [
-            (f"{site.base}/download.pdf", "application/pdf")
-        ]
-        envelope = await run_pipeline(stack, url=f"{site.base}/download.pdf")
+        url = f"{site.base}/download.pdf"
+        rendered = await render(stack, url)
+        assert [(r.url, r.content_type) for r in rendered.responses] == [(url, "application/pdf")]
+        assert rendered.download_url == url
+        # F18: the pipeline fetches it directly; the stack's fake fetcher answers 404.
+        envelope = await run_pipeline(stack, url=url)
         assert envelope.error is not None
-        assert envelope.error.code is ErrorCode.UNSUPPORTED_CONTENT_TYPE
+        assert envelope.error.code is ErrorCode.TARGET_HTTP_ERROR
+        assert envelope.data is not None
+        assert envelope.data.mode_used == "fast"
+        assert "document_fetched_directly" in envelope.data.warnings
+
+    scenario(settings_for, site, body)
+
+
+@pytest.mark.parametrize(
+    ("path", "title"),
+    [("/download-frame", "Download frame"), ("/download-later", "Download later")],
+)
+def test_a_page_that_is_read_reports_no_download(
+    settings_for: SettingsFor, site: Site, path: str, title: str
+) -> None:
+    # An iframe's download, or one the page's script starts after the load, leaves the page in
+    # the main frame: its HTML is the result, not the file (F18).
+    async def body(stack: Stack) -> None:
+        rendered = await render(stack, f"{site.base}{path}")
+        assert f"<h1>{title}</h1>" in rendered.html
+        assert ARTICLE_TEXT in rendered.html
+        assert rendered.download_url is None
+        envelope = await run_pipeline(stack, url=f"{site.base}{path}")
+        assert envelope.data is not None
+        assert envelope.data.mode_used == "browser"
+        assert "document_fetched_directly" not in envelope.data.warnings
+
+    scenario(settings_for, site, body)
+
+
+def test_a_download_an_action_starts_is_reported(settings_for: SettingsFor, site: Site) -> None:
+    async def body(stack: Stack) -> None:
+        options = RenderOptions(actions=(ClickAction(selector="#worksheet"),))
+        rendered = await render(stack, f"{site.base}/download-link", options)
+        assert rendered.download_url == f"{site.base}/download.pdf"
+        assert rendered.html == ""
 
     scenario(settings_for, site, body)
 

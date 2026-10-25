@@ -202,23 +202,25 @@ def _with_documents(text: str, documents: list[tuple[str, str]], fmt: OutputForm
 def _make_absolute(soup: BeautifulSoup, url: str) -> None:
     """Every href and src resolved against the page (or its <base>) - or removed, when no URL
     parser accepts it or it is not an http(s) URL (``javascript:``, ``data:``, ``mailto:``, ...):
-    the output carries web links only. The link's text stays."""
+    the output carries web links only. The link's text stays. Without a page URL (an upload)
+    a reference that stays relative is kept as it is."""
     base = base_url_of(soup, url)
     for tag in soup.select("[href], [src]"):
         for name in ("href", "src"):
             if tag.get(name):
                 target = absolute_url(base, attr(tag, name).strip())
-                if target is None or _scheme(target) not in _LINK_SCHEMES:
-                    del tag[name]
-                else:
+                scheme = _scheme(target) if target is not None else None  # None: unparsable
+                if target is not None and (scheme in _LINK_SCHEMES or (scheme == "" and not url)):
                     tag[name] = target
+                else:
+                    del tag[name]
 
 
-def _scheme(url: str) -> str:
+def _scheme(url: str) -> str | None:
     try:
         return urlsplit(url).scheme.lower()
     except ValueError:
-        return ""
+        return None
 
 
 def _visible_text(soup: BeautifulSoup) -> str:

@@ -9,18 +9,24 @@ license-files = ["LICENSE", "NOTICE"]
 dependencies = [
     "beautifulsoup4>=4.15.0",
     "charset-normalizer>=3.5.2",
+    "defusedxml>=0.7.1",
     "extruct>=0.18.0",
     "fastapi>=0.162.0",
     "httpcore>=1.0.9",
     "httpx[http2]>=0.28.1",
     "jstyleson>=0.0.2",
     "lxml>=6.1.3",
+    "markdown-it-py==4.2.0",
+    "markitdown[docx,pdf,pptx,xls,xlsx]==0.1.8",
     "numpy>=2.0",
     "prometheus-client>=0.26.0",
     "prometheus-fastapi-instrumentator>=8.1.0",
     "protego>=0.7.0",
     "py3langid>=0.4.0",
     "pydantic-settings>=2.16.1",
+    # Newest release at least 14 days old when added (supply-chain caution, as for patchright).
+    "pypdfium2==5.14.0",
+    "python-multipart==0.0.32",  # Apache-2.0; 14-day rule as above
     "redis>=8.1.0",
     "structlog>=26.1.0",
     "trafilatura>=1.8",
@@ -31,6 +37,7 @@ dependencies = [
 text-extraction = "text_extraction.server:main"
 text-extraction-worker = "text_extraction.worker:main"
 text-extraction-browser-worker = "text_extraction.browser_worker:main"
+text-extraction-docling-worker = "text_extraction.docling_worker:main"
 
 [project.optional-dependencies]
 browser = [
@@ -39,10 +46,36 @@ browser = [
     "patchright==1.63.0",
     "playwright>=1.64",
 ]
+# The Docling worker (text-extraction-docling-worker): Docling with only the parts it uses (PDF and
+# image pipeline, OpenDocument, local layout and table models), and torch and torchvision from the
+# PyTorch CPU index (no CUDA). Each pinned to a release at least 14 days old (ruling R16).
+docling = [
+    "docling-slim[convert-core,format-pdf,format-opendocument,models-local]==2.137.0",
+    # TableFormer (docling-ibm-models) imports cv2 but leaves OpenCV to an extra of its own.
+    "opencv-python-headless==4.14.0.94",
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
+
+[tool.uv]
+# The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
+# `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
+# does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
+exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days" }
+
+# torch and torchvision only from the PyTorch CPU index: its wheels carry no CUDA libraries.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.build-backend]
 module-root = "src"
@@ -59,6 +92,13 @@ dev = [
     "playwright>=1.64",
     "patchright==1.63.0",  # as in the extra `browser`
     "duckduckgo-autoconsent-py>=16",
+    # Build the document corpus in tests/documents (dev only), 14-day rule as above.
+    "reportlab==5.0.1",
+    "python-docx==1.2.0",
+    "python-pptx==1.0.2",  # also in markitdown's extras
+    "openpyxl==3.1.5",  # also in markitdown's extras
+    "pillow==12.3.0",
+    "xlwt==1.3.0",
 ]
 
 [tool.ruff]
@@ -76,10 +116,10 @@ select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "RUF", "N", "ASYNC", "PT"]
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "py3langid.*"]
+module = ["defusedxml.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -87,6 +127,10 @@ testpaths = ["tests"]
 # tests/live needs a running service and the internet: only run_live.py runs it, by hand or in CI.
 # tests/e2e starts its own processes: only run_batch.py runs it (.github/workflows/e2e.yml).
 # Browser tests need Chromium: `pytest -m browser` runs them (CI job `browser`).
-addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser'"
-markers = ["browser: needs a real Chromium (run with `-m browser`)"]
+# Docling tests need the extra `docling`, Tesseract and the models: `pytest -m docling`.
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser and not docling'"
+markers = [
+    "browser: needs a real Chromium (run with `-m browser`)",
+    "docling: needs Docling, Tesseract and the models (run with `-m docling`)",
+]
 xfail_strict = true

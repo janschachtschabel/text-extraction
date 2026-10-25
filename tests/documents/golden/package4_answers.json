@@ -1,0 +1,202 @@
+{
+  "article": {
+    "data": {
+      "attempts": 1,
+      "cache": "miss",
+      "compliance": {
+        "ai_txt": "absent",
+        "crawl_delay": null,
+        "decision": "allowed",
+        "mode": "enforce",
+        "noai": false,
+        "reasons": [],
+        "robots": "allowed",
+        "tdm_policy": null,
+        "tdm_reserved": null,
+        "tdm_source": null
+      },
+      "content": "# Photosynthesis explained\n\nPhotosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction.\n\nPhotosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction.  Read [respiration](https://example.org/learn/respiration.html),\nthe [plant atlas](https://other.example/plants) and the\n[worksheet](https://example.org/files/worksheet.pdf).",
+      "content_type": "text/html",
+      "document": null,
+      "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
+      "fingerprint": {
+        "changed": null,
+        "minhash": "P1eWBaK91gbhpr8GMSxZAL9gGgxE8yMAB5xIC3I3QAC3yVMC1OM+BEknqAZ/LfMgZolsAaUySRLHNisFGvwDB3Wa6ALh1vcA84oOD3n5pwG5hsYCa+bqAdlhdgMOwoQB9BCcAcfMCwMKQngBBBPXBWrIQxLi0+wM25BIAxfkQQg05KEEsTSLConqgAEG0sQNBfxGA3sqSgT4bEoAJfy0AFM6dga3O5sAZbE6A3GXJgOh9kQDpaXTDQvOoQKBgq4LQmxbAsMNHA7mgBsJtthtAelwbw8JJkABbZg4A++PawJfm+QB/uNSAtl9uwKmDmYA/TBIDLqOLAc4wGYFY99vABQA0QKM3gUC2o9JBayRpAdJbkYBTU53AF+IsAW5Rl0NZVywAOh9PxEl7k0B8RNeC2itsQsKnQEBWzklAD46zwGcIEwAnxO7BPPqEQEB34QGlXOFAJK5CARid8oIW2b0AuPaOQAMHKgJrMdiB1/6NgTqbzABiGViDZEzrgLZ8GsBhFv1A44NSQWQ1wgGEcMjCDkMMQSX5ooCKKrLAjPQoQAyxyoA+bFZC6jNWgiUZvABzn0GCeAChgC/+OMBq9v3C9+pkQGt9s4JQVh2AqAKEwgDas4JhJHeAKfZJQkRIWMCDt9oASIg4AGmXngD5YYZAK9VTg4R9QsHJ59FCAVJ7gg=",
+        "raw_sha256": "a5efa8fd1b81c1b78d2c77e045563ebbf76d5492e5f48184de68a2efaad47d73",
+        "similarity_to_previous": null,
+        "text_sha256": "51086183e7150a57de8b72706bad84443424f2f81b8a0ee929d9037af2584694"
+      },
+      "format": "markdown",
+      "language": "en",
+      "links": [
+        {
+          "kind": "internal",
+          "text": "Home",
+          "url": "https://example.org/"
+        },
+        {
+          "kind": "internal",
+          "text": "respiration",
+          "url": "https://example.org/learn/respiration.html"
+        },
+        {
+          "kind": "external",
+          "text": "plant atlas",
+          "url": "https://other.example/plants"
+        },
+        {
+          "kind": "file",
+          "text": "worksheet",
+          "url": "https://example.org/files/worksheet.pdf"
+        }
+      ],
+      "metadata": {
+        "authors": [],
+        "canonical_url": null,
+        "description": "How plants turn light into food.",
+        "images": [],
+        "keywords": [],
+        "language": "en",
+        "license": {
+          "confidence": "high",
+          "id": "CC-BY-SA-4.0",
+          "label": null,
+          "source": "rel-license",
+          "url": "https://creativecommons.org/licenses/by-sa/4.0/"
+        },
+        "licenses": [
+          {
+            "confidence": "high",
+            "id": "CC-BY-SA-4.0",
+            "label": null,
+            "source": "rel-license",
+            "url": "https://creativecommons.org/licenses/by-sa/4.0/"
+          }
+        ],
+        "lrmi": {},
+        "modified": null,
+        "published": null,
+        "site_name": null,
+        "title": "Photosynthesis explained"
+      },
+      "mode_used": "fast",
+      "quality": {
+        "bot_challenge": false,
+        "browser_recommended": false,
+        "challenge_status": false,
+        "js_heavy": false,
+        "login_wall": false,
+        "script_count": 0,
+        "soft_404": false,
+        "visible_chars": 1314,
+        "word_count": 200
+      },
+      "screenshot": null,
+      "title": "Photosynthesis explained",
+      "unblocked": false,
+      "upstream_status": 200,
+      "url": "https://example.org/learn/photosynthesis.html?session=secret-token",
+      "warnings": [],
+      "word_count": 200
+    },
+    "error": null,
+    "status": "success"
+  },
+  "plain": {
+    "data": {
+      "attempts": 1,
+      "cache": "miss",
+      "compliance": {
+        "ai_txt": "absent",
+        "crawl_delay": null,
+        "decision": "allowed",
+        "mode": "enforce",
+        "noai": false,
+        "reasons": [],
+        "robots": "allowed",
+        "tdm_policy": null,
+        "tdm_reserved": null,
+        "tdm_source": null
+      },
+      "content": "<pre>Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction. Photosynthesis is the process by which green plants and some other organisms use sunlight to synthesize foods from carbon dioxide and water. It generally involves the green pigment chlorophyll and generates oxygen as a byproduct of the reaction.</pre>",
+      "content_type": "text/plain",
+      "document": null,
+      "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
+      "fingerprint": {
+        "changed": null,
+        "minhash": "P1eWBaK91gbhpr8GMSxZAL9gGgzNAOsAwcrOAnI3QAC3yVMC1OM+BEknqAZ/LfMgZolsAaUySRL3H7gXoFYLD3Wa6ALh1vcA84oOD3n5pwG5hsYCa+bqAc9QDQgOwoQB9BCcAcfMCwMKQngBkIHrEgqOgBIV8ZAaRHX0BxfkQQg05KEEsTSLConqgAEG0sQNBfxGA3sqSgT4bEoAJfy0AC0tEQwFfHcBZbE6A5JDqAKh9kQDISg5DKJYkAKBgq4LQmxbAsMNHA7mgBsJtthtAUOgXBEJJkABbZg4A7qgbg9WrPQG/uNSAtl9uwKmDmYAtqfoDbqOLAc4wGYFY99vABQA0QKM3gUC2o9JBayRpAdRNqkadN7BAF+IsAW5Rl0NZVywAO++8hNvObMB8RNeC2itsQsKnQEBWzklAD46zwGcIEwAJ7gtCvPqEQEoBZIHU+1xFJK5CATw4QEARCkcCePaOQCsv1Ua+Zn4Dl/6NgQCIP8FiGViDZEzrgLZ8GsBhyZ9EI4NSQWQ1wgGWB3fEzkMMQSX5ooCjhAFETPQoQDK6g8IvbLRFajNWgiUZvABPYpnDOAChgC/+OMBq9v3Czk/JQmt9s4JQVh2AqAKEwguE6QWhJHeAKfZJQnFFVwJDt9oASIg4AGmXngD5YYZAK9VTg4R9QsHXb7WCQVJ7gg=",
+        "raw_sha256": "43a73f6321bbbc8c4088c012829e0aecb49c7bae6b120697b2469734eb59eadb",
+        "similarity_to_previous": null,
+        "text_sha256": "56be537e7b08494c1b63e16f98746a2227a55dc51dc2cc3748d40b4f21da5d3e"
+      },
+      "format": "html",
+      "language": "en",
+      "links": [],
+      "metadata": null,
+      "mode_used": "fast",
+      "quality": {
+        "bot_challenge": false,
+        "browser_recommended": false,
+        "challenge_status": false,
+        "js_heavy": false,
+        "login_wall": false,
+        "script_count": 0,
+        "soft_404": false,
+        "visible_chars": 1240,
+        "word_count": 190
+      },
+      "screenshot": null,
+      "title": null,
+      "unblocked": false,
+      "upstream_status": 200,
+      "url": "https://example.org/learn/photosynthesis.html?session=secret-token",
+      "warnings": [],
+      "word_count": 190
+    },
+    "error": null,
+    "status": "success"
+  },
+  "unsupported": {
+    "data": {
+      "attempts": 1,
+      "cache": "miss",
+      "compliance": {
+        "ai_txt": "absent",
+        "crawl_delay": null,
+        "decision": "allowed",
+        "mode": "enforce",
+        "noai": false,
+        "reasons": [],
+        "robots": "allowed",
+        "tdm_policy": null,
+        "tdm_reserved": null,
+        "tdm_source": null
+      },
+      "content": null,
+      "content_type": "image/gif",
+      "document": null,
+      "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
+      "fingerprint": null,
+      "format": "markdown",
+      "language": null,
+      "links": null,
+      "metadata": null,
+      "mode_used": "fast",
+      "quality": null,
+      "screenshot": null,
+      "title": null,
+      "unblocked": false,
+      "upstream_status": 200,
+      "url": "https://example.org/learn/photosynthesis.html?session=secret-token",
+      "warnings": [],
+      "word_count": 0
+    },
+    "error": {
+      "code": "unsupported_content_type",
+      "details": null,
+      "message": "Content type image/gif is not supported in fast mode.",
+      "retryable": false
+    },
+    "status": "failed"
+  }
+}

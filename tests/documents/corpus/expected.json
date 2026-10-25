@@ -1,0 +1,191 @@
+{
+  "text.pdf": {
+    "content_type": "application/pdf",
+    "kind": "pdf",
+    "converter": "markitdown",
+    "pages": 3,
+    "pages_converted": 3,
+    "phrases": [
+      "Die Photosynthese",
+      "Chloroplasten",
+      "Spaltöffnungen",
+      "Kohlenstoffdioxid",
+      "Traubenzucker"
+    ],
+    "ocr": false
+  },
+  "long.pdf": {
+    "content_type": "application/pdf",
+    "kind": "pdf",
+    "converter": "markitdown",
+    "pages": 120,
+    "pages_converted": 100,
+    "warnings": [
+      "pages_truncated"
+    ],
+    "phrases": [
+      "Abschnitt 1:",
+      "Abschnitt 100:"
+    ],
+    "absent": [
+      "Abschnitt 101:"
+    ],
+    "ocr": false
+  },
+  "xmp-cc-by-sa.pdf": {
+    "content_type": "application/pdf",
+    "kind": "pdf",
+    "converter": "markitdown",
+    "pages": 1,
+    "pages_converted": 1,
+    "phrases": [
+      "CC BY-SA 4.0",
+      "Namensnennung"
+    ],
+    "license": {
+      "id": "CC-BY-SA-4.0",
+      "source": "xmp"
+    },
+    "ocr": false
+  },
+  "core.docx": {
+    "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "kind": "docx",
+    "converter": "markitdown",
+    "phrases": [
+      "Photosynthese",
+      "Pflanzen wandeln Lichtenergie in chemische Energie um."
+    ],
+    "ocr": false
+  },
+  "lesson.docx": {
+    "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "kind": "docx",
+    "converter": "markitdown",
+    "phrases": [
+      "Wichtige Stoffe",
+      "Kohlenstoffdioxid",
+      "Traubenzucker",
+      "Der Quelltext"
+    ],
+    "ocr": false
+  },
+  "slides.pptx": {
+    "content_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "kind": "pptx",
+    "converter": "markitdown",
+    "phrases": [
+      "Die Photosynthese",
+      "Wichtige Stoffe",
+      "Chlorophyll"
+    ],
+    "ocr": false
+  },
+  "sheets.xlsx": {
+    "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "kind": "xlsx",
+    "converter": "markitdown",
+    "phrases": [
+      "Noten",
+      "Jörg",
+      "Termine",
+      "Photosynthese"
+    ],
+    "ocr": false
+  },
+  "sheets.xls": {
+    "content_type": "application/vnd.ms-excel",
+    "kind": "xls",
+    "converter": "markitdown",
+    "phrases": [
+      "Noten",
+      "Jörg",
+      "Termine",
+      "Photosynthese"
+    ],
+    "ocr": false
+  },
+  "book.epub": {
+    "content_type": "application/epub+zip",
+    "kind": "epub",
+    "converter": "markitdown",
+    "phrases": [
+      "Die Photosynthese",
+      "Wichtige Stoffe",
+      "Chloroplasten",
+      "Spaltöffnungen"
+    ],
+    "ocr": false
+  },
+  "latin1.csv": {
+    "content_type": "text/csv",
+    "kind": "csv",
+    "converter": "markitdown",
+    "phrases": [
+      "Größe",
+      "Jörg",
+      "1.80"
+    ],
+    "ocr": false
+  },
+  "bomb.docx": {
+    "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "error": "too_large"
+  },
+  "encrypted.pdf": {
+    "content_type": "application/pdf",
+    "error": "conversion_failed"
+  },
+  "empty.pdf": {
+    "content_type": "application/pdf",
+    "error": "empty_content"
+  },
+  "scan.pdf": {
+    "content_type": "application/pdf",
+    "kind": "pdf",
+    "converter": "docling",
+    "pages": 2,
+    "pages_converted": 2,
+    "phrases": [
+      "Blätter",
+      "läuft",
+      "Größere",
+      "Stärke",
+      "Übung",
+      "grünen"
+    ],
+    "recall": {
+      "of": "scan.expected.txt",
+      "min": 0.9
+    },
+    "ocr": true
+  },
+  "page.png": {
+    "content_type": "image/png",
+    "kind": "png",
+    "converter": "docling",
+    "phrases": [
+      "Photosynthese"
+    ],
+    "ocr": true
+  },
+  "photo.jpeg": {
+    "content_type": "image/jpeg",
+    "kind": "jpeg",
+    "converter": "docling",
+    "phrases": [
+      "Chlorophyll"
+    ],
+    "ocr": true
+  },
+  "text.odt": {
+    "content_type": "application/vnd.oasis.opendocument.text",
+    "kind": "odt",
+    "converter": "docling",
+    "phrases": [
+      "Die Photosynthese",
+      "Größere Pflanzen speichern"
+    ],
+    "ocr": false
+  }
+}

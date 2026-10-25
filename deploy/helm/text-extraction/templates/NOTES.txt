@@ -43,6 +43,24 @@ No browser workers are deployed: browser mode is off (BROWSER_ENABLED=false), so
 screenshots answer 400 and mode "auto" never uses a browser.
 {{- end }}
 
+{{- if .Values.workers.docling.enabled }}
+
+Docling workers (OCR): {{ include "text-extraction.workerName" (list . "docling") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" .Values.workers.docling.autoscaling.hpa.enabled) .Values.workers.docling.autoscaling.keda.enabled }}), image {{ include "text-extraction.workerImage" (list . "docling") }}; internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "docling") }}.
+OCR is on (DOCLING_ENABLED=true in every pod). Models volume: PVC {{ include "text-extraction.doclingModelsClaim" . }}, {{ ternary "filled by the init container on the first start (needs egress to raw.githubusercontent.com and huggingface.co)" "pre-filled (no download)" .Values.workers.docling.models.download }}. A worker without the models exits with code 1 and logs docling_models_missing.
+{{- if and .Values.valkey.enabled (eq (toString .Values.valkey.maxmemory) "768mb") }}
+
+NOTE: Valkey keeps its default maxmemory (768mb). With Docling workers it also holds the bytes of
+  documents queued for OCR and of slow uploads, up to DOCLING_INPUT_BUDGET_BYTES ({{ get .Values.config "DOCLING_INPUT_BUDGET_BYTES" | default "200000000" }}) in all,
+  next to job results and the result cache. That fits for batches of about 1,000 URLs; for larger
+  batches or a larger budget raise valkey.maxmemory with valkey.resources (60 % of the limit).
+{{- end }}
+{{- else }}
+
+No Docling workers are deployed: OCR is off (DOCLING_ENABLED=false), so scans keep their text layer
+(warning ocr_unavailable), images and OpenDocument files answer unsupported_content_type, and
+ocr "always" answers 400.
+{{- end }}
+
 {{- if and .Values.networkPolicy.enabled .Values.metrics.serviceMonitor.enabled (eq (toJson .Values.networkPolicy.metricsFrom) "[{\"podSelector\":{}}]") }}
 
 WARNING: networkPolicy.metricsFrom is still the default (pods of this namespace only). A Prometheus in

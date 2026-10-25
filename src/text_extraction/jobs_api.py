@@ -27,7 +27,7 @@ from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.extract_api import BROWSER_DISABLED_MESSAGE
+from text_extraction.extract_api import BROWSER_DISABLED_MESSAGE, check_ocr_request
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
     BatchRequest,
@@ -37,7 +37,7 @@ from text_extraction.job_models import (
     JobProgress,
     JobView,
 )
-from text_extraction.jobs import JobRecord, JobStore
+from text_extraction.jobs import JobRecord, JobStore, owner_key
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
@@ -62,13 +62,10 @@ _BYTES_AROUND_URL = 8
 _LOST_MESSAGE = "The pod running this extraction stopped."
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
-_OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
 
 
 def _open_key(owner: str) -> str:
-    for char, code in _OWNER_ESCAPES.items():
-        owner = owner.replace(char, code)
-    return f"jobs:{{owner:{owner}}}:open"
+    return owner_key(owner, "open")
 
 
 async def require_jobs_enabled(
@@ -190,6 +187,7 @@ async def create_batch(
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
 
     `mode: browser` queues the URLs for the browser workers (400 while browser mode is off);
+    `ocr: always` answers 400 while the service has no OCR;
     `auto` items that need a browser move there on their own. A batch takes no `actions`,
     `cookies`, `headers` or `screenshot` (422).
     """
@@ -204,6 +202,7 @@ async def create_batch(
         if not settings.browser_enabled:
             raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
         queue = request.app.state.browser_queue
+    check_ocr_request(body.ocr, settings)  # 400 for `ocr: always` while there is no OCR
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -211,6 +210,7 @@ async def create_batch(
         links=body.links,
         compliance=resolve_mode(body.compliance, principal, settings),
         cache=body.cache,
+        ocr=body.ocr,
     )
     if guard.high:
         raise _memory_high()

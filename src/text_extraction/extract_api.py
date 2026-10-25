@@ -3,8 +3,9 @@ workers.
 
 **The flow** (``_flow``) of one request:
 
-1. The request is checked first: browser options while browser mode is off answer 400 (B9),
-   an ``evaluate`` action of a non-admin key 403, a compliance mode the key may not choose 403.
+1. The request is checked first: browser options while browser mode is off answer 400 (B9), so
+   does ``ocr: always`` while the service has no OCR (F11); an ``evaluate`` action of a
+   non-admin key 403, a compliance mode the key may not choose 403.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
@@ -15,20 +16,22 @@ workers.
    browser may answer the next request), and ``browser`` answers ``failed``/``timeout``,
    retryable. The browser job is deleted, as it is once the request answers with its result
    (one with a screenshot is kept as long as the screenshot).
+5. While the service has OCR, a document that needs it goes to the Docling workers once the fast
+   phase is done (``docling_dispatch.DoclingHandoff``, F12), with its text layer as the draft.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result:
 
 1. the flow runs as a task, and the route waits ``wait_seconds`` for it (the wait does not
    cancel it);
-2. if the flow waits for a browser job by then (or will, step 2 above), the route answers 202
-   with that job and detaches the task: the browser worker writes the job's result;
+2. if the flow waits for a browser or a Docling job by then (or will, step 2 above), the route
+   answers 202 with that job and detaches the task: the pool's worker writes the job's result;
 3. otherwise an ``extract`` job with one URL is created and marked running with a lease of
    ``EXTRACT_TIMEOUT_SECONDS + 10`` seconds, and the route answers 202;
 4. a done-callback of the task stores its envelope as item 0 of the job. A task that raised is
    stored as ``internal_error`` (a ``ServiceError`` keeps its own code). A flow whose fast result
-   escalates after the hand-over reuses the job for the browser (its lease is cleared) and
-   stores nothing: the browser worker writes item 0;
+   escalates (or needs OCR) after the hand-over reuses the job for the browser (or Docling; its
+   lease is cleared) and stores nothing: that pool's worker writes item 0;
 5. a pod that dies in between leaves the lease to expire; ``GET /v1/jobs/{id}`` then shows the
    item as failed (``jobs_api.py``).
 
@@ -40,14 +43,17 @@ tasks are kept in ``app.state.background``, so that the lifespan can wait for th
 
 An extract job is not a batch: it does not count toward ``BATCH_MAX_OPEN_PER_CLIENT``.
 
-``respond`` is shared with ``POST /v1/screenshot`` (``screenshot_api.py``).
+``respond`` is shared with ``POST /v1/screenshot`` (``screenshot_api.py``), and the hand-over
+(``answer_or_hand_over``, ``create_p1_job``) with ``POST /v1/extract/file`` (``file_api.py``),
+whose P1 job has kind ``file`` and keeps the upload's bytes as the input of its item.
 """
 
 import asyncio
 import contextlib
 import time
+from collections.abc import Awaitable, Callable, Coroutine
 from functools import partial
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -63,6 +69,9 @@ from text_extraction.browser_dispatch import (
 )
 from text_extraction.browser_options import EvaluateAction
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
+from text_extraction.docling_dispatch import DoclingDispatcher, DoclingHandoff
+from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
+from text_extraction.documents.types import OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING, needs_browser, unblock_for
@@ -72,8 +81,9 @@ from text_extraction.extract_models import (
     Timings,
     failed_extract,
 )
-from text_extraction.job_models import JobAccepted, JobOptions, JobState
-from text_extraction.jobs import JobLost, JobStore
+from text_extraction.file_models import UploadInputMeta
+from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
+from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
 from text_extraction.pipeline import Pipeline
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
@@ -120,8 +130,9 @@ async def extract(
     too short) or `failed`, with `error.code`, `error.retryable` and, in `data`,
     `upstream_status`, `mode_used`, `compliance`, `timings` and as much of the result as was
     reached. 4xx answers are about the request itself (invalid body, key, rate limit, a
-    compliance mode the caller may not choose, browser options while browser mode is off, an
-    `evaluate` action of a non-admin key); 5xx are faults of this service.
+    compliance mode the caller may not choose, browser options while browser mode is off,
+    `ocr: always` while the service has no OCR, an `evaluate` action of a non-admin key); 5xx
+    are faults of this service.
 
     `mode: browser`, `screenshot`, browser options and an `auto` page that needs a browser are
     rendered by a browser worker. Such a request can take the fast phase plus
@@ -139,6 +150,13 @@ def renders_first(body: ExtractRequest) -> bool:
     """Whether the request goes to the browser without a fast phase: ``browser``, a screenshot,
     or browser options (the fast fetch could not use them; R8)."""
     return body.mode == "browser" or body.screenshot or not body.secrets().empty()
+
+
+def check_ocr_request(ocr: OcrOption, settings: Settings) -> None:
+    """400 for ``ocr: always`` while the service has no OCR (F11): the request could not get
+    what it asks for. ``auto`` and ``never`` are always fine."""
+    if ocr == "always" and not ocr_available(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, OCR_DISABLED_MESSAGE, 400)
 
 
 def check_browser_request(body: ExtractRequest, principal: Principal, settings: Settings) -> None:
@@ -160,17 +178,59 @@ async def respond(
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
+    check_ocr_request(body.ocr, settings)
     handover = Handover()
-    flow = partial(_flow, state, body, principal, compliance, handover, kind)
-    if body.wait_seconds is None or not settings.jobs_enabled:
+    wait_until = handover_time(body.wait_seconds, settings)
+    flow = partial(_flow, state, body, principal, compliance, handover, kind, wait_until)
+    options = job_options(body, compliance)
+    return await answer_or_hand_over(
+        state,
+        flow,
+        handover,
+        wait_seconds=body.wait_seconds,
+        kind=kind,
+        renders_first=renders_first(body),
+        hand_over=partial(create_p1_job, state.job_store, settings, principal, options, body.url),
+    )
+
+
+def handover_time(wait_seconds: float | None, settings: Settings) -> float | None:
+    """When (``time.monotonic()``) the route of a request with ``wait_seconds`` turns it into a
+    job; None when it never does."""
+    if wait_seconds is None or not settings.jobs_enabled:
+        return None
+    return time.monotonic() + wait_seconds
+
+
+async def wait_for_flow(task: asyncio.Task[Any], seconds: float) -> None:
+    """Wait ``seconds`` for the flow's task, without cancelling it."""
+    await asyncio.wait({task}, timeout=seconds)
+
+
+async def answer_or_hand_over(
+    state: Any,
+    flow: Callable[[], Coroutine[Any, Any, _Answer]],
+    handover: Handover,
+    *,
+    wait_seconds: float | None,
+    kind: JobKind,
+    renders_first: bool,
+    hand_over: Callable[[], Awaitable[str | None]],
+) -> Envelope[ExtractResult] | JSONResponse:
+    """Run ``flow``, or answer 202 with a job after ``wait_seconds`` (the module docstring):
+    the pool job the flow dispatched (of ``kind``), or a P1 job that ``hand_over`` creates (of
+    kind ``file`` for an upload, else ``extract``). ``renders_first`` says that the flow goes to
+    the browser at once. Shared with ``POST /v1/extract/file`` (``file_api.py``)."""
+    settings: Settings = state.settings
+    if wait_seconds is None or not settings.jobs_enabled:
         return _answered(await flow())
 
     background: _Background = state.background
     task = asyncio.create_task(flow())
     background.add(task)
     try:
-        if body.wait_seconds > 0:
-            await asyncio.wait({task}, timeout=body.wait_seconds)
+        if wait_seconds > 0:
+            await wait_for_flow(task, wait_seconds)
     except asyncio.CancelledError:
         task.cancel()  # nobody is waiting for it any more, and no job exists
         background.discard(task)
@@ -178,7 +238,7 @@ async def respond(
     if task.done():
         background.discard(task)
         return _answered(task.result())
-    if renders_first(body) or handover.claimed == "browser":
+    if renders_first or handover.claimed == "pool":
         return await _detach(state, task, handover, kind)
 
     store: JobStore = state.job_store
@@ -193,9 +253,7 @@ async def respond(
         and handover.claim_p1()
     ):
         try:
-            job_id = await _hand_over(
-                store, settings, principal, job_options(body, compliance), body.url
-            )
+            job_id = await hand_over()
         except asyncio.CancelledError:
             task.cancel()  # nobody is waiting for it any more, and no job is left
             background.discard(task)
@@ -207,13 +265,14 @@ async def respond(
             return _answered(await task)
         finally:
             background.discard(task)
+    p1_kind: JobKind = "file" if kind == "file" else "extract"
     metrics: JobMetrics = state.job_metrics
-    metrics.created.labels(kind="extract").inc()
+    metrics.created.labels(kind=p1_kind).inc()
     task.add_done_callback(
-        partial(_store_when_done, background, store, metrics, job_id, handed_over_at)
+        partial(_store_when_done, background, store, metrics, job_id, handed_over_at, kind=p1_kind)
     )
-    _log.info("extract_job_accepted", job_id=job_id)
-    return _accepted(job_id, "extract", "running")
+    _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
+    return _accepted(job_id, p1_kind, "running")
 
 
 def _answered(answer: _Answer) -> Envelope[ExtractResult]:
@@ -222,7 +281,7 @@ def _answered(answer: _Answer) -> Envelope[ExtractResult]:
     return answer
 
 
-def _accepted(job_id: str, kind: BrowserJobKind, state: JobState) -> JSONResponse:
+def _accepted(job_id: str, kind: JobKind, state: JobState) -> JSONResponse:
     accepted = Envelope(
         status="success",
         data=JobAccepted(
@@ -234,11 +293,11 @@ def _accepted(job_id: str, kind: BrowserJobKind, state: JobState) -> JSONRespons
 
 
 async def _detach(
-    state: Any, task: asyncio.Task[_Answer], handover: Handover, kind: BrowserJobKind
+    state: Any, task: asyncio.Task[_Answer], handover: Handover, kind: JobKind
 ) -> Envelope[ExtractResult] | JSONResponse:
-    """``wait_seconds`` ran out while the flow dispatches or waits for a browser job: answer 202
-    with that job and let the flow stop waiting. If the dispatch failed, wait for the flow's own
-    answer."""
+    """``wait_seconds`` ran out while the flow dispatches or waits for a pool job (a browser or
+    a Docling job): answer 202 with that job and let the flow stop waiting. If the dispatch
+    failed, wait for the flow's own answer."""
     background: _Background = state.background
     settled = asyncio.ensure_future(handover.settled())
     try:
@@ -249,7 +308,7 @@ async def _detach(
         raise
     finally:
         settled.cancel()
-    job_id = handover.browser_job
+    job_id = handover.pool_job
     # A flow that released its job (it gave up and deletes it) answers on its own.
     if task.done() or job_id is None or not handover.detach():
         try:
@@ -259,7 +318,7 @@ async def _detach(
     task.add_done_callback(partial(_forget, background))
     metrics: JobMetrics = state.job_metrics
     metrics.created.labels(kind=kind).inc()
-    _log.info("browser_job_accepted", job_id=job_id, kind=kind)
+    _log.info(f"{handover.pool}_job_accepted", job_id=job_id, kind=kind)
     return _accepted(job_id, kind, await _job_state(state.job_store, job_id))
 
 
@@ -273,7 +332,7 @@ async def _job_state(store: JobStore, job_id: str) -> JobState:
 
 
 def _forget(background: _Background, task: asyncio.Task[_Answer]) -> None:
-    """Done-callback of a detached flow: its job belongs to the browser worker now."""
+    """Done-callback of a detached flow: its job belongs to the pool's worker now."""
     background.discard(task)
     if not task.cancelled() and (error := task.exception()) is not None:
         _log.error("detached_flow_failed", exc_info=error)
@@ -289,14 +348,30 @@ async def _flow(
     compliance: ComplianceMode,
     handover: Handover,
     kind: BrowserJobKind,
+    wait_until: float | None = None,
 ) -> _Answer:
-    """The envelope of the request, or None when its job's result is written by the browser
-    worker (after a hand-over); see the module docstring."""
+    """The envelope of the request, or None when its job's result is written by a pool's
+    worker (after a hand-over); see the module docstring. ``wait_until`` is when the route
+    turns the request into a job (``handover_time``)."""
     started = time.perf_counter()
     if renders_first(body):
         return await _in_browser(state, body, principal, compliance, handover, kind, None, started)
     pipeline: Pipeline = state.pipeline
-    fast = await pipeline.run(body, principal)
+    ocr = docling_handoff(
+        state,
+        handover,
+        kind="extract",
+        options=job_options(body, compliance),
+        principal=principal,
+        url=body.url,
+        wait_until=wait_until,
+    )
+    if ocr is None:
+        fast = await pipeline.run(body, principal)
+    else:
+        fast = await pipeline.run(body, principal, ocr_handoff=ocr)
+        if ocr.handed_over:
+            return None  # the Docling worker writes the job's result
     settings: Settings = state.settings
     unblock = unblock_for(principal, compliance, settings)
     if (
@@ -306,6 +381,32 @@ async def _flow(
     ):
         return fast
     return await _in_browser(state, body, principal, compliance, handover, kind, fast, started)
+
+
+def docling_handoff(
+    state: Any,
+    handover: Handover,
+    *,
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    wait_until: float | None,
+) -> DoclingHandoff | None:
+    """The OCR handoff of one request (F12); None while the service has no OCR."""
+    dispatcher: DoclingDispatcher | None = state.docling_dispatcher
+    if dispatcher is None:
+        return None
+    return DoclingHandoff(
+        dispatcher,
+        state.memory_guard,
+        handover,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        wait_until=wait_until,
+    )
 
 
 async def _in_browser(
@@ -321,7 +422,7 @@ async def _in_browser(
     """Dispatch the request to the browser workers and wait for their result. ``draft`` is the
     fast result of an escalating ``auto`` request (None when the request renders first)."""
     dispatcher: BrowserDispatcher = state.browser_dispatcher
-    if not handover.claim_browser():  # the route is handing the request over to a P1 job
+    if not handover.claim_pool("browser"):  # the route is handing it over to a P1 job
         await handover.settled()
         if handover.job_id is not None:
             try:
@@ -342,7 +443,7 @@ async def _in_browser(
             raise _backend_unavailable() from None
         return _unavailable(body, compliance, draft, started)
     finally:
-        if handover.claimed == "browser":
+        if handover.claimed == "pool":
             handover.settle(job_id)
     unblock = unblock_for(principal, compliance, state.settings)
     try:
@@ -443,23 +544,33 @@ def _unavailable(
 # --- the P1 job -----------------------------------------------------------------------------------
 
 
-async def _hand_over(
-    store: JobStore, settings: Settings, principal: Principal, options: JobOptions, url: str
+async def create_p1_job(
+    store: JobStore,
+    settings: Settings,
+    principal: Principal,
+    options: JobOptions,
+    url: str | None,
+    *,
+    kind: Literal["extract", "file"] = "extract",
+    upload: tuple[bytes, UploadInputMeta] | None = None,
 ) -> str | None:
-    """Create the extract job and mark it running; its id, or None when Valkey fails (logged).
-    A job that was created but could not be marked, or whose creator is cancelled, is deleted
-    again, if that works."""
+    """Create the P1 job (of ``kind``; an upload's with its bytes as the input of item 0, for
+    ``DOCLING_INPUT_TTL_SECONDS``, within ``DOCLING_INPUT_BUDGET_BYTES``) and mark it running;
+    its id, or None when Valkey fails or the input budget is full (logged): the request then
+    stays synchronous. A job that was created but could not be completed, or whose creator is
+    cancelled, is deleted again, if that works."""
     job_id: str | None = None
     try:
-        job_id = await store.create(
-            "extract", principal, options, [url], trace_id=current_trace_id()
-        )
+        job_id = await store.create(kind, principal, options, [url], trace_id=current_trace_id())
+        if upload is not None:
+            body, meta = upload
+            await store.put_input(job_id, 0, body, meta, settings.docling_input_ttl_seconds)
         lease = settings.extract_timeout_seconds + _LEASE_MARGIN_SECONDS
         await store.mark_running(job_id, lease_seconds=lease)
-    except (RedisError, OSError, JobLost) as error:
-        _log.warning(
-            "extract_job_handover_failed", error_type=type(error).__name__, error=str(error)
-        )
+    except (RedisError, OSError, JobLost, InputBudgetExceeded) as error:
+        # The type only for an upload: an error's text never gets near its bytes.
+        text = {} if upload is not None else {"error": str(error)}
+        _log.warning("extract_job_handover_failed", error_type=type(error).__name__, **text)
         if job_id is not None:
             await _delete_quietly(store, job_id)
         return None
@@ -496,14 +607,18 @@ def _store_when_done(
     job_id: str,
     created_at: float,
     task: asyncio.Task[_Answer],
+    *,
+    kind: JobKind = "extract",
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
-    went on to the browser worker, which writes it. The storing task is added to ``background``
+    went on to a pool's worker, which writes it. The storing task is added to ``background``
     before the extraction leaves it, so a shutdown that waits for the set never misses the
     write."""
     envelope = _envelope_of(task)
     if envelope is not None:
-        storing = asyncio.create_task(_store_result(store, metrics, job_id, created_at, envelope))
+        storing = asyncio.create_task(
+            _store_result(store, metrics, job_id, created_at, envelope, kind=kind)
+        )
         background.add(storing)
         storing.add_done_callback(background.discard)
     background.discard(task)
@@ -515,15 +630,19 @@ async def _store_result(
     job_id: str,
     created_at: float,
     envelope: Envelope[ExtractResult],
+    *,
+    kind: JobKind = "extract",
 ) -> None:
     """Store the envelope as item 0 and observe the job's duration (``created_at`` is a
-    ``time.monotonic()`` reading from just before the job was created). A Valkey failure is logged
-    and not raised: the job's lease then runs out and ``GET /v1/jobs/{id}`` reports the item as
-    lost."""
+    ``time.monotonic()`` reading from just before the job was created); an upload's input is
+    deleted then. A Valkey failure is logged and not raised: the job's lease then runs out and
+    ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its own)."""
     try:
-        # The first and only write of an extract job completes it ("last"); a repeat is not counted.
+        # The first and only write of a P1 job completes it ("last"); a repeat is not counted.
         if await store.write_result(job_id, 0, envelope) == "last":
-            metrics.duration.labels(kind="extract").observe(max(time.monotonic() - created_at, 0.0))
+            metrics.duration.labels(kind=kind).observe(max(time.monotonic() - created_at, 0.0))
+        if kind == "file":
+            await store.delete_input(job_id, 0)
     except JobLost:
         _log.warning("extract_job_gone", job_id=job_id)
     except (RedisError, OSError) as error:
