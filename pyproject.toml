@@ -46,6 +46,16 @@ browser = [
     "patchright==1.63.0",
     "playwright>=1.64",
 ]
+# The Docling worker (text-extraction-docling-worker): Docling with only the parts it uses (PDF and
+# image pipeline, OpenDocument, local layout and table models), and torch and torchvision from the
+# PyTorch CPU index (no CUDA). Each pinned to a release at least 14 days old (ruling R16).
+docling = [
+    "docling-slim[convert-core,format-pdf,format-opendocument,models-local]==2.137.0",
+    # TableFormer (docling-ibm-models) imports cv2 but leaves OpenCV to an extra of its own.
+    "opencv-python-headless==4.14.0.94",
+    "torch==2.14.1",
+    "torchvision==0.29.1",
+]
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
@@ -55,7 +65,17 @@ build-backend = "uv_build"
 # The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
 # `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
 # does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
-exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days" }
+exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days" }
+
+# torch and torchvision only from the PyTorch CPU index: its wheels carry no CUDA libraries.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.build-backend]
 module-root = "src"

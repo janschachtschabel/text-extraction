@@ -21,3 +21,8 @@ reason = "Windows only: a dependency of humanfriendly under sys_platform == 'win
 name = "httpx2-jsfetch"
 license = "BSD-3-Clause"
 reason = "Emscripten only: a dependency of httpx2 under sys_platform == 'emscripten'"
+
+[[not_installed]]
+name = "pywin32"
+license = "PSF-2.0"
+reason = "Windows only: a dependency of docling-parse (extra docling) under sys_platform == 'win32'"

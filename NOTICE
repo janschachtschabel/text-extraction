@@ -15,3 +15,10 @@ The Docling worker downloads model files onto its models volume (they are never 
 image; see src/text_extraction/documents/models.toml):
 - Tesseract's tessdata_best models deu, eng and osd (tesseract-ocr/tessdata_best),
   Apache License 2.0.
+- Tesseract's `tsv` output config (tesseract-ocr/tessconfigs, commit
+  3decf1c8252ba6dbeef0bf908f4b0aab7f18d113), Apache License 2.0.
+- Docling's layout model "heron" (docling-project/docling-layout-heron, revision main at
+  commit 8f39ad3c0b4c58e9c2d2c84a38465abf757272d8), Apache License 2.0.
+- Docling's TableFormer model, fast mode (docling-project/docling-models, revision v2.3.0 at
+  commit fc0f2d45e2218ea24bce5045f58a389aed16dc23), Community Data License Agreement -
+  Permissive, Version 2.0 (CDLA-Permissive-2.0).
