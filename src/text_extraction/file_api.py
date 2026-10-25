@@ -15,15 +15,19 @@
   every route) without the pod receiving or spooling the upload. ``ocr: always`` is 400 while
   the service has no OCR, as for ``/v1/extract``.
 
-The conversion is ``Pipeline.extract_upload``: no compliance check, no result cache. The upload
-answers synchronously for now: its conversion in this pod ends within
-``EXTRACT_TIMEOUT_SECONDS``. Handing a slow upload over to a job (``wait_seconds``, ruling P1) and
-an OCR upload to its Docling job (F12) need the upload's bytes stored with the job, which the
-Docling dispatch adds.
+The conversion is ``Pipeline.extract_upload``: no compliance check, no result cache. With
+``wait_seconds`` (25 by default) a slower upload becomes a job of kind ``file``, as a slow
+``POST /v1/extract`` does (``extract_api.answer_or_hand_over``, ruling P1): the conversion keeps
+running in this pod, the job keeps the upload's bytes as the input of its item
+(``DOCLING_INPUT_TTL_SECONDS``, deleted once the result is stored), and the answer is 202. An
+upload that needs OCR goes to the Docling workers (``pool_dispatch.DoclingHandoff``, F12): it
+waits ``DOCLING_SYNC_WAIT_SECONDS`` without ``wait_seconds``, and with it the 202 carries its
+Docling job. The job's item has no URL (``url: null``).
 """
 
 import unicodedata
 from collections.abc import Callable, Coroutine
+from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Final
 
@@ -33,13 +37,21 @@ from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from text_extraction.auth import Principal, authenticate, require_role
+from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.extract_api import check_ocr_request
+from text_extraction.extract_api import (
+    answer_or_hand_over,
+    check_ocr_request,
+    create_p1_job,
+    docling_handoff,
+    handover_time,
+)
 from text_extraction.extract_models import ExtractResult
-from text_extraction.file_models import FILE_PART, FileForm
-from text_extraction.job_models import JobAccepted
+from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
+from text_extraction.job_models import JobAccepted, JobOptions
 from text_extraction.pipeline import Pipeline
+from text_extraction.pool_dispatch import Handover
 from text_extraction.ratelimit import rate_limited
 from text_extraction.settings import Settings
 
@@ -110,7 +122,8 @@ router = APIRouter(route_class=_UploadRoute)
     responses={
         202: {
             "model": Envelope[JobAccepted],
-            "description": "The upload takes longer than `wait_seconds` and became a job.",
+            "description": "The upload takes longer than `wait_seconds` (25 by default) and "
+            "became a job of kind `file`.",
         }
     },
 )
@@ -128,7 +141,7 @@ async def extract_file(
     ],
     form: Annotated[FileForm, Form()],
     principal: Annotated[Principal, Depends(require_role("user"))],
-) -> Envelope[ExtractResult]:
+) -> Envelope[ExtractResult] | Response:
     """Extract an uploaded file as Markdown, text or HTML.
 
     The answer is the result envelope of `POST /v1/extract`, with `mode_used: "upload"`,
@@ -139,18 +152,79 @@ async def extract_file(
     `too_large`, `conversion_failed`, ...). 422 for a form with more than one file or eight
     fields, or unknown fields; 413 for a body over `DOCUMENT_MAX_BYTES` + 64 KiB; 400 for
     `ocr: always` while the service has no OCR.
+
+    An upload still converting after `wait_seconds` (25 by default) becomes a job: 202 with the
+    job's id and `status_url` (`GET /v1/jobs/{id}`, kind `file`, its item's `url` null). A
+    document that needs OCR waits up to `DOCLING_SYNC_WAIT_SECONDS` for it without
+    `wait_seconds`, then answers its text layer with the warning `ocr_unavailable`.
     """
-    settings: Settings = request.app.state.settings
+    state = request.app.state
+    settings: Settings = state.settings
     check_ocr_request(form.ocr, settings)
     try:
         body = await file.read(settings.document_max_bytes + 1)
     finally:
         await file.close()  # deletes the spooled part now, not when the answer is sent
-    pipeline: Pipeline = request.app.state.pipeline
-    return await pipeline.extract_upload(
+    name = sanitize_file_name(file.filename)
+    compliance = resolve_mode(None, principal, settings)
+    options = upload_options(form, compliance)
+    handover = Handover()
+    flow = partial(
+        _flow,
+        state,
         body,
-        sanitize_file_name(file.filename),
+        name,
         form,
         principal,
-        content_type=file.content_type,
+        file.content_type,
+        handover,
+        options,
+        handover_time(form.wait_seconds, settings),
     )
+    meta = UploadInputMeta(file_name=name, content_type=file.content_type)
+    return await answer_or_hand_over(
+        state,
+        flow,
+        handover,
+        wait_seconds=form.wait_seconds,
+        kind="file",
+        renders_first=False,
+        hand_over=partial(
+            create_p1_job,
+            state.job_store,
+            settings,
+            principal,
+            options,
+            None,
+            kind="file",
+            upload=(body, meta),
+        ),
+    )
+
+
+async def _flow(
+    state: Any,
+    body: bytes,
+    name: str | None,
+    form: FileForm,
+    principal: Principal,
+    content_type: str | None,
+    handover: Handover,
+    options: JobOptions,
+    wait_until: float | None,
+) -> Envelope[ExtractResult] | None:
+    """The upload's envelope, or None when the Docling worker writes its job's result."""
+    pipeline: Pipeline = state.pipeline
+    ocr = docling_handoff(
+        state,
+        handover,
+        kind="file",
+        options=options,
+        principal=principal,
+        url=None,
+        wait_until=wait_until,
+    )
+    envelope = await pipeline.extract_upload(
+        body, name, form, principal, content_type=content_type, ocr_handoff=ocr
+    )
+    return None if ocr is not None and ocr.handed_over else envelope

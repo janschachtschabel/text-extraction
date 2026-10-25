@@ -6,13 +6,16 @@
   visible. Every API pod reads the same queue, so a query takes ``max()`` over pods (``sum()``
   would count the backlog once per pod).
 - ``text_extraction_jobs_created_total{kind}``: jobs accepted by this pod (``batch``,
-  ``extract`` or ``screenshot``). A sync request's browser job counts once it is handed over to
-  the caller (202), like a P1 job.
+  ``extract``, ``screenshot`` or ``file``). A sync request's browser or Docling job counts once
+  it is handed over to the caller (202), like a P1 job.
 - ``text_extraction_job_duration_seconds{kind}``: observed by whichever process writes the last
   result of a job. The definition lives here so that the worker and the API cannot drift apart;
   each process has its own registry.
 - ``text_extraction_browser_dispatch_total{outcome}``: how the sync requests of this pod that
   went to the browser workers ended (``browser_dispatch.DISPATCH_OUTCOMES``).
+- ``text_extraction_docling_dispatch_total{outcome}``: how the dispatch of this pod's sync
+  requests with a document that needs OCR ended (``pool_dispatch.DOCLING_OUTCOMES``). The queue
+  gauges have pool ``docling`` while the service has OCR.
 
 A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``
 seconds, not once per scrape, since collectors are synchronous; the collector only reports the
@@ -93,11 +96,12 @@ def job_metrics_for(registry: CollectorRegistry) -> JobMetrics:
         created = Counter(
             "text_extraction_jobs_created_total",
             "Jobs accepted by this pod, by kind: batch (POST /v1/batch), extract (a slow "
-            "POST /v1/extract handed over to a job) or screenshot (a slow POST /v1/screenshot).",
+            "POST /v1/extract handed over to a job), screenshot (a slow POST /v1/screenshot) or "
+            "file (a slow POST /v1/extract/file).",
             ["kind"],
             registry=registry,
         )
-        for kind in ("batch", "extract", "screenshot"):
+        for kind in ("batch", "extract", "screenshot", "file"):
             created.labels(kind=kind)  # export 0 from the start, so rate() sees the first job
         metrics = JobMetrics(created=created, duration=job_duration_for(registry))
         _JOB_METRICS[registry] = metrics
@@ -109,6 +113,9 @@ _DISPATCH: WeakKeyDictionary[CollectorRegistry, dict[str, Counter]] = WeakKeyDic
 _DISPATCH_HELP: Final = {
     "browser": "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
     "not_claimed, no_result, handed_over or backend_error.",
+    "docling": "Sync requests of this pod with a document that needs OCR, by how its dispatch to "
+    "the Docling workers ended: answered, not_claimed, no_result, handed_over, backend_error, "
+    "memory_guard or open_limit (nothing dispatched).",
 }
 
 

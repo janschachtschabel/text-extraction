@@ -279,7 +279,7 @@ worker. Docling is off by default: without it a scan keeps its text layer and an
 | `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod. |
 | `DOCLING_TIMEOUT_SECONDS` | `300` | Time budget of one Docling conversion, in seconds; the conversion child is killed after it. 30 to 1800. |
 | `DOCLING_SYNC_WAIT_SECONDS` | `20` | How long a synchronous request that needs OCR waits for the Docling worker, in seconds. Then it answers the text layer with the warning `ocr_unavailable` (an image fails with `timeout`, retryable). 0 to 25. |
-| `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker stay in Valkey, in seconds. The worker deletes them when the item is done. Minimum 600. |
+| `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker, or of an upload that became a job (`wait_seconds`), stay in Valkey, in seconds; never longer than the job. They are deleted when the item is done. Minimum 600. |
 | `DOCLING_MAX_OPEN_PER_CLIENT` | `5` | Unfinished Docling jobs one API key may have. Beyond it nothing is queued for OCR and the request answers without it (`ocr_unavailable`). Minimum 1. |
 | `DOCLING_CONCURRENCY` | `1` | Documents one Docling worker pod converts at once, each in a child process of its own. Minimum 1. |
 | `DOCLING_THREADS` | `4` | CPU threads of one Docling conversion. Minimum 1. |

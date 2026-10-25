@@ -668,13 +668,16 @@ def test_extract_upload_image_without_handoff_is_unsupported() -> None:
 
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
-    assert envelope.error.message == "OCR is not enabled on this service."
+    assert "not enabled" not in envelope.error.message  # OCR exists; no handoff was given
+    assert "OCR" in envelope.error.message
 
 
 def test_extract_upload_hands_over_after_the_deadline() -> None:
     handed: list[OcrNeeded] = []
 
-    async def handoff(needed: OcrNeeded) -> Envelope[ExtractResult]:
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
         handed.append(needed)
         await asyncio.sleep(2.5)  # longer than the whole extraction may take
         assert needed.draft is not None

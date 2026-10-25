@@ -81,6 +81,12 @@ _log = structlog.get_logger(__name__)
 MARKITDOWN_TARGET: Final = "text_extraction.documents.child"
 # Added to a document result whose text did not get the OCR it needed.
 OCR_UNAVAILABLE_WARNING: Final = "ocr_unavailable"
+# The error of a document without a text layer (an image) whose extraction has no OCR handoff
+# while the service has OCR: a render's (the browser worker hands nothing on).
+OCR_NOT_HANDED_MESSAGE: Final = (
+    "The document needs OCR, which this extraction cannot hand on to the OCR workers. "
+    "Extract the document's own URL with mode fast."
+)
 # The child's deadline is this much before the extraction's, so its timeout is ours to answer.
 _POOL_MARGIN_SECONDS: Final = 0.25
 
@@ -272,12 +278,14 @@ def document_input(
     )
 
 
-def without_ocr(needed: OcrNeeded, run: DocumentRun) -> Envelope[ExtractResult]:
+def without_ocr(
+    needed: OcrNeeded, run: DocumentRun, *, message: str = OCR_DISABLED_MESSAGE
+) -> Envelope[ExtractResult]:
     """The answer when the OCR is not done: the draft with the warning ``ocr_unavailable``, or
-    ``unsupported_content_type`` for a document without one."""
+    ``unsupported_content_type`` with ``message`` for a document without one."""
     draft = needed.draft
     if draft is None or draft.data is None:
-        return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, OCR_DISABLED_MESSAGE)
+        return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, message)
     warnings = [*draft.data.warnings, OCR_UNAVAILABLE_WARNING]
     return draft.model_copy(update={"data": draft.data.model_copy(update={"warnings": warnings})})
 

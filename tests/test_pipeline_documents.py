@@ -54,6 +54,7 @@ from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline, create_pipeline
 from text_extraction.pipeline_documents import (
     MARKITDOWN_TARGET,
+    OCR_NOT_HANDED_MESSAGE,
     OCR_UNAVAILABLE_WARNING,
     DocumentSteps,
     OcrNeeded,
@@ -190,7 +191,8 @@ class Harness:
 
     def run(
         self,
-        handoff: Callable[[OcrNeeded], Awaitable[Envelope[ExtractResult]]] | None = None,
+        handoff: Callable[[OcrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
+        | None = None,
         *,
         draft: Envelope[ExtractResult] | None = None,
         **request: Any,
@@ -510,7 +512,11 @@ def test_image_without_docling_unsupported(docling: bool) -> None:
     assert envelope.status == "failed"
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
-    assert envelope.error.message == "OCR is not enabled on this service."
+    if docling:  # OCR exists, but this extraction (a render's, B2) has no handoff
+        assert envelope.error.message == OCR_NOT_HANDED_MESSAGE
+        assert "not enabled" not in envelope.error.message
+    else:
+        assert envelope.error.message == "OCR is not enabled on this service."
     assert data_of(envelope).content_type == "image/png"
     assert pool.calls == []
 
@@ -540,9 +546,14 @@ def test_scan_with_docling_returns_ocr_needed() -> None:
     )
     handed: list[OcrNeeded] = []
 
-    async def handoff(needed: OcrNeeded) -> Envelope[ExtractResult]:
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
         handed.append(needed)
         assert needed.draft is not None
+        # The stand-in answer without OCR: the draft with the warning.
+        assert without.data is not None
+        assert OCR_UNAVAILABLE_WARNING in without.data.warnings
         return needed.draft
 
     envelope = harness.run(handoff)
@@ -584,8 +595,13 @@ def test_image_with_docling_hands_over_without_draft() -> None:
     )
     handed: list[OcrNeeded] = []
 
-    async def handoff(needed: OcrNeeded) -> Envelope[ExtractResult]:
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
         handed.append(needed)
+        assert without.status == "failed"  # an image has no text layer to stand in
+        assert without.data is not None
+        assert without.data.content_type == "image/png"
         return Envelope(status="success", data=None)
 
     harness.run(handoff)
@@ -600,7 +616,9 @@ def test_ocr_always_hands_over_a_text_pdf() -> None:
     harness = Harness(None, {DOC: pdf()}, pool=FakePool(reply()), docling_enabled=True)
     handed: list[OcrNeeded] = []
 
-    async def handoff(needed: OcrNeeded) -> Envelope[ExtractResult]:
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
         handed.append(needed)
         assert needed.draft is not None
         return needed.draft
@@ -778,7 +796,9 @@ def test_handoff_runs_after_the_extraction_deadline() -> None:
         extract_timeout_seconds=2,
     )
 
-    async def handoff(needed: OcrNeeded) -> Envelope[ExtractResult]:
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
         await asyncio.sleep(2.5)  # longer than the whole extraction may take
         assert needed.draft is not None
         assert needed.draft.data is not None

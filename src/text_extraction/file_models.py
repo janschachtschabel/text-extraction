@@ -5,8 +5,10 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from text_extraction.browser_options import WaitSeconds
+from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
 from text_extraction.documents.types import OcrOption
+from text_extraction.job_models import JobOptions
 
 # The form part that carries the file; the route takes it as a parameter of its own.
 FILE_PART = "file"
@@ -42,3 +44,31 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
         if isinstance(data, dict) and FILE_PART in data:
             return {name: value for name, value in data.items() if name != FILE_PART}
         return data
+
+
+class UploadInputMeta(BaseModel):
+    """What a job keeps next to an upload's bytes (``JobStore.put_input``) until its item is
+    extracted: the part's sanitised file name and its declared content type."""
+
+    file_name: str | None = None
+    content_type: str | None = None  # as the part declared it, parameters included
+
+
+def upload_options(form: FileForm, compliance: ComplianceMode) -> JobOptions:
+    """The stored options of an upload's job (kind ``file``): no mode of its own, no result
+    cache."""
+    return JobOptions(
+        mode="fast",
+        format=form.format,
+        metadata=form.metadata,
+        links=False,
+        compliance=compliance,
+        cache=False,
+        ocr=form.ocr,
+    )
+
+
+def form_of(options: JobOptions) -> FileForm:
+    """The form of an upload, rebuilt from its job's options (``wait_seconds`` does not
+    matter any more)."""
+    return FileForm(format=options.format, metadata=options.metadata, ocr=options.ocr)

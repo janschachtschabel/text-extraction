@@ -37,7 +37,7 @@ from text_extraction.job_models import (
     JobProgress,
     JobView,
 )
-from text_extraction.jobs import JobRecord, JobStore
+from text_extraction.jobs import JobRecord, JobStore, owner_key
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
@@ -62,13 +62,10 @@ _BYTES_AROUND_URL = 8
 _LOST_MESSAGE = "The pod running this extraction stopped."
 
 _JOB_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
-_OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
 
 
 def _open_key(owner: str) -> str:
-    for char, code in _OWNER_ESCAPES.items():
-        owner = owner.replace(char, code)
-    return f"jobs:{{owner:{owner}}}:open"
+    return owner_key(owner, "open")
 
 
 async def require_jobs_enabled(

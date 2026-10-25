@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from pydantic import BaseModel
 
 from text_extraction.auth import Principal
 from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
@@ -666,3 +667,93 @@ async def _secrets_flag() -> None:
 
 def test_has_secrets_is_recorded_and_outlives_the_secrets() -> None:
     asyncio.run(_secrets_flag())
+
+
+# --- inputs and URL-less items (ruling F12) ---------------------------------------------------
+
+
+class Meta(BaseModel):
+    kind: str
+    name: str | None = None
+
+
+@scenario
+async def test_input_is_stored_read_and_deleted() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none"))
+    job_id = await store.create("file", OWNER, OPTIONS, [None])
+
+    await store.put_input(job_id, 0, PNG, Meta(kind="png", name="a.png"), 600)
+
+    assert await store.get_input(job_id, 0, Meta) == (PNG, Meta(kind="png", name="a.png"))
+    assert await store.get_input(job_id, 1, Meta) is None
+    assert 0 < await valkey.ttl(f"job:{{{job_id}}}:input:0") <= 600
+    await store.delete_input(job_id, 0)
+    assert await store.get_input(job_id, 0, Meta) is None
+
+
+@scenario
+async def test_input_never_outlives_its_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none", job_ttl_seconds=300))
+    job_id = await store.create("file", OWNER, OPTIONS, [None])
+
+    await store.put_input(job_id, 0, PNG, Meta(kind="png"), 3600)
+
+    assert 0 < await valkey.ttl(f"job:{{{job_id}}}:input:0") <= 300
+
+
+@scenario
+async def test_input_of_a_gone_job_is_not_stored() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none"))
+
+    with pytest.raises(JobLost):
+        await store.put_input("f" * 32, 0, PNG, Meta(kind="png"), 600)
+
+    assert await valkey.keys("*") == []
+
+
+@scenario
+async def test_delete_and_shorten_remove_the_input() -> None:
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, Settings(auth_mode="none"))
+    deleted = await store.create("file", OWNER, OPTIONS, [None])
+    shortened = await store.create("file", OWNER, OPTIONS, [None])
+    for job_id in (deleted, shortened):
+        await store.put_input(job_id, 0, PNG, Meta(kind="png"), 600)
+
+    await store.delete(deleted)
+    await store.shorten(shortened, 30)
+
+    assert await store.get_input(deleted, 0, Meta) is None
+    assert await store.get_input(shortened, 0, Meta) is None
+
+
+@scenario
+async def test_an_upload_item_has_no_url() -> None:
+    store = JobStore(FakeAsyncRedis(), Settings(auth_mode="none"))
+    job_id = await store.create("file", OWNER, OPTIONS, [None])
+
+    (item,) = await store.items(job_id, 0, 10)
+    assert item.url is None
+    assert await store.url(job_id, 0) == ""  # the item exists, without a URL
+    assert await store.url(job_id, 1) is None
+
+
+@scenario
+async def test_open_docling_jobs_count_only_unfinished_ones() -> None:
+    clock = Clock()
+    store = JobStore(FakeAsyncRedis(), Settings(auth_mode="none"), clock=clock)
+    open_job, done_job, gone_job = [
+        await store.create("extract", OWNER, OPTIONS, [URLS[0]]) for _ in range(3)
+    ]
+    for job_id in (open_job, done_job, gone_job):
+        assert await store.add_docling_job("alice", job_id) >= 1
+    await store.write_result(done_job, 0, Envelope[ExtractResult](status="failed"))
+    await store.delete(gone_job)
+
+    assert await store.open_docling_jobs("alice") == 1
+    assert await store.open_docling_jobs("bob") == 0
+    await store.drop_docling_job("alice", open_job)
+    assert await store.open_docling_jobs("alice") == 0

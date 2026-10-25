@@ -171,3 +171,18 @@ def test_graceful_seconds_cover_browser_wait() -> None:
     assert graceful_shutdown_seconds(slow) == 90 + 10 + 30 + 10
     # Workers never wait for another pool: the extract worker keeps the extraction bound.
     assert extraction_graceful_seconds(unblock) == 30
+
+
+def test_graceful_seconds_cover_docling_wait() -> None:
+    # F12: a sync request that needs OCR runs its fast phase, then waits
+    # DOCLING_SYNC_WAIT_SECONDS for the Docling worker, then answers (5 s).
+    docling = Settings(auth_mode="none", docling_enabled=True)
+    assert graceful_shutdown_seconds(docling) == 25 + 20 + 5
+    slow = Settings(auth_mode="none", docling_enabled=True, extract_timeout_seconds=60)
+    assert graceful_shutdown_seconds(slow) == 60 + 20 + 5
+    # The longer of the browser's and Docling's bound.
+    both = Settings(auth_mode="none", docling_enabled=True, browser_enabled=True)
+    assert graceful_shutdown_seconds(both) == 25 + 10 + 30 + 10
+    short = Settings(auth_mode="none", docling_enabled=True, docling_sync_wait_seconds=0)
+    assert graceful_shutdown_seconds(short) == 30
+    assert extraction_graceful_seconds(docling) == 30

@@ -19,22 +19,26 @@ from prometheus_client import CollectorRegistry
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
-from tests.fakes import Answer, FakeFetcher, RefusingGate, fetched
+from tests.fakes import PARAGRAPH, Answer, FakeFetcher, RefusingGate, fetched
 from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
 from text_extraction import worker as worker_module
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
+from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchResult, Validators
+from text_extraction.file_models import UploadInputMeta
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobOptions
-from text_extraction.jobs import JobLost, JobStore, ResultWrite
+from text_extraction.jobs import JobLost, JobRecord, JobStore, ResultWrite
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
+from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
+from text_extraction.pool_dispatch import docling_queue
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
@@ -86,6 +90,12 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(**values)
 
 
+class Pressure:
+    """A memory guard whose verdict the test sets."""
+
+    high = False
+
+
 def default_queue(valkey: FakeAsyncRedis, settings: Settings, clock: Clock) -> FairQueue:
     return FairQueue(valkey, settings, clock=clock)
 
@@ -101,6 +111,7 @@ class Harness:
         make_queue: Callable[[FakeAsyncRedis, Settings, Clock], Any] | None = None,
         pipeline: Any = None,
         random: Callable[[], float] = lambda: 0.5,  # no jitter
+        document_pool: Any = None,
         **overrides: Any,
     ) -> None:
         self.valkey = FakeAsyncRedis()
@@ -118,16 +129,22 @@ class Harness:
             FingerprintStore(self.valkey, self.settings),
             self.settings,
             self.registry,
+            document_pool=document_pool,
         )
         self.store = JobStore(self.valkey, self.settings, clock=self.clock)
         self.queue = (make_queue or default_queue)(self.valkey, self.settings, self.clock)
         # The browser pool's queue, which escalating ``auto`` items move to (B5).
         self.browser_queue = FairQueue(self.valkey, self.settings, "browser", clock=self.clock)
+        # The Docling pool's queue, which items that need OCR move to (F13).
+        self.docling_queue = docling_queue(self.valkey, self.settings)
+        self.guard = Pressure()
         self.runner = ExtractRunner(
             self.pipeline,
             self.store,
             self.settings,
             self.browser_queue if self.settings.browser_enabled else None,
+            docling_queue=self.docling_queue if ocr_available(self.settings) else None,
+            guard=self.guard,
         )
         self.worker = Worker(
             self.settings,
@@ -1258,3 +1275,229 @@ async def test_shutdown_waits_only_briefly_for_a_start_up_that_does_not_unwind(
 
     assert not readiness.ready
     assert any(log["event"] == "worker_start_not_unwound" for log in logs)
+
+
+# --- documents that need OCR (F13) ---------------------------------------------------------
+
+
+SCAN_URL = "https://docs.example.org/scan.pdf"
+SCAN_BODY = b"%PDF-1.7\nscan\n%%EOF\n"
+
+
+class OcrPool:
+    """MarkItDown's children: every PDF has a text layer too thin to keep (it needs OCR)."""
+
+    async def start(self) -> None:
+        pass
+
+    async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+        return {
+            "content": "Thin text layer.",
+            "title": "Scan",
+            "warnings": [],
+            "pages": 1,
+            "pages_converted": 1,
+            "needs_ocr": True,
+            "metadata": None,
+        }
+
+    async def shutdown(self) -> None:
+        pass
+
+
+def ocr_harness(**overrides: Any) -> Harness:
+    scan = fetched(SCAN_URL, SCAN_BODY, content_type="application/pdf")
+    return Harness({SCAN_URL: scan}, document_pool=OcrPool(), docling_enabled=True, **overrides)
+
+
+async def docling_members(
+    harness: Harness, client: str = "alice", domain: str = "docs.example.org"
+) -> list[str]:
+    raw = await harness.valkey.lrange(f"q:{{docling}}:c:{client}:d:{domain}", 0, -1)
+    return [os.fsdecode(value) for value in raw]
+
+
+@scenario
+async def test_batch_item_moves_to_docling() -> None:
+    harness = ocr_harness()
+    job_id = await harness.submit([SCAN_URL])
+    steps: list[str] = []
+    store, queue = harness.store, harness.docling_queue
+    real_input, real_draft, real_enqueue = store.put_input, store.put_draft, queue.enqueue_items
+
+    async def put_input(*args: Any, **kwargs: Any) -> None:
+        steps.append("input")
+        await real_input(*args, **kwargs)
+
+    async def put_draft(*args: Any, **kwargs: Any) -> None:
+        steps.append("draft")
+        await real_draft(*args, **kwargs)
+
+    failures = [RedisConnectionError("valkey is down")]
+
+    async def enqueue_items(*args: Any, **kwargs: Any) -> None:
+        steps.append("queue")
+        if failures:  # the pod dies after the draft
+            raise failures.pop()
+        await real_enqueue(*args, **kwargs)
+
+    store.put_input = put_input  # type: ignore[method-assign]
+    store.put_draft = put_draft  # type: ignore[method-assign]
+    queue.enqueue_items = enqueue_items  # type: ignore[method-assign]
+    real_complete = harness.queue.complete
+
+    async def complete(item: QueueItem) -> bool:
+        steps.append("complete")
+        return await real_complete(item)
+
+    harness.queue.complete = complete  # type: ignore[method-assign]
+
+    with pytest.raises(RedisConnectionError):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    # Still leased here, and nothing reached the Docling queue.
+    assert (await harness.queue.counts()).leased == 1
+    assert (await queue.counts()).pending == 0
+    harness.clock.now += harness.lease_seconds + 1
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert steps == ["input", "draft", "queue", "input", "draft", "queue", "complete"]
+    # Moved once: completed in ``extract`` without a result, queued on ``docling`` with the same
+    # job, index and client.
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert await docling_members(harness) == [f"{job_id}:0:0"]
+    (item,) = await harness.items(job_id)
+    assert (item.state, item.result) == ("pending", None)
+    stored = await store.get_input(job_id, 0, DocumentInputMeta)
+    assert stored is not None
+    body, meta = stored
+    assert body == SCAN_BODY
+    assert (meta.kind, meta.final_url, meta.needs_ocr) == ("pdf", SCAN_URL, True)
+    ttl = await harness.valkey.ttl(f"job:{{{job_id}}}:input:0")
+    assert 0 < ttl <= harness.settings.docling_input_ttl_seconds
+    draft = await store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.content == "Thin text layer."
+    assert outcome_count(harness, "escalated") == 1
+    # The draft is neither cached nor fingerprinted: the Docling worker stores the kept one.
+    assert await harness.valkey.keys("res:*") == []
+
+
+@scenario
+async def test_batch_item_keeps_its_draft_while_memory_is_high() -> None:
+    harness = ocr_harness()
+    harness.guard.high = True
+    job_id = await harness.submit([SCAN_URL])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"  # the draft's own verdict: too few words
+    assert item.result.data is not None
+    assert OCR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert item.result.data.fingerprint is None
+    assert (await harness.docling_queue.counts()).pending == 0
+    assert await harness.valkey.keys("job:*:input:*") == []
+
+
+@scenario
+async def test_no_move_while_docling_is_off() -> None:
+    scan = fetched(SCAN_URL, SCAN_BODY, content_type="application/pdf")
+    harness = Harness({SCAN_URL: scan}, document_pool=OcrPool())
+    job_id = await harness.submit([SCAN_URL])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert OCR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert (await harness.docling_queue.counts()).pending == 0
+
+
+async def submit_upload(harness: Harness, body: bytes, content_type: str) -> str:
+    options = JobOptions(mode="fast", compliance="enforce", cache=False, format="text")
+    job_id = await harness.store.create("file", OWNER, options, [None])
+    meta = UploadInputMeta(file_name="notes.txt", content_type=content_type)
+    await harness.store.put_input(job_id, 0, body, meta, 600)
+    await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
+    return job_id
+
+
+@scenario
+async def test_file_item_runs_from_its_input_and_deletes_it() -> None:
+    harness = Harness()
+    job_id = await submit_upload(harness, (PARAGRAPH * 4).encode(), "text/plain")
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.url is None
+    assert item.result is not None
+    assert item.result.status == "success"
+    assert item.result.data is not None
+    assert (item.result.data.mode_used, item.result.data.url) == ("upload", None)
+    assert item.result.data.format == "text"
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert harness.fetcher.calls == []
+
+
+@scenario
+async def test_file_item_whose_input_expired_fails_timeout() -> None:
+    harness = Harness()
+    job_id = await submit_upload(harness, (PARAGRAPH * 4).encode(), "text/plain")
+    await harness.store.delete_input(job_id, 0)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    code, retryable, _ = error_of(item)
+    assert (code, retryable) == (ErrorCode.TIMEOUT, True)
+
+
+@scenario
+async def test_file_item_that_needs_ocr_moves_to_docling() -> None:
+    harness = Harness(document_pool=OcrPool(), docling_enabled=True)
+    job_id = await submit_upload(harness, SCAN_BODY, "application/pdf")
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert await docling_members(harness, domain="-") == [f"{job_id}:0:0"]
+    stored = await harness.store.get_input(job_id, 0, DocumentInputMeta)
+    assert stored is not None
+    assert stored[1].file_name == "notes.txt"
+    assert stored[1].needs_ocr is True
+
+
+@scenario
+async def test_docling_worker_deletes_the_input_with_the_outcome() -> None:
+    """The ``Worker`` of pool ``docling`` (Task 9's runner) deletes an item's input once the
+    item's result is written."""
+    harness = ocr_harness()
+    job_id = await harness.submit([SCAN_URL])
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    class Answering:
+        lease_seconds = 60.0
+
+        async def run(self, job: JobRecord, item: QueueItem, url: str, **kwargs: Any) -> Any:
+            assert await harness.store.get_input(job.id, item.index, DocumentInputMeta)
+            return Envelope[ExtractResult](status="failed")
+
+    docling = Worker(
+        harness.settings,
+        harness.valkey,
+        Answering(),
+        harness.store,
+        harness.docling_queue,
+        harness.registry,
+        clock=harness.clock,
+    )
+    claim = await harness.docling_queue.claim(60)
+    assert claim.item is not None
+    await docling.process(claim.item)
+
+    assert await harness.completed(job_id)
+    assert await harness.valkey.keys("job:*:input:*") == []

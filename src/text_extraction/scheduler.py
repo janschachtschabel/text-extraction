@@ -444,8 +444,9 @@ class FairQueue:
 
     Claims rotate between clients, then between the domains of a client, so a small batch is not
     queued behind a large one and a small domain not behind a large one. A domain is skipped
-    while it is deferred or holds ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` leases. A lease that
-    expires (its worker died) puts the item back at the front of its domain.
+    while it is deferred or holds ``OUTBOUND_MAX_CONCURRENCY_PER_HOST`` leases (``domain_cap``
+    for a pool that fetches nothing, such as ``docling``). A lease that expires (its worker died)
+    puts the item back at the front of its domain.
     """
 
     def __init__(
@@ -455,10 +456,14 @@ class FairQueue:
         pool: str = "extract",
         *,
         clock: Callable[[], float] = time.time,
+        domain_cap: int | None = None,
     ) -> None:
         if not _POOL.fullmatch(pool):
             raise ValueError(f"Invalid queue pool name: {pool!r}")
         self._settings = settings
+        self._domain_cap = (
+            domain_cap if domain_cap is not None else settings.outbound_max_concurrency_per_host
+        )
         self._clock = clock
         self._pool = pool
         self._prefix = f"q:{{{pool}}}:"
@@ -476,14 +481,18 @@ class FairQueue:
         """Queue the items ``0 … len(urls) - 1`` of a job for ``client``, in index order."""
         await self.enqueue_items(job_id, client, list(enumerate(urls)))
 
-    async def enqueue_items(self, job_id: str, client: str, items: list[tuple[int, str]]) -> None:
+    async def enqueue_items(
+        self, job_id: str, client: str, items: Sequence[tuple[int, str | None]]
+    ) -> None:
         """Queue the given ``(index, url)`` items of a job for ``client``, in the given order:
-        an item that moves to this pool from another one keeps its index."""
+        an item that moves to this pool from another one keeps its index. An item without a URL
+        (an upload) has the domain ``-``."""
         token = _escape(client)
         for start in range(0, len(items), _ENQUEUE_CHUNK):
             args: list[str] = [self._prefix, token]
             for index, url in items[start : start + _ENQUEUE_CHUNK]:
-                args += [_escape(domain_of(url)), f"{job_id}:{index}:0"]
+                domain = domain_of(url) if url else NO_DOMAIN
+                args += [_escape(domain), f"{job_id}:{index}:0"]
             await self._enqueue(keys=self._keys, args=args)
 
     async def claim(self, lease_seconds: float) -> Claim:
@@ -498,7 +507,7 @@ class FairQueue:
                 repr(now),
                 f"{now + lease_seconds:.6f}",
                 settings.job_item_max_attempts,
-                settings.outbound_max_concurrency_per_host,
+                self._domain_cap,
                 _RECLAIM_LIMIT,
                 settings.scheduler_claim_scan_budget,
                 lease,

@@ -39,6 +39,21 @@ completed here without a result. The browser worker renders it and keeps the bet
 Draft first, then the browser queue, then the completion: a crash in between leaves the item
 leased here, so it runs again and moves again, and only the first result of an item counts.
 
+**OCR (F13).** While the service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), an item
+whose document needs it moves to the ``docling`` pool the same way: its bytes are stored as the
+item's input (``DOCLING_INPUT_TTL_SECONDS``), MarkItDown's result as its draft, the item is
+queued on ``docling`` with the same job, index and client, and it is completed here without a
+result. Input, then draft, then the queue, then the completion: a crash in between leaves the
+item leased here, and the rerun moves it once more. While the memory guard is high nothing is
+stored: the item keeps its draft with the warning ``ocr_unavailable`` (an image without one fails
+``rate_limited``, retryable). The ``pool_dispatch`` module docstring has what the Docling worker
+reads.
+
+**Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
+the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
+expired fails ``timeout``, retryable. Once such an item's result is written, the worker deletes
+its input; so does a worker of pool ``docling`` for each of its items.
+
 While Valkey's memory is at ``VALKEY_MEMORY_GUARD_RATIO`` of its maximum (``memory_guard.py``,
 read every 5 s from the start to the end of the process), the result cache skips its writes; the
 results still go to the job.
@@ -74,19 +89,23 @@ from redis.exceptions import RedisError
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.documents.pool import DocumentPool
+from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import needs_browser, unblock_for
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
+from text_extraction.file_models import UploadInputMeta, form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
-from text_extraction.pipeline_documents import create_document_pool
+from text_extraction.pipeline_documents import OcrNeeded, create_document_pool
+from text_extraction.pool_dispatch import DOCLING_POOL, docling_queue, without_ocr
 from text_extraction.queue_metrics import job_duration_for
+from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.server import (
     _HANDLED_SIGNALS,
@@ -112,10 +131,12 @@ _ERROR_PAUSE_SECONDS = 1.0
 _START_UNWIND_SECONDS = 5.0
 
 _LOST_MESSAGE = "The item was lost by a worker too often."
+_INPUT_EXPIRED_MESSAGE = "The uploaded file expired before it was extracted. Upload it again."
+_OCR_BUSY_MESSAGE = "The service takes no new documents for OCR at the moment. Try again later."
 _INTERNAL_MESSAGE = "Internal server error."
 
 # Outcomes of an item besides its envelope's: given back to the queue, its job is gone, or it
-# moved to another pool (the browser's).
+# moved to another pool (the browser's or Docling's).
 _DEFERRED = "deferred"
 _LOST = "lost"
 _ESCALATED = "escalated"
@@ -145,7 +166,7 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
                 "text_extraction_job_items_total",
                 "Job items handled by this worker, by outcome: success, the error code of the "
                 "result, deferred (given back while the host is busy or paused), lost (the "
-                "job was gone) or escalated (moved to the browser pool).",
+                "job was gone) or escalated (moved to the browser or the docling pool).",
                 ["outcome"],
                 registry=registry,
             ),
@@ -186,16 +207,60 @@ class ItemRunner(Protocol):
         gate_refusals: Literal["fail", "raise"],
     ) -> Envelope[ExtractResult] | None:
         """The item's result, or None when the item was moved to another pool: it is then
-        completed without a result. A gate refusal (``OutboundBusy``, ``CircuitOpen``) with
-        ``gate_refusals="raise"``, a Valkey error and ``JobLost`` propagate; the worker defers,
-        backs off or drops the item."""
+        completed without a result. ``url`` is ``""`` for an upload's item. A gate refusal
+        (``OutboundBusy``, ``CircuitOpen``) with ``gate_refusals="raise"``, a Valkey error and
+        ``JobLost`` propagate; the worker defers, backs off or drops the item."""
         ...
 
 
+class DoclingMove:
+    """The OCR handoff of one item (F13): moves its document to the ``docling`` pool, or, while
+    ``guard`` is high, keeps its draft with ``ocr_unavailable``. ``moved`` is True once the
+    item is queued there; its runner then answers None."""
+
+    def __init__(
+        self,
+        store: JobStore,
+        queue: FairQueue,
+        guard: MemoryPressure | None,
+        settings: Settings,
+        job: JobRecord,
+        item: QueueItem,
+        url: str | None,
+    ) -> None:
+        self._store = store
+        self._queue = queue
+        self._guard = guard
+        self._settings = settings
+        self._job = job
+        self._item = item
+        self._url = url
+        self.moved = False
+
+    async def __call__(
+        self, needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        if self._guard is not None and self._guard.high:
+            return without_ocr(needed, without, ErrorCode.RATE_LIMITED, _OCR_BUSY_MESSAGE)
+        job_id, index = self._job.id, self._item.index
+        document = needed.input
+        # Input, then draft, then the queue: the Docling worker may claim the item at once.
+        await self._store.put_input(
+            job_id, index, document.body, document.meta, self._settings.docling_input_ttl_seconds
+        )
+        if needed.draft is not None:
+            await self._store.put_draft(job_id, index, needed.draft)
+        await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
+        self.moved = True
+        return without  # not stored: the item is completed without a result
+
+
 class ExtractRunner:
-    """The ``extract`` pool's runner: the fast pipeline, and the move of an ``auto`` item that
-    needs the browser to the ``browser`` pool (B5). ``browser_queue`` is that pool's queue; None
-    while ``BROWSER_ENABLED`` is false, and then nothing moves."""
+    """The ``extract`` pool's runner: the fast pipeline, the move of an ``auto`` item that needs
+    the browser to the ``browser`` pool (B5), and the move of a document that needs OCR to the
+    ``docling`` pool (F13). ``browser_queue`` is the browser pool's queue, None while
+    ``BROWSER_ENABLED`` is false; ``docling_queue`` the Docling pool's, None while the service
+    has no OCR; then nothing moves there. ``guard`` tells whether Valkey is nearly full."""
 
     def __init__(
         self,
@@ -203,11 +268,16 @@ class ExtractRunner:
         store: JobStore,
         settings: Settings,
         browser_queue: FairQueue | None,
+        *,
+        docling_queue: FairQueue | None = None,
+        guard: MemoryPressure | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._store = store
         self._settings = settings
         self._browser_queue = browser_queue
+        self._docling_queue = docling_queue
+        self._guard = guard
         self.lease_seconds = settings.extract_timeout_seconds * 2 + 10
 
     async def run(
@@ -219,11 +289,18 @@ class ExtractRunner:
         gate_refusals: Literal["fail", "raise"],
     ) -> Envelope[ExtractResult] | None:
         principal = job_principal(job)
-        envelope = await self._pipeline.run(
-            ExtractRequest(url=url, **job.options.model_dump()),
-            principal,
-            gate_refusals=gate_refusals,
-        )
+        move = self._docling_move(job, item, url or None)
+        if job.kind == "file":
+            return await self._upload(job, item, principal, move)
+        request = ExtractRequest(url=url, **job.options.model_dump())
+        if move is None:  # while the service has no OCR, the call of package 3
+            envelope = await self._pipeline.run(request, principal, gate_refusals=gate_refusals)
+        else:
+            envelope = await self._pipeline.run(
+                request, principal, gate_refusals=gate_refusals, ocr_handoff=move
+            )
+            if move.moved:
+                return None
         if self._browser_queue is None or job.options.mode != "auto":
             return envelope
         unblock = unblock_for(principal, job.options.compliance, self._settings)
@@ -233,6 +310,31 @@ class ExtractRunner:
         await self._store.put_draft(job.id, item.index, envelope)
         await self._browser_queue.enqueue_items(job.id, item.client, [(item.index, url)])
         return None
+
+    def _docling_move(self, job: JobRecord, item: QueueItem, url: str | None) -> DoclingMove | None:
+        if self._docling_queue is None:
+            return None
+        return DoclingMove(
+            self._store, self._docling_queue, self._guard, self._settings, job, item, url
+        )
+
+    async def _upload(
+        self, job: JobRecord, item: QueueItem, principal: Principal, move: DoclingMove | None
+    ) -> Envelope[ExtractResult] | None:
+        """An uploaded file's item, converted from its input."""
+        stored = await self._store.get_input(job.id, item.index, UploadInputMeta)
+        if stored is None:
+            return failed_extract(ErrorCode.TIMEOUT, _INPUT_EXPIRED_MESSAGE, retryable=True)
+        body, meta = stored
+        envelope = await self._pipeline.extract_upload(
+            body,
+            meta.file_name,
+            form_of(job.options),
+            principal,
+            content_type=meta.content_type,
+            ocr_handoff=move,
+        )
+        return None if move is not None and move.moved else envelope
 
 
 def job_principal(job: JobRecord) -> Principal:
@@ -361,6 +463,7 @@ class Worker:
         if await self._store.has_result(item.job_id, item.index):
             # A copy of an item that has finished (it was rerun after a lost lease, or moved to
             # this pool twice): its result stands, and the target is not asked again.
+            await self._drop_input(job, item)
             await self._queue.complete(item)
             _log.debug("job_item_skipped", reason="has_result")
             return None
@@ -424,8 +527,15 @@ class Worker:
             seconds = max(self._clock() - job.created_at.timestamp(), 0.0)
             self._metrics.job_duration.labels(kind=job.kind).observe(seconds)
             _log.info("job_completed", kind=job.kind, seconds=round(seconds, 3))
+        await self._drop_input(job, item)
         await self._queue.complete(item)
         return None if write == "repeat" else _outcome(envelope)
+
+    async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
+        """Delete the item's bytes once it has its result: an upload's, or a document's that
+        was queued for OCR (pool ``docling``)."""
+        if job.kind == "file" or self._queue.pool == DOCLING_POOL:
+            await self._store.delete_input(item.job_id, item.index)
 
     async def _drop(self, item: QueueItem) -> str:
         """Complete an item whose job is gone (expired): there is nowhere to store its result."""
@@ -542,10 +652,13 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     )
     store = JobStore(valkey, settings)
     browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None
+    ocr_queue = docling_queue(valkey, settings) if ocr_available(settings) else None
     worker = Worker(
         settings,
         valkey,
-        ExtractRunner(pipeline, store, settings, browser_queue),
+        ExtractRunner(
+            pipeline, store, settings, browser_queue, docling_queue=ocr_queue, guard=guard
+        ),
         store,
         FairQueue(valkey, settings),
         registry,

@@ -7,7 +7,8 @@ keys share a slot and a Lua script can touch all of them:
                           finished_at, total, done, success, partial, failed, lease_until,
                           trace_id (of the request that created the job, when it had one),
                           secrets (``1`` when the job was created with caller secrets)
-- ``job:{<id>}:urls``     list: the URLs in input order
+- ``job:{<id>}:urls``     list: the URLs in input order; an empty string for an uploaded file's
+                          item, which has no URL (kind ``file``)
 - ``job:{<id>}:results``  hash: item index -> ``Envelope[ExtractResult]`` as JSON
 - ``job:{<id>}:done``     bitmap: bit ``index`` is set once that item has its result
 
@@ -26,6 +27,17 @@ Browser jobs (package 4) may have these as well:
 - ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
+Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR) have:
+
+- ``job:{<id>}:input:<index>`` hash: ``body`` (the bytes) and ``meta`` (JSON: what the consumer
+                          needs to know about them); TTL ``DOCLING_INPUT_TTL_SECONDS`` at most,
+                          never longer than the job's. No read of the job shows it; the worker
+                          deletes it once the item has its outcome, and ``delete`` and
+                          ``shorten`` delete the input of item 0 (the only item of a sync job).
+
+``jobs:{owner:<owner>}:docling`` is a set of an owner's Docling jobs (``add_docling_job``); a job
+that is completed or gone leaves it when it is counted (``open_docling_jobs``).
+
 A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
 then; one with a screenshot is kept only as long as the screenshot (``shorten``).
 
@@ -33,15 +45,17 @@ Times are epoch seconds from the injected clock (every pod needs a synchronised 
 as numbers and handed out as UTC datetimes, except ``lease_until``, which stays a number.
 """
 
+import asyncio
 import math
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from pydantic import BaseModel
 from redis.asyncio import Redis
 
 from text_extraction.auth import Principal, Role
@@ -71,6 +85,12 @@ _URL_CHUNK = 1000
 
 # The keys of a job: the four of every job, and those of browser jobs.
 _KINDS = ("meta", "urls", "results", "done", "secrets", "drafts")
+
+# The input of item 0 (the only item of a sync job), which ``delete`` and ``shorten`` remove.
+_FIRST_INPUT = "input:0"
+# An item without a URL (an upload) is stored with this in the URL list.
+_NO_URL = ""
+_OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
 
 # The files a job can have; ``delete`` removes them by name.
 SCREENSHOT_ARTIFACT = "screenshot.png"
@@ -152,6 +172,23 @@ end
 return 1
 """
 
+# KEYS = meta, input; ARGV = body, meta JSON, ttl in ms. Stores the input for the ttl, but never
+# longer than the job lives; returns 1, or -1 when the job is gone (nothing is written).
+_PUT_INPUT = """
+local remaining = redis.call('PTTL', KEYS[1])
+if remaining == -2 then
+  return -1
+end
+local ttl = tonumber(ARGV[3])
+if remaining > 0 and remaining < ttl then
+  ttl = remaining
+end
+redis.call('DEL', KEYS[2])
+redis.call('HSET', KEYS[2], 'body', ARGV[1], 'meta', ARGV[2])
+redis.call('PEXPIRE', KEYS[2], ttl)
+return 1
+"""
+
 # KEYS = meta, artifact; ARGV = data, ttl in seconds. Returns 1, or -1 when the job is gone.
 _PUT_ARTIFACT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -198,6 +235,20 @@ def browser_lease_seconds(settings: Settings) -> float:
     (``BROWSER_TIMEOUT_SECONDS`` or ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``) plus 10 s."""
     longest = max(settings.browser_timeout_seconds, settings.browser_unblock_timeout_seconds)
     return 2 * longest + 10
+
+
+def docling_lease_seconds(settings: Settings) -> float:
+    """How long the Docling worker holds an item: two conversions (``DOCLING_TIMEOUT_SECONDS``)
+    plus 10 s (ruling F14)."""
+    return 2 * settings.docling_timeout_seconds + 10
+
+
+def owner_key(owner: str, name: str) -> str:
+    """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
+    escaped, so a name cannot break the hash tag."""
+    for char, code in _OWNER_ESCAPES.items():
+        owner = owner.replace(char, code)
+    return f"jobs:{{owner:{owner}}}:{name}"
 
 
 def _key(job_id: str, kind: str) -> str:
@@ -249,21 +300,24 @@ class JobStore:
         self._mark_running = valkey.register_script(_MARK_RUNNING)
         self._put_draft = valkey.register_script(_PUT_DRAFT)
         self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
+        self._put_input = valkey.register_script(_PUT_INPUT)
 
     async def create(
         self,
         kind: JobKind,
         owner: Principal,
         options: JobOptions,
-        urls: list[str],
+        urls: Sequence[str | None],
         *,
         trace_id: str | None = None,
         secrets: BrowserSecrets | None = None,
     ) -> str:
-        """Store a new job in state ``queued`` and return its id. ``trace_id`` is the creating
-        request's. ``secrets`` (B6) are stored apart from the job, for a short time only."""
+        """Store a new job in state ``queued`` and return its id. ``urls`` has one entry per
+        item, None for an uploaded file. ``trace_id`` is the creating request's. ``secrets``
+        (B6) are stored apart from the job, for a short time only."""
         if not urls:
-            raise ValueError("A job needs at least one URL")
+            raise ValueError("A job needs at least one URL (None for an uploaded file)")
+        stored_urls = [_NO_URL if url is None else url for url in urls]
         job_id = uuid.uuid4().hex
         meta_key = _key(job_id, "meta")
         urls_key = _key(job_id, "urls")
@@ -287,8 +341,8 @@ class JobStore:
             meta["secrets"] = "1"
         async with self._valkey.pipeline(transaction=True) as pipe:
             pipe.hset(meta_key, mapping=meta)
-            for start in range(0, len(urls), _URL_CHUNK):
-                pipe.rpush(urls_key, *urls[start : start + _URL_CHUNK])
+            for start in range(0, len(stored_urls), _URL_CHUNK):
+                pipe.rpush(urls_key, *stored_urls[start : start + _URL_CHUNK])
             pipe.expire(meta_key, self._ttl_seconds)
             pipe.expire(urls_key, self._ttl_seconds)
             if stored_secrets is not None:
@@ -301,23 +355,25 @@ class JobStore:
         return job_id
 
     async def delete(self, job_id: str) -> None:
-        """Remove all keys of the job, its secrets, drafts and files too. A job that is gone
-        already is not an error."""
+        """Remove all keys of the job, its secrets, drafts, files and the input of item 0 too.
+        A job that is gone already is not an error."""
         await self._valkey.delete(
             *(_key(job_id, kind) for kind in _KINDS),
             *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
+            _key(job_id, _FIRST_INPUT),
         )
 
     async def shorten(self, job_id: str, seconds: int) -> None:
         """Let the job and its files expire within ``seconds`` (never later than they would)
-        and delete its secrets and drafts: a sync answer's screenshot job, which only the
-        artifact route still reads. A job that is gone already is not an error."""
+        and delete its secrets, drafts and the input of item 0: a sync answer's screenshot job,
+        which only the artifact route still reads. A job that is gone already is not an
+        error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
             for kind in ("meta", "urls", "results", "done"):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
             for name in ARTIFACT_NAMES:
                 pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
-            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"))
+            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"), _key(job_id, _FIRST_INPUT))
             await pipe.execute()
 
     async def secrets(self, job_id: str) -> BrowserSecrets:
@@ -352,6 +408,64 @@ class JobStore:
         if raw is None:
             return None
         return Envelope[ExtractResult].model_validate_json(raw)
+
+    async def put_input(
+        self, job_id: str, index: int, body: bytes, meta: BaseModel, ttl: int
+    ) -> None:
+        """Keep the bytes of item ``index`` with ``meta`` (stored as JSON) for ``ttl`` seconds,
+        but never longer than the job; a later input of the item replaces it. Raises
+        ``JobLost`` when the job is gone, so nothing is stored for it."""
+        outcome = await self._put_input(
+            keys=[_key(job_id, "meta"), _key(job_id, f"input:{index}")],
+            args=[body, meta.model_dump_json(), ttl * 1000],
+        )
+        if outcome == _NOT_FOUND:
+            raise JobLost(job_id)
+
+    async def get_input[M: BaseModel](
+        self, job_id: str, index: int, model: type[M]
+    ) -> tuple[bytes, M] | None:
+        """The bytes of item ``index`` and their meta as ``model``, or None when there are none
+        (never stored, deleted or expired)."""
+        body, meta = await self._valkey.hmget(_key(job_id, f"input:{index}"), ["body", "meta"])
+        if body is None or meta is None:
+            return None
+        raw = body.encode() if isinstance(body, str) else bytes(body)
+        return raw, model.model_validate_json(meta)
+
+    async def delete_input(self, job_id: str, index: int) -> None:
+        """Delete the bytes of item ``index`` (it has its outcome)."""
+        await self._valkey.delete(_key(job_id, f"input:{index}"))
+
+    async def add_docling_job(self, owner: str, job_id: str) -> int:
+        """Count the job as one of the owner's Docling jobs; how many the set holds afterwards,
+        finished ones that were not counted out yet included."""
+        key = owner_key(owner, "docling")
+        async with self._valkey.pipeline(transaction=True) as pipe:
+            pipe.sadd(key, job_id)
+            pipe.expire(key, self._ttl_seconds)
+            pipe.scard(key)
+            size: int = (await pipe.execute())[-1]
+        return size
+
+    async def drop_docling_job(self, owner: str, job_id: str) -> None:
+        """Count the job out of the owner's Docling jobs."""
+        await self._valkey.srem(owner_key(owner, "docling"), job_id)
+
+    async def open_docling_jobs(self, owner: str) -> int:
+        """The owner's unfinished Docling jobs. Jobs that are completed or gone are counted
+        out."""
+        key = owner_key(owner, "docling")
+        ids = [reply_text(raw) for raw in await self._valkey.smembers(key)]
+        records = await asyncio.gather(*(self.get(job_id) for job_id in ids))
+        finished = [
+            job_id
+            for job_id, record in zip(ids, records, strict=True)
+            if record is None or record.state == "completed"
+        ]
+        if finished:
+            await self._valkey.srem(key, *finished)
+        return len(ids) - len(finished)
 
     async def put_artifact(self, job_id: str, name: str, data: bytes) -> datetime:
         """Store a file of the job for ``ARTIFACT_TTL_SECONDS`` and return when it expires.
@@ -401,7 +515,8 @@ class JobStore:
         )
 
     async def url(self, job_id: str, index: int) -> str | None:
-        """The URL at ``index``, or None when there is none."""
+        """The URL at ``index``, ``""`` for an uploaded file's item, or None when the job has no
+        such item."""
         if index < 0:
             return None
         raw = await self._valkey.lindex(_key(job_id, "urls"), index)
@@ -420,7 +535,7 @@ class JobStore:
         return [
             JobItem(
                 index=offset + position,
-                url=reply_text(url),
+                url=reply_text(url) or None,
                 state="done" if results[position] is not None else "pending",
                 result=(
                     Envelope[ExtractResult].model_validate_json(results[position])

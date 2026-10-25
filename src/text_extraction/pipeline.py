@@ -104,6 +104,7 @@ from text_extraction.convert import (
     page_links,
 )
 from text_extraction.documents.pool import DocumentPool
+from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
 from text_extraction.documents.sniff import media_type, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -124,6 +125,7 @@ from text_extraction.outbound import (
     parse_retry_after,
 )
 from text_extraction.pipeline_documents import (
+    OCR_NOT_HANDED_MESSAGE,
     DocumentInput,
     DocumentInputMeta,
     DocumentRequest,
@@ -193,8 +195,14 @@ _MAX_TAG_CHARS = 4096
 _LANG_ATTRIBUTE = re.compile(r"""(?:^|\s)(?:xml:)?lang\s*=\s*["']?([^"'\s>]+)""", re.IGNORECASE)
 _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30)
 
-# Hands a document that needs OCR to the Docling pool and answers for it.
-type OcrHandoff = Callable[[OcrNeeded], Awaitable[Envelope[ExtractResult]]]
+# Hands a document that needs OCR to the Docling pool and answers for it. It gets the answer
+# without OCR too (``pipeline_documents.without_ocr``), for a fallback of its own.
+type OcrHandoff = Callable[[OcrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
+# The error of an upload without a text layer whose extraction has no handoff while the
+# service has OCR.
+_UPLOAD_NOT_HANDED_MESSAGE = (
+    "The document needs OCR, which this extraction cannot hand on to the OCR workers."
+)
 
 _BLOCK_MESSAGES = {
     ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",
@@ -531,9 +539,10 @@ class Pipeline:
         compared with instead of fetching the page again (B5).
 
         A document that needs OCR goes to ``ocr_handoff``, once the steps under the deadline are
-        done; its envelope is the answer (the pool it hands to stores the result it keeps).
-        Without it, the document's text layer answers with the warning ``ocr_unavailable``
-        (``pipeline_documents.without_ocr``).
+        done, with the answer without OCR (``pipeline_documents.without_ocr``); its envelope is
+        the answer (the pool it hands to stores the result it keeps). Without it, the
+        document's text layer answers with the warning ``ocr_unavailable``; an image fails
+        ``unsupported_content_type``.
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
         private = not req.secrets().empty()
@@ -559,7 +568,7 @@ class Pipeline:
             if run.ocr_needed is not None and run.ocr_handoff is not None:
                 # After the deadline's steps: the handoff waits for OCR on a clock of its own
                 # (DOCLING_SYNC_WAIT_SECONDS, F12).
-                envelope = await run.ocr_handoff(run.ocr_needed)
+                envelope = await run.ocr_handoff(run.ocr_needed, envelope)
             if envelope.data is not None:
                 envelope.data.timings = run.timings()
             envelope.trace_id = current_trace_id()
@@ -607,7 +616,7 @@ class Pipeline:
             envelope = await self._upload_within_deadline(run, body, content_type)
             if run.ocr_needed is not None and run.ocr_handoff is not None:
                 # After the deadline's steps, as in `run` (F12).
-                envelope = await run.ocr_handoff(run.ocr_needed)
+                envelope = await run.ocr_handoff(run.ocr_needed, envelope)
             if envelope.data is not None:
                 envelope.data.timings = run.timings()
             envelope.trace_id = current_trace_id()
@@ -828,7 +837,12 @@ class Pipeline:
             if run.ocr_handoff is not None and not run.comparing:
                 run.ocr_needed = outcome  # `run` hands it over once the deadline is off
                 return without_ocr(outcome, run)  # stands in until then; never stored
-            outcome = without_ocr(outcome, run)
+            # While the service has OCR, only a render's extraction (which hands nothing on, or
+            # compares with a draft) ends here without it.
+            message = (
+                OCR_NOT_HANDED_MESSAGE if ocr_available(self._settings) else OCR_DISABLED_MESSAGE
+            )
+            outcome = without_ocr(outcome, run, message=message)
         # The validators fit the request URL only; a file a render ended on is not revalidated.
         if run.target == run.req.url:
             run.validators = Validators.from_headers(fetched.headers)
@@ -1181,7 +1195,10 @@ class Pipeline:
             return outcome
         if run.ocr_handoff is not None:
             run.ocr_needed = outcome  # `extract_upload` hands it over once the deadline is off
-        return without_ocr(outcome, run)  # without a handoff the answer, else its stand-in
+            return without_ocr(outcome, run)  # its stand-in until then
+        if ocr_available(self._settings):
+            return without_ocr(outcome, run, message=_UPLOAD_NOT_HANDED_MESSAGE)
+        return without_ocr(outcome, run)
 
     async def _uploaded_page(
         self,

@@ -20,7 +20,8 @@ On SIGTERM or SIGINT the shutdown runs in this order:
 While ``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
 (``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode. The Helm chart
 computes the grace period with the same formula (45, 90 or 120 s; ``_helpers.tpl``) and refuses
-a set value that is too short.
+a set value that is too short. While ``DOCLING_ENABLED`` it also covers a sync request waiting
+for OCR: the fast phase, ``DOCLING_SYNC_WAIT_SECONDS`` and 5 s (50 s by default; F12).
 """
 
 import asyncio
@@ -50,6 +51,8 @@ _SHUTDOWN_MARGIN_SECONDS = 5
 # On top of the wait for a browser worker and the render: the result margin of the wait (5 s)
 # and the answer.
 _BROWSER_MARGIN_SECONDS = 10
+# On top of the fast phase and the wait for the Docling worker: the answer.
+_DOCLING_MARGIN_SECONDS = 5
 
 _HANDLED_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
@@ -93,7 +96,8 @@ def graceful_shutdown_seconds(settings: Settings) -> int:
     just started can still end within its own deadline. While ``BROWSER_ENABLED``, a sync request
     may also wait ``BROWSER_QUEUE_WAIT_SECONDS`` for a browser worker and then the render, after
     the fast phase of an escalating ``auto`` request (bounded by ``EXTRACT_TIMEOUT_SECONDS``;
-    B13)."""
+    B13). While ``DOCLING_ENABLED``, a sync request with a document that needs OCR waits
+    ``DOCLING_SYNC_WAIT_SECONDS`` for the Docling worker after its fast phase (F12)."""
     seconds = extraction_graceful_seconds(settings)
     if settings.browser_enabled:
         render = settings.browser_timeout_seconds
@@ -106,6 +110,13 @@ def graceful_shutdown_seconds(settings: Settings) -> int:
             + _BROWSER_MARGIN_SECONDS
         )
         seconds = max(seconds, math.ceil(browser))
+    if settings.docling_enabled:
+        docling = (
+            settings.extract_timeout_seconds
+            + settings.docling_sync_wait_seconds
+            + _DOCLING_MARGIN_SECONDS
+        )
+        seconds = max(seconds, math.ceil(docling))
     return seconds
 
 
