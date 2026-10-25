@@ -13,7 +13,7 @@ from collections.abc import Iterable, Iterator
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from text_extraction.convert.links import absolute_url
 
@@ -149,7 +149,11 @@ class License(BaseModel):
     id: str | None  # SPDX-style, e.g. CC-BY-SA-4.0, CC0-1.0, PDM-1.0
     url: str | None
     label: str | None
-    source: LicenseSource
+    source: LicenseSource = Field(
+        description="Where the licence was found: the page's `rel-license` link, its "
+        "`json-ld`, `microdata` or `rdfa` data, a `meta` or `opengraph` tag, the page `text`, "
+        "or a document's XMP packet (`xmp`, PDF)."
+    )
     confidence: Confidence
 
 

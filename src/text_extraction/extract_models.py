@@ -143,7 +143,19 @@ class ExtractResult(BaseModel):
     links: list[Link] | None
     fingerprint: Fingerprint | None
     cache: CacheState
-    warnings: list[str]
+    warnings: list[str] = Field(
+        description="What did not go as asked, while the result still answers: "
+        "`browser_unavailable` (no browser worker took the page: the fast result), "
+        "`action_<index>_failed` (a browser action, counted from 0), "
+        "`navigation_refused_non_get`, `consent_overlay_removed`, `screenshot_clipped`, "
+        "`browser_bytes_capped`, `challenge_checkbox_clicked`, `challenge_not_cleared`, "
+        "`browser_profile_left` (browser mode); `ocr_unavailable` (a document that needed OCR "
+        "answers its text layer, or nothing), `pages_truncated` (pages after the page limit "
+        "were cut), `pages_partial` (OCR stopped at its time limit or skipped a page: the pages "
+        "it read), `document_fetched_directly` (a render ended on a file, which was fetched "
+        "and converted in fast mode) (documents); `content_not_stored_too_large` (a job item "
+        "stored without its content). Converter notes may follow."
+    )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
     unblocked: bool = False  # the page was loaded in unblock mode

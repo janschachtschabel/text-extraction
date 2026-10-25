@@ -705,3 +705,21 @@ def test_extract_upload_hands_over_after_the_deadline() -> None:
     assert meta.compliance is not None
     assert meta.compliance.decision == "skipped"
     assert needed.input.body == b"%PDF-1.7\n"
+
+
+def test_openapi_documents_the_warnings_and_licence_sources(client: TestClient) -> None:
+    schemas = cast(FastAPI, client.app).openapi()["components"]["schemas"]
+
+    warnings = schemas["ExtractResult"]["properties"]["warnings"]["description"]
+    for warning in (
+        "ocr_unavailable",
+        "pages_truncated",
+        "pages_partial",
+        "document_fetched_directly",
+        "browser_unavailable",
+        "content_not_stored_too_large",
+    ):
+        assert f"`{warning}`" in warnings
+    source = schemas["License"]["properties"]["source"]
+    assert "xmp" in source["enum"]
+    assert "`xmp`" in source["description"]
