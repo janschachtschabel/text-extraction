@@ -40,7 +40,7 @@
   - (a, recommended, **chosen**) Answer honestly: tier 2 (title, description, licence from the page data) with `transcript_source: metadata_only`, the warning `subtitles_blocked`, the gate's backoff on 429. No proxy.
   - (b) Like (a), plus an operator may set one fixed upstream proxy for media requests (`MEDIA_UPSTREAM_PROXY`, e.g. an office or residential line), chained behind our SSRF proxy; never rotating.
   - (c) Like (a), plus a later browser fallback (the browser worker opens the transcript panel of the watch page), as its own small package after this one.
-- **D2, default Whisper model.** CPU only (int8).
+- **D2, default Whisper model.** CPU only (int8). Jan re-confirmed large-v3-turbo on 2026-10-25 after the spike (RTF 0.88 on 4 threads).
   - (a, recommended, **chosen**) `large-v3-turbo`: clearly better German, ~1.6 GB on the PVC, ~2.5 GB RAM per child; Task 1 measures its speed on 4 threads. If it is slower than real time there, Task 1 reports it and the default falls to `small`.
   - (b) `small`: ~0.5 GB, roughly 2-3 times faster on CPU, more errors in German.
 - **D3, uploads of audio and video.** Upload bytes travel through Valkey (inputs, as for OCR).
