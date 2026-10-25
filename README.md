@@ -5,8 +5,9 @@ Markdown, with a fast HTTP mode and a browser mode.
 
 ## Status
 
-Under construction. See [docs/packages.md](docs/packages.md) for the implementation
-packages and their progress.
+Under construction: packages 0-5 are merged (foundation, service skeleton, fast extraction,
+jobs and batch, browser worker, documents and OCR); package 6 (audio and video) is next. See
+[docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Quick start
 
