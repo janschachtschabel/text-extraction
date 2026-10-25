@@ -17,13 +17,16 @@ what a parent may call by name:
   ``fetch_track`` the chosen track's bytes. A track that is an HLS playlist (``#EXTM3U``, as
   arte and Vimeo deliver subtitles) is read and its segments are fetched and concatenated.
   The track is at most ``subtitle_max_bytes``, else ``error`` is ``too_large``; a track that
-  cannot be fetched is ``track_failed``. Either way the metadata comes back. A failure of the
-  extraction itself is raised as yt-dlp raises it (``DownloadError``).
+  cannot be fetched is ``track_failed``, and so is a track or segment URL that is not
+  http(s). Either way the metadata comes back. A failure of the extraction itself is raised as
+  yt-dlp raises it (``DownloadError``).
 
 Each call's payload carries the proxy URL with the call's own credentials (the parent's
 ``EgressProxy``, the only way out), our user agent, the requested languages and the seconds
 the call has left. yt-dlp runs with ruling M4's options: one allowed extractor, no playlist, no
-download, no cache, no cookies, no retries, no JavaScript runtime and no remote components.
+download, no cache, no cookies, no retries, no JavaScript runtime and no remote components;
+its request handlers take only http and https (``_HttpOnlyYoutubeDL``), so no request of yt-dlp
+or of an extractor can leave by another scheme past the proxy.
 A reply holds plain values only; the track's URLs and yt-dlp's format list never leave the
 child.
 
@@ -34,7 +37,7 @@ logger that drops everything: what the libraries print may quote the URL or the 
 import json
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Final
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from text_extraction.documents.child_logging import silence_logging
 
@@ -70,6 +73,8 @@ _FORMATS: Final = {
 _HLS_EXTENSIONS: Final = frozenset({"m3u8"})
 _HLS_PROTOCOLS: Final = frozenset({"m3u8", "m3u8_native"})
 _HLS_MAGIC: Final = b"#EXTM3U"
+# The only URL schemes a child's requests may have: the egress proxy carries HTTP alone.
+HTTP_SCHEMES: Final = frozenset({"http", "https"})
 
 
 class _TooLarge(Exception):  # noqa: N818 - a cap, not an error
@@ -78,6 +83,10 @@ class _TooLarge(Exception):  # noqa: N818 - a cap, not an error
 
 class _BadPlaylist(Exception):  # noqa: N818
     pass
+
+
+class _NotHttp(Exception):  # noqa: N818 - a refusal
+    """A track or segment URL whose scheme is not http(s)."""
 
 
 class _QuietLogger:
@@ -189,9 +198,33 @@ def ytdlp_params(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+class _HttpOnlyYoutubeDL(YoutubeDL):  # type: ignore[misc]
+    """A ``YoutubeDL`` whose request handlers take http and https only.
+
+    Every request yt-dlp makes, its extractors' and downloaders' included, goes through the
+    handlers of this instance's request director. Its urllib handler would also take ``ftp``,
+    ``data`` and (when enabled) ``file``, and connect for ``ftp`` without the proxy when the
+    environment's ``no_proxy`` names the host; the websockets handler would take ``ws`` and
+    ``wss``. Each handler keeps only the HTTP schemes, so any other URL has no handler and
+    fails before a connection is made.
+    """
+
+    def build_request_director(self, handlers: Any, preferences: Any = None) -> Any:
+        director = super().build_request_director(handlers, preferences)
+        for handler in director.handlers.values():
+            schemes = handler._SUPPORTED_URL_SCHEMES or ()  # None would mean every scheme
+            handler._SUPPORTED_URL_SCHEMES = tuple(s for s in schemes if s in HTTP_SCHEMES)
+        return director
+
+
+def youtube_dl(payload: Mapping[str, Any]) -> YoutubeDL:
+    """The ``YoutubeDL`` of a call: ruling M4's options, HTTP requests only."""
+    return _HttpOnlyYoutubeDL(ytdlp_params(payload))
+
+
 def ytdlp_info(payload: dict[str, Any]) -> dict[str, Any]:
     result = _empty_result()
-    with YoutubeDL(ytdlp_params(payload)) as ydl:
+    with youtube_dl(payload) as ydl:
         info = ydl.extract_info(payload["url"], download=False)
         if isinstance(info, dict) and info.get("_type") == "playlist":
             entries = [entry for entry in info.get("entries") or () if isinstance(entry, dict)]
@@ -217,7 +250,7 @@ def ytdlp_info(payload: dict[str, Any]) -> dict[str, Any]:
             fmt, body, charset = _download_track(ydl, formats, payload["subtitle_max_bytes"])
         except _TooLarge:
             result["error"] = "too_large"
-        except (RequestError, _BadPlaylist, OSError):
+        except (RequestError, _BadPlaylist, _NotHttp, OSError):
             result["error"] = "track_failed"
         else:
             if fmt is None:
@@ -284,7 +317,7 @@ def _download_track(
     if not ranked:
         return None, b"", None
     fmt = ranked[0]
-    response = ydl.urlopen(Request(fmt["url"], headers=_headers(fmt)))
+    response = ydl.urlopen(Request(_http_url(fmt["url"]), headers=_headers(fmt)))
     body = _read_capped(response, max_bytes)
     charset = _charset(response.headers.get("Content-Type"))
     if _is_hls(fmt) or body.lstrip().startswith(_HLS_MAGIC):
@@ -321,7 +354,7 @@ def _hls_track(
     total = 0
     charset: str | None = None
     for index, uri in enumerate(uris):
-        response = ydl.urlopen(Request(urljoin(base, uri), headers=headers))
+        response = ydl.urlopen(Request(_http_url(urljoin(base, uri)), headers=headers))
         segment = _read_capped(response, max_bytes - total)
         if segment.lstrip().startswith(_HLS_MAGIC):
             raise _BadPlaylist  # no nested playlists
@@ -335,6 +368,13 @@ def _hls_track(
     if len(body) > max_bytes:
         raise _TooLarge
     return body, charset
+
+
+def _http_url(url: object) -> str:
+    """``url`` when its scheme is http or https; anything else raises ``_NotHttp``."""
+    if not isinstance(url, str) or urlsplit(url).scheme.lower() not in HTTP_SCHEMES:
+        raise _NotHttp
+    return url
 
 
 def _without_vtt_header(segment: bytes) -> bytes:

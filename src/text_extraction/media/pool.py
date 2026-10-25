@@ -25,7 +25,8 @@ is shut down. The codes: ``blocked`` (a bot check, a blocked IP, a PO token dema
 ``empty_track`` (a 200 caption body without text), ``too_large`` (over
 ``MEDIA_SUBTITLE_MAX_BYTES``), ``track_failed``, ``extractor_error``, ``crashed`` and
 ``out_of_memory``; a request the proxy refused during a failed call gives its refusal reason
-instead (``blocked_address``, ``bytes_cap``, ``dns_error``, ``connect_error``). ``blocked`` on
+instead (``blocked_address``, ``bytes_cap``, ``dns_error``, ``connect_error``), unless the call
+was ``blocked``, ``rate_limited`` or ``too_large``. ``blocked`` on
 the probe is True when no track came and a platform refused the service (``blocked``,
 ``rate_limited``, or an empty YouTube caption body): the answer for ruling D1.
 
@@ -70,7 +71,9 @@ _log = structlog.get_logger(__name__)
 MEDIA_TARGET: Final = "text_extraction.media.child"
 _RESULT_SLACK_BYTES: Final = 2 * 1024 * 1024  # metadata and track lists next to the track
 _BLOCKING: Final = frozenset({"blocked", "rate_limited"})
-_KEEP_OVER_REFUSAL: Final = frozenset({"too_large"})  # the child's own cap explains it better
+# Codes a proxy refusal during the same call does not replace: the platform's refusal of the
+# service (D1) and the child's own cap say more than a refused side request.
+_KEEP_OVER_REFUSAL: Final = frozenset({*_BLOCKING, "too_large"})
 # youtube-transcript-api's exceptions by type name (its RequestBlocked covers HTTP 429 too).
 _YTA_CODES: Final = {
     "RequestBlocked": "blocked",
@@ -116,8 +119,15 @@ class FetchedTrack:
 
 @dataclass(frozen=True, slots=True)
 class MediaProbe:
-    """What the children found out about a video (see the module docstring for ``error`` and
-    ``blocked``). ``manual`` and ``automatic`` are the tracks by language key."""
+    """What the children found out about a video. ``manual`` and ``automatic`` are the tracks
+    by language key.
+
+    ``error`` is the code of the failure behind what the probe lacks (the codes are in the
+    module docstring): without ``track``, why there is none (yt-dlp's failure, else
+    youtube-transcript-api's; None when the video simply has no track we take). With
+    ``track`` it is normally None, but on YouTube it is set when youtube-transcript-api gave
+    the track and yt-dlp then failed: the track is good, the metadata fields are empty, and
+    ``error`` says why. ``blocked`` is True only without ``track``."""
 
     title: str | None = None
     description: str | None = None
@@ -371,7 +381,8 @@ def _failure_code(error: ConversionError) -> str:
 
 
 def _refusal(context: ProxyContext, code: str) -> str:
-    """A failed call's code, or the reason of the first request the proxy refused during it."""
+    """A failed call's code, or the reason of the first request the proxy refused during it,
+    unless the code is one that says more (``blocked``, ``rate_limited``, ``too_large``)."""
     if context.refused and code not in _KEEP_OVER_REFUSAL:
         return context.refused[0][1]
     return code

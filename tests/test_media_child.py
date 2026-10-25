@@ -10,9 +10,12 @@ the production one, so a redirect to a private address is still refused.
 
 import asyncio
 import json
+import os
+import socket
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -24,12 +27,13 @@ import pytest
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 
-from text_extraction.browser_proxy import EgressProxy
-from text_extraction.documents.pool import ConversionTimeout, DocumentPool
+from text_extraction.browser_proxy import EgressProxy, ProxyContext
+from text_extraction.documents.pool import ConversionError, ConversionTimeout, DocumentPool
 from text_extraction.media.captions import parse_captions
 from text_extraction.media.pool import (
     MEDIA_TARGET,
     MediaFetcher,
+    _refusal,
     create_media_fetcher,
     create_media_pool,
 )
@@ -103,6 +107,21 @@ def page(track_src: str) -> str:
     )
 
 
+def record_proxied_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str | None]]:
+    """``(method, path)`` of every request the egress proxy forwards (path None: a tunnel)."""
+    forwarded: list[tuple[str, str | None]] = []
+    tunnel = EgressProxy._tunnel
+
+    async def recording(
+        proxy: EgressProxy, context: Any, request: Any, reader: Any, writer: Any
+    ) -> None:
+        forwarded.append((request.method, request.path))
+        await tunnel(proxy, context, request, reader, writer)
+
+    monkeypatch.setattr(EgressProxy, "_tunnel", recording)
+    return forwarded
+
+
 def serve_page(httpserver: HTTPServer, track_src: str = "de.vtt") -> str:
     httpserver.expect_request("/lesson.html").respond_with_data(
         page(track_src), content_type="text/html"
@@ -113,10 +132,13 @@ def serve_page(httpserver: HTTPServer, track_src: str = "de.vtt") -> str:
 # --- the real yt-dlp against a local site ------------------------------------------------------
 
 
-def test_ytdlp_info_through_proxy_with_local_site(httpserver: HTTPServer) -> None:
+def test_ytdlp_info_through_proxy_with_local_site(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
     url = serve_page(httpserver)
     httpserver.expect_request("/de.vtt").respond_with_data(VTT, content_type="text/vtt")
     seen: list[frozenset[str]] = []
+    proxied = record_proxied_requests(monkeypatch)
 
     async def scenario() -> None:
         async with fetcher(settings()) as media:
@@ -147,10 +169,12 @@ def test_ytdlp_info_through_proxy_with_local_site(httpserver: HTTPServer) -> Non
             assert context.bytes > len(VTT)
 
     run(scenario)
-    assert seen == [frozenset({"127.0.0.1"})]  # every request went through the proxy
+    assert seen == [frozenset({"127.0.0.1"})]
     paths = [request.path for request, _response in httpserver.log]
     assert paths[0] == "/lesson.html"
     assert "/de.vtt" in paths
+    # Every request the site saw, the track's included, is one the proxy forwarded.
+    assert [path for _method, path in proxied] == paths
     agents = {request.headers.get("User-Agent") for request, _response in httpserver.log}
     assert len(agents) == 1
     assert next(iter(agents)).startswith("text-extraction/")  # type: ignore[union-attr]
@@ -246,6 +270,117 @@ def test_hls_subtitle_playlist_over_the_cap_is_too_large(httpserver: HTTPServer)
             assert probe.error == "too_large"
 
     run(scenario)
+
+
+# Makes urllib bypass the proxy for loopback: the condition under which yt-dlp's urllib handler
+# dialed an ``ftp`` URL directly (review of Task 5).
+NO_PROXY_LOOPBACK = {"no_proxy": "127.0.0.1,localhost", "NO_PROXY": "127.0.0.1,localhost"}
+
+
+class Listener:
+    """A TCP listener on loopback that only notes the connections it gets."""
+
+    def __init__(self) -> None:
+        self.socket = socket.create_server(("127.0.0.1", 0))
+        self.socket.settimeout(0.2)
+        self.port = self.socket.getsockname()[1]
+        self.connections = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._accept, daemon=True)
+        self._thread.start()
+
+    def _accept(self) -> None:
+        while not self._stop.is_set():
+            try:
+                connection, _address = self.socket.accept()
+            except TimeoutError:
+                continue
+            self.connections += 1
+            connection.close()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join()
+        self.socket.close()
+
+
+@pytest.mark.parametrize("scheme", ["ftp", "ws", "file"])
+def test_hls_segment_with_a_non_http_scheme_is_never_fetched(
+    httpserver: HTTPServer, scheme: str
+) -> None:
+    """A track body that starts with ``#EXTM3U`` is read as a playlist: a segment URI of
+    another scheme must not open a connection. yt-dlp's urllib handler takes ``ftp`` and, when
+    the environment names the host in ``no_proxy`` (the child gets an allowlisted environment,
+    but a guard must not rest on that), dials it directly, past the egress proxy."""
+    url = serve_page(httpserver, "subs/de.m3u8")
+    target = Listener()
+    uri = (
+        "file:///etc/hostname" if scheme == "file" else f"{scheme}://127.0.0.1:{target.port}/s.vtt"
+    )
+    httpserver.expect_request("/subs/de.m3u8").respond_with_data(
+        f"#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\n{uri}\n#EXT-X-ENDLIST\n"
+    )
+
+    async def scenario() -> None:
+        async with fetcher(settings(), env=NO_PROXY_LOOPBACK) as media:
+            probe = await media.probe(local_target(url), ["de"], deadline_in(60))
+
+            assert probe.track is None
+            assert probe.error == "track_failed"
+
+    try:
+        run(scenario)
+        time.sleep(0.3)
+        assert target.connections == 0
+    finally:
+        target.close()
+
+
+_SCHEME_SCRIPT = """
+import json, sys
+from text_extraction.media import child
+
+proxy_port, target_port = int(sys.argv[1]), int(sys.argv[2])
+payload = {"proxy": f"http://u:p@127.0.0.1:{proxy_port}", "extractors": ["youtube"],
+           "user_agent": "ua/1", "timeout": 3}
+outcomes = {}
+with child.youtube_dl(payload) as ydl:
+    for url in (f"ftp://127.0.0.1:{target_port}/x", f"ws://127.0.0.1:{target_port}/x",
+                f"wss://127.0.0.1:{target_port}/x", "file:///etc/hostname",
+                "data:text/plain,hello", f"http://127.0.0.1:{target_port}/x"):
+        try:
+            ydl.urlopen(url)
+            outcomes[url.split(":")[0]] = "opened"
+        except Exception as error:
+            outcomes[url.split(":")[0]] = type(error).__name__
+print(json.dumps(outcomes))
+"""
+
+
+def test_ytdlp_requests_are_http_only_and_go_through_the_proxy() -> None:
+    """Every request of the child's yt-dlp, its extractors' included, is http(s) and leaves
+    through the proxy: other schemes have no request handler at all."""
+    proxy, target = Listener(), Listener()
+    try:
+        output = subprocess.run(  # noqa: S603 - our own interpreter and script
+            [sys.executable, "-c", _SCHEME_SCRIPT, str(proxy.port), str(target.port)],
+            env={**os.environ, **NO_PROXY_LOOPBACK},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        ).stdout
+        time.sleep(0.3)
+        outcomes = json.loads(output)
+
+        for scheme in ("ftp", "ws", "wss", "file", "data"):
+            assert outcomes[scheme] != "opened", scheme
+        assert outcomes["http"] != "opened"  # the dummy proxy answers nothing useful
+        assert target.connections == 0
+        assert proxy.connections >= 1  # the http request went to the proxy, not the target
+    finally:
+        proxy.close()
+        target.close()
 
 
 def test_a_page_without_a_track_has_metadata_and_no_error(httpserver: HTTPServer) -> None:
@@ -663,3 +798,52 @@ def test_browser_worker_builds_a_media_fetcher_when_media_is_enabled() -> None:
     finally:
         parts.conversion_pool.shutdown()
         plain.conversion_pool.shutdown()
+
+
+# --- error codes -------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("blocked", "blocked"),  # a bot check outranks a refused side request
+        ("rate_limited", "rate_limited"),
+        ("too_large", "too_large"),
+        ("track_failed", "blocked_address"),
+        ("extractor_error", "blocked_address"),
+        ("crashed", "blocked_address"),
+    ],
+)
+def test_a_proxy_refusal_wins_only_over_generic_failures(code: str, expected: str) -> None:
+    context = ProxyContext(1000, lambda _context: None)
+    context._refuse("169.254.169.254", "blocked_address")
+
+    assert _refusal(context, code) == expected
+
+
+def test_blocked_survives_a_refused_side_request() -> None:
+    """A call that hit a bot check and also had a request refused by the proxy is still
+    ``blocked`` (D1)."""
+
+    async def scenario() -> None:
+        async with fetcher(settings(), target=FAKE_TARGET) as media:
+            open_context = media.proxy.open_context
+
+            def refused_context(max_bytes: int | None = None) -> ProxyContext:
+                context = open_context(max_bytes)
+                context._refuse("10.0.0.1", "blocked_address")
+                return context
+
+            async def fake(function_name: str, payload: Payload, deadline: float) -> Any:
+                if function_name == "youtube_transcript":
+                    raise ConversionError("RequestBlocked", "")
+                raise ConversionError("DownloadError", "ERROR: Sign in to confirm you're not a bot")
+
+            media.proxy.open_context = refused_context  # type: ignore[method-assign]
+            media.pool.run = fake  # type: ignore[method-assign]
+            probe = await media.probe(youtube("blockedvid0"), ["de"], deadline_in(30))
+
+            assert probe.blocked
+            assert probe.error == "blocked"
+
+    run(scenario)
