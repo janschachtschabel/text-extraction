@@ -15,6 +15,11 @@ container that mounts the volume writable (``text-extraction-docling-worker
    renamed into place, replacing the old one; then the marker is written. A run cut in between
    leaves no marker, so the next run downloads again.
 
+Several init containers may share one ReadWriteMany volume (replicas started at once). One that
+finds the marker after its downloads keeps the other's files and discards its staging; a
+failure while it moves its files into place (``OSError``) is ``ModelDownloadFailed``, unless the
+marker appeared meanwhile: then the other container won, and the volume is complete.
+
 The downloads use plain httpx, not the SSRF-guarded fetcher of the pipeline: the URLs are ours
 (the manifest), never a caller's, and an operator may route them through a proxy (``HTTPS_PROXY``,
 which httpx reads). They are https only (a manifest with an http URL is refused; tests opt in
@@ -161,17 +166,34 @@ def download_models(
         with httpx.Client(follow_redirects=True, timeout=_TIMEOUT, transport=transport) as client:
             for file in manifest.files:
                 _download(client, file, staging / file.path, clock)
-        for old in root.glob(f"{_MARKER_PREFIX}*"):
-            old.unlink()
-        for top in sorted({PurePosixPath(file.path).parts[0] for file in manifest.files}):
-            _replace(staging / top, root / top, staging)
-        written = staging / manifest.marker
-        written.write_text(f"{manifest.digest}\n", encoding="utf-8")
-        os.replace(written, marker)
+        if marker.is_file():  # another init container on the volume finished meanwhile
+            _log.info("docling_models_present", models_path=str(root))
+            return False
+        try:
+            _swap(root, staging, manifest)
+        except OSError as error:
+            if marker.is_file():  # the other container's swap won the race
+                _log.info("docling_models_present", models_path=str(root))
+                return False
+            raise ModelDownloadFailed(
+                f"moving the files into place: {type(error).__name__}"
+            ) from None
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     _log.info("docling_models_downloaded", models_path=str(root), files=len(manifest.files))
     return True
+
+
+def _swap(root: Path, staging: Path, manifest: Manifest) -> None:
+    """Remove the old markers, rename each top-level directory from ``staging`` into place,
+    then write the marker."""
+    for old in root.glob(f"{_MARKER_PREFIX}*"):
+        old.unlink()
+    for top in sorted({PurePosixPath(file.path).parts[0] for file in manifest.files}):
+        _replace(staging / top, root / top, staging)
+    written = staging / manifest.marker
+    written.write_text(f"{manifest.digest}\n", encoding="utf-8")
+    os.replace(written, root / manifest.marker)
 
 
 def _download(

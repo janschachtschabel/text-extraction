@@ -48,6 +48,11 @@ _LESSER_TEXT: Final = re.compile(
     r"\bLGPL|LESSER GENERAL PUBLIC|LIBRARY GENERAL PUBLIC|LIBRARY OR LESSER", re.IGNORECASE
 )
 _STRONG_TEXT: Final = re.compile(r"\bA?GPL|GENERAL PUBLIC LICEN[CS]E", re.IGNORECASE)
+# The LGPL's names as a whole, taken out of a text before the GPL is looked for in it.
+_LESSER_NAMES: Final = re.compile(
+    r"\bLGPL[\w.+-]*|(?:LIBRARY OR LESSER|LESSER|LIBRARY)\s+GENERAL\s+PUBLIC(?:\s+LICEN[CS]E)?",
+    re.IGNORECASE,
+)
 _ALLOW_KEYS: Final = ("name", "version", "license", "reason")
 _NOT_INSTALLED_KEYS: Final = ("name", "license", "reason")
 
@@ -125,11 +130,13 @@ def spdx_level(expression: str) -> Level:
 
 
 def text_level(text: str) -> Level:
-    """The level of a classifier or a free-text ``License`` field."""
+    """The level of a classifier or a free-text ``License`` field. A text that names the GPL
+    next to the LGPL ("GPL-3.0 and LGPL-2.1") is strong: the LGPL's names are taken out
+    before the GPL is looked for."""
+    if _STRONG_TEXT.search(_LESSER_NAMES.sub(" ", text)):
+        return "strong"
     if _LESSER_TEXT.search(text):
         return "weak"
-    if _STRONG_TEXT.search(text):
-        return "strong"
     return "ok"
 
 

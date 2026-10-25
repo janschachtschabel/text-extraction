@@ -723,3 +723,30 @@ def test_openapi_documents_the_warnings_and_licence_sources(client: TestClient) 
     source = schemas["License"]["properties"]["source"]
     assert "xmp" in source["enum"]
     assert "`xmp`" in source["description"]
+
+
+def test_a_file_name_that_is_not_utf8_is_sanitised() -> None:
+    """Review Focus 5: a multipart file name in Latin-1 bytes (not UTF-8) converts the upload
+    and reports a sanitised name, never a 4xx or 5xx."""
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    head = (
+        b"--" + BOUNDARY + b"\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="\xc4rger\x85bericht.pdf"\r\n'
+        b"Content-Type: application/pdf\r\n\r\n"
+    )
+    tail = b"\r\n--" + BOUNDARY + b"--\r\n"
+
+    async def scenario() -> Answer:
+        async with app.router.lifespan_context(app):
+            return await asgi_call(app, [head + corpus("text.pdf") + tail], [*MULTIPART, *BEARER])
+
+    answer = asyncio.run(scenario())
+
+    assert answer.status == 200
+    body = answer.json()
+    assert body["status"] == "success", body["error"]
+    name = body["data"]["document"]["file_name"]
+    assert name is not None
+    assert name.endswith("bericht.pdf")
+    assert name.isprintable()
+    assert name == "\u00c4rgerbericht.pdf"  # read as Latin-1, the C1 control removed

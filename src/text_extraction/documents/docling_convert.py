@@ -6,8 +6,9 @@ table models' code, which the parent never does (see ``documents/docling_child.p
 converts one document:
 
 1. An OpenDocument file passes ``check_container`` (F5): a bomb is ``DocumentTooLarge``. An
-   image over ``MAX_IMAGE_PIXELS`` is ``DocumentTooLarge`` before it is decoded; one Pillow
-   cannot read is ``DocumentUnreadable``.
+   image with a frame over ``MAX_IMAGE_PIXELS`` (in the first ``max_pages`` frames) is
+   ``DocumentTooLarge`` before it is decoded; one Pillow cannot read is ``DocumentUnreadable``
+   (``documents/images.check_image``).
 2. A PDF is probed with pdfium, as for MarkItDown (F4): a password is ``PasswordProtected``, a
    PDF without pages is empty content without a conversion, pages after ``max_pages`` are cut
    (``pages_truncated``). Other paged kinds (a multi-page TIFF) convert their first
@@ -75,18 +76,14 @@ from docling.document_converter import (
     PdfFormatOption,
 )
 from docling_core.types.io import DocumentStream
-from PIL import Image
 
 from text_extraction.convert import OutputFormat
 from text_extraction.documents.formats import first_heading, from_markdown
+from text_extraction.documents.images import check_image
 from text_extraction.documents.meta import document_metadata
 from text_extraction.documents.pdf import probe_pdf, truncate_pdf
-from text_extraction.documents.sniff import DocumentTooLarge, DocumentUnreadable, check_container
+from text_extraction.documents.sniff import DocumentUnreadable, check_container
 from text_extraction.documents.types import DocumentKind
-
-# An image with more pixels is not decoded: Pillow's own bomb limit (about 9,500 by 9,500
-# pixels), far above a 600 dpi A4 scan (about 5,000 by 7,000).
-MAX_IMAGE_PIXELS: Final = 89_478_485
 
 # The file name extension Docling recognises each kind by.
 _EXTENSIONS: Final[dict[str, str]] = {
@@ -137,7 +134,7 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
             pages_converted = max_pages
             warnings.append("pages_truncated")
     elif kind in _IMAGE_KINDS:
-        _check_image(body)
+        check_image(body, max_frames=max_pages)
     if pages == 0:
         markdown, text = "", ""  # nothing to convert (as for MarkItDown: empty content)
     else:
@@ -162,19 +159,6 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
         "needs_ocr": False,
         "metadata": metadata.model_dump(mode="json") if payload["metadata"] else None,
     }
-
-
-def _check_image(body: bytes) -> None:
-    """Refuse an image that is too large to decode, from its header alone."""
-    try:
-        with Image.open(io.BytesIO(body)) as image:
-            width, height = image.size
-    except Image.DecompressionBombError as exc:
-        raise DocumentTooLarge("The image has too many pixels.") from exc
-    except Exception as exc:  # a parser boundary on hostile input
-        raise DocumentUnreadable("The image could not be read.") from exc
-    if width * height > MAX_IMAGE_PIXELS:
-        raise DocumentTooLarge("The image has too many pixels.")
 
 
 def _docling(body: bytes, kind: DocumentKind, payload: dict[str, Any]) -> tuple[str, str, bool]:

@@ -551,8 +551,8 @@ process. HTML served without a `Content-Type` does not escalate (step 4).
 ## Documents and OCR
 
 Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `routing.py`,
-`markitdown_convert.py`, `docling_convert.py`, `meta.py`, `formats.py`, `model_store.py`,
-`models.toml`), `pipeline_documents.py`, `file_api.py`, `pool_dispatch.py`,
+`markitdown_convert.py`, `docling_convert.py`, `images.py`, `meta.py`, `formats.py`,
+`model_store.py`, `models.toml`), `pipeline_documents.py`, `file_api.py`, `pool_dispatch.py`,
 `docling_dispatch.py`, `docling_worker.py`. Settings are in [configuration.md](configuration.md)
 ("Documents and OCR").
 
@@ -591,8 +591,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |
 
   A body declared HTML or XHTML keeps its package-2 path. A body declared `text/plain` is a
-  document only when a signature starts it (offset 0 after an optional byte order mark and
-  whitespace); otherwise it stays plain text, also when its URL ends in `.csv` (the extension
+  document only when a signature starts it (offset 0 after an optional byte order mark and at
+  most 1 KiB of whitespace); otherwise it stays plain text, also when its URL ends in `.csv` (the extension
   tie-break does not apply to a declared `text/plain`). Untyped bodies, `application/octet-stream`
   and other declared types keep the 1024-byte window for `%PDF-`. Where no document signature
   matches and the body (after a byte order mark and whitespace) starts with `<!doctype html` or
@@ -711,7 +711,9 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   (`TESSDATA_PREFIX`), CPU only with `DOCLING_THREADS` (4) threads, Hugging Face offline, and
   `document_timeout` = 0.9 × `DOCLING_TIMEOUT_SECONDS`, so Docling stops between pages and answers
   what it read (warning `pages_partial`) before the child is killed. OpenDocument files go through
-  Docling's simple pipeline (no OCR, no models). Pages after `DOCLING_MAX_PAGES` (100) are cut
+  Docling's simple pipeline (no OCR, no models). An image with a frame over Pillow's bomb
+  limit (89,478,485 pixels, in each of the first `DOCLING_MAX_PAGES` frames) is `too_large`
+  before it is decoded (`documents/images.py`). Pages after `DOCLING_MAX_PAGES` (100) are cut
   (`pages_truncated`). The runner calls `Pipeline.convert_queued_document`, which builds the result
   like the inline path (F7-F9) and keeps the OCR result unless it failed when the request said
   `ocr: always` or the probe found a scan or a broken text layer (`needs_ocr`): a garbage layer
@@ -744,7 +746,9 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   container runs `--download-models` with the PVC mounted writable, the worker mounts it
   read-only; `models.download: false` with `models.persistence.existingClaim` serves an
   air-gapped, pre-filled volume. Compose: the one-shot service `docling-models` on the named
-  volume `docling-models`.
+  volume `docling-models`. Init containers of several replicas may share one ReadWriteMany
+  volume: one that finds the marker after its downloads keeps the other's files, and a failed
+  rename is a failure only while the marker is still missing.
 - **F16, switches (D3).** `DOCLING_ENABLED` (default false). Helm renders it into every pod from
   `workers.docling.enabled` (default false); compose reads it from `.env` (`docker compose
   --profile docling up` with `DOCLING_ENABLED=true`).

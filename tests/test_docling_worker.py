@@ -1047,3 +1047,85 @@ print(",".join(loaded))
         [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=120
     )
     assert result.stdout.strip() == ""
+
+
+def mock_manifest(files: dict[str, bytes]) -> model_store.Manifest:
+    entries = [
+        f'[[files]]\npath = "{path}"\nurl = "https://models.example.org/{path}"\n'
+        f'sha256 = "{hashlib.sha256(content).hexdigest()}"\nsize = {len(content)}\n'
+        for path, content in files.items()
+    ]
+    return model_store.load_manifest("\n".join(entries).encode())
+
+
+def other_container_done(root: Path, manifest: model_store.Manifest) -> None:
+    """What another init container on the same volume left: the files and the marker."""
+    for path, content in MODEL_FILES.items():
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_bytes(content)
+    (root / manifest.marker).write_text(f"{manifest.digest}\n", encoding="utf-8")
+
+
+def test_a_volume_another_init_container_filled_meanwhile_is_kept(tmp_path: Path) -> None:
+    """Two init containers on one ReadWriteMany volume: the one that finishes second finds the
+    marker after its downloads, keeps the other's files and discards its own staging."""
+    manifest = mock_manifest(MODEL_FILES)
+    calls: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if len(calls) == len(MODEL_FILES):
+            other_container_done(tmp_path, manifest)
+        path = request.url.path.removeprefix("/")
+        return httpx.Response(200, content=MODEL_FILES[path])
+
+    assert (
+        model_store.download_models(tmp_path, manifest, transport=httpx.MockTransport(answer))
+        is False
+    )
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [
+        manifest.marker,
+        "docling",
+        "tessdata",
+    ]
+    assert model_store.missing_models(tmp_path, manifest) == []
+
+
+def test_a_failed_swap_is_a_download_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = mock_manifest(MODEL_FILES)
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=MODEL_FILES[request.url.path[1:]])
+    )
+
+    def busy(source: Path, target: Path, staging: Path) -> None:
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(model_store, "_replace", busy)
+
+    with pytest.raises(model_store.ModelDownloadFailed, match="OSError"):
+        model_store.download_models(tmp_path, manifest, transport=transport)
+    assert not (tmp_path / manifest.marker).exists()
+    assert [entry.name for entry in tmp_path.iterdir() if entry.name.startswith(".")] == []
+
+
+def test_a_swap_that_lost_to_another_init_container_succeeds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other container renamed its directories while this one swapped: its marker says the
+    volume is complete, so the error is not a failure."""
+    manifest = mock_manifest(MODEL_FILES)
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, content=MODEL_FILES[request.url.path[1:]])
+    )
+
+    def raced(source: Path, target: Path, staging: Path) -> None:
+        other_container_done(tmp_path, manifest)
+        raise OSError(39, "Directory not empty")
+
+    monkeypatch.setattr(model_store, "_replace", raced)
+
+    assert model_store.download_models(tmp_path, manifest, transport=transport) is False
+    assert model_store.missing_models(tmp_path, manifest) == []

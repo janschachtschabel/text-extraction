@@ -25,6 +25,7 @@ _PDF_WINDOW: Final = 1024
 _HTML_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})
 _HTML_START: Final = re.compile(rb"<(?:!doctype\s+html|html)(?:[\s>/]|$)", re.IGNORECASE)
 _HTML_PREFIX_LIMIT: Final = 1024  # whitespace before the tag is skipped up to this
+_TEXT_PREFIX_LIMIT: Final = 1024  # whitespace before a text/plain body's signature, likewise
 _CSV_SAMPLE: Final = 8192
 _CONTENT_TYPES_LIMIT: Final = 256 * 1024
 _MIMETYPE_LIMIT: Final = 128
@@ -149,10 +150,11 @@ def check_container(body: bytes, kind: DocumentKind, max_uncompressed: int) -> N
 
 def _sniff_bytes(body: bytes, *, at_start: bool) -> DocumentKind | None:
     if at_start:
-        # Skip a byte order mark and whitespace; the signature must follow at once.
-        skipped = 3 if body.startswith(b"\xef\xbb\xbf") else 0
-        while skipped < len(body) and body[skipped] in b" \t\r\n\f\v":
-            skipped += 1
+        # Skip a byte order mark and whitespace (in the first KiB only: a body of megabytes of
+        # spaces is no document); the signature must follow at once.
+        start = 3 if body.startswith(b"\xef\xbb\xbf") else 0
+        window = body[start : start + _TEXT_PREFIX_LIMIT]
+        skipped = start + len(window) - len(window.lstrip(b" \t\r\n\f\v"))
         if skipped:
             body = body[skipped:]
         if body.startswith(b"%PDF-"):

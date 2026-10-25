@@ -322,3 +322,22 @@ def test_this_environment_passes(capsys: pytest.CaptureFixture[str]) -> None:
     out = capsys.readouterr().out
     assert code == 0, out
     assert "ERROR" not in out
+
+
+@pytest.mark.parametrize(
+    ("text", "level"),
+    [
+        ("GPL-3.0 and LGPL-2.1", "strong"),
+        ("LGPLv3 or GPLv2", "strong"),
+        ("Dual: LGPL-2.1+, GNU General Public License v2", "strong"),
+        ("GNU Lesser General Public License v3", "weak"),
+        ("GNU Library or Lesser General Public License (LGPL)", "weak"),
+        ("GNU Lesser General Public License v2 or later (LGPLv2+)", "weak"),
+        ("GNU Library General Public License", "weak"),
+        ("MIT", "ok"),
+    ],
+)
+def test_a_gpl_next_to_an_lgpl_is_strong(text: str, level: str) -> None:
+    """The LGPL names are taken out before the GPL is looked for: a text that names both is
+    judged by the GPL (the worse one)."""
+    assert check_licenses.text_level(text) == level

@@ -449,3 +449,11 @@ def test_mutation_fuzz_fails_closed() -> None:
             with contextlib.suppress(DocumentTooLarge, DocumentUnreadable):
                 check_container(bytes(data), container, MAX_UNCOMPRESSED)
     assert {"docx", "odt", "epub", "xls"} <= kinds  # the mutations leave some files intact
+
+
+def test_text_plain_skips_at_most_a_kilobyte_of_whitespace() -> None:
+    """The signature of a ``text/plain`` body counts after a byte order mark and whitespace, but
+    only in its first KiB: a body of megabytes of spaces is not scanned byte by byte."""
+    assert sniff(b"\xef\xbb\xbf" + b" \r\n" * 300 + PDF, "text/plain", None) == "pdf"
+    assert sniff(b" " * 1025 + PDF, "text/plain", None) == "text"
+    assert sniff(b" " * 20_000_000, "text/plain", None) == "text"
