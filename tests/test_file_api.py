@@ -818,9 +818,12 @@ def test_body_limit_is_max_of_both() -> None:
     declared = [(b"content-length", str(1_000_000 + 1024).encode())]
 
     # Not refused by the middleware: it reads the body (the part is cut, so the form is bad).
-    status, pulled, _ = asgi_post(app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *declared])
+    status, pulled, body = asgi_post(
+        app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *declared]
+    )
     assert pulled > 0, status
-    assert status != 413
+    assert status == 422  # the form's parse found no complete file part, not the body limit
+    assert json.loads(body)["error"]["code"] == "invalid_request"
 
     with TestClient(app) as test_client:
         response = upload(test_client, b"%PDF-1.7\n" + b"x" * (1_000_000 + 1024))
@@ -1013,3 +1016,109 @@ def test_an_audio_upload_logs_no_file_name() -> None:
     dumped = json.dumps(logs, default=str)
     assert "salary-review" not in dumped
     assert "kowalski" not in dumped
+
+
+# --- with the ASR dispatch on (Task 8) ---
+
+
+def asr_app(**overrides: Any) -> tuple[FastAPI, FakePool, FakeAsyncRedis]:
+    """The public app with ASR on and a fake document pool (no MarkItDown child)."""
+    settings = make_settings(asr_enabled=True, **overrides)
+    registry = CollectorRegistry()
+    valkey = FakeAsyncRedis()
+    app = create_public_app(settings, valkey, registry)
+    pool = FakePool(reply())
+    app.state.pipeline = create_pipeline(
+        settings,
+        valkey,
+        app.state.fetcher,
+        registry,
+        ConversionPool(1),
+        memory_guard=app.state.memory_guard,
+        document_pool=cast(DocumentPool, pool),
+    )
+    return app, pool, valkey
+
+
+def keys_of(valkey: FakeAsyncRedis, pattern: str) -> list[bytes]:
+    async def scan() -> list[bytes]:
+        return [key async for key in valkey.scan_iter(pattern)]
+
+    return asyncio.run(scan())
+
+
+HEIC = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\x00" * 64
+ID3_TEXT = b"ID3 tags hold the title and the artist of an MP3 file. " * 8
+
+
+@pytest.mark.parametrize(
+    ("body", "name", "declared"),
+    [
+        (corpus("lesson.docx"), "lesson.docx", "application/octet-stream"),
+        (HEIC, "photo.heic", "image/heic"),
+        (ID3_TEXT, "notes.txt", "text/plain"),
+    ],
+    ids=["ooxml zip", "heic image", "text starting with ID3"],
+)
+def test_documents_and_images_keep_their_path_with_asr_on(
+    body: bytes, name: str, declared: str
+) -> None:
+    app, pool, valkey = asr_app()
+    with TestClient(app) as test_client:
+        response = upload(test_client, body, name, declared)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["media"] is None
+    assert not (data["content_type"] or "").startswith(("audio/", "video/"))
+    assert response.json()["error"] is None or response.json()["error"]["code"] != (
+        "no_transcript_available"
+    )
+    assert keys_of(valkey, "job:*") == []
+    assert keys_of(valkey, "q:{asr}:*") == []
+    if name == "lesson.docx":
+        assert data["document"]["kind"] == "docx"
+        assert len(pool.calls) == 1
+    if name == "notes.txt":
+        assert response.json()["status"] == "success"
+        assert "ID3 tags hold the title" in data["content"]
+
+
+def test_an_audio_upload_of_exactly_the_media_limit_is_handed_over() -> None:
+    app, _, valkey = asr_app(media_upload_max_bytes=1_000_000, document_max_bytes=4096)
+    exact = OGG + b"\x00" * (1_000_000 - len(OGG))
+    with TestClient(app) as test_client:
+        handed = upload(test_client, exact, "talk.ogg", "audio/ogg")
+        over = upload(test_client, exact + b"\x00", "talk.ogg", "audio/ogg")
+
+    assert handed.status_code == 202, handed.text
+    job_id = handed.json()["data"]["id"]
+    assert keys_of(valkey, f"job:{{{job_id}}}:input:0") != []
+    assert over.status_code == 200
+    assert over.json()["error"]["code"] == "too_large"
+    assert "1000000" in over.json()["error"]["message"]
+
+
+def test_a_large_upload_that_is_no_media_is_refused_before_it_is_sniffed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Over DOCUMENT_MAX_BYTES and not audio or video: too_large without reading the whole body
+    (no document sniff, no SHA-256 of the bytes)."""
+    from text_extraction import pipeline as pipeline_module
+
+    def never(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the whole body was read")
+
+    monkeypatch.setattr(pipeline_module, "sniff", never)
+    monkeypatch.setattr(pipeline_module, "_sha256", never)
+    app, pool, _ = asr_app(media_upload_max_bytes=1_000_000, document_max_bytes=4096)
+    with TestClient(app) as test_client:
+        response = upload(test_client, b"%PDF-1.7\n" + b"x" * 500_000)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "too_large"
+    assert "4096" in body["error"]["message"]
+    assert body["data"]["mode_used"] == "upload"
+    assert pool.calls == []

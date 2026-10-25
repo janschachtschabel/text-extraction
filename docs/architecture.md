@@ -263,8 +263,8 @@ script stores an item's result: it sets the done bit and counts the item only wh
 so a re-run after a lost lease counts once. The script answers `first`, `last` (this write
 completed the job; only then is `job_duration_seconds` observed) or `repeat` (R7).
 
-**The fair queue.** One queue per worker pool (`extract`, `browser`, `docling`; the nlp and asr
-pools will reuse it), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and
+**The fair queue.** One queue per worker pool (`extract`, `browser`, `docling`, `asr`; the nlp
+pool will reuse it), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and
 a queue key. Items are `<job>:<index>:<attempts>` in lists per client and domain.
 
 - Client = API key name (P3); under `AUTH_MODE=none` everyone is `anonymous` and batches share

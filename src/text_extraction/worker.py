@@ -13,10 +13,9 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 1. claims the next item, leased for the runner's lease (``EXTRACT_TIMEOUT_SECONDS * 2 + 10``
    seconds here). An item that lost too many leases (``exhausted``) fails with
    ``internal_error``, retryable (an item of pool ``docling`` answers its draft with
-   ``ocr_unavailable`` instead, when it has one), and is completed once that is recorded or its
-   job is gone. A
-   Valkey error leaves it leased: it comes back after the lease, so its batch still gets a
-   result for it;
+   ``ocr_unavailable`` instead, when it has one; of pool ``asr`` with ``asr_unavailable``), and
+   is completed once that is recorded or its job is gone. A Valkey error leaves it leased: it
+   comes back after the lease, so its batch still gets a result for it;
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
    1 s while claims keep answering that their scan budget ran out; every idle sleep has ±50 %
    jitter, so the loops of many pods do not claim in step;
@@ -51,6 +50,19 @@ stored: the item keeps its draft with the warning ``ocr_unavailable`` (an image 
 ``rate_limited``, retryable). The ``docling_dispatch`` module docstring has what the Docling worker
 reads. A worker of the ``docling`` pool deletes an item's input and draft once its result is
 written (an exhausted item's too).
+
+**Transcriptions (M9).** While the service has ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``), an
+item whose media needs a transcription (``transcribe: true``: a platform video without
+subtitles, a media file; an audio or video upload) moves to the ``asr`` pool the same way
+(``asr_dispatch.AsrMove``): its ``MediaInputMeta`` is stored as the item's input
+(``ASR_INPUT_TTL_SECONDS``, with an upload's bytes), the video's metadata as its draft, the item
+is queued on ``asr`` with the same job, index and client, and it is completed here without a
+result. While the memory guard is high or the input budget is full nothing is stored: the item
+keeps its draft with the warning ``asr_unavailable`` (media without one fails ``rate_limited``,
+retryable). The ``asr_dispatch`` module docstring has what the ASR worker reads. A worker of the
+``asr`` pool deletes an item's input and draft once its result is written, and the job's caller
+key unless the job is a batch; an exhausted item of that pool answers its draft with
+``asr_unavailable`` when it has one.
 
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
@@ -90,6 +102,13 @@ from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histo
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from text_extraction.asr_dispatch import (
+    ASR_OUTCOMES,
+    ASR_POOL,
+    AsrMove,
+    asr_queue,
+    draft_without_asr,
+)
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.docling_dispatch import (
@@ -115,6 +134,7 @@ from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
+from text_extraction.pipeline_media import asr_available
 from text_extraction.queue_metrics import dispatch_counter_for, job_duration_for
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
@@ -176,7 +196,7 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
                 "text_extraction_job_items_total",
                 "Job items handled by this worker, by outcome: success, the error code of the "
                 "result, deferred (given back while the host is busy or paused), lost (the "
-                "job was gone) or escalated (moved to the browser or the docling pool).",
+                "job was gone) or escalated (moved to the browser, the docling or the asr pool).",
                 ["outcome"],
                 registry=registry,
             ),
@@ -225,11 +245,13 @@ class ItemRunner(Protocol):
 
 class ExtractRunner:
     """The ``extract`` pool's runner: the fast pipeline, the move of an ``auto`` item that needs
-    the browser to the ``browser`` pool (B5), and the move of a document that needs OCR to the
-    ``docling`` pool (F13). ``browser_queue`` is the browser pool's queue, None while
-    ``BROWSER_ENABLED`` is false; ``docling_queue`` the Docling pool's, None while the service
-    has no OCR; then nothing moves there. ``guard`` tells whether Valkey is nearly full;
-    ``registry`` gets ``text_extraction_docling_dispatch_total`` for the refused moves."""
+    the browser to the ``browser`` pool (B5), the move of a document that needs OCR to the
+    ``docling`` pool (F13), and the move of media that needs a transcription to the ``asr`` pool
+    (M9). ``browser_queue`` is the browser pool's queue, None while ``BROWSER_ENABLED`` is false;
+    ``docling_queue`` the Docling pool's, None while the service has no OCR; ``asr_queue`` the
+    ASR pool's, None while the service has no ASR; then nothing moves there. ``guard`` tells
+    whether Valkey is nearly full; ``registry`` gets ``text_extraction_docling_dispatch_total``
+    and ``text_extraction_asr_dispatch_total`` for the refused moves."""
 
     def __init__(
         self,
@@ -239,6 +261,7 @@ class ExtractRunner:
         browser_queue: FairQueue | None,
         *,
         docling_queue: FairQueue | None = None,
+        asr_queue: FairQueue | None = None,
         guard: MemoryPressure | None = None,
         registry: CollectorRegistry | None = None,
     ) -> None:
@@ -247,11 +270,17 @@ class ExtractRunner:
         self._settings = settings
         self._browser_queue = browser_queue
         self._docling_queue = docling_queue
+        self._asr_queue = asr_queue
         self._guard = guard
         # The refused moves count in text_extraction_docling_dispatch_total, as sync requests'.
         self._docling_outcomes = (
             dispatch_counter_for(registry, DOCLING_OUTCOMES, pool=DOCLING_POOL)
             if registry is not None and docling_queue is not None
+            else None
+        )
+        self._asr_outcomes = (
+            dispatch_counter_for(registry, ASR_OUTCOMES, pool=ASR_POOL)
+            if registry is not None and asr_queue is not None
             else None
         )
         self.lease_seconds = settings.extract_timeout_seconds * 2 + 10
@@ -269,14 +298,18 @@ class ExtractRunner:
         if job.kind == "file":
             return await self._upload(job, item, principal, move)
         request = ExtractRequest(url=url, **job.options.model_dump())
-        if move is None:  # while the service has no OCR, the call of package 3
-            envelope = await self._pipeline.run(request, principal, gate_refusals=gate_refusals)
-        else:
-            envelope = await self._pipeline.run(
-                request, principal, gate_refusals=gate_refusals, ocr_handoff=move
-            )
-            if move.moved:
-                return None
+        transcription = self._asr_move(job, item, url) if request.transcribe else None
+        handoffs: dict[str, Any] = {}
+        if move is not None:
+            handoffs["ocr_handoff"] = move
+        if transcription is not None:
+            handoffs["asr_handoff"] = transcription
+        # Without a handoff (no OCR, no ASR), the call of package 3.
+        envelope = await self._pipeline.run(
+            request, principal, gate_refusals=gate_refusals, **handoffs
+        )
+        if (move is not None and move.moved) or (transcription is not None and transcription.moved):
+            return None
         if self._browser_queue is None or job.options.mode != "auto":
             return envelope
         unblock = unblock_for(principal, job.options.compliance, self._settings)
@@ -301,16 +334,34 @@ class ExtractRunner:
             outcomes=self._docling_outcomes,
         )
 
+    def _asr_move(
+        self, job: JobRecord, item: QueueItem, url: str | None, body: bytes = b""
+    ) -> AsrMove | None:
+        if self._asr_queue is None:
+            return None
+        return AsrMove(
+            self._store,
+            self._asr_queue,
+            self._guard,
+            self._settings,
+            job,
+            item,
+            url,
+            body=body,
+            outcomes=self._asr_outcomes,
+        )
+
     async def _upload(
         self, job: JobRecord, item: QueueItem, principal: Principal, move: DoclingMove | None
     ) -> Envelope[ExtractResult] | None:
         """An uploaded file's item, converted from its input."""
-        # A rerun after a move to ``docling`` reads that pool's ``DocumentInputMeta``: it parses
-        # as ``UploadInputMeta`` only through the fields both have (file name, content type).
+        # A rerun after a move to ``docling`` or ``asr`` reads that pool's meta: it parses as
+        # ``UploadInputMeta`` only through the fields they share (file name, content type).
         stored = await self._store.get_input(job.id, item.index, UploadInputMeta)
         if stored is None:
             return failed_extract(ErrorCode.TIMEOUT, _INPUT_EXPIRED_MESSAGE, retryable=True)
         body, meta = stored
+        transcription = self._asr_move(job, item, None, body)
         envelope = await self._pipeline.extract_upload(
             body,
             meta.file_name,
@@ -318,8 +369,11 @@ class ExtractRunner:
             principal,
             content_type=meta.content_type,
             ocr_handoff=move,
+            asr_handoff=transcription,
         )
-        return None if move is not None and move.moved else envelope
+        if (move is not None and move.moved) or (transcription is not None and transcription.moved):
+            return None
+        return envelope
 
 
 def job_principal(job: JobRecord) -> Principal:
@@ -487,10 +541,10 @@ class Worker:
         return _ESCALATED if await self._queue.complete(item) else None
 
     async def _fail_exhausted(self, item: QueueItem, job: JobRecord | None) -> str | None:
-        """Record the item as lost too often, then complete it; an item of pool ``docling``
-        answers its draft instead, when it has one (``draft_without_ocr``). A Valkey error
-        propagates and leaves the item leased, so it is offered again after the lease instead
-        of vanishing without a result."""
+        """Record the item as lost too often, then complete it; an item of pool ``docling`` or
+        ``asr`` answers its draft instead, when it has one (``draft_without_ocr``,
+        ``draft_without_asr``). A Valkey error propagates and leaves the item leased, so it is
+        offered again after the lease instead of vanishing without a result."""
         _log.warning("job_item_exhausted", attempts=item.attempts)
         if job is None:
             return await self._drop(item)
@@ -499,8 +553,13 @@ class Worker:
             # A document whose OCR never finished keeps its text layer, unstored.
             draft = await self._store.draft(item.job_id, item.index)
             envelope = draft_without_ocr(draft) or envelope
+        elif self._queue.pool == ASR_POOL:
+            # A video whose transcription never finished keeps its metadata, unstored.
+            draft = await self._store.draft(item.job_id, item.index)
+            envelope = draft_without_asr(draft) or envelope
         outcome = await self._finish(item, job, envelope)
-        # The item never runs again: its caller secrets (a browser job's, B6) are done with.
+        # The item never runs again: its caller secrets (a browser job's, B6; an ASR key, M11)
+        # are done with.
         await self._store.drop_secrets(item.job_id)
         return outcome
 
@@ -522,13 +581,18 @@ class Worker:
         return None if write == "repeat" else _outcome(envelope)
 
     async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
-        """Delete the item's bytes once it has its result: an upload's, or a document's that
-        was queued for OCR (pool ``docling``), with its draft. Only after the result is
-        written: an item that runs again (a failed write, a lost lease) needs both."""
-        if self._queue.pool == DOCLING_POOL:
+        """Delete the item's bytes once it has its result: an upload's, or those of an item
+        that was queued for OCR (pool ``docling``) or a transcription (pool ``asr``), with its
+        draft; on pool ``asr`` also the caller's key of a sync request's job (a batch has none).
+        Only after the result is written: an item that runs again (a failed write, a lost lease)
+        needs them."""
+        pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)
+        if pooled:
             await self._store.drop_draft(item.job_id, item.index)
-        if job.kind == "file" or self._queue.pool == DOCLING_POOL:
+        if job.kind == "file" or pooled:
             await self._store.delete_input(item.job_id, item.index)
+        if self._queue.pool == ASR_POOL and job.kind != "batch":
+            await self._store.drop_secrets(item.job_id)
 
     async def _drop(self, item: QueueItem) -> str:
         """Complete an item whose job is gone (expired): there is nowhere to store its result."""
@@ -651,6 +715,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     store = JobStore(valkey, settings)
     browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None
     ocr_queue = docling_queue(valkey, settings) if ocr_available(settings) else None
+    transcription_queue = asr_queue(valkey, settings) if asr_available(settings) else None
     worker = Worker(
         settings,
         valkey,
@@ -660,6 +725,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
             settings,
             browser_queue,
             docling_queue=ocr_queue,
+            asr_queue=transcription_queue,
             guard=guard,
             registry=registry,
         ),

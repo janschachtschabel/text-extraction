@@ -28,20 +28,33 @@ Browser jobs (package 4) may have these as well:
 - ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
-Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR) have:
+Jobs that wait for a transcription (package 6, M11) may have:
+
+- ``job:{<id>}:asr_key``  string: the caller's key of the external transcription endpoint (the
+                          request header ``X-ASR-Api-Key``). Kept ``ASR_INPUT_TTL_SECONDS`` + the
+                          ASR lease (``asr_lease_seconds``) at most, never longer than the job;
+                          deleted with the job, by ``shorten`` and ``drop_secrets``, and by the
+                          worker of pool ``asr`` once the item has its outcome. No read of the
+                          job shows it, and it is never logged.
+
+Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR; M9: media queued
+for transcription, with an empty body for a URL) have:
 
 - ``job:{<id>}:input:<index>`` hash: ``body`` (the bytes) and ``meta`` (JSON: what the consumer
-                          needs to know about them); TTL ``DOCLING_INPUT_TTL_SECONDS`` at most,
+                          needs to know about them); TTL ``DOCLING_INPUT_TTL_SECONDS`` at most
+                          (``ASR_INPUT_TTL_SECONDS`` for media queued for transcription),
                           never longer than the job's. No read of the job shows it; the worker
                           deletes it once the item has its outcome, and ``delete`` and
                           ``shorten`` delete the input of item 0 (the only item of a sync job).
 
-``jobs:{owner:<owner>}:docling`` is a set of an owner's Docling jobs (``add_docling_job``); a job
-that is completed or gone leaves it when it is counted (``open_docling_jobs``).
+``jobs:{owner:<owner>}:docling`` is a set of an owner's Docling jobs (``add_docling_job``), and
+``jobs:{owner:<owner>}:asr`` one of its ASR jobs (``add_asr_job``); a job that is completed or
+gone leaves its set when it is counted (``open_docling_jobs``, ``open_asr_jobs``).
 
-All inputs together stay within ``DOCLING_INPUT_BUDGET_BYTES`` (Valkey's memory: a full Valkey
-under ``noeviction`` refuses the writes of the job store, the queue and the rate limiter). Three
-keys of their own hash tag account for it:
+All inputs together (documents for OCR, uploads, media for transcription) stay within
+``DOCLING_INPUT_BUDGET_BYTES`` (Valkey's memory: a full Valkey under ``noeviction`` refuses the
+writes of the job store, the queue and the rate limiter). Three keys of their own hash tag
+account for it:
 
 - ``inputs:{budget}:size``   hash: ``<id>:<index>`` -> the input's bytes (body and meta)
 - ``inputs:{budget}:expiry`` sorted set: ``<id>:<index>`` scored by when its input expires
@@ -106,8 +119,8 @@ CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
 
-# The keys of a job: the four of every job, and those of browser jobs.
-_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts")
+# The keys of a job: the four of every job, those of browser jobs and the caller's ASR key.
+_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts", "asr_key")
 
 # The input of item 0 (the only item of a sync job), which ``delete`` and ``shorten`` remove.
 _FIRST_INPUT = "input:0"
@@ -209,6 +222,21 @@ end
 redis.call('DEL', KEYS[2])
 redis.call('HSET', KEYS[2], 'body', ARGV[1], 'meta', ARGV[2])
 redis.call('PEXPIRE', KEYS[2], ttl)
+return 1
+"""
+
+# KEYS = meta, key; ARGV = value, ttl in ms. Stores the value for the ttl, but never longer than
+# the job lives; returns 1, or -1 when the job is gone (nothing is written).
+_PUT_WITH_JOB = """
+local remaining = redis.call('PTTL', KEYS[1])
+if remaining == -2 then
+  return -1
+end
+local ttl = tonumber(ARGV[2])
+if remaining > 0 and remaining < ttl then
+  ttl = remaining
+end
+redis.call('SET', KEYS[2], ARGV[1], 'PX', ttl)
 return 1
 """
 
@@ -325,6 +353,12 @@ def docling_lease_seconds(settings: Settings) -> float:
     return 2 * settings.docling_timeout_seconds + 10
 
 
+def asr_lease_seconds(settings: Settings) -> float:
+    """How long the ASR worker holds an item: two transcriptions (``ASR_TIMEOUT_SECONDS``) plus
+    10 s (ruling M10)."""
+    return 2 * settings.asr_timeout_seconds + 10
+
+
 def owner_key(owner: str, name: str) -> str:
     """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
     escaped, so a name cannot break the hash tag."""
@@ -397,11 +431,19 @@ class JobStore:
             settings.browser_queue_wait_seconds + browser_lease_seconds(settings) + 60
         )
         self._artifact_ttl_seconds = settings.artifact_ttl_seconds
+        # M11: as long as the item's input may wait, and one claim of the ASR worker after it.
+        self._asr_key_ttl_seconds = math.ceil(
+            min(
+                settings.job_ttl_seconds,
+                settings.asr_input_ttl_seconds + asr_lease_seconds(settings),
+            )
+        )
         self._store_result = valkey.register_script(_STORE_RESULT)
         self._mark_running = valkey.register_script(_MARK_RUNNING)
         self._put_draft = valkey.register_script(_PUT_DRAFT)
         self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
         self._put_input = valkey.register_script(_PUT_INPUT)
+        self._put_with_job = valkey.register_script(_PUT_WITH_JOB)
         self._reserve_input = valkey.register_script(_RESERVE_INPUT)
         self._release_inputs = valkey.register_script(_RELEASE_INPUTS)
         self._input_budget = settings.docling_input_budget_bytes
@@ -470,15 +512,20 @@ class JobStore:
 
     async def shorten(self, job_id: str, seconds: int) -> None:
         """Let the job and its files expire within ``seconds`` (never later than they would)
-        and delete its secrets, drafts and the input of item 0: a sync answer's screenshot job,
-        which only the artifact route still reads. A job that is gone already is not an
-        error."""
+        and delete its secrets (the ASR key too), drafts and the input of item 0: a sync answer's
+        screenshot job, which only the artifact route still reads. A job that is gone already is
+        not an error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
             for kind in ("meta", "urls", "results", "done"):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
             for name in ARTIFACT_NAMES:
                 pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
-            pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"), _key(job_id, _FIRST_INPUT))
+            pipe.delete(
+                _key(job_id, "secrets"),
+                _key(job_id, "asr_key"),
+                _key(job_id, "drafts"),
+                _key(job_id, _FIRST_INPUT),
+            )
             await pipe.execute()
         await self._release(job_id, 0)
 
@@ -490,8 +537,26 @@ class JobStore:
         return BrowserSecrets.model_validate_json(raw)
 
     async def drop_secrets(self, job_id: str) -> None:
-        """Delete the job's secrets (the worker has finished its item)."""
-        await self._valkey.delete(_key(job_id, "secrets"))
+        """Delete the job's caller secrets, the browser's and the ASR key (the worker has
+        finished its item)."""
+        await self._valkey.delete(_key(job_id, "secrets"), _key(job_id, "asr_key"))
+
+    async def put_asr_key(self, job_id: str, key: str) -> None:
+        """Keep the caller's key of the external transcription endpoint for the job (M11), for
+        ``ASR_INPUT_TTL_SECONDS`` + the ASR lease, never longer than the job. Raises ``JobLost``
+        when the job is gone; nothing is stored then."""
+        outcome = await self._put_with_job(
+            keys=[_key(job_id, "meta"), _key(job_id, "asr_key")],
+            args=[key, self._asr_key_ttl_seconds * 1000],
+        )
+        if outcome == _NOT_FOUND:
+            raise JobLost(job_id)
+
+    async def asr_key(self, job_id: str) -> str | None:
+        """The caller's key of the external transcription endpoint, or None when the job had
+        none or it is gone."""
+        raw = await self._valkey.get(_key(job_id, "asr_key"))
+        return reply_text(raw) if raw is not None else None
 
     async def put_draft(self, job_id: str, index: int, envelope: Envelope[ExtractResult]) -> None:
         """Keep the fast result of item ``index`` while the browser renders it (B5); a later
@@ -570,13 +635,7 @@ class JobStore:
     async def add_docling_job(self, owner: str, job_id: str) -> int:
         """Count the job as one of the owner's Docling jobs; how many the set holds afterwards,
         finished ones that were not counted out yet included."""
-        key = owner_key(owner, "docling")
-        async with self._valkey.pipeline(transaction=True) as pipe:
-            pipe.sadd(key, job_id)
-            pipe.expire(key, self._ttl_seconds)
-            pipe.scard(key)
-            size: int = (await pipe.execute())[-1]
-        return size
+        return await self._add_owner_job(owner_key(owner, "docling"), job_id)
 
     async def drop_docling_job(self, owner: str, job_id: str) -> None:
         """Count the job out of the owner's Docling jobs."""
@@ -585,7 +644,29 @@ class JobStore:
     async def open_docling_jobs(self, owner: str) -> int:
         """The owner's unfinished Docling jobs. Jobs that are completed or gone are counted
         out."""
-        key = owner_key(owner, "docling")
+        return await self._open_owner_jobs(owner_key(owner, "docling"))
+
+    async def add_asr_job(self, owner: str, job_id: str) -> int:
+        """Count the job as one of the owner's ASR jobs, as ``add_docling_job`` does."""
+        return await self._add_owner_job(owner_key(owner, "asr"), job_id)
+
+    async def drop_asr_job(self, owner: str, job_id: str) -> None:
+        """Count the job out of the owner's ASR jobs."""
+        await self._valkey.srem(owner_key(owner, "asr"), job_id)
+
+    async def open_asr_jobs(self, owner: str) -> int:
+        """The owner's unfinished ASR jobs, as ``open_docling_jobs`` counts its Docling jobs."""
+        return await self._open_owner_jobs(owner_key(owner, "asr"))
+
+    async def _add_owner_job(self, key: str, job_id: str) -> int:
+        async with self._valkey.pipeline(transaction=True) as pipe:
+            pipe.sadd(key, job_id)
+            pipe.expire(key, self._ttl_seconds)
+            pipe.scard(key)
+            size: int = (await pipe.execute())[-1]
+        return size
+
+    async def _open_owner_jobs(self, key: str) -> int:
         ids = [reply_text(raw) for raw in await self._valkey.smembers(key)]
         records = await asyncio.gather(*(self.get(job_id) for job_id in ids))
         finished = [

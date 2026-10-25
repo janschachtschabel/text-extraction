@@ -55,7 +55,8 @@ the service has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``) the upload is
 ``unsupported_content_type`` ("Transcription is not enabled on this service."), over
 ``MEDIA_UPLOAD_MAX_BYTES`` it is ``too_large``, otherwise an ``AsrNeeded`` (``MediaInputMeta`` with
 ``source: upload`` and the file name, for the result only) goes to ``asr_handoff`` once the
-deadline's steps are done, as media of a URL does. Without a handoff the stand-in is final.
+deadline's steps are done, as media of a URL does. Without a handoff the stand-in is final. Any
+other upload over ``DOCUMENT_MAX_BYTES`` is ``too_large`` before its bytes are sniffed or hashed.
 
 The Docling worker builds the result of a document that waited for OCR with
 ``convert_queued_document``: step 8 on its Docling conversion, the better of it and MarkItDown's
@@ -1450,12 +1451,23 @@ class Pipeline:
     ) -> Envelope[ExtractResult]:
         """Step 7 for an upload: its kind by the bytes (F1), then a page's or a document's
         conversion, each with its byte limit. Audio and video come first, by their magic bytes
-        alone (the declared type never makes a body media, nor stops one from being it)."""
+        alone (the declared type never makes a body media, nor stops one from being it); any
+        other body over ``DOCUMENT_MAX_BYTES`` is ``too_large`` before it is sniffed or
+        hashed."""
         declared, charset = split_content_type(content_type)
         if self._settings.media_enabled:
             media_kind = await self._pool.run(sniff_media, body[:MEDIA_HEAD_BYTES], declared)
             if media_kind is not None:
                 return self._uploaded_media(run, body, media_kind)
+        limit = self._settings.document_max_bytes
+        if len(body) > limit:
+            # Only media may be larger (the route reads up to MEDIA_UPLOAD_MAX_BYTES): refused
+            # before the whole body is sniffed or hashed.
+            run.content_type = declared
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The file has more than the {limit} bytes that are converted.",
+            )
         kind = await self._pool.run(sniff, body, declared, run.file_name)
         run.kind = kind
         if kind is None:
@@ -1469,12 +1481,6 @@ class Pipeline:
             run.content_type = _page_type(kind, declared)
             return await self._uploaded_page(run, body, kind, charset, raw_sha256)
         run.content_type = media_type(kind)
-        limit = self._settings.document_max_bytes
-        if len(body) > limit:
-            return run.failed(
-                ErrorCode.TOO_LARGE,
-                f"The file has more than the {limit} bytes that are converted.",
-            )
         document = DocumentInput(
             body=body,
             meta=DocumentInputMeta(

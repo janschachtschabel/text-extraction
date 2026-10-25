@@ -20,7 +20,11 @@
 - A part whose bytes are audio or video (``sniff_media``; no form field is needed) is for
   transcription (M14, ``Pipeline.extract_upload``): ``unsupported_content_type`` while the
   service has no ASR, ``too_large`` over ``MEDIA_UPLOAD_MAX_BYTES``, otherwise it goes to the
-  ASR handoff (the ASR pool stores the bytes as the job item's input; not wired here yet).
+  ASR workers (``asr_dispatch.AsrHandoff``, built here because the bytes are in hand): a job of
+  kind ``file`` on pool ``asr`` whose item keeps the bytes as its input
+  (``ASR_INPUT_TTL_SECONDS``) and the ``X-ASR-Api-Key`` header as its secret, answered 202 at
+  once (the form's ``wait_seconds`` does not apply). Any other file over ``DOCUMENT_MAX_BYTES``
+  is ``too_large`` before its bytes are sniffed or hashed.
 
 The conversion is ``Pipeline.extract_upload``: no compliance check, no result cache. With
 ``wait_seconds`` (25 by default) a slower upload becomes a job of kind ``file``, as a slow
@@ -38,17 +42,20 @@ from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Final
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
 from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import (
+    ASR_KEY_DESCRIPTION,
     answer_or_hand_over,
+    asr_handoff,
     check_ocr_request,
     create_p1_job,
     docling_handoff,
@@ -160,6 +167,9 @@ async def extract_file(
     ],
     form: Annotated[FileForm, Form()],
     principal: Annotated[Principal, Depends(require_role("user"))],
+    asr_key: Annotated[
+        str | None, Header(alias=ASR_KEY_HEADER, description=ASR_KEY_DESCRIPTION)
+    ] = None,
 ) -> Envelope[ExtractResult] | Response:
     """Extract an uploaded file as Markdown, text or HTML.
 
@@ -171,10 +181,13 @@ async def extract_file(
     `too_large`, `conversion_failed`, ...). An audio or video file (decided by its bytes) is
     transcribed where the service has speech recognition, else `unsupported_content_type`
     ("Transcription is not enabled on this service."); over `MEDIA_UPLOAD_MAX_BYTES` it is
-    `too_large`; its result has `media.platform: "upload"`. 422 for a form with more than one
-    file or eight fields, or unknown fields; 413 for a body over `DOCUMENT_MAX_BYTES` + 64 KiB
-    (the larger `MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where audio and video are transcribed); 400 for
-    `ocr: always` while the service has no OCR.
+    `too_large`; otherwise it becomes a job at once (202, kind `file`), whose result has
+    `media.platform: "upload"` (while the key has `ASR_MAX_OPEN_PER_CLIENT` transcriptions
+    waiting, or the service is busy: `failed`/`rate_limited`, retryable). 422 for a form with
+    more than one file or eight fields, or unknown fields; 413 for a body over
+    `DOCUMENT_MAX_BYTES` + 64 KiB (the larger `MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where audio and
+    video are transcribed); 400 for `ocr: always` while the service has no OCR, or an
+    `X-ASR-Api-Key` header that is not 1 to 1024 visible ASCII characters.
 
     An upload still converting after `wait_seconds` (25 by default) becomes a job: 202 with the
     job's id and `status_url` (`GET /v1/jobs/{id}`, kind `file`, its item's `url` null). A
@@ -184,6 +197,7 @@ async def extract_file(
     state = request.app.state
     settings: Settings = state.settings
     check_ocr_request(form.ocr, settings)
+    key = asr_key_of(asr_key)
     try:
         body = await file.read(upload_file_limit(settings) + 1)
     finally:
@@ -203,6 +217,7 @@ async def extract_file(
         handover,
         options,
         handover_time(form.wait_seconds, settings),
+        key,
     )
     meta = UploadInputMeta(file_name=name, content_type=file.content_type)
     return await answer_or_hand_over(
@@ -235,8 +250,10 @@ async def _flow(
     handover: Handover,
     options: JobOptions,
     wait_until: float | None,
+    asr_key: str | None,
 ) -> Envelope[ExtractResult] | None:
-    """The upload's envelope, or None when the Docling worker writes its job's result."""
+    """The upload's envelope, or None when the Docling or the ASR worker writes its job's
+    result."""
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
         state,
@@ -247,7 +264,19 @@ async def _flow(
         url=None,
         wait_until=wait_until,
     )
-    envelope = await pipeline.extract_upload(
-        body, name, form, principal, content_type=content_type, ocr_handoff=ocr
+    asr = asr_handoff(
+        state,
+        handover,
+        kind="file",
+        options=options,
+        principal=principal,
+        url=None,
+        body=body,
+        key=asr_key,
     )
-    return None if ocr is not None and ocr.handed_over else envelope
+    envelope = await pipeline.extract_upload(
+        body, name, form, principal, content_type=content_type, ocr_handoff=ocr, asr_handoff=asr
+    )
+    if (ocr is not None and ocr.handed_over) or (asr is not None and asr.handed_over):
+        return None
+    return envelope

@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from redis.asyncio import Redis
 
 from text_extraction import __version__
+from text_extraction.asr_dispatch import AsrDispatcher, asr_queue
 from text_extraction.auth import Principal, Role, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
@@ -35,6 +36,7 @@ from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
+from text_extraction.pipeline_media import asr_available
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
@@ -156,7 +158,9 @@ def create_public_app(
     ``app.state.browser_queue`` is the ``browser`` pool's queue and
     ``app.state.browser_dispatcher`` sends sync requests there (both None otherwise); while the
     service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), ``app.state.docling_queue`` and
-    ``app.state.docling_dispatcher`` do the same for documents that need OCR;
+    ``app.state.docling_dispatcher`` do the same for documents that need OCR; while it has ASR
+    (``ASR_ENABLED`` and ``JOBS_ENABLED``), ``app.state.asr_queue`` and
+    ``app.state.asr_dispatcher`` for media that needs a transcription;
     ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
@@ -210,6 +214,14 @@ def create_public_app(
             app.state.job_store, app.state.docling_queue, settings, registry=registry
         )
         queues.append(app.state.docling_queue)
+    app.state.asr_queue = None
+    app.state.asr_dispatcher = None
+    if asr_available(settings):
+        app.state.asr_queue = asr_queue(valkey, settings)
+        app.state.asr_dispatcher = AsrDispatcher(
+            app.state.job_store, app.state.asr_queue, settings, registry=registry
+        )
+        queues.append(app.state.asr_queue)
     app.state.job_metrics = job_metrics_for(registry)
     app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()
