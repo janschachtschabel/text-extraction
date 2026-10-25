@@ -198,20 +198,30 @@ _MAX_ROOTS = 3  # ``/Root`` references tried, newest first
 _MAX_HITS = 32  # of one object search
 
 
+_OBJECT_DELIMITERS = (b"\n", b"\r", b" ", b"\t", b">")  # what may stand before ``N G obj``
+
+
 def _last_definition(body: bytes, number: bytes, generation: bytes) -> int | None:
     """The offset just after the last ``N G obj`` in the file (the newest definition), found
-    by searching backwards for the usual spelling with single spaces. None when there is none
-    among the last ``_MAX_HITS`` look-alikes (``11 0 obj`` when ``1 0 obj`` is wanted)."""
+    by searching backwards for the usual spelling with single spaces.
+
+    The needle is anchored to the delimiter before it, so that ``11 0 obj`` is no hit for
+    ``1 0 obj`` and the cap counts real definitions (an object written twice) only; the
+    look-alikes of a large file cost nothing. None when there is none."""
     needle = b"%b %b obj" % (number, generation)
     end = len(body)
     for _ in range(_MAX_HITS):
-        found = body.rfind(needle, 0, end)
-        if found < 0:
+        delimiter = max(body.rfind(before + needle, 0, end) for before in _OBJECT_DELIMITERS)
+        if delimiter >= 0:
+            start = delimiter + 1
+        elif end >= len(needle) and body.startswith(needle):  # the first thing in the file
+            start = 0
+        else:
             return None
-        after = found + len(needle)
-        if not body[found - 1 : found].isdigit() and not body[after : after + 1].isalnum():
+        after = start + len(needle)
+        if not body[after : after + 1].isalnum():
             return after
-        end = found
+        end = after - 1
     return None
 
 

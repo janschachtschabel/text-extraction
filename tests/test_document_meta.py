@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 from pytest_httpserver import HTTPServer
 
-from text_extraction.documents.meta import _pdf_date, _xmp_packets, document_metadata
+from text_extraction.documents.meta import (
+    _catalog_packets,
+    _pdf_date,
+    _xmp_packets,
+    document_metadata,
+)
 from text_extraction.documents.types import DocumentKind
 from text_extraction.metadata import PageMetadata
 
@@ -409,3 +414,25 @@ def test_a_large_document_still_finds_its_xmp_through_the_catalog() -> None:
     result = meta(body, "pdf")
 
     assert result.title == "Lizenzierte Handreichung"
+
+
+def with_many_objects(count: int) -> bytes:
+    """The XMP document (catalog = object 1, metadata stream = object 5) followed by many plain
+    objects, 11, 15, 21, 25 and so on among them: their numbers end in 1 and 5."""
+    objects = b"".join(b"%d 0 obj\n<< /Length 0 >>\nendobj\n" % n for n in range(7, count + 7))
+    return corpus("xmp-cc-by-sa.pdf") + objects
+
+
+@pytest.mark.parametrize("count", [50, 400, 1000, 5000])
+def test_catalog_path_survives_many_objects_with_look_alike_numbers(count: int) -> None:
+    packets = list(_catalog_packets(with_many_objects(count)))
+
+    assert len(packets) == 1
+    assert b"Lizenzierte Handreichung" in packets[0]
+
+
+@pytest.mark.parametrize("count", [50, 1000, 5000])
+def test_a_placed_images_metadata_stream_does_not_win_in_a_large_file(count: int) -> None:
+    body = with_many_objects(count) + typed_stream(CAT)
+
+    assert_documents_own_xmp(meta(body, "pdf"))
