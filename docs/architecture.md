@@ -14,22 +14,31 @@ reclaims stale messages only when new ones arrive (Jan, 2026-10-24).
 Clients / AI agents ──(8080: REST /v1, /mcp, /ui)──▶ API pods (FastAPI, stateless)
 Prometheus ──(9090: /health /ready /metrics)──────▶ API pods
 API pods ──fetch (SSRF guard)──▶ target websites and files
+API pods, workers ──▶ document children (MarkItDown: PDF text layers, Office, EPUB, CSV)
 API pods ──▶ LLM endpoint (OpenAI-compatible, default model gpt-6-luna)
 API pods ──jobs──▶ Valkey (queues, results, cache, rate limits, fingerprints)
 Valkey ◀──▶ extract-worker  (fast pipeline: batch items from the fair queue)
 Valkey ◀──▶ browser-worker  (Chromium behind an egress proxy: auto fallback, actions,
                              screenshots; Patchright + Chrome for unblock mode)
-Valkey ◀──▶ docling-worker  (OCR, scanned and table-heavy PDFs, images)
-Valkey ◀──▶ nlp-worker      (MarkItDown, Presidio)
+Valkey ◀──▶ docling-worker  (Docling and Tesseract: scans, broken text layers, images,
+                             OpenDocument files, PDFs with `ocr: always`)
+Valkey ◀──▶ nlp-worker      (Presidio)
 Valkey ◀──▶ asr-worker      (faster-whisper transcription)
-workers ──▶ model volume (PVC, read-only: spaCy, Docling, Whisper models)
+workers ──▶ model volume (PVC, read-only: spaCy, Docling and Tesseract, Whisper models)
 optional: S3-compatible store for screenshots and large results
 ```
 
 Images: `api` (slim), `browser-worker` (image `text-extraction-browser`: Chromium headless
-shell, Google Chrome stable, Xvfb), `docling-worker`, `nlp-worker`, `asr-worker`. Each worker is a
+shell, Google Chrome stable, Xvfb), `docling-worker` (image `text-extraction-docling`: Docling,
+CPU torch, the Tesseract CLI, no models), `nlp-worker`, `asr-worker`. Each worker is a
 Helm toggle and scales on queue length (KEDA or HPA). The API image holds no browser and no
-Playwright or Patchright; the details are in "Browser worker" below.
+Playwright or Patchright, and no Docling, torch or Tesseract; the details are in "Browser
+worker" and "Documents and OCR" below. Every image runs tini as PID 1, which forwards signals
+and reaps orphaned processes (a tesseract whose conversion child was killed).
+
+MarkItDown runs where the bytes are (package 5, D1): in child processes of the API pods, the
+extract workers and the browser worker, never in their parent processes. The nlp-worker keeps
+Presidio (package 7).
 
 ## Extraction pipeline
 
@@ -68,10 +77,13 @@ Playwright or Patchright; the details are in "Browser worker" below.
    words, on a tie the render). `auto` with `actions`, `cookies`, `headers` or `screenshot`
    skips the fast phase and always renders, like `browser`. `mode` is part of the result cache
    key.
-5. **Convert:** HTML → Trafilatura (keep link-only lists of linked files, domain
-   boilerplate rules, MathML → LaTeX). Office/EPUB and PDFs with a good text layer →
-   MarkItDown. Scans, table-heavy PDFs, images → Docling. Vision LLM opt-in.
-   Video/audio → see below.
+5. **Convert:** the body's bytes decide what it is (`documents/sniff.py`, F1). HTML →
+   Trafilatura (keep link-only lists of linked files, domain boilerplate rules, MathML →
+   LaTeX); `text/plain` → plain text. PDFs with a text layer, DOCX, PPTX, XLSX, XLS, EPUB and
+   CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
+   layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
+   Tesseract OCR, in the Docling worker. A document never escalates to the browser. See
+   "Documents and OCR". Vision LLM opt-in (package 8). Video/audio → see below.
 6. **Post-process (optional):** DOM metadata, PII, links, structured output, chunking,
    screenshot.
 7. **Fingerprint and classify:** see change detection; return the result envelope.
@@ -79,12 +91,30 @@ Playwright or Patchright; the details are in "Browser worker" below.
 ## Result envelope and errors
 
 Fields: `status` (`success|partial|failed`), `error.code`, `error.message`,
-`error.retryable`, `upstream_status`, `mode_used` (`fast|browser`), `attempts`,
+`error.retryable`, `upstream_status`, `mode_used` (`fast|browser|upload`), `attempts`,
 `final_url`, `content_type`, `language`, `word_count`, `quality`, `timings` (`render_ms` is the
-time in the browser, 0 in fast mode), `compliance`, `metadata`, `fingerprint`, and for browser
-results `unblocked` (unblock mode rendered the page) and `screenshot` (the artifact reference).
-For a browser result `attempts` counts the main-frame document responses of the render, redirect
-hops included.
+time in the browser, 0 in fast mode), `compliance`, `metadata`, `fingerprint`, `warnings`, for
+browser results `unblocked` (unblock mode rendered the page) and `screenshot` (the artifact
+reference), and for documents `document` (`kind`, `converter`, `pages`, `pages_converted`,
+`ocr`, `file_name`; F7). For a browser result `attempts` counts the main-frame document
+responses of the render, redirect hops included.
+
+`warnings` names what did not go as asked while the result still answers (the HTML converter may
+add a note of its own):
+
+- Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
+  `action_<index>_failed`, `navigation_refused_non_get`, `consent_overlay_removed`,
+  `screenshot_clipped`, `browser_bytes_capped`, `challenge_checkbox_clicked`,
+  `challenge_not_cleared`, `browser_profile_left`.
+- Documents: `ocr_unavailable` (a document that needed OCR answers its text layer, F12),
+  `pages_truncated` (pages after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES` were cut),
+  `pages_partial` (Docling stopped at its own time limit or skipped a page; the pages it read),
+  `document_fetched_directly` (a render ended on a file, which was fetched and converted in fast
+  mode, F18).
+- Jobs: `content_not_stored_too_large` (an item stored without its content).
+
+A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
+`meta`, `opengraph`, `text`, or `xmp` (a PDF's XMP packet, F8).
 
 Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `dns_error`, `connection_error`, `timeout`, `target_http_error`, `bot_protection`,
@@ -111,21 +141,22 @@ also on failure, as far as the request got. `partial` keeps the content and name
 `login_required`, `empty_content`) keeps it too, a compliance block or a target error has none.
 `data.cache` is `miss`, `hit` (fresh stored result, no fetch), `revalidated` (stale stored
 result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no read, no write).
-Only `success` and `partial` results are cached and fingerprinted (per URL and output format). `attempts` counts fetches of
-the target in this request (0 for a cache hit or a refusal before the fetch). The outbound gate
-refusing a turn gives `rate_limited` (busy) or `connection_error` (host paused), both retryable.
+Only `success` and `partial` results are cached and fingerprinted (per URL and output format; a
+document also per `ocr` option, F10). `attempts` counts fetches of the target in this request (0
+for a cache hit or a refusal before the fetch). The outbound gate refusing a turn gives
+`rate_limited` (busy) or `connection_error` (host paused), both retryable.
 
 ## Public API (port 8080)
 
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
-| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`. The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1) |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1) |
 | `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
 | `POST /v1/chunk` | Text/Markdown/URL → chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`) | sync |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
-| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache` as for `/v1/extract`), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
+| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr` as for `/v1/extract`), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `/mcp` | MCP tools (optional, `MCP_ENABLED`) | streamable HTTP |
@@ -161,9 +192,10 @@ optional rate limit.
   of the page becomes a checked navigation); max 20 actions; `evaluate` admin-only. Stealth
   (Patchright) is unblock mode, admin-only. The index in the warning `action_<index>_failed`
   counts from 0. A click on a link to a page that fails to load, or that the compliance checks
-  refuse, fails the whole render with that page's error. A click that starts a download
-  discards the page: the render ends without content, as a download is `unsupported_content_type`
-  until package 5 routes files. Details in "Browser worker".
+  refuse, fails the whole render with that page's error. A click that starts a download ends
+  the render; the file is then fetched directly and converted when it is a document (F18;
+  `unsupported_content_type` when the request carries cookies, headers or actions). Details in
+  "Browser worker".
 - **DOM metadata:** extruct (JSON-LD, microdata, RDFa, OpenGraph) + Trafilatura. License
   normalized (e.g. `CC-BY-SA-4.0`) with source and confidence; author, dates, canonical,
   language, LRMI educational fields, images with alt text.
@@ -221,9 +253,9 @@ script stores an item's result: it sets the done bit and counts the item only wh
 so a re-run after a lost lease counts once. The script answers `first`, `last` (this write
 completed the job; only then is `job_duration_seconds` observed) or `repeat` (R7).
 
-**The fair queue.** One queue per worker pool (`extract` now; browser, docling, nlp and asr pools
-reuse it), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and a queue
-key. Items are `<job>:<index>:<attempts>` in lists per client and domain.
+**The fair queue.** One queue per worker pool (`extract`, `browser`, `docling`; the nlp and asr
+pools will reuse it), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and
+a queue key. Items are `<job>:<index>:<attempts>` in lists per client and domain.
 
 - Client = API key name (P3); under `AUTH_MODE=none` everyone is `anonymous` and batches share
   by domain only. Domain = `normalize_host(hostname)`, the key the outbound gate uses; a URL
@@ -385,7 +417,8 @@ while `BROWSER_ENABLED` is false, are unchanged.
      another host went out before its check (the accepted gap of D1); the hop gets its turn from
      then on.
   5. The final response is judged as in fast mode: a non-2xx status is `target_http_error`, a
-     download or non-HTML type is `unsupported_content_type`.
+     download or non-HTML type is `unsupported_content_type`, except that a download or a
+     document type without caller secrets is fetched directly (package 5, F18).
   A document that cannot be loaded because the egress proxy refused its host (a private address)
   shows in Chromium as a failed tunnel; the render maps it to `blocked_url` by matching the
   document host against the proxy's refusals of that page (R6).
@@ -510,17 +543,277 @@ checked navigation, and the headers go only to it when its host is the request's
 requests are buffered and carry Node's TLS fingerprint rather than Chromium's.
 
 **Known limits.** A click that starts a download discards the page (the render ends without
-content). The first request of an HTTP redirect hop to another host leaves before its check
-(D1). Screenshots need `JOBS_ENABLED=true`. The first browser launch of a worker happens before
-`/ready`, and a browser that does not start ends the process. HTML served without a
-`Content-Type` does not escalate (step 4).
+its content; the file is fetched directly, F18). The first request of an HTTP redirect hop to
+another host leaves before its check (D1). Screenshots need `JOBS_ENABLED=true`. The first
+browser launch of a worker happens before `/ready`, and a browser that does not start ends the
+process. HTML served without a `Content-Type` does not escalate (step 4).
+
+## Documents and OCR
+
+Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `routing.py`,
+`markitdown_convert.py`, `docling_convert.py`, `meta.py`, `formats.py`, `model_store.py`,
+`models.toml`), `pipeline_documents.py`, `file_api.py`, `pool_dispatch.py`,
+`docling_dispatch.py`, `docling_worker.py`. Settings are in [configuration.md](configuration.md)
+("Documents and OCR").
+
+**Decisions of Jan (2026-10-25: the recommended options).**
+
+- **D1, where MarkItDown runs: in the pod that has the bytes.** API pods, extract workers and the
+  browser worker each keep `DOCUMENT_CONCURRENCY` child processes for it. No extra hop and no
+  mandatory worker for PDFs; the API image grows by about 120 MB (pandas, pdfminer, onnxruntime
+  via magika). The nlp-worker stays for Presidio.
+- **D2, a sync request that needs OCR: wait, then answer the text layer.** `POST /v1/extract`
+  without `wait_seconds` waits up to `DOCLING_SYNC_WAIT_SECONDS` (20) for the Docling worker, then
+  answers the text layer with the warning `ocr_unavailable` (an image, which has none, fails
+  `timeout`, retryable). With `wait_seconds` it becomes a 202 job. `POST /v1/extract/file`
+  defaults to `wait_seconds: 25`, so an upload that needs longer answers 202 with its job. The
+  sync contract of `/v1/extract` and the ~30 s rule both hold.
+- **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false`, compose
+  profile `docling`; it needs an image of about 2 GB and about 2 GiB of models. Without it a
+  scan keeps its text layer (`ocr_unavailable`), and images and OpenDocument files answer
+  `unsupported_content_type` ("OCR is not enabled on this service.").
+
+**Rulings, as built.**
+
+- **F1, formats and detection** (`documents/sniff.py`). Magic bytes win; the declared type
+  decides only where the bytes do not; the extension (URL path or upload name) only breaks the
+  CSV tie.
+
+  | Kind | Detected by | Converter |
+  | --- | --- | --- |
+  | `pdf` | `%PDF-` in the first 1024 bytes | MarkItDown, or Docling per F4 and F11 |
+  | `docx`, `pptx`, `xlsx` | ZIP with `[Content_Types].xml` naming the main part | MarkItDown |
+  | `xls` | OLE2 signature with a `Workbook` or `Book` stream | MarkItDown |
+  | `epub` | ZIP whose first entry `mimetype` is `application/epub+zip` | MarkItDown |
+  | `csv` | `text/csv` or `.csv`, decodable text | MarkItDown |
+  | `odt`, `ods`, `odp` | ZIP `mimetype` `application/vnd.oasis.opendocument.*` | Docling |
+  | `png`, `jpeg`, `tiff`, `webp`, `bmp` | image signatures | Docling (OCR) |
+  | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |
+
+  A body declared HTML or XHTML keeps its package-2 path. A body declared `text/plain` is a
+  document only when a signature starts it (offset 0 after an optional byte order mark and
+  whitespace); otherwise it stays plain text, also when its URL ends in `.csv` (the extension
+  tie-break does not apply to a declared `text/plain`). Untyped bodies, `application/octet-stream`
+  and other declared types keep the 1024-byte window for `%PDF-`. Where no document signature
+  matches and the body (after a byte order mark and whitespace) starts with `<!doctype html` or
+  `<html`, under a document type, `application/octet-stream` or no type, it is HTML: an "upload
+  named `report.pdf`" or a PDF URL that serves an error page converts as that page, for URLs and
+  uploads alike. `content_type` in the result is the sniffed media type.
+- **F2, where conversions run (D1).** MarkItDown kinds convert in the pod that holds the bytes,
+  in a `DocumentPool` child; Docling kinds and OCR convert only in the Docling worker. No module
+  that the API, the extract worker or the browser worker imports pulls in Docling or torch, and
+  their parent processes never import MarkItDown, pdfminer, pdfplumber or pandas.
+- **F3, process isolation** (`documents/pool.py`). A child is a plain interpreter (`python -m
+  text_extraction.documents.pool_child`) in a session of its own, not a `multiprocessing` child
+  (which would re-import the parent's `__main__` before its limit is set). It gets an
+  allowlisted environment (no keys, no Valkey password), talks over a socket pair, and imports
+  only its target module (`documents/child.py` for MarkItDown, `documents/docling_child.py` for
+  Docling), whose `FUNCTIONS` the parent calls by name. It sets `RLIMIT_AS`
+  (`DOCUMENT_MEMORY_LIMIT_MB`, 2048) before its first import. A child runs one conversion at a
+  time and is replaced after 50 conversions, when it dies, runs out of memory or is killed. The
+  caller passes its deadline; waiting for a free child counts against it; when it passes, the
+  child's process group gets SIGKILL (a tesseract it started too) and the caller gets
+  `timeout`. Replies are unpickled with builtin types only and at most 64 MiB of them; a larger
+  one, like a `MemoryError`, is `too_large`. A dead child or a malformed reply is our fault,
+  logged by its type only (a converter's message may quote the document). The children start
+  before `/ready`.
+- **F4, PDF probe and OCR routing** (`documents/pdf.py`). In the child, before MarkItDown,
+  pypdfium2 opens the PDF (one that needs a password fails `conversion_failed`, not retryable,
+  "The PDF is password-protected."), counts its pages and the characters of each of the first
+  50. The PDF needs OCR when at least half of the probed pages have fewer than 50 characters, or
+  when more than 5 % of MarkItDown's tokens are `(cid:N)` or U+FFFD. A PDF without pages is
+  `empty_content` without a conversion. Pages after `DOCUMENT_MAX_PAGES` (100) are cut before
+  the conversion (a new pdfium document of the first pages; warning `pages_truncated`).
+  "Table-heavy" is not guessed: MarkItDown's pdfplumber pass keeps simple tables, and
+  `ocr: always` sends a PDF to Docling for its layout and tables.
+- **F5, container bombs.** Before a ZIP-based kind (OOXML, EPUB, OpenDocument) converts, its
+  central directory alone decides: at most 10,000 entries, at most
+  `DOCUMENT_MAX_UNCOMPRESSED_BYTES` (200,000,000) unpacked in total, and no entry over 1 MiB
+  unpacked whose ratio to its compressed size is over 100, else `too_large`; nothing is
+  decompressed. Small entries are exempt from the ratio (a sparse sheet of zeros is no bomb; the
+  total still bounds them), and `RLIMIT_AS` is the backstop. An archive that cannot be read is
+  `conversion_failed`.
+- **F6, output formats** (`documents/formats.py`). `markdown` is the converter's Markdown,
+  whitespace normalised; `html` is markdown-it-py (CommonMark plus tables, raw HTML escaped)
+  rendering it; `text` is the text of that HTML with a newline after each block. For Docling the
+  Markdown is its `export_to_markdown` and the text its `export_to_text`, but the HTML is built
+  from its Markdown with markdown-it too, not with `export_to_html`: Docling's page carries a
+  stylesheet whose words the quality gate would count, and our renderer escapes the raw HTML of
+  a hostile document. Merged table cells are lost in that HTML.
+- **F7, the result.** `document` (`DocumentInfo`): `kind`, `converter` (`markitdown` or
+  `docling`), `pages` (None for kinds without pages), `pages_converted`, `ocr` (the text comes
+  from OCR; false for OpenDocument files, which Docling reads without it) and `file_name`
+  (uploads only). URL documents have `mode_used: "fast"`, also after a render that ended on a
+  file (F18); uploads `mode_used: "upload"`, `url` and `final_url` null, `attempts` 0. The new
+  fields have defaults, so cached results stay valid; `JobItem.url` is null for uploads.
+- **F8, document metadata** (`metadata: true`, `documents/meta.py`). From the PDF info
+  dictionary and its XMP packet (`dc:title`, `dc:creator`, `dc:description`, `dc:rights`,
+  `xmpRights:WebStatement`, `cc:license`, dates; the packet the catalog's `/Metadata` names,
+  else a stream typed `/Metadata`, never the XMP of an embedded image), OOXML
+  `docProps/core.xml`, ODF `meta.xml` and the EPUB package document (`dc:*`), parsed with
+  defusedxml. Licences go through
+  `LicenseCollector`: a CC licence in a PDF's XMP becomes `CC-BY-SA-4.0` with the source `xmp`
+  and confidence `high`. The language is `dc:language`, then `Content-Language`, then the text;
+  the child always reads the metadata for it, the result carries it only when asked.
+- **F9, quality.** A document is judged like `text/plain`: `assess(None, content)` and
+  `QUALITY_MIN_WORDS`. It never escalates to the browser. A scan without OCR ends `empty_content`
+  or `content_too_short` with the warning `ocr_unavailable`.
+- **F10, URL documents.** Pipeline step 7 hands document kinds to
+  `pipeline_documents.DocumentSteps`. The byte limit is `DOCUMENT_MAX_BYTES` (20,000,000; at most
+  `FETCH_MAX_BYTES`, checked at start-up) instead of `CONVERT_MAX_BYTES`. Compliance after the
+  fetch checks the headers only (`X-Robots-Tag`, `tdm-reservation`), as for `text/plain`. Cache,
+  revalidation and fingerprints work as for pages. The cache key gains `ocr`, and so does the
+  fingerprint variant of a document (`<format>|ocr=<ocr>`; pages keep `<format>`, so their stored
+  fingerprints stay valid): `auto`, `never` and `always` may read one file with different
+  converters, and alternating them must not report a change. A cached document result is final,
+  also one cached with `ocr_unavailable`. The MarkItDown child gets what the fetch left of
+  `EXTRACT_TIMEOUT_SECONDS`, so its timeout is `timeout`, retryable.
+- **F11, the `ocr` option.** `ExtractRequest`, `BatchRequest` and the upload form take `ocr:
+  "auto" | "never" | "always"` (default `auto`). `auto`: Docling for scans and broken text layers
+  (F4), images and OpenDocument files; `never`: MarkItDown only (images and OpenDocument files
+  answer `unsupported_content_type`); `always`: Docling for every PDF too. `routing.needs_ocr` is
+  the one rule; Docling is used only while `DOCLING_ENABLED` and `JOBS_ENABLED`. `ocr: always`
+  while it is not answers 400 `invalid_request` ("OCR is not enabled on this service.").
+- **F12, sync dispatch (D2)** (`pool_dispatch.py`, `docling_dispatch.py`). `PoolDispatcher` and
+  `Handover` are what the `browser` and `docling` pools share; `BrowserDispatcher` and its metric
+  are unchanged. A sync request that needs OCR creates a one-item job (kind `extract` for a URL,
+  `file` for an upload) and queues it on pool `docling` under the client `<key name>#live`. The
+  bytes go to `job:{<id>}:input:<index>` (a hash with `body` and `meta`: kind, sniffed type, file
+  name, validators, `Content-Language`, `raw_sha256`, the probe's verdict, the compliance report),
+  with TTL `DOCLING_INPUT_TTL_SECONDS` (3600, never longer than the job); the worker deletes it
+  once the item has its outcome, and an item whose input expired before the claim fails
+  `timeout`, retryable. MarkItDown's result, when there is one, is the item's draft. Without
+  `wait_seconds` the request waits `DOCLING_SYNC_WAIT_SECONDS` in all, then answers the draft with
+  `ocr_unavailable` (no draft: `failed`/`timeout`, retryable) and deletes the job; with
+  `wait_seconds` the `Handover` turns it into a 202 with the Docling job. A request whose route
+  had already handed it over to a P1 job puts the document on that job instead. Back-pressure:
+  while Valkey's memory guard is high, or the caller already has `DOCLING_MAX_OPEN_PER_CLIENT` (5)
+  unfinished Docling jobs, nothing is stored or queued: the draft answers with `ocr_unavailable`
+  (no draft: `failed`/`rate_limited`, retryable). A fallback answer carries no fingerprint, so
+  it is neither compared nor cached and the next request may get the OCR. The API's graceful
+  shutdown covers the fast phase plus `DOCLING_SYNC_WAIT_SECONDS` + 5 s while `DOCLING_ENABLED`.
+- **F13, batches.** The extract worker moves an item that needs OCR to pool `docling` (same job,
+  index and client): input, then draft, then the queue, then its own completion without a
+  result, as B5 moves items to `browser`. While the memory guard is high it keeps the draft with
+  `ocr_unavailable` instead (no draft: `rate_limited`, retryable).
+- **F14, the Docling worker** (`text-extraction-docling-worker`, pool `docling`, internal port
+  only). The package-3 `Worker` with a `DoclingRunner`; leases of `2 × DOCLING_TIMEOUT_SECONDS +
+  10` seconds. `DOCLING_CONCURRENCY` (1) slot loops, each converting in a child of its own (F3,
+  with `DOCLING_MEMORY_LIMIT_MB`, 6144), killed at `DOCLING_TIMEOUT_SECONDS` (300) from the start
+  of its conversion. Docling's options: the PDF pipeline with OCR through Tesseract's command line
+  (`TesseractCliOcrOptions`, languages `DOCLING_OCR_LANGUAGES`, `deu,eng`), full-page OCR when the
+  probe said "scan" (always for an image), table structure in fast mode, `artifacts_path` =
+  `DOCLING_MODELS_PATH/docling` with Tesseract's data beside it in `DOCLING_MODELS_PATH/tessdata`
+  (`TESSDATA_PREFIX`), CPU only with `DOCLING_THREADS` (4) threads, Hugging Face offline, and
+  `document_timeout` = 0.9 × `DOCLING_TIMEOUT_SECONDS`, so Docling stops between pages and answers
+  what it read (warning `pages_partial`) before the child is killed. OpenDocument files go through
+  Docling's simple pipeline (no OCR, no models). Pages after `DOCLING_MAX_PAGES` (100) are cut
+  (`pages_truncated`). The runner calls `Pipeline.convert_queued_document`, which builds the result
+  like the inline path (F7-F9), keeps the better of draft and OCR result (`escalation.better`; a
+  tie goes to OCR) and, for a URL, compares and stores the kept one in the result cache and
+  fingerprints (with the input's validators; none for a file a render ended on, whose warning
+  `document_fetched_directly` is kept). A draft kept because the OCR failed gets `ocr_unavailable`;
+  when that failure is retryable (models missing, the conversion pool unavailable) the draft also
+  loses its fingerprint and is neither compared nor stored. A Docling timeout is not retryable,
+  unlike MarkItDown's: the child had all of `DOCLING_TIMEOUT_SECONDS`, and the same file would time
+  out again. Models missing on the volume are `internal_error`, retryable. Before `/ready` the
+  worker checks the manifest's files, starts its children and converts a built-in one-page scan
+  (`documents/scan_check.png`) in each, which loads the models; a missing file or a failed check
+  ends the process with exit code 1 and a log line naming `DOCLING_MODELS_PATH`. On SIGTERM it
+  stops claiming, gives the items in flight 30 s, then kills its children; their leases expire and
+  the items run again.
+- **F15, models on the PVC** (`documents/model_store.py`, `documents/models.toml`).
+  `--download-models` fills `DOCLING_MODELS_PATH` from our own manifest instead of Docling's
+  downloader, which pins its layout model to a branch (`main`), not a commit: every file has a
+  URL at a fixed commit (https only, redirects too), its byte size and its SHA-256: Docling's
+  layout and TableFormer files under `docling/`, and `deu`, `eng` and `osd.traineddata` from
+  `tesseract-ocr/tessdata_best` under `tessdata/`. It downloads into a staging directory on the
+  volume, checks size and hash while writing, renames each directory into place and then
+  writes `.complete-<manifest hash>`; with that marker present it does nothing, and a new
+  manifest has a new marker. Each file has a total deadline (120 s plus 256 KiB/s). `--check`
+  converts the built-in scan and exits 0 or 1 (the image build and CI run it). Helm: an init
+  container runs `--download-models` with the PVC mounted writable, the worker mounts it
+  read-only; `models.download: false` with `models.persistence.existingClaim` serves an
+  air-gapped, pre-filled volume. Compose: the one-shot service `docling-models` on the named
+  volume `docling-models`.
+- **F16, switches (D3).** `DOCLING_ENABLED` (default false). Helm renders it into every pod from
+  `workers.docling.enabled` (default false); compose reads it from `.env` (`docker compose
+  --profile docling up` with `DOCLING_ENABLED=true`).
+- **F17, `POST /v1/extract/file`** (`file_api.py`). `multipart/form-data` with one file part
+  `file` and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25, D2); at most one
+  file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB. Auth (role `user`) and the
+  inbound rate limit are checked before a byte of the body is read, so a caller without a key or
+  over its limit never makes the pod receive or spool the upload. The part is read into memory
+  and its spooled file in `/tmp` deleted at once. The file name is reduced to its base name,
+  control characters removed, at most 255 characters, reported as `document.file_name` and never
+  logged. HTML and plain-text uploads use the package-2 converters (relative links stay as they
+  are). No compliance check (`compliance.decision: "skipped"`), no result cache (`cache:
+  "bypass"`), a fingerprint that is computed but never compared or stored (`changed: null`).
+  With `wait_seconds` a slower conversion becomes a job of kind `file` (202) whose item keeps
+  the upload's bytes as its input (the same input hash as F12; deleted once the result is
+  stored); an upload that needs OCR becomes its Docling job.
+- **F18, a render that ends on a file.** When a render's main frame ends on a download (also one
+  a clicked link started; `Rendered.download_url`) or on a 2xx answer of a document type, and the
+  request carries no caller secrets (cookies, headers, actions) and is no screenshot, the
+  pipeline fetches that URL with the fast fetcher in a turn of its own, with the compliance
+  checks of fast mode and the SSRF checks of a navigation, and converts it per F10, with the
+  warning `document_fetched_directly` and `mode_used: "fast"`. Its validators are not stored (they
+  fit the request URL only). With secrets it stays `unsupported_content_type`: the fetcher must
+  not send the caller's cookies or headers. Built in the fix round of Task 6, which the plan had
+  left without an owner.
+- **F19, metrics.** `text_extraction_document_conversions_total{converter, kind, outcome}`,
+  `text_extraction_document_conversion_seconds{converter}` and
+  `text_extraction_document_pages_total{converter}`, recorded where the conversions run (the
+  MarkItDown ones in API pods and workers, uploads included; the Docling ones in the Docling
+  worker); `text_extraction_docling_dispatch_total{outcome}` on API pods; the queue gauges for
+  pool `docling`. Helm alert rules: `TextExtractionQueueBacklog` for pool `docling` (its own
+  threshold, `alerts.doclingQueueBacklogItems`, 100) and `TextExtractionWorkersDown` for the
+  Docling workers. The conversion metrics joined Task 6, the dispatch metric Task 8, the Docling
+  conversions Task 9 and the alert rules Task 10.
+
+**Images and processes.** The Docling image (target `docling` of the one Dockerfile, linux/amd64)
+holds Docling (`docling-slim`), CPU torch and the Tesseract CLI, no models. Every image runs tini
+as PID 1. A CI licence gate (`scripts/check_licenses.py`) fails on any GPL or AGPL distribution in
+the installed environments (CLAUDE.md rule 7).
+
+**Done when (package 5):** `tests/documents/test_corpus.py` converts the corpus that
+`tests/documents/make_corpus.py` builds (`tests/documents/corpus/`, described in `expected.json`)
+through the real pipeline and document children: a German PDF with a table, a 120-page PDF (cut
+to 100), a PDF with a CC BY-SA licence in its XMP, DOCX, PPTX, XLSX, XLS, EPUB and a Latin-1
+CSV, each with its expected phrases, kind and pages; a DOCX container bomb answers `too_large`, a
+password-protected PDF `conversion_failed` and a PDF without pages `empty_content`. Under the
+marker `docling` (CI job `documents`, with the models) the scan, a PNG, a JPEG and an ODT convert
+through the Docling path, and the two-page scan yields its text with a word recall of at least
+0.9.
+
+**Known limits.**
+
+- An HTML page with a UTF-16 byte order mark, an `<?xml` prolog or a leading comment, served under
+  a document type, `application/octet-stream` or no type, is not recognised as HTML and answers
+  `unsupported_content_type`.
+- A CSV served as `text/plain` stays plain text.
+- A crashed Docling child is final (`conversion_failed`, not retryable): a scan keeps its draft
+  with `ocr_unavailable`, which is cached until its entry expires, and an image fails.
+- An exhausted Docling item (past `JOB_ITEM_MAX_ATTEMPTS`) answers `internal_error` instead of its
+  draft with `ocr_unavailable`.
+- Docling backlog: with no Docling worker (scaled to zero, crashed, models missing) sync requests
+  answer without OCR after `DOCLING_SYNC_WAIT_SECONDS`, and batch items wait in the queue until a
+  worker comes (the alerts `TextExtractionQueueBacklog` and `TextExtractionWorkersDown` fire). A crashed API pod's sync Docling job counts as open
+  for its key until `JOB_TTL_SECONDS`.
+- The browser worker hands no document to OCR: an image a render ended on fails
+  `unsupported_content_type` ("... Extract the document's own URL with mode fast."), and a scan
+  answers its text layer with `ocr_unavailable`.
+- Not in this package: vision-LLM descriptions of images (package 8), PII (package 7), S3 offload
+  of inputs (package 11), legacy binary `.doc` and `.ppt`, RTF, e-mail files and archives
+  (`unsupported_content_type`).
 
 ## Observability
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
 duration, extraction outcome by error code and mode, browser pool usage (pages in use, pages by
 outcome, render seconds, launches, proxy refusals), sync browser dispatches by outcome (API pods:
-rendered, not claimed, no result, handed over, backend error), LLM calls,
+rendered, not claimed, no result, handed over, backend error), document conversions by converter,
+kind and outcome with their seconds and pages, sync Docling dispatches by outcome, LLM calls,
 tokens and failures, rate-limit rejections. Alert rules ship in the Helm chart
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.

@@ -25,3 +25,10 @@ Per package:
 | 9 | Site structure | Sitemap discovery (robots.txt, index, gzip), link graph with link types to a set depth, `POST /v1/site-structure` job | Sample sites return complete sitemaps and typed links |
 | 10 | MCP and UI | FastMCP at `/mcp`, htmx playground at `/ui`, both toggled by env and Helm | MCP tools usable from Claude; UI drives every endpoint |
 | 11 | Hand-over | Full WLO regression run, load test, resource baselines (`docker stats`), env reference, example `values.yaml`, secrets list, cost notes (LLM, ASR), final architecture doc | Ops-guide hand-over checklist complete |
+
+Package 5 note (Jan, D2): a sync request that needs OCR waits up to `DOCLING_SYNC_WAIT_SECONDS`
+(20 s) for the Docling worker and then answers its text layer with the warning `ocr_unavailable`
+(an image fails `timeout`, retryable); with `wait_seconds` it becomes a 202 job.
+`POST /v1/extract/file` defaults to `wait_seconds: 25`, so a slower upload answers 202 with its
+job. The sync contract of `POST /v1/extract` and the ~30 s rule stay as they are. Details in
+[architecture.md](architecture.md), "Documents and OCR".

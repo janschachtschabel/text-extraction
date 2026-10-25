@@ -41,6 +41,29 @@ OCR for scans and images runs in the Docling worker, which is off by default (an
 `docling`: `docker compose --profile docling up --build`. The first start downloads the models
 into a volume.
 
+### Documents and uploads
+
+PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
+`POST /v1/extract` with their URL, or `POST /v1/batch`. The bytes decide what a file is before its
+`Content-Type` does (a PDF served as `application/octet-stream` is still a PDF). To convert a
+file you have, upload it to `POST /v1/extract/file` as `multipart/form-data` (at most
+`DOCUMENT_MAX_BYTES`, 20 MB):
+
+```bash
+curl -H "Authorization: Bearer $KEY" -F file=@report.pdf -F format=markdown \
+  http://localhost:8080/v1/extract/file
+# {"status": "success", "data": {"mode_used": "upload", "url": null, "content": "# ...",
+#  "document": {"kind": "pdf", "converter": "markitdown", "pages": 12, "pages_converted": 12,
+#  "ocr": false, "file_name": "report.pdf"}, ...}, ...}
+```
+
+The form also takes `metadata`, `ocr` (`auto`, `never` or `always`) and `wait_seconds` (25 by
+default: an upload that takes longer answers 202 with a job to poll). PDFs keep their first
+`DOCUMENT_MAX_PAGES` (100) pages, with the warning `pages_truncated`. With the Docling worker
+(above), scans and images (PNG, JPEG, TIFF, WebP, BMP) are read with OCR and OpenDocument files
+(ODT, ODS, ODP) are converted too; without it a scan answers its text layer with the warning
+`ocr_unavailable`, and images and OpenDocument files answer `unsupported_content_type`.
+
 ### Batch
 
 `POST /v1/batch` queues many URLs as one job (at most `BATCH_MAX_URLS`, 1,000 by default) and

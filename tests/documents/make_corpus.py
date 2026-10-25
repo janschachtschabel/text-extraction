@@ -4,10 +4,12 @@ committed, so the tests do not need this script, reportlab, python-docx or Pillo
     uv run python tests/documents/make_corpus.py
 
 The output is deterministic (fixed dates and ids), so a re-run changes a file only when this
-script or the system font changes. Later tasks add their files here. It also writes the Docling
-worker's built-in scan, ``src/text_extraction/documents/scan_check.png``. Office files come from
-python-docx, python-pptx and openpyxl, the old Excel format from xlwt (BSD-3-Clause, dev only:
-no other permissive library writes it), the EPUB is assembled entry by entry.
+script or the system font changes. Every file but ``scan.expected.txt`` is described in
+``corpus/expected.json``, which ``test_corpus.py`` reads; add a file there when you add one here.
+It also writes the Docling worker's built-in scan, ``scan_check.png`` in
+``src/text_extraction/documents/``. Office files come from python-docx, python-pptx and openpyxl,
+the old Excel format from xlwt (BSD-3-Clause, dev only: no other permissive library writes it),
+the EPUB and the OpenDocument text are assembled entry by entry.
 """
 
 import datetime
@@ -90,6 +92,26 @@ def _text_pdf() -> bytes:
             pdf.drawString(x + 6, y - 16, cell)
             x += width
     pdf.showPage()
+    pdf.save()
+    return buffer.getvalue()
+
+
+LONG_PAGES = 120  # over DOCUMENT_MAX_PAGES (100): the last 20 pages are cut
+
+
+def _long_pdf() -> bytes:
+    """120 pages of German text, each opened by a numbered heading (``Abschnitt <n>:``)."""
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4, invariant=1)
+    pdf.setTitle("Ein langes Dokument")
+    for number in range(1, LONG_PAGES + 1):
+        lines = GERMAN_PAGES[number % 2]
+        pdf.setFont("Helvetica-Bold", 14)
+        pdf.drawString(72, 770, f"Abschnitt {number}: {lines[0]}")
+        pdf.setFont("Helvetica", 11)
+        for row, line in enumerate(lines[1:]):
+            pdf.drawString(72, 740 - 18 * row, line)
+        pdf.showPage()
     pdf.save()
     return buffer.getvalue()
 
@@ -258,6 +280,26 @@ def _core_docx() -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     return _fix_zip_dates(buffer.getvalue())
+
+
+BOMB_ENTRY_BYTES = 16 * 1024 * 1024  # zeros: deflated to about 16 KB, a ratio of about 1,000
+
+
+def _bomb_docx() -> bytes:
+    """``core.docx`` plus one entry of 16 MiB of zeros: a container bomb by its compression
+    ratio (over 100 for an entry over 1 MiB, ruling F5), refused from the central directory
+    before anything is unpacked."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(_core_docx())) as source,
+        zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for info in source.infolist():
+            target.writestr(info, source.read(info.filename))
+        entry = zipfile.ZipInfo("word/media/fill.bin", date_time=(2000, 1, 1, 0, 0, 0))
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        target.writestr(entry, bytes(BOMB_ENTRY_BYTES))
+    return out.getvalue()
 
 
 SCRIPT_LINE = "Der Quelltext <script>alert(1)</script> bleibt Text."
@@ -476,11 +518,13 @@ def main() -> None:
     pages = _scan_pages()
     files = {
         "text.pdf": _text_pdf(),
+        "long.pdf": _long_pdf(),
         "scan.pdf": _scan_pdf(pages),
         "encrypted.pdf": _encrypted_pdf(),
         "empty.pdf": _empty_pdf(),
         "xmp-cc-by-sa.pdf": _xmp_pdf(),
         "core.docx": _core_docx(),
+        "bomb.docx": _bomb_docx(),
         "lesson.docx": _lesson_docx(),
         "slides.pptx": _slides_pptx(),
         "sheets.xlsx": _sheets_xlsx(),
