@@ -104,23 +104,29 @@ def job_metrics_for(registry: CollectorRegistry) -> JobMetrics:
     return metrics
 
 
-# One counter per registry, as for the job metrics.
-_DISPATCH: WeakKeyDictionary[CollectorRegistry, Counter] = WeakKeyDictionary()
+# One counter per registry and pool, as for the job metrics.
+_DISPATCH: WeakKeyDictionary[CollectorRegistry, dict[str, Counter]] = WeakKeyDictionary()
+_DISPATCH_HELP: Final = {
+    "browser": "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
+    "not_claimed, no_result, handed_over or backend_error.",
+}
 
 
-def dispatch_counter_for(registry: CollectorRegistry, outcomes: Iterable[str]) -> Counter:
-    """``text_extraction_browser_dispatch_total{outcome}`` in ``registry``, every one of
+def dispatch_counter_for(
+    registry: CollectorRegistry, outcomes: Iterable[str], *, pool: str = "browser"
+) -> Counter:
+    """``text_extraction_<pool>_dispatch_total{outcome}`` in ``registry``, every one of
     ``outcomes`` exported as 0 from the start."""
-    counter = _DISPATCH.get(registry)
+    counters = _DISPATCH.setdefault(registry, {})
+    counter = counters.get(pool)
     if counter is None:
         counter = Counter(
-            "text_extraction_browser_dispatch_total",
-            "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
-            "not_claimed, no_result, handed_over or backend_error.",
+            f"text_extraction_{pool}_dispatch_total",
+            _DISPATCH_HELP.get(pool, f"Sync requests this pod sent to the {pool} workers."),
             ["outcome"],
             registry=registry,
         )
-        _DISPATCH[registry] = counter
+        counters[pool] = counter
     for outcome in outcomes:
         counter.labels(outcome=outcome)
     return counter
