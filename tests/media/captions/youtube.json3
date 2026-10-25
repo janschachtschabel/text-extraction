@@ -1,0 +1,8 @@
+{"wireMagic":"pb3","events":[
+{"tStartMs":0,"dDurationMs":120000,"id":1,"wpWinPosId":1,"wsWinStyleId":1},
+{"tStartMs":160,"dDurationMs":4550,"wWinId":1,"segs":[{"utf8":"hallo","acAsrConf":0},{"utf8":" und","tOffsetMs":480,"acAsrConf":220},{"utf8":" willkommen","tOffsetMs":840,"acAsrConf":240}]},
+{"tStartMs":2470,"dDurationMs":2240,"wWinId":1,"aAppend":1,"segs":[{"utf8":"\n"}]},
+{"tStartMs":4720,"dDurationMs":3270,"wWinId":1,"segs":[{"utf8":"zu"},{"utf8":" unserem","tOffsetMs":320},{"utf8":" Video","tOffsetMs":760}]},
+{"tStartMs":8000,"dDurationMs":2870,"wWinId":1,"segs":[{"utf8":"über die Größe"},{"utf8":"\n"},{"utf8":"der Sonne"}]},
+{"tStartMs":12000,"dDurationMs":500}
+]}

@@ -1,0 +1,27 @@
+WEBVTT - Lecture about rivers
+
+NOTE
+This file was produced by the editorial team.
+Do not publish before Friday.
+
+STYLE
+::cue(.loud) {
+  color: red;
+}
+
+REGION
+id:top
+width:40%
+
+intro
+00:00:00.500 --> 00:00:03.000
+<v Moderatorin>Willkommen zur Vorlesung über <i>Flüsse</i>.</v>
+
+00:00:03.200 --> 00:00:06.100 region:top
+<v Prof. Meier><c.loud>Der Rhein ist 1.233 km lang</c>&nbsp;und
+fließt durch &quot;sechs&quot; Länder.</v>
+
+NOTE a comment between the cues --> that must not become a cue
+
+00:01:07.250 --> 00:01:09.000
+Rhein &amp; Donau, 3 &lt; 5 und 7 > 2.
