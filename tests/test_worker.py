@@ -1623,6 +1623,11 @@ async def test_batch_item_moves_to_asr() -> None:
     assert (meta.source, meta.platform, meta.url) == ("platform", "youtube", YOUTUBE)
     ttl = await harness.valkey.ttl(f"job:{{{job_id}}}:input:0")
     assert 0 < ttl <= harness.settings.asr_input_ttl_seconds
+    # The rerun replaced the first input's reservation: the budget holds its bytes once.
+    reserved = len(body) + len(meta.model_dump_json().encode())
+    sizes = await harness.valkey.hgetall("inputs:{budget}:size")
+    assert sizes == {f"{job_id}:0".encode(): str(reserved).encode()}
+    assert await harness.valkey.get("inputs:{budget}:total") == str(reserved).encode()
     draft = await store.draft(job_id, 0)
     assert draft is not None
     assert draft.data is not None
@@ -1819,5 +1824,8 @@ async def test_exhausted_asr_item_answers_its_draft_with_asr_unavailable() -> No
     (item,) = await harness.items(job_id)
     assert item.result is not None
     assert item.result.status == "partial"  # the draft, not a lost item's internal_error
+    assert item.result.data is not None
+    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert item.result.data.fingerprint is None  # neither cached nor deduplicated
     assert await harness.store.asr_key(job_id) is None
     assert await harness.valkey.keys("job:*:input:*") == []

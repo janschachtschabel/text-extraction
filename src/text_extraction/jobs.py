@@ -552,6 +552,11 @@ class JobStore:
         if outcome == _NOT_FOUND:
             raise JobLost(job_id)
 
+    async def drop_asr_key(self, job_id: str) -> None:
+        """Delete the caller's key of the external transcription endpoint only (a hand-over
+        that failed after storing it; the job's other secrets stay)."""
+        await self._valkey.delete(_key(job_id, "asr_key"))
+
     async def asr_key(self, job_id: str) -> str | None:
         """The caller's key of the external transcription endpoint, or None when the job had
         none or it is gone."""

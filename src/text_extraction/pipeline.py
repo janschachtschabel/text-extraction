@@ -56,7 +56,8 @@ the service has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``) the upload is
 ``MEDIA_UPLOAD_MAX_BYTES`` it is ``too_large``, otherwise an ``AsrNeeded`` (``MediaInputMeta`` with
 ``source: upload`` and the file name, for the result only) goes to ``asr_handoff`` once the
 deadline's steps are done, as media of a URL does. Without a handoff the stand-in is final. Any
-other upload over ``DOCUMENT_MAX_BYTES`` is ``too_large`` before its bytes are sniffed or hashed.
+other upload over its limit (``CONVERT_MAX_BYTES`` for a page, ``DOCUMENT_MAX_BYTES`` for a
+document) is ``too_large`` before its bytes are hashed.
 
 The Docling worker builds the result of a document that waited for OCR with
 ``convert_queued_document``: step 8 on its Docling conversion, the better of it and MarkItDown's
@@ -1452,22 +1453,15 @@ class Pipeline:
         """Step 7 for an upload: its kind by the bytes (F1), then a page's or a document's
         conversion, each with its byte limit. Audio and video come first, by their magic bytes
         alone (the declared type never makes a body media, nor stops one from being it); any
-        other body over ``DOCUMENT_MAX_BYTES`` is ``too_large`` before it is sniffed or
-        hashed."""
+        other body over its limit is ``too_large`` before it is hashed."""
         declared, charset = split_content_type(content_type)
         if self._settings.media_enabled:
             media_kind = await self._pool.run(sniff_media, body[:MEDIA_HEAD_BYTES], declared)
             if media_kind is not None:
                 return self._uploaded_media(run, body, media_kind)
-        limit = self._settings.document_max_bytes
-        if len(body) > limit:
-            # Only media may be larger (the route reads up to MEDIA_UPLOAD_MAX_BYTES): refused
-            # before the whole body is sniffed or hashed.
-            run.content_type = declared
-            return run.failed(
-                ErrorCode.TOO_LARGE,
-                f"The file has more than the {limit} bytes that are converted.",
-            )
+        # The sniff reads bounded parts only (the head, a ZIP's central directory, OLE2
+        # directory sectors), so a body over its limit is refused with its own type before the
+        # whole of it is hashed.
         kind = await self._pool.run(sniff, body, declared, run.file_name)
         run.kind = kind
         if kind is None:
@@ -1476,11 +1470,25 @@ class Pipeline:
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
                 f"Content type {declared or 'unknown'} is not supported.",
             )
-        raw_sha256 = await self._pool.run(_sha256, body)
         if kind == "html" or kind == "text":
             run.content_type = _page_type(kind, declared)
+            limit = self._settings.convert_max_bytes
+            if len(body) > limit:
+                return run.failed(
+                    ErrorCode.TOO_LARGE,
+                    f"The page has {len(body)} bytes, more than the {limit} bytes that are "
+                    "converted.",
+                )
+            raw_sha256 = await self._pool.run(_sha256, body)
             return await self._uploaded_page(run, body, kind, charset, raw_sha256)
         run.content_type = media_type(kind)
+        limit = self._settings.document_max_bytes
+        if len(body) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The file has more than the {limit} bytes that are converted.",
+            )
+        raw_sha256 = await self._pool.run(_sha256, body)
         document = DocumentInput(
             body=body,
             meta=DocumentInputMeta(
@@ -1557,13 +1565,8 @@ class Pipeline:
         charset: str | None,
         raw_sha256: str,
     ) -> Envelope[ExtractResult]:
-        """An HTML or plain-text upload, converted like a fetched page without a URL."""
-        limit = self._settings.convert_max_bytes
-        if len(body) > limit:
-            return run.failed(
-                ErrorCode.TOO_LARGE,
-                f"The page has {len(body)} bytes, more than the {limit} bytes that are converted.",
-            )
+        """An HTML or plain-text upload within ``CONVERT_MAX_BYTES``, converted like a fetched
+        page without a URL."""
         started = time.perf_counter()
         text = await self._pool.run(decode_html, body, charset)
         run.convert_ms += _ms(started)

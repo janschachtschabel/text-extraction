@@ -28,6 +28,8 @@ from text_extraction.app import create_public_app
 from text_extraction.asr_dispatch import (
     ASR_KEY_HEADER,
     ASR_OUTCOMES,
+    AsrDispatcher,
+    AsrOpenLimitReached,
     asr_lease_seconds,
     asr_queue,
     draft_without_asr,
@@ -38,12 +40,12 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.fetch import Fetcher
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobRecord, JobStore
+from text_extraction.jobs import JobRecord, JobStore, owner_key
 from text_extraction.media.pool import MediaFetcher, MediaProbe
 from text_extraction.media.sites import MediaTarget
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pipeline import create_pipeline
-from text_extraction.pipeline_media import ASR_UNAVAILABLE_WARNING, MediaInputMeta
+from text_extraction.pipeline_media import ASR_UNAVAILABLE_WARNING, AsrNeeded, MediaInputMeta
 from text_extraction.server import graceful_shutdown_seconds
 from text_extraction.settings import Settings
 
@@ -554,6 +556,99 @@ def test_deleting_the_job_deletes_the_key() -> None:
         ]["id"]
     service.store(lambda store: store.delete(job_id))
     assert service.stored() == []
+
+
+def _needed() -> AsrNeeded:
+    meta = MediaInputMeta(
+        source="upload",
+        platform="upload",
+        url=None,
+        extractor=None,
+        kind="ogg",
+        file_name=None,
+        duration=None,
+        languages=[],
+        compliance=None,
+        attempts=0,
+    )
+    return AsrNeeded(draft=Envelope[ExtractResult](status="partial"), input=meta)
+
+
+async def _broken(*args: Any, **kwargs: Any) -> None:
+    raise RedisError("Valkey is down")
+
+
+@pytest.mark.parametrize(
+    ("job", "failing"),
+    [
+        ("p1", "put_draft"),
+        ("p1", "enqueue_items"),
+        ("new", "put_draft"),
+        ("new", "enqueue_items"),
+    ],
+)
+def test_a_failed_handoff_drops_the_key(
+    monkeypatch: pytest.MonkeyPatch, job: str, failing: str
+) -> None:
+    """A Valkey failure after the key was stored leaves no key behind: the reused P1 job gets
+    the fallback as its result, and a new job whose ``abandon`` failed too would keep it."""
+    settings = make_settings()
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, settings)
+    queue = asr_queue(valkey, settings)
+    dispatcher = AsrDispatcher(store, queue, settings)
+    if failing == "put_draft":
+        monkeypatch.setattr(JobStore, "put_draft", _broken)
+    else:
+        monkeypatch.setattr(type(queue), "enqueue_items", _broken)
+    monkeypatch.setattr(JobStore, "delete", _broken)  # ``abandon`` fails too
+
+    async def scenario() -> list[Any]:
+        p1 = None
+        if job == "p1":
+            p1 = await store.create("file", ALICE, JobOptions(compliance="enforce"), [None])
+        with pytest.raises(RedisError):
+            await dispatcher.submit(
+                "file",
+                JobOptions(compliance="enforce"),
+                ALICE,
+                None,
+                _needed(),
+                OGG,
+                key=ASR_KEY,
+                job_id=p1,
+            )
+        return list(await valkey.keys("job:*:asr_key"))
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_over_the_limit_after_the_count_restores_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two requests passed the cheap count at once: the one that counts its job past
+    ``ASR_MAX_OPEN_PER_CLIENT`` counts it out again and stores nothing."""
+    settings = make_settings(asr_max_open_per_client=2)
+    valkey = FakeAsyncRedis()
+    store = JobStore(valkey, settings)
+    dispatcher = AsrDispatcher(store, asr_queue(valkey, settings), settings)
+
+    async def none_open(self: JobStore, owner: str) -> int:
+        return 0
+
+    async def scenario() -> tuple[int, list[Any]]:
+        for _ in range(2):
+            open_job = await store.create("extract", ALICE, JobOptions(compliance="enforce"), [YT])
+            await store.add_asr_job("alice", open_job)
+        monkeypatch.setattr(JobStore, "open_asr_jobs", none_open)
+        with pytest.raises(AsrOpenLimitReached):
+            await dispatcher.submit(
+                "file", JobOptions(compliance="enforce"), ALICE, None, _needed(), OGG, key=ASR_KEY
+            )
+        return int(await valkey.scard(owner_key("alice", "asr"))), list(await valkey.keys("job:*"))
+
+    count, keys = asyncio.run(scenario())
+    assert count == 2  # the refused job is counted out again
+    assert len([key for key in keys if key.endswith(b":meta")]) == 2  # and deleted
+    assert not any(b"asr_key" in key or b":input:" in key for key in keys)
 
 
 @pytest.mark.parametrize(

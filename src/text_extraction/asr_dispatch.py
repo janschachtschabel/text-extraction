@@ -83,6 +83,8 @@ or the input budget is full, nothing is stored: the item keeps its draft with
 Logs carry job ids only, never a URL, a video id, a file name, a key or media bytes.
 """
 
+import asyncio
+import contextlib
 import re
 from typing import Final, Literal
 
@@ -225,6 +227,7 @@ class AsrDispatcher(PoolDispatcher):
         settings = self._settings
         limit = settings.asr_max_open_per_client
         owner = principal.name
+        keyed: list[str] = []  # the job whose key is stored
 
         async def prepare(job: str) -> None:
             if await self._store.add_asr_job(owner, job) > limit:
@@ -238,6 +241,7 @@ class AsrDispatcher(PoolDispatcher):
                 await self._store.drop_asr_job(owner, job)
                 raise
             if key is not None:
+                keyed.append(job)
                 await self._store.put_asr_key(job, key)
 
         try:
@@ -253,6 +257,17 @@ class AsrDispatcher(PoolDispatcher):
         except InputBudgetExceeded:
             self.count("input_budget")
             raise
+        except BaseException:
+            # The draft or the queue failed after the key was stored: a reused P1 job gets the
+            # fallback as its result, and a new job whose deletion failed too would keep it.
+            if keyed:
+                await asyncio.shield(self._drop_key(keyed[0]))
+            raise
+
+    async def _drop_key(self, job_id: str) -> None:
+        """Best effort: a Valkey failure leaves the key to its expiry."""
+        with contextlib.suppress(RedisError, OSError):
+            await self._store.drop_asr_key(job_id)
 
     async def _open_jobs(self, owner: str) -> int:
         try:

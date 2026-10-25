@@ -6,8 +6,10 @@ with the first document (a few seconds); the pipeline tests use a fake pool.
 
 import asyncio
 import hashlib
+import io
 import json
 import time
+import zipfile
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -1099,26 +1101,74 @@ def test_an_audio_upload_of_exactly_the_media_limit_is_handed_over() -> None:
     assert "1000000" in over.json()["error"]["message"]
 
 
-def test_a_large_upload_that_is_no_media_is_refused_before_it_is_sniffed(
+def _large_docx(size: int) -> bytes:
+    """A DOCX of at least ``size`` bytes: its kind is in its central directory, at the end."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "[Content_Types].xml",
+            '<Types><Override PartName="/word/document.xml" ContentType="x"/></Types>',
+        )
+        archive.writestr("word/document.xml", b"x" * size)
+    return out.getvalue()
+
+
+LARGE_DOCX = _large_docx(8192)
+DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+LARGE_PAGE = b"<!doctype html><html><body>" + b"x" * 8192 + b"</body></html>"
+LARGE_PDF = b"%PDF-1.7\n" + b"x" * 8192
+
+
+PDF_TOO_LARGE = "The file has more than the 4096 bytes that are converted."
+
+
+def _page_too_large(size: int) -> str:
+    return f"The page has {size} bytes, more than the 2048 bytes that are converted."
+
+
+# With ASR off the route reads DOCUMENT_MAX_BYTES + 1 bytes of the file (4097), with ASR on all of
+# it. A DOCX cut there has lost its central directory, so it needs ASR on to be read as one.
+@pytest.mark.parametrize(
+    ("asr", "body", "name", "declared", "content_type", "message"),
+    [
+        (False, LARGE_PDF, "big.pdf", "application/pdf", "application/pdf", PDF_TOO_LARGE),
+        (True, LARGE_PDF, "big.pdf", "application/pdf", "application/pdf", PDF_TOO_LARGE),
+        (True, LARGE_DOCX, "big.docx", "application/octet-stream", DOCX_TYPE, PDF_TOO_LARGE),
+        (False, LARGE_PAGE, "big.html", "text/html", "text/html", _page_too_large(4097)),
+        (True, LARGE_PAGE, "big.html", "text/html", "text/html", _page_too_large(len(LARGE_PAGE))),
+    ],
+    ids=["pdf asr off", "pdf asr on", "docx asr on", "page asr off", "page asr on"],
+)
+def test_a_large_upload_keeps_its_answer_without_hashing_the_body(
     monkeypatch: pytest.MonkeyPatch,
+    asr: bool,
+    body: bytes,
+    name: str,
+    declared: str,
+    content_type: str,
+    message: str,
 ) -> None:
-    """Over DOCUMENT_MAX_BYTES and not audio or video: too_large without reading the whole body
-    (no document sniff, no SHA-256 of the bytes)."""
+    """Over its limit (DOCUMENT_MAX_BYTES for a document, CONVERT_MAX_BYTES for a page): too_large
+    with the sniffed type and the limit's own message, before the bytes are hashed."""
     from text_extraction import pipeline as pipeline_module
 
     def never(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("the whole body was read")
+        raise AssertionError("the whole body was hashed")
 
-    monkeypatch.setattr(pipeline_module, "sniff", never)
     monkeypatch.setattr(pipeline_module, "_sha256", never)
-    app, pool, _ = asr_app(media_upload_max_bytes=1_000_000, document_max_bytes=4096)
+    limits: dict[str, Any] = {"document_max_bytes": 4096, "convert_max_bytes": 2048}
+    if asr:
+        app, pool, _ = asr_app(media_upload_max_bytes=1_000_000, **limits)
+    else:
+        app = create_public_app(make_settings(**limits), FakeAsyncRedis(), CollectorRegistry())
     with TestClient(app) as test_client:
-        response = upload(test_client, b"%PDF-1.7\n" + b"x" * 500_000)
+        response = upload(test_client, body, name, declared)
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "failed"
-    assert body["error"]["code"] == "too_large"
-    assert "4096" in body["error"]["message"]
-    assert body["data"]["mode_used"] == "upload"
-    assert pool.calls == []
+    answer = response.json()
+    assert answer["status"] == "failed"
+    assert (answer["error"]["code"], answer["error"]["message"]) == ("too_large", message)
+    assert answer["data"]["content_type"] == content_type
+    assert answer["data"]["mode_used"] == "upload"
+    if asr:
+        assert pool.calls == []
