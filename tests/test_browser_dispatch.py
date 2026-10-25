@@ -399,13 +399,14 @@ def test_handover_claims_once() -> None:
     handover = Handover()
     assert handover.claimed is None
     assert handover.claim_p1() is True
-    assert handover.claim_browser() is False
+    assert handover.claim_pool("browser") is False
     assert handover.claimed == "p1"
+    assert handover.pool is None
 
     other = Handover()
-    assert other.claim_browser() is True
+    assert other.claim_pool("browser") is True
     assert other.claim_p1() is False
-    assert other.claimed == "browser"
+    assert (other.claimed, other.pool) == ("pool", "browser")
 
 
 @scenario

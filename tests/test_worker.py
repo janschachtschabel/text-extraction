@@ -24,6 +24,7 @@ from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
 from text_extraction import worker as worker_module
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
+from text_extraction.docling_dispatch import docling_queue
 from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
@@ -38,7 +39,6 @@ from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
-from text_extraction.pool_dispatch import docling_queue
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server

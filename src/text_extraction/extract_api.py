@@ -17,7 +17,7 @@ workers.
    retryable. The browser job is deleted, as it is once the request answers with its result
    (one with a screenshot is kept as long as the screenshot).
 5. While the service has OCR, a document that needs it goes to the Docling workers once the fast
-   phase is done (``pool_dispatch.DoclingHandoff``, F12), with its text layer as the draft.
+   phase is done (``docling_dispatch.DoclingHandoff``, F12), with its text layer as the draft.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result:
@@ -69,6 +69,7 @@ from text_extraction.browser_dispatch import (
 )
 from text_extraction.browser_options import EvaluateAction
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
+from text_extraction.docling_dispatch import DoclingDispatcher, DoclingHandoff
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
 from text_extraction.documents.types import OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -84,7 +85,6 @@ from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import JobLost, JobStore
 from text_extraction.pipeline import Pipeline
-from text_extraction.pool_dispatch import DoclingDispatcher, DoclingHandoff
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
@@ -238,7 +238,7 @@ async def answer_or_hand_over(
     if task.done():
         background.discard(task)
         return _answered(task.result())
-    if renders_first or handover.claimed == "browser":
+    if renders_first or handover.claimed == "pool":
         return await _detach(state, task, handover, kind)
 
     store: JobStore = state.job_store
@@ -308,7 +308,7 @@ async def _detach(
         raise
     finally:
         settled.cancel()
-    job_id = handover.browser_job
+    job_id = handover.pool_job
     # A flow that released its job (it gave up and deletes it) answers on its own.
     if task.done() or job_id is None or not handover.detach():
         try:
@@ -318,7 +318,7 @@ async def _detach(
     task.add_done_callback(partial(_forget, background))
     metrics: JobMetrics = state.job_metrics
     metrics.created.labels(kind=kind).inc()
-    _log.info("pool_job_accepted", job_id=job_id, kind=kind)
+    _log.info(f"{handover.pool}_job_accepted", job_id=job_id, kind=kind)
     return _accepted(job_id, kind, await _job_state(state.job_store, job_id))
 
 
@@ -422,7 +422,7 @@ async def _in_browser(
     """Dispatch the request to the browser workers and wait for their result. ``draft`` is the
     fast result of an escalating ``auto`` request (None when the request renders first)."""
     dispatcher: BrowserDispatcher = state.browser_dispatcher
-    if not handover.claim_browser():  # the route is handing the request over to a P1 job
+    if not handover.claim_pool("browser"):  # the route is handing it over to a P1 job
         await handover.settled()
         if handover.job_id is not None:
             try:
@@ -443,7 +443,7 @@ async def _in_browser(
             raise _backend_unavailable() from None
         return _unavailable(body, compliance, draft, started)
     finally:
-        if handover.claimed == "browser":
+        if handover.claimed == "pool":
             handover.settle(job_id)
     unblock = unblock_for(principal, compliance, state.settings)
     try:

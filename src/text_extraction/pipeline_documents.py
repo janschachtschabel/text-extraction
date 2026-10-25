@@ -82,10 +82,13 @@ MARKITDOWN_TARGET: Final = "text_extraction.documents.child"
 # Added to a document result whose text did not get the OCR it needed.
 OCR_UNAVAILABLE_WARNING: Final = "ocr_unavailable"
 # The error of a document without a text layer (an image) whose extraction has no OCR handoff
-# while the service has OCR: a render's (the browser worker hands nothing on).
+# while the service has OCR: an upload's (``OCR_NOT_HANDED_REASON``), a render's (the browser
+# worker hands nothing on; ``OCR_NOT_HANDED_MESSAGE``, which says what to do instead).
+OCR_NOT_HANDED_REASON: Final = (
+    "The document needs OCR, which this extraction cannot hand on to the OCR workers."
+)
 OCR_NOT_HANDED_MESSAGE: Final = (
-    "The document needs OCR, which this extraction cannot hand on to the OCR workers. "
-    "Extract the document's own URL with mode fast."
+    f"{OCR_NOT_HANDED_REASON} Extract the document's own URL with mode fast."
 )
 # The child's deadline is this much before the extraction's, so its timeout is ours to answer.
 _POOL_MARGIN_SECONDS: Final = 0.25

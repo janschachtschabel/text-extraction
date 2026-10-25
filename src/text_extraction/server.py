@@ -18,10 +18,11 @@ On SIGTERM or SIGINT the shutdown runs in this order:
 ``shutdown_seconds`` is the drain plus the graceful phase (steps 1 and 2); the API pods'
 ``terminationGracePeriodSeconds`` must stay above it plus a 10 s margin. Step 3 is not part of it.
 While ``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
-(``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode. The Helm chart
-computes the grace period with the same formula (45, 90 or 120 s; ``_helpers.tpl``) and refuses
-a set value that is too short. While ``DOCLING_ENABLED`` it also covers a sync request waiting
-for OCR: the fast phase, ``DOCLING_SYNC_WAIT_SECONDS`` and 5 s (50 s by default; F12).
+(``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode. While
+``DOCLING_ENABLED`` it also covers a sync request waiting for OCR: the fast phase,
+``DOCLING_SYNC_WAIT_SECONDS`` and 5 s (50 s by default; F12). The Helm chart must compute the
+grace period with the same formula and refuse a set value that is too short; ``_helpers.tpl``
+does so for the browser terms (45, 90 or 120 s), and the Docling term has yet to be added there.
 """
 
 import asyncio

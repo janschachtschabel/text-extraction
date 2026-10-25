@@ -126,6 +126,7 @@ from text_extraction.outbound import (
 )
 from text_extraction.pipeline_documents import (
     OCR_NOT_HANDED_MESSAGE,
+    OCR_NOT_HANDED_REASON,
     DocumentInput,
     DocumentInputMeta,
     DocumentRequest,
@@ -198,11 +199,6 @@ _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30)
 # Hands a document that needs OCR to the Docling pool and answers for it. It gets the answer
 # without OCR too (``pipeline_documents.without_ocr``), for a fallback of its own.
 type OcrHandoff = Callable[[OcrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
-# The error of an upload without a text layer whose extraction has no handoff while the
-# service has OCR.
-_UPLOAD_NOT_HANDED_MESSAGE = (
-    "The document needs OCR, which this extraction cannot hand on to the OCR workers."
-)
 
 _BLOCK_MESSAGES = {
     ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",
@@ -1197,7 +1193,7 @@ class Pipeline:
             run.ocr_needed = outcome  # `extract_upload` hands it over once the deadline is off
             return without_ocr(outcome, run)  # its stand-in until then
         if ocr_available(self._settings):
-            return without_ocr(outcome, run, message=_UPLOAD_NOT_HANDED_MESSAGE)
+            return without_ocr(outcome, run, message=OCR_NOT_HANDED_REASON)
         return without_ocr(outcome, run)
 
     async def _uploaded_page(

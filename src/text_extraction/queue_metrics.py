@@ -14,7 +14,7 @@
 - ``text_extraction_browser_dispatch_total{outcome}``: how the sync requests of this pod that
   went to the browser workers ended (``browser_dispatch.DISPATCH_OUTCOMES``).
 - ``text_extraction_docling_dispatch_total{outcome}``: how the dispatch of this pod's sync
-  requests with a document that needs OCR ended (``pool_dispatch.DOCLING_OUTCOMES``). The queue
+  requests with a document that needs OCR ended (``docling_dispatch.DOCLING_OUTCOMES``). The queue
   gauges have pool ``docling`` while the service has OCR.
 
 A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``

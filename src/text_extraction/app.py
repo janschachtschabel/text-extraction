@@ -17,6 +17,7 @@ from text_extraction.auth import Principal, Role, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.docling_dispatch import DoclingDispatcher, docling_queue
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope
@@ -33,7 +34,6 @@ from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
-from text_extraction.pool_dispatch import DoclingDispatcher, docling_queue
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue

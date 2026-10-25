@@ -20,7 +20,7 @@ The conversion is ``Pipeline.extract_upload``: no compliance check, no result ca
 ``POST /v1/extract`` does (``extract_api.answer_or_hand_over``, ruling P1): the conversion keeps
 running in this pod, the job keeps the upload's bytes as the input of its item
 (``DOCLING_INPUT_TTL_SECONDS``, deleted once the result is stored), and the answer is 202. An
-upload that needs OCR goes to the Docling workers (``pool_dispatch.DoclingHandoff``, F12): it
+upload that needs OCR goes to the Docling workers (``docling_dispatch.DoclingHandoff``, F12): it
 waits ``DOCLING_SYNC_WAIT_SECONDS`` without ``wait_seconds``, and with it the 202 carries its
 Docling job. The job's item has no URL (``url: null``).
 """

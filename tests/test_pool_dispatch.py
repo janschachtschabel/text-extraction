@@ -1,5 +1,6 @@
-"""``PoolDispatcher`` and ``DoclingDispatcher`` (``pool_dispatch.py``) on fakeredis with the real
-job store and queues. The browser pool's behaviour is covered by ``test_browser_dispatch.py``."""
+"""``PoolDispatcher`` (``pool_dispatch.py``) and ``DoclingDispatcher`` (``docling_dispatch.py``) on
+fakeredis with the real job store and queues. The browser pool's behaviour is covered by
+``test_browser_dispatch.py``."""
 
 import asyncio
 from collections.abc import Callable, Coroutine
@@ -12,17 +13,13 @@ from prometheus_client import CollectorRegistry
 
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import BrowserDispatcher
+from text_extraction.docling_dispatch import DoclingDispatcher, OpenLimitReached, docling_queue
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
 from text_extraction.pipeline_documents import DocumentInput, DocumentInputMeta, OcrNeeded
-from text_extraction.pool_dispatch import (
-    DoclingDispatcher,
-    OpenLimitReached,
-    PoolDispatcher,
-    docling_queue,
-)
+from text_extraction.pool_dispatch import PoolDispatcher
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 

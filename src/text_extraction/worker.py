@@ -46,7 +46,7 @@ queued on ``docling`` with the same job, index and client, and it is completed h
 result. Input, then draft, then the queue, then the completion: a crash in between leaves the
 item leased here, and the rerun moves it once more. While the memory guard is high nothing is
 stored: the item keeps its draft with the warning ``ocr_unavailable`` (an image without one fails
-``rate_limited``, retryable). The ``pool_dispatch`` module docstring has what the Docling worker
+``rate_limited``, retryable). The ``docling_dispatch`` module docstring has what the Docling worker
 reads.
 
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
@@ -88,6 +88,7 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.docling_dispatch import DOCLING_POOL, DoclingMove, docling_queue
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope, ErrorCode
@@ -102,8 +103,7 @@ from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
-from text_extraction.pipeline_documents import OcrNeeded, create_document_pool
-from text_extraction.pool_dispatch import DOCLING_POOL, docling_queue, without_ocr
+from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.queue_metrics import job_duration_for
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
@@ -132,7 +132,6 @@ _START_UNWIND_SECONDS = 5.0
 
 _LOST_MESSAGE = "The item was lost by a worker too often."
 _INPUT_EXPIRED_MESSAGE = "The uploaded file expired before it was extracted. Upload it again."
-_OCR_BUSY_MESSAGE = "The service takes no new documents for OCR at the moment. Try again later."
 _INTERNAL_MESSAGE = "Internal server error."
 
 # Outcomes of an item besides its envelope's: given back to the queue, its job is gone, or it
@@ -213,48 +212,6 @@ class ItemRunner(Protocol):
         ...
 
 
-class DoclingMove:
-    """The OCR handoff of one item (F13): moves its document to the ``docling`` pool, or, while
-    ``guard`` is high, keeps its draft with ``ocr_unavailable``. ``moved`` is True once the
-    item is queued there; its runner then answers None."""
-
-    def __init__(
-        self,
-        store: JobStore,
-        queue: FairQueue,
-        guard: MemoryPressure | None,
-        settings: Settings,
-        job: JobRecord,
-        item: QueueItem,
-        url: str | None,
-    ) -> None:
-        self._store = store
-        self._queue = queue
-        self._guard = guard
-        self._settings = settings
-        self._job = job
-        self._item = item
-        self._url = url
-        self.moved = False
-
-    async def __call__(
-        self, needed: OcrNeeded, without: Envelope[ExtractResult]
-    ) -> Envelope[ExtractResult]:
-        if self._guard is not None and self._guard.high:
-            return without_ocr(needed, without, ErrorCode.RATE_LIMITED, _OCR_BUSY_MESSAGE)
-        job_id, index = self._job.id, self._item.index
-        document = needed.input
-        # Input, then draft, then the queue: the Docling worker may claim the item at once.
-        await self._store.put_input(
-            job_id, index, document.body, document.meta, self._settings.docling_input_ttl_seconds
-        )
-        if needed.draft is not None:
-            await self._store.put_draft(job_id, index, needed.draft)
-        await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
-        self.moved = True
-        return without  # not stored: the item is completed without a result
-
-
 class ExtractRunner:
     """The ``extract`` pool's runner: the fast pipeline, the move of an ``auto`` item that needs
     the browser to the ``browser`` pool (B5), and the move of a document that needs OCR to the
@@ -322,6 +279,8 @@ class ExtractRunner:
         self, job: JobRecord, item: QueueItem, principal: Principal, move: DoclingMove | None
     ) -> Envelope[ExtractResult] | None:
         """An uploaded file's item, converted from its input."""
+        # A rerun after a move to ``docling`` reads that pool's ``DocumentInputMeta``: it parses
+        # as ``UploadInputMeta`` only through the fields both have (file name, content type).
         stored = await self._store.get_input(job.id, item.index, UploadInputMeta)
         if stored is None:
             return failed_extract(ErrorCode.TIMEOUT, _INPUT_EXPIRED_MESSAGE, retryable=True)

@@ -19,6 +19,7 @@ import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from redis.exceptions import RedisError
 from structlog.testing import capture_logs
 
 from tests.fakes import PARAGRAPH, FakeFetcher, fetched
@@ -27,6 +28,7 @@ from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceReport
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.docling_dispatch import DOCLING_OUTCOMES, docling_queue
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.types import DocumentInfo
 from text_extraction.envelope import Envelope
@@ -37,7 +39,6 @@ from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pipeline import create_pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
-from text_extraction.pool_dispatch import DOCLING_OUTCOMES, docling_queue
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
 from text_extraction.worker import Worker
@@ -52,6 +53,9 @@ MARKER = b"INPUT-BYTES-7f3a91"
 SCAN_BODY = b"%PDF-1.7\n" + MARKER + b"\n%%EOF\n"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + MARKER + b"\x00" * 48
 OCR_TEXT = "Text read with OCR. " + PARAGRAPH * 3
+TEXT_LAYER = "The PDF's own text layer. " + PARAGRAPH * 3
+# Longer than the ``wait_seconds`` of the P1 tests (0.2 s): the route creates the P1 job first.
+SLOW_SECONDS = 1.0
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -73,19 +77,25 @@ def make_settings(**overrides: Any) -> Settings:
 
 
 class FakePool:
-    """MarkItDown's children: every PDF has a text layer too thin to keep (it needs OCR)."""
+    """MarkItDown's children: every PDF has a text layer too thin to keep (it needs OCR), or,
+    with ``needs_ocr=False``, one that is kept. Each conversion takes ``seconds``."""
+
+    def __init__(self, *, seconds: float = 0.0, needs_ocr: bool = True) -> None:
+        self._seconds = seconds
+        self._needs_ocr = needs_ocr
 
     async def start(self) -> None:
         pass
 
     async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+        await asyncio.sleep(self._seconds)
         return {
-            "content": "Thin text layer.",
+            "content": "Thin text layer." if self._needs_ocr else TEXT_LAYER,
             "title": "Scan",
             "warnings": [],
             "pages": 2,
             "pages_converted": 2,
-            "needs_ocr": True,
+            "needs_ocr": self._needs_ocr,
             "metadata": None,
         }
 
@@ -208,7 +218,7 @@ class DoclingWorker:
 class Service:
     """The public app with Docling enabled, on a fakeredis server the fake worker shares."""
 
-    def __init__(self, **overrides: Any) -> None:
+    def __init__(self, pool: FakePool | None = None, **overrides: Any) -> None:
         self.settings = make_settings(**overrides)
         self.server = FakeServer()
         self.registry = CollectorRegistry()
@@ -227,7 +237,7 @@ class Service:
             self.registry,
             ConversionPool(1),
             memory_guard=self.app.state.memory_guard,
-            document_pool=cast(DocumentPool, FakePool()),
+            document_pool=cast(DocumentPool, pool or FakePool()),
         )
 
     def worker(self) -> DoclingWorker:
@@ -251,6 +261,12 @@ class Service:
     def wait_for_no_jobs(self) -> list[str]:
         deadline = time.monotonic() + 5
         while (keys := self.stored()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return keys
+
+    def wait_until_gone(self, key: str) -> list[str]:
+        deadline = time.monotonic() + 5
+        while key in (keys := self.stored()) and time.monotonic() < deadline:
             time.sleep(0.02)
         return keys
 
@@ -405,12 +421,13 @@ def test_fallback_answer_is_not_cached() -> None:
 
 def test_wait_seconds_gives_202_docling_job() -> None:
     service = Service()
-    with TestClient(service.app) as client, service.worker() as worker:
+    with TestClient(service.app) as client, service.worker() as worker, capture_logs() as logs:
         worker.release.clear()
         response = extract(client, SCAN, wait_seconds=1)
 
         assert response.status_code == 202
         accepted = response.json()["data"]
+        assert "docling_job_accepted" in [event["event"] for event in logs]
         assert accepted["kind"] == "extract"
         assert accepted["total"] == 1
         pending = client.get(accepted["status_url"], headers=AUTH).json()["data"]
@@ -518,6 +535,110 @@ def test_input_ttl_set() -> None:
         while key in service.stored() and time.monotonic() < deadline:
             time.sleep(0.02)
         assert key not in service.stored()  # deleted with the outcome
+
+
+# --- wait_seconds: the P1 job (the conversion outlasts wait_seconds) ---
+
+
+def post(client: TestClient, source: str, wait_seconds: float) -> Any:
+    if source == "url":
+        return extract(client, SCAN, wait_seconds=wait_seconds)
+    return upload(client, SCAN_BODY, wait_seconds=str(wait_seconds))
+
+
+def test_slow_upload_becomes_file_job_with_input() -> None:
+    service = Service(
+        FakePool(seconds=SLOW_SECONDS, needs_ocr=False), docling_input_ttl_seconds=900
+    )
+    with TestClient(service.app) as client:
+        response = upload(client, SCAN_BODY, wait_seconds="0.2")
+
+        assert response.status_code == 202
+        accepted = response.json()["data"]
+        assert (accepted["kind"], accepted["state"]) == ("file", "running")
+        key = f"job:{{{accepted['id']}}}:input:0"
+        assert 0 < service.ttl(key) <= 900  # the upload's bytes, while the conversion runs
+
+        final = service.wait_for_job(client, accepted["id"])
+        item = final["data"]["items"][0]
+        assert item["url"] is None
+        data = item["result"]["data"]
+        assert data["mode_used"] == "upload"
+        assert data["content"] == TEXT_LAYER
+        assert data["document"]["file_name"] == "scan.pdf"
+        assert key not in service.wait_until_gone(key)  # deleted with the result
+        assert MARKER.decode() not in json.dumps(final)
+    assert service.outcomes() == {}
+    created = service.registry.get_sample_value(
+        "text_extraction_jobs_created_total", {"kind": "file"}
+    )
+    assert created == 1
+
+
+@pytest.mark.parametrize("source", ["url", "upload"])
+def test_ocr_after_handover_reuses_p1_job(source: str) -> None:
+    service = Service(FakePool(seconds=SLOW_SECONDS))
+    with TestClient(service.app) as client, service.worker() as worker:
+        response = post(client, source, 0.2)
+
+        assert response.status_code == 202
+        accepted = response.json()["data"]
+        assert accepted["kind"] == ("extract" if source == "url" else "file")
+        final = service.wait_for_job(client, accepted["id"])
+        item = final["data"]["items"][0]
+        assert item["result"]["status"] == "success"
+        assert item["result"]["data"]["content"] == OCR_TEXT  # written by the Docling worker
+        key = f"job:{{{accepted['id']}}}:input:0"
+        assert key not in service.wait_until_gone(key)
+        assert service.pending() == 0
+
+    assert worker.runner is not None
+    (seen,) = worker.runner.seen
+    assert seen["item"].job_id == accepted["id"]
+    assert seen["body"] == SCAN_BODY
+    # The upload's own input (``UploadInputMeta``) was replaced by the document's.
+    meta: DocumentInputMeta = seen["meta"]
+    assert meta.raw_sha256 == hashlib.sha256(SCAN_BODY).hexdigest()
+    assert meta.needs_ocr is True
+    assert meta.file_name == (None if source == "url" else "scan.pdf")
+    assert seen["draft"] is not None
+    assert service.outcomes() == {"handed_over": 1}
+    created = service.registry.get_sample_value(
+        "text_extraction_jobs_created_total", {"kind": accepted["kind"]}
+    )
+    assert created == 1  # the P1 job only: no Docling job of its own
+
+
+@pytest.mark.parametrize(
+    ("source", "refusal"), [("upload", "open_limit"), ("url", "backend_error")]
+)
+def test_p1_job_stores_fallback_when_dispatch_refused(
+    source: str, refusal: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = Service(FakePool(seconds=SLOW_SECONDS))
+    if refusal == "open_limit":
+        service.open_jobs(5)
+    else:
+
+        async def down(self: JobStore, owner: str) -> int:
+            raise RedisError("Valkey is down")
+
+        monkeypatch.setattr(JobStore, "open_docling_jobs", down)
+    with TestClient(service.app) as client:
+        response = post(client, source, 0.2)
+
+        assert response.status_code == 202
+        accepted = response.json()["data"]
+        final = service.wait_for_job(client, accepted["id"])
+        result = final["data"]["items"][0]["result"]
+        # The draft with ``ocr_unavailable``, stored in the P1 job by the request's own task.
+        assert result["data"]["content"] == "Thin text layer."
+        assert OCR_UNAVAILABLE_WARNING in result["data"]["warnings"]
+        assert result["data"]["fingerprint"] is None
+        key = f"job:{{{accepted['id']}}}:input:0"
+        assert key not in service.wait_until_gone(key)
+        assert service.pending() == 0
+    assert service.outcomes() == {refusal: 1}
 
 
 # --- back-pressure ---

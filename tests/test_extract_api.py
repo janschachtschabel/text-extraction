@@ -1237,7 +1237,7 @@ def test_browser_mode_without_worker_is_timeout(options: dict[str, Any]) -> None
 
 def test_wait_seconds_during_browser_phase_answers_202_with_browser_job() -> None:
     case = BrowserCase()
-    with TestClient(case.app) as client, case.worker() as worker:
+    with TestClient(case.app) as client, case.worker() as worker, capture_logs() as logs:
         worker.hold.clear()
         response = client.post(
             "/v1/extract", json={"url": PAGE, "mode": "browser", "wait_seconds": 0.3}, headers=AUTH
@@ -1245,6 +1245,7 @@ def test_wait_seconds_during_browser_phase_answers_202_with_browser_job() -> Non
 
         assert response.status_code == 202
         accepted = response.json()["data"]
+        assert "browser_job_accepted" in [event["event"] for event in logs]
         assert worker.claimed.wait(10)
         assert accepted["id"] == worker.seen[0].job.id  # the dispatched job, no P1 job
         assert (accepted["kind"], accepted["total"]) == ("extract", 1)
