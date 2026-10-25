@@ -306,8 +306,14 @@ class MediaRun(Protocol):
     ) -> Envelope[ExtractResult]: ...
 
 
+class _Answering(Protocol):
+    """What building an answer needs of a run: its ``result`` (an upload's run has no more)."""
+
+    def result(self, **fields: Any) -> ExtractResult: ...
+
+
 def without_asr(
-    needed: AsrNeeded, run: MediaRun, *, message: str = TRANSCRIPTION_DISABLED_MESSAGE
+    needed: AsrNeeded, run: _Answering, *, message: str = TRANSCRIPTION_DISABLED_MESSAGE
 ) -> Envelope[ExtractResult]:
     """The answer while the transcription is not done: the draft with the warning
     ``asr_unavailable`` and without its fingerprint (the transcription may come next time), or,
@@ -914,7 +920,7 @@ class MediaSteps:
 
 
 def _failure(
-    run: MediaRun, code: ErrorCode, message: str, *, media: MediaInfo, retryable: bool = False
+    run: _Answering, code: ErrorCode, message: str, *, media: MediaInfo, retryable: bool = False
 ) -> Envelope[ExtractResult]:
     return _failed(run.result(media=media), code, message, retryable)
 

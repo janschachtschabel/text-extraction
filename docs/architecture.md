@@ -138,7 +138,9 @@ Request bodies of the public API are limited before they are read whole, parsed 
 authenticated (`src/text_extraction/body_limit.py`): over the limit of its path a body answers
 413 `invalid_request`, at once for a `Content-Length` over it and otherwise as soon as the bytes
 read pass it. The limit is `REQUEST_MAX_BODY_BYTES` (64 KiB), the batch bound for
-`POST /v1/batch`, and `DOCUMENT_MAX_BYTES` + 64 KiB for `POST /v1/extract/file`.
+`POST /v1/batch`, and `DOCUMENT_MAX_BYTES` + 64 KiB for `POST /v1/extract/file` (the larger
+`MEDIA_UPLOAD_MAX_BYTES` + 64 KiB while uploaded audio and video are transcribed: `MEDIA_ENABLED`,
+`ASR_ENABLED` and `JOBS_ENABLED`).
 
 `POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
 also on failure, as far as the request got. `partial` keeps the content and names
@@ -156,7 +158,7 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
 | `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1) |
-| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
+| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
 | `POST /v1/chunk` | Text/Markdown/URL → chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`) | sync |
@@ -788,7 +790,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   --profile docling up` with `DOCLING_ENABLED=true`).
 - **F17, `POST /v1/extract/file`** (`file_api.py`). `multipart/form-data` with one file part
   `file` and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25, D2); at most one
-  file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB. Auth (role `user`) and the
+  file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB (`MEDIA_UPLOAD_MAX_BYTES`
+  + 64 KiB where it is larger and audio and video uploads are transcribed). Auth (role `user`) and the
   inbound rate limit are checked before a byte of the body is read, so a caller without a key or
   over its limit never makes the pod receive or spool the upload. The part is read into memory
   and its spooled file in `/tmp` deleted at once. The file name is reduced to its base name,

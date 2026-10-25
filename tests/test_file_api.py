@@ -34,6 +34,12 @@ from text_extraction.file_api import sanitize_file_name
 from text_extraction.file_models import FileForm
 from text_extraction.pipeline import create_pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
+from text_extraction.pipeline_media import (
+    TRANSCRIPTION_DISABLED_MESSAGE,
+    TRANSCRIPTION_NOT_HANDED_MESSAGE,
+    AsrNeeded,
+    MediaInputMeta,
+)
 from text_extraction.settings import Settings
 
 CORPUS = Path(__file__).parent / "documents" / "corpus"
@@ -41,6 +47,7 @@ USER_KEY = "user-key-0123456789-raw-secret"
 AUTH = {"Authorization": f"Bearer {USER_KEY}"}
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 GIF = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00"
+OGG = b"OggS\x00\x02" + b"\x00" * 64
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 64
 # A file name no log line may carry (ruling F17).
 PRIVATE_NAME = "salary-review-kowalski-7f3a.pdf"
@@ -608,6 +615,9 @@ def run_upload(
     body: bytes = b"%PDF-1.7\n",
     *,
     handoff: Any = None,
+    asr_handoff: Any = None,
+    name: str = "lesson.pdf",
+    content_type: str = "application/pdf",
     form: FileForm | None = None,
     **overrides: Any,
 ) -> tuple[Envelope[ExtractResult], FakePool, CollectorRegistry]:
@@ -628,11 +638,12 @@ def run_upload(
         try:
             return await pipeline.extract_upload(
                 body,
-                "lesson.pdf",
+                name,
                 form or FileForm(),
                 USER,
-                content_type="application/pdf",
+                content_type=content_type,
                 ocr_handoff=handoff,
+                asr_handoff=asr_handoff,
             )
         finally:
             await fetcher.aclose()
@@ -750,3 +761,255 @@ def test_a_file_name_that_is_not_utf8_is_sanitised() -> None:
     assert name.endswith("bericht.pdf")
     assert name.isprintable()
     assert name == "\u00c4rgerbericht.pdf"  # read as Latin-1, the C1 control removed
+
+
+# --- audio and video uploads (ruling M14) ---
+
+
+def test_audio_upload_while_asr_off() -> None:
+    settings = make_settings()  # ASR_ENABLED is off by default
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app) as test_client:
+        response = upload(test_client, OGG, "talk.ogg", "audio/ogg")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "unsupported_content_type"
+    assert body["error"]["retryable"] is False
+    assert body["error"]["message"] == TRANSCRIPTION_DISABLED_MESSAGE
+    data = body["data"]
+    assert data["mode_used"] == "upload"
+    assert data["url"] is None
+    assert data["content_type"] == "audio/ogg"
+    assert data["media"] == {
+        "platform": "upload",
+        "transcript_source": None,
+        "transcript_language": None,
+        "available_languages": [],
+        "duration_seconds": None,
+        "uploader": None,
+        "asr_model": None,
+        "embeds": [],
+    }
+
+
+def test_audio_upload_over_media_limit() -> None:
+    settings = make_settings(
+        asr_enabled=True, media_upload_max_bytes=1_000_000, document_max_bytes=4096
+    )
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app) as test_client:
+        response = upload(test_client, OGG + b"\x00" * 1_000_000, "talk.ogg", "audio/ogg")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "too_large"
+    assert "1000000" in body["error"]["message"]
+    assert body["data"]["media"]["platform"] == "upload"
+
+
+def test_body_limit_is_max_of_both() -> None:
+    settings = make_settings(
+        asr_enabled=True, media_upload_max_bytes=1_000_000, document_max_bytes=4096
+    )
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    declared = [(b"content-length", str(1_000_000 + 1024).encode())]
+
+    # Not refused by the middleware: it reads the body (the part is cut, so the form is bad).
+    status, pulled, _ = asgi_post(app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *declared])
+    assert pulled > 0, status
+    assert status != 413
+
+    with TestClient(app) as test_client:
+        response = upload(test_client, b"%PDF-1.7\n" + b"x" * (1_000_000 + 1024))
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == "too_large"
+    assert "4096" in response.json()["error"]["message"]
+
+    over = [(b"content-length", str(1_000_000 + 64 * 1024 + 1).encode())]
+    status, pulled, _ = asgi_post(app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *over])
+    assert (status, pulled) == (413, 0)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"asr_enabled": True, "media_enabled": False},
+        {"asr_enabled": True, "jobs_enabled": False},
+    ],
+    ids=["asr off", "media off", "jobs off"],
+)
+def test_body_limit_stays_with_documents_when_nothing_transcribes(
+    overrides: dict[str, Any],
+) -> None:
+    """MEDIA_UPLOAD_MAX_BYTES widens the path only while uploads can be transcribed."""
+    settings = make_settings(media_upload_max_bytes=1_000_000, document_max_bytes=4096, **overrides)
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    declared = [(b"content-length", str(1_000_000 + 1024).encode())]
+
+    status, pulled, _ = asgi_post(app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *declared])
+
+    assert (status, pulled) == (413, 0)
+
+
+def test_audio_upload_with_media_off_is_unsupported() -> None:
+    settings = make_settings(asr_enabled=True, media_enabled=False)
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app) as test_client:
+        response = upload(test_client, OGG, "talk.ogg", "audio/ogg")
+
+    body = response.json()
+    assert body["error"]["code"] == "unsupported_content_type"
+    assert body["error"]["message"] == "Content type audio/ogg is not supported."
+    assert body["data"]["media"] is None
+
+
+def test_audio_upload_hands_to_asr() -> None:
+    handed: list[AsrNeeded] = []
+    stand_ins: list[Envelope[ExtractResult]] = []
+
+    async def handoff(
+        needed: AsrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        stand_ins.append(without)
+        await asyncio.sleep(2.5)  # longer than the whole extraction may take
+        return without.model_copy(update={"status": "success", "error": None})
+
+    started = time.monotonic()
+    envelope, pool, registry = run_upload(
+        AssertionError("not converted"),
+        OGG,
+        asr_handoff=handoff,
+        name="talk.ogg",
+        content_type="audio/ogg",
+        asr_enabled=True,
+        extract_timeout_seconds=2,
+    )
+
+    assert time.monotonic() - started >= 2.5  # handed over once the deadline's steps are done
+    assert pool.calls == []  # no document conversion
+    assert envelope.status == "success"
+    assert envelope.data is not None
+    assert envelope.data.timings.total_ms >= 2500
+    (needed,) = handed
+    assert needed.draft is None
+    assert needed.input == MediaInputMeta(
+        source="upload",
+        platform="upload",
+        url=None,
+        extractor=None,
+        kind="ogg",
+        file_name="talk.ogg",
+        duration=None,
+        languages=[],
+        compliance=needed.input.compliance,
+        attempts=0,
+    )
+    assert needed.input.compliance is not None
+    assert needed.input.compliance.decision == "skipped"
+    (stand_in,) = stand_ins  # what the answer is while the handoff has not taken over
+    assert stand_in.status == "failed"
+    assert stand_in.error is not None
+    assert stand_in.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert stand_in.data is not None
+    assert stand_in.data.media is not None
+    assert stand_in.data.media.platform == "upload"
+    total = "text_extraction_extract_total"
+    assert registry.get_sample_value(total, {"mode": "upload", "outcome": "success"}) == 1
+
+
+def test_audio_upload_without_a_handoff_answers_that_it_cannot_be_handed_on() -> None:
+    envelope, _, _ = run_upload(
+        AssertionError("not converted"),
+        OGG,
+        asr_enabled=True,
+        name="a.ogg",
+        content_type="audio/ogg",
+    )
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert envelope.error.message == TRANSCRIPTION_NOT_HANDED_MESSAGE
+    assert envelope.data is not None
+    assert envelope.data.content_type == "audio/ogg"
+
+
+def test_asr_off_never_calls_the_handoff() -> None:
+    async def handoff(
+        needed: AsrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        raise AssertionError("ASR is off")
+
+    envelope, _, _ = run_upload(
+        AssertionError("not converted"),
+        OGG,
+        asr_handoff=handoff,
+        name="a.ogg",
+        content_type="audio/ogg",
+    )
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert envelope.error.message == TRANSCRIPTION_DISABLED_MESSAGE
+
+
+@pytest.mark.parametrize("declared", ["application/pdf", "text/html", "application/octet-stream"])
+def test_the_bytes_decide_that_an_upload_is_media(declared: str) -> None:
+    envelope, pool, _ = run_upload(
+        AssertionError("not converted"),
+        OGG,
+        asr_enabled=True,
+        name="report.pdf",
+        content_type=declared,
+    )
+
+    assert pool.calls == []
+    assert envelope.data is not None
+    assert envelope.data.media is not None
+    assert envelope.data.media.platform == "upload"
+    assert envelope.data.content_type == "audio/ogg"
+
+
+@pytest.mark.parametrize("declared", ["audio/mpeg", "video/mp4", "audio/ogg"])
+def test_a_declared_audio_type_does_not_make_garbage_media(declared: str) -> None:
+    handed: list[AsrNeeded] = []
+
+    async def handoff(
+        needed: AsrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        return without
+
+    envelope, _, _ = run_upload(
+        AssertionError("not converted"),
+        b"this is not audio, whatever the part says" * 4,
+        asr_handoff=handoff,
+        name="talk.mp3",
+        content_type=declared,
+        asr_enabled=True,
+    )
+
+    assert handed == []
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert envelope.data is not None
+    assert envelope.data.media is None
+
+
+def test_an_audio_upload_logs_no_file_name() -> None:
+    settings = make_settings(asr_enabled=True)
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app) as test_client, capture_logs() as logs:
+        upload(test_client, OGG, PRIVATE_NAME.replace(".pdf", ".ogg"), "audio/ogg")
+
+    done = [log for log in logs if log["event"] == "extract_done"]
+    assert done
+    assert done[0]["kind"] == "ogg"
+    dumped = json.dumps(logs, default=str)
+    assert "salary-review" not in dumped
+    assert "kowalski" not in dumped

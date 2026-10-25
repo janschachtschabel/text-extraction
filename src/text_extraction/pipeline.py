@@ -49,7 +49,13 @@ a transcription as its stand-in (never stored), as a document is handed to ``ocr
 
 An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on the bytes in
 hand: no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor
-stored (ruling F17).
+stored (ruling F17). With ``MEDIA_ENABLED``, bytes that sniff as audio or video (``sniff_media``,
+before the document kinds; the part's declared type never decides) are transcribed (M14): while
+the service has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``) the upload is
+``unsupported_content_type`` ("Transcription is not enabled on this service."), over
+``MEDIA_UPLOAD_MAX_BYTES`` it is ``too_large``, otherwise an ``AsrNeeded`` (``MediaInputMeta`` with
+``source: upload`` and the file name, for the result only) goes to ``asr_handoff`` once the
+deadline's steps are done, as media of a URL does. Without a handoff the stand-in is final.
 
 The Docling worker builds the result of a document that waited for OCR with
 ``convert_queued_document``: step 8 on its Docling conversion, the better of it and MarkItDown's
@@ -141,7 +147,7 @@ from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.media.pool import MediaFetcher
 from text_extraction.media.sites import MediaTarget, media_target
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, media_type_of, sniff_media
-from text_extraction.media.types import MediaKind
+from text_extraction.media.types import MediaInfo, MediaKind
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
 from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.outbound import (
@@ -171,6 +177,7 @@ from text_extraction.pipeline_media import (
     TRANSCRIPTION_DISABLED_MESSAGE,
     TRANSCRIPTION_NOT_HANDED_MESSAGE,
     AsrNeeded,
+    MediaInputMeta,
     MediaSteps,
     asr_available,
     without_asr,
@@ -421,6 +428,8 @@ class _UploadRun:
     warnings: list[str] = field(default_factory=list)
     ocr_handoff: OcrHandoff | None = None
     ocr_needed: OcrNeeded | None = None  # for the handoff, once the deadline's steps are done
+    asr_handoff: TranscriptionHandoff | None = None
+    asr_needed: AsrNeeded | None = None  # likewise
 
     def timings(self) -> Timings:
         return Timings(
@@ -661,6 +670,7 @@ class Pipeline:
         *,
         content_type: str | None = None,
         ocr_handoff: OcrHandoff | None = None,
+        asr_handoff: TranscriptionHandoff | None = None,
     ) -> Envelope[ExtractResult]:
         """Extract an uploaded file (ruling F17). ``name`` is its sanitised file name, reported
         as ``document.file_name`` and never logged; ``content_type`` is the part's declared
@@ -672,6 +682,9 @@ class Pipeline:
         (``cache: bypass``); the fingerprint is computed, but neither compared nor stored. A
         document that needs OCR goes to ``ocr_handoff`` after the deadline, as in ``run``;
         without one its text layer answers with ``ocr_unavailable``.
+
+        Audio and video (decided by the bytes, M14) go to ``asr_handoff`` the same way, with the
+        answer without a transcription as its stand-in; without a handoff that answer is final.
         """
         mode = resolve_mode(None, principal, self._settings)
         run = _UploadRun(
@@ -679,6 +692,7 @@ class Pipeline:
             report=ComplianceReport(mode=mode, decision="skipped"),
             file_name=name,
             ocr_handoff=ocr_handoff,
+            asr_handoff=asr_handoff,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -686,6 +700,8 @@ class Pipeline:
             if run.ocr_needed is not None and run.ocr_handoff is not None:
                 # After the deadline's steps, as in `run` (F12).
                 envelope = await run.ocr_handoff(run.ocr_needed, envelope)
+            if run.asr_needed is not None and run.asr_handoff is not None:
+                envelope = await run.asr_handoff(run.asr_needed, envelope)
             if envelope.data is not None:
                 envelope.data.timings = run.timings()
             envelope.trace_id = current_trace_id()
@@ -1433,8 +1449,13 @@ class Pipeline:
         self, run: _UploadRun, body: bytes, content_type: str | None, deadline: asyncio.Timeout
     ) -> Envelope[ExtractResult]:
         """Step 7 for an upload: its kind by the bytes (F1), then a page's or a document's
-        conversion, each with its byte limit."""
+        conversion, each with its byte limit. Audio and video come first, by their magic bytes
+        alone (the declared type never makes a body media, nor stops one from being it)."""
         declared, charset = split_content_type(content_type)
+        if self._settings.media_enabled:
+            media_kind = await self._pool.run(sniff_media, body[:MEDIA_HEAD_BYTES], declared)
+            if media_kind is not None:
+                return self._uploaded_media(run, body, media_kind)
         kind = await self._pool.run(sniff, body, declared, run.file_name)
         run.kind = kind
         if kind is None:
@@ -1477,6 +1498,50 @@ class Pipeline:
         if ocr_available(self._settings):
             return without_ocr(outcome, run, message=OCR_NOT_HANDED_REASON)
         return without_ocr(outcome, run)
+
+    def _uploaded_media(
+        self, run: _UploadRun, body: bytes, kind: MediaKind
+    ) -> Envelope[ExtractResult]:
+        """An audio or video upload (M14): refused while the service has no ASR or over
+        ``MEDIA_UPLOAD_MAX_BYTES``, otherwise an ``AsrNeeded`` for ``asr_handoff`` (its bytes are
+        the route's to store); the answer is its stand-in, or final without a handoff."""
+        run.kind = kind
+        run.content_type = media_type_of(kind)
+        info = MediaInfo(platform="upload", transcript_source=None)
+        if not asr_available(self._settings):
+            return _failed(
+                run.result(media=info),
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+                TRANSCRIPTION_DISABLED_MESSAGE,
+                retryable=False,
+            )
+        limit = self._settings.media_upload_max_bytes
+        if len(body) > limit:
+            return _failed(
+                run.result(media=info),
+                ErrorCode.TOO_LARGE,
+                f"The file has more than the {limit} bytes that are transcribed.",
+                retryable=False,
+            )
+        needed = AsrNeeded(
+            draft=None,
+            input=MediaInputMeta(
+                source="upload",
+                platform="upload",
+                url=None,
+                extractor=None,
+                kind=kind,
+                file_name=run.file_name,
+                duration=None,
+                languages=[],
+                compliance=run.report,
+                attempts=0,
+            ),
+        )
+        if run.asr_handoff is not None:
+            run.asr_needed = needed  # `extract_upload` hands it over once the deadline is off
+            return without_asr(needed, run)
+        return without_asr(needed, run, message=TRANSCRIPTION_NOT_HANDED_MESSAGE)
 
     async def _uploaded_page(
         self,

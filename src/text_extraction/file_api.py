@@ -1,12 +1,15 @@
 """``POST /v1/extract/file``: extract an uploaded file (ruling F17).
 
 - The body is ``multipart/form-data`` with one file part ``file`` and the fields of
-  ``FileForm``. Its limit is ``DOCUMENT_MAX_BYTES`` + 64 KiB (``upload_body_limit``, applied by
+  ``FileForm``. Its limit is ``upload_file_limit`` + 64 KiB (``upload_body_limit``, applied by
   ``BodyLimitMiddleware``): a larger ``Content-Length`` is 413 before anything is read, and a
-  body without one is refused at the chunk that goes over the limit.
+  body without one is refused at the chunk that goes over the limit. ``upload_file_limit`` is
+  ``DOCUMENT_MAX_BYTES``, or the larger ``MEDIA_UPLOAD_MAX_BYTES`` while uploaded audio and video
+  are transcribed (``MEDIA_ENABLED`` and the service has ASR); with ASR off the setting does not
+  widen the path. A document over ``DOCUMENT_MAX_BYTES`` still answers ``too_large``.
 - The form is parsed with at most ``MAX_FILES`` file and ``MAX_FIELDS`` fields of at most
   ``MAX_FIELD_BYTES`` each; more, or a malformed body, is 422 ``invalid_request``.
-- The file part is read into memory up to ``DOCUMENT_MAX_BYTES`` + 1 bytes and closed at once,
+- The file part is read into memory up to ``upload_file_limit`` + 1 bytes and closed at once,
   which deletes its spooled file; the pipeline answers a longer one with ``too_large``.
 - The part's file name is reduced to its base name (``sanitize_file_name``) and reported as
   ``document.file_name`` only: it is never logged.
@@ -14,6 +17,10 @@
   a caller without a key, or over its rate limit, gets its 401 or 429 (the same answers as on
   every route) without the pod receiving or spooling the upload. ``ocr: always`` is 400 while
   the service has no OCR, as for ``/v1/extract``.
+- A part whose bytes are audio or video (``sniff_media``; no form field is needed) is for
+  transcription (M14, ``Pipeline.extract_upload``): ``unsupported_content_type`` while the
+  service has no ASR, ``too_large`` over ``MEDIA_UPLOAD_MAX_BYTES``, otherwise it goes to the
+  ASR handoff (the ASR pool stores the bytes as the job item's input; not wired here yet).
 
 The conversion is ``Pipeline.extract_upload``: no compliance check, no result cache. With
 ``wait_seconds`` (25 by default) a slower upload becomes a job of kind ``file``, as a slow
@@ -51,6 +58,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
 from text_extraction.job_models import JobAccepted, JobOptions
 from text_extraction.pipeline import Pipeline
+from text_extraction.pipeline_media import asr_available
 from text_extraction.pool_dispatch import Handover
 from text_extraction.ratelimit import rate_limited
 from text_extraction.settings import Settings
@@ -64,9 +72,19 @@ MAX_FILE_NAME_CHARS: Final = 255
 _FORM_OVERHEAD_BYTES: Final = 64 * 1024
 
 
+def upload_file_limit(settings: Settings) -> int:
+    """The most bytes of the file part that are read: ``DOCUMENT_MAX_BYTES``, or
+    ``MEDIA_UPLOAD_MAX_BYTES`` where that is larger and uploaded audio and video are transcribed
+    (``MEDIA_ENABLED`` and the service has ASR; M14). Otherwise the setting does not apply: with
+    ASR off it is not even bounded by the input budget, and the upload would only be refused."""
+    if settings.media_enabled and asr_available(settings):
+        return max(settings.document_max_bytes, settings.media_upload_max_bytes)
+    return settings.document_max_bytes
+
+
 def upload_body_limit(settings: Settings) -> int:
-    """The body limit of the upload route: ``DOCUMENT_MAX_BYTES`` + 64 KiB."""
-    return settings.document_max_bytes + _FORM_OVERHEAD_BYTES
+    """The body limit of the upload route: ``upload_file_limit`` + 64 KiB."""
+    return upload_file_limit(settings) + _FORM_OVERHEAD_BYTES
 
 
 def sanitize_file_name(name: str | None) -> str | None:
@@ -134,8 +152,9 @@ async def extract_file(
         File(
             alias=FILE_PART,
             description="The file: PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, HTML or plain text; "
-            "OpenDocument files and images where the service has OCR. At most "
-            "`DOCUMENT_MAX_BYTES`.",
+            "OpenDocument files and images where the service has OCR; audio and video files "
+            "where the service has speech recognition (they are transcribed as a job). At most "
+            "`DOCUMENT_MAX_BYTES` (`MEDIA_UPLOAD_MAX_BYTES` for audio and video).",
             json_schema_extra={"format": "binary"},
         ),
     ],
@@ -149,8 +168,12 @@ async def extract_file(
     document's `document.file_name` is the part's file name without its path. The kind is
     decided by the bytes; the part's content type decides only where they do not. A file that
     cannot be converted answers 200 with `status: failed` (`unsupported_content_type`,
-    `too_large`, `conversion_failed`, ...). 422 for a form with more than one file or eight
-    fields, or unknown fields; 413 for a body over `DOCUMENT_MAX_BYTES` + 64 KiB; 400 for
+    `too_large`, `conversion_failed`, ...). An audio or video file (decided by its bytes) is
+    transcribed where the service has speech recognition, else `unsupported_content_type`
+    ("Transcription is not enabled on this service."); over `MEDIA_UPLOAD_MAX_BYTES` it is
+    `too_large`; its result has `media.platform: "upload"`. 422 for a form with more than one
+    file or eight fields, or unknown fields; 413 for a body over `DOCUMENT_MAX_BYTES` + 64 KiB
+    (the larger `MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where audio and video are transcribed); 400 for
     `ocr: always` while the service has no OCR.
 
     An upload still converting after `wait_seconds` (25 by default) becomes a job: 202 with the
@@ -162,7 +185,7 @@ async def extract_file(
     settings: Settings = state.settings
     check_ocr_request(form.ocr, settings)
     try:
-        body = await file.read(settings.document_max_bytes + 1)
+        body = await file.read(upload_file_limit(settings) + 1)
     finally:
         await file.close()  # deletes the spooled part now, not when the answer is sent
     name = sanitize_file_name(file.filename)
