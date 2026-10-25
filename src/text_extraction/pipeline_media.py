@@ -59,6 +59,12 @@ rest:
 final: the draft with ``asr_unavailable`` and without its fingerprint, or, for a file,
 ``failed``/``no_transcript_available``.
 
+The ASR worker's results (``Pipeline.transcribed_result``) are built here as well:
+``transcribed`` makes the result of a transcription (the draft's title, metadata, uploader and
+languages for a platform video; ``transcript_source: asr`` and ``asr_model``), ``asr_failed``
+the answer when the transcription failed (the draft with ``asr_unavailable`` and the failure's
+error, without its fingerprint when the failure is retryable; without a draft ``failed``).
+
 Metrics (M15), per registry: ``text_extraction_media_extractions_total{platform, source,
 outcome}`` and ``text_extraction_media_seconds{platform}``. Logs carry the platform, the host and
 codes only: never a URL, a video id or a file name.
@@ -95,7 +101,8 @@ from text_extraction.media.html5 import PageTrack, page_media, track_format
 from text_extraction.media.pool import FetchedTrack, MediaFetcher, MediaProbe
 from text_extraction.media.select import track_language
 from text_extraction.media.sites import MediaTarget
-from text_extraction.media.transcript import build_transcript
+from text_extraction.media.sniff import media_type_of
+from text_extraction.media.transcript import Transcription, build_transcript
 from text_extraction.media.types import (
     LanguageCode,
     MediaInfo,
@@ -127,7 +134,11 @@ __all__ = [
     "AsrNeeded",
     "MediaInputMeta",
     "MediaSteps",
+    "TranscribedContent",
     "asr_available",
+    "asr_failed",
+    "transcribed",
+    "transcribed_content",
     "without_asr",
 ]
 
@@ -326,6 +337,106 @@ def without_asr(
         update={"warnings": [*draft.data.warnings, ASR_UNAVAILABLE_WARNING], "fingerprint": None}
     )
     return draft.model_copy(update={"data": data})
+
+
+# --- the ASR worker's results ----------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TranscribedContent:
+    """A transcription in the request's shape: content, quality verdict and language."""
+
+    content: str
+    quality: Quality
+    language: str | None
+
+
+def transcribed_content(
+    fmt: OutputFormat, transcription: Transcription, title: str | None
+) -> TranscribedContent:
+    """The transcript of ``transcription`` under ``title`` (``# <title>``, paragraphs); the
+    language Whisper heard, else the one the text reads as. CPU-bound: runs on the conversion
+    pool."""
+    content = build_transcript(transcription.segments, title, [], fmt)
+    language = transcription.language or (detect_language(None, None, content) if content else None)
+    return TranscribedContent(content, assess(None, content), language)
+
+
+def transcribed(
+    run: _Answering,
+    meta: MediaInputMeta,
+    draft: Envelope[ExtractResult] | None,
+    transcription: Transcription,
+    built: TranscribedContent,
+    *,
+    metadata: bool,
+    links: bool,
+    kept: bool,
+) -> ExtractResult:
+    """The result of a transcription (M6): the draft's title, metadata (with the language
+    heard), uploader and subtitle languages for a platform video, its warnings but
+    ``asr_unavailable``; ``transcript_source: asr`` with the model. ``kept`` (the quality
+    verdict did not fail) fingerprints the content."""
+    details = draft.data if draft is not None and draft.data is not None else None
+    language = built.language
+    page: PageMetadata | None = None
+    if metadata:
+        page = (
+            details.metadata.model_copy(update={"language": language})
+            if details is not None and details.metadata is not None
+            else PageMetadata(language=language)
+        )
+    known = details.media if details is not None else None
+    raw = hashlib.sha256(built.content.encode()).hexdigest()
+    warnings = [w for w in (details.warnings if details else []) if w != ASR_UNAVAILABLE_WARNING]
+    return run.result(
+        content_type=media_type_of(transcription.kind) if transcription.kind else None,
+        language=language,
+        word_count=built.quality.word_count,
+        title=details.title if details is not None else None,
+        content=built.content,
+        quality=built.quality,
+        metadata=page,
+        links=[] if links else None,
+        fingerprint=compute_fingerprint(raw, built.content) if kept else None,
+        warnings=list(dict.fromkeys(warnings)),
+        media=MediaInfo(
+            platform=meta.platform,
+            transcript_source="asr",
+            transcript_language=transcription.language or None,
+            available_languages=known.available_languages if known is not None else [],
+            duration_seconds=transcription.duration,
+            uploader=known.uploader if known is not None else None,
+            asr_model=transcription.model,
+        ),
+    )
+
+
+def asr_failed(
+    run: _Answering,
+    meta: MediaInputMeta,
+    draft: Envelope[ExtractResult] | None,
+    error: ErrorInfo,
+    *,
+    upstream_status: int | None = None,
+) -> Envelope[ExtractResult]:
+    """The answer when the transcription failed with ``error``: the draft (a platform video's
+    details) keeps its status, adds ``asr_unavailable`` and takes the error, and loses its
+    fingerprint when the error is retryable (the next request may get the transcription;
+    F14's rule); without a draft ``failed`` with the error and ``upstream_status``."""
+    if draft is not None and draft.data is not None:
+        update: dict[str, Any] = {
+            "warnings": list(dict.fromkeys([*draft.data.warnings, ASR_UNAVAILABLE_WARNING]))
+        }
+        if error.retryable:
+            update["fingerprint"] = None
+        answered = error.model_copy(update={"message": error.message + _DETAILS_ONLY})
+        return draft.model_copy(
+            update={"data": draft.data.model_copy(update=update), "error": answered}
+        )
+    media = MediaInfo(platform=meta.platform, transcript_source=None)
+    result = run.result(media=media, upstream_status=upstream_status)
+    return _failed(result, error.code, error.message, error.retryable)
 
 
 @dataclass(frozen=True)

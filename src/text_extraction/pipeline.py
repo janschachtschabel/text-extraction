@@ -63,6 +63,10 @@ The Docling worker builds the result of a document that waited for OCR with
 ``convert_queued_document``: step 8 on its Docling conversion, the better of it and MarkItDown's
 draft, and for a URL the fingerprint and the cache as above (F14).
 
+The ASR worker builds the result of transcribed media with ``transcribed_result``: the
+transcript (or the draft with ``asr_unavailable`` when the transcription failed), and for a URL
+the fingerprint and the cache as above (M10).
+
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
 compliance mode (403) and a Valkey outage of the outbound gate (503) leave as ``ServiceError``.
@@ -149,6 +153,7 @@ from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.media.pool import MediaFetcher
 from text_extraction.media.sites import MediaTarget, media_target
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, media_type_of, sniff_media
+from text_extraction.media.transcript import Transcription
 from text_extraction.media.types import MediaInfo, MediaKind
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
 from text_extraction.netguard import InvalidUrlError, validate_url
@@ -182,6 +187,9 @@ from text_extraction.pipeline_media import (
     MediaInputMeta,
     MediaSteps,
     asr_available,
+    asr_failed,
+    transcribed,
+    transcribed_content,
     without_asr,
 )
 from text_extraction.pipeline_render import (
@@ -816,6 +824,109 @@ class Pipeline:
             warnings=list(meta.warnings),
             target=meta.target or req.url,
             direct=meta.target is not None,
+        )
+
+    async def transcribed_result(
+        self,
+        req: ExtractRequest | FileForm,
+        principal: Principal,
+        meta: MediaInputMeta,
+        draft: Envelope[ExtractResult] | None,
+        transcription: Transcription | Envelope[ExtractResult],
+        *,
+        upstream_status: int | None = None,
+    ) -> Envelope[ExtractResult]:
+        """The result of media the ASR worker transcribed (ruling M10): ``req`` is the request
+        of its job (an ``ExtractRequest`` for a URL, the ``FileForm`` of an upload), ``meta``
+        its stored input, ``draft`` a platform video's metadata result (None for a file or an
+        upload), ``transcription`` the speech recognition, or the failed envelope that says why
+        there is none (``upstream_status``: the target's answer to a failed download).
+
+        A transcription becomes the result as the media steps build one (M6): ``# <title>``
+        (the draft's) and paragraphs, ``transcript_source: asr`` with ``asr_model``, the draft's
+        metadata and details; its quality verdict decides the status. A failure is answered by
+        the draft with ``asr_unavailable`` (``pipeline_media.asr_failed``), or without a draft
+        ``failed``. For a URL the answer is compared with the URL's previous fingerprint and
+        stored in the result cache under the URL's key (a platform video's canonical URL, with
+        ``media``), like a fast result (``_finish``), so the next request is a hit. An upload's
+        is not: its fingerprint is computed, but neither compared nor stored (F17)."""
+        run: _Run | _UploadRun
+        if isinstance(req, FileForm):
+            run = _UploadRun(
+                req=_UploadOptions(format=req.format, metadata=req.metadata, ocr=req.ocr),
+                report=ComplianceReport(
+                    mode=resolve_mode(None, principal, self._settings), decision="skipped"
+                ),
+                file_name=meta.file_name,
+                kind=meta.kind,
+                content_type=media_type_of(meta.kind) if meta.kind is not None else None,
+            )
+        else:
+            run = self._media_run(req, principal, meta)
+        envelope: Envelope[ExtractResult]
+        if isinstance(transcription, Envelope):
+            error = transcription.error or ErrorInfo(
+                code=ErrorCode.INTERNAL_ERROR, message="The transcription failed.", retryable=True
+            )
+            envelope = asr_failed(run, meta, draft, error, upstream_status=upstream_status)
+        else:
+            envelope = await self._transcribed(run, meta, draft, transcription)
+        if isinstance(run, _Run):
+            envelope = await self._finish(run, envelope, Validators())
+        envelope.trace_id = current_trace_id()
+        return envelope
+
+    async def _transcribed(
+        self,
+        run: _Run | _UploadRun,
+        meta: MediaInputMeta,
+        draft: Envelope[ExtractResult] | None,
+        transcription: Transcription,
+    ) -> Envelope[ExtractResult]:
+        if isinstance(run, _Run):
+            run.attempts += 1  # the download
+            run.fetch_ms += transcription.fetch_ms
+        if transcription.kind is not None:
+            run.content_type = media_type_of(transcription.kind)
+        run.convert_ms += transcription.convert_ms
+        title = draft.data.title if draft is not None and draft.data is not None else None
+        started = time.perf_counter()
+        built = await self._pool.run(transcribed_content, run.req.format, transcription, title)
+        run.convert_ms += _ms(started)
+        verdict = quality_error(built.quality, self._settings.quality_min_words)
+        result = transcribed(
+            run,
+            meta,
+            draft,
+            transcription,
+            built,
+            metadata=run.req.metadata,
+            links=run.req.links,
+            kept=verdict is None or verdict[0] != "failed",
+        )
+        return self._envelope(result)
+
+    def _media_run(self, req: ExtractRequest, principal: Principal, meta: MediaInputMeta) -> _Run:
+        """The run state of a URL's transcribed media, from what its extraction learned: the
+        compliance report, the final (or canonical) URL and the fetches so far. A platform
+        video's result is filed under its canonical URL with ``media`` (step 2b)."""
+        report = meta.compliance or ComplianceReport(
+            mode=resolve_mode(req.compliance, principal, self._settings), decision="skipped"
+        )
+        private = not req.secrets().empty()
+        cacheable = req.cache and not private and not req.screenshot
+        return _Run(
+            req=req,
+            report=report,
+            cache="miss" if cacheable else "bypass",
+            started=time.perf_counter(),
+            cacheable=cacheable,
+            private=private,
+            host=urlsplit(req.url).hostname,
+            final_url=meta.url,
+            attempts=meta.attempts,
+            target=req.url,
+            media=media_target(req.url) if meta.source == "platform" else None,
         )
 
     # --- steps ---------------------------------------------------------------------------------

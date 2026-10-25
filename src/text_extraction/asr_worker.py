@@ -1,0 +1,1043 @@
+"""The ASR worker (entry point ``text-extraction-asr-worker``): transcribes the media of the
+``asr`` pool with faster-whisper and stores the results in the job (ruling M10).
+
+It is the extract worker's ``Worker`` (``worker.py``: slot loops, leases, exhausted items, result
+writes, metrics, ``/ready`` and the shutdown) with another runner. The ``asr_dispatch`` module
+docstring has the contract of the pool's items: their job, input, draft and key. This process
+never imports faster-whisper, CTranslate2, PyAV or yt-dlp: only its children do
+(``media/asr_child.py``), so a crash, a hang or a memory blow-up of a download or a
+transcription ends there. This is the local backend: the caller's key of an external endpoint
+(``JobStore.asr_key``) is not read.
+
+**The runner** (``AsrRunner``) leases an item for ``asr_lease_seconds`` (``2 *
+ASR_TIMEOUT_SECONDS + 10``). For each item it:
+
+1. reads the item's input (``MediaInputMeta`` and an upload's bytes) and its draft (a platform
+   video's metadata result, None for a file or an upload). An input that expired before the
+   claim answers the draft with ``asr_unavailable`` (``draft_without_asr``), neither
+   fingerprinted nor cached; without a draft the item fails ``timeout``, retryable;
+2. checks the duration the platform said (the draft's probe): over
+   ``MEDIA_MAX_DURATION_SECONDS`` it is ``media_too_long`` and nothing is downloaded;
+3. puts the media into a directory of its own under ``ASR_SCRATCH_PATH`` (``item-<random>``,
+   mode 0700; the file is ``upload.<kind>`` or ``media.<ext>``, never the caller's file name):
+   an upload's bytes are written there; a URL's media is downloaded by a child through the
+   worker's ``EgressProxy`` (each child call gets a ``ProxyContext`` with credentials of its
+   own and ``MEDIA_MAX_BYTES`` plus ``MEDIA_EXTRACT_MAX_BYTES`` for a platform's pages; the
+   child stops a file at ``MEDIA_MAX_BYTES``), within ``MEDIA_DOWNLOAD_TIMEOUT_SECONDS`` in
+   all. A platform video is two calls: ``platform_info`` (yt-dlp's info, with the extractor of
+   the input as its only allowed one) in the turn of the canonical URL's host at the outbound
+   gate, then ``download`` of that info outside it (the media comes from the platform's CDN). A
+   media file is one ``download`` in its host's turn, whose answer status goes to the gate;
+4. checks the duration again (yt-dlp's or PyAV's): over the limit it is ``media_too_long``;
+5. checks whether the item has its result already (a copy that ran twice after a crash): then
+   it stops before the long transcription and its result stands;
+6. transcribes the file in a child (``transcribe``) by a deadline of its own,
+   ``ASR_TIMEOUT_SECONDS``: PyAV decodes its first audio stream to 16 kHz mono float32 and
+   faster-whisper reads that array with ``ASR_MODEL`` from ``ASR_MODELS_PATH``
+   (``ASR_COMPUTE_TYPE``, ``ASR_THREADS``), in the first requested language or the one it
+   detects;
+7. runs ``Pipeline.transcribed_result``: the transcript in the result's shape, the draft's
+   details, ``transcript_source: asr``; a URL's result goes to the fingerprints and the result
+   cache, an upload's does not;
+8. deletes the scratch directory on every path, a crash or a cancellation included, and leaves
+   the input, the draft and the key to the ``Worker``, which deletes them after the result
+   write. ``clean_scratch`` removes what a killed process left, at start-up.
+
+A gate refusal of a download (``OutboundBusy``, ``CircuitOpen``) defers the item as in the
+extract worker. Failures map to codes, never to a library's text: a download that timed out is
+``timeout``, retryable; a transcription that timed out is ``timeout``, not retryable (the same
+file would time out again); a decoder error is ``transcription_failed``; a child that crashed
+is ``transcription_failed``, retryable, one out of memory not; a model missing on the volume is
+``internal_error``, retryable; a file over ``MEDIA_MAX_BYTES`` ``too_large``; a target's HTTP
+error ``target_http_error`` with its status (retryable for 408, 425, 429 and 5xx); a live stream
+or bytes that are no media ``unsupported_content_type``; a request the proxy refused
+``blocked_url``, ``too_large``, ``dns_error`` or ``connection_error``; any other failed download
+``transcription_failed``, retryable. With a draft, the draft answers with the failure's error and
+``asr_unavailable``, and keeps its fingerprint only when the failure is final.
+
+**The children** (``DocumentPool``, ``ASR_CONCURRENCY`` of them with ``ASR_MEMORY_LIMIT_MB`` of
+address space) get the thread count (``OMP_NUM_THREADS``) and Hugging Face's offline switch
+through their own environment, never this process's secrets. Each loads the model once and
+keeps it.
+
+**The process** serves only the internal port. Before anything else it checks the model's
+files (``model_store``, manifest ``media/models.toml``, only the folder of ``ASR_MODEL``): a
+missing one ends the process with exit code 1 and a log line naming ``ASR_MODELS_PATH``. Then
+it starts the proxy and the children, and each child runs the self-check: PyAV's FFmpeg must be
+an LGPL build (``ffmpeg_gpl_findings`` on ``av._core.library_meta``, PyAV 19.0.1's per-library
+``configuration`` and ``license``; ``av.library_versions`` has the versions only), so neither
+``--enable-gpl``, ``--enable-nonfree`` nor a GPL or non-free external library such as libx264
+(decision D5: the PyPI wheel of av bundles libx264 and libx265 and fails the check, by design;
+the ASR image builds PyAV against its own LGPL FFmpeg), and the built-in clip
+(``media/asr_check.ogg``, German speech) must transcribe to its words. Children that do not start
+(``asr_start_failed``) or a failed check (``asr_self_check_failed``) end the process before
+``/ready`` with exit code 1. On SIGTERM the loops stop claiming, the items in flight get 30 s,
+then they are cancelled and the children killed; their leases expire and the items run again.
+
+- ``--download-models`` fills ``ASR_MODELS_PATH`` with the files of ``ASR_MODEL`` (the Helm init
+  container and the compose one-shot service run it; idempotent) and exits 0, or 1.
+- ``--check`` checks the model, FFmpeg's licence and the built-in clip in one child, then exits
+  0, or 1 on any failure (the image build runs it).
+
+The names used of the pinned libraries (``media/asr_child.py``): faster-whisper 1.2.1
+``WhisperModel(path, device="cpu", compute_type=, cpu_threads=, local_files_only=True)`` and
+``WhisperModel.transcribe(audio, language=, vad_filter=True, condition_on_previous_text=False)``
+(segments ``start``, ``end``, ``text``; info ``language``, ``duration``); PyAV 19.0.1 ``av.open``,
+``av.AudioResampler(format="flt", layout="mono", rate=16000)``, ``av.error.InvalidDataError``;
+yt-dlp's ``YoutubeDL.extract_info``, ``process_ie_result`` and ``sanitize_info``.
+
+Metrics: ``text_extraction_asr_transcriptions_total{backend, outcome}`` (``success`` or the error
+code), ``text_extraction_asr_audio_seconds_total{backend}`` (audio transcribed) and
+``text_extraction_asr_seconds{backend}`` (time of the transcription calls). Logs carry job ids,
+sources, platforms, codes and type names only, never a URL, a video id, a file name, a key, a
+library's message or transcript text.
+"""
+
+import argparse
+import asyncio
+import shutil
+import sys
+import tempfile
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
+from typing import Any, Final, Literal, Protocol, get_args
+from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
+
+import structlog
+from prometheus_client import REGISTRY, CollectorRegistry, Counter, Histogram
+from redis.asyncio import Redis
+
+from text_extraction import model_store
+from text_extraction.asr_dispatch import asr_queue, draft_without_asr
+from text_extraction.browser_proxy import TUNNEL_GRACE_SECONDS, EgressProxy, ProxyContext
+from text_extraction.conversion_pool import ConversionPool
+from text_extraction.documents.pool import (
+    ConversionCrashed,
+    ConversionError,
+    ConversionOutOfMemory,
+    ConversionTimeout,
+    DocumentPool,
+)
+from text_extraction.envelope import Envelope, ErrorCode
+from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
+from text_extraction.fetch import USER_AGENT, Fetcher
+from text_extraction.file_models import form_of
+from text_extraction.internal import Readiness, create_internal_app
+from text_extraction.jobs import JobRecord, JobStore, asr_lease_seconds
+from text_extraction.media.captions import Cue
+from text_extraction.media.transcript import Transcription
+from text_extraction.media.types import MediaKind
+from text_extraction.memory_guard import MemoryGuard
+from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
+from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
+from text_extraction.pipeline_media import MediaInputMeta
+from text_extraction.scheduler import QueueItem
+from text_extraction.server import _Server, _server, configured_settings
+from text_extraction.settings import Settings
+from text_extraction.valkey import create_valkey
+from text_extraction.worker import Worker, _serve, job_principal
+
+__all__ = [
+    "ASR_TARGET",
+    "AsrRunner",
+    "AsrStartFailed",
+    "AsrWorkerParts",
+    "SelfCheckFailed",
+    "build_asr_worker",
+    "clean_scratch",
+    "create_asr_pool",
+    "create_asr_proxy",
+    "ffmpeg_gpl_findings",
+    "main",
+    "self_check",
+]
+
+_log = structlog.get_logger(__name__)
+
+# The ``DocumentPool`` target of the ASR children.
+ASR_TARGET: Final = "text_extraction.media.asr_child"
+BACKEND: Final = "local"
+# What the items in flight get after SIGTERM before they are cancelled.
+GRACEFUL_SECONDS: Final = 30
+# Importing faster-whisper and CTranslate2 takes a while on a cold volume.
+_CHILD_START_SECONDS: Final = 180.0
+# The scratch directory of one item: ``clean_scratch`` removes only these.
+_SCRATCH_PREFIX: Final = "item-"
+# The platform's info (one request or a few) gets at most this much of the download's time.
+_INFO_SECONDS: Final = 120.0
+# A child call gets at least this long, even when the budget is nearly spent.
+_MIN_CALL_SECONDS: Final = 1.0
+# The built-in clip of the self-check and words its transcript must have.
+_CHECK_CLIP: Final = "asr_check.ogg"
+_CHECK_WORDS: Final = ("gregor", "morgens")
+_CHECK_LANGUAGE: Final = "de"
+# The FFmpeg libraries PyAV decodes with; each must be reported and an LGPL build.
+_FFMPEG_LIBRARIES: Final = ("libavcodec", "libavformat", "libavutil", "libswresample")
+# Configure switches of FFmpeg that make a build GPL or non-free: the switches themselves and
+# the external libraries of FFmpeg's configure lists EXTERNAL_LIBRARY_GPL_LIST,
+# EXTERNAL_LIBRARY_GPLV3_LIST and EXTERNAL_LIBRARY_NONFREE_LIST.
+_FFMPEG_GPL_SWITCHES: Final = frozenset(
+    {
+        "--enable-gpl",
+        "--enable-nonfree",
+        "--enable-avisynth",
+        "--enable-frei0r",
+        "--enable-libcdio",
+        "--enable-libdavs2",
+        "--enable-librubberband",
+        "--enable-libvidstab",
+        "--enable-libx264",
+        "--enable-libx265",
+        "--enable-libxavs",
+        "--enable-libxavs2",
+        "--enable-libxvid",
+        "--enable-libsmbclient",
+        "--enable-decklink",
+        "--enable-libfdk-aac",
+        "--enable-libtls",
+    }
+)
+_SECONDS_BUCKETS: Final = (5, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600, 7200, 14_400)
+# Statuses of a media file's answer that may pass when retried later.
+_RETRYABLE_STATUSES: Final = frozenset({408, 425, 429})
+
+INPUT_EXPIRED_MESSAGE: Final = "The media expired before a worker transcribed it. Send it again."
+_TRANSCRIBE_TIMEOUT_MESSAGE: Final = "The transcription did not finish within ASR_TIMEOUT_SECONDS."
+_DOWNLOAD_TIMEOUT_MESSAGE: Final = (
+    "The media did not download within MEDIA_DOWNLOAD_TIMEOUT_SECONDS. Try again later."
+)
+_DOWNLOAD_FAILED_MESSAGE: Final = "The media could not be downloaded. Try again later."
+_CRASHED_MESSAGE: Final = "The transcription failed on our side. Try again later."
+_OUT_OF_MEMORY_MESSAGE: Final = "The transcription needed more memory than it may use."
+_DECODE_MESSAGE: Final = "The audio could not be decoded."
+_FAILED_MESSAGE: Final = "The transcription failed."
+_MODELS_MISSING_MESSAGE: Final = "Transcription is not available at the moment. Try again later."
+_NOT_MEDIA_MESSAGE: Final = "The file is not audio or video that can be transcribed."
+_LIVE_MESSAGE: Final = "The URL is a live stream that is still running."
+_BLOCKED_ADDRESS_MESSAGE: Final = (
+    "The download tried to reach an address that is not public, which is not allowed."
+)
+_DNS_MESSAGE: Final = "The media's host name could not be resolved. Try again later."
+_CONNECT_MESSAGE: Final = "The media's host could not be reached. Try again later."
+_BUSY_MESSAGE: Final = "Too many requests to the media's site are waiting. Try again later."
+_PAUSED_MESSAGE: Final = "Requests to the media's site are paused. Try again later."
+# Failures of a download whose own type says more than a refused request of the proxy.
+_KEEP_OVER_REFUSAL: Final = frozenset({"TooLarge", "NotMedia", "IsLive", "MediaTooLong"})
+
+
+class AsrChildren(Protocol):
+    """The part of ``DocumentPool`` the runner and the self-check use (a fake in tests)."""
+
+    async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any: ...
+
+
+class StartableChildren(AsrChildren, Protocol):
+    """``AsrChildren`` with the start of the children (a fake in tests)."""
+
+    async def start(self) -> None: ...
+
+
+class Egress(Protocol):
+    """The part of ``EgressProxy`` the runner uses (a fake in tests)."""
+
+    @property
+    def url(self) -> str: ...
+
+    def open_context(self, max_bytes: int | None = None) -> ProxyContext: ...
+
+
+def create_asr_pool(settings: Settings) -> DocumentPool:
+    """The ASR children of a worker (``ASR_CONCURRENCY``, ``ASR_MEMORY_LIMIT_MB``); not started
+    yet. The thread count and Hugging Face's offline switch go through the children's own
+    environment; Deno (yt-dlp's JavaScript runtime) keeps its cache in the temporary folder."""
+    temp = Path(tempfile.gettempdir())
+    return DocumentPool(
+        settings.asr_concurrency,
+        settings.asr_memory_limit_mb,
+        target=ASR_TARGET,
+        start_timeout=_CHILD_START_SECONDS,
+        extra_env={
+            "OMP_NUM_THREADS": str(settings.asr_threads),
+            # Nothing is fetched: the model comes from the volume only.
+            "HF_HUB_OFFLINE": "1",
+            "HF_HOME": str(temp / "text-extraction-hf"),
+            "DENO_DIR": str(temp / "text-extraction-deno"),
+            "DENO_NO_UPDATE_CHECK": "1",
+        },
+    )
+
+
+def create_asr_proxy(settings: Settings, registry: CollectorRegistry) -> EgressProxy:
+    """The children's only way out; its tunnels live a whole download and a grace."""
+    return EgressProxy(
+        settings,
+        registry=registry,
+        tunnel_timeout=settings.media_download_timeout_seconds + TUNNEL_GRACE_SECONDS,
+    )
+
+
+# --- metrics -------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Metrics:
+    transcriptions: Counter
+    audio_seconds: Counter
+    seconds: Histogram
+
+
+_METRICS: WeakKeyDictionary[CollectorRegistry, _Metrics] = WeakKeyDictionary()
+
+
+def _metrics_for(registry: CollectorRegistry) -> _Metrics:
+    metrics = _METRICS.get(registry)
+    if metrics is None:
+        metrics = _Metrics(
+            transcriptions=Counter(
+                "text_extraction_asr_transcriptions_total",
+                "Transcriptions by backend and outcome (success or the error code).",
+                ["backend", "outcome"],
+                registry=registry,
+            ),
+            audio_seconds=Counter(
+                "text_extraction_asr_audio_seconds_total",
+                "Seconds of audio transcribed, by backend.",
+                ["backend"],
+                registry=registry,
+            ),
+            seconds=Histogram(
+                "text_extraction_asr_seconds",
+                "Duration of transcriptions (the speech recognition), by backend.",
+                ["backend"],
+                buckets=_SECONDS_BUCKETS,
+                registry=registry,
+            ),
+        )
+        _METRICS[registry] = metrics
+    return metrics
+
+
+# --- the runner ----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """Why an item has no transcription: its error and the target's status."""
+
+    code: ErrorCode
+    message: str
+    retryable: bool
+    upstream_status: int | None = None
+
+    def envelope(self) -> Envelope[ExtractResult]:
+        return failed_extract(self.code, self.message, retryable=self.retryable)
+
+
+@dataclass(frozen=True)
+class _Media:
+    """The downloaded or written media of an item, in its scratch directory."""
+
+    path: Path
+    kind: MediaKind | None
+    duration: float | None
+    fetch_ms: int = 0
+
+
+class _Superseded(Exception):  # noqa: N818 - not an error: the item has its result
+    """The item got its result while this copy downloaded."""
+
+
+class AsrRunner:
+    """The ``asr`` pool's ``ItemRunner`` (local backend); see the module docstring.
+    ``children`` downloads and transcribes, ``egress`` is their proxy, ``gate`` the outbound
+    gate whose turns the downloads take."""
+
+    def __init__(
+        self,
+        pipeline: Pipeline,
+        store: JobStore,
+        settings: Settings,
+        children: AsrChildren,
+        egress: Egress,
+        gate: DomainGate,
+        registry: CollectorRegistry,
+    ) -> None:
+        self._pipeline = pipeline
+        self._store = store
+        self._settings = settings
+        self._children = children
+        self._egress = egress
+        self._gate = gate
+        self._metrics = _metrics_for(registry)
+        self.lease_seconds = asr_lease_seconds(settings)
+
+    async def run(
+        self,
+        job: JobRecord,
+        item: QueueItem,
+        url: str,
+        *,
+        gate_refusals: Literal["fail", "raise"],
+    ) -> Envelope[ExtractResult] | None:
+        # The worker deletes the input, the draft and the key once the result is written
+        # (``Worker._drop_input``): an item that runs again finds them.
+        stored = await self._store.get_input(job.id, item.index, MediaInputMeta)
+        draft = await self._store.draft(job.id, item.index)
+        if stored is None:
+            _log.info("asr_input_expired", draft=draft is not None)
+            fallback = draft_without_asr(draft)
+            if fallback is not None:
+                return fallback
+            return failed_extract(ErrorCode.TIMEOUT, INPUT_EXPIRED_MESSAGE, retryable=True)
+        body, meta = stored
+        request = (
+            form_of(job.options)
+            if job.kind == "file"
+            else ExtractRequest(url=url, **job.options.model_dump())
+        )
+        try:
+            outcome = await self._transcription(job, item, meta, body, gate_refusals)
+        except _Superseded:
+            _log.info("asr_item_superseded")
+            # Its result stands: this answer is a repeat write, which changes nothing.
+            return draft_without_asr(draft) or failed_extract(
+                ErrorCode.INTERNAL_ERROR, _FAILED_MESSAGE, retryable=True
+            )
+        if isinstance(outcome, _Failure):
+            label = outcome.code.value
+            answer: Transcription | Envelope[ExtractResult] = outcome.envelope()
+            upstream = outcome.upstream_status
+        else:
+            label, answer, upstream = "success", outcome, None
+            self._metrics.audio_seconds.labels(backend=BACKEND).inc(max(outcome.duration, 0.0))
+        self._metrics.transcriptions.labels(backend=BACKEND, outcome=label).inc()
+        _log.info("asr_item_done", source=meta.source, platform=meta.platform, outcome=label)
+        return await self._pipeline.transcribed_result(
+            request, job_principal(job), meta, draft, answer, upstream_status=upstream
+        )
+
+    async def _transcription(
+        self,
+        job: JobRecord,
+        item: QueueItem,
+        meta: MediaInputMeta,
+        body: bytes,
+        gate_refusals: Literal["fail", "raise"],
+    ) -> Transcription | _Failure:
+        if meta.duration is not None and meta.duration > self._settings.media_max_duration_seconds:
+            return self._too_long(meta.duration)
+        scratch = _new_scratch(self._settings)
+        try:
+            media = await self._media(meta, body, scratch, gate_refusals)
+            if isinstance(media, _Failure):
+                return media
+            limit = self._settings.media_max_duration_seconds
+            if media.duration is not None and media.duration > limit:
+                return self._too_long(media.duration)
+            if meta.source != "upload" and await self._store.has_result(job.id, item.index):
+                raise _Superseded
+            return await self._transcribe(meta, media)
+        finally:
+            # Synchronous, so that a cancelled item removes it too.
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    async def _media(
+        self,
+        meta: MediaInputMeta,
+        body: bytes,
+        scratch: Path,
+        gate_refusals: Literal["fail", "raise"],
+    ) -> _Media | _Failure:
+        if meta.source == "upload":
+            if meta.kind is None:
+                return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, _NOT_MEDIA_MESSAGE, False)
+            path = scratch / f"upload.{meta.kind}"
+            await asyncio.to_thread(path.write_bytes, body)
+            return _Media(path, meta.kind, None)
+        if meta.url is None:
+            return _Failure(ErrorCode.INTERNAL_ERROR, _DOWNLOAD_FAILED_MESSAGE, True)
+        try:
+            return await self._download(meta, meta.url, scratch)
+        except (OutboundBusy, CircuitOpen) as refusal:
+            if gate_refusals == "raise":
+                raise
+            if isinstance(refusal, OutboundBusy):
+                return _Failure(ErrorCode.RATE_LIMITED, _BUSY_MESSAGE, True)
+            return _Failure(ErrorCode.CONNECTION_ERROR, _PAUSED_MESSAGE, True)
+
+    async def _download(self, meta: MediaInputMeta, url: str, scratch: Path) -> _Media | _Failure:
+        """The media of a URL, downloaded by a child into ``scratch``: a platform video's info
+        in its host's turn, then the download outside it; a file in its host's turn."""
+        loop = asyncio.get_running_loop()
+        settings = self._settings
+        host = urlsplit(url).hostname or ""
+        crawl_delay = meta.compliance.crawl_delay if meta.compliance is not None else None
+        started = time.perf_counter()
+        payload: dict[str, Any] = {
+            "source": meta.source,
+            "url": url,
+            "extractor": meta.extractor,
+            "max_bytes": settings.media_max_bytes,
+            "user_agent": USER_AGENT,
+            "scratch": str(scratch),
+            "info": None,
+        }
+        if meta.source == "platform":
+            async with self._gate.slot(host, crawl_delay):
+                deadline = loop.time() + settings.media_download_timeout_seconds
+                info = await self._call(
+                    "platform_info",
+                    {k: payload[k] for k in ("url", "extractor", "user_agent")},
+                    min(deadline, loop.time() + _INFO_SECONDS),
+                    host=host,
+                )
+            if isinstance(info, _Failure):
+                return info
+            duration = _number(info.get("duration"))
+            if duration is not None and duration > settings.media_max_duration_seconds:
+                return self._too_long(duration)
+            payload["info"] = info.get("info")
+            reply = await self._call("download", payload, deadline)
+        else:
+            async with self._gate.slot(host, crawl_delay):
+                deadline = loop.time() + settings.media_download_timeout_seconds
+                reply = await self._call("download", payload, deadline, host=host)
+        fetch_ms = round((time.perf_counter() - started) * 1000)
+        if isinstance(reply, _Failure):
+            return reply
+        return self._downloaded(reply, scratch, fetch_ms)
+
+    def _downloaded(
+        self, reply: Mapping[str, Any], scratch: Path, fetch_ms: int
+    ) -> _Media | _Failure:
+        """The child's answer of a download: a file in the item's scratch directory."""
+        raw_path = reply.get("path")
+        kind = reply.get("kind")
+        path = Path(raw_path) if isinstance(raw_path, str) else None
+        if (
+            path is None
+            or not path.resolve().is_relative_to(scratch.resolve())
+            or not path.is_file()
+        ):
+            _log.warning("asr_download_without_file")
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DOWNLOAD_FAILED_MESSAGE, True)
+        if kind not in get_args(MediaKind):
+            return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, _NOT_MEDIA_MESSAGE, False)
+        return _Media(path, kind, _number(reply.get("duration")), fetch_ms)
+
+    async def _call(
+        self,
+        function: str,
+        payload: dict[str, Any],
+        deadline: float,
+        *,
+        host: str | None = None,
+    ) -> dict[str, Any] | _Failure:
+        """A download call of a child with a proxy context of its own; a failure as the item's
+        error. ``host`` (a turn held at it) gets the answer's status at the gate."""
+        settings = self._settings
+        context = self._egress.open_context(
+            max_bytes=settings.media_max_bytes + settings.media_extract_max_bytes
+        )
+        try:
+            loop = asyncio.get_running_loop()
+            deadline = max(deadline, loop.time() + _MIN_CALL_SECONDS)
+            call = {
+                **payload,
+                "proxy": _proxy_url(self._egress.url, context),
+                "timeout": max(deadline - loop.time(), _MIN_CALL_SECONDS),
+            }
+            try:
+                reply = await self._children.run(function, call, deadline)
+            except ConversionTimeout:
+                return _Failure(ErrorCode.TIMEOUT, _DOWNLOAD_TIMEOUT_MESSAGE, True)
+            except ConversionError as error:
+                failure = self._download_failure(error, context)
+                if host is not None:
+                    await self._record(host, error, failure)
+                return failure
+            except ConversionCrashed:
+                _log.warning("asr_child_crashed", function=function)
+                return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _CRASHED_MESSAGE, True)
+            except ConversionOutOfMemory:
+                _log.warning("asr_child_out_of_memory", function=function)
+                return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _OUT_OF_MEMORY_MESSAGE, False)
+            if context.capped:
+                return self._too_large()
+            if host is not None and function == "download":
+                await self._gate.record(host, status=200, retry_after=None)
+            return reply if isinstance(reply, dict) else {}
+        finally:
+            context.close()
+
+    def _download_failure(self, error: ConversionError, context: ProxyContext) -> _Failure:
+        name = error.type_name
+        # The type only: the message may quote the URL or the video id.
+        _log.info("asr_download_failed", child_error=name)
+        if name not in _KEEP_OVER_REFUSAL and name != "HttpStatus":
+            if context.capped:
+                return self._too_large()
+            if context.refused:
+                refused = _refusal(context.refused[0][1])
+                if refused is not None:
+                    return refused
+        if name == "TooLarge":
+            return self._too_large()
+        if name in ("NotMedia", "IsLive"):
+            message = _LIVE_MESSAGE if name == "IsLive" else _NOT_MEDIA_MESSAGE
+            return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, message, False)
+        if name == "MediaTooLong":
+            return self._too_long(None)
+        if name == "HttpStatus" and error.message.strip().isdecimal():
+            status = int(error.message.strip())
+            retryable = status in _RETRYABLE_STATUSES or status >= 500
+            message = f"The media's site answered with HTTP status {status}."
+            if retryable:
+                message += " Try again later."
+            return _Failure(ErrorCode.TARGET_HTTP_ERROR, message, retryable, upstream_status=status)
+        return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DOWNLOAD_FAILED_MESSAGE, True)
+
+    async def _record(self, host: str, error: ConversionError, failure: _Failure) -> None:
+        """A failed download's answer at the gate: its status, a host failure, or a 429 that
+        yt-dlp reported of the platform."""
+        if failure.upstream_status is not None:
+            await self._gate.record(host, status=failure.upstream_status, retry_after=None)
+        elif failure.code in (ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR):
+            await self._gate.record(host, status=None, retry_after=None)
+        elif error.type_name == "DownloadError" and "HTTP Error 429" in error.message:
+            await self._gate.record(host, status=429, retry_after=None)
+
+    async def _transcribe(self, meta: MediaInputMeta, media: _Media) -> Transcription | _Failure:
+        settings = self._settings
+        payload = {
+            "path": str(media.path),
+            "model_path": str(settings.asr_models_path / settings.asr_model),
+            "compute_type": settings.asr_compute_type,
+            "threads": settings.asr_threads,
+            "language": _primary_language(meta.languages),
+            "max_duration": settings.media_max_duration_seconds,
+        }
+        # A budget of its own: the media waited in the queue and downloaded first.
+        deadline = asyncio.get_running_loop().time() + settings.asr_timeout_seconds
+        started = time.perf_counter()
+        try:
+            reply = await self._children.run("transcribe", payload, deadline)
+        except ConversionTimeout:
+            # Not retryable: the child had all of ASR_TIMEOUT_SECONDS.
+            return _Failure(ErrorCode.TIMEOUT, _TRANSCRIBE_TIMEOUT_MESSAGE, False)
+        except ConversionCrashed:
+            _log.warning("asr_child_crashed", function="transcribe")
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _CRASHED_MESSAGE, True)
+        except ConversionOutOfMemory:
+            _log.warning("asr_child_out_of_memory", function="transcribe")
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _OUT_OF_MEMORY_MESSAGE, False)
+        except ConversionError as error:
+            return self._transcription_failure(error)
+        finally:
+            seconds = time.perf_counter() - started
+            self._metrics.seconds.labels(backend=BACKEND).observe(seconds)
+        try:
+            transcription = _transcription(reply, settings.asr_model)
+        except (KeyError, TypeError, ValueError):
+            _log.warning("asr_reply_unreadable")
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _FAILED_MESSAGE, False)
+        return Transcription(
+            segments=transcription.segments,
+            language=transcription.language,
+            duration=transcription.duration,
+            model=transcription.model,
+            kind=media.kind,
+            fetch_ms=media.fetch_ms,
+            convert_ms=round(seconds * 1000),
+        )
+
+    def _transcription_failure(self, error: ConversionError) -> _Failure:
+        name = error.type_name
+        # The type only: the message may quote a path.
+        _log.info("asr_transcription_failed", child_error=name)
+        if name == "ModelsMissing":
+            _log.error(
+                "asr_models_missing",
+                models_path=str(self._settings.asr_models_path),
+                model=self._settings.asr_model,
+            )
+            return _Failure(ErrorCode.INTERNAL_ERROR, _MODELS_MISSING_MESSAGE, True)
+        if name == "MediaTooLong":
+            return self._too_long(None)
+        if name == "DecodeFailed":
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DECODE_MESSAGE, False)
+        return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _FAILED_MESSAGE, False)
+
+    def _too_long(self, duration: float | None) -> _Failure:
+        limit = self._settings.media_max_duration_seconds
+        length = f"is {round(duration)} s long, " if duration is not None else "is "
+        message = (
+            f"The media {length}longer than the {limit} s that are transcribed "
+            "(MEDIA_MAX_DURATION_SECONDS)."
+        )
+        return _Failure(ErrorCode.MEDIA_TOO_LONG, message, False)
+
+    def _too_large(self) -> _Failure:
+        limit = self._settings.media_max_bytes
+        return _Failure(
+            ErrorCode.TOO_LARGE,
+            f"The media is larger than the {limit} bytes that are downloaded (MEDIA_MAX_BYTES).",
+            False,
+        )
+
+
+def _refusal(reason: str) -> _Failure | None:
+    """A request the proxy refused, as the item's error; None for a reason that says nothing
+    about the target (a malformed request, the proxy's own authentication)."""
+    if reason == "blocked_address":
+        return _Failure(ErrorCode.BLOCKED_URL, _BLOCKED_ADDRESS_MESSAGE, False)
+    if reason == "bytes_cap":
+        return _Failure(
+            ErrorCode.TOO_LARGE, "The download needed more bytes than it may use.", False
+        )
+    if reason == "dns_error":
+        return _Failure(ErrorCode.DNS_ERROR, _DNS_MESSAGE, True)
+    if reason == "connect_error":
+        return _Failure(ErrorCode.CONNECTION_ERROR, _CONNECT_MESSAGE, True)
+    return None
+
+
+def _transcription(reply: Any, model: str) -> Transcription:
+    """The child's ``transcribe`` reply; raises ``KeyError``, ``TypeError`` or ``ValueError``
+    when it is not the reply's shape."""
+    segments = [Cue(float(start), float(end), str(text)) for start, end, text in reply["segments"]]
+    language = reply.get("language")
+    return Transcription(
+        segments=segments,
+        language=language if isinstance(language, str) else "",
+        duration=float(reply.get("duration") or 0.0),
+        model=model,
+    )
+
+
+def _primary_language(languages: Sequence[str]) -> str | None:
+    """The first requested language's primary subtag (``de`` of ``de-AT``), None without."""
+    if not languages:
+        return None
+    return languages[0].split("-")[0].lower() or None
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _proxy_url(url: str, context: ProxyContext) -> str:
+    scheme, _, address = url.partition("://")
+    return f"{scheme}://{context.username}:{context.password}@{address}"
+
+
+# --- the scratch directory -----------------------------------------------------------------------
+
+
+def _new_scratch(settings: Settings) -> Path:
+    """A directory of its own for one item under ``ASR_SCRATCH_PATH`` (mode 0700)."""
+    root = settings.asr_scratch_path
+    root.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=_SCRATCH_PREFIX, dir=root))
+
+
+def clean_scratch(settings: Settings) -> None:
+    """Remove the items' directories a killed process left under ``ASR_SCRATCH_PATH``; other
+    entries stay."""
+    root = settings.asr_scratch_path
+    if not root.is_dir():
+        return
+    removed = 0
+    for entry in root.iterdir():
+        if not entry.name.startswith(_SCRATCH_PREFIX):
+            continue
+        if entry.is_dir() and not entry.is_symlink():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+        removed += 1
+    if removed:
+        _log.info("asr_scratch_cleaned", entries=removed)
+
+
+# --- start-up: the models, FFmpeg's licence and the self-check -----------------------------------
+
+
+class SelfCheckFailed(Exception):  # noqa: N818 - a failed check, named as such
+    """FFmpeg is not an LGPL build, or the built-in clip did not transcribe to its words."""
+
+
+class AsrStartFailed(Exception):  # noqa: N818 - a failed start, named as such
+    """The ASR children did not start (faster-whisper or PyAV do not load)."""
+
+
+def ffmpeg_gpl_findings(libraries: Mapping[str, Mapping[str, str]]) -> list[str]:
+    """What makes PyAV's FFmpeg other than an LGPL build (decision D5), one finding per
+    problem, each starting with the library's name; empty for an LGPL build. ``libraries`` is
+    PyAV's ``av._core.library_meta``: per library its ``configuration`` (the configure
+    switches) and ``license``. A library that is not reported is a finding too."""
+    findings: list[str] = []
+    for name in _FFMPEG_LIBRARIES:
+        meta = libraries.get(name)
+        if meta is None:
+            findings.append(f"{name}: not reported")
+            continue
+        switches = set(str(meta.get("configuration") or "").split())
+        findings.extend(f"{name}: {switch}" for switch in sorted(switches & _FFMPEG_GPL_SWITCHES))
+        license = str(meta.get("license") or "").strip()
+        if not license.startswith("LGPL"):
+            findings.append(f"{name}: license {license or 'unknown'}")
+    return findings
+
+
+def _check_clip() -> Path:
+    return Path(str(resources.files("text_extraction.media").joinpath(_CHECK_CLIP)))
+
+
+async def self_check(pool: AsrChildren, settings: Settings, *, children: int) -> None:
+    """In each of ``children`` children (they run one call at a time, so as many calls at once
+    reach each child once): FFmpeg's licence, then the built-in clip, which loads the model.
+    Raises ``SelfCheckFailed`` when a call fails, FFmpeg is not an LGPL build or the
+    transcript lacks the expected words."""
+    payload = {
+        "path": str(_check_clip()),
+        "model_path": str(settings.asr_models_path / settings.asr_model),
+        "compute_type": settings.asr_compute_type,
+        "threads": settings.asr_threads,
+        "language": _CHECK_LANGUAGE,
+        "max_duration": settings.media_max_duration_seconds,
+    }
+    deadline = asyncio.get_running_loop().time() + settings.asr_timeout_seconds
+
+    async def check_one() -> None:
+        libraries = await pool.run("ffmpeg", {}, deadline)
+        findings = ffmpeg_gpl_findings(libraries.get("libraries") or {})
+        if findings:
+            _log.error(
+                "asr_self_check_failed",
+                reason="ffmpeg_not_lgpl",
+                findings=findings,
+                pyav=libraries.get("version"),
+                models_path=str(settings.asr_models_path),
+            )
+            raise SelfCheckFailed("PyAV's FFmpeg is not an LGPL build")
+        reply = await pool.run("transcribe", payload, deadline)
+        text = " ".join(str(segment[2]) for segment in reply["segments"]).casefold()
+        if not all(word in text for word in _CHECK_WORDS):
+            _log.error(
+                "asr_self_check_failed",
+                reason="text_not_found",
+                models_path=str(settings.asr_models_path),
+            )
+            raise SelfCheckFailed("the built-in clip's words were not found")
+
+    outcomes = await asyncio.gather(*(check_one() for _ in range(children)), return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, SelfCheckFailed):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            if not isinstance(outcome, Exception):
+                raise outcome
+            # The type only: a library's message may quote a path.
+            _log.error(
+                "asr_self_check_failed",
+                error=type(outcome).__name__,
+                child_error=outcome.type_name if isinstance(outcome, ConversionError) else None,
+                models_path=str(settings.asr_models_path),
+            )
+            raise SelfCheckFailed("the built-in clip did not transcribe") from None
+    _log.info("asr_self_check_passed", children=children)
+
+
+async def start_children(pool: StartableChildren, settings: Settings, *, children: int) -> None:
+    """Start ``pool``'s children, then the self-check in each. Children that do not start are
+    logged with the models' path (never more than the error's type) and raise
+    ``AsrStartFailed``; a failed check raises ``SelfCheckFailed``."""
+    try:
+        await pool.start()
+    except Exception as error:
+        _log.error(
+            "asr_start_failed",
+            models_path=str(settings.asr_models_path),
+            error_type=type(error).__name__,
+        )
+        raise AsrStartFailed("the ASR children did not start") from None
+    await self_check(pool, settings, children=children)
+
+
+def _manifest(settings: Settings) -> model_store.Manifest:
+    return model_store.load_manifest("asr").only(settings.asr_model)
+
+
+def models_missing(settings: Settings) -> bool:
+    """Whether a file of ``ASR_MODEL`` is missing on the volume; logs the volume's path and the
+    model when one is."""
+    root = settings.asr_models_path
+    missing = model_store.missing_models(root, _manifest(settings))
+    if missing:
+        _log.error(
+            "asr_models_missing",
+            models_path=str(root),
+            model=settings.asr_model,
+            missing=len(missing),
+        )
+    return bool(missing)
+
+
+# --- the process ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AsrWorkerParts:
+    """What one ASR worker process runs on: the worker, its memory guard, its children and
+    their proxy, and the fetcher and conversion pool of its pipeline to close at the end."""
+
+    worker: Worker
+    guard: MemoryGuard
+    asr_pool: DocumentPool
+    proxy: EgressProxy
+    fetcher: Fetcher
+    conversion_pool: ConversionPool
+    settings: Settings
+
+    async def start(self) -> None:
+        """Clean the scratch directory, start the proxy and the children, then the self-check
+        in each (before ``/ready``)."""
+        clean_scratch(self.settings)
+        await self.proxy.start()
+        await start_children(self.asr_pool, self.settings, children=self.settings.asr_concurrency)
+
+
+def build_asr_worker(
+    settings: Settings, valkey: Redis, registry: CollectorRegistry
+) -> AsrWorkerParts:
+    """The ASR worker of a process, nothing started yet. Its result cache skips writes while
+    the memory guard reports Valkey as nearly full, as in the extract worker."""
+    guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
+    gate, fetcher = create_outbound(settings, valkey)
+    conversion_pool = ConversionPool(settings.convert_concurrency)
+    pipeline = create_pipeline(
+        settings, valkey, fetcher, registry, conversion_pool, gate=gate, memory_guard=guard
+    )
+    asr_pool = create_asr_pool(settings)
+    proxy = create_asr_proxy(settings, registry)
+    store = JobStore(valkey, settings)
+    worker = Worker(
+        settings,
+        valkey,
+        AsrRunner(pipeline, store, settings, asr_pool, proxy, gate, registry),
+        store,
+        asr_queue(valkey, settings),
+        registry,
+        concurrency=settings.asr_concurrency,
+    )
+    return AsrWorkerParts(
+        worker=worker,
+        guard=guard,
+        asr_pool=asr_pool,
+        proxy=proxy,
+        fetcher=fetcher,
+        conversion_pool=conversion_pool,
+        settings=settings,
+    )
+
+
+async def serve(parts: AsrWorkerParts, internal: _Server, readiness: Readiness) -> None:
+    """Start the children and check them, run the worker until a signal, then let the items in
+    flight finish for ``GRACEFUL_SECONDS``. The caller kills the children and closes the rest."""
+    await _serve(
+        parts.worker,
+        internal,
+        readiness,
+        graceful_seconds=GRACEFUL_SECONDS,
+        guard=parts.guard,
+        startup=parts.start,
+    )
+
+
+async def _run(settings: Settings) -> None:
+    valkey = create_valkey(settings.valkey_url)
+    registry = REGISTRY
+    parts = build_asr_worker(settings, valkey, registry)
+    readiness = Readiness()
+    internal = _server(
+        create_internal_app(settings, valkey, registry, readiness=readiness),
+        settings.internal_host,
+        settings.internal_port,
+        GRACEFUL_SECONDS,
+    )
+    try:
+        await serve(parts, internal, readiness)
+    finally:
+        await parts.asr_pool.shutdown()  # after the loops: their items are given back
+        await parts.proxy.stop()
+        clean_scratch(settings)
+        await parts.fetcher.aclose()
+        parts.conversion_pool.shutdown()
+        await valkey.aclose()
+        _log.info("valkey_closed")
+
+
+async def _check(settings: Settings) -> int:
+    """FFmpeg's licence and the built-in clip in one child: 0 when both pass, else 1."""
+    clean_scratch(settings)
+    pool = create_asr_pool(settings.model_copy(update={"asr_concurrency": 1}))
+    try:
+        await start_children(pool, settings, children=1)
+    except (SelfCheckFailed, AsrStartFailed):
+        return 1  # logged, with the models' path
+    finally:
+        await pool.shutdown()
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="text-extraction-asr-worker",
+        description="Run the ASR worker (pool asr) of text-extraction.",
+    )
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument(
+        "--download-models",
+        action="store_true",
+        help="Download the files of ASR_MODEL into ASR_MODELS_PATH, then exit (0: in place).",
+    )
+    actions.add_argument(
+        "--check",
+        action="store_true",
+        help="Check FFmpeg's licence and transcribe the built-in clip once, then exit "
+        "(0: both passed).",
+    )
+    args = parser.parse_args(argv)
+    settings = configured_settings()
+    if args.download_models:
+        sys.exit(_download(settings))
+    if models_missing(settings):
+        sys.exit(1)
+    if args.check:
+        sys.exit(asyncio.run(_check(settings)))
+    try:
+        asyncio.run(_run(settings))
+    except (SelfCheckFailed, AsrStartFailed):
+        sys.exit(1)  # logged, with the models' path
+
+
+def _download(settings: Settings) -> int:
+    try:
+        model_store.download_models(settings.asr_models_path, _manifest(settings))
+    except (model_store.ModelDownloadFailed, OSError) as error:
+        _log.error(
+            "asr_models_download_failed",
+            models_path=str(settings.asr_models_path),
+            model=settings.asr_model,
+            reason=str(error) if isinstance(error, model_store.ModelDownloadFailed) else None,
+            error_type=type(error).__name__,
+        )
+        return 1
+    return 0

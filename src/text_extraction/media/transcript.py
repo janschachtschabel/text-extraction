@@ -12,6 +12,10 @@ brackets, ``<``, ``&`` and backslashes are escaped, and so is a marker at the st
 paragraph (``#``, ``-``, ``+``, ``>``, ``|``, ``~`` or ``12.``). The formats then come from
 ``documents.formats.from_markdown`` like those of a document: ``html`` escapes raw HTML,
 ``text`` has no heading markers.
+
+``Transcription`` is what speech recognition made of a media file (the ASR worker's children):
+its segments, the language heard, the duration and the model, for
+``Pipeline.transcribed_result``.
 """
 
 import re
@@ -22,8 +26,9 @@ from typing import Final
 from text_extraction.convert import OutputFormat
 from text_extraction.documents.formats import from_markdown
 from text_extraction.media.captions import Cue
+from text_extraction.media.types import MediaKind
 
-__all__ = ["Chapter", "build_transcript"]
+__all__ = ["Chapter", "Transcription", "build_transcript"]
 
 PAUSE_SECONDS: Final = 2.0
 MAX_SENTENCES: Final = 6
@@ -40,6 +45,22 @@ _BLOCK_MARKER: Final = re.compile(r"^(?:([#>|+~-])|(\d+)([.)]))")
 class Chapter:
     start: float
     title: str
+
+
+@dataclass(frozen=True, slots=True)
+class Transcription:
+    """Speech recognition of one media file: ``segments`` (start, end and text, in seconds),
+    the ``language`` heard (ISO 639-1), the audio's ``duration`` in seconds and the ``model``'s
+    name. ``kind`` is what the transcribed bytes were (for the result's ``content_type``),
+    ``fetch_ms`` and ``convert_ms`` the time of the download and of the transcription."""
+
+    segments: list[Cue]
+    language: str
+    duration: float
+    model: str
+    kind: MediaKind | None = None
+    fetch_ms: int = 0
+    convert_ms: int = 0
 
 
 def build_transcript(

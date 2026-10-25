@@ -562,8 +562,9 @@ process. HTML served without a `Content-Type` does not escalate (step 4).
 
 Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `routing.py`,
 `markitdown_convert.py`, `docling_convert.py`, `images.py`, `meta.py`, `formats.py`,
-`model_store.py`, `models.toml`), `pipeline_documents.py`, `file_api.py`, `pool_dispatch.py`,
-`docling_dispatch.py`, `docling_worker.py`. Settings are in [configuration.md](configuration.md)
+`models.toml`), `model_store.py` (shared with the ASR worker since package 6),
+`pipeline_documents.py`, `file_api.py`, `pool_dispatch.py`, `docling_dispatch.py`,
+`docling_worker.py`. Settings are in [configuration.md](configuration.md)
 ("Documents and OCR").
 
 **Decisions of Jan (2026-10-25: the recommended options).**
@@ -769,7 +770,7 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   ends the process with exit code 1 and a log line naming `DOCLING_MODELS_PATH`. On SIGTERM it
   stops claiming, gives the items in flight 30 s, then kills its children; their leases expire and
   the items run again.
-- **F15, models on the PVC** (`documents/model_store.py`, `documents/models.toml`).
+- **F15, models on the PVC** (`model_store.py`, `documents/models.toml`).
   `--download-models` fills `DOCLING_MODELS_PATH` from our own manifest instead of Docling's
   downloader, which pins its layout model to a branch (`main`), not a commit: every file has a
   URL at a fixed commit (https only, redirects too), its byte size and its SHA-256: Docling's

@@ -22,3 +22,15 @@ image; see src/text_extraction/documents/models.toml):
 - Docling's TableFormer model, fast mode (docling-project/docling-models, revision v2.3.0 at
   commit fc0f2d45e2218ea24bce5045f58a389aed16dc23), Community Data License Agreement -
   Permissive, Version 2.0 (CDLA-Permissive-2.0).
+
+The ASR worker downloads the files of one Whisper model onto its models volume (never part of an
+image; see src/text_extraction/media/models.toml). Both are CTranslate2 conversions of OpenAI's
+Whisper models (openai/whisper, MIT License, Copyright (c) 2022 OpenAI):
+- faster-whisper "small" (Systran/faster-whisper-small, revision main at commit
+  536b0662742c02347bc0e980a01041f333bce120), MIT License.
+- faster-whisper "large-v3-turbo" (mobiuslabsgmbh/faster-whisper-large-v3-turbo, revision main
+  at commit 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf), MIT License.
+
+src/text_extraction/media/asr_check.ogg and tests/media/corpus/speech_de.ogg are read from
+Franz Kafka's "Die Verwandlung" (LibriVox recording, public domain); see
+tests/media/corpus/SOURCES.md.

@@ -1,18 +1,28 @@
-"""The models of the Docling worker on their volume (ruling F15): download, verify, marker.
+"""The models of a worker on its own volume (rulings F15, M13): download, verify, marker.
 
-``models.toml`` (next to this module) lists every file with a URL at a fixed commit, its byte
-size and its SHA-256. ``download_models`` fills ``DOCLING_MODELS_PATH`` from it, in the init
-container that mounts the volume writable (``text-extraction-docling-worker
---download-models``):
+A manifest (``models.toml``) lists every file with a URL at a fixed commit, its byte size and its
+SHA-256. ``load_manifest(name)`` reads the built-in one of a worker (``MANIFESTS``): ``docling``
+(``documents/models.toml``: Tesseract's and Docling's models, under ``DOCLING_MODELS_PATH``) or
+``asr`` (``media/models.toml``: the Whisper models, one top-level directory per model, under
+``ASR_MODELS_PATH``). ``Manifest.only(top)`` keeps the files under one top-level directory, with a
+marker of their own: the ASR worker downloads only the configured ``ASR_MODEL``, and a new pin of
+another model does not make its volume download again.
+
+``download_models`` fills a volume from a manifest, in the init container that mounts the volume
+writable (``text-extraction-docling-worker --download-models``,
+``text-extraction-asr-worker --download-models``):
 
 1. With the marker ``.complete-<manifest hash>`` present it does nothing: the volume holds this
-   manifest's files already. Another manifest (a new pin) has another marker.
+   manifest's files already. Another manifest (a new pin) has another marker. The marker of the
+   whole Docling manifest is the hash of its file's bytes (as in package 5); the marker of a part
+   (``only``) is the hash of its entries.
 2. Otherwise every file is downloaded into a staging directory under the volume
    (``.download-*``), checked against its size and SHA-256 while it is written. One file that
    does not match fails the run: nothing is moved, no marker is written, the staging directory
    is removed.
-3. The old markers are removed, then each top-level directory (``docling/``, ``tessdata/``) is
-   renamed into place, replacing the old one; then the marker is written. A run cut in between
+3. The old markers are removed, then each top-level directory of the manifest (``docling/``,
+   ``tessdata/``; ``large-v3-turbo/``) is renamed into place, replacing the old one; then the
+   marker is written. Directories the manifest does not name stay as they are. A run cut in between
    leaves no marker, so the next run downloads again.
 
 Several init containers may share one ReadWriteMany volume (replicas started at once). One that
@@ -28,13 +38,14 @@ CDN); the size and the hash decide what is kept. Each file has a total deadline 
 its size (``file_deadline_seconds``: 120 s plus 256 KiB/s), on top of the 60 s for each read, so
 a mirror that trickles cannot hold the init container.
 
-``missing_models`` is the worker's check before ``/ready``: the files of the manifest that are
+``missing_models`` is a worker's check before ``/ready``: the files of the manifest that are
 absent or have another size (the hash of the files is not read at every start).
 ``require_models`` repeats that check in the Docling child before it builds a converter, so a
 file that went missing later is ``ModelsMissing`` (Docling itself raises a plain
 ``RuntimeError`` for a missing ``config.json``, which would read as an unreadable document).
 
-Logs name the files' paths in the manifest and the volume's path, never a URL.
+Logs name the files' paths in the manifest and the volume's path, never a URL; their events start
+with the manifest's name (``docling_models_present``, ``asr_model_downloaded``, ...).
 """
 
 import hashlib
@@ -63,11 +74,13 @@ _TIMEOUT: Final = httpx.Timeout(60.0, connect=15.0)
 # The total time of one file: a fixed part, then the slowest rate accepted.
 _FILE_BASE_SECONDS: Final = 120.0
 _MIN_BYTES_PER_SECOND: Final = 256 * 1024
+# The built-in manifests by name: the package that holds each one's ``models.toml``.
+MANIFESTS: Final = {"docling": "text_extraction.documents", "asr": "text_extraction.media"}
 
 
 class ModelsMissing(Exception):  # noqa: N818 - a state of the volume, named as such
-    """A model file of the manifest is not on the models volume. The Docling worker maps this
-    type name to ``internal_error`` (retryable)."""
+    """A model file of the manifest is not on the models volume. The Docling and the ASR worker
+    map this type name to ``internal_error`` (retryable)."""
 
 
 class ModelDownloadFailed(Exception):  # noqa: N818 - a failed run, named as such
@@ -85,27 +98,42 @@ class ModelFile:
 @dataclass(frozen=True)
 class Manifest:
     files: tuple[ModelFile, ...]
-    digest: str  # SHA-256 of the manifest's bytes
+    digest: str  # SHA-256 of the manifest's bytes, or of a part's entries (``only``)
+    name: str  # the worker's (``MANIFESTS``): the start of its log events
 
     @property
     def marker(self) -> str:
         """The name of the file that says the volume holds this manifest's files."""
         return f"{_MARKER_PREFIX}{self.digest[:16]}"
 
+    def only(self, top: str) -> "Manifest":
+        """The files under the top-level directory ``top`` (one Whisper model), with a digest of
+        their entries: a change to another directory's files keeps their marker. Raises
+        ``ValueError`` when the manifest has no files there."""
+        files = tuple(file for file in self.files if PurePosixPath(file.path).parts[0] == top)
+        if not files:
+            raise ValueError(f"the {self.name} models manifest has no files under {top}/")
+        entries = "\n".join(f"{f.path} {f.url} {f.sha256} {f.size}" for f in files)
+        return Manifest(files, hashlib.sha256(entries.encode()).hexdigest(), self.name)
 
-def load_manifest(data: bytes | None = None, *, allow_http: bool = False) -> Manifest:
-    """The manifest from ``data`` (TOML), by default the built-in ``models.toml``. Raises
-    ``ValueError`` for an entry that is not a safe relative path, an https URL (http too with
+
+def load_manifest(name: str, data: bytes | None = None, *, allow_http: bool = False) -> Manifest:
+    """The manifest of the worker ``name`` (``docling`` or ``asr``, see ``MANIFESTS``) from
+    ``data`` (TOML), by default its built-in ``models.toml``. Raises ``ValueError`` for an
+    unknown name, and for an entry that is not a safe relative path, an https URL (http too with
     ``allow_http``, for tests against a local server), a SHA-256 in lower-case hex and a positive
     size."""
+    package = MANIFESTS.get(name)
+    if package is None:
+        raise ValueError(f"there is no models manifest named {name!r}")
     if data is None:
-        data = resources.files("text_extraction.documents").joinpath("models.toml").read_bytes()
+        data = resources.files(package).joinpath("models.toml").read_bytes()
     parsed = tomllib.loads(data.decode("utf-8"))
     schemes = ("https", "http") if allow_http else ("https",)
     files = tuple(_model_file(entry, schemes) for entry in parsed.get("files", []))
     if len({file.path for file in files}) != len(files):
         raise ValueError("the models manifest names a path twice")
-    return Manifest(files=files, digest=hashlib.sha256(data).hexdigest())
+    return Manifest(files=files, digest=hashlib.sha256(data).hexdigest(), name=name)
 
 
 def _model_file(entry: Mapping[str, Any], schemes: tuple[str, ...]) -> ModelFile:
@@ -147,10 +175,9 @@ def missing_models(root: Path, manifest: Manifest) -> list[str]:
     return sorted(missing)
 
 
-def require_models(root: Path, manifest: Manifest | None = None) -> None:
-    """Raise ``ModelsMissing`` unless every file of the manifest (by default the built-in one)
-    is under ``root`` with its size. The message counts the files; it names no path."""
-    manifest = manifest or load_manifest()
+def require_models(root: Path, manifest: Manifest) -> None:
+    """Raise ``ModelsMissing`` unless every file of ``manifest`` is under ``root`` with its size.
+    The message counts the files; it names no path."""
     missing = missing_models(root, manifest)
     if missing:
         raise ModelsMissing(
@@ -165,7 +192,7 @@ def file_deadline_seconds(size: int) -> float:
 
 def download_models(
     root: Path,
-    manifest: Manifest | None = None,
+    manifest: Manifest,
     *,
     transport: httpx.BaseTransport | None = None,
     clock: Callable[[], float] = time.monotonic,
@@ -174,32 +201,33 @@ def download_models(
     downloaded them, False when the marker said they are there. Raises
     ``ModelDownloadFailed``; ``root`` then has no marker and no new file. ``clock`` measures
     each file's deadline."""
-    manifest = manifest if manifest is not None else load_manifest()
     root.mkdir(parents=True, exist_ok=True)
     marker = root / manifest.marker
     if marker.is_file():
-        _log.info("docling_models_present", models_path=str(root))
+        _log.info(f"{manifest.name}_models_present", models_path=str(root))
         return False
     staging = Path(tempfile.mkdtemp(prefix=_STAGING_PREFIX, dir=root))
     try:
         with httpx.Client(follow_redirects=True, timeout=_TIMEOUT, transport=transport) as client:
             for file in manifest.files:
-                _download(client, file, staging / file.path, clock)
+                _download(client, file, staging / file.path, clock, manifest.name)
         if marker.is_file():  # another init container on the volume finished meanwhile
-            _log.info("docling_models_present", models_path=str(root))
+            _log.info(f"{manifest.name}_models_present", models_path=str(root))
             return False
         try:
             _swap(root, staging, manifest)
         except OSError as error:
             if marker.is_file():  # the other container's swap won the race
-                _log.info("docling_models_present", models_path=str(root))
+                _log.info(f"{manifest.name}_models_present", models_path=str(root))
                 return False
             raise ModelDownloadFailed(
                 f"moving the files into place: {type(error).__name__}"
             ) from None
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    _log.info("docling_models_downloaded", models_path=str(root), files=len(manifest.files))
+    _log.info(
+        f"{manifest.name}_models_downloaded", models_path=str(root), files=len(manifest.files)
+    )
     return True
 
 
@@ -216,7 +244,7 @@ def _swap(root: Path, staging: Path, manifest: Manifest) -> None:
 
 
 def _download(
-    client: httpx.Client, file: ModelFile, target: Path, clock: Callable[[], float]
+    client: httpx.Client, file: ModelFile, target: Path, clock: Callable[[], float], name: str
 ) -> None:
     """Stream one file to ``target``, checking its size, SHA-256 and deadline on the way."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -246,7 +274,7 @@ def _download(
         raise ModelDownloadFailed(f"{file.path}: {size} bytes instead of {file.size}")
     if digest.hexdigest() != file.sha256:
         raise ModelDownloadFailed(f"{file.path}: the SHA-256 does not match the manifest")
-    _log.info("docling_model_downloaded", path=file.path, size=size)
+    _log.info(f"{name}_model_downloaded", path=file.path, size=size)
 
 
 def _replace(source: Path, target: Path, staging: Path) -> None:
