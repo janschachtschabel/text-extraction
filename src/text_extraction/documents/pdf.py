@@ -57,18 +57,31 @@ def _open(body: bytes) -> pdfium.PdfDocument | None:
 
     pdfium reports a missing page tree as a password error or as a failure without a code, so a
     failure is a password problem only where the file carries an ``/Encrypt`` entry, whose name
-    may be written with ``#xx`` escapes."""
+    may be written with ``#xx`` escapes.
+
+    pdfium keeps its last error until a failure sets another one, and a missing page tree sets
+    none, so a child that opened a broken file before would read that file's error. A load of a
+    path that does not exist sets ``FPDF_ERR_FILE`` first, which a load from memory never sets:
+    that code afterwards means "no code"."""
+    _reset_last_error()
     try:
         return pdfium.PdfDocument(body)
     except pdfium.PdfiumError as error:
         code = error.err_code
         if code == pdfium_raw.FPDF_ERR_PASSWORD and _ENCRYPT_NAME.search(body):
             raise PasswordProtected from None
-        if code in (0, pdfium_raw.FPDF_ERR_PASSWORD) and b"%PDF-" in body[:1024]:
+        no_code = (0, pdfium_raw.FPDF_ERR_FILE, pdfium_raw.FPDF_ERR_PASSWORD)
+        if code in no_code and b"%PDF-" in body[:1024]:
             return None
         raise PdfUnreadable from None
     except (ValueError, OverflowError, MemoryError):
         raise PdfUnreadable from None
+
+
+def _reset_last_error() -> None:
+    document = pdfium_raw.FPDF_LoadDocument(b"/nonexistent/text-extraction-reset.pdf", None)
+    if document:  # cannot happen; never leak a handle if it does
+        pdfium_raw.FPDF_CloseDocument(document)
 
 
 def _characters(pdf: pdfium.PdfDocument, index: int) -> int:

@@ -101,6 +101,16 @@ def test_zero_pages() -> None:
     assert truncate_pdf(corpus("empty.pdf"), 5) == corpus("empty.pdf")
 
 
+def test_zero_pages_after_other_failures() -> None:
+    # pdfium keeps its last error until a failure sets another, and refusing a PDF without
+    # pages sets none: a long-lived child must not read an earlier document's error.
+    for earlier in (b"%PDF-1.7\ngarbage that is no document", corpus("encrypted.pdf")):
+        with pytest.raises((PdfUnreadable, PasswordProtected)):
+            probe_pdf(earlier)
+        assert probe_pdf(corpus("empty.pdf")).pages == 0
+        assert truncate_pdf(corpus("empty.pdf"), 1) == corpus("empty.pdf")
+
+
 @pytest.mark.parametrize(
     "name",
     [b"/Encr#79pt", b"/#45ncrypt", b"/E#6Ecrypt", b"/E#6ec#72ypt", b"/#45#6e#63#72#79#70#74"],
