@@ -49,6 +49,10 @@
 - **D4, players embedded in a page** (a YouTube iframe on a teaching page, a podcast page's MP3).
   - (a, recommended, **chosen**) Listed in `data.media.embeds` (platform URL or file URL, kind), so the caller can extract them with their own request; only `<track>` text is added inline.
   - (b) Also fetch the subtitles of the first embedded platform player and add them to the page (one more child call per page with an embed, about 1-3 s).
+- **D6, length limits for transcription** (asked 2026-10-25 after Task 9: 3 h media against a 1 h ASR timeout at RTF 0.88).
+  - (a, recommended, **chosen**) `MEDIA_MAX_DURATION_SECONDS` 7200 (2 h), `ASR_TIMEOUT_SECONDS` 10800 (3 h), `ASR_INPUT_TTL_SECONDS` 28800 (8 h, longer than the 2 × timeout + 10 s lease). All stay adjustable via env and Helm.
+  - (b) 1 h media, 90 min timeout.
+  - (c) 3 h media, `small` for anything over 1 h, 3 h timeout.
 
 ## Rulings in this plan
 
