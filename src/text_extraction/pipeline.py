@@ -28,6 +28,10 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 8. Quality verdict, language, metadata, links, fingerprint and cache. A document's result is
    final: it never goes to the browser, and a cached one is served even with ``ocr_unavailable``.
 
+An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on the bytes in
+hand: no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor
+stored (ruling F17).
+
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
 compliance mode (403) and a Valkey outage of the outbound gate (503) leave as ``ServiceError``.
@@ -91,15 +95,23 @@ from text_extraction.compliance import (
     with_redirect_findings,
 )
 from text_extraction.conversion_pool import ConversionPool
-from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
+from text_extraction.convert import (
+    Link,
+    OutputFormat,
+    convert_html,
+    convert_plain,
+    decode_html,
+    page_links,
+)
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.sniff import media_type, sniff
-from text_extraction.documents.types import DocumentKind
+from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import better, needs_browser, unblock_for
 from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
-from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
+from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators, split_content_type
+from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
 from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
@@ -112,6 +124,10 @@ from text_extraction.outbound import (
     parse_retry_after,
 )
 from text_extraction.pipeline_documents import (
+    DocumentInput,
+    DocumentInputMeta,
+    DocumentRequest,
+    DocumentRun,
     DocumentSteps,
     OcrNeeded,
     create_document_pool,
@@ -208,13 +224,14 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
         metrics = _Metrics(
             total=Counter(
                 "text_extraction_extract_total",
-                "Extractions by requested mode and outcome (success, partial or the error code).",
+                "Extractions by requested mode (upload for files) and outcome (success, partial "
+                "or the error code).",
                 ["mode", "outcome"],
                 registry=registry,
             ),
             duration=Histogram(
                 "text_extraction_extract_duration_seconds",
-                "Duration of extractions by requested mode.",
+                "Duration of extractions by requested mode (upload for files).",
                 ["mode"],
                 buckets=_DURATION_BUCKETS,
                 registry=registry,
@@ -298,6 +315,76 @@ class _Run:
             "links": None,
             "fingerprint": None,
             "cache": self.cache,
+            "warnings": list(self.warnings),
+        }
+        values.update(fields)
+        return ExtractResult(**values)
+
+    def failed(
+        self, code: ErrorCode, message: str, *, retryable: bool = False
+    ) -> Envelope[ExtractResult]:
+        return Envelope(
+            status="failed",
+            data=self.result(),
+            error=ErrorInfo(code=code, message=message, retryable=retryable),
+        )
+
+
+@dataclass(frozen=True)
+class _UploadOptions:
+    """The options of an upload as the conversion steps read them (a ``DocumentRequest``)."""
+
+    format: OutputFormat
+    metadata: bool
+    ocr: OcrOption
+    links: bool = False  # the form has no `links`: without a URL, links stay relative
+
+
+@dataclass
+class _UploadRun:
+    """What one upload has learned so far (``extract_upload``); the conversion steps use it as
+    their ``DocumentRun``. ``file_name`` goes into ``document.file_name`` and nowhere else."""
+
+    req: _UploadOptions
+    report: ComplianceReport  # decision "skipped": an upload is not checked
+    file_name: str | None
+    started: float = field(default_factory=time.perf_counter)
+    host: str | None = None  # an upload has none
+    kind: str | None = None  # what the bytes are, for the log line
+    content_type: str | None = None
+    convert_ms: int = 0
+    warnings: list[str] = field(default_factory=list)
+    ocr_handoff: OcrHandoff | None = None
+    ocr_needed: OcrNeeded | None = None  # for the handoff, once the deadline's steps are done
+
+    def timings(self) -> Timings:
+        return Timings(
+            total_ms=_ms(self.started), compliance_ms=0, fetch_ms=0, convert_ms=self.convert_ms
+        )
+
+    def result(self, **fields: Any) -> ExtractResult:
+        document = fields.get("document")
+        if isinstance(document, DocumentInfo):
+            fields["document"] = document.model_copy(update={"file_name": self.file_name})
+        values: dict[str, Any] = {
+            "url": None,
+            "final_url": None,
+            "upstream_status": None,
+            "content_type": self.content_type,
+            "mode_used": "upload",
+            "attempts": 0,
+            "language": None,
+            "word_count": 0,
+            "title": None,
+            "format": self.req.format,
+            "content": None,
+            "quality": None,
+            "timings": self.timings(),
+            "compliance": self.report,
+            "metadata": None,
+            "links": None,
+            "fingerprint": None,
+            "cache": "bypass",
             "warnings": list(self.warnings),
         }
         values.update(fields)
@@ -483,6 +570,49 @@ class Pipeline:
             raise
         finally:
             self._observe(run, outcome)
+
+    async def extract_upload(
+        self,
+        body: bytes,
+        name: str | None,
+        form: FileForm,
+        principal: Principal,
+        *,
+        content_type: str | None = None,
+        ocr_handoff: OcrHandoff | None = None,
+    ) -> Envelope[ExtractResult]:
+        """Extract an uploaded file (ruling F17). ``name`` is its sanitised file name, reported
+        as ``document.file_name`` and never logged; ``content_type`` is the part's declared
+        type, which decides only where the bytes do not (F1).
+
+        Steps 7 and 8 of ``run`` on the bytes in hand, under the same deadline: HTML and plain
+        text convert as pages, without a base URL (relative links stay as they are), documents
+        through ``DocumentSteps``. No compliance check (``decision: skipped``), no result cache
+        (``cache: bypass``); the fingerprint is computed, but neither compared nor stored. A
+        document that needs OCR goes to ``ocr_handoff`` after the deadline, as in ``run``;
+        without one its text layer answers with ``ocr_unavailable``.
+        """
+        mode = resolve_mode(None, principal, self._settings)
+        run = _UploadRun(
+            req=_UploadOptions(format=form.format, metadata=form.metadata, ocr=form.ocr),
+            report=ComplianceReport(mode=mode, decision="skipped"),
+            file_name=name,
+            ocr_handoff=ocr_handoff,
+        )
+        outcome = ErrorCode.INTERNAL_ERROR.value
+        try:
+            envelope = await self._upload_within_deadline(run, body, content_type)
+            if run.ocr_needed is not None and run.ocr_handoff is not None:
+                # After the deadline's steps, as in `run` (F12).
+                envelope = await run.ocr_handoff(run.ocr_needed)
+            if envelope.data is not None:
+                envelope.data.timings = run.timings()
+            envelope.trace_id = current_trace_id()
+            outcome = _outcome(envelope)
+            return envelope
+        finally:
+            # Kind and size only: never the file name.
+            self._record("upload", run.started, outcome, kind=run.kind, size=len(body))
 
     # --- steps ---------------------------------------------------------------------------------
 
@@ -928,7 +1058,7 @@ class Pipeline:
         return await self._finish(run, envelope, run.validators)
 
     async def _converted(
-        self, run: _Run, fetched: FetchResult, kind: Literal["html", "text"], text: str
+        self, run: DocumentRun, fetched: FetchResult, kind: Literal["html", "text"], text: str
     ) -> _Processed | Envelope[ExtractResult]:
         """``_process`` on the conversion pool, or the failed envelope of a page that broke it."""
         started = time.perf_counter()
@@ -985,6 +1115,116 @@ class Pipeline:
                 ),
             )
         return envelope
+
+    # --- uploads ---------------------------------------------------------------------------------
+
+    async def _upload_within_deadline(
+        self, run: _UploadRun, body: bytes, content_type: str | None
+    ) -> Envelope[ExtractResult]:
+        deadline = asyncio.timeout(self._timeout_seconds or self._settings.extract_timeout_seconds)
+        try:
+            async with deadline:
+                return await self._extract_upload(run, body, content_type, deadline)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            return run.failed(
+                ErrorCode.TIMEOUT, "The extraction did not finish in time.", retryable=True
+            )
+
+    async def _extract_upload(
+        self, run: _UploadRun, body: bytes, content_type: str | None, deadline: asyncio.Timeout
+    ) -> Envelope[ExtractResult]:
+        """Step 7 for an upload: its kind by the bytes (F1), then a page's or a document's
+        conversion, each with its byte limit."""
+        declared, charset = split_content_type(content_type)
+        kind = await self._pool.run(sniff, body, declared, run.file_name)
+        run.kind = kind
+        if kind is None:
+            run.content_type = declared
+            return run.failed(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+                f"Content type {declared or 'unknown'} is not supported.",
+            )
+        raw_sha256 = await self._pool.run(_sha256, body)
+        if kind == "html" or kind == "text":
+            run.content_type = declared if kind == "html" else "text/plain"
+            return await self._uploaded_page(run, body, kind, charset, raw_sha256)
+        run.content_type = media_type(kind)
+        limit = self._settings.document_max_bytes
+        if len(body) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The file has more than the {limit} bytes that are converted.",
+            )
+        document = DocumentInput(
+            body=body,
+            meta=DocumentInputMeta(
+                kind=kind,
+                content_type=media_type(kind),
+                file_name=run.file_name,
+                charset=charset,
+                raw_sha256=raw_sha256,
+                compliance=run.report,
+            ),
+        )
+        when = deadline.when()
+        if when is None:  # pragma: no cover - the deadline is always set
+            when = asyncio.get_running_loop().time() + self._settings.extract_timeout_seconds
+        outcome = await self._documents.extract(run, document, when)
+        if not isinstance(outcome, OcrNeeded):
+            return outcome
+        if run.ocr_handoff is not None:
+            run.ocr_needed = outcome  # `extract_upload` hands it over once the deadline is off
+        return without_ocr(outcome, run)  # without a handoff the answer, else its stand-in
+
+    async def _uploaded_page(
+        self,
+        run: _UploadRun,
+        body: bytes,
+        kind: Literal["html", "text"],
+        charset: str | None,
+        raw_sha256: str,
+    ) -> Envelope[ExtractResult]:
+        """An HTML or plain-text upload, converted like a fetched page without a URL."""
+        limit = self._settings.convert_max_bytes
+        if len(body) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The page has {len(body)} bytes, more than the {limit} bytes that are converted.",
+            )
+        started = time.perf_counter()
+        text = await self._pool.run(decode_html, body, charset)
+        run.convert_ms += _ms(started)
+        page = FetchResult(
+            url="",
+            final_url="",  # no base URL: relative links stay relative
+            status=200,  # not read by the converters
+            headers={},
+            content=body,
+            content_type=run.content_type,
+            charset=charset,
+            elapsed_ms=0,
+            redirects=[],
+            not_modified=False,
+            raw_sha256=raw_sha256,
+        )
+        processed = await self._converted(run, page, kind, text)
+        if isinstance(processed, Envelope):
+            return processed
+        return self._envelope(
+            run.result(
+                language=processed.language,
+                word_count=processed.quality.word_count,
+                title=processed.title,
+                content=processed.content,
+                quality=processed.quality,
+                metadata=processed.metadata,
+                links=processed.links,
+                fingerprint=processed.fingerprint,
+                warnings=processed.warnings,
+            )
+        )
 
     # --- the render path (browser worker only) -------------------------------------------------
 
@@ -1314,7 +1554,7 @@ class Pipeline:
             )
 
     def _process(
-        self, req: ExtractRequest, fetched: FetchResult, kind: Literal["html", "text"], text: str
+        self, req: DocumentRequest, fetched: FetchResult, kind: Literal["html", "text"], text: str
     ) -> _Processed:
         """Convert and judge the decoded page. CPU-bound: runs on the conversion pool."""
         final_url = fetched.final_url
@@ -1368,18 +1608,27 @@ class Pipeline:
 
     def _observe(self, run: _Run, outcome: str) -> None:
         """Metrics and the one log line of the request. No URL: host and path hash only."""
-        seconds = time.perf_counter() - run.started
-        mode = run.req.mode
+        self._record(
+            run.req.mode,
+            run.started,
+            outcome,
+            host=run.host,
+            path_hash=_path_hash(run.req.url) if run.host else None,
+            cache=run.cache,
+            upstream_status=run.upstream_status,
+        )
+
+    def _record(self, mode: str, started: float, outcome: str, **fields: Any) -> None:
+        """Count an extraction under ``mode`` (the requested one, or ``upload``) and log its
+        line with ``fields``."""
+        seconds = time.perf_counter() - started
         self._metrics.total.labels(mode=mode, outcome=outcome).inc()
         self._metrics.duration.labels(mode=mode).observe(seconds)
         _log.info(
             "extract_done",
-            host=run.host,
-            path_hash=_path_hash(run.req.url) if run.host else None,
             mode=mode,
             outcome=outcome,
-            cache=run.cache,
-            upstream_status=run.upstream_status,
+            **fields,
             total_ms=round(seconds * 1000),
         )
 
@@ -1478,6 +1727,10 @@ def _path_hash(url: str) -> str:
     parts = urlsplit(url)
     target = parts.path + (f"?{parts.query}" if parts.query else "")
     return hashlib.sha256(target.encode()).hexdigest()[:12]
+
+
+def _sha256(body: bytes) -> str:
+    return hashlib.sha256(body).hexdigest()
 
 
 def _outcome(envelope: Envelope[ExtractResult]) -> str:

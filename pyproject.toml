@@ -26,6 +26,7 @@ dependencies = [
     "pydantic-settings>=2.16.1",
     # Newest release at least 14 days old when added (supply-chain caution, as for patchright).
     "pypdfium2==5.14.0",
+    "python-multipart==0.0.32",  # Apache-2.0; 14-day rule as above
     "redis>=8.1.0",
     "structlog>=26.1.0",
     "trafilatura>=1.8",

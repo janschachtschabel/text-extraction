@@ -233,7 +233,7 @@ def _decode(inflaters: list[_Inflater], data: bytes) -> Iterator[bytes]:
         yield from _decode(inflaters[1:], part)
 
 
-def _split_content_type(value: str | None) -> tuple[str | None, str | None]:
+def split_content_type(value: str | None) -> tuple[str | None, str | None]:
     """Media type and charset of a Content-Type header, both lower-case."""
     if not value:
         return None, None
@@ -437,7 +437,7 @@ class Fetcher:
                 content, truncated = (
                     (b"", False) if status == 304 else await self._read_body(response, limits)
                 )
-                content_type, charset = _split_content_type(response.headers.get("content-type"))
+                content_type, charset = split_content_type(response.headers.get("content-type"))
                 return FetchResult(
                     url=url,
                     final_url=current,

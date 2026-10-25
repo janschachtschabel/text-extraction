@@ -98,6 +98,22 @@ def test_relative_links_made_absolute() -> None:
     assert "[broken" not in content
 
 
+def test_without_a_page_url_relative_links_stay_relative() -> None:
+    """An upload has no URL: its relative links are kept as they are (ruling F17), the other
+    rules still hold."""
+    page = f"""<html><body><article><h1>Links</h1><p>{LONG} Read
+    <a href="../lessons/decimals">the decimals lesson</a>,
+    <a href="javascript:alert(1)">a script</a> and
+    <a href="https://www.example.org/next">the next one</a>.</p></article></body></html>"""
+
+    content = convert_html(page, "", "markdown").content
+
+    assert "[the decimals lesson](../lessons/decimals)" in content
+    assert "[the next one](https://www.example.org/next)" in content
+    assert "javascript:" not in content
+    assert "a script" in content
+
+
 def test_mathml_to_latex() -> None:
     page = f"""<html><body><article><h1>Vectors</h1><p>{LONG}</p>
     <p>The length is

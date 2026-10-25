@@ -102,8 +102,8 @@ requests, auth and rate limits; 5xx only for our own faults.
 Request bodies of the public API are limited before they are read whole, parsed or
 authenticated (`src/text_extraction/body_limit.py`): over the limit of its path a body answers
 413 `invalid_request`, at once for a `Content-Length` over it and otherwise as soon as the bytes
-read pass it. The limit is `REQUEST_MAX_BODY_BYTES` (64 KiB), and the batch bound for
-`POST /v1/batch`; a later upload route brings its own bound.
+read pass it. The limit is `REQUEST_MAX_BODY_BYTES` (64 KiB), the batch bound for
+`POST /v1/batch`, and `DOCUMENT_MAX_BYTES` + 64 KiB for `POST /v1/extract/file`.
 
 `POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
 also on failure, as far as the request got. `partial` keeps the content and names
@@ -120,7 +120,7 @@ refusing a turn gives `rate_limited` (busy) or `connection_error` (host paused),
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
 | `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`. The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1) |
-| `POST /v1/extract/file` | Upload (multipart) → text/Markdown | sync, job for large files |
+| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed. The bytes decide the kind (the part's type only where they do not); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). `ocr: always` while the service has no OCR is 400 | sync; a slower upload becomes a job (202) once uploads can be stored with jobs (Docling dispatch) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
 | `POST /v1/chunk` | Text/Markdown/URL → chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`) | sync |

@@ -46,6 +46,7 @@ from pydantic import BaseModel
 
 from text_extraction.compliance import ComplianceReport
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.convert import OutputFormat
 from text_extraction.documents.pool import (
     ConversionCrashed,
     ConversionError,
@@ -60,9 +61,14 @@ from text_extraction.documents.routing import (
     wants_ocr,
 )
 from text_extraction.documents.sniff import media_type
-from text_extraction.documents.types import DocumentConversion, DocumentInfo, DocumentKind
+from text_extraction.documents.types import (
+    DocumentConversion,
+    DocumentInfo,
+    DocumentKind,
+    OcrOption,
+)
 from text_extraction.envelope import Envelope, ErrorCode
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractResult
 from text_extraction.fetch import FetchResult, Validators
 from text_extraction.fingerprint import Fingerprint, compute_fingerprint
 from text_extraction.metadata import PageMetadata
@@ -131,11 +137,30 @@ class OcrNeeded:
     input: DocumentInput
 
 
-class DocumentRun(Protocol):
-    """The part of the pipeline's run state the document steps use. ``warnings`` come first in
-    a result (``document_fetched_directly``)."""
+class DocumentRequest(Protocol):
+    """The options of a request that the conversion steps read: an ``ExtractRequest``, or the
+    options of an upload."""
 
-    req: ExtractRequest
+    @property
+    def format(self) -> OutputFormat: ...
+
+    @property
+    def metadata(self) -> bool: ...
+
+    @property
+    def links(self) -> bool: ...
+
+    @property
+    def ocr(self) -> OcrOption: ...
+
+
+class DocumentRun(Protocol):
+    """The part of the pipeline's run state the document steps use: of a URL's run or an
+    upload's. ``warnings`` come first in a result (``document_fetched_directly``)."""
+
+    @property
+    def req(self) -> DocumentRequest: ...
+
     host: str | None
     convert_ms: int
     warnings: list[str]

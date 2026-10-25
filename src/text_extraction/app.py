@@ -22,6 +22,9 @@ from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
 from text_extraction.extract_api import router as extract_router
 from text_extraction.fetch import Fetcher
+from text_extraction.file_api import PATH as UPLOAD_PATH
+from text_extraction.file_api import router as file_router
+from text_extraction.file_api import upload_body_limit
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
@@ -186,6 +189,7 @@ def create_public_app(
     app.state.background = set()
     install_error_handlers(app)
     app.include_router(extract_router)
+    app.include_router(file_router)
     app.include_router(screenshot_router)
     app.include_router(jobs_router)
 
@@ -206,7 +210,10 @@ def create_public_app(
     app.add_middleware(
         BodyLimitMiddleware,
         default_limit=settings.request_max_body_bytes,
-        path_limits={"/v1/batch": batch_body_limit(settings)},
+        path_limits={
+            "/v1/batch": batch_body_limit(settings),
+            UPLOAD_PATH: upload_body_limit(settings),
+        },
     )
     Instrumentator(registry=registry).instrument(app)
     # Added last, so it is the outermost middleware and sees every request.
