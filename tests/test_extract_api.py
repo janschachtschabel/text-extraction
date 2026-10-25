@@ -135,6 +135,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "warnings",
         "screenshot",
         "unblocked",
+        "document",
     }
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"

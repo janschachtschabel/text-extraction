@@ -185,6 +185,29 @@ class Settings(BaseSettings):
     screenshot_max_bytes: int = Field(default=10_485_760, ge=1)
     screenshot_max_height_px: int = Field(default=16384, ge=1080, le=32768)
     artifact_ttl_seconds: int = Field(default=3600, ge=60)
+    # Documents (PDF, Office, EPUB, CSV, ODF, images). MarkItDown converts in child processes of
+    # the pod that holds the bytes; OCR and ODF go to the Docling worker.
+    document_max_bytes: int = Field(default=20_000_000, ge=1024)  # at most FETCH_MAX_BYTES
+    document_max_pages: int = Field(default=100, ge=1)  # pages after it are cut
+    # Largest total of all entries of a ZIP-based document once unpacked (container bombs).
+    document_max_uncompressed_bytes: int = Field(default=200_000_000, ge=1024)
+    document_concurrency: int = Field(default=2, ge=1)  # conversion child processes per pod
+    document_memory_limit_mb: int = Field(default=2048, ge=256)  # address space of one child
+    # Docling worker (OCR). Off by default: the API image has neither Docling nor Tesseract.
+    docling_enabled: bool = False
+    docling_timeout_seconds: float = Field(default=300, ge=30, le=1800)  # one conversion
+    # How long a sync request waits for the Docling worker before it answers without OCR.
+    docling_sync_wait_seconds: float = Field(default=20, ge=0, le=25)
+    docling_input_ttl_seconds: int = Field(default=3600, ge=600)  # a queued document's bytes
+    docling_max_open_per_client: int = Field(default=5, ge=1)  # unfinished Docling jobs per key
+    docling_concurrency: int = Field(default=1, ge=1)  # conversions at once per Docling worker
+    docling_threads: int = Field(default=4, ge=1)  # CPU threads of one conversion
+    docling_max_pages: int = Field(default=100, ge=1)  # pages after it are cut
+    docling_memory_limit_mb: int = Field(default=6144, ge=256)  # address space of one child
+    # Tesseract language codes, comma-separated (the traineddata files must be on the volume).
+    docling_ocr_languages: str = Field(default="deu,eng", pattern=r"^[a-z_]{3,}(,[a-z_]{3,})*$")
+    # Volume with the models: Docling's in docling/, Tesseract's data in tessdata/.
+    docling_models_path: Path = Path("/models")
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -203,6 +226,12 @@ class Settings(BaseSettings):
         if any(item not in _RESOURCE_TYPES for item in types):
             raise ValueError(f"unknown resource type; known: {', '.join(_RESOURCE_TYPES)}")
         return ",".join(types)
+
+    @model_validator(mode="after")
+    def _document_limit_within_fetch_limit(self) -> Self:
+        if self.document_max_bytes > self.fetch_max_bytes:
+            raise ValueError("DOCUMENT_MAX_BYTES must not exceed FETCH_MAX_BYTES")
+        return self
 
     @model_validator(mode="after")
     def _merge_and_validate_api_keys(self) -> Self:

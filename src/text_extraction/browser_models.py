@@ -116,6 +116,10 @@ class ScreenshotResult(BaseModel):
 
 def screenshot_view(result: ExtractResult) -> ScreenshotResult:
     """The screenshot answer for an extraction result."""
+    if (
+        result.url is None or result.mode_used == "upload"
+    ):  # pragma: no cover - uploads have no page
+        raise ValueError("a screenshot needs a page, not an upload")
     return ScreenshotResult(
         url=result.url,
         final_url=result.final_url,

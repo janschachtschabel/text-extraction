@@ -18,6 +18,7 @@ from text_extraction.browser_options import (
 )
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
+from text_extraction.documents.types import DocumentInfo, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.fingerprint import Fingerprint
 from text_extraction.metadata import PageMetadata
@@ -85,6 +86,12 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="Screenshot of the whole page; `false`: the first viewport only. Not with "
         "`mode: fast`.",
     )
+    ocr: OcrOption = Field(
+        default="auto",
+        description="OCR of documents. `auto`: scans, broken text layers and images are read "
+        "with OCR where the service has it. `never`: no OCR. `always`: every PDF is read with "
+        "OCR. Pages that are not documents ignore it.",
+    )
 
     @model_validator(mode="after")
     def _browser_options(self) -> Self:
@@ -118,11 +125,11 @@ class Timings(BaseModel):
 class ExtractResult(BaseModel):
     """What one extraction produced; on failure as much of it as was known."""
 
-    url: str
+    url: str | None  # None for an upload
     final_url: str | None
     upstream_status: int | None  # of the response the content came from
     content_type: str | None
-    mode_used: Literal["fast", "browser"]
+    mode_used: Literal["fast", "browser", "upload"]
     attempts: int  # fetches of the target in this request
     language: str | None
     word_count: int
@@ -140,6 +147,8 @@ class ExtractResult(BaseModel):
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
     unblocked: bool = False  # the page was loaded in unblock mode
+    # Documents only; the default keeps results cached before documents valid.
+    document: DocumentInfo | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

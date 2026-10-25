@@ -211,6 +211,7 @@ async def create_batch(
         links=body.links,
         compliance=resolve_mode(body.compliance, principal, settings),
         cache=body.cache,
+        ocr=body.ocr,
     )
     if guard.high:
         raise _memory_high()

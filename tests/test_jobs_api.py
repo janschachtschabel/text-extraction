@@ -23,7 +23,7 @@ from text_extraction.envelope import ErrorCode
 from text_extraction.extract_models import ExtractRequest
 from text_extraction.fetch import Fetcher, FetchError
 from text_extraction.job_models import MAX_BATCH_URLS, BatchRequest, JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.jobs_api import create_batch
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pipeline import create_pipeline
@@ -797,6 +797,19 @@ def test_batch_stores_the_trace_id_of_its_request(api: Api) -> None:
 
     assert record is not None
     assert record.trace_id == "trace-b"
+
+
+def stored_job(api: Api, job_id: str) -> JobRecord | None:
+    return api.run(lambda valkey: JobStore(valkey, api.settings).get(job_id))
+
+
+def test_batch_stores_the_ocr_option_in_the_job_options(api: Api) -> None:
+    chosen = api.batch([PAGE], ocr="never").json()["data"]["id"]
+    default = api.batch([PAGE]).json()["data"]["id"]
+
+    records = [stored_job(api, chosen), stored_job(api, default)]
+
+    assert [record.options.ocr for record in records if record is not None] == ["never", "auto"]
 
 
 def test_job_whose_lease_was_cleared_is_never_lost(api: Api) -> None:

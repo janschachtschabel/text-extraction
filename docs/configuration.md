@@ -262,6 +262,36 @@ The Helm keys, with the variables they render (the full table is in the
 
 All other browser variables go under `config.<NAME>` like any other setting.
 
+## Documents and OCR
+
+Documents (PDF, DOCX, PPTX, XLSX, XLS, EPUB, CSV, ODF and images) are converted to text by
+child processes of the pod that holds the bytes (MarkItDown); OCR and ODF files need the Docling
+worker. Docling is off by default: without it a scan keeps its text layer and an image answers
+`unsupported_content_type`.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `DOCUMENT_MAX_BYTES` | `20000000` | Largest document that is converted, in bytes (also the largest upload). At least 1024 and at most `FETCH_MAX_BYTES`: a larger value makes the service exit with code 2 at start-up, so lower `DOCUMENT_MAX_BYTES` too when you lower `FETCH_MAX_BYTES`. A larger document fails with `too_large` (not retryable). |
+| `DOCUMENT_MAX_PAGES` | `100` | Pages of a PDF that are converted; later pages are cut (warning `pages_truncated`). Minimum 1. |
+| `DOCUMENT_MAX_UNCOMPRESSED_BYTES` | `200000000` | Largest total size of all entries of a ZIP-based document (DOCX, PPTX, XLSX, EPUB) once unpacked, in bytes. A document over it, with more than 10,000 entries or with an entry that unpacks to over 100 times its size fails with `too_large`. Minimum 1024. |
+| `DOCUMENT_CONCURRENCY` | `2` | Conversion child processes per pod; each converts one document at a time. A request waits for a free one within its time budget. Minimum 1. |
+| `DOCUMENT_MEMORY_LIMIT_MB` | `2048` | Address space limit (`RLIMIT_AS`) of one conversion child, in MiB. A child that exceeds it answers `too_large`. Minimum 256. |
+| `DOCLING_ENABLED` | `false` | Switch OCR on: scans, broken text layers, images and ODF files are converted by the Docling worker (`text-extraction-docling-worker`, pool `docling`). Needs `JOBS_ENABLED=true`. Off, `ocr: always` answers 400 `invalid_request`. The Helm chart sets it from `workers.docling.enabled` on every pod. |
+| `DOCLING_TIMEOUT_SECONDS` | `300` | Time budget of one Docling conversion, in seconds; the conversion child is killed after it. 30 to 1800. |
+| `DOCLING_SYNC_WAIT_SECONDS` | `20` | How long a synchronous request that needs OCR waits for the Docling worker, in seconds. Then it answers the text layer with the warning `ocr_unavailable` (an image fails with `timeout`, retryable). 0 to 25. |
+| `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker stay in Valkey, in seconds. The worker deletes them when the item is done. Minimum 600. |
+| `DOCLING_MAX_OPEN_PER_CLIENT` | `5` | Unfinished Docling jobs one API key may have. Beyond it nothing is queued for OCR and the request answers without it (`ocr_unavailable`). Minimum 1. |
+| `DOCLING_CONCURRENCY` | `1` | Documents one Docling worker pod converts at once, each in a child process of its own. Minimum 1. |
+| `DOCLING_THREADS` | `4` | CPU threads of one Docling conversion. Minimum 1. |
+| `DOCLING_MAX_PAGES` | `100` | Pages of a document the Docling worker converts; later pages are cut (warning `pages_truncated`). Minimum 1. |
+| `DOCLING_MEMORY_LIMIT_MB` | `6144` | Address space limit of one Docling conversion child, in MiB. Minimum 256. |
+| `DOCLING_OCR_LANGUAGES` | `deu,eng` | Tesseract language codes for OCR, comma-separated, lower case with underscores (`deu_frak` is valid). Their `.traineddata` files must be in `tessdata/` under `DOCLING_MODELS_PATH`. Anything else makes the service exit with code 2. |
+| `DOCLING_MODELS_PATH` | `/models` | Volume with the OCR models: Docling's layout and table models in `docling/`, Tesseract's data in `tessdata/`. The image holds no models; the Docling worker mounts the volume read-only. |
+
+The request field `ocr` (`auto`, `never` or `always`; default `auto`) is part of
+`POST /v1/extract` and `POST /v1/batch`. `auto` reads scans, broken text layers and images with
+OCR where it is enabled, `never` uses the text layer only, `always` also reads every PDF with OCR.
+
 ## Headers
 
 Read from the request:
