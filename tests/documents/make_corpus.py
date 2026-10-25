@@ -123,16 +123,26 @@ def _font_path() -> str:
     sys.exit("DejaVuSans.ttf not found: install fonts-dejavu-core or add its path")
 
 
+_SCAN_SIZE = (1240, 600)
+_SCAN_MARGIN = 60  # left and right, in pixels
+
+
 def _scan_pages() -> list[Image.Image]:
-    font = ImageFont.truetype(_font_path(), 30)
+    """One picture per page of ``GERMAN_PAGES``. Every line must fit between the margins: a
+    glyph cut off at the right edge is lost to OCR (and to ``scan.expected.txt``)."""
+    font = ImageFont.truetype(_font_path(), 26)
     title_font = ImageFont.truetype(_font_path(), 40)
     pages = []
     for lines in GERMAN_PAGES:
-        image = Image.new("L", (1240, 600), 255)
+        image = Image.new("L", _SCAN_SIZE, 255)
         draw = ImageDraw.Draw(image)
-        draw.text((60, 50), lines[0], font=title_font, fill=0)
+        draw.text((_SCAN_MARGIN, 50), lines[0], font=title_font, fill=0)
         for number, line in enumerate(lines[1:]):
-            draw.text((60, 140 + 60 * number), line, font=font, fill=0)
+            draw.text((_SCAN_MARGIN, 140 + 60 * number), line, font=font, fill=0)
+        for line, line_font in ((lines[0], title_font), *((line, font) for line in lines[1:])):
+            right = _SCAN_MARGIN + line_font.getbbox(line)[2]
+            if right > _SCAN_SIZE[0] - _SCAN_MARGIN:
+                sys.exit(f"scan line too wide ({right} px): {line!r}")
         pages.append(image)
     return pages
 
