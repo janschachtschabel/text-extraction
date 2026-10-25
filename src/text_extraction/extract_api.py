@@ -83,7 +83,7 @@ from text_extraction.extract_models import (
 )
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
-from text_extraction.jobs import JobLost, JobStore
+from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
 from text_extraction.pipeline import Pipeline
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
@@ -555,9 +555,10 @@ async def create_p1_job(
     upload: tuple[bytes, UploadInputMeta] | None = None,
 ) -> str | None:
     """Create the P1 job (of ``kind``; an upload's with its bytes as the input of item 0, for
-    ``DOCLING_INPUT_TTL_SECONDS``) and mark it running; its id, or None when Valkey fails
-    (logged). A job that was created but could not be completed, or whose creator is cancelled,
-    is deleted again, if that works."""
+    ``DOCLING_INPUT_TTL_SECONDS``, within ``DOCLING_INPUT_BUDGET_BYTES``) and mark it running;
+    its id, or None when Valkey fails or the input budget is full (logged): the request then
+    stays synchronous. A job that was created but could not be completed, or whose creator is
+    cancelled, is deleted again, if that works."""
     job_id: str | None = None
     try:
         job_id = await store.create(kind, principal, options, [url], trace_id=current_trace_id())
@@ -566,7 +567,7 @@ async def create_p1_job(
             await store.put_input(job_id, 0, body, meta, settings.docling_input_ttl_seconds)
         lease = settings.extract_timeout_seconds + _LEASE_MARGIN_SECONDS
         await store.mark_running(job_id, lease_seconds=lease)
-    except (RedisError, OSError, JobLost) as error:
+    except (RedisError, OSError, JobLost, InputBudgetExceeded) as error:
         # The type only for an upload: an error's text never gets near its bytes.
         text = {} if upload is not None else {"error": str(error)}
         _log.warning("extract_job_handover_failed", error_type=type(error).__name__, **text)

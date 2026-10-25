@@ -19,6 +19,7 @@ import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from pydantic import BaseModel
 from redis.exceptions import RedisError
 from structlog.testing import capture_logs
 
@@ -46,6 +47,15 @@ from text_extraction.worker import Worker
 USER_KEY = "user-key-0123456789-raw-secret"
 AUTH = {"Authorization": f"Bearer {USER_KEY}"}
 ALICE = Principal(name="alice", role="user", rate_limit_per_minute=None)
+BOB = Principal(name="bob", role="user", rate_limit_per_minute=None)
+# A small input budget (DOCLING_INPUT_BUDGET_BYTES) and the largest document within it.
+BUDGET: dict[str, Any] = {"docling_input_budget_bytes": 100_000, "document_max_bytes": 50_000}
+
+
+class Filler(BaseModel):
+    """The meta of an input that only takes up the budget."""
+
+
 SCAN = "https://docs.example.org/scan.pdf"
 IMAGE = "https://docs.example.org/page.png"
 # Bytes no job view or log line may carry (Review Focus 4).
@@ -300,6 +310,19 @@ class Service:
             if body["data"]["state"] == "completed" or time.monotonic() > deadline:
                 return body
             time.sleep(0.02)
+
+    def fill_budget(self, *, leave: int = 10) -> str:
+        """Another key's queued document that leaves ``leave`` bytes of the input budget;
+        its job's id."""
+
+        async def fill(valkey: FakeAsyncRedis) -> str:
+            store = JobStore(valkey, self.settings)
+            job_id = await store.create("extract", BOB, JobOptions(compliance="enforce"), [SCAN])
+            size = self.settings.docling_input_budget_bytes - len(Filler().model_dump_json())
+            await store.put_input(job_id, 0, b"f" * (size - leave), Filler(), 600)
+            return job_id
+
+        return str(self.run(fill))
 
     def open_jobs(self, count: int) -> None:
         """``count`` unfinished Docling jobs of alice."""
@@ -610,14 +633,18 @@ def test_ocr_after_handover_reuses_p1_job(source: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("source", "refusal"), [("upload", "open_limit"), ("url", "backend_error")]
+    ("source", "refusal"),
+    [("upload", "open_limit"), ("url", "backend_error"), ("url", "input_budget")],
 )
 def test_p1_job_stores_fallback_when_dispatch_refused(
     source: str, refusal: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service = Service(FakePool(seconds=SLOW_SECONDS))
+    budget: dict[str, Any] = BUDGET if refusal == "input_budget" else {}
+    service = Service(FakePool(seconds=SLOW_SECONDS), **budget)
     if refusal == "open_limit":
         service.open_jobs(5)
+    elif refusal == "input_budget":
+        service.fill_budget()
     else:
 
         async def down(self: JobStore, owner: str) -> int:
@@ -659,6 +686,41 @@ def test_memory_guard_high_skips_dispatch() -> None:
         assert service.stored() == []
         assert service.pending() == 0
     assert service.outcomes() == {"memory_guard": 2}
+
+
+def test_a_full_input_budget_skips_dispatch() -> None:
+    """All queued documents together fill DOCLING_INPUT_BUDGET_BYTES: nothing is stored or
+    queued, and the request answers as at its open limit (Valkey memory, final review I3)."""
+    service = Service(**BUDGET)
+    filler = service.fill_budget()
+    with TestClient(service.app) as client:
+        scan = extract(client, SCAN).json()
+        image = extract(client, IMAGE).json()
+
+        assert scan["status"] == "partial"  # the draft's own verdict: too few words
+        assert scan["data"]["content"] == "Thin text layer."
+        assert OCR_UNAVAILABLE_WARNING in scan["data"]["warnings"]
+        assert scan["data"]["fingerprint"] is None
+        assert image["status"] == "failed"
+        assert (image["error"]["code"], image["error"]["retryable"]) == ("rate_limited", True)
+        assert service.stored("job:*:meta") == [f"job:{{{filler}}}:meta"]  # none left behind
+        assert service.stored("jobs:*") == []  # and none counts as alice's open job
+        assert service.pending() == 0
+    assert service.outcomes() == {"input_budget": 2}
+
+
+def test_a_slow_upload_stays_synchronous_while_the_input_budget_is_full() -> None:
+    """The P1 job of an upload keeps its bytes as an input: without room in the budget the
+    request is not handed over, and answers when its conversion is done."""
+    service = Service(FakePool(seconds=SLOW_SECONDS, needs_ocr=False), **BUDGET)
+    filler = service.fill_budget()
+    with TestClient(service.app) as client:
+        response = upload(client, SCAN_BODY, wait_seconds="0.2")
+
+        assert response.status_code == 200
+        assert response.json()["data"]["content"] == TEXT_LAYER
+        assert service.stored("job:*:meta") == [f"job:{{{filler}}}:meta"]
+    assert service.outcomes() == {}
 
 
 def test_open_job_limit() -> None:

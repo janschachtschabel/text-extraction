@@ -113,9 +113,10 @@ _DISPATCH: WeakKeyDictionary[CollectorRegistry, dict[str, Counter]] = WeakKeyDic
 _DISPATCH_HELP: Final = {
     "browser": "Sync requests this pod sent to the browser workers, by how they ended: rendered, "
     "not_claimed, no_result, handed_over or backend_error.",
-    "docling": "Sync requests of this pod with a document that needs OCR, by how its dispatch to "
-    "the Docling workers ended: answered, not_claimed, no_result, handed_over, backend_error, "
-    "memory_guard or open_limit (nothing dispatched).",
+    "docling": "Documents of this pod that needed OCR, by how their dispatch to the Docling "
+    "workers ended: answered, not_claimed, no_result, handed_over, backend_error (sync "
+    "requests), memory_guard, open_limit or input_budget (nothing dispatched; batch items count "
+    "memory_guard and input_budget).",
 }
 
 

@@ -228,7 +228,10 @@ optional rate limit.
   one-item job (kind `extract` or `file`, its bytes as the item's input) to the `docling` pool,
   and the request waits `DOCLING_SYNC_WAIT_SECONDS` for it, or until its 202. `POST
   /v1/extract/file` hands over the same way, as a job of kind `file` whose item has no URL and
-  keeps the upload's bytes (`DOCLING_INPUT_TTL_SECONDS`, deleted once the result is stored).
+  keeps the upload's bytes in Valkey for the job's run (up to `DOCUMENT_MAX_BYTES`,
+  `DOCLING_INPUT_TTL_SECONDS` at most, deleted once the result is stored). They count against
+  `DOCLING_INPUT_BUDGET_BYTES` like a queued document's; while that is full the request stays
+  synchronous.
   A pod that dies mid-run leaves the lease to expire, and `GET /v1/jobs/{id}` then shows a job
   that is still `running` past its `lease_until` as completed, with item 0 `failed` /
   `internal_error`, retryable ("The pod running this extraction stopped."); this view is
@@ -608,8 +611,16 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   (which would re-import the parent's `__main__` before its limit is set). It gets an
   allowlisted environment (no keys, no Valkey password), talks over a socket pair, and imports
   only its target module (`documents/child.py` for MarkItDown, `documents/docling_child.py` for
-  Docling), whose `FUNCTIONS` the parent calls by name. It sets `RLIMIT_AS`
-  (`DOCUMENT_MEMORY_LIMIT_MB`, 2048) before its first import. A child runs one conversion at a
+  Docling), whose `FUNCTIONS` the parent calls by name. It raises its `oom_score_adj` to 1000
+  (so the container's OOM killer, which counts the parent and all children, ends a child before
+  the server) and sets `RLIMIT_AS` (`DOCUMENT_MEMORY_LIMIT_MB`, 2048) before its first import.
+  The Helm chart renders `DOCUMENT_MEMORY_LIMIT_MB` from each pod's memory limit: floor((limit -
+  `documentParentReserveMiB`) / `DOCUMENT_CONCURRENCY`), 768 MiB with the defaults (2Gi with a
+  512 MiB reserve for the API and extract pods, 4Gi with a 2560 MiB reserve for Chromium in the
+  browser pods), so the children's address space fits the limit and a large document ends as
+  `too_large` in its child rather than as an OOM kill of the pod; a share below 256 fails the
+  render (measured: an idle MarkItDown child maps about 390 MB, about 500 MB after a small
+  PDF). A child runs one conversion at a
   time and is replaced after 50 conversions, when it dies, runs out of memory or is killed. The
   caller passes its deadline; waiting for a free child counts against it; when it passes, the
   child's process group gets SIGKILL (a tesseract it started too) and the caller gets
@@ -691,15 +702,27 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   `ocr_unavailable` (no draft: `failed`/`timeout`, retryable) and deletes the job; with
   `wait_seconds` the `Handover` turns it into a 202 with the Docling job. A request whose route
   had already handed it over to a P1 job puts the document on that job instead. Back-pressure:
-  while Valkey's memory guard is high, or the caller already has `DOCLING_MAX_OPEN_PER_CLIENT` (5)
-  unfinished Docling jobs, nothing is stored or queued: the draft answers with `ocr_unavailable`
-  (no draft: `failed`/`rate_limited`, retryable). A fallback answer carries no fingerprint, so
+  while Valkey's memory guard is high, the caller already has `DOCLING_MAX_OPEN_PER_CLIENT` (5)
+  unfinished Docling jobs, or the input would take the inputs of all jobs over
+  `DOCLING_INPUT_BUDGET_BYTES` (200,000,000), nothing is stored or queued: the draft answers with
+  `ocr_unavailable` (no draft: `failed`/`rate_limited`, retryable). The memory guard is read
+  every 5 s and is no bound on its own; the input budget is: `JobStore.put_input` reserves the
+  input's bytes in one Lua script (check and reservation are one step, so concurrent writers on
+  every pod never pass it together) before the input is written, and gives them back when the
+  input is deleted. The reservations live in keys of their own hash tag (`inputs:{budget}:*`; one
+  script on keys of two hash tags would not run on a Valkey cluster), scored by the input's
+  expiry, and each reservation pruned when that has passed, so an input that expires by its TTL
+  leaves the budget too and a pod that dies between reservation and write leaks nothing for
+  longer than the TTL. Every input writer goes through it: this sync dispatch, the batch move
+  (F13) and a slow upload's P1 job (F17). A fallback answer carries no fingerprint, so
   it is neither compared nor cached and the next request may get the OCR. The API's graceful
   shutdown covers the fast phase plus `DOCLING_SYNC_WAIT_SECONDS` + 5 s while `DOCLING_ENABLED`.
 - **F13, batches.** The extract worker moves an item that needs OCR to pool `docling` (same job,
   index and client): input, then draft, then the queue, then its own completion without a
-  result, as B5 moves items to `browser`. While the memory guard is high it keeps the draft with
-  `ocr_unavailable` instead (no draft: `rate_limited`, retryable).
+  result, as B5 moves items to `browser`. While the memory guard is high, or the input budget
+  (F12) is full, it keeps the draft with `ocr_unavailable` instead, unstored (no draft:
+  `rate_limited`, retryable), and counts the refusal in `text_extraction_docling_dispatch_total`
+  (`memory_guard`, `input_budget`).
 - **F14, the Docling worker** (`text-extraction-docling-worker`, pool `docling`, internal port
   only). The package-3 `Worker` with a `DoclingRunner`; leases of `2 × DOCLING_TIMEOUT_SECONDS +
   10` seconds. `DOCLING_CONCURRENCY` (1) slot loops, each converting in a child of its own (F3,
@@ -763,8 +786,11 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   are). No compliance check (`compliance.decision: "skipped"`), no result cache (`cache:
   "bypass"`), a fingerprint that is computed but never compared or stored (`changed: null`).
   With `wait_seconds` a slower conversion becomes a job of kind `file` (202) whose item keeps
-  the upload's bytes as its input (the same input hash as F12; deleted once the result is
-  stored); an upload that needs OCR becomes its Docling job.
+  the upload's bytes as its input (the same input hash as F12, up to `DOCUMENT_MAX_BYTES`, for
+  the job's run and deleted once the result is stored, `DOCLING_INPUT_TTL_SECONDS` at most). The
+  input counts against `DOCLING_INPUT_BUDGET_BYTES`: while the budget is full the upload is not
+  handed over and its request stays synchronous. An upload that needs OCR becomes its Docling
+  job.
 - **F18, a render that ends on a file.** When a render's main frame ends on a download (also one
   a clicked link started; `Rendered.download_url`) or on a 2xx answer of a document type, and the
   request carries no caller secrets (cookies, headers, actions) and is no screenshot, the

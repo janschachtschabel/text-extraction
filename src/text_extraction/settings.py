@@ -199,6 +199,9 @@ class Settings(BaseSettings):
     # How long a sync request waits for the Docling worker before it answers without OCR.
     docling_sync_wait_seconds: float = Field(default=20, ge=0, le=25)
     docling_input_ttl_seconds: int = Field(default=3600, ge=600)  # a queued document's bytes
+    # Bytes of all jobs' inputs at once in Valkey (queued documents, slow uploads); at least
+    # DOCUMENT_MAX_BYTES.
+    docling_input_budget_bytes: int = Field(default=200_000_000, ge=1024)
     docling_max_open_per_client: int = Field(default=5, ge=1)  # unfinished Docling jobs per key
     docling_concurrency: int = Field(default=1, ge=1)  # conversions at once per Docling worker
     docling_threads: int = Field(default=4, ge=1)  # CPU threads of one conversion
@@ -231,6 +234,8 @@ class Settings(BaseSettings):
     def _document_limit_within_fetch_limit(self) -> Self:
         if self.document_max_bytes > self.fetch_max_bytes:
             raise ValueError("DOCUMENT_MAX_BYTES must not exceed FETCH_MAX_BYTES")
+        if self.document_max_bytes > self.docling_input_budget_bytes:
+            raise ValueError("DOCUMENT_MAX_BYTES must not exceed DOCLING_INPUT_BUDGET_BYTES")
         return self
 
     @model_validator(mode="after")

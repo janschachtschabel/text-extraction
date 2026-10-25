@@ -61,6 +61,7 @@ SETTING_ENV_VARS = (
     "DOCLING_TIMEOUT_SECONDS",
     "DOCLING_SYNC_WAIT_SECONDS",
     "DOCLING_INPUT_TTL_SECONDS",
+    "DOCLING_INPUT_BUDGET_BYTES",
     "DOCLING_MAX_OPEN_PER_CLIENT",
     "DOCLING_CONCURRENCY",
     "DOCLING_THREADS",
@@ -770,6 +771,7 @@ def test_document_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.docling_timeout_seconds == 300
     assert settings.docling_sync_wait_seconds == 20
     assert settings.docling_input_ttl_seconds == 3600
+    assert settings.docling_input_budget_bytes == 200_000_000
     assert settings.docling_max_open_per_client == 5
     assert settings.docling_concurrency == 1
     assert settings.docling_threads == 4
@@ -790,6 +792,7 @@ def test_document_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
         ("DOCLING_SYNC_WAIT_SECONDS", ["0", "25"], ["-1", "26"]),
         ("DOCLING_INPUT_TTL_SECONDS", ["600", "7200"], ["599", "0"]),
         ("DOCLING_MAX_OPEN_PER_CLIENT", ["1", "50"], ["0"]),
+        ("DOCLING_INPUT_BUDGET_BYTES", ["20000000", "1000000000"], ["1023", "0"]),
     ],
 )
 def test_document_setting_bounds(
@@ -817,6 +820,19 @@ def test_document_max_bytes_cannot_exceed_fetch_max_bytes(
 
     assert "30000000" not in str(error.value)
     assert "20000000" not in str(error.value)
+
+
+def test_document_max_bytes_cannot_exceed_the_input_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document larger than the budget of all inputs could never be queued for OCR."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCLING_INPUT_BUDGET_BYTES", "10000000")
+
+    with pytest.raises(ConfigError, match="DOCLING_INPUT_BUDGET_BYTES"):
+        load_settings()
+    monkeypatch.setenv("DOCUMENT_MAX_BYTES", "10000000")
+    assert load_settings().docling_input_budget_bytes == 10_000_000
 
 
 def test_document_max_bytes_may_equal_fetch_max_bytes(monkeypatch: pytest.MonkeyPatch) -> None:

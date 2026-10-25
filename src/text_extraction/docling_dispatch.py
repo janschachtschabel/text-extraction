@@ -8,8 +8,10 @@ the extract worker's batch items (F13). The last section is the contract of the 
 ``docling``. ``DoclingHandoff`` is the ``ocr_handoff`` of one sync request (``Pipeline.run`` and
 ``Pipeline.extract_upload``):
 
-- While Valkey's memory guard is high, or the caller has ``DOCLING_MAX_OPEN_PER_CLIENT``
-  unfinished Docling jobs, nothing is stored or queued: the request answers its draft with the
+- While Valkey's memory guard is high, the caller has ``DOCLING_MAX_OPEN_PER_CLIENT``
+  unfinished Docling jobs, or the input would exceed ``DOCLING_INPUT_BUDGET_BYTES``
+  (``JobStore.put_input`` refuses with ``InputBudgetExceeded``; the budget is that of all jobs'
+  inputs, see ``jobs.py``), nothing is stored or queued: the request answers its draft with the
   warning ``ocr_unavailable``, or without a draft ``failed``/``rate_limited``, retryable.
 - Otherwise a one-item job of kind ``extract`` (a URL) or ``file`` (an upload) is created, the
   document's bytes are stored as its input, the MarkItDown result as its draft, and the item is
@@ -26,14 +28,15 @@ the extract worker's batch items (F13). The last section is the contract of the 
 ``text_extraction_docling_dispatch_total{outcome}`` (``DOCLING_OUTCOMES``): ``answered`` (the
 worker's result came back), ``not_claimed`` (no worker claimed the item in time), ``no_result``
 (claimed, but no result in time, or the job was gone), ``handed_over`` (the request answered 202,
-or put the document on its P1 job), ``backend_error`` (Valkey failed), ``memory_guard`` and
-``open_limit`` (nothing was dispatched).
+or put the document on its P1 job), ``backend_error`` (Valkey failed), ``memory_guard``,
+``open_limit`` and ``input_budget`` (nothing was dispatched).
 
 **Batch items (F13).** ``DoclingMove`` is the ``ocr_handoff`` of one item of the extract worker
 (``worker.ExtractRunner``): it stores the document as the item's input and MarkItDown's result as
 its draft, then queues the item on ``docling`` with the same job, index and client; the extract
-worker completes it without a result. While the memory guard is high nothing is stored: the item
-keeps its draft with ``ocr_unavailable`` (without a draft it fails ``rate_limited``, retryable).
+worker completes it without a result. While the memory guard is high, or the input budget is
+full, nothing is stored: the item keeps its draft with ``ocr_unavailable`` (without a draft it
+fails ``rate_limited``, retryable), counted as ``memory_guard`` or ``input_budget``.
 
 **The ``docling`` pool's items (the contract of the Docling worker).**
 
@@ -75,7 +78,7 @@ from collections.abc import Awaitable, Callable
 from typing import Final, Literal
 
 import structlog
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, Counter
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -84,7 +87,7 @@ from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobRecord, JobStore
+from text_extraction.jobs import InputBudgetExceeded, JobRecord, JobStore
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
 from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatcher
 from text_extraction.result_cache import MemoryPressure
@@ -102,6 +105,7 @@ DOCLING_OUTCOMES: Final = (
     "backend_error",
     "memory_guard",
     "open_limit",
+    "input_budget",
 )
 DOCLING_POOL: Final = "docling"
 # The per-domain lease cap of the ``docling`` queue: OCR fetches nothing, so no host is spared.
@@ -189,8 +193,9 @@ class DoclingDispatcher(PoolDispatcher):
         """Queue the document on the ``docling`` pool and return its job's id: a new job of
         ``kind``, or ``job_id`` (the request's P1 job), whose lease is cleared. The job counts
         as one of the caller's Docling jobs before its input is stored; over
-        ``DOCLING_MAX_OPEN_PER_CLIENT`` this raises ``OpenLimitReached`` and a new job is deleted
-        again. Valkey errors propagate."""
+        ``DOCLING_MAX_OPEN_PER_CLIENT`` this raises ``OpenLimitReached``, over
+        ``DOCLING_INPUT_BUDGET_BYTES`` ``InputBudgetExceeded``, and a new job is deleted again.
+        Valkey errors propagate."""
         settings = self._settings
         limit = settings.docling_max_open_per_client
         owner = principal.name
@@ -199,9 +204,13 @@ class DoclingDispatcher(PoolDispatcher):
             if await self._store.add_docling_job(owner, job) > limit:
                 await self._store.drop_docling_job(owner, job)
                 raise OpenLimitReached
-            await self._store.put_input(
-                job, 0, needed.input.body, needed.input.meta, settings.docling_input_ttl_seconds
-            )
+            try:
+                await self._store.put_input(
+                    job, 0, needed.input.body, needed.input.meta, settings.docling_input_ttl_seconds
+                )
+            except InputBudgetExceeded:
+                await self._store.drop_docling_job(owner, job)
+                raise
 
         try:
             # Counted first, so that a caller at its limit stores nothing at all.
@@ -212,6 +221,9 @@ class DoclingDispatcher(PoolDispatcher):
             )
         except OpenLimitReached:
             self.count("open_limit")
+            raise
+        except InputBudgetExceeded:
+            self.count("input_budget")
             raise
 
     async def _open_jobs(self, owner: str) -> int:
@@ -297,6 +309,8 @@ class DoclingHandoff:
             job_id = await self._submit(needed)
         except OpenLimitReached:
             return self._at_limit(needed, without)
+        except InputBudgetExceeded:
+            return ocr_fallback(needed, without, ErrorCode.RATE_LIMITED, OCR_BUSY_MESSAGE)
         except BACKEND_ERRORS as error:  # JobLost: the new job vanished before its input
             return self._backend_failed(needed, without, error)
         finally:
@@ -341,6 +355,8 @@ class DoclingHandoff:
             await self._submit(needed, job_id)
         except OpenLimitReached:
             return self._at_limit(needed, without)
+        except InputBudgetExceeded:
+            return ocr_fallback(needed, without, ErrorCode.RATE_LIMITED, OCR_BUSY_MESSAGE)
         except BACKEND_ERRORS as error:
             _dispatch_failed(error)
             return ocr_fallback(needed, without, ErrorCode.INTERNAL_ERROR, _BACKEND_MESSAGE)
@@ -368,8 +384,9 @@ class DoclingHandoff:
 
 class DoclingMove:
     """The OCR handoff of one item (F13): moves its document to the ``docling`` pool, or, while
-    ``guard`` is high, keeps its draft with ``ocr_unavailable``. ``moved`` is True once the
-    item is queued there; its runner then answers None."""
+    ``guard`` is high or the input budget is full, keeps its draft with ``ocr_unavailable``.
+    ``moved`` is True once the item is queued there; its runner then answers None. ``outcomes``
+    (``text_extraction_docling_dispatch_total``) counts those refusals."""
 
     def __init__(
         self,
@@ -380,6 +397,8 @@ class DoclingMove:
         job: JobRecord,
         item: QueueItem,
         url: str | None,
+        *,
+        outcomes: Counter | None = None,
     ) -> None:
         self._store = store
         self._queue = queue
@@ -388,24 +407,38 @@ class DoclingMove:
         self._job = job
         self._item = item
         self._url = url
+        self._outcomes = outcomes
         self.moved = False
 
     async def __call__(
         self, needed: OcrNeeded, without: Envelope[ExtractResult]
     ) -> Envelope[ExtractResult]:
         if self._guard is not None and self._guard.high:
+            self._count("memory_guard")
             return ocr_fallback(needed, without, ErrorCode.RATE_LIMITED, OCR_BUSY_MESSAGE)
         job_id, index = self._job.id, self._item.index
         document = needed.input
         # Input, then draft, then the queue: the Docling worker may claim the item at once.
-        await self._store.put_input(
-            job_id, index, document.body, document.meta, self._settings.docling_input_ttl_seconds
-        )
+        try:
+            await self._store.put_input(
+                job_id,
+                index,
+                document.body,
+                document.meta,
+                self._settings.docling_input_ttl_seconds,
+            )
+        except InputBudgetExceeded:
+            self._count("input_budget")
+            return ocr_fallback(needed, without, ErrorCode.RATE_LIMITED, OCR_BUSY_MESSAGE)
         if needed.draft is not None:
             await self._store.put_draft(job_id, index, needed.draft)
         await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
         self.moved = True
         return without  # not stored: the item is completed without a result
+
+    def _count(self, outcome: str) -> None:
+        if self._outcomes is not None:
+            self._outcomes.labels(outcome=outcome).inc()
 
 
 def _dispatch_failed(error: Exception) -> None:

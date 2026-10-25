@@ -15,7 +15,7 @@ from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions, JobProgress
-from text_extraction.jobs import JobLost, JobStore, browser_lease_seconds
+from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore, browser_lease_seconds
 from text_extraction.settings import Settings
 
 START = 1_000_000.0
@@ -821,3 +821,119 @@ async def test_a_job_an_older_pod_stored_reads_with_ocr_auto() -> None:
     assert record is not None
     assert record.options == OPTIONS
     assert record.options.ocr == "auto"
+
+
+# --- the input budget (DOCLING_INPUT_BUDGET_BYTES) ----------------------------------------------
+
+BUDGET = 10_000
+BUDGET_TOTAL = "inputs:{budget}:total"
+BUDGET_EXPIRY = "inputs:{budget}:expiry"
+
+
+class InputMeta(BaseModel):
+    kind: str = "pdf"
+
+
+def budget_store(valkey: FakeAsyncRedis) -> JobStore:
+    return make_store(valkey, docling_input_budget_bytes=BUDGET, document_max_bytes=BUDGET)
+
+
+async def budget_used(valkey: FakeAsyncRedis) -> int:
+    return int(await valkey.get(BUDGET_TOTAL) or 0)
+
+
+def input_size(body: bytes) -> int:
+    return len(body) + len(InputMeta().model_dump_json())
+
+
+@scenario
+async def test_inputs_over_the_budget_are_refused() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    first, second = await create_job(store), await create_job(store)
+
+    await store.put_input(first, 0, b"x" * 6_000, InputMeta(), 600)
+    with pytest.raises(InputBudgetExceeded):
+        await store.put_input(second, 0, b"y" * 6_000, InputMeta(), 600)
+
+    assert await store.get_input(second, 0, InputMeta) is None  # nothing was stored
+    assert await budget_used(valkey) == input_size(b"x" * 6_000)
+    await store.put_input(second, 1, b"z" * 3_000, InputMeta(), 600)  # what is left still fits
+
+
+@scenario
+async def test_a_deleted_input_gives_its_bytes_back() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    first, second, third = [await create_job(store) for _ in range(3)]
+    for job_id in (first, second, third):
+        await store.put_input(job_id, 0, b"x" * 9_000, InputMeta(), 600)
+        assert await budget_used(valkey) == input_size(b"x" * 9_000)
+        if job_id == first:
+            await store.delete_input(job_id, 0)  # the item has its outcome
+        elif job_id == second:
+            await store.delete(job_id)  # a sync job answered
+        else:
+            await store.shorten(job_id, 60)  # a sync job with a screenshot
+
+    assert await budget_used(valkey) == 0
+    assert await valkey.zcard(BUDGET_EXPIRY) == 0
+
+
+@scenario
+async def test_an_input_that_expired_leaves_the_budget() -> None:
+    """An input whose TTL ran out is not deleted by anyone: the next write prunes it by its
+    expiry, so the budget does not leak."""
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    first, second = await create_job(store), await create_job(store)
+    await store.put_input(first, 0, b"x" * 9_000, InputMeta(), 600)
+    # Its TTL runs out: the key is gone, and its expiry lies in the past.
+    await valkey.delete(f"job:{{{first}}}:input:0")
+    await valkey.zadd(BUDGET_EXPIRY, {f"{first}:0": 1})
+
+    await store.put_input(second, 0, b"y" * 9_000, InputMeta(), 600)
+
+    assert await budget_used(valkey) == input_size(b"y" * 9_000)
+    assert await valkey.zrange(BUDGET_EXPIRY, 0, -1) == [f"{second}:0".encode()]
+
+
+@scenario
+async def test_a_replaced_input_counts_once() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    job_id = await create_job(store)
+
+    await store.put_input(job_id, 0, b"x" * 6_000, InputMeta(), 600)
+    await store.put_input(job_id, 0, b"y" * 7_000, InputMeta(), 600)  # an upload's, then OCR's
+
+    assert await budget_used(valkey) == input_size(b"y" * 7_000)
+
+
+@scenario
+async def test_a_lost_job_takes_nothing_from_the_budget() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+
+    with pytest.raises(JobLost):
+        await store.put_input("0" * 32, 0, b"x" * 9_000, InputMeta(), 600)
+
+    assert await budget_used(valkey) == 0
+
+
+@scenario
+async def test_the_budget_holds_under_concurrent_writes() -> None:
+    valkey = FakeAsyncRedis()
+    store = budget_store(valkey)
+    jobs = [await create_job(store) for _ in range(10)]
+
+    outcomes = await asyncio.gather(
+        *(store.put_input(job_id, 0, b"x" * 2_000, InputMeta(), 600) for job_id in jobs),
+        return_exceptions=True,
+    )
+
+    stored = [outcome for outcome in outcomes if outcome is None]
+    refused = [outcome for outcome in outcomes if isinstance(outcome, InputBudgetExceeded)]
+    assert len(stored) == BUDGET // input_size(b"x" * 2_000)
+    assert len(stored) + len(refused) == len(jobs)
+    assert await budget_used(valkey) <= BUDGET

@@ -39,6 +39,26 @@ Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR) 
 ``jobs:{owner:<owner>}:docling`` is a set of an owner's Docling jobs (``add_docling_job``); a job
 that is completed or gone leaves it when it is counted (``open_docling_jobs``).
 
+All inputs together stay within ``DOCLING_INPUT_BUDGET_BYTES`` (Valkey's memory: a full Valkey
+under ``noeviction`` refuses the writes of the job store, the queue and the rate limiter). Three
+keys of their own hash tag account for it:
+
+- ``inputs:{budget}:size``   hash: ``<id>:<index>`` -> the input's bytes (body and meta)
+- ``inputs:{budget}:expiry`` sorted set: ``<id>:<index>`` scored by when its input expires
+                          (Valkey's own clock, in ms)
+- ``inputs:{budget}:total``  string: the sum of ``size``
+
+``put_input`` first reserves the input's bytes in one script on these keys: it prunes the
+reservations whose expiry has passed (an input that expired by its TTL, which nobody deletes),
+then reserves, or refuses with ``InputBudgetExceeded`` when the total would exceed the budget.
+Check and reservation are one atomic step, so concurrent writers never pass the budget
+together. Only then is the input written; a write that fails gives the reservation back.
+Deleting an input (``delete_input``, ``delete``, ``shorten``) gives it back too. The budget's
+keys are not in a job's slot, so reservation and write are two scripts: one script on keys of
+two hash tags would not run on a Valkey cluster. A pod that dies between them leaves a
+reservation that its expiry prunes, never a leak. A reservation lasts the requested TTL even
+where the job's shorter life cuts the input's: it then counts a little longer, never shorter.
+
 A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
 then; one with a screenshot is kept only as long as the screenshot (``shorten``).
 
@@ -47,6 +67,7 @@ as numbers and handed out as UTC datetimes, except ``lease_until``, which stays 
 """
 
 import asyncio
+import contextlib
 import math
 import re
 import time
@@ -58,6 +79,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal, Role
 from text_extraction.browser_options import BrowserSecrets
@@ -190,6 +212,57 @@ redis.call('PEXPIRE', KEYS[2], ttl)
 return 1
 """
 
+# KEYS = the budget's size, expiry and total; ARGV = member (``<id>:<index>``), bytes, ttl in ms,
+# budget. Prunes the reservations that have expired, then reserves ``bytes`` for the member (a
+# member reserved already counts once, with its new size) and returns 1, or returns 0 when the
+# total would exceed the budget (nothing is reserved). Valkey's clock decides the expiry, as for
+# the TTL of the input itself.
+_RESERVE_INPUT = """
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local total = tonumber(redis.call('GET', KEYS[3]) or '0')
+local expired = redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', now)
+for _, member in ipairs(expired) do
+  total = total - tonumber(redis.call('HGET', KEYS[1], member) or '0')
+  redis.call('HDEL', KEYS[1], member)
+  redis.call('ZREM', KEYS[2], member)
+end
+local size = tonumber(ARGV[2])
+local previous = tonumber(redis.call('HGET', KEYS[1], ARGV[1]) or '0')
+local reserved = 0
+if total - previous + size <= tonumber(ARGV[4]) then
+  total = total - previous + size
+  redis.call('HSET', KEYS[1], ARGV[1], size)
+  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[3]), ARGV[1])
+  reserved = 1
+end
+if total > 0 then
+  redis.call('SET', KEYS[3], total)
+else
+  redis.call('DEL', KEYS[3])
+end
+return reserved
+"""
+
+# KEYS = the budget's size, expiry and total; ARGV = members. Gives their reservations back.
+_RELEASE_INPUTS = """
+local total = tonumber(redis.call('GET', KEYS[3]) or '0')
+for _, member in ipairs(ARGV) do
+  local size = redis.call('HGET', KEYS[1], member)
+  if size then
+    total = total - tonumber(size)
+    redis.call('HDEL', KEYS[1], member)
+    redis.call('ZREM', KEYS[2], member)
+  end
+end
+if total > 0 then
+  redis.call('SET', KEYS[3], total)
+else
+  redis.call('DEL', KEYS[3])
+end
+return 1
+"""
+
 # KEYS = meta, artifact; ARGV = data, ttl in seconds. Returns 1, or -1 when the job is gone.
 _PUT_ARTIFACT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -198,6 +271,14 @@ end
 redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
 return 1
 """
+
+
+# The keys of the input budget, in the order the scripts take them.
+_BUDGET_KEYS = ("inputs:{budget}:size", "inputs:{budget}:expiry", "inputs:{budget}:total")
+
+
+class InputBudgetExceeded(Exception):  # noqa: N818 - a refusal, not an error of ours
+    """Storing the input would take all inputs over ``DOCLING_INPUT_BUDGET_BYTES``."""
 
 
 class JobLost(Exception):  # noqa: N818 - public name fixed by the plan
@@ -275,6 +356,11 @@ def _options_json(options: JobOptions) -> str:
     return options.model_dump_json(exclude={"ocr"} if options.ocr == "auto" else None)
 
 
+def _budget_member(job_id: str, index: int) -> str:
+    """The name of an input in the input budget."""
+    return f"{job_id}:{index}"
+
+
 def _epoch(value: float) -> str:
     return repr(float(value))
 
@@ -309,6 +395,9 @@ class JobStore:
         self._put_draft = valkey.register_script(_PUT_DRAFT)
         self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
         self._put_input = valkey.register_script(_PUT_INPUT)
+        self._reserve_input = valkey.register_script(_RESERVE_INPUT)
+        self._release_inputs = valkey.register_script(_RELEASE_INPUTS)
+        self._input_budget = settings.docling_input_budget_bytes
 
     async def create(
         self,
@@ -363,13 +452,14 @@ class JobStore:
         return job_id
 
     async def delete(self, job_id: str) -> None:
-        """Remove all keys of the job, its secrets, drafts, files and the input of item 0 too.
-        A job that is gone already is not an error."""
+        """Remove all keys of the job, its secrets, drafts, files and the input of item 0 too
+        (its bytes leave the input budget). A job that is gone already is not an error."""
         await self._valkey.delete(
             *(_key(job_id, kind) for kind in _KINDS),
             *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
             _key(job_id, _FIRST_INPUT),
         )
+        await self._release(job_id, 0)
 
     async def shorten(self, job_id: str, seconds: int) -> None:
         """Let the job and its files expire within ``seconds`` (never later than they would)
@@ -383,6 +473,7 @@ class JobStore:
                 pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
             pipe.delete(_key(job_id, "secrets"), _key(job_id, "drafts"), _key(job_id, _FIRST_INPUT))
             await pipe.execute()
+        await self._release(job_id, 0)
 
     async def secrets(self, job_id: str) -> BrowserSecrets:
         """The caller's browser secrets of the job; empty when it had none or they are gone."""
@@ -422,12 +513,26 @@ class JobStore:
     ) -> None:
         """Keep the bytes of item ``index`` with ``meta`` (stored as JSON) for ``ttl`` seconds,
         but never longer than the job; a later input of the item replaces it. Raises
-        ``JobLost`` when the job is gone, so nothing is stored for it."""
-        outcome = await self._put_input(
-            keys=[_key(job_id, "meta"), _key(job_id, f"input:{index}")],
-            args=[body, meta.model_dump_json(), ttl * 1000],
+        ``InputBudgetExceeded`` when all inputs would exceed ``DOCLING_INPUT_BUDGET_BYTES``, and
+        ``JobLost`` when the job is gone; nothing is stored then."""
+        encoded = meta.model_dump_json()
+        member = _budget_member(job_id, index)
+        reserved = await self._reserve_input(
+            keys=list(_BUDGET_KEYS),
+            args=[member, len(body) + len(encoded.encode()), ttl * 1000, self._input_budget],
         )
+        if not reserved:
+            raise InputBudgetExceeded
+        try:
+            outcome = await self._put_input(
+                keys=[_key(job_id, "meta"), _key(job_id, f"input:{index}")],
+                args=[body, encoded, ttl * 1000],
+            )
+        except BaseException:
+            await asyncio.shield(self._release(job_id, index))
+            raise
         if outcome == _NOT_FOUND:
+            await self._release(job_id, index)
             raise JobLost(job_id)
 
     async def get_input[M: BaseModel](
@@ -442,8 +547,18 @@ class JobStore:
         return raw, model.model_validate_json(meta)
 
     async def delete_input(self, job_id: str, index: int) -> None:
-        """Delete the bytes of item ``index`` (it has its outcome)."""
+        """Delete the bytes of item ``index`` (it has its outcome); they leave the input
+        budget."""
         await self._valkey.delete(_key(job_id, f"input:{index}"))
+        await self._release(job_id, index)
+
+    async def _release(self, job_id: str, index: int) -> None:
+        """Give the reservation of an input back (after the input is gone). A Valkey failure
+        leaves it to its expiry."""
+        with contextlib.suppress(RedisError, OSError):
+            await self._release_inputs(
+                keys=list(_BUDGET_KEYS), args=[_budget_member(job_id, index)]
+            )
 
     async def add_docling_job(self, owner: str, job_id: str) -> int:
         """Count the job as one of the owner's Docling jobs; how many the set holds afterwards,

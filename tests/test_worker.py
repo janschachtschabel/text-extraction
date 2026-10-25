@@ -145,6 +145,7 @@ class Harness:
             self.browser_queue if self.settings.browser_enabled else None,
             docling_queue=self.docling_queue if ocr_available(self.settings) else None,
             guard=self.guard,
+            registry=self.registry,
         )
         self.worker = Worker(
             self.settings,
@@ -1391,6 +1392,8 @@ async def test_batch_item_keeps_its_draft_while_memory_is_high() -> None:
     job_id = await harness.submit([SCAN_URL])
 
     await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    counted = harness.sample("text_extraction_docling_dispatch_total", {"outcome": "memory_guard"})
+    assert counted == 1
 
     (item,) = await harness.items(job_id)
     assert item.result is not None
@@ -1400,6 +1403,32 @@ async def test_batch_item_keeps_its_draft_while_memory_is_high() -> None:
     assert item.result.data.fingerprint is None
     assert (await harness.docling_queue.counts()).pending == 0
     assert await harness.valkey.keys("job:*:input:*") == []
+
+
+@scenario
+async def test_batch_item_keeps_its_draft_while_the_input_budget_is_full() -> None:
+    """All inputs together would exceed DOCLING_INPUT_BUDGET_BYTES: the item keeps its draft
+    with ``ocr_unavailable``, unstored, and nothing moves (final review I3)."""
+    harness = ocr_harness(docling_input_budget_bytes=10_000, document_max_bytes=10_000)
+    other = await harness.store.create("batch", OWNER, OPTIONS, [SCAN_URL])
+    meta = DocumentInputMeta(kind="pdf", content_type="application/pdf", raw_sha256="0" * 64)
+    size = 10_000 - len(meta.model_dump_json()) - 10  # 10 bytes are left
+    await harness.store.put_input(other, 0, b"f" * size, meta, 600)
+    job_id = await harness.submit([SCAN_URL])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"  # the draft's own verdict: too few words
+    assert item.result.data is not None
+    assert OCR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert item.result.data.fingerprint is None
+    assert (await harness.docling_queue.counts()).pending == 0
+    assert await harness.valkey.keys(f"job:{{{job_id}}}:input:*") == []
+    assert await harness.store.draft(job_id, 0) is None
+    counted = harness.sample("text_extraction_docling_dispatch_total", {"outcome": "input_budget"})
+    assert counted == 1
 
 
 @scenario

@@ -92,6 +92,7 @@ from redis.exceptions import RedisError
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.docling_dispatch import (
+    DOCLING_OUTCOMES,
     DOCLING_POOL,
     DoclingMove,
     docling_queue,
@@ -112,7 +113,7 @@ from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
-from text_extraction.queue_metrics import job_duration_for
+from text_extraction.queue_metrics import dispatch_counter_for, job_duration_for
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.server import (
@@ -225,7 +226,8 @@ class ExtractRunner:
     the browser to the ``browser`` pool (B5), and the move of a document that needs OCR to the
     ``docling`` pool (F13). ``browser_queue`` is the browser pool's queue, None while
     ``BROWSER_ENABLED`` is false; ``docling_queue`` the Docling pool's, None while the service
-    has no OCR; then nothing moves there. ``guard`` tells whether Valkey is nearly full."""
+    has no OCR; then nothing moves there. ``guard`` tells whether Valkey is nearly full;
+    ``registry`` gets ``text_extraction_docling_dispatch_total`` for the refused moves."""
 
     def __init__(
         self,
@@ -236,6 +238,7 @@ class ExtractRunner:
         *,
         docling_queue: FairQueue | None = None,
         guard: MemoryPressure | None = None,
+        registry: CollectorRegistry | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._store = store
@@ -243,6 +246,12 @@ class ExtractRunner:
         self._browser_queue = browser_queue
         self._docling_queue = docling_queue
         self._guard = guard
+        # The refused moves count in text_extraction_docling_dispatch_total, as sync requests'.
+        self._docling_outcomes = (
+            dispatch_counter_for(registry, DOCLING_OUTCOMES, pool=DOCLING_POOL)
+            if registry is not None and docling_queue is not None
+            else None
+        )
         self.lease_seconds = settings.extract_timeout_seconds * 2 + 10
 
     async def run(
@@ -280,7 +289,14 @@ class ExtractRunner:
         if self._docling_queue is None:
             return None
         return DoclingMove(
-            self._store, self._docling_queue, self._guard, self._settings, job, item, url
+            self._store,
+            self._docling_queue,
+            self._guard,
+            self._settings,
+            job,
+            item,
+            url,
+            outcomes=self._docling_outcomes,
         )
 
     async def _upload(
@@ -632,7 +648,13 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         settings,
         valkey,
         ExtractRunner(
-            pipeline, store, settings, browser_queue, docling_queue=ocr_queue, guard=guard
+            pipeline,
+            store,
+            settings,
+            browser_queue,
+            docling_queue=ocr_queue,
+            guard=guard,
+            registry=registry,
         ),
         store,
         FairQueue(valkey, settings),
