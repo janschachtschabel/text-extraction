@@ -3,7 +3,8 @@
 Licences get SPDX-style ids (``CC-BY-SA-4.0``). ``LicenseCollector`` gathers the candidates a
 page offers, each with the source it came from and how far to trust it: the page's own
 ``rel=license`` link or structured ``license`` property is ``high``, a meta tag or OpenGraph
-property ``medium``, and a licence mentioned in the footer ``low``. The best candidate has the
+property ``medium``, and a licence mentioned in the footer ``low``. A document's XMP packet
+(``xmp``) counts like structured data: ``cc:license`` is ``high``. The best candidate has the
 highest confidence, then a recognised id, then comes first.
 """
 
@@ -16,7 +17,9 @@ from pydantic import BaseModel
 
 from text_extraction.convert.links import absolute_url
 
-LicenseSource = Literal["rel-license", "json-ld", "microdata", "rdfa", "meta", "opengraph", "text"]
+LicenseSource = Literal[
+    "rel-license", "json-ld", "microdata", "rdfa", "meta", "opengraph", "text", "xmp"
+]
 Confidence = Literal["high", "medium", "low"]
 
 _MAX_LICENSES = 10  # kept in the result
