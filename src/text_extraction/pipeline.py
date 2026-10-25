@@ -245,6 +245,17 @@ def _ms(since: float) -> int:
     return round((time.perf_counter() - since) * 1000)
 
 
+def _failed(
+    result: ExtractResult, code: ErrorCode, message: str, *, retryable: bool
+) -> Envelope[ExtractResult]:
+    """A failed envelope with as much of the result as the run reached."""
+    return Envelope(
+        status="failed",
+        data=result,
+        error=ErrorInfo(code=code, message=message, retryable=retryable),
+    )
+
+
 @dataclass
 class _Run:
     """What one request has learned so far; a failure at any step reports it."""
@@ -323,11 +334,7 @@ class _Run:
     def failed(
         self, code: ErrorCode, message: str, *, retryable: bool = False
     ) -> Envelope[ExtractResult]:
-        return Envelope(
-            status="failed",
-            data=self.result(),
-            error=ErrorInfo(code=code, message=message, retryable=retryable),
-        )
+        return _failed(self.result(), code, message, retryable=retryable)
 
 
 @dataclass(frozen=True)
@@ -393,11 +400,7 @@ class _UploadRun:
     def failed(
         self, code: ErrorCode, message: str, *, retryable: bool = False
     ) -> Envelope[ExtractResult]:
-        return Envelope(
-            status="failed",
-            data=self.result(),
-            error=ErrorInfo(code=code, message=message, retryable=retryable),
-        )
+        return _failed(self.result(), code, message, retryable=retryable)
 
 
 class _Turn:
@@ -751,6 +754,8 @@ class Pipeline:
             )
         if kind != "html" and kind != "text":
             return await self._document(run, fetched, kind, stored)
+        if kind == "html" and _KINDS.get(fetched.content_type or "") != "html":
+            run.content_type = "text/html"  # an HTML page declared as a document (F1)
         if run.direct:  # a file the render ended on, but no document after all
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
@@ -1148,7 +1153,7 @@ class Pipeline:
             )
         raw_sha256 = await self._pool.run(_sha256, body)
         if kind == "html" or kind == "text":
-            run.content_type = declared if kind == "html" else "text/plain"
+            run.content_type = _page_type(kind, declared)
             return await self._uploaded_page(run, body, kind, charset, raw_sha256)
         run.content_type = media_type(kind)
         limit = self._settings.document_max_bytes
@@ -1727,6 +1732,16 @@ def _path_hash(url: str) -> str:
     parts = urlsplit(url)
     target = parts.path + (f"?{parts.query}" if parts.query else "")
     return hashlib.sha256(target.encode()).hexdigest()[:12]
+
+
+def _page_type(kind: Literal["html", "text"], declared: str | None) -> str:
+    """The media type a page's result reports: a declared HTML type as it is, else the type
+    the bytes were read as."""
+    if kind == "text":
+        return "text/plain"
+    if declared is not None and _KINDS.get(declared) == "html":
+        return declared
+    return "text/html"
 
 
 def _sha256(body: bytes) -> str:

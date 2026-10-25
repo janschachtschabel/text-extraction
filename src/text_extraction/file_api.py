@@ -10,7 +10,9 @@
   which deletes its spooled file; the pipeline answers a longer one with ``too_large``.
 - The part's file name is reduced to its base name (``sanitize_file_name``) and reported as
   ``document.file_name`` only: it is never logged.
-- The usual auth (role ``user``) and inbound rate limit apply, and ``ocr: always`` is 400 while
+- The usual auth (role ``user``) and inbound rate limit apply, before a byte of the body is read:
+  a caller without a key, or over its rate limit, gets its 401 or 429 (the same answers as on
+  every route) without the pod receiving or spooling the upload. ``ocr: always`` is 400 while
   the service has no OCR, as for ``/v1/extract``.
 
 The conversion is ``Pipeline.extract_upload``: no compliance check, no result cache. The upload
@@ -30,7 +32,7 @@ from fastapi.responses import Response
 from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from text_extraction.auth import Principal, require_role
+from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import check_ocr_request
@@ -70,14 +72,18 @@ def sanitize_file_name(name: str | None) -> str | None:
 
 
 class _UploadRoute(APIRoute):
-    """Parses the form with the upload's limits before FastAPI reads it (FastAPI's own parse
-    allows 1,000 files and fields). The parsed form is kept on the request, so FastAPI uses it,
-    and closes it when the answer is sent."""
+    """Authenticates the caller and counts the request against its rate limit, then parses the
+    form with the upload's limits, all before FastAPI reads the body (it reads the body before
+    it runs any dependency, and its own parse allows 1,000 files and fields). Both checks read
+    headers only. The parsed form is kept on the request, so FastAPI uses it, and closes it when
+    the answer is sent."""
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
 
         async def limited(request: Request) -> Response:
+            principal = await require_role("user")(await authenticate(request))
+            await rate_limited(request, principal)  # the route's only count of this request
             try:
                 await request.form(
                     max_files=MAX_FILES, max_fields=MAX_FIELDS, max_part_size=MAX_FIELD_BYTES
@@ -100,7 +106,6 @@ router = APIRouter(route_class=_UploadRoute)
 
 @router.post(
     PATH,
-    dependencies=[Depends(rate_limited)],
     response_model=Envelope[ExtractResult],
     responses={
         202: {

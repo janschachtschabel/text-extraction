@@ -23,6 +23,8 @@ RATIO_MIN_BYTES: Final = 1024 * 1024
 
 _PDF_WINDOW: Final = 1024
 _HTML_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})
+_HTML_START: Final = re.compile(rb"<(?:!doctype\s+html|html)(?:[\s>/]|$)", re.IGNORECASE)
+_HTML_PREFIX_LIMIT: Final = 1024  # whitespace before the tag is skipped up to this
 _CSV_SAMPLE: Final = 8192
 _CONTENT_TYPES_LIMIT: Final = 256 * 1024
 _MIMETYPE_LIMIT: Final = 128
@@ -44,6 +46,10 @@ _MEDIA_TYPES: Final[dict[DocumentKind, str]] = {
     "webp": "image/webp",
     "bmp": "image/bmp",
 }
+# Declared types under which a body that starts like an HTML page is that page: the document
+# types, an unknown type and none. Other types (``text/plain``, ``application/json``, ...) keep
+# their path.
+_HTML_SNIFFED_TYPES: Final = frozenset({*_MEDIA_TYPES.values(), "", "application/octet-stream"})
 _ZIP_KINDS: Final[frozenset[DocumentKind]] = frozenset(
     {"docx", "pptx", "xlsx", "epub", "odt", "ods", "odp"}
 )
@@ -89,10 +95,12 @@ def sniff(
     """The kind of a body, or None when it is not supported.
 
     A declared HTML or XHTML type is always "html" (the page path). For anything else the
-    bytes decide first; then CSV (declared, or a ``.csv`` name, with decodable text); then a
-    declared ``text/plain`` is "text". A ``text/plain`` body is a document only when its
-    signature stands at the start (after a byte order mark and whitespace), so prose that
-    quotes ``%PDF-`` stays text. Any parser error means None.
+    bytes decide first; then an HTML page declared as a document type, as
+    ``application/octet-stream`` or not at all ("html": an upload named report.pdf that is
+    HTML); then CSV (declared, or a ``.csv`` name, with decodable text); then a declared
+    ``text/plain`` is "text". A ``text/plain`` body is a document only when its signature
+    stands at the start (after a byte order mark and whitespace), so prose that quotes
+    ``%PDF-`` stays text. Any parser error means None.
     """
     media = (declared or "").split(";", 1)[0].strip().lower()
     if media in _HTML_TYPES:
@@ -103,6 +111,8 @@ def sniff(
         by_bytes = None
     if by_bytes is not None:
         return by_bytes
+    if media in _HTML_SNIFFED_TYPES and _starts_like_html(body):
+        return "html"
     if (media == "text/csv" or (name or "").lower().endswith(".csv")) and _looks_like_text(body):
         return "csv"
     if media == "text/plain":
@@ -195,6 +205,15 @@ def _sniff_zip(body: bytes) -> DocumentKind | None:
     except Exception:  # bad, encrypted or corrupt entries (zlib.error, RuntimeError, ...): None
         return None
     return None
+
+
+def _starts_like_html(body: bytes) -> bool:
+    """Whether the body starts with ``<!doctype html`` or ``<html`` (any case), after a byte
+    order mark and whitespace."""
+    head = body[:_HTML_PREFIX_LIMIT]
+    if head.startswith(b"\xef\xbb\xbf"):
+        head = head[3:]
+    return _HTML_START.match(head.lstrip(b" \t\r\n\f\v")) is not None
 
 
 def _looks_like_text(body: bytes) -> bool:

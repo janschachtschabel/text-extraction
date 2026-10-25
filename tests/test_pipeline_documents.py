@@ -320,6 +320,25 @@ def test_csv_gets_the_header_charset(loop: Loop) -> None:
     assert "Размер" in (data_of(envelope).content or "")
 
 
+@pytest.mark.parametrize("content_type", ["application/pdf", "application/octet-stream", None])
+def test_html_body_under_a_document_type_converts_as_html(content_type: str | None) -> None:
+    """Detection follows the bytes: a "PDF" whose body is an HTML page is that page."""
+    harness = Harness(
+        None,
+        {DOC: fetched(DOC, ARTICLE_HTML, content_type=content_type)},
+        pool=FakePool(AssertionError("not a document")),
+    )
+
+    envelope = harness.run()
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.content_type == "text/html"  # the sniffed type, as for documents (F7)
+    assert data.document is None
+    assert "Photosynthesis is the process" in (data.content or "")
+    assert data.mode_used == "fast"
+
+
 def test_html_page_answer_unchanged() -> None:
     """The package-4 answers of an HTML page, a text page and an unsupported type, recorded
     before documents were added, are unchanged (apart from the timings)."""

@@ -92,6 +92,48 @@ def test_html_declared_stays_html() -> None:
     assert sniff(PDF, "application/xhtml+xml", "x.pdf") == "html"
 
 
+HTML_BODIES = [
+    b"<!DOCTYPE html><html><body><p>Hi</p></body></html>",
+    b"<!doctype HTML>\n<html lang='de'>",
+    b"\xef\xbb\xbf \r\n\t<HTML>",
+    b"<html>",
+]
+
+
+@pytest.mark.parametrize("body", HTML_BODIES)
+@pytest.mark.parametrize(
+    "declared",
+    [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "text/csv; charset=utf-8",
+        "image/png",
+        "application/octet-stream",
+        None,
+    ],
+)
+def test_html_bytes_under_a_document_type_are_html(body: bytes, declared: str | None) -> None:
+    """Detection follows the bytes: an upload named report.pdf that is HTML is HTML."""
+    assert sniff(body, declared, "report.pdf") == "html"
+    assert sniff(body, declared, "table.csv") == "html"
+
+
+@pytest.mark.parametrize("body", HTML_BODIES)
+def test_html_bytes_keep_the_path_of_other_declared_types(body: bytes) -> None:
+    assert sniff(body, "text/plain", None) == "text"  # package 2: plain text stays text
+    assert sniff(body, "text/html", None) == "html"
+    assert sniff(body, "application/json", None) is None
+    assert sniff(body, "image/gif", None) is None
+
+
+def test_html_bytes_need_the_tag_at_the_start() -> None:
+    assert sniff(b"Notes: <html> is a tag", None, None) is None
+    assert sniff(b"<htmlish>", None, None) is None
+    assert sniff(b"<head><title>x</title></head>", "application/pdf", None) is None
+    # Document magic wins: a PDF signature in the first kilobyte is a PDF.
+    assert sniff(b"<html>" + PDF, None, None) == "pdf"
+
+
 def test_declared_type_with_parameters_and_case() -> None:
     assert sniff(PDF, "Text/HTML; charset=UTF-8", None) == "html"
     assert sniff(PDF, "TEXT/PLAIN; charset=utf-8", None) == "pdf"

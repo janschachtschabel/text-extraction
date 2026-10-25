@@ -9,6 +9,7 @@ import hashlib
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -183,11 +184,24 @@ def test_upload_rate_limited() -> None:
     assert second.json()["error"]["code"] == "rate_limited"
 
 
-def asgi_post(
-    app: FastAPI, chunks: list[bytes], headers: list[tuple[bytes, bytes]]
-) -> tuple[int, int, bytes]:
-    """POST ``chunks`` to the upload route through the whole ASGI stack: the answer's status,
-    how many chunks the app read, and the answer's body."""
+@dataclass(frozen=True)
+class Answer:
+    status: int
+    pulled: int  # chunks of the body the app read
+    body: bytes
+    headers: dict[str, str]
+
+    def json(self) -> Any:
+        return json.loads(self.body)
+
+
+async def asgi_call(
+    app: FastAPI,
+    chunks: list[bytes],
+    headers: list[tuple[bytes, bytes]],
+    path: str = "/v1/extract/file",
+) -> Answer:
+    """POST ``chunks`` to ``path`` through the whole ASGI stack."""
     pulled = 0
     sent: list[Message] = []
 
@@ -211,22 +225,33 @@ def asgi_post(
         "http_version": "1.1",
         "method": "POST",
         "scheme": "http",
-        "path": "/v1/extract/file",
-        "raw_path": b"/v1/extract/file",
+        "path": path,
+        "raw_path": path.encode(),
         "query_string": b"",
         "root_path": "",
         "headers": [(b"host", b"test"), *headers],
         "client": ("127.0.0.1", 1),
         "server": ("test", 80),
     }
-    asyncio.run(app(scope, receive, send))
+    await app(scope, receive, send)
     start = next(message for message in sent if message["type"] == "http.response.start")
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
-    return start["status"], pulled, body
+    answer_headers = {name.decode(): value.decode() for name, value in start["headers"]}
+    return Answer(start["status"], pulled, body, answer_headers)
+
+
+def asgi_post(
+    app: FastAPI, chunks: list[bytes], headers: list[tuple[bytes, bytes]]
+) -> tuple[int, int, bytes]:
+    """POST ``chunks`` to the upload route: the answer's status, how many chunks the app read,
+    and the answer's body."""
+    answer = asyncio.run(asgi_call(app, chunks, headers))
+    return answer.status, answer.pulled, answer.body
 
 
 BOUNDARY = b"upload-boundary"
 MULTIPART = [(b"content-type", b"multipart/form-data; boundary=" + BOUNDARY)]
+BEARER = [(b"authorization", AUTH["Authorization"].encode())]
 PART_HEAD = (
     b"--" + BOUNDARY + b"\r\n"
     b'Content-Disposition: form-data; name="file"; filename="a.pdf"\r\n'
@@ -240,7 +265,9 @@ def test_upload_over_limit_413_before_parse() -> None:
     limit = 2048 + 64 * 1024
     declared = [(b"content-length", str(limit + 1).encode())]
 
-    status, pulled, body = asgi_post(app, [PART_HEAD, b"x" * limit], [*MULTIPART, *declared])
+    status, pulled, body = asgi_post(
+        app, [PART_HEAD, b"x" * limit], [*MULTIPART, *BEARER, *declared]
+    )
 
     assert status == 413
     assert pulled == 0  # nothing was read, so nothing was parsed
@@ -263,11 +290,79 @@ def test_chunked_upload_over_limit_413_without_reading_it_all() -> None:
     app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
     chunks = [PART_HEAD, *([b"x" * 65_536] * 40)]  # 2.6 MB, no Content-Length
 
-    status, pulled, body = asgi_post(app, chunks, MULTIPART)
+    status, pulled, body = asgi_post(app, chunks, [*MULTIPART, *BEARER])
 
     assert status == 413
     assert pulled <= 3  # refused at the chunk that went over 66,560 bytes
     assert json.loads(body)["error"]["code"] == "invalid_request"
+
+
+UPLOAD_CHUNKS = [PART_HEAD, *([b"x" * 65_536] * 8)]
+
+
+def comparable(answer: Answer) -> tuple[int, Any, dict[str, str]]:
+    """What must match between two routes' refusals: status, envelope without the trace id,
+    and the headers that are not about the body's length."""
+    envelope = answer.json()
+    envelope.pop("trace_id", None)
+    headers = {k: v for k, v in answer.headers.items() if k not in ("content-length",)}
+    return answer.status, envelope, headers
+
+
+def test_upload_without_key_is_401_before_the_body_is_read() -> None:
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+
+    async def scenario() -> tuple[Answer, Answer]:
+        refused = await asgi_call(app, UPLOAD_CHUNKS, MULTIPART)
+        extract = await asgi_call(
+            app,
+            [b'{"url": "https://example.org/"}'],
+            [(b"content-type", b"application/json")],
+            "/v1/extract",
+        )
+        return refused, extract
+
+    refused, extract = asyncio.run(scenario())
+
+    assert refused.status == 401
+    assert refused.pulled == 0  # nothing received, nothing spooled
+    assert refused.json()["error"]["code"] == "unauthorized"
+    assert comparable(refused) == comparable(extract)
+
+
+def test_upload_over_rate_limit_is_429_before_the_body_is_read() -> None:
+    app = create_public_app(
+        make_settings(rate_limit_per_minute=1), FakeAsyncRedis(), CollectorRegistry()
+    )
+
+    async def scenario() -> tuple[Answer, Answer]:
+        await app.state.rate_limiter.hit("alice", 1)  # the minute's one request is used up
+        refused = await asgi_call(app, UPLOAD_CHUNKS, [*MULTIPART, *BEARER])
+        extract = await asgi_call(
+            app,
+            [b'{"url": "https://example.org/"}'],
+            [(b"content-type", b"application/json"), *BEARER],
+            "/v1/extract",
+        )
+        return refused, extract
+
+    refused, extract = asyncio.run(scenario())
+
+    assert refused.status == 429
+    assert refused.pulled == 0
+    assert refused.json()["error"]["code"] == "rate_limited"
+    assert "retry-after" in refused.headers
+    assert comparable(refused) == comparable(extract)
+
+
+def test_upload_counts_once_against_the_rate_limit() -> None:
+    app = create_public_app(
+        make_settings(rate_limit_per_minute=2), FakeAsyncRedis(), CollectorRegistry()
+    )
+    with TestClient(app) as test_client:
+        statuses = [upload(test_client, GIF, "a.gif", "image/gif").status_code for _ in range(3)]
+
+    assert statuses == [200, 200, 429]
 
 
 def test_file_over_document_limit_fails_too_large() -> None:
@@ -392,6 +487,18 @@ def test_html_upload_uses_html_converter(client: TestClient) -> None:
     assert "(/learn/respiration.html)" in data["content"]
     assert data["mode_used"] == "upload"
     assert data["cache"] == "bypass"
+
+
+def test_html_named_pdf_upload_follows_the_bytes(client: TestClient) -> None:
+    """An upload named report.pdf, sent as application/pdf, that is HTML (Review Focus 2)."""
+    response = upload(client, ARTICLE.encode(), "report.pdf", "application/pdf")
+
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert data["content_type"] == "text/html"
+    assert data["document"] is None
+    assert data["title"] == "Photosynthesis explained"
 
 
 def test_plain_text_upload(client: TestClient) -> None:
