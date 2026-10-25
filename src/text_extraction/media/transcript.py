@@ -27,6 +27,7 @@ __all__ = ["Chapter", "build_transcript"]
 
 PAUSE_SECONDS: Final = 2.0
 MAX_SENTENCES: Final = 6
+MAX_WORDS: Final = 120
 
 _EPSILON = 1e-6  # a gap of 1.9999999 s computed from rounded times is a gap of 2 s
 # A closing quote or bracket may stand between the mark and the space.
@@ -57,14 +58,16 @@ def build_transcript(
 
     parts: list[str] = []
     sentences = 0
+    words = 0
     previous_end = 0.0
 
     def close_paragraph() -> None:
-        nonlocal sentences
+        nonlocal sentences, words
         if parts:
             blocks.append(_escape_paragraph(" ".join(parts)))
         parts.clear()
         sentences = 0
+        words = 0
 
     for cue in cues:
         text = _one_line(cue.text)
@@ -77,8 +80,9 @@ def build_transcript(
             close_paragraph()
         parts.append(text)
         sentences += len(_SENTENCE_END.findall(text))
+        words += len(text.split())
         previous_end = cue.end
-        if sentences >= MAX_SENTENCES:
+        if sentences >= MAX_SENTENCES or words >= MAX_WORDS:
             close_paragraph()
     close_paragraph()
     return from_markdown("\n\n".join(blocks), fmt)

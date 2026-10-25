@@ -15,9 +15,13 @@ with times in seconds. The track is untrusted input from a platform or a page:
 Cleaning keeps the spoken record: tags (``<c>``, ``<i>``, ``<v Name>``, ``<lang>``, ``<ruby>``,
 timing tags, SRT's ``{\\an8}``) and entities are removed and whitespace collapses, but a sound
 label such as ``[Musik]`` stays a cue. Only the rolling repetition of automatic captions is
-dropped: a cue's leading lines that repeat the previous cue's last lines (YouTube shows two
-lines at a time and repeats the first line of each cue as the last line of the one before).
-The cue that repeats lengthens the cue it repeats, so the pauses between cues stay true.
+dropped (YouTube shows two lines at a time and repeats the first line of each cue as the last
+line of the one before): a cue's leading lines that repeat the previous cue's last lines, when
+the cue has further lines after them; a cue that is only such a repeat goes when it lasts under
+``TRANSITION_SECONDS`` (YouTube's transition cues), else it is a real repeat ("Nein." twice)
+and stays. A dropped cue lengthens the cue it repeats, so the pauses between cues stay true.
+TTML times are absolute: the offsets of parent elements, and frame and tick offset times, are
+not supported (a ``<p>`` whose ``begin`` we cannot read is skipped).
 
 Light enough for the parent process: no media library is imported.
 """
@@ -40,6 +44,7 @@ __all__ = ["CaptionError", "CaptionFormat", "Cue", "parse_captions"]
 CaptionFormat = Literal["vtt", "srt", "ttml", "json3"]
 
 DEFAULT_MAX_BYTES: Final = 5_000_000  # MEDIA_SUBTITLE_MAX_BYTES
+TRANSITION_SECONDS: Final = 0.1
 
 _BOMS: Final = (
     (codecs.BOM_UTF32_LE, "utf-32"),  # before UTF-16 LE, whose BOM is a prefix of this one
@@ -280,10 +285,11 @@ def _to_cues(raw: Iterable[_Raw]) -> list[Cue]:
             default=0,
         )
         previous = lines
-        fresh = lines[repeated:]
-        if fresh:
-            cues.append(Cue(start, end, " ".join(fresh)))
-        elif cues:
+        if repeated < len(lines):
+            cues.append(Cue(start, end, " ".join(lines[repeated:])))
+        elif cues and end - start < TRANSITION_SECONDS:
             last = cues[-1]
             cues[-1] = Cue(last.start, max(last.end, end), last.text)
+        else:
+            cues.append(Cue(start, end, " ".join(lines)))
     return cues

@@ -42,6 +42,26 @@ def test_rolling_duplicates_keep_the_time_of_the_spoken_line() -> None:
     assert cues[0].end == pytest.approx(1.93)
 
 
+def test_a_real_repeat_in_consecutive_cues_is_kept() -> None:
+    body = (
+        b"WEBVTT\n\n"
+        b"00:00:00.000 --> 00:00:01.000\nNein.\n\n"
+        b"00:00:01.000 --> 00:00:02.000\nNein.\n\n"
+        b"00:00:02.000 --> 00:00:02.050\nNein.\n\n"
+        b"00:00:02.050 --> 00:00:03.000\nNein.\nDoch.\n"
+    )
+
+    cues = parse_captions(body, "vtt")
+
+    # The 50 ms cue is a transition and goes; the 1 s repeat is speech; the last cue keeps
+    # only its new line.
+    assert [(c.start, c.end, c.text) for c in cues] == [
+        (0.0, 1.0, "Nein."),
+        (1.0, 2.05, "Nein."),
+        (2.05, 3.0, "Doch."),
+    ]
+
+
 def test_a_line_repeated_by_a_later_cue_after_new_speech_is_kept() -> None:
     body = (
         b"WEBVTT\n\n"

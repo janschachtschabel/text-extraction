@@ -63,6 +63,24 @@ def test_cues_without_punctuation_stay_one_paragraph() -> None:
     assert result == " ".join(f"wort{i}" for i in range(20))
 
 
+def test_long_unpunctuated_text_breaks_after_120_words_at_cue_boundaries() -> None:
+    words = [f"w{i}" for i in range(300)]
+    cues = [cue(i, " ".join(words[i * 10 : i * 10 + 10]), 1.0) for i in range(30)]
+
+    paragraphs = build_transcript(cues, None, [], "markdown").split("\n\n")
+
+    assert [len(p.split()) for p in paragraphs] == [120, 120, 60]
+    assert paragraphs[1].split()[0] == "w120"
+
+
+def test_a_cue_is_never_cut_by_the_word_limit() -> None:
+    cues = [cue(0, " ".join(["a"] * 100)), cue(1, " ".join(["b"] * 100)), cue(2, "c d")]
+
+    paragraphs = build_transcript(cues, None, [], "markdown").split("\n\n")
+
+    assert [len(p.split()) for p in paragraphs] == [200, 2]
+
+
 def test_title_and_chapters_as_headings() -> None:
     cues = [cue(0.5, "Intro."), cue(10, "Erstes Thema."), cue(11, "Mehr."), cue(30, "Zweites.")]
     chapters = [Chapter(30, "Zweites Kapitel"), Chapter(0, "Einleitung"), Chapter(10, "Erstes")]
