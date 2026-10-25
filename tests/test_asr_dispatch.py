@@ -81,6 +81,7 @@ def make_settings(**overrides: Any) -> Settings:
         "rate_limit_per_minute": 10_000,
         "asr_enabled": True,
         "asr_input_ttl_seconds": 1800,
+        "asr_timeout_seconds": 600,  # its lease (1210 s) within the input TTL
     }
     values.update(overrides)
     return Settings(**values)

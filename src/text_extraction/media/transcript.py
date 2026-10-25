@@ -52,7 +52,9 @@ class Transcription:
     """Speech recognition of one media file: ``segments`` (start, end and text, in seconds),
     the ``language`` heard (ISO 639-1), the audio's ``duration`` in seconds and the ``model``'s
     name. ``kind`` is what the transcribed bytes were (for the result's ``content_type``),
-    ``fetch_ms`` and ``convert_ms`` the time of the download and of the transcription."""
+    ``fetch_ms`` and ``convert_ms`` the time of the download and of the transcription,
+    ``upstream_status`` the answer of a downloaded media file (None for an upload or a platform
+    video)."""
 
     segments: list[Cue]
     language: str
@@ -61,6 +63,7 @@ class Transcription:
     kind: MediaKind | None = None
     fetch_ms: int = 0
     convert_ms: int = 0
+    upstream_status: int | None = None
 
 
 def build_transcript(

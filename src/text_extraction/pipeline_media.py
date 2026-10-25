@@ -61,7 +61,9 @@ final: the draft with ``asr_unavailable`` and without its fingerprint, or, for a
 
 The ASR worker's results (``Pipeline.transcribed_result``) are built here as well:
 ``transcribed`` makes the result of a transcription (the draft's title, metadata, uploader and
-languages for a platform video; ``transcript_source: asr`` and ``asr_model``), ``asr_failed``
+languages for a platform video; ``transcript_source: asr`` and ``asr_model``), ``no_speech`` the
+answer when the speech recognition heard nothing (the draft, final, or ``failed`` with
+``no_transcript_available``), ``asr_failed``
 the answer when the transcription failed (the draft with ``asr_unavailable`` and the failure's
 error, without its fingerprint when the failure is retryable; without a draft ``failed``).
 
@@ -137,6 +139,7 @@ __all__ = [
     "TranscribedContent",
     "asr_available",
     "asr_failed",
+    "no_speech",
     "transcribed",
     "transcribed_content",
     "without_asr",
@@ -410,6 +413,44 @@ def transcribed(
             asr_model=transcription.model,
         ),
     )
+
+
+_NO_SPEECH_DETAILS_MESSAGE: Final = (
+    "The video has no speech that could be transcribed: the answer has its details only."
+)
+_NO_SPEECH_MESSAGE: Final = "The audio has no speech that could be transcribed."
+
+
+def no_speech(
+    run: _Answering,
+    meta: MediaInputMeta,
+    draft: Envelope[ExtractResult] | None,
+    transcription: Transcription,
+) -> Envelope[ExtractResult]:
+    """The answer when the speech recognition ran and heard nothing: the draft (a platform
+    video's details) with ``no_transcript_available``, final, so it keeps its fingerprint and
+    no ``asr_unavailable``; without a draft ``failed`` with the same code, not retryable."""
+    if draft is not None and draft.data is not None:
+        warnings = [w for w in draft.data.warnings if w != ASR_UNAVAILABLE_WARNING]
+        error = ErrorInfo(
+            code=ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+            message=_NO_SPEECH_DETAILS_MESSAGE,
+            retryable=False,
+        )
+        return draft.model_copy(
+            update={"data": draft.data.model_copy(update={"warnings": warnings}), "error": error}
+        )
+    media = MediaInfo(
+        platform=meta.platform,
+        transcript_source="asr",
+        duration_seconds=transcription.duration,
+        asr_model=transcription.model,
+    )
+    result = run.result(
+        media=media,
+        content_type=media_type_of(transcription.kind) if transcription.kind else None,
+    )
+    return _failed(result, ErrorCode.NO_TRANSCRIPT_AVAILABLE, _NO_SPEECH_MESSAGE, False)
 
 
 def asr_failed(

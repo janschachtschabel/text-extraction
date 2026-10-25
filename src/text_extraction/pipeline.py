@@ -188,6 +188,7 @@ from text_extraction.pipeline_media import (
     MediaSteps,
     asr_available,
     asr_failed,
+    no_speech,
     transcribed,
     transcribed_content,
     without_asr,
@@ -842,14 +843,16 @@ class Pipeline:
         upload), ``transcription`` the speech recognition, or the failed envelope that says why
         there is none (``upstream_status``: the target's answer to a failed download).
 
-        A transcription becomes the result as the media steps build one (M6): ``# <title>``
-        (the draft's) and paragraphs, ``transcript_source: asr`` with ``asr_model``, the draft's
-        metadata and details; its quality verdict decides the status. A failure is answered by
-        the draft with ``asr_unavailable`` (``pipeline_media.asr_failed``), or without a draft
-        ``failed``. For a URL the answer is compared with the URL's previous fingerprint and
-        stored in the result cache under the URL's key (a platform video's canonical URL, with
-        ``media``), like a fast result (``_finish``), so the next request is a hit. An upload's
-        is not: its fingerprint is computed, but neither compared nor stored (F17)."""
+        A transcription becomes the result as the media steps build one (M6): ``# <title>`` (the
+        draft's) and paragraphs, ``transcript_source: asr`` with ``asr_model``, the draft's metadata
+        and details, and ``upstream_status`` the downloaded file's answer (else the draft's); its
+        quality verdict decides the status. Media without speech answers the draft, final
+        (``no_transcript_available``), or ``failed`` without one. A failure is answered by the draft
+        with ``asr_unavailable`` (``pipeline_media.asr_failed``), or without a draft ``failed``. For
+        a URL the answer is compared with the URL's previous fingerprint and stored in the result
+        cache under the URL's key (a platform video's canonical URL, with ``media``), like a fast
+        result (``_finish``), so the next request is a hit. An upload's is not: its fingerprint is
+        computed, but neither compared nor stored (F17)."""
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
@@ -883,13 +886,22 @@ class Pipeline:
         draft: Envelope[ExtractResult] | None,
         transcription: Transcription,
     ) -> Envelope[ExtractResult]:
+        details = draft.data if draft is not None and draft.data is not None else None
         if isinstance(run, _Run):
             run.attempts += 1  # the download
             run.fetch_ms += transcription.fetch_ms
+            # The downloaded file's answer, else the one the video's details came with.
+            run.upstream_status = (
+                transcription.upstream_status
+                if transcription.upstream_status is not None
+                else (details.upstream_status if details is not None else None)
+            )
         if transcription.kind is not None:
             run.content_type = media_type_of(transcription.kind)
         run.convert_ms += transcription.convert_ms
-        title = draft.data.title if draft is not None and draft.data is not None else None
+        if not any(cue.text.strip() for cue in transcription.segments):
+            return no_speech(run, meta, draft, transcription)
+        title = details.title if details is not None else None
         started = time.perf_counter()
         built = await self._pool.run(transcribed_content, run.req.format, transcription, title)
         run.convert_ms += _ms(started)

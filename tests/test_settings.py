@@ -904,7 +904,7 @@ def test_media_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.media_extract_max_bytes == 30_000_000
     assert settings.media_subtitle_max_bytes == 5_000_000
     assert settings.media_max_tracks == 3
-    assert settings.media_max_duration_seconds == 10_800
+    assert settings.media_max_duration_seconds == 7200  # D6: 2 h
     assert settings.media_max_bytes == 500_000_000
     assert settings.media_upload_max_bytes == 25_000_000
     assert settings.media_download_timeout_seconds == 600
@@ -916,8 +916,8 @@ def test_media_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.asr_threads == 4
     assert settings.asr_concurrency == 1
     assert settings.asr_memory_limit_mb == 4096
-    assert settings.asr_timeout_seconds == 3600
-    assert settings.asr_input_ttl_seconds == 21_600
+    assert settings.asr_timeout_seconds == 10_800  # D6: 3 h for the whole item
+    assert settings.asr_input_ttl_seconds == 28_800  # D6: longer than the lease
     assert settings.asr_max_open_per_client == 3
     assert settings.asr_scratch_path == Path("/tmp/asr")  # noqa: S108 - the default of an emptyDir
     assert settings.asr_external_base_url is None
@@ -954,6 +954,32 @@ def test_media_setting_bounds(
         monkeypatch.setenv(name, value)
         with pytest.raises(ConfigError, match=name.lower()):
             load_settings()
+
+
+def test_asr_input_ttl_outlives_the_lease_while_asr_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An upload waits in its input until the ASR worker reads it; a lease that outlives the
+    input would let a reclaimed item find its bytes gone (lease: 2 x ASR_TIMEOUT_SECONDS + 10)."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
+    monkeypatch.setenv("ASR_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("ASR_INPUT_TTL_SECONDS", "1211")
+    load_settings()
+
+    monkeypatch.setenv("ASR_INPUT_TTL_SECONDS", "1210")
+    with pytest.raises(ConfigError, match="ASR_INPUT_TTL_SECONDS"):
+        load_settings()
+
+    monkeypatch.setenv("ASR_ENABLED", "false")
+    load_settings()  # no ASR worker, no lease
+
+
+def test_asr_defaults_keep_the_input_past_the_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.asr_input_ttl_seconds > 2 * settings.asr_timeout_seconds + 10
 
 
 @pytest.mark.parametrize(

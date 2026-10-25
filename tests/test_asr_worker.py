@@ -85,7 +85,10 @@ def downloaded(
     def download(payload: dict[str, Any]) -> dict[str, Any]:
         path = Path(payload["scratch"]) / f"media.{kind}"
         path.write_bytes(OGG)
-        return {"path": str(path), "duration": duration, "kind": kind}
+        reply: dict[str, Any] = {"path": str(path), "duration": duration, "kind": kind}
+        if payload["source"] == "file":
+            reply["status"] = 200  # the file's answer; yt-dlp reports none
+        return reply
 
     return download
 
@@ -357,7 +360,7 @@ async def test_too_long_before_transcription(tmp_path: Path) -> None:
     assert "transcribe" not in asr.children.names()
     code, retryable, message = error_of(await only_item(harness, job_id))
     assert (code, retryable) == (ErrorCode.MEDIA_TOO_LONG, False)
-    assert "10800" in message
+    assert "7200" in message  # MEDIA_MAX_DURATION_SECONDS (D6)
     assert asr.scratch_entries() == []
 
 
@@ -584,12 +587,19 @@ async def test_transcription_failures_map_to_codes(
         ("connect_error", ErrorCode.CONNECTION_ERROR, True),
     ],
 )
+@pytest.mark.parametrize(
+    "child_error",
+    # How the child sees the refusal: a failed tunnel, or the proxy's own HTTP answer to a
+    # plain-HTTP request (403 or 502), which yt-dlp reports as the URL's status.
+    [ConversionError("URLError", "refused"), ConversionError("HttpStatus", "403")],
+    ids=["tunnel", "proxy-answer"],
+)
 @scenario
 async def test_proxy_refusals_of_a_download(
-    tmp_path: Path, refusal: str, code: ErrorCode, retryable: bool
+    tmp_path: Path, refusal: str, code: ErrorCode, retryable: bool, child_error: ConversionError
 ) -> None:
     harness = file_harness(tmp_path)
-    asr = Asr(harness, FakeChildren(download=ConversionError("URLError", "refused")))
+    asr = Asr(harness, FakeChildren(download=child_error))
     asr.egress.refusal = ("169.254.169.254", refusal)
     job_id = await moved(harness, [FILE_URL])
 
@@ -818,11 +828,198 @@ async def test_transcriptions_are_counted(tmp_path: Path) -> None:
     assert harness.sample("text_extraction_asr_seconds_count", {"backend": "local"}) == 1
 
 
-def test_runner_lease_covers_a_download_and_two_transcriptions() -> None:
+@scenario
+async def test_each_download_call_has_its_own_byte_cap(tmp_path: Path) -> None:
+    """The platform's info gets MEDIA_EXTRACT_MAX_BYTES (M4), the media's download
+    MEDIA_MAX_BYTES with a little slack for headers and manifests."""
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness)
+    await moved(harness)
+
+    await asr.process_next()
+
+    settings = harness.settings
+    (_info, info_cap), (_download, download_cap) = asr.egress.contexts
+    assert info_cap == settings.media_extract_max_bytes
+    assert download_cap is not None
+    assert settings.media_max_bytes <= download_cap < settings.media_max_bytes + 10_000_000
+
+
+@scenario
+async def test_a_url_transcription_carries_the_upstream_status(tmp_path: Path) -> None:
+    harness = file_harness(tmp_path)
+    asr = Asr(harness)
+    job_id = await moved(harness, [FILE_URL])
+
+    await asr.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.upstream_status == 200
+
+
+class ResultWritingGate(SpyGate):
+    """A gate whose turn comes only after another worker wrote the item's result."""
+
+    write: Callable[[], Any] | None = None
+
+    @asynccontextmanager
+    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
+        if self.write is not None:
+            await self.write()
+        async with super().slot(host, crawl_delay):
+            yield
+
+
+@scenario
+async def test_an_item_that_got_its_result_while_waiting_for_its_turn_downloads_nothing(
+    tmp_path: Path,
+) -> None:
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness)
+    gate = ResultWritingGate(harness.valkey, harness.settings)
+    asr.runner._gate = gate
+    job_id = await moved(harness)
+    first = await harness.store.draft(job_id, 0)
+    assert first is not None
+
+    async def write() -> None:
+        await harness.store.write_result(job_id, 0, first)
+
+    gate.write = write
+
+    await asr.process_next()
+
+    assert asr.children.names() == []
+    item = await only_item(harness, job_id)
+    assert item.result == first
+    assert asr.scratch_entries() == []
+
+
+@scenario
+async def test_a_platform_video_without_speech_answers_its_details(tmp_path: Path) -> None:
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=transcript(segments=[])))
+    job_id = await moved(harness)
+
+    await asr.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    assert item.result.error is not None
+    assert (item.result.error.code, item.result.error.retryable) == (
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+        False,
+    )
+    assert "speech" in item.result.error.message
+    data = item.result.data
+    assert data is not None
+    assert data.media is not None
+    assert data.media.transcript_source == "metadata_only"
+    assert ASR_UNAVAILABLE_WARNING not in data.warnings  # the speech recognition ran
+    assert data.fingerprint is not None  # final: compared and cached
+    assert await harness.valkey.keys("res:*") != []
+
+
+@scenario
+async def test_an_upload_without_speech_fails(tmp_path: Path) -> None:
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=transcript(segments=[[0.0, 1.0, "  "]])))
+    job_id = await moved_upload(harness)
+
+    await asr.process_next()
+
+    item = await only_item(harness, job_id)
+    code, retryable, _message = error_of(item)
+    assert (code, retryable) == (ErrorCode.NO_TRANSCRIPT_AVAILABLE, False)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.media is not None
+    assert item.result.data.media.transcript_source == "asr"
+    assert item.result.data.media.asr_model == "large-v3-turbo"
+
+
+@scenario
+async def test_an_upload_too_long_says_its_duration(tmp_path: Path) -> None:
+    """The child probes an upload's duration before it decodes it and answers the duration."""
+    harness = asr_harness(**settings_for(tmp_path, media_max_duration_seconds=7200))
+    asr = Asr(harness, FakeChildren(transcribe=ConversionError("MediaTooLong", "14400")))
+    job_id = await moved_upload(harness)
+
+    await asr.process_next()
+
+    code, retryable, message = error_of(await only_item(harness, job_id))
+    assert (code, retryable) == (ErrorCode.MEDIA_TOO_LONG, False)
+    assert "14400 s" in message
+    assert "7200" in message
+
+
+def test_check_leaves_the_scratch_of_running_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``--check`` may run in a live pod: it must not delete the items in flight."""
+    settings = Settings(auth_mode="none", **settings_for(tmp_path))
+    running = settings.asr_scratch_path / "item-running"
+    running.mkdir(parents=True)
+    children = FakeChildren(
+        transcribe=transcript(segments=[[0.0, 5.0, "Als Gregor Samsa eines Morgens"]])
+    )
+    monkeypatch.setattr(asr_worker, "create_asr_pool", lambda _settings: children)
+
+    assert asyncio.run(asr_worker._check(settings)) == 0
+
+    assert running.is_dir()
+
+
+def test_runner_lease_covers_the_items_budget_twice() -> None:
+    """ASR_TIMEOUT_SECONDS is the budget of the whole item (the download included)."""
     settings = Settings(auth_mode="none", asr_timeout_seconds=600)
-    lease = asr_lease_seconds(settings)
-    assert lease == 2 * 600 + 10
-    assert lease > settings.media_download_timeout_seconds + settings.asr_timeout_seconds
+    assert asr_lease_seconds(settings) == 2 * 600 + 10
+
+
+@scenario
+async def test_the_item_budget_covers_download_and_transcription(tmp_path: Path) -> None:
+    """The download gets MEDIA_DOWNLOAD_TIMEOUT_SECONDS or what is left of ASR_TIMEOUT_SECONDS,
+    the transcription the rest: no call outlives the item's budget (and with it the lease)."""
+    harness = file_harness(tmp_path, asr_timeout_seconds=60, media_download_timeout_seconds=600)
+    children = FakeChildren()
+
+    called: dict[str, float] = {}
+
+    async def run(function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+        called[function_name] = asyncio.get_running_loop().time()
+        if function_name == "download":
+            await asyncio.sleep(0.3)  # the download takes its time
+        return await FakeChildren.run(children, function_name, payload, deadline)
+
+    children.run = run  # type: ignore[method-assign]
+    asr = Asr(harness, children)
+    await moved(harness, [FILE_URL])
+
+    await asr.process_next()
+
+    assert children.names() == ["download", "transcribe"]
+    assert children.payload("download")["timeout"] <= 60
+    (_d, _p, download_deadline), (_t, _q, transcribe_deadline) = children.calls
+    assert download_deadline - called["download"] <= 60
+    # The transcription gets what the download left, not a budget of its own.
+    assert transcribe_deadline - called["transcribe"] <= 60 - 0.3
+    assert transcribe_deadline == pytest.approx(download_deadline, abs=0.05)
+
+
+@scenario
+async def test_a_download_cut_short_by_the_items_budget_is_the_asr_timeout(tmp_path: Path) -> None:
+    harness = file_harness(tmp_path, asr_timeout_seconds=60, media_download_timeout_seconds=600)
+    asr = Asr(harness, FakeChildren(download=ConversionTimeout("deadline")))
+    job_id = await moved(harness, [FILE_URL])
+
+    await asr.process_next()
+
+    code, retryable, message = error_of(await only_item(harness, job_id))
+    assert (code, retryable) == (ErrorCode.TIMEOUT, False)
+    assert "ASR_TIMEOUT_SECONDS" in message
 
 
 def test_gate_lease_covers_a_download_while_asr_is_on() -> None:
@@ -862,8 +1059,24 @@ def test_ffmpeg_licence_check_passes_an_lgpl_build() -> None:
         (LGPL_CONFIG + " --enable-libx264 --enable-libx265", "LGPL version 3 or later", "libx264"),
         (LGPL_CONFIG + " --enable-libfdk-aac", "LGPL version 3 or later", "libfdk-aac"),
         (LGPL_CONFIG, "GPL version 3 or later", "GPL version 3 or later"),
+        # configure takes the underscore spelling too.
+        (LGPL_CONFIG + " --enable-libfdk_aac", "LGPL version 3 or later", "libfdk-aac"),
+        # GPL since FFmpeg 7.1, and libpostproc.
+        (LGPL_CONFIG + " --enable-libdvdread", "LGPL version 3 or later", "libdvdread"),
+        (LGPL_CONFIG + " --enable-libdvdnav", "LGPL version 3 or later", "libdvdnav"),
+        (LGPL_CONFIG + " --enable-postproc", "LGPL version 3 or later", "postproc"),
     ],
-    ids=["gpl", "nonfree", "x264", "fdk-aac", "license"],
+    ids=[
+        "gpl",
+        "nonfree",
+        "x264",
+        "fdk-aac",
+        "license",
+        "fdk_aac",
+        "dvdread",
+        "dvdnav",
+        "postproc",
+    ],
 )
 def test_ffmpeg_licence_check_refuses_gpl_and_nonfree(
     configuration: str, license: str, finding: str
@@ -878,6 +1091,27 @@ def test_ffmpeg_licence_check_refuses_gpl_and_nonfree(
 
 def test_ffmpeg_licence_check_refuses_an_empty_answer() -> None:
     assert ffmpeg_gpl_findings({}) != []
+
+
+def test_ffmpeg_licence_check_reads_every_library() -> None:
+    gpl = {"configuration": LGPL_CONFIG + " --enable-gpl", "license": "GPL version 2 or later"}
+
+    findings = ffmpeg_gpl_findings({**LIBRARIES, "libpostproc": gpl})
+
+    assert findings
+    assert all(item.startswith("libpostproc") for item in findings)
+
+
+@pytest.mark.parametrize("codec", ["libx264", "libx264rgb", "libx265", "libxvid", "libfdk_aac"])
+def test_ffmpeg_licence_check_refuses_gpl_and_nonfree_codecs(codec: str) -> None:
+    """Whatever the configure line says: a GPL or non-free codec PyAV can open is a finding."""
+    findings = ffmpeg_gpl_findings(LIBRARIES, codecs={"opus", "vorbis", "aac", codec})
+
+    assert findings == [f"codec {codec}"]
+
+
+def test_ffmpeg_licence_check_passes_lgpl_codecs() -> None:
+    assert ffmpeg_gpl_findings(LIBRARIES, codecs={"opus", "vorbis", "aac", "mp3", "flac"}) == []
 
 
 def test_self_check_passes(tmp_path: Path) -> None:
@@ -901,8 +1135,10 @@ def test_self_check_passes(tmp_path: Path) -> None:
         {"transcribe": transcript(segments=[[0.0, 5.0, "Guten Tag"]])},
         {"transcribe": ConversionError("ModelsMissing", "no model.bin")},
         {"ffmpeg": {"libraries": {"libavcodec": {**LGPL, "configuration": "--enable-gpl"}}}},
+        {"ffmpeg": {"libraries": LIBRARIES, "codecs": ["opus", "libx264"]}},
+        {"ffmpeg": {"libraries": LIBRARIES, "codecs": ["opus"], "tools": ["ffmpeg"]}},
     ],
-    ids=["wrong-text", "error", "gpl-ffmpeg"],
+    ids=["wrong-text", "error", "gpl-ffmpeg", "gpl-codec", "ffmpeg-on-path"],
 )
 def test_self_check_fails(tmp_path: Path, answers: dict[str, Any]) -> None:
     children = FakeChildren(**answers)

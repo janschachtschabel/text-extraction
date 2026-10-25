@@ -223,7 +223,7 @@ class Settings(BaseSettings):
     media_extract_max_bytes: int = Field(default=30_000_000, ge=1024)
     media_subtitle_max_bytes: int = Field(default=5_000_000, ge=1024)
     media_max_tracks: int = Field(default=3, ge=0, le=10)  # HTML5 tracks added to one page
-    media_max_duration_seconds: int = Field(default=10_800, ge=60)  # longer is media_too_long
+    media_max_duration_seconds: int = Field(default=7200, ge=60)  # longer is media_too_long (D6)
     media_max_bytes: int = Field(default=500_000_000, ge=1_000_000)  # a download for ASR
     # Largest uploaded audio or video file; its bytes travel through Valkey, so with ASR_ENABLED
     # at most DOCLING_INPUT_BUDGET_BYTES.
@@ -238,8 +238,8 @@ class Settings(BaseSettings):
     asr_threads: int = Field(default=4, ge=1)  # CPU threads of one transcription
     asr_concurrency: int = Field(default=1, ge=1)  # transcriptions at once per ASR worker
     asr_memory_limit_mb: int = Field(default=4096, ge=256)  # address space of one child
-    asr_timeout_seconds: int = Field(default=3600, ge=60, le=14_400)  # one item
-    asr_input_ttl_seconds: int = Field(default=21_600, ge=600)  # an uploaded file's bytes
+    asr_timeout_seconds: int = Field(default=10_800, ge=60, le=14_400)  # one whole item (D6)
+    asr_input_ttl_seconds: int = Field(default=28_800, ge=600)  # an uploaded file's bytes (D6)
     asr_max_open_per_client: int = Field(default=3, ge=1)  # unfinished ASR jobs per key
     asr_scratch_path: Path = Path("/tmp/asr")  # noqa: S108 - an emptyDir for downloaded media
     # External backend (``ASR_BACKEND=openai``): an OpenAI-compatible transcription endpoint.
@@ -287,6 +287,13 @@ class Settings(BaseSettings):
         # Uploaded media only travel through the input budget when the service transcribes.
         if self.asr_enabled and self.media_upload_max_bytes > self.docling_input_budget_bytes:
             raise ValueError("MEDIA_UPLOAD_MAX_BYTES must not exceed DOCLING_INPUT_BUDGET_BYTES")
+        # An ASR item's lease (2 x ASR_TIMEOUT_SECONDS + 10, ruling M10) may run out once and
+        # the item run again: its input must still be there.
+        if self.asr_enabled and self.asr_input_ttl_seconds <= 2 * self.asr_timeout_seconds + 10:
+            raise ValueError(
+                "ASR_INPUT_TTL_SECONDS must be longer than the ASR lease "
+                "(2 x ASR_TIMEOUT_SECONDS + 10)"
+            )
         return self
 
     @model_validator(mode="after")

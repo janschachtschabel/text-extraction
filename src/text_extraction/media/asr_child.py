@@ -6,31 +6,43 @@ after its memory limit is set; the parent (``asr_worker.py``) never imports it. 
 the allowlist of what a parent may call by name:
 
 - ``platform_info``: yt-dlp's info of a platform video (``url``, with ``extractor`` as its only
-  allowed extractor), its format chosen (``bestaudio/best[height<=360]``), as JSON
-  (``YoutubeDL.sanitize_info``) for ``download``, with its ``duration``. A live stream that is
-  still running raises ``IsLive``.
+  allowed extractor), its format chosen (``FORMAT``: the best audio, else the smallest video up
+  to 360p, either only over plain HTTP(S), native HLS or native DASH segments, the protocols
+  yt-dlp downloads itself; never RTMP or another protocol it hands to an outside program), as
+  JSON (``YoutubeDL.sanitize_info``) for ``download``, with its ``duration``. A live stream that
+  is still running raises ``IsLive``.
 - ``download``: the media into the item's scratch directory (``scratch``) as ``media.<ext>``.
   A platform video downloads from that info (``YoutubeDL.process_ie_result``, as yt-dlp's
   ``--load-info-json`` does), with yt-dlp's own downloaders only (no FFmpeg, no fix-ups, no
   post-processors) and ``max_filesize``. A media file (``source: file``) is one GET, read in
   chunks up to ``max_bytes`` (``TooLarge`` past it), an HTTP error raises ``HttpStatus`` with
   the status. The bytes must sniff as audio or video (``media/sniff.py``), else ``NotMedia``.
-  The reply is the file's ``path``, its ``kind`` and its ``duration`` (yt-dlp's, else PyAV's
-  probe; None when neither knows).
+  The reply is the file's ``path``, its ``kind``, its ``duration`` (yt-dlp's, else PyAV's
+  probe; None when neither knows) and, for a media file, the HTTP ``status`` it answered with.
 - ``transcribe``: the file at ``path`` with the model at ``model_path`` (``ModelsMissing``
-  without its ``model.bin``). PyAV decodes the first audio stream to 16 kHz mono float32
-  (``decode_audio``; a packet that does not decode is skipped, a read error after some audio
-  ends the decoding with what was decoded; past ``max_duration`` seconds of audio it raises
-  ``MediaTooLong``; nothing decoded, or a file PyAV cannot open, raises
-  ``DecodeFailed``), and faster-whisper reads that array, never the path:
-  ``WhisperModel(model_path, device="cpu", compute_type=, cpu_threads=, local_files_only=True)``,
-  kept for the child's later calls, and ``transcribe(audio, language=, vad_filter=True,
-  condition_on_previous_text=False)``, in ``language`` when Whisper knows it, else the language
-  it detects. The reply is the segments as ``[start, end, text]``, the language and the audio's
-  duration.
+  without its ``model.bin``). A container that says it is longer than ``max_duration`` seconds
+  raises ``MediaTooLong`` (its seconds as the message) before anything is decoded. PyAV decodes
+  the first audio stream to 16 kHz mono float32 (``decode_audio``; a packet that does not
+  decode is skipped, a read error after some audio ends the decoding with what was decoded;
+  past ``max_duration`` seconds of audio it raises ``MediaTooLong``, whatever the container
+  said; nothing decoded, or a file PyAV cannot open, raises ``DecodeFailed``), and
+  faster-whisper reads that array, never the path: ``WhisperModel(model_path, device="cpu",
+  compute_type=, cpu_threads=, local_files_only=True)``, kept for the child's later calls, gets
+  it in windows of at most 10 minutes cut in pauses (``media/asr_windows.py``: faster-whisper
+  computes the features of a whole call at once, 3.4 GiB for an hour), each with
+  ``vad_filter=True, condition_on_previous_text=False``, in ``language`` when Whisper knows it,
+  else the language it detects in the first window with speech. The reply is the segments as
+  ``[start, end, text]`` on the file's clock, the language and the audio's duration.
 - ``ffmpeg``: PyAV's FFmpeg libraries with their ``configuration`` and ``license``
-  (``av._core.library_meta`` of PyAV 19.0.1) and PyAV's version, for the licence check
+  (``av._core.library_meta`` of PyAV 19.0.1), the codecs PyAV offers (``av.codecs_available``),
+  the outside programs yt-dlp could hand a download to that are on ``PATH`` (``ffmpeg``,
+  ``rtmpdump``; the image ships neither) and PyAV's version, for the self-check
   (``asr_worker.ffmpeg_gpl_findings``).
+
+PyAV opens files with ``protocol_whitelist=file``: a container that names other inputs (an HLS
+playlist, for example) cannot make FFmpeg fetch anything or read through another protocol.
+Whisper's language codes come from ``faster_whisper.tokenizer._LANGUAGE_CODES``, a private name
+of faster-whisper 1.2.1 (pinned): an upgrade must check that it still exists.
 
 A download's payload carries the proxy URL with the call's own credentials (the parent's
 ``EgressProxy``, the only way out), our user agent and the seconds the call has left. yt-dlp runs
@@ -46,6 +58,7 @@ speech.
 """
 
 import json
+import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
@@ -63,6 +76,7 @@ from faster_whisper.tokenizer import _LANGUAGE_CODES  # noqa: E402
 from yt_dlp.networking import Request  # noqa: E402
 from yt_dlp.networking.exceptions import HTTPError  # noqa: E402
 
+from text_extraction.media.asr_windows import transcribe_windows  # noqa: E402
 from text_extraction.media.child import (  # noqa: E402
     _http_url,
     _HttpOnlyYoutubeDL,
@@ -73,8 +87,14 @@ from text_extraction.media.sniff import MEDIA_HEAD_BYTES, sniff_media  # noqa: E
 from text_extraction.model_store import ModelsMissing  # noqa: E402
 
 SAMPLE_RATE: Final = 16_000
+# The protocols yt-dlp downloads itself (no FFmpeg, no rtmpdump).
+_PROTOCOLS: Final = "[protocol~='^(https?|m3u8_native|http_dash_segments)$']"
 # A platform video's audio, or its smallest video when it has no audio of its own.
-FORMAT: Final = "bestaudio/best[height<=360]"
+FORMAT: Final = f"bestaudio{_PROTOCOLS}/best[height<=360]{_PROTOCOLS}"
+# Outside programs yt-dlp hands some downloads to; the self-check fails when one is on PATH.
+TOOLS: Final = ("ffmpeg", "rtmpdump")
+# PyAV opens local files only: no network or other protocol through a playlist.
+_AV_OPTIONS: Final = {"protocol_whitelist": "file"}
 _READ_CHUNK: Final = 1024 * 1024
 _FILE_PART: Final = "media.part"
 _FFMPEG_LIBRARIES: Final = ("libavcodec", "libavformat", "libavutil", "libswresample")
@@ -153,10 +173,11 @@ def platform_info(payload: dict[str, Any]) -> dict[str, Any]:
 def download(payload: dict[str, Any]) -> dict[str, Any]:
     """See the module docstring."""
     scratch = Path(payload["scratch"])
+    status: int | None = None
     if payload["source"] == "platform":
         path, duration = _platform_download(payload, scratch)
     else:
-        path, duration = _file_download(payload, scratch), None
+        (path, status), duration = _file_download(payload, scratch), None
     with path.open("rb") as file:
         head = file.read(MEDIA_HEAD_BYTES)
     kind = sniff_media(head, None)
@@ -167,7 +188,10 @@ def download(payload: dict[str, Any]) -> dict[str, Any]:
     path.replace(final)
     if duration is None:
         duration = probe_duration(final)
-    return {"path": str(final), "kind": kind, "duration": duration}
+    reply: dict[str, Any] = {"path": str(final), "kind": kind, "duration": duration}
+    if status is not None:
+        reply["status"] = status
+    return reply
 
 
 def _platform_download(payload: Mapping[str, Any], scratch: Path) -> tuple[Path, float | None]:
@@ -206,8 +230,8 @@ def _platform_download(payload: Mapping[str, Any], scratch: Path) -> tuple[Path,
     return path, duration
 
 
-def _file_download(payload: Mapping[str, Any], scratch: Path) -> Path:
-    """One GET through the proxy, read up to ``max_bytes``."""
+def _file_download(payload: Mapping[str, Any], scratch: Path) -> tuple[Path, int | None]:
+    """One GET through the proxy, read up to ``max_bytes``; the file and the HTTP status."""
     params = ytdlp_params({**payload, "extractors": ["generic"]})
     max_bytes = int(payload["max_bytes"])
     path = scratch / _FILE_PART
@@ -221,6 +245,7 @@ def _file_download(payload: Mapping[str, Any], scratch: Path) -> Path:
         except HTTPError as error:
             raise HttpStatus(str(error.status)) from None
         with response:
+            status = getattr(response, "status", None)
             declared = response.headers.get("Content-Length")
             if declared is not None and declared.strip().isdecimal() and int(declared) > max_bytes:
                 raise TooLarge
@@ -231,7 +256,7 @@ def _file_download(payload: Mapping[str, Any], scratch: Path) -> Path:
                     if total > max_bytes:
                         raise TooLarge
                     file.write(chunk)
-    return path
+    return path, status if isinstance(status, int) else None
 
 
 # --- PyAV ----------------------------------------------------------------------------------
@@ -241,7 +266,7 @@ def probe_duration(path: Path | str) -> float | None:
     """The media's duration in seconds from its container (or its first audio stream); None
     when neither says or PyAV cannot open it."""
     try:
-        with av.open(str(path)) as container:
+        with av.open(str(path), options=dict(_AV_OPTIONS)) as container:
             if container.duration:
                 return float(container.duration / av.time_base)
             stream = next(iter(container.streams.audio), None)
@@ -256,7 +281,7 @@ def decode_audio(path: Path | str, *, max_seconds: float) -> np.ndarray[Any, Any
     """The first audio stream as 16 kHz mono float32 samples; see the module docstring."""
     limit = int(max_seconds * SAMPLE_RATE)
     try:
-        container = av.open(str(path))
+        container = av.open(str(path), options=dict(_AV_OPTIONS))
     except (av.error.FFmpegError, OSError, ValueError):
         raise DecodeFailed("not readable") from None
     with container:
@@ -333,24 +358,16 @@ def transcribe(payload: dict[str, Any]) -> dict[str, Any]:
     model_path = Path(payload["model_path"])
     if not (model_path / "model.bin").is_file():
         raise ModelsMissing(model_path.name)
-    audio = decode_audio(payload["path"], max_seconds=float(payload["max_duration"]))
+    max_duration = float(payload["max_duration"])
+    declared = probe_duration(payload["path"])
+    if declared is not None and declared > max_duration:
+        raise MediaTooLong(str(round(declared)))  # nothing decoded
+    audio = decode_audio(payload["path"], max_seconds=max_duration)
     model = _model(str(model_path), payload["compute_type"], int(payload["threads"]))
     language = payload.get("language")
-    segments, info = model.transcribe(
-        audio,
-        language=language if language in _LANGUAGE_CODES else None,
-        vad_filter=True,
-        condition_on_previous_text=False,
+    return transcribe_windows(
+        model, audio, language=language if language in _LANGUAGE_CODES else None
     )
-    found = [
-        [round(float(segment.start), 3), round(float(segment.end), 3), segment.text.strip()]
-        for segment in segments
-    ]
-    return {
-        "segments": [segment for segment in found if segment[2]],
-        "language": info.language,
-        "duration": float(info.duration),
-    }
 
 
 def ffmpeg(_payload: dict[str, Any]) -> dict[str, Any]:
@@ -363,7 +380,12 @@ def ffmpeg(_payload: dict[str, Any]) -> dict[str, Any]:
         }
         for name in meta
     }
-    return {"libraries": libraries, "version": av.__version__}
+    return {
+        "libraries": libraries,
+        "codecs": sorted(av.codecs_available),
+        "tools": [tool for tool in TOOLS if shutil.which(tool)],
+        "version": av.__version__,
+    }
 
 
 def _number(value: object) -> float | None:
