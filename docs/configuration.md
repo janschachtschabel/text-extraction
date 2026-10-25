@@ -411,7 +411,7 @@ slot.
 
 | Key | Content | Lifetime |
 | --- | --- | --- |
-| `job:{<id>}:meta` | Hash: kind, owner, owner role, options (JSON), state, counters, times, lease, and the trace id of the request that created the job. | `JOB_TTL_SECONDS` from creation, renewed on completion. |
+| `job:{<id>}:meta` | Hash: kind, owner, owner role, options (JSON; `ocr` only when it is not `auto`, so pods of an older release read the job during a rolling upgrade), state, counters, times, lease, and the trace id of the request that created the job. | `JOB_TTL_SECONDS` from creation, renewed on completion. |
 | `job:{<id>}:urls` | List of the job's URLs in input order. | As `meta`. |
 | `job:{<id>}:results` | Hash of item index to the result envelope (JSON). | As `meta`; set with the first result. |
 | `job:{<id>}:done` | Bitmap of the finished item indexes. | As `meta`; set with the first result. |

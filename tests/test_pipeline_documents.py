@@ -51,7 +51,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import DomainGate
-from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.pipeline import Pipeline, _cache_options, create_pipeline
 from text_extraction.pipeline_documents import (
     MARKITDOWN_TARGET,
     OCR_NOT_HANDED_MESSAGE,
@@ -61,7 +61,7 @@ from text_extraction.pipeline_documents import (
     document_input,
 )
 from text_extraction.render import Renderer
-from text_extraction.result_cache import ResultCache
+from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
 
 CORPUS = Path(__file__).parent / "documents" / "corpus"
@@ -1200,3 +1200,21 @@ def test_workers_wire_and_start_their_document_pools(monkeypatch: pytest.MonkeyP
         assert runner._pipeline._documents.pool is browser.document_pool
     finally:
         browser.conversion_pool.shutdown()
+
+
+def test_default_ocr_leaves_the_cache_key_of_package_4() -> None:
+    """``ocr`` joins the cache key only when it is not ``auto``: the keys of HTML pages and of
+    default requests stay those of the release before, so a deploy keeps the cache warm."""
+    req = ExtractRequest(url=DOC)
+    package_4 = {
+        "mode": "auto",
+        "format": "markdown",
+        "metadata": True,
+        "links": False,
+        "compliance": "enforce",
+    }
+
+    assert _cache_options(req, "enforce") == package_4
+    assert cache_key(DOC, _cache_options(req, "enforce")) == cache_key(DOC, package_4)
+    never = ExtractRequest(url=DOC, ocr="never")
+    assert _cache_options(never, "enforce") == {**package_4, "ocr": "never"}

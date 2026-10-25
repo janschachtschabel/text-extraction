@@ -51,12 +51,15 @@ keeps its draft with ``ocr_unavailable`` (without a draft it fails ``rate_limite
   ``DocumentInputMeta`` (kind, sniffed content type, file name of an upload, final URL, upstream
   status, validators, ``Content-Language``, charset, ``raw_sha256``, ``needs_ocr``: the probe
   said "scan", the compliance report, the fetch attempts). TTL ``DOCLING_INPUT_TTL_SECONDS``,
-  never longer than the job's; None when it expired, and the item then fails ``timeout``,
-  retryable. The ``Worker`` deletes the input once the item's result is written (pool
-  ``docling``, and any ``file`` job).
+  never longer than the job's; None when it expired: the item then answers its draft with
+  ``ocr_unavailable`` (``draft_without_ocr``: neither fingerprinted nor cached), or without a
+  draft fails ``timeout``, retryable. The ``Worker`` deletes the input once the item's result is
+  written (pool ``docling``, and any ``file`` job). An item lost too often
+  (``JOB_ITEM_MAX_ATTEMPTS``) answers its draft the same way.
 - Draft: ``JobStore.draft(job, index)``: MarkItDown's envelope of the document, not yet cached
-  nor fingerprinted, or None (images, ODF). The runner answers the better of the draft and the
-  OCR result (``escalation.better``) and deletes the draft once the item has its outcome.
+  nor fingerprinted, or None (images, ODF). The runner answers the OCR result unless it failed
+  (under ``ocr: always`` or ``needs_ocr``; otherwise the better of the two, ``escalation.
+  better``), and the draft is deleted once the item has its outcome.
 - Result: the runner returns the envelope and the ``Worker`` writes it as the item's result
   (only the first result of an item counts). A sync request polls the job until it is completed
   and deletes it; a job that is gone when the worker claims or writes was given up, and the item
@@ -82,7 +85,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobRecord, JobStore
-from text_extraction.pipeline_documents import OcrNeeded
+from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
 from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatcher
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
@@ -134,6 +137,18 @@ def ocr_fallback(
         return without.model_copy(update={"data": data.model_copy(update={"fingerprint": None})})
     error = ErrorInfo(code=code, message=message, retryable=True)
     return without.model_copy(update={"status": "failed", "error": error})
+
+
+def draft_without_ocr(draft: Envelope[ExtractResult] | None) -> Envelope[ExtractResult] | None:
+    """A queued item's draft as its answer when its OCR cannot run at all (its input expired, or
+    the item was lost too often): with the warning ``ocr_unavailable`` and without its
+    fingerprint, so it is neither compared nor cached, as for a retryable OCR failure. None
+    without a draft (an image, an OpenDocument file)."""
+    if draft is None or draft.data is None:
+        return None
+    warnings = list(dict.fromkeys([*draft.data.warnings, OCR_UNAVAILABLE_WARNING]))
+    data = draft.data.model_copy(update={"warnings": warnings, "fingerprint": None})
+    return draft.model_copy(update={"data": data})
 
 
 class DoclingDispatcher(PoolDispatcher):

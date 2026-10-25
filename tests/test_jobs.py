@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 from collections.abc import Callable, Coroutine
 from functools import wraps
@@ -757,3 +758,66 @@ async def test_open_docling_jobs_count_only_unfinished_ones() -> None:
     assert await store.open_docling_jobs("bob") == 0
     await store.drop_docling_job("alice", open_job)
     assert await store.open_docling_jobs("alice") == 0
+
+
+# --- rolling upgrades: the stored options of package 4 ------------------------------------------
+
+# The options a package-4 pod knows (``JobOptions`` there is ``extra="forbid"``).
+PACKAGE_4_OPTIONS = {
+    "mode",
+    "format",
+    "metadata",
+    "links",
+    "compliance",
+    "cache",
+    "screenshot",
+    "full_page",
+}
+
+
+async def stored_options(valkey: FakeAsyncRedis, job_id: str) -> dict[str, Any]:
+    raw = await valkey.hget(f"job:{{{job_id}}}:meta", "options")
+    assert raw is not None
+    parsed: dict[str, Any] = json.loads(raw)
+    return parsed
+
+
+@scenario
+async def test_default_ocr_is_not_stored_so_older_pods_read_the_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("batch", OWNER, JobOptions(compliance="enforce"), URLS[:1])
+
+    assert set(await stored_options(valkey, job_id)) == PACKAGE_4_OPTIONS
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options.ocr == "auto"
+
+
+@scenario
+async def test_an_ocr_choice_is_stored() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    options = JobOptions(compliance="enforce", ocr="always")
+    job_id = await store.create("batch", OWNER, options, URLS[:1])
+
+    assert (await stored_options(valkey, job_id))["ocr"] == "always"
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options == options
+
+
+@scenario
+async def test_a_job_an_older_pod_stored_reads_with_ocr_auto() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await create_job(store)
+    old = {"mode": "fast", "format": "text", "metadata": False, "links": True}
+    old.update({"compliance": "report", "cache": True, "screenshot": False, "full_page": True})
+    await valkey.hset(f"job:{{{job_id}}}:meta", "options", json.dumps(old))
+
+    record = await store.get(job_id)
+
+    assert record is not None
+    assert record.options == OPTIONS
+    assert record.options.ocr == "auto"

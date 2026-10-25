@@ -662,14 +662,17 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   `pipeline_documents.DocumentSteps`. The byte limit is `DOCUMENT_MAX_BYTES` (20,000,000; at most
   `FETCH_MAX_BYTES`, checked at start-up) instead of `CONVERT_MAX_BYTES`. Compliance after the
   fetch checks the headers only (`X-Robots-Tag`, `tdm-reservation`), as for `text/plain`. Cache,
-  revalidation and fingerprints work as for pages. The cache key gains `ocr`, and so does the
-  fingerprint variant of a document (`<format>|ocr=<ocr>`; pages keep `<format>`, so their stored
-  fingerprints stay valid): `auto`, `never` and `always` may read one file with different
-  converters, and alternating them must not report a change. A cached document result is final,
+  revalidation and fingerprints work as for pages. The cache key gains `ocr` when it is not
+  `auto` (so the keys of pages and of default requests stay those of package 4 and a deploy keeps
+  the cache), and the fingerprint variant of a document is `<format>|ocr=<ocr>` (pages keep
+  `<format>`, so their stored fingerprints stay valid): `auto`, `never` and `always` may read one
+  file with different converters, and alternating them must not report a change. A cached document result is final,
   also one cached with `ocr_unavailable`. The MarkItDown child gets what the fetch left of
   `EXTRACT_TIMEOUT_SECONDS`, so its timeout is `timeout`, retryable.
 - **F11, the `ocr` option.** `ExtractRequest`, `BatchRequest` and the upload form take `ocr:
-  "auto" | "never" | "always"` (default `auto`). `auto`: Docling for scans and broken text layers
+  "auto" | "never" | "always"` (default `auto`; a job stores it only when it is not `auto`, so
+  pods of package 4 still read the jobs of new pods during a rolling upgrade). `auto`: Docling
+  for scans and broken text layers
   (F4), images and OpenDocument files; `never`: MarkItDown only (images and OpenDocument files
   answer `unsupported_content_type`); `always`: Docling for every PDF too. `routing.needs_ocr` is
   the one rule; Docling is used only while `DOCLING_ENABLED` and `JOBS_ENABLED`. `ocr: always`
@@ -681,8 +684,9 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   bytes go to `job:{<id>}:input:<index>` (a hash with `body` and `meta`: kind, sniffed type, file
   name, validators, `Content-Language`, `raw_sha256`, the probe's verdict, the compliance report),
   with TTL `DOCLING_INPUT_TTL_SECONDS` (3600, never longer than the job); the worker deletes it
-  once the item has its outcome, and an item whose input expired before the claim fails
-  `timeout`, retryable. MarkItDown's result, when there is one, is the item's draft. Without
+  once the item has its outcome. An item whose input expired before the claim answers its draft
+  with `ocr_unavailable`, neither fingerprinted nor cached; without a draft it fails `timeout`,
+  retryable. MarkItDown's result, when there is one, is the item's draft. Without
   `wait_seconds` the request waits `DOCLING_SYNC_WAIT_SECONDS` in all, then answers the draft with
   `ocr_unavailable` (no draft: `failed`/`timeout`, retryable) and deletes the job; with
   `wait_seconds` the `Handover` turns it into a 202 with the Docling job. A request whose route
@@ -709,14 +713,19 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   what it read (warning `pages_partial`) before the child is killed. OpenDocument files go through
   Docling's simple pipeline (no OCR, no models). Pages after `DOCLING_MAX_PAGES` (100) are cut
   (`pages_truncated`). The runner calls `Pipeline.convert_queued_document`, which builds the result
-  like the inline path (F7-F9), keeps the better of draft and OCR result (`escalation.better`; a
-  tie goes to OCR) and, for a URL, compares and stores the kept one in the result cache and
+  like the inline path (F7-F9) and keeps the OCR result unless it failed when the request said
+  `ocr: always` or the probe found a scan or a broken text layer (`needs_ocr`): a garbage layer
+  of many `(cid:N)` words, or a good one with the headers and footers Docling leaves out, must
+  not beat it. Otherwise it keeps the better of draft and OCR result (`escalation.better`; a tie
+  goes to OCR). For a URL it compares and stores the kept one in the result cache and
   fingerprints (with the input's validators; none for a file a render ended on, whose warning
   `document_fetched_directly` is kept). A draft kept because the OCR failed gets `ocr_unavailable`;
   when that failure is retryable (models missing, the conversion pool unavailable) the draft also
   loses its fingerprint and is neither compared nor stored. A Docling timeout is not retryable,
   unlike MarkItDown's: the child had all of `DOCLING_TIMEOUT_SECONDS`, and the same file would time
-  out again. Models missing on the volume are `internal_error`, retryable. Before `/ready` the
+  out again. Models missing on the volume are `internal_error`, retryable. An item lost too often
+  (`JOB_ITEM_MAX_ATTEMPTS`) answers its draft with `ocr_unavailable`, unstored (no draft:
+  `internal_error`, retryable). Before `/ready` the
   worker checks the manifest's files, starts its children and converts a built-in one-page scan
   (`documents/scan_check.png`) in each, which loads the models; a missing file or a failed check
   ends the process with exit code 1 and a log line naming `DOCLING_MODELS_PATH`. On SIGTERM it
@@ -794,12 +803,12 @@ through the Docling path, and the two-page scan yields its text with a word reca
 - A CSV served as `text/plain` stays plain text.
 - A crashed Docling child is final (`conversion_failed`, not retryable): a scan keeps its draft
   with `ocr_unavailable`, which is cached until its entry expires, and an image fails.
-- An exhausted Docling item (past `JOB_ITEM_MAX_ATTEMPTS`) answers `internal_error` instead of its
-  draft with `ocr_unavailable`.
 - Docling backlog: with no Docling worker (scaled to zero, crashed, models missing) sync requests
-  answer without OCR after `DOCLING_SYNC_WAIT_SECONDS`, and batch items wait in the queue until a
-  worker comes (the alerts `TextExtractionQueueBacklog` and `TextExtractionWorkersDown` fire). A crashed API pod's sync Docling job counts as open
-  for its key until `JOB_TTL_SECONDS`.
+  answer without OCR after `DOCLING_SYNC_WAIT_SECONDS`, and batch items wait in the queue (the
+  alerts `TextExtractionQueueBacklog` and `TextExtractionWorkersDown` fire), but their inputs
+  only `DOCLING_INPUT_TTL_SECONDS` (3600): an item claimed later answers its draft with
+  `ocr_unavailable`, unstored, and an image or OpenDocument file fails `timeout`, retryable. A
+  crashed API pod's sync Docling job counts as open for its key until `JOB_TTL_SECONDS`.
 - The browser worker hands no document to OCR: an image a render ended on fails
   `unsupported_content_type` ("... Extract the document's own URL with mode fast."), and a scan
   answers its text layer with `ocr_unavailable`.

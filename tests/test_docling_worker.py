@@ -19,6 +19,7 @@ from pytest_httpserver import HTTPServer
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
+from tests.fakes import fetched
 from tests.test_worker import (
     OPTIONS,
     OWNER,
@@ -206,18 +207,140 @@ async def test_runner_keeps_the_draft_when_ocr_reads_less() -> None:
     assert await harness.store.draft(job_id, 0) is None
 
 
+class TextLayerPool:
+    """MarkItDown's children: every PDF reads ``content``, with the probe's ``needs_ocr``."""
+
+    def __init__(self, content: str, *, needs_ocr: bool) -> None:
+        self.content = content
+        self.needs_ocr = needs_ocr
+
+    async def start(self) -> None:
+        pass
+
+    async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+        return {
+            "content": self.content,
+            "title": None,
+            "warnings": [],
+            "pages": 1,
+            "pages_converted": 1,
+            "needs_ocr": self.needs_ocr,
+            "metadata": None,
+        }
+
+    async def shutdown(self) -> None:
+        pass
+
+
+# A broken text layer (F4): many words, none of them readable.
+GARBAGE = " ".join(f"(cid:{n})" for n in range(300))
+# Docling under ``ocr: always`` leaves out headers and footers: fewer words than the text layer.
+LAYER_TEXT = OCR_TEXT + " " + " ".join(["Kopfzeile Seite eins von zwei."] * 20)
+
+
+def layer_harness(content: str, *, needs_ocr: bool) -> Harness:
+    scan = fetched(SCAN_URL, SCAN_BODY, content_type="application/pdf")
+    pool = TextLayerPool(content, needs_ocr=needs_ocr)
+    return Harness({SCAN_URL: scan}, document_pool=pool, docling_enabled=True)
+
+
 @scenario
-async def test_runner_keeps_a_better_draft_without_ocr_unavailable() -> None:
-    """The OCR succeeded, but read less than the text layer: the draft is kept as it is."""
+async def test_a_scan_keeps_its_ocr_result_with_fewer_words() -> None:
+    """The probe said the text layer is broken: any OCR result that did not fail wins, also
+    against a draft with more (garbage) words (rulings F4, F11)."""
+    harness = layer_harness(GARBAGE, needs_ocr=True)
+    docling = Docling(harness, FakeDoclingPool())
+    job_id = await moved_scan(harness)
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.word_count > OCR_TEXT.count(" ") + 1  # better() would keep the draft
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content == OCR_TEXT
+    assert data.document is not None
+    assert data.document.converter == "docling"
+    assert OCR_UNAVAILABLE_WARNING not in data.warnings
+    assert data.fingerprint is not None  # the OCR result is the final one: compared and stored
+
+
+@scenario
+async def test_a_scan_keeps_a_partial_ocr_result() -> None:
+    """One word of OCR is ``partial``, not ``failed``: it wins against a thin text layer."""
     harness = ocr_harness()
-    docling = Docling(harness, FakeDoclingPool(reply("Kurz.")))  # one word: partial, not failed
+    docling = Docling(harness, FakeDoclingPool(reply("Kurz.")))
     job_id = await moved_scan(harness)
 
     await docling.process_next()
 
     item = await only_item(harness, job_id)
     assert item.result is not None
-    assert item.result.status != "failed"
+    assert item.result.status == "partial"
+    data = item.result.data
+    assert data is not None
+    assert data.content == "Kurz."
+    assert data.document is not None
+    assert data.document.converter == "docling"
+    assert OCR_UNAVAILABLE_WARNING not in data.warnings
+
+
+@scenario
+async def test_ocr_always_keeps_the_ocr_result_with_fewer_words() -> None:
+    """``ocr: always`` asked for Docling: its result wins, though it read fewer words than a good
+    text layer (F11)."""
+    harness = layer_harness(LAYER_TEXT, needs_ocr=False)
+    docling = Docling(harness, FakeDoclingPool())
+    options = JobOptions(compliance="enforce", ocr="always")
+    job_id = await harness.store.create("batch", OWNER, options, [SCAN_URL])
+    await harness.queue.enqueue(job_id, OWNER.name, [SCAN_URL])
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    stored = await harness.store.get_input(job_id, 0, DocumentInputMeta)
+    assert stored is not None
+    assert stored[1].needs_ocr is False  # moved for the option, not for the probe
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content == OCR_TEXT
+    assert data.document is not None
+    assert data.document.converter == "docling"
+
+
+@scenario
+async def test_otherwise_the_better_of_draft_and_ocr_is_kept() -> None:
+    """Neither ``ocr: always`` nor a probe that asked for OCR: ``escalation.better`` decides,
+    and a draft with more words stays as it is."""
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool(reply("Kurz.")))
+    job_id = await harness.store.create("batch", OWNER, OPTIONS, [SCAN_URL])
+    meta = DocumentInputMeta(
+        kind="pdf",
+        content_type="application/pdf",
+        final_url=SCAN_URL,
+        upstream_status=200,
+        raw_sha256=hashlib.sha256(SCAN_BODY).hexdigest(),
+        needs_ocr=False,
+    )
+    await harness.store.put_input(job_id, 0, SCAN_BODY, meta, 600)
+    # MarkItDown's result without the OCR fallback's warning.
+    request = ExtractRequest(url=SCAN_URL, ocr="never", cache=False)
+    draft = await harness.pipeline.run(request, OWNER)
+    assert draft.data is not None
+    await harness.store.put_draft(job_id, 0, draft)
+    await harness.docling_queue.enqueue_items(job_id, OWNER.name, [(0, SCAN_URL)])
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
     data = item.result.data
     assert data is not None
     assert data.content == "Thin text layer."
@@ -359,8 +482,22 @@ async def test_runner_does_not_cache_uploads() -> None:
     assert await harness.valkey.keys("fp:*") == []
 
 
+def assert_draft_without_ocr(item: JobItem) -> None:
+    """The item answered its text layer with ``ocr_unavailable``, neither compared nor stored."""
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content == "Thin text layer."
+    assert data.document is not None
+    assert data.document.converter == "markitdown"
+    assert OCR_UNAVAILABLE_WARNING in data.warnings
+    assert data.fingerprint is None
+
+
 @scenario
-async def test_expired_input_fails_timeout_retryable() -> None:
+async def test_an_expired_input_answers_the_draft() -> None:
+    """The input's TTL ran out while it waited, but the draft holds the text layer: it answers,
+    as when the OCR fails retryably (neither fingerprinted nor cached)."""
     harness = ocr_harness()
     docling = Docling(harness, FakeDoclingPool())
     job_id = await moved_scan(harness)
@@ -368,10 +505,40 @@ async def test_expired_input_fails_timeout_retryable() -> None:
 
     await docling.process_next()
 
+    assert_draft_without_ocr(await only_item(harness, job_id))
+    assert docling.pool.calls == []
+    assert await harness.store.draft(job_id, 0) is None
+    assert await harness.valkey.keys("res:*") == []
+    assert await harness.valkey.keys("fp:*") == []
+
+
+async def moved_image(harness: Harness) -> str:
+    """An image upload's job the extract worker moved to ``docling`` (no draft)."""
+    options = JobOptions(mode="fast", compliance="enforce", cache=False)
+    job_id = await harness.store.create("file", OWNER, options, [None])
+    image = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    meta = UploadInputMeta(file_name="scan.png", content_type="image/png")
+    await harness.store.put_input(job_id, 0, image, meta, 600)
+    await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
+    claim = await harness.claim()
+    assert claim.item is not None
+    await harness.worker.process(claim.item)
+    return job_id
+
+
+@scenario
+async def test_an_expired_input_without_a_draft_fails_timeout_retryable() -> None:
+    harness = Harness(document_pool=OcrPool(), docling_enabled=True)
+    docling = Docling(harness, FakeDoclingPool())
+    job_id = await moved_image(harness)
+    assert await harness.store.draft(job_id, 0) is None
+    await harness.store.delete_input(job_id, 0)
+
+    await docling.process_next()
+
     code, retryable, _message = error_of(await only_item(harness, job_id))
     assert (code, retryable) == (ErrorCode.TIMEOUT, True)
     assert docling.pool.calls == []
-    assert await harness.store.draft(job_id, 0) is None
 
 
 @pytest.mark.parametrize(
@@ -411,7 +578,9 @@ async def test_a_failed_result_write_keeps_the_draft_for_the_rerun() -> None:
 
 
 @scenario
-async def test_an_exhausted_item_drops_its_draft() -> None:
+async def test_an_exhausted_item_answers_its_draft_and_drops_it() -> None:
+    """Lost too often (its children crashed): the text layer answers with ``ocr_unavailable``,
+    neither compared nor stored, and the draft and the input are gone."""
     harness = ocr_harness()
     docling = Docling(harness, FakeDoclingPool(AssertionError("not converted")))
     job_id = await moved_scan(harness)
@@ -420,9 +589,24 @@ async def test_an_exhausted_item_drops_its_draft() -> None:
 
     await docling.worker.process(claim.item, exhausted=True)
 
+    assert_draft_without_ocr(await only_item(harness, job_id))
+    assert await harness.store.draft(job_id, 0) is None
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert await harness.valkey.keys("res:*") == []
+
+
+@scenario
+async def test_an_exhausted_item_without_a_draft_is_lost() -> None:
+    harness = Harness(document_pool=OcrPool(), docling_enabled=True)
+    docling = Docling(harness, FakeDoclingPool(AssertionError("not converted")))
+    job_id = await moved_image(harness)
+    claim = await harness.docling_queue.claim(docling.runner.lease_seconds)
+    assert claim.item is not None
+
+    await docling.worker.process(claim.item, exhausted=True)
+
     code, retryable, _message = error_of(await only_item(harness, job_id))
     assert (code, retryable) == (ErrorCode.INTERNAL_ERROR, True)
-    assert await harness.store.draft(job_id, 0) is None
     assert await harness.valkey.keys("job:*:input:*") == []
 
 

@@ -645,14 +645,16 @@ class Pipeline:
 
         The result is built like the inline one (F7-F9): the run starts from what the input's
         meta knows (final URL, status, compliance report, attempts), ``mode_used`` is ``fast``
-        (``upload`` for an upload), ``document.converter`` is ``docling``. Of the draft and the
-        OCR result the better one is kept (``escalation.better``; on a tie the OCR result); a
-        draft kept because the OCR failed gets the warning ``ocr_unavailable``; when that
-        failure is retryable, the draft also loses its fingerprint, so it is neither compared
-        nor cached and the next request gets the OCR. For a URL the kept result is compared
-        with the URL's previous fingerprint and stored in the result cache, with the input's
-        validators (none for a file a render ended on), like any fast result (``_finish``). An
-        upload's is not: its fingerprint is computed, but neither compared nor stored (F17)."""
+        (``upload`` for an upload), ``document.converter`` is ``docling``. Under ``ocr:
+        always``, or when the input's probe said the text layer needs OCR (``needs_ocr``), the
+        OCR result is kept unless it failed; otherwise the better of draft and OCR result
+        (``escalation.better``; on a tie the OCR result). A draft kept because the OCR failed
+        gets the warning ``ocr_unavailable``; when that failure is retryable, the draft also
+        loses its fingerprint, so it is neither compared nor cached and the next request gets
+        the OCR. For a URL the kept result is compared with the URL's previous fingerprint and
+        stored in the result cache, with the input's validators (none for a file a render ended
+        on), like any fast result (``_finish``). An upload's is not: its fingerprint is
+        computed, but neither compared nor stored (F17)."""
         meta = document.meta
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
@@ -679,7 +681,15 @@ class Pipeline:
                 ocr=meta.kind not in _NO_OCR_KINDS,
                 warnings=list(converted.warnings),
             )
-        kept = ocr if draft is None else better(draft, ocr)
+        if draft is None:
+            kept = ocr
+        elif req.ocr == "always" or meta.needs_ocr:
+            # The caller asked for Docling, or the probe found the text layer a scan's or broken
+            # (F4, F11): any OCR result that did not fail wins. ``better`` would count the words
+            # of a garbage layer, or the headers and footers Docling leaves out.
+            kept = draft if ocr.status == "failed" else ocr
+        else:
+            kept = better(draft, ocr)
         if kept is draft and ocr.status == "failed" and kept.data is not None:
             update: dict[str, Any] = {"warnings": [*kept.data.warnings, OCR_UNAVAILABLE_WARNING]}
             if ocr.error is not None and ocr.error.retryable:
@@ -1822,17 +1832,21 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
 
     ``mode`` keeps the results of each mode apart: ``browser`` renders, and ``auto`` keeps a
     rendered result when the fast one needed the browser. ``ocr`` matters for documents only,
-    but which URL is one is known only after the fetch. The browser options that are not
-    here (actions, cookies, headers, a screenshot) keep a request out of the cache altogether.
+    but which URL is one is known only after the fetch; it is left out while it is the default
+    (``auto``), so the keys of pages and of default requests stay those of the release before
+    it and a deploy keeps the cache. The browser options that are not here (actions, cookies,
+    headers, a screenshot) keep a request out of the cache altogether.
     """
-    return {
+    options: dict[str, Any] = {
         "mode": req.mode,
         "format": req.format,
         "metadata": req.metadata,
         "links": req.links,
         "compliance": mode,
-        "ocr": req.ocr,
     }
+    if req.ocr != "auto":
+        options["ocr"] = req.ocr
+    return options
 
 
 def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:

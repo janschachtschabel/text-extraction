@@ -11,13 +11,15 @@ there.
 **The runner** (``DoclingRunner``) leases an item for ``2 * DOCLING_TIMEOUT_SECONDS + 10``
 seconds. For each item it:
 
-1. reads the item's input (``DocumentInputMeta`` and the bytes). An input that expired before
-   the claim fails the item with ``timeout``, retryable: the caller sends the document again;
-2. reads the item's draft (MarkItDown's result, None for an image or an OpenDocument file) and
-   rebuilds the request from the job: its options with its URL, or an upload's form;
+1. reads the item's input (``DocumentInputMeta`` and the bytes) and its draft (MarkItDown's
+   result, None for an image or an OpenDocument file). An input that expired before the claim
+   answers the draft with ``ocr_unavailable``, neither fingerprinted nor cached; without a
+   draft the item fails ``timeout``, retryable: the caller sends the document again;
+2. rebuilds the request from the job: its options with its URL, or an upload's form;
 3. runs ``Pipeline.convert_queued_document`` with the Docling conversion (``DoclingConverter``):
-   the result is built as inline, the better of draft and OCR result is kept, and a URL's kept
-   result goes to the result cache and the fingerprints (an upload's does not);
+   the result is built as inline, the OCR result is kept (under ``ocr: always`` or for a scan,
+   unless it failed; otherwise the better of draft and OCR result), and a URL's kept result
+   goes to the result cache and the fingerprints (an upload's does not);
 4. leaves the input and the draft to the ``Worker``, which deletes both after the result write
    (also of an exhausted item). An item that runs again (a failed write, a Valkey error, a
    cancelled shutdown) finds both.
@@ -67,7 +69,7 @@ from prometheus_client import REGISTRY, CollectorRegistry
 from redis.asyncio import Redis
 
 from text_extraction.conversion_pool import ConversionPool
-from text_extraction.docling_dispatch import docling_queue
+from text_extraction.docling_dispatch import docling_queue, draft_without_ocr
 from text_extraction.documents import model_store
 from text_extraction.documents.pool import ConversionError, DocumentPool
 from text_extraction.documents.types import DocumentConversion
@@ -241,11 +243,14 @@ class DoclingRunner:
         # The worker deletes the input and the draft once the result is written (``Worker.
         # _drop_input``): an item that runs again finds both.
         stored = await self._store.get_input(job.id, item.index, DocumentInputMeta)
+        draft = await self._store.draft(job.id, item.index)
         if stored is None:
-            _log.info("docling_input_expired")
+            _log.info("docling_input_expired", draft=draft is not None)
+            fallback = draft_without_ocr(draft)
+            if fallback is not None:
+                return fallback
             return failed_extract(ErrorCode.TIMEOUT, INPUT_EXPIRED_MESSAGE, retryable=True)
         body, meta = stored
-        draft = await self._store.draft(job.id, item.index)
         request = (
             form_of(job.options)
             if job.kind == "file"

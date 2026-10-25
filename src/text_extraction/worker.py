@@ -12,7 +12,9 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 
 1. claims the next item, leased for the runner's lease (``EXTRACT_TIMEOUT_SECONDS * 2 + 10``
    seconds here). An item that lost too many leases (``exhausted``) fails with
-   ``internal_error``, retryable, and is completed once that is recorded or its job is gone. A
+   ``internal_error``, retryable (an item of pool ``docling`` answers its draft with
+   ``ocr_unavailable`` instead, when it has one), and is completed once that is recorded or its
+   job is gone. A
    Valkey error leaves it leased: it comes back after the lease, so its batch still gets a
    result for it;
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
@@ -89,7 +91,12 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
-from text_extraction.docling_dispatch import DOCLING_POOL, DoclingMove, docling_queue
+from text_extraction.docling_dispatch import (
+    DOCLING_POOL,
+    DoclingMove,
+    docling_queue,
+    draft_without_ocr,
+)
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope, ErrorCode
@@ -462,13 +469,18 @@ class Worker:
         return _ESCALATED if await self._queue.complete(item) else None
 
     async def _fail_exhausted(self, item: QueueItem, job: JobRecord | None) -> str | None:
-        """Record the item as lost too often, then complete it. A Valkey error propagates and
-        leaves the item leased, so it is offered again after the lease instead of vanishing
-        without a result."""
+        """Record the item as lost too often, then complete it; an item of pool ``docling``
+        answers its draft instead, when it has one (``draft_without_ocr``). A Valkey error
+        propagates and leaves the item leased, so it is offered again after the lease instead
+        of vanishing without a result."""
         _log.warning("job_item_exhausted", attempts=item.attempts)
         if job is None:
             return await self._drop(item)
         envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
+        if self._queue.pool == DOCLING_POOL:
+            # A document whose OCR never finished keeps its text layer, unstored.
+            draft = await self._store.draft(item.job_id, item.index)
+            envelope = draft_without_ocr(draft) or envelope
         outcome = await self._finish(item, job, envelope)
         # The item never runs again: its caller secrets (a browser job's, B6) are done with.
         await self._store.drop_secrets(item.job_id)
