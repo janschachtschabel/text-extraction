@@ -86,7 +86,7 @@
   - arte and Vimeo deliver subtitles as HLS (`m3u8_native`): the child reads the playlist (`#EXTM3U`) and fetches and concatenates its VTT segments, within the byte cap and through the proxy.
   - faster-whisper 1.2.1's `decode_audio` breaks on PyAV 19 (`metadata_errors`): the child always decodes itself and passes a float32 array, never a path (a test pins it).
   - Deno is not needed for tier 1, and audio download worked without it from Jan's line; it stays in the ASR image only, for YouTube's player challenges from other networks.
-  - PyAV wheels bundle GPL `libx264`/`libx265`: decision D5 (open).
+  - PyAV wheels bundle GPL `libx264`/`libx265`: decision D5: Jan chose (a) on 2026-10-25, build PyAV from source in the ASR image against a pinned BtbN LGPL-shared FFmpeg build (no GPL x264/x265); Task 9 adds a test that the installed `av` reports an LGPL FFmpeg configuration.
 - **M16, yt-dlp versions.** The 14-day rule holds; a pinned yt-dlp that a platform broke is replaced by the newest stable release in its own small PR (CONTRIBUTING.md gains this exception, as the platforms change their players without notice).
 
 ## Review Focus
