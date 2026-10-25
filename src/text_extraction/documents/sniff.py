@@ -74,6 +74,10 @@ class DocumentTooLarge(Exception):  # noqa: N818 - the name is part of the task'
     """A container is too big, too packed or too odd to convert safely."""
 
 
+class DocumentUnreadable(Exception):  # noqa: N818 - named like DocumentTooLarge
+    """A container cannot be read at all (corrupt or truncated archive)."""
+
+
 def media_type(kind: DocumentKind) -> str:
     """The media type a result reports for a document of this kind."""
     return _MEDIA_TYPES[kind]
@@ -86,12 +90,17 @@ def sniff(
 
     A declared HTML or XHTML type is always "html" (the page path). For anything else the
     bytes decide first; then CSV (declared, or a ``.csv`` name, with decodable text); then a
-    declared ``text/plain`` is "text".
+    declared ``text/plain`` is "text". A ``text/plain`` body is a document only when its
+    signature stands at the start (after a byte order mark and whitespace), so prose that
+    quotes ``%PDF-`` stays text. Any parser error means None.
     """
     media = (declared or "").split(";", 1)[0].strip().lower()
     if media in _HTML_TYPES:
         return "html"
-    by_bytes = _sniff_bytes(body)
+    try:
+        by_bytes = _sniff_bytes(body, at_start=media == "text/plain")
+    except Exception:  # a parser boundary on hostile input: no kind is always safe
+        by_bytes = None
     if by_bytes is not None:
         return by_bytes
     if (media == "text/csv" or (name or "").lower().endswith(".csv")) and _looks_like_text(body):
@@ -113,8 +122,8 @@ def check_container(body: bytes, kind: DocumentKind, max_uncompressed: int) -> N
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             infos = archive.infolist()
-    except (zipfile.BadZipFile, EOFError, OSError, ValueError, NotImplementedError) as exc:
-        raise DocumentTooLarge("The archive is unreadable.") from exc
+    except Exception as exc:  # a parser boundary on hostile input: fail closed
+        raise DocumentUnreadable("The archive is unreadable.") from exc
     if len(infos) > MAX_ZIP_ENTRIES:
         raise DocumentTooLarge(f"The archive has more than {MAX_ZIP_ENTRIES} entries.")
     total = 0
@@ -128,8 +137,17 @@ def check_container(body: bytes, kind: DocumentKind, max_uncompressed: int) -> N
             raise DocumentTooLarge(f"An archive entry is compressed by a ratio over {MAX_RATIO}.")
 
 
-def _sniff_bytes(body: bytes) -> DocumentKind | None:
-    if b"%PDF-" in body[:_PDF_WINDOW]:
+def _sniff_bytes(body: bytes, *, at_start: bool) -> DocumentKind | None:
+    if at_start:
+        # Skip a byte order mark and whitespace; the signature must follow at once.
+        skipped = 3 if body.startswith(b"\xef\xbb\xbf") else 0
+        while skipped < len(body) and body[skipped] in b" \t\r\n\f\v":
+            skipped += 1
+        if skipped:
+            body = body[skipped:]
+        if body.startswith(b"%PDF-"):
+            return "pdf"
+    elif b"%PDF-" in body[:_PDF_WINDOW]:
         return "pdf"
     head = body[:32]
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -174,7 +192,7 @@ def _sniff_zip(body: bytes) -> DocumentKind | None:
                 for kind, pattern in _OOXML_PARTS:
                     if pattern.search(types):
                         return kind
-    except (zipfile.BadZipFile, EOFError, OSError, ValueError, NotImplementedError, KeyError):
+    except Exception:  # bad, encrypted or corrupt entries (zlib.error, RuntimeError, ...): None
         return None
     return None
 
@@ -192,9 +210,9 @@ def _looks_like_text(body: bytes) -> bool:
 def _ole_has_workbook(body: bytes) -> bool:
     """Whether an OLE2 file has a ``Workbook`` or ``Book`` stream in its directory.
 
-    Reads the header, the FAT (from the DIFAT) and the directory sector chain. The chain walk
-    stops at the end marker, at a sector seen before, at the end of the body or after
-    ``_OLE_MAX_DIRECTORY_SECTORS`` sectors, so a corrupt file cannot make it loop.
+    Reads the header, the DIFAT and the directory sector chain, and looks up one FAT entry at
+    a time. Every loop is bounded by the body size, a seen-set or a sector cap, so a corrupt
+    file cannot make it loop or allocate more than a list of the body's own sector count.
     """
     if len(body) < 512:
         return False
@@ -202,26 +220,35 @@ def _ole_has_workbook(body: bytes) -> bool:
     if shift not in (9, 12):
         return False
     sector_size = 1 << shift
-    first_directory, difat_start = (
-        struct.unpack_from("<I", body, 0x30)[0],
-        struct.unpack_from("<I", body, 0x44)[0],
-    )
+    sector_count = len(body) // sector_size
+    first_directory = struct.unpack_from("<I", body, 0x30)[0]
     fat_ids = list(struct.unpack_from("<109I", body, 0x4C))
-    difat_id, visited = difat_start, 0
-    while difat_id <= _OLE_MAX_SECTOR_ID and visited < _OLE_MAX_DIFAT_SECTORS:
+    difat_id, seen_difat = struct.unpack_from("<I", body, 0x44)[0], set[int]()
+    while (
+        difat_id <= _OLE_MAX_SECTOR_ID
+        and difat_id not in seen_difat
+        and len(seen_difat) < min(_OLE_MAX_DIFAT_SECTORS, sector_count)
+        and len(fat_ids) < sector_count
+    ):
+        seen_difat.add(difat_id)
         offset = (difat_id + 1) * sector_size
         if offset + sector_size > len(body):
             break
         entries = struct.unpack_from(f"<{sector_size // 4}I", body, offset)
         fat_ids.extend(entries[:-1])
         difat_id = entries[-1]
-        visited += 1
-    fat: list[int] = []
-    for fat_id in fat_ids:
-        offset = (fat_id + 1) * sector_size
-        if fat_id > _OLE_MAX_SECTOR_ID or offset + sector_size > len(body):
-            continue
-        fat.extend(struct.unpack_from(f"<{sector_size // 4}I", body, offset))
+    del fat_ids[sector_count:]
+    per_fat_sector = sector_size // 4
+
+    def next_sector(sector_id: int) -> int:
+        index = sector_id // per_fat_sector
+        if index >= len(fat_ids) or fat_ids[index] > _OLE_MAX_SECTOR_ID:
+            return _OLE_END_OF_CHAIN
+        offset = (fat_ids[index] + 1) * sector_size + sector_id % per_fat_sector * 4
+        if offset + 4 > len(body):
+            return _OLE_END_OF_CHAIN
+        return int(struct.unpack_from("<I", body, offset)[0])
+
     sector_id, seen = first_directory, set[int]()
     while (
         sector_id <= _OLE_MAX_SECTOR_ID
@@ -239,5 +266,5 @@ def _ole_has_workbook(body: bytes) -> bool:
             name = body[entry : entry + name_length - 2].decode("utf-16-le", "replace")
             if name in _OLE_WORKBOOK_STREAMS:
                 return True
-        sector_id = fat[sector_id] if sector_id < len(fat) else _OLE_END_OF_CHAIN
+        sector_id = next_sector(sector_id)
     return False

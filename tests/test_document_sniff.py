@@ -1,14 +1,25 @@
+import contextlib
 import io
+import random
 import struct
+import time
 import zipfile
 
 import pytest
 
-from text_extraction.documents.sniff import DocumentTooLarge, check_container, media_type, sniff
+from text_extraction.documents.sniff import (
+    DocumentTooLarge,
+    DocumentUnreadable,
+    check_container,
+    media_type,
+    sniff,
+)
 from text_extraction.documents.types import DocumentKind
 
 PDF = b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n"
 MAX_UNCOMPRESSED = 200_000_000
+ZIP_CONTAINER_KINDS: tuple[DocumentKind, ...] = ("docx", "xlsx", "epub", "odt")
+_OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def make_zip(entries: list[tuple[str, bytes]], *, stored: bool = False) -> bytes:
@@ -316,5 +327,83 @@ def test_check_container_never_decompresses(monkeypatch: pytest.MonkeyPatch) -> 
 def test_check_container_on_a_corrupt_zip_is_refused() -> None:
     # Called only for sniffed kinds, so a corrupt ZIP here means the body changed or lies:
     # refuse it rather than let a converter walk it.
-    with pytest.raises(DocumentTooLarge, match="unreadable"):
+    with pytest.raises(DocumentUnreadable, match="unreadable"):
         check_container(b"PK\x03\x04" + b"\0" * 40, "docx", MAX_UNCOMPRESSED)
+    assert not issubclass(DocumentUnreadable, DocumentTooLarge)
+
+
+def encrypt_entry(body: bytes, index: int) -> bytes:
+    """Set the "encrypted" flag of the index-th entry, in its local and central header."""
+    data = bytearray(body)
+    for signature, flag_offset in ((b"PK\x03\x04", 6), (b"PK\x01\x02", 8)):
+        position = -1
+        for _ in range(index + 1):
+            position = data.index(signature, position + 1)
+        data[position + flag_offset] |= 1
+    return bytes(data)
+
+
+def test_encrypted_first_entry_is_unsupported() -> None:
+    assert sniff(encrypt_entry(mimetype_zip("application/epub+zip"), 0), None, None) is None
+    assert sniff(encrypt_entry(ooxml("word/document.xml"), 0), None, None) is None
+
+
+def test_corrupt_deflate_stream_is_unsupported() -> None:
+    body = bytearray(ooxml("word/document.xml"))
+    name_length, extra_length = struct.unpack_from("<HH", body, 26)
+    start = 30 + name_length + extra_length
+    body[start : start + 8] = b"\xff" * 8  # a deflate block of the invalid type 3
+    assert sniff(bytes(body), None, None) is None
+
+
+def test_self_referencing_difat_is_bounded() -> None:
+    # 12 KB, 4096-byte sectors: the DIFAT sector points at itself and lists sector 0 everywhere.
+    header = bytearray(_OLE_SIGNATURE + bytes(16))
+    header += struct.pack("<HHHHH", 0x3E, 4, 0xFFFE, 12, 6) + bytes(6)
+    header += struct.pack("<IIIIIIIII", 0, 109, 0, 0, 4096, 0xFFFFFFFE, 0, 0, 1)
+    header += struct.pack("<109I", *([0] * 109))
+    sector = struct.pack("<1024I", *([0] * 1023), 0)
+    body = bytes(header.ljust(4096, b"\0")) + sector + sector
+    started = time.monotonic()
+    assert sniff(body, None, None) is None
+    assert time.monotonic() - started < 1
+
+
+def test_text_plain_signature_counts_only_at_the_start() -> None:
+    late = b"Some prose that quotes the header %PDF-1.7 in a sentence."
+    assert sniff(late, "text/plain", None) == "text"
+    assert sniff(late, "text/plain; charset=utf-8", "x.txt") == "text"
+    assert sniff(b"\xef\xbb\xbf \r\n\t" + PDF, "text/plain", None) == "pdf"
+    assert sniff(b"\n\n" + ooxml("xl/workbook.xml"), "text/plain", None) == "xlsx"
+    assert sniff(b"intro\n" + PDF, "text/plain", None) == "text"
+
+
+@pytest.mark.parametrize("declared", [None, "application/octet-stream", "application/pdf"])
+def test_other_types_keep_the_pdf_window(declared: str | None) -> None:
+    assert sniff(b"junk\n" + PDF, declared, None) == "pdf"
+
+
+def test_mutation_fuzz_fails_closed() -> None:
+    seeds = [
+        ooxml("word/document.xml"),
+        mimetype_zip("application/vnd.oasis.opendocument.text"),
+        make_zip([("mimetype", b"application/epub+zip"), ("a.xml", b"<x/>" * 50)]),
+        ole(["SummaryInformation", "Workbook"]),
+        ole(["Workbook"], sector_size=4096),
+    ]
+    rng = random.Random(20261024)  # noqa: S311 - a deterministic fuzz seed
+    kinds: set[object] = set()
+    for _ in range(2000):
+        data = bytearray(rng.choice(seeds))
+        for _ in range(rng.randint(1, 6)):
+            data[rng.randrange(len(data))] = rng.randrange(256)
+        if rng.random() < 0.2:
+            del data[rng.randrange(len(data)) :]
+        kind = sniff(
+            bytes(data), rng.choice([None, "application/octet-stream", "text/plain"]), None
+        )
+        kinds.add(kind)
+        for container in ZIP_CONTAINER_KINDS:
+            with contextlib.suppress(DocumentTooLarge, DocumentUnreadable):
+                check_container(bytes(data), container, MAX_UNCOMPRESSED)
+    assert {"docx", "odt", "epub", "xls"} <= kinds  # the mutations leave some files intact
