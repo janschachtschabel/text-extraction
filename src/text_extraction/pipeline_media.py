@@ -19,14 +19,21 @@ rest:
   4. A subtitle track becomes the transcript (``media/captions.py``, ``media/transcript.py``):
      ``# <title>``, ``## <chapter>`` headings, paragraphs; ``content_type`` ``text/vtt``.
      Quality is judged like ``text/plain``.
-  5. Without a track (or with one that cannot be read) the answer is the metadata
+  5. A proxy refusal of the children (``blocked_address``, the SSRF guard) is ``failed`` with
+     ``blocked_url``.
+  6. Without a track (or with one that cannot be read) the answer is the metadata
      (``transcript_source`` ``metadata_only``): title and description, one paragraph per line
      of the description, ``content_type`` ``text/html``, ``partial`` with
-     ``no_transcript_available`` (not retryable; ``failed`` and retryable only when the
-     platform refused the service and left nothing). A platform that refused the service (D1)
-     adds ``subtitles_blocked``, and that answer loses its fingerprint: the block may lift, so it
-     is neither compared nor cached. With ``transcribe: true`` this answer is the draft of an
-     ``AsrNeeded`` for the caller to hand on.
+     ``no_transcript_available``. Only a probe that succeeded and found no usable track says
+     the video "has no subtitles" (not retryable), and only that answer is fingerprinted and
+     cached. A platform that refused the service (D1) adds ``subtitles_blocked``; any other
+     failure of the probe (``_PROBE_FAILURES``: the children, the network, the track, a limit)
+     says what failed, mostly with ``subtitles_failed``, and is retryable when it may pass.
+     Neither is compared or cached. Without title and description it is ``failed``: retryable
+     after a refusal, else with the failure's own code (``internal_error``, ``dns_error``,
+     ``connection_error``, ``too_large`` or ``no_transcript_available``). With
+     ``transcribe: true`` this answer is the draft of an ``AsrNeeded`` for the caller to hand
+     on.
 
   The description, uploader, date, keywords and licence go to ``metadata`` (a licence with
   source ``platform`` and confidence ``high``; YouTube's "Creative Commons Attribution license"
@@ -38,7 +45,9 @@ rest:
 - ``tracks(run, html, result)``, after an HTML page's conversion: the ``<track>`` of each
   player (``media/html5.py``), up to ``MEDIA_MAX_TRACKS``, each fetched with the fast fetcher in
   a turn of its host (SSRF checks and gate as for any fetch, no compliance files: a
-  sub-resource of a page that passed; a redirect to another host ends it), at most
+  sub-resource of a page that passed; a redirect to another host ends it; the page's
+  Crawl-delay on the page's host; the wait for the turn and the fetch bounded by the time the
+  run has left, so a busy host skips the track instead of failing the page), at most
   ``MEDIA_SUBTITLE_MAX_BYTES``, appended as ``## Transcript`` (with its label). A track that
   fails is skipped; ``tracks_failed`` when every one failed, ``tracks_truncated`` with more
   players than the limit. The players' embeds are listed (D4 a). A page with neither keeps
@@ -109,6 +118,7 @@ __all__ = [
     "ASR_UNAVAILABLE_WARNING",
     "PLAYLIST_MESSAGE",
     "SUBTITLES_BLOCKED_WARNING",
+    "SUBTITLES_FAILED_WARNING",
     "TRACKS_FAILED_WARNING",
     "TRACKS_TRUNCATED_WARNING",
     "TRANSCRIBE_WAIT_SECONDS",
@@ -133,6 +143,7 @@ TRANSCRIPTION_NOT_HANDED_MESSAGE: Final = (
 PLAYLIST_MESSAGE: Final = "The URL is a playlist, not one video. Extract the videos one by one."
 _LIVE_MESSAGE: Final = "The URL is a live stream that is still running."
 SUBTITLES_BLOCKED_WARNING: Final = "subtitles_blocked"
+SUBTITLES_FAILED_WARNING: Final = "subtitles_failed"
 ASR_UNAVAILABLE_WARNING: Final = "asr_unavailable"
 TRACKS_TRUNCATED_WARNING: Final = "tracks_truncated"
 TRACKS_FAILED_WARNING: Final = "tracks_failed"
@@ -143,6 +154,12 @@ _BLOCKED_MESSAGE: Final = (
     "The platform refused the subtitles: the answer has the video's details only."
 )
 _NOTHING_MESSAGE: Final = "The platform refused the subtitles and the video's details."
+_NOTHING_AT_ALL_MESSAGE: Final = "The video has no subtitles and no details."
+_DETAILS_ONLY: Final = " The answer has the video's details only."
+_TRY_AGAIN: Final = " Try again later."
+_BLOCKED_ADDRESS_MESSAGE: Final = (
+    "The media extraction tried to reach an address that is not public, which is not allowed."
+)
 _FILE_MESSAGE: Final = "The URL is an audio or video file without subtitles."
 _TIMEOUT_MESSAGE: Final = "The video's subtitles did not arrive in time."
 _UNAVAILABLE_MESSAGE: Final = "The media extraction is not available. Try again later."
@@ -162,6 +179,59 @@ _MIN_SECONDS: Final = 1.0
 _SECONDS_BUCKETS: Final = (0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 60)
 _PLAYER_RESPONSE: Final = re.compile(r"ytInitialPlayerResponse\s*=\s*\{")
 _DATE: Final = re.compile(r"^(\d{4})-?(\d{2})-?(\d{2})")
+
+
+@dataclass(frozen=True)
+class _ProbeFailure:
+    """How a probe's error code is answered when no transcript came: ``code`` and ``reason``
+    without any of the video's details, ``reason`` and ``warning`` with them (``partial``,
+    ``no_transcript_available``). Such an answer is never fingerprinted, so never cached."""
+
+    code: ErrorCode
+    retryable: bool
+    reason: str
+    warning: str | None = SUBTITLES_FAILED_WARNING
+
+
+_UNREADABLE: Final = _ProbeFailure(
+    ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "The platform's answer could not be read."
+)
+_CHILD_FAILED: Final = _ProbeFailure(
+    ErrorCode.INTERNAL_ERROR, True, "The media extraction failed on our side."
+)
+_TRACK_FAILED: Final = _ProbeFailure(
+    ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "The subtitles could not be fetched or read."
+)
+# The probe's error codes (``media/pool.py``) but the refusals (``blocked``, ``rate_limited``,
+# ``subtitles_blocked``) and ``blocked_address`` (``blocked_url``); an unknown one reads as
+# ``extractor_error``.
+_PROBE_FAILURES: Final[dict[str, _ProbeFailure]] = {
+    "extractor_error": _UNREADABLE,
+    "crashed": _CHILD_FAILED,
+    "out_of_memory": _CHILD_FAILED,
+    "connect_error": _ProbeFailure(
+        ErrorCode.CONNECTION_ERROR, True, "The platform could not be reached."
+    ),
+    "dns_error": _ProbeFailure(
+        ErrorCode.DNS_ERROR, True, "The platform's host name could not be resolved."
+    ),
+    "track_failed": _TRACK_FAILED,
+    "empty_track": _ProbeFailure(
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "The subtitles came without text."
+    ),
+    "too_large": _ProbeFailure(
+        ErrorCode.TOO_LARGE, False, "The subtitles are larger than MEDIA_SUBTITLE_MAX_BYTES."
+    ),
+    "bytes_cap": _ProbeFailure(
+        ErrorCode.TOO_LARGE, False, "The media extraction needed more than MEDIA_EXTRACT_MAX_BYTES."
+    ),
+    "unavailable": _ProbeFailure(
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+        False,
+        "The video is private, removed or restricted.",
+        warning=None,
+    ),
+}
 
 
 def asr_available(settings: Settings) -> bool:
@@ -367,6 +437,7 @@ class MediaSteps:
             and probe.track is None
             and probe.title is None
             and not probe.blocked
+            and probe.error != "blocked_address"
         ):
             probe = await self._watch_page(run, target, probe)
         if probe.title is None and probe.description is None and probe.rate_limited:
@@ -383,6 +454,10 @@ class MediaSteps:
             transcript = await self._transcript(run, target, probe, probe.track)
             if transcript is not None:
                 return transcript
+            probe = replace(probe, track=None, error="track_failed")  # it had no readable cue
+        if probe.error == "blocked_address" and not (probe.blocked or probe.rate_limited):
+            # The proxy refused a request of the children: an SSRF guard, not the platform.
+            return run.failed(ErrorCode.BLOCKED_URL, _BLOCKED_ADDRESS_MESSAGE)
         draft = await self._metadata_only(run, target, probe)
         if not run.req.transcribe:
             return draft
@@ -457,9 +532,18 @@ class MediaSteps:
         finally:
             run.convert_ms += _ms(started)
         refused = probe.blocked or probe.rate_limited
+        failure = (
+            None
+            if refused or probe.error is None
+            else _PROBE_FAILURES.get(probe.error, _UNREADABLE)
+        )
         warnings = [SUBTITLES_BLOCKED_WARNING] if refused else []
-        # A refusal may lift: the answer is neither compared nor cached.
-        fingerprint = None if refused else hashlib.sha256(built.content.encode()).hexdigest()
+        if failure is not None and failure.warning is not None:
+            warnings.append(failure.warning)
+        # A refusal may lift and a failure may pass: such an answer is neither compared nor
+        # cached. Only a probe that succeeded without a usable track is.
+        kept = not refused and failure is None
+        fingerprint = hashlib.sha256(built.content.encode()).hexdigest() if kept else None
         result = self._result(
             run,
             target,
@@ -472,11 +556,24 @@ class MediaSteps:
             warnings=warnings,
         )
         if not built.content:
-            return _failed(result, ErrorCode.NO_TRANSCRIPT_AVAILABLE, _NOTHING_MESSAGE, refused)
-        message = _BLOCKED_MESSAGE if refused else _NO_SUBTITLES_MESSAGE
+            if failure is not None:
+                message = failure.reason + (_TRY_AGAIN if failure.retryable else "")
+                return _failed(result, failure.code, message, failure.retryable)
+            message = _NOTHING_MESSAGE if refused else _NOTHING_AT_ALL_MESSAGE
+            return _failed(result, ErrorCode.NO_TRANSCRIPT_AVAILABLE, message, refused)
+        retryable = False
+        if refused:
+            message = _BLOCKED_MESSAGE
+        elif failure is not None:
+            message = failure.reason + _DETAILS_ONLY
+            retryable = failure.retryable
+        else:
+            message = _NO_SUBTITLES_MESSAGE
         if asr_available(self._settings):
             message += _TRANSCRIBE_HINT
-        error = ErrorInfo(code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=message)
+        error = ErrorInfo(
+            code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=message, retryable=retryable
+        )
         return Envelope(status="partial", data=result, error=error)
 
     def _result(
@@ -700,24 +797,36 @@ class MediaSteps:
         return _track_section(cues, track.label, fmt)
 
     async def _fetch_track(self, run: MediaRun, track: PageTrack) -> FetchResult | None:
-        """The track's answer, fetched in a turn of its host; None when it failed."""
+        """The track's answer, fetched in a turn of its host; None when it failed. The wait
+        for the turn and the fetch together get the time the run has left (minus a margin), so
+        a busy host costs the track, never the page. A track on the page's host keeps the
+        robots.txt Crawl-delay the page's turns keep."""
         host = urlsplit(track.url).hostname or ""
         budget = self._fetch_budget(run)
         if budget < _MIN_SECONDS:
             return None
+        page_host = normalize_host(urlsplit(run.final_url or "").hostname or "")
+        crawl_delay = run.report.crawl_delay if normalize_host(host) == page_host else None
 
         async def same_host(url: str) -> None:
             if normalize_host(urlsplit(url).hostname or "") != normalize_host(host):
                 raise FetchError(ErrorCode.TARGET_HTTP_ERROR, "The track redirected elsewhere.")
 
+        loop = asyncio.get_running_loop()
+        bound = asyncio.timeout(budget)
         started = time.perf_counter()
         try:
-            async with self._gate.slot(host):
+            async with bound, self._gate.slot(host, crawl_delay):
+                when = bound.when()
+                left = (when if when is not None else loop.time()) - loop.time()
+                if left <= 0:
+                    _log.info("media_track_failed", host=host, error_code="timeout")
+                    return None
                 try:
                     fetched = await self._fetcher.fetch(
                         track.url,
                         max_bytes=self._settings.media_subtitle_max_bytes,
-                        timeout_seconds=self._fetch_budget(run),
+                        timeout_seconds=left,
                         on_redirect=same_host,
                     )
                 except FetchError as error:
@@ -727,6 +836,11 @@ class MediaSteps:
                 await self._record(host, fetched)
         except (OutboundBusy, CircuitOpen):
             _log.info("media_track_failed", host=host, error_code=ErrorCode.RATE_LIMITED.value)
+            return None
+        except TimeoutError:
+            if not bound.expired():
+                raise
+            _log.info("media_track_failed", host=host, error_code=ErrorCode.TIMEOUT.value)
             return None
         finally:
             run.fetch_ms += _ms(started)

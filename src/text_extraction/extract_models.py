@@ -167,9 +167,10 @@ class ExtractResult(BaseModel):
         "were cut), `pages_partial` (OCR stopped at its time limit or skipped a page: the pages "
         "it read), `document_fetched_directly` (a render ended on a file, which was fetched "
         "and converted in fast mode) (documents); `subtitles_blocked` (the platform refused the "
-        "subtitles: the metadata answers), `asr_unavailable` (no transcription in time, or it "
-        "failed: the metadata answers), `tracks_truncated` (more tracks than the limit: the "
-        "first ones), `tracks_failed` (no track of the page could be read) (media); "
+        "subtitles: the metadata answers), `subtitles_failed` (the subtitles could not be "
+        "had or read this time: the metadata answers), `asr_unavailable` (no transcription in "
+        "time, or it failed: the metadata answers), `tracks_truncated` (more tracks than the "
+        "limit: the first ones), `tracks_failed` (no track of the page could be read) (media); "
         "`content_not_stored_too_large` (a job item stored without its content). Converter "
         "notes may follow."
     )

@@ -19,9 +19,11 @@ fetched here):
 
 Every URL is resolved against ``<base href>`` or the page URL and must pass ``validate_url``
 (http or https, a host, no user information), so nothing listed or fetched carries
-credentials. CPU-bound: the caller runs it on the conversion pool.
+credentials. A page without any of the markup that can declare media is not parsed at all.
+CPU-bound: the caller runs it on the conversion pool.
 """
 
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Final
@@ -42,6 +44,10 @@ _TRANSCRIPT_KINDS: Final = frozenset({"", "subtitles", "captions"})
 _MAX_ELEMENTS: Final = 200  # media elements and iframes looked at
 _MAX_TRACKS_PER_ELEMENT: Final = 50
 _MAX_LABEL: Final = 200
+# Markup without which a page declares no media: a cheap look before the page is parsed.
+_MEDIA_MARKUP: Final = re.compile(
+    r"<(?:video|audio|iframe)\b|og:(?:video|audio)|application/ld\+json", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +82,8 @@ class _Candidate:
 
 def page_media(html: str, url: str, languages: Sequence[str], max_tracks: int) -> PageMedia:
     """The tracks and embeds of the page at ``url`` (see the module docstring)."""
+    if _MEDIA_MARKUP.search(html) is None:
+        return PageMedia()
     tree = page_tree(html)
     base = base_url(tree, url)
     page_language = track_language(tree.get("lang") or "") if tree.tag == "html" else None

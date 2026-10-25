@@ -6,8 +6,9 @@ come from a fake fetcher or pytest-httpserver.
 """
 
 import asyncio
+import contextlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from ipaddress import IPv4Address, IPv6Address
 from pathlib import Path
 from typing import Any, cast
@@ -19,7 +20,16 @@ from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from structlog.testing import capture_logs
 
-from tests.fakes import ARTICLE, PAGE, PARAGRAPH, Answer, FakeFetcher, RecordingGate, fetched
+from tests.fakes import (
+    ARTICLE,
+    PAGE,
+    PARAGRAPH,
+    Answer,
+    FakeFetcher,
+    RecordingGate,
+    Redirect,
+    fetched,
+)
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.documents.pool import ConversionTimeout
@@ -553,7 +563,7 @@ def test_metadata_only_cache_not_hit_for_transcribe() -> None:
 
     async def scenario() -> list[Envelope[ExtractResult]]:
         first = await harness.arun()
-        second = await harness.arun(handoff, transcribe=True, languages=["de"])
+        second = await harness.arun(handoff, transcribe=True)
         third = await harness.arun()
         return [first, second, third]
 
@@ -570,7 +580,7 @@ def test_metadata_only_cache_not_hit_for_transcribe() -> None:
         kind=None,
         file_name=None,
         duration=212.0,
-        languages=["de"],
+        languages=[],
         compliance=data_of(first).compliance.model_copy(),
         attempts=1,
     )
@@ -1017,3 +1027,243 @@ def test_transcribe_defaults_wait_seconds_to_20(monkeypatch: pytest.MonkeyPatch)
         client.post("/v1/extract", json={"url": PAGE})
 
     assert waited == [20, 5]
+
+
+# --- fix round 1 -----------------------------------------------------------------------------
+
+VIMEO = "https://player.vimeo.com/video/76979871"
+NO_SUBTITLES = "has no subtitles"
+
+
+# (probe error, with metadata) -> (status, code, retryable, warning)
+PROBE_FAILURES: list[tuple[str | None, bool, str, ErrorCode, bool, str | None]] = [
+    (None, True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
+    (None, False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
+    (
+        "extractor_error",
+        True,
+        "partial",
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+        True,
+        "subtitles_failed",
+    ),
+    ("extractor_error", False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, None),
+    ("crashed", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "subtitles_failed"),
+    ("crashed", False, "failed", ErrorCode.INTERNAL_ERROR, True, None),
+    ("out_of_memory", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "subtitles_failed"),
+    ("out_of_memory", False, "failed", ErrorCode.INTERNAL_ERROR, True, None),
+    ("connect_error", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "subtitles_failed"),
+    ("connect_error", False, "failed", ErrorCode.CONNECTION_ERROR, True, None),
+    ("dns_error", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "subtitles_failed"),
+    ("dns_error", False, "failed", ErrorCode.DNS_ERROR, True, None),
+    ("track_failed", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "subtitles_failed"),
+    ("track_failed", False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, None),
+    ("empty_track", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, "subtitles_failed"),
+    ("empty_track", False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, True, None),
+    ("too_large", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, "subtitles_failed"),
+    ("too_large", False, "failed", ErrorCode.TOO_LARGE, False, None),
+    ("bytes_cap", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, "subtitles_failed"),
+    ("bytes_cap", False, "failed", ErrorCode.TOO_LARGE, False, None),
+    ("unavailable", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
+    ("unavailable", False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
+    ("blocked_address", True, "failed", ErrorCode.BLOCKED_URL, False, None),
+    ("blocked_address", False, "failed", ErrorCode.BLOCKED_URL, False, None),
+]
+
+
+@pytest.mark.parametrize(
+    ("error", "with_metadata", "status", "code", "retryable", "warning"), PROBE_FAILURES
+)
+def test_a_failed_probe_is_reported_as_what_it_is(
+    error: str | None,
+    with_metadata: bool,
+    status: str,
+    code: ErrorCode,
+    retryable: bool,
+    warning: str | None,
+) -> None:
+    """Only a probe that succeeded and listed no usable track "has no subtitles", and only that
+    answer is fingerprinted and cached; a failure of the children, the network or the track
+    says so, and is extracted again next time."""
+    answer = (
+        probe(manual={}, automatic={}, track=None, error=error)
+        if with_metadata
+        else MediaProbe(error=error)
+    )
+    harness = Harness(media=answer)
+
+    first, second = harness.run_all({"url": VIMEO}, {"url": VIMEO})
+
+    assert first.status == status
+    assert first.error is not None
+    assert first.error.code == code
+    assert first.error.retryable is retryable
+    assert "refused" not in first.error.message
+    assert (NO_SUBTITLES in first.error.message) is (error is None)
+    data = data_of(first)
+    assert "subtitles_blocked" not in data.warnings
+    if warning is not None:
+        assert warning in data.warnings
+    cached = error is None and with_metadata
+    assert (data.fingerprint is not None) is cached
+    assert data_of(second).cache == ("hit" if cached else "miss")
+
+
+def test_an_unreadable_subtitle_track_is_no_video_without_subtitles() -> None:
+    harness = Harness(media=probe(track=track(body=b"\x00\x01 not a caption file", fmt="ttml")))
+
+    first, second = harness.run_all({}, {})
+
+    assert first.status == "partial"
+    assert first.error is not None
+    assert NO_SUBTITLES not in first.error.message
+    assert "subtitles_failed" in data_of(first).warnings
+    assert data_of(first).fingerprint is None
+    assert data_of(second).cache == "miss"
+
+
+def bilingual_lesson() -> dict[str, Answer]:
+    players = (
+        '<video src="/clip.mp4">'
+        '<track src="/clip.en.vtt" srclang="en" label="English">'
+        '<track src="/clip.de.vtt" srclang="de" label="Deutsch"></video>'
+    )
+    en = "https://example.org/clip.en.vtt"
+    de = "https://example.org/clip.de.vtt"
+    return {
+        PAGE: fetched(PAGE, lesson(players)),
+        en: fetched(en, track_vtt("Leaves are green."), content_type="text/vtt"),
+        de: fetched(de, track_vtt("Blätter sind grün."), content_type="text/vtt"),
+    }
+
+
+def test_the_page_cache_key_has_the_languages_that_chose_a_track() -> None:
+    harness = Harness(bilingual_lesson(), media=probe())
+
+    english, german, again, plain = harness.run_all(
+        {"url": PAGE, "languages": ["en"]},
+        {"url": PAGE, "languages": ["de"]},
+        {"url": PAGE, "languages": ["de"]},
+        {"url": PAGE},
+    )
+
+    assert "Leaves are green." in (data_of(english).content or "")
+    assert data_of(german).cache == "miss"
+    assert "Blätter sind grün." in (data_of(german).content or "")
+    assert data_of(again).cache == "hit"
+    assert data_of(plain).cache == "miss"  # the default key is the one without languages
+
+
+def test_switching_languages_on_a_page_with_tracks_is_no_content_change() -> None:
+    harness = Harness(bilingual_lesson(), media=probe())
+
+    _, german, plain, plain_again = harness.run_all(
+        {"url": PAGE, "languages": ["en"], "cache": False},
+        {"url": PAGE, "languages": ["de"], "cache": False},
+        {"url": PAGE, "cache": False},
+        {"url": PAGE, "cache": False},
+    )
+
+    assert data_of(german).fingerprint is not None
+    assert data_of(german).fingerprint.changed is None  # type: ignore[union-attr]
+    assert data_of(plain).fingerprint.changed is None  # type: ignore[union-attr]
+    assert data_of(plain_again).fingerprint.changed is False  # type: ignore[union-attr]
+    # A request without languages keeps the variant of package 4.
+    assert _store_key(PAGE, "markdown") in {key.decode() for key in harness.keys("fp:*")}
+
+
+def test_waiting_for_a_tracks_turn_never_outlives_the_deadline() -> None:
+    """A busy track host is skipped once the time is up: the page still answers (M8)."""
+    players = '<video><track src="https://media.example/t.vtt" srclang="en"></video>'
+    harness = Harness(
+        {PAGE: fetched(PAGE, lesson(players))}, media=probe(), extract_timeout_seconds=3
+    )
+    slot = harness.gate.slot
+
+    @contextlib.asynccontextmanager
+    async def busy(host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
+        if host == "media.example":
+            await asyncio.sleep(60)
+        async with slot(host, crawl_delay):
+            yield
+
+    harness.gate.slot = busy  # type: ignore[method-assign]
+
+    envelope = harness.run(url=PAGE)
+
+    assert envelope.status == "success", envelope.error
+    assert "tracks_failed" in data_of(envelope).warnings
+    assert "https://media.example/t.vtt" not in harness.fetched_urls()
+
+
+def test_a_track_on_the_page_host_keeps_its_crawl_delay() -> None:
+    robots = "https://example.org/robots.txt"
+    players = '<video><track src="/t.vtt" srclang="en"></video>'
+    answers: dict[str, Answer] = {
+        robots: fetched(robots, "User-agent: *\nCrawl-delay: 1\n", content_type="text/plain"),
+        PAGE: fetched(PAGE, lesson(players)),
+        "https://example.org/t.vtt": fetched(
+            "https://example.org/t.vtt", track_vtt("Roots take up water."), content_type="text/vtt"
+        ),
+    }
+    harness = Harness(answers, media=probe())
+
+    envelope = harness.run(url=PAGE)
+
+    assert "Roots take up water." in (data_of(envelope).content or "")
+    assert harness.gate.crawl_delays[-1] == ("example.org", 1.0)
+
+
+def test_a_track_that_redirects_to_another_host_is_skipped() -> None:
+    players = '<video><track src="/t.vtt" srclang="en"></video>'
+    elsewhere = "https://other.example/t.vtt"
+    answers: dict[str, Answer] = {
+        PAGE: fetched(PAGE, lesson(players)),
+        "https://example.org/t.vtt": Redirect(elsewhere),
+        elsewhere: fetched(elsewhere, track_vtt("Not ours."), content_type="text/vtt"),
+    }
+    harness = Harness(answers, media=probe())
+
+    envelope = harness.run(url=PAGE)
+
+    data = data_of(envelope)
+    assert "Not ours." not in (data.content or "")
+    assert "tracks_failed" in data.warnings
+
+
+def test_a_track_over_the_subtitle_limit_is_skipped(httpserver: HTTPServer) -> None:
+    serve_compliance_files(httpserver)
+    players = '<video><track src="/big.vtt" srclang="en"></video>'
+    httpserver.expect_request("/lesson").respond_with_data(
+        lesson(players), content_type="text/html"
+    )
+    big = track_vtt("Word " * 400)
+    assert len(big) > 1024
+    httpserver.expect_request("/big.vtt").respond_with_data(big, content_type="text/vtt")
+    settings = make_settings(media_subtitle_max_bytes=1024)
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, policy=loopback_or_public)
+        try:
+            harness = Harness(media=probe(), fetcher=fetcher, media_subtitle_max_bytes=1024)
+            return await harness.arun(url=httpserver.url_for("/lesson"))
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert "## Transcript" not in (data.content or "")
+    assert "tracks_failed" in data.warnings
+
+
+def test_the_api_pods_media_calls_fit_its_pipelines_deadline() -> None:
+    from text_extraction.app import create_public_app
+
+    app = create_public_app(
+        make_settings(extract_timeout_seconds=17), FakeAsyncRedis(), CollectorRegistry()
+    )
+
+    assert app.state.media_fetcher is not None
+    assert app.state.media_fetcher.call_seconds == 17

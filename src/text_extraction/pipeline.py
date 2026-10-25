@@ -2006,8 +2006,9 @@ def _cache_options(
     headers, a screenshot) keep a request out of the cache altogether.
 
     A platform video's result (``media``) is filed under its canonical URL with ``media: true``,
-    apart from a page result of the same URL, and with the requested ``languages``, which choose
-    its subtitle track; both are left out for pages, whose keys stay as they were.
+    apart from a page result of the same URL. The requested ``languages`` choose a video's
+    subtitle track and the tracks of a page's players, so they are part of every key, but only
+    when set: the keys of requests without them stay as they were.
     """
     options: dict[str, Any] = {
         "mode": req.mode,
@@ -2020,8 +2021,8 @@ def _cache_options(
         options["ocr"] = req.ocr
     if media:
         options["media"] = True
-        if req.languages:
-            options["languages"] = list(req.languages)
+    if req.languages:
+        options["languages"] = list(req.languages)
     return options
 
 
@@ -2031,12 +2032,18 @@ def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
     read the same file with different converters (MarkItDown, Docling), so alternating them must
     not report a change; the result cache keeps them apart the same way (``_cache_options``).
     Pages keep the variant of package 4 (the format), so their stored fingerprints stay valid,
-    also with HTML5 tracks; a platform video or a media file has ``<format>|media``."""
+    also with HTML5 tracks; a platform video or a media file has ``<format>|media``. A media
+    result (a page's players included) of a request with ``languages`` adds them: they choose
+    the track, so switching them must not report a change either."""
     if result.document is not None:
         return f"{req.format}|ocr={req.ocr}"
-    if result.media is not None and result.media.platform != "html5":
-        return f"{req.format}|media"
-    return req.format
+    variant: str = req.format
+    if result.media is not None:
+        if result.media.platform != "html5":
+            variant += "|media"
+        if req.languages:
+            variant += f"|languages={','.join(req.languages)}"
+    return variant
 
 
 def _metadata_only(result: ExtractResult) -> bool:
