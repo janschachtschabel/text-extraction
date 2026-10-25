@@ -193,35 +193,33 @@ _METADATA_TYPE = re.compile(rb"/Type\s*/Metadata\b")
 _PACKET_PREAMBLE = re.compile(rb"\s*(?:<\?xpacket[^>]{0,200}\?>\s*)?")
 _OBJECT_DICTIONARY_BYTES = 1 << 16  # looked at after ``N G obj``
 _TYPE_WINDOW_BYTES = 256  # before the ``stream`` keyword of a packet found by search
-# A hostile body is full of look-alikes: every search below looks at a few hits at most.
+# A hostile body is full of look-alikes: the searches below stay bounded or linear.
 _MAX_ROOTS = 3  # ``/Root`` references tried, newest first
-_MAX_HITS = 32  # of one object search
-
-
-_OBJECT_DELIMITERS = (b"\n", b"\r", b" ", b"\t", b">")  # what may stand before ``N G obj``
+# PDF white space and the delimiters that may end the token before ``N G obj``; after ``obj``
+# any white space or delimiter ends the keyword, a regular character would continue it.
+_PDF_WHITESPACE = b"\x00\t\n\x0c\r "
+_BEFORE_OBJECT = frozenset(_PDF_WHITESPACE + b">])")
+_AFTER_OBJECT = frozenset(_PDF_WHITESPACE + b"()<>[]{}/%")
 
 
 def _last_definition(body: bytes, number: bytes, generation: bytes) -> int | None:
     """The offset just after the last ``N G obj`` in the file (the newest definition), found
     by searching backwards for the usual spelling with single spaces.
 
-    The needle is anchored to the delimiter before it, so that ``11 0 obj`` is no hit for
-    ``1 0 obj`` and the cap counts real definitions (an object written twice) only; the
-    look-alikes of a large file cost nothing. None when there is none."""
+    A hit counts only after white space, a delimiter or at the start of the file, and only
+    when white space, a delimiter or the end of the file follows ``obj``: ``11 0 obj`` and
+    ``1 0 objx`` are look-alikes and skipped. Each search goes on from the previous hit, so the
+    searches cover disjoint stretches and the walk reads the body once, however many
+    look-alikes it holds. None when there is none."""
     needle = b"%b %b obj" % (number, generation)
     end = len(body)
-    for _ in range(_MAX_HITS):
-        delimiter = max(body.rfind(before + needle, 0, end) for before in _OBJECT_DELIMITERS)
-        if delimiter >= 0:
-            start = delimiter + 1
-        elif end >= len(needle) and body.startswith(needle):  # the first thing in the file
-            start = 0
-        else:
-            return None
-        after = start + len(needle)
-        if not body[after : after + 1].isalnum():
+    while (found := body.rfind(needle, 0, end)) >= 0:
+        after = found + len(needle)
+        if (found == 0 or body[found - 1] in _BEFORE_OBJECT) and (
+            after == len(body) or body[after] in _AFTER_OBJECT
+        ):
             return after
-        end = after - 1
+        end = found  # the needle cannot overlap itself: it starts with a digit, ends with j
     return None
 
 
@@ -246,14 +244,21 @@ def _root_references(body: bytes) -> Iterator[tuple[bytes, bytes]]:
 def _catalog_packets(body: bytes) -> Iterator[bytes]:
     """The packet in the stream that the catalog's ``/Metadata N G R`` points to. Finds none
     when the catalog sits in an object stream or the file spells ``N G obj`` unusually."""
+    definitions: dict[tuple[bytes, bytes], int | None] = {}  # each object is looked up once
+
+    def definition(number: bytes, generation: bytes) -> int | None:
+        if (number, generation) not in definitions:
+            definitions[number, generation] = _last_definition(body, number, generation)
+        return definitions[number, generation]
+
     for root in _root_references(body):
-        root_start = _last_definition(body, *root)
+        root_start = definition(*root)
         if root_start is None:
             continue
         reference = _METADATA_REFERENCE.search(
             body, root_start, root_start + _OBJECT_DICTIONARY_BYTES
         )
-        start = _last_definition(body, *reference.groups()) if reference else None
+        start = definition(reference[1], reference[2]) if reference else None
         if start is None:
             continue
         window = body[start : start + _MAX_XMP_BYTES + _OBJECT_DICTIONARY_BYTES]

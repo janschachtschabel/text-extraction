@@ -373,6 +373,13 @@ def many_roots_and_definitions() -> bytes:
     return padded(head, b"% filler line of a large file\n")
 
 
+def fragments(filler: bytes) -> bytes:
+    """Three roots, 20 MiB of filler that almost spells ``1 0 obj``, then 40 look-alike
+    definitions at the end: every search for the object walks the whole body."""
+    roots = b"/Root 1 0 R /Metadata 1 0 R\n" * 3
+    return padded(roots, filler) + b"\n1 0 objx" * 40
+
+
 HOSTILE_BODIES: dict[str, Callable[[], bytes]] = {
     "root-references": lambda: padded(b"%PDF-1.7\n", b"/Root 1 0 R "),
     "object-keywords": lambda: padded(b"%PDF-1.7\n", b"1 0 obj "),
@@ -380,6 +387,10 @@ HOSTILE_BODIES: dict[str, Callable[[], bytes]] = {
     "roots-times-definitions": many_roots_and_definitions,
     "packet-starts": lambda: padded(b"%PDF-1.7\n", b"<x:xmpmeta "),
     "plain-padding": lambda: padded(corpus("xmp-cc-by-sa.pdf")[:-6], b" "),
+    "spaced-fragments": lambda: fragments(b" 1 0 ob"),
+    "bare-fragments": lambda: fragments(b"1 0 ob"),
+    "line-fragments": lambda: fragments(b"\n1 0 ob"),
+    "repeated-unusable-definitions": lambda: padded(b"", b"/Root 1 0 R /Metadata 1 0 R\n1 0 objx"),
 }
 
 
@@ -395,7 +406,10 @@ def test_xmp_lookup_in_a_hostile_body_is_quick_and_finds_nothing(name: str) -> N
         assert packets == []
 
 
-@pytest.mark.parametrize("name", ["root-references", "object-keywords", "roots-times-definitions"])
+@pytest.mark.parametrize(
+    "name",
+    ["root-references", "object-keywords", "roots-times-definitions", "spaced-fragments"],
+)
 def test_xmp_lookup_in_a_hostile_body_needs_little_memory(name: str) -> None:
     body = HOSTILE_BODIES[name]()
     tracemalloc.start()
@@ -436,3 +450,27 @@ def test_a_placed_images_metadata_stream_does_not_win_in_a_large_file(count: int
     body = with_many_objects(count) + typed_stream(CAT)
 
     assert_documents_own_xmp(meta(body, "pdf"))
+
+
+@pytest.mark.parametrize(
+    "delimiter", [b"\x00", b"\x0c", b"]", b")"], ids=["nul", "form-feed", "bracket", "paren"]
+)
+def test_a_definition_after_any_pdf_delimiter_is_found_through_the_catalog(
+    delimiter: bytes,
+) -> None:
+    document = corpus("xmp-cc-by-sa.pdf")
+    body = document.replace(b"\n1 0 obj", delimiter + b"1 0 obj").replace(
+        b"\n5 0 obj", delimiter + b"5 0 obj"
+    )
+
+    packets = list(_catalog_packets(body))
+
+    assert len(packets) == 1
+    assert b"Lizenzierte Handreichung" in packets[0]
+
+
+def test_a_definition_followed_by_a_regular_character_is_no_definition() -> None:
+    """``1 0 obj_`` is a look-alike: an underscore is a regular character, so the name goes on."""
+    body = corpus("xmp-cc-by-sa.pdf").replace(b"\n5 0 obj", b"\n5 0 obj_")
+
+    assert list(_catalog_packets(body)) == []
