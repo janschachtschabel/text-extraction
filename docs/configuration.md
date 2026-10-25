@@ -80,7 +80,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `SCREENSHOT_MAX_BYTES` | `10485760` | Largest screenshot file, in bytes (10 MiB). Minimum 1. |
 | `SCREENSHOT_MAX_HEIGHT_PX` | `16384` | Tallest screenshot, in pixels; a longer page is cut. 1080 to 32768. |
 | `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download (`GET /v1/jobs/{id}/artifacts/screenshot.png`), in seconds. The download is a job route: it needs `JOBS_ENABLED=true` (otherwise 503), so a deployment that takes screenshots keeps jobs on. Minimum 60. |
-| `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default, 80 s with browser mode, 110 s with unblock mode) must stay below the API pods' `terminationGracePeriodSeconds` minus a 10 s margin; the Helm chart computes it from both unless you set it (45, 90 or 120 s), see Response times. Minimum 0. |
+| `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default, 55 s with OCR only, 80 s with browser mode, 110 s with unblock mode) must stay below the API pods' `terminationGracePeriodSeconds` minus a 10 s margin; the Helm chart computes it from both unless you set it (45, 65, 90 or 120 s), see Response times. Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
 taken over the normalised URL: lower-case scheme and host, no fragment, no default port (80 for
@@ -187,6 +187,22 @@ shutdown ends. The worker needs the same `API_KEYS` as the API while `AUTH_MODE`
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
 
+The Docling worker (`text-extraction-docling-worker`, image `text-extraction-docling`) serves only
+port 9090 as well. Its `/ready` answers 200 once it has checked the models under
+`DOCLING_MODELS_PATH`, started its conversion children and converted a built-in scan; without the
+models it exits with code 1 (log `docling_models_missing`). On SIGTERM it stops claiming and gives
+the conversions in flight 30 s, then kills its children; their leases expire and the items run
+again. The image runs as uid 10001 with `HOME` under `/tmp` and `TESSDATA_PREFIX=/models/tessdata`,
+and holds no models: they come from a volume (Helm: a PVC filled by an init container; compose:
+the volume `docling-models` filled by the one-shot service `docling-models`). All images start
+`tini` as PID 1, which forwards signals and reaps orphaned child processes.
+
+docker compose starts the Docling worker only with the profile `docling`:
+`docker compose --profile docling up -d --wait` with `DOCLING_ENABLED=true` in `.env` (compose
+passes `DOCLING_ENABLED` from `.env` or the shell to every service, default false). The service
+`docling-models` runs `--download-models` into the volume first (it needs the internet once), then
+`docling-worker` mounts it read-only; its stop grace period is 45 s.
+
 ## Response times
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
@@ -208,15 +224,18 @@ While `BROWSER_ENABLED`, the graceful phase is at least
 `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds (75 s by
 default, 105 s with unblock mode; the render deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock
 mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`), because a sync request may wait for
-a browser worker and its render after the fast phase.
+a browser worker and its render after the fast phase. While `DOCLING_ENABLED`, it is also at least
+`EXTRACT_TIMEOUT_SECONDS + DOCLING_SYNC_WAIT_SECONDS + 5` seconds (50 s by default), because a
+sync request with a document that needs OCR waits for the Docling worker after its fast phase.
 
 The grace periods in the Helm chart, each with a 10 s margin:
 
 | Pods | Value | Default | Must cover |
 | --- | --- | --- | --- |
-| API | `terminationGracePeriodSeconds` | unset: computed, 45 s without browser workers, 90 s with them, 120 s with unblock mode | `SHUTDOWN_DRAIN_SECONDS` + the graceful phase above |
+| API | `terminationGracePeriodSeconds` | unset: computed, 45 s without browser or Docling workers, 65 s with Docling workers only, 90 s with browser workers, 120 s with unblock mode | `SHUTDOWN_DRAIN_SECONDS` + the graceful phase above |
 | Extract workers | `workers.extract.terminationGracePeriodSeconds` | 45 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (30 s) |
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
+| Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -291,6 +310,25 @@ worker. Docling is off by default: without it a scan keeps its text layer and an
 The request field `ocr` (`auto`, `never` or `always`; default `auto`) is part of
 `POST /v1/extract` and `POST /v1/batch`. `auto` reads scans, broken text layers and images with
 OCR where it is enabled, `never` uses the text layer only, `always` also reads every PDF with OCR.
+
+`FETCH_MAX_BYTES` and `DOCUMENT_MAX_BYTES` are both 20000000 by default: lower them together.
+
+OCR needs `DOCLING_ENABLED=true` on every pod, `JOBS_ENABLED=true` on the API pods, at least one
+Docling worker and its models volume. The Helm keys (the full table is in the
+[chart README](../deploy/helm/text-extraction/README.md#docling-workers-and-the-models-volume)):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.docling.enabled` | `false` | Deploys the Docling workers and the models PVC; renders `DOCLING_ENABLED` into every pod. Needs jobs on the API pods. |
+| `workers.docling.concurrency` | `1` | `DOCLING_CONCURRENCY` on the Docling workers. |
+| `workers.docling.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. |
+| `workers.docling.terminationGracePeriodSeconds` | `60` | See Response times. |
+| `workers.docling.resources` | 1 / 3Gi to 4 / 8Gi | Sized for one conversion. |
+| `workers.docling.nodeSelector` | `kubernetes.io/arch: amd64` | The image is built for linux/amd64 only. |
+| `workers.docling.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `docling` queue or on CPU. |
+| `workers.docling.models.download` | `true` | An init container fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.docling.models.persistence.*` | `5Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`DOCLING_MODELS_PATH`), read-only in the worker. |
+| `workers.docling.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-docling`, chart version | The Docling image. |
 
 ## Headers
 

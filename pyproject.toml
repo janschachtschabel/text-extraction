@@ -51,6 +51,12 @@ browser = [
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
 
+[tool.uv]
+# The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
+# `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
+# does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
+exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days" }
+
 [tool.uv.build-backend]
 module-root = "src"
 
@@ -88,7 +94,7 @@ select = ["E", "W", "F", "I", "B", "UP", "S", "SIM", "RUF", "N", "ASYNC", "PT"]
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src", "tests"]
+files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
 module = ["defusedxml.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*"]

@@ -36,6 +36,11 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 The internal port 9090 (`/health`, `/ready`, `/metrics`) is not published. For Kubernetes use the
 [Helm chart](deploy/helm/text-extraction/README.md).
 
+OCR for scans and images runs in the Docling worker, which is off by default (an image of about
+2 GB and about 2 GiB of models). Set `DOCLING_ENABLED=true` in `.env` and start the profile
+`docling`: `docker compose --profile docling up --build`. The first start downloads the models
+into a volume.
+
 ### Batch
 
 `POST /v1/batch` queues many URLs as one job (at most `BATCH_MAX_URLS`, 1,000 by default) and

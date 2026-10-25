@@ -31,6 +31,10 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run mypy
       - run: uv run pytest -q
+      # No GPL or AGPL distribution in the default environment (CLAUDE.md rule 7); every package
+      # of uv.lock this environment reaches is installed here or reviewed in the allowlist.
+      - name: licence gate
+        run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser
 
   # Real Chromium against a local test site (tests/browser, marker `browser`).
   browser:
@@ -51,6 +55,39 @@ jobs:
       - run: uv run patchright install --with-deps chromium
       - run: uv run pytest -m browser -q
 
+  # Docling, CPU torch and Tesseract with the real models (tests/docling, marker `docling`). The
+  # models are cached by the manifest's hash, so they are downloaded once per manifest.
+  documents:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AUTH_MODE: none
+      DOCLING_MODELS_PATH: ${{ github.workspace }}/.docling-models
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr
+      - run: uv sync --locked --extra docling
+
+      # The gate on the environment with the extra `docling` (torch and the Docling packages).
+      - name: licence gate (docling)
+        run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser --extra docling
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ env.DOCLING_MODELS_PATH }}
+          key: docling-models-${{ hashFiles('src/text_extraction/documents/models.toml') }}
+      # Does nothing when the cache restored this manifest's files (its marker is there).
+      - run: uv run text-extraction-docling-worker --download-models
+      - run: uv run text-extraction-docling-worker --check
+      - run: uv run pytest -m docling -q
+
   helm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -69,6 +106,14 @@ jobs:
         run: helm lint --strict deploy/helm/text-extraction --set workers.browser.unblock=true
       - name: helm lint (browser workers off)
         run: helm lint --strict deploy/helm/text-extraction --set workers.browser.enabled=false
+      - name: helm lint (Docling workers on)
+        run: helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
+      - name: helm lint (Docling workers on a pre-filled volume, KEDA)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
+          --set workers.docling.models.download=false
+          --set workers.docling.models.persistence.existingClaim=models
+          --set workers.docling.autoscaling.keda.enabled=true
       # Render checks: toggles, env, grace periods, KEDA queries, network policies, alerts.
       - run: deploy/helm/test.sh
 
@@ -103,6 +148,30 @@ jobs:
           jq -e '.services.api.build.target == null' compose.json
           BROWSER_UNBLOCK_ENABLED=true docker compose config --format json \
             | jq -e '[.services.api, .services.worker, .services["browser-worker"]] | all(.environment.BROWSER_UNBLOCK_ENABLED == "true")'
+          rm compose.json
+
+      # The profile `docling`: the one-shot models service writes the volume, the worker reads it
+      # read-only after it; OCR is off unless the environment switches it on, then on everywhere.
+      - name: docker compose config (profile docling)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose --profile docling config --format json > compose.json
+          jq -e '.services["docling-models"]
+            | .build.target == "docling" and .command == ["text-extraction-docling-worker", "--download-models"]
+              and .volumes == [{"type": "volume", "source": "docling-models", "target": "/models", "volume": {}}]' compose.json
+          jq -e '.services["docling-worker"]
+            | .build.target == "docling" and .read_only == true and .tmpfs == ["/tmp"]
+              and (.volumes | length == 1 and .[0].source == "docling-models" and .[0].read_only == true)
+              and .depends_on["docling-models"].condition == "service_completed_successfully"
+              and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "false")' compose.json
+          DOCLING_ENABLED=true docker compose --profile docling config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.DOCLING_ENABLED == "true")'
+          # Without the profile there is no Docling service.
+          if docker compose config --services | grep -q docling; then
+            echo "a Docling service runs without the profile" >&2; exit 1
+          fi
           rm compose.json
 
       # VALKEY_PASSWORD has no default: without it the file must be rejected.

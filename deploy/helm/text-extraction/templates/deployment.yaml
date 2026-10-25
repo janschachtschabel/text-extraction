@@ -64,7 +64,7 @@ spec:
               value: "9090"
             - name: JOBS_ENABLED
               value: {{ include "text-extraction.jobsEnabled" . | quote }}
-            {{- include "text-extraction.browserEnv" . | nindent 12 }}
+            {{- include "text-extraction.switchEnv" . | nindent 12 }}
             {{- include "text-extraction.valkeyEnv" . | trim | nindent 12 }}
             {{- with include "text-extraction.apiKeysEnv" . | trim }}
             {{- . | nindent 12 }}

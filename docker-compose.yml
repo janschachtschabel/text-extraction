@@ -2,6 +2,10 @@
 # Start: cp .env.example .env, set API_KEYS and VALKEY_PASSWORD, then `docker compose up -d --wait`.
 # VALKEY_PASSWORD has no default: compose stops with an error while it is empty or missing.
 # The browser worker image (target `browser`) holds Chromium and Google Chrome (linux/amd64 only).
+# OCR (the Docling worker, image target `docling`, about 2 GB) is off by default: set
+# DOCLING_ENABLED=true in .env and start with `docker compose --profile docling up -d --wait`.
+# The one-shot service `docling-models` first downloads the models into the volume `docling-models`
+# (about 2 GiB, once), then `docling-worker` reads them read-only.
 
 # Shared by the API and the workers: same settings, same hardening. The API and the extract worker
 # use the default image (no browser); the browser worker builds the target `browser`.
@@ -19,6 +23,9 @@ x-app: &app
     # in .env does not change it). Unblock mode is read from .env or the shell, default off.
     BROWSER_ENABLED: "true"
     BROWSER_UNBLOCK_ENABLED: ${BROWSER_UNBLOCK_ENABLED:-false}
+    # OCR: on for every service only with DOCLING_ENABLED=true in .env or the shell, together with
+    # the profile `docling` (which starts the Docling worker). Default off.
+    DOCLING_ENABLED: ${DOCLING_ENABLED:-false}
   read_only: true
   tmpfs:
     - /tmp
@@ -96,6 +103,53 @@ services:
     # the default timeouts. Raise this with the browser timeouts (docs/configuration.md).
     stop_grace_period: 90s
 
+  # Downloads the Docling and Tesseract models of the manifest into the volume, checks their
+  # SHA-256, then exits; with the files in place it does nothing. Needs the internet on its first
+  # run (raw.githubusercontent.com, huggingface.co).
+  docling-models:
+    <<: *app
+    profiles: ["docling"]
+    build:
+      context: .
+      target: docling
+    image: text-extraction-docling:dev
+    command: ["text-extraction-docling-worker", "--download-models"]
+    restart: "no"
+    volumes:
+      - docling-models:/models
+
+  # Docling worker: converts the items of the pool `docling` (scans, broken text layers, images,
+  # OpenDocument files) with Docling and Tesseract. Only the internal port 9090, not published.
+  # The models volume is read-only here.
+  docling-worker:
+    <<: *app
+    profiles: ["docling"]
+    build:
+      context: .
+      target: docling
+    image: text-extraction-docling:dev
+    command: ["text-extraction-docling-worker"]
+    volumes:
+      - docling-models:/models:ro
+    depends_on:
+      valkey:
+        condition: service_healthy
+      docling-models:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/ready', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      # The children import Docling and torch and convert a built-in scan before /ready.
+      start_period: 180s
+    # SIGTERM stops claiming and gives conversions in flight 30 s, then kills the children.
+    stop_grace_period: 45s
+
   valkey:
     image: valkey/valkey:8.1-alpine
     # Jobs, the queue and counters are state: refuse writes when full, never evict.
@@ -120,3 +174,4 @@ services:
 
 volumes:
   valkey-data:
+  docling-models:

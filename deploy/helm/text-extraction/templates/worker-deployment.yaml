@@ -1,8 +1,13 @@
-{{- /* One Deployment per enabled worker pool (workers.extract, workers.browser). */ -}}
+{{- /* One Deployment per enabled worker pool (workers.extract, workers.browser, workers.docling).
+The Docling workers also mount the models volume: read-only, after an init container that
+downloads the models into it (writable) unless workers.docling.models.download is false. */ -}}
 {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
 {{- $worker := index $.Values.workers $pool }}
 {{- if $worker.enabled }}
 {{- $args := list $ $pool }}
+{{- $docling := eq $pool "docling" }}
+{{- /* The env of the worker (and of the Docling init container). */}}
+{{- $env := include "text-extraction.workerEnv" $args }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -44,11 +49,40 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      {{- if and $docling $worker.models.download }}
+      initContainers:
+        # Fills the models volume from the manifest (SHA-256 checked); does nothing when the
+        # volume already holds this manifest's files.
+        - name: models
+          image: {{ include "text-extraction.workerImage" $args | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args:
+            - {{ include "text-extraction.workerCommand" $pool }}
+            - --download-models
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: {{ include "text-extraction.fullname" $ }}
+          env:
+            {{- $env | nindent 12 }}
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: models
+              mountPath: /models
+      {{- end }}
       containers:
         - name: worker
           image: {{ include "text-extraction.workerImage" $args | quote }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
-          command:
+          args:
             - {{ include "text-extraction.workerCommand" $pool }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -64,20 +98,7 @@ spec:
             - configMapRef:
                 name: {{ include "text-extraction.fullname" $ }}
           env:
-            - name: INTERNAL_PORT
-              value: "9090"
-            {{- if eq $pool "browser" }}
-            - name: BROWSER_CONCURRENCY
-              value: {{ $worker.concurrency | toString | quote }}
-            {{- else }}
-            - name: WORKER_CONCURRENCY
-              value: {{ $worker.concurrency | toString | quote }}
-            {{- end }}
-            {{- include "text-extraction.browserEnv" $ | nindent 12 }}
-            {{- include "text-extraction.valkeyEnv" $ | trim | nindent 12 }}
-            {{- with include "text-extraction.apiKeysEnv" $ | trim }}
-            {{- . | nindent 12 }}
-            {{- end }}
+            {{- $env | nindent 12 }}
           livenessProbe:
             httpGet:
               path: /health
@@ -99,6 +120,11 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if $docling }}
+            - name: models
+              mountPath: /models
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           {{- if $worker.tmpSizeLimit }}
@@ -107,6 +133,11 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
+        {{- if $docling }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ include "text-extraction.doclingModelsClaim" $ }}
+        {{- end }}
       {{- /* The pool's nodeSelector wins over the global one, key by key. */}}
       {{- with merge (deepCopy ($worker.nodeSelector | default dict)) (deepCopy ($.Values.nodeSelector | default dict)) }}
       nodeSelector:

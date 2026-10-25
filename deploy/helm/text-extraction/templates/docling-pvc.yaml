@@ -1,0 +1,21 @@
+{{- $docling := .Values.workers.docling }}
+{{- if and $docling.enabled (not $docling.models.persistence.existingClaim) }}
+# The models of the Docling workers (DOCLING_MODELS_PATH=/models): filled by their init container,
+# read-only in the workers. ReadWriteMany by default, so replicas on any node share it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "text-extraction.doclingModelsClaim" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: docling-models
+spec:
+  accessModes:
+    {{- toYaml $docling.models.persistence.accessModes | nindent 4 }}
+  {{- with $docling.models.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $docling.models.persistence.size }}
+{{- end }}

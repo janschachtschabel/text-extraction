@@ -3,6 +3,8 @@
 {{- $internal := include "text-extraction.internalServiceName" . }}
 {{- $workerInternal := include "text-extraction.workerInternalServiceName" (list . "extract") }}
 {{- $browserInternal := include "text-extraction.workerInternalServiceName" (list . "browser") }}
+{{- $doclingInternal := include "text-extraction.workerInternalServiceName" (list . "docling") }}
+{{- $podServices := printf "%s|%s|%s|%s" $internal $workerInternal $browserInternal $doclingInternal }}
 {{- $ns := .Release.Namespace }}
 {{- $jobs := eq (include "text-extraction.jobsEnabled" .) "true" }}
 apiVersion: monitoring.coreos.com/v1
@@ -45,9 +47,9 @@ spec:
         # hence max(). `> 0` drops a Valkey without maxmemory, which has no limit to alert on.
         - alert: TextExtractionValkeyMemoryHigh
           expr: |
-            max(text_extraction_valkey_used_memory_bytes{namespace="{{ $ns }}", service=~"{{ $internal }}|{{ $workerInternal }}|{{ $browserInternal }}"})
+            max(text_extraction_valkey_used_memory_bytes{namespace="{{ $ns }}", service=~"{{ $podServices }}"})
               /
-            max(text_extraction_valkey_max_memory_bytes{namespace="{{ $ns }}", service=~"{{ $internal }}|{{ $workerInternal }}|{{ $browserInternal }}"} > 0)
+            max(text_extraction_valkey_max_memory_bytes{namespace="{{ $ns }}", service=~"{{ $podServices }}"} > 0)
               > {{ .Values.alerts.valkeyMemoryRatio }}
           for: 10m
           labels:
@@ -57,18 +59,23 @@ spec:
             description: Valkey of {{ $fullName }} in namespace {{ $ns }} has used more than {{ mulf .Values.alerts.valkeyMemoryRatio 100 }} % of its maxmemory for 10 minutes. New batches are refused (503) and result-cache writes are skipped until it drops; a full Valkey refuses every write.
         {{- if $jobs }}
         {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
-        {{- /* The pool browser has a queue only while BROWSER_ENABLED, that is with browser workers. */}}
+        {{- /* The pools browser and docling have a queue only while BROWSER_ENABLED or DOCLING_ENABLED,
+        that is with their workers. */}}
         {{- if or (eq $pool "extract") (index $.Values.workers $pool).enabled }}
         {{- $worker := include "text-extraction.workerName" (list $ $pool) }}
-        {{- /* The item counter has no pool label: the browser workers' Service tells the pools apart. */}}
-        {{- $items := ternary (printf `service="%s"` $browserInternal) (printf `service!="%s"` $browserInternal) (eq $pool "browser") }}
+        {{- /* The item counter has no pool label: the workers' Services tell the pools apart. */}}
+        {{- $items := printf `service!~"%s|%s"` $browserInternal $doclingInternal }}
+        {{- if ne $pool "extract" }}
+        {{- $items = printf `service="%s"` (include "text-extraction.workerInternalServiceName" (list $ $pool)) }}
+        {{- end }}
+        {{- $backlog := ternary $.Values.alerts.doclingQueueBacklogItems $.Values.alerts.queueBacklogItems (eq $pool "docling") }}
         # The queue gauges come from the API pods (every pod reports the same queue), hence max().
         # Counters appear with the first item a worker handles. `or vector(0)` makes "no completion
         # yet" count as 0 on a fresh cluster instead of hiding the alert. Escalated items (moved from
-        # the extract to the browser pool) are not completions.
+        # the extract pool to the browser or the docling pool) are not completions.
         - alert: TextExtractionQueueBacklog
           expr: |
-            max(text_extraction_queue_pending_items{namespace="{{ $ns }}", pool="{{ $pool }}"}) > {{ $.Values.alerts.queueBacklogItems }}
+            max(text_extraction_queue_pending_items{namespace="{{ $ns }}", pool="{{ $pool }}"}) > {{ $backlog }}
               and
             (sum(increase(text_extraction_job_items_total{namespace="{{ $ns }}", {{ $items }}, outcome!~"deferred|lost|escalated"}[15m])) or vector(0)) == 0
           for: 15m
@@ -77,7 +84,7 @@ spec:
             pool: {{ $pool }}
           annotations:
             summary: The {{ $pool }} job queue has a backlog and no item completes
-            description: More than {{ $.Values.alerts.queueBacklogItems }} items have waited in the {{ $pool }} queue of {{ $fullName }} in namespace {{ $ns }} for 15 minutes while no {{ $pool }} worker completed an item.
+            description: More than {{ $backlog }} items have waited in the {{ $pool }} queue of {{ $fullName }} in namespace {{ $ns }} for 15 minutes while no {{ $pool }} worker completed an item.
         {{- if (index $.Values.workers $pool).enabled }}
         # Needs kube-state-metrics. The `or vector(0)` also fires when the Deployment series is missing.
         - alert: TextExtractionWorkersDown

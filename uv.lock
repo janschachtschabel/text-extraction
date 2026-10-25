@@ -6,6 +6,13 @@ resolution-markers = [
     "sys_platform != 'win32'",
 ]
 
+[options]
+
+[options.exclude-newer-package]
+xlsxwriter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+pycparser = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+pandas = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+
 [[package]]
 name = "annotated-doc"
 version = "0.0.5"

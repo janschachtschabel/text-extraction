@@ -8,7 +8,7 @@ metadata:
     {{- with .Values.metrics.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-# Selects the internal Services of the API pods and of the extract and browser workers.
+# Selects the internal Services of the API pods and of the workers (extract, browser, docling).
 spec:
   selector:
     matchLabels:

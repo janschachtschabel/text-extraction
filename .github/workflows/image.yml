@@ -1,8 +1,9 @@
 name: image
 
-# Two images from one Dockerfile, with the same tags:
-#   api      ghcr.io/<repo>          default target: API and extract worker, no browser;
-#   browser  ghcr.io/<repo>-browser  target `browser`: the browser worker.
+# Three images from one Dockerfile, with the same tags:
+#   api      ghcr.io/<repo>          default target: API and extract worker, no browser, no Docling;
+#   browser  ghcr.io/<repo>-browser  target `browser`: the browser worker;
+#   docling  ghcr.io/<repo>-docling  target `docling`: the Docling worker (no models inside).
 # Each image is built and checked first; pull requests stop there and push nothing.
 # Pushes to main publish `latest` (staging) and `sha-<short>`.
 # Tags vX.Y.Z publish `X.Y.Z` and `X.Y` (production uses SemVer tags only).
@@ -23,7 +24,8 @@ jobs:
   image:
     name: image (${{ matrix.variant }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The Docling image (torch) takes longest.
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -37,6 +39,9 @@ jobs:
           - variant: browser
             target: browser
             suffix: "-browser"
+          - variant: docling
+            target: docling
+            suffix: "-docling"
     env:
       IMAGE: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
       CHECK_TAG: text-extraction-${{ matrix.variant }}:check
@@ -87,6 +92,27 @@ jobs:
           done
           '
 
+      # The API image must not hold Docling, torch or Tesseract (they belong to the Docling image).
+      - name: API image has no docling or torch
+        if: matrix.variant == 'api'
+        run: |
+          docker run --rm "$CHECK_TAG" python -c '
+          import importlib.util, sys
+          names = ("docling", "docling_core", "docling_ibm_models", "torch", "torchvision")
+          found = [name for name in names if importlib.util.find_spec(name)]
+          sys.exit(f"Docling packages in the API image: {found}" if found else 0)
+          '
+          docker run --rm "$CHECK_TAG" sh -c '
+          if command -v tesseract; then echo "tesseract in the API image" >&2; exit 1; fi
+          '
+
+      # Every image runs tini as PID 1 and as the non-root user 10001.
+      - name: Image runs tini as a non-root user
+        run: |
+          test "$(docker image inspect -f '{{json .Config.Entrypoint}}' "$CHECK_TAG")" = '["/usr/bin/tini","--"]'
+          test "$(docker image inspect -f '{{.Config.User}}' "$CHECK_TAG")" = 10001
+          docker run --rm "$CHECK_TAG" sh -c 'test "$(id -u)" = 10001 && /usr/bin/tini --version'
+
       # Both drivers start in the image, as the pods run it: non-root, read-only root filesystem,
       # /tmp as the only writable place, Xvfb for headful Chrome. --check needs no Valkey.
       - name: Browser image starts its browsers
@@ -108,6 +134,48 @@ jobs:
           if command -v curl; then echo "curl in the browser image" >&2; exit 1; fi
           test -x /opt/google/chrome/chrome
           '
+
+      # No models in the image: /models is an empty mount point.
+      - name: Docling image holds no models
+        if: matrix.variant == 'docling'
+        run: |
+          docker run --rm "$CHECK_TAG" sh -c '
+          test -d /models && test -z "$(ls -A /models)" && command -v tesseract
+          '
+
+      # The models of the manifest, cached by its hash (as in the CI job `documents`). On a miss
+      # the image itself downloads them, as the Helm init container does (writable mount).
+      - name: Docling models cache
+        if: matrix.variant == 'docling'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/docling-models
+          key: docling-models-${{ hashFiles('src/text_extraction/documents/models.toml') }}
+      - name: Docling image downloads the models
+        if: matrix.variant == 'docling'
+        run: |
+          mkdir -p "$RUNNER_TEMP/docling-models"
+          sudo chown -R 10001:10001 "$RUNNER_TEMP/docling-models"
+          docker run --rm --read-only --tmpfs /tmp --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/docling-models:/models" -e AUTH_MODE=none \
+            "$CHECK_TAG" text-extraction-docling-worker --download-models
+          # The cache step saves the directory after the job as the runner user.
+          sudo chmod -R a+rX "$RUNNER_TEMP/docling-models"
+
+      # The worker converts its built-in scan with the models mounted read-only, as the pods run
+      # it: non-root, read-only root filesystem, /tmp as the only writable place. No Valkey needed.
+      - name: Docling image reads its built-in scan
+        if: matrix.variant == 'docling'
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:size=1g --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/docling-models:/models:ro" -e AUTH_MODE=none -e DOCLING_ENABLED=true \
+            "$CHECK_TAG" text-extraction-docling-worker --check
+
+      - name: Image size
+        run: |
+          size="$(docker image inspect -f '{{.Size}}' "$CHECK_TAG")"
+          echo "${{ matrix.variant }} image: $((size / 1000000)) MB"
+          echo "${{ matrix.variant }} image: $((size / 1000000)) MB" >> "$GITHUB_STEP_SUMMARY"
 
       - if: github.event_name != 'pull_request'
         uses: docker/login-action@v4

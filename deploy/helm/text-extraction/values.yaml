@@ -19,10 +19,12 @@ replicaCount: 2
 # max(30, EXTRACT_TIMEOUT_SECONDS + 5) (30 s), and with browser workers (BROWSER_ENABLED) at least
 # EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + the render deadline + 10, where the render
 # deadline is BROWSER_TIMEOUT_SECONDS, with unblock mode the larger of it and
-# BROWSER_UNBLOCK_TIMEOUT_SECONDS: 25 + 10 + 30 + 10 = 75 s, with unblock 105 s.
+# BROWSER_UNBLOCK_TIMEOUT_SECONDS: 25 + 10 + 30 + 10 = 75 s, with unblock 105 s. With Docling
+# workers (DOCLING_ENABLED) it is also at least EXTRACT_TIMEOUT_SECONDS +
+# DOCLING_SYNC_WAIT_SECONDS + 5: 25 + 20 + 5 = 50 s.
 # Unset (the default), the chart sets drain + graceful + a 10 s margin from config.* or the
-# defaults: 45 without browser workers, 90 with them, 120 with unblock mode. A value set here
-# must be at least that, or the render fails.
+# defaults: 45 without browser or Docling workers, 65 with Docling workers only, 90 with browser
+# workers, 120 with unblock mode. A value set here must be at least that, or the render fails.
 terminationGracePeriodSeconds: null
 
 # Non-secret settings. Each key becomes an environment variable of the same name
@@ -38,6 +40,9 @@ config:
   CONVERT_CONCURRENCY: "2"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
+  # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both
+  # 20000000 by default. Lower them together: DOCUMENT_MAX_BYTES must not exceed FETCH_MAX_BYTES,
+  # or every pod exits with code 2 at start-up.
 
 # Secrets. API_KEYS is a JSON list of {"name", "role", "sha256", "rate_limit_per_minute"} objects.
 # Set `apiKeys` for a chart-managed Secret, or point `existingSecret` at your own Secret.
@@ -181,6 +186,77 @@ workers:
         maxReplicas: 10
         targetCPUUtilizationPercentage: 70
 
+  # Docling workers (OCR, D3: off by default): they claim the items of the pool `docling` (scans,
+  # broken text layers, images, OpenDocument files) and convert them with Docling and Tesseract.
+  # Image `workers.docling.image` (about 2 GB), internal port 9090 only, no ingress, same ConfigMap
+  # and Secrets as the API pods. The chart renders DOCLING_ENABLED from `enabled` into the API,
+  # extract worker, browser worker and Docling worker pods: a config.DOCLING_ENABLED entry is
+  # ignored. Needs JOBS_ENABLED=true on the API pods (see `jobs.enabled`).
+  docling:
+    enabled: false
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-docling
+      # Defaults to image.tag, then the chart appVersion. The pull policy is image.pullPolicy.
+      tag: ""
+    replicaCount: 1
+    # Documents one pod converts at once, each in a child process of its own
+    # (DOCLING_CONCURRENCY). Rendered into the pod env: a config.DOCLING_CONCURRENCY entry is
+    # ignored. The resources below are sized for one.
+    concurrency: 1
+    # No drain wait. On SIGTERM the worker stops claiming and gives conversions in flight 30 s,
+    # then kills its children; their items run again elsewhere once their lease expires. The render
+    # fails below 30 + a 10 s margin.
+    terminationGracePeriodSeconds: 60
+    # Placeholder values until package 11 measures real consumption: one conversion child with the
+    # layout and table models (DOCLING_MEMORY_LIMIT_MB 6144 of address space) and DOCLING_THREADS
+    # (4) threads.
+    resources:
+      requests:
+        cpu: "1"
+        memory: 3Gi
+      limits:
+        cpu: "4"
+        memory: 8Gi
+    # Merged over the global `nodeSelector` for these pods; a key set here wins. The Docling image
+    # is built for linux/amd64 only.
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    # As for the extract workers. KEDA reads the pool `docling` gauges that API pods export with
+    # JOBS_ENABLED=true and DOCLING_ENABLED=true. With no replica, sync requests answer without OCR
+    # (`ocr_unavailable`) after DOCLING_SYNC_WAIT_SECONDS and batch items wait in the queue.
+    autoscaling:
+      keda:
+        enabled: false
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        # Pending queue items per worker replica (a conversion takes up to minutes).
+        threshold: 4
+        minReplicaCount: 1
+        maxReplicaCount: 4
+      hpa:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 4
+        targetCPUUtilizationPercentage: 70
+    # The models (Docling's layout and table models, Tesseract's data; about 2 GiB) live on a
+    # volume mounted at /models (DOCLING_MODELS_PATH, set by the chart). The image holds none.
+    models:
+      # An init container runs `text-extraction-docling-worker --download-models` with the
+      # volume mounted writable: it downloads the files of the manifest, checks their SHA-256 and
+      # does nothing when they are in place. Needs egress to raw.githubusercontent.com and
+      # huggingface.co. false: for an air-gapped, pre-filled volume (`persistence.existingClaim`,
+      # required then). The worker mounts the volume read-only either way.
+      download: true
+      persistence:
+        size: 5Gi
+        # ReadWriteMany lets replicas on any node share one volume. With ReadWriteOnce keep the
+        # replicas on one node (or at 1). The volume must be writable by uid/gid 10001 (fsGroup).
+        accessModes:
+          - ReadWriteMany
+        # The cluster default when empty.
+        storageClass: ""
+        # Use this PVC instead of creating one.
+        existingClaim: ""
+
 service:
   type: ClusterIP
   # Public API port. The ingress targets this port only.
@@ -263,7 +339,7 @@ externalValkey:
 
 metrics:
   # Needs the Prometheus Operator CRDs. Scrapes the internal Services of the API pods and of the
-  # extract and browser workers, port `internal`, path /metrics.
+  # workers (extract, browser, docling), port `internal`, path /metrics.
   serviceMonitor:
     enabled: false
     interval: 30s
@@ -281,6 +357,8 @@ alerts:
   # TextExtractionQueueBacklog fires above this many pending items of a pool (extract, browser)
   # while no item of that pool completes.
   queueBacklogItems: 1000
+  # The same for the pool docling, whose items take minutes each.
+  doclingQueueBacklogItems: 100
   # TextExtractionValkeyMemoryHigh fires while Valkey's used memory stays above this share of
   # its maxmemory for 10 minutes. Keep it at or below config.VALKEY_MEMORY_GUARD_RATIO (0.8),
   # from which the API refuses new batches.
@@ -288,9 +366,10 @@ alerts:
 
 # Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
 # limited: the API must reach arbitrary sites, so egress stays open.
-#   Valkey   accepts 6379 from the API and worker pods (extract and browser) of this release only.
+#   Valkey   accepts 6379 from the API and worker pods (extract, browser, docling) of this release
+#            only.
 #   API      accepts 8080 from anywhere and 9090 from `metricsFrom`.
-#   Workers  (extract and browser) accept 9090 from `metricsFrom` only.
+#   Workers  (extract, browser, docling) accept 9090 from `metricsFrom` only.
 # Probes of the kubelet run from the node and are normally allowed by the CNI.
 networkPolicy:
   enabled: false
