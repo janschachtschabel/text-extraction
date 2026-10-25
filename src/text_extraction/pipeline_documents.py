@@ -31,11 +31,13 @@ document.
 
 Metrics (F19), per registry like the pipeline's: ``text_extraction_document_conversions_total``
 by converter, kind and outcome (``success`` or the error code), the conversion's seconds and the
-pages converted, by converter. ``document_metrics_for`` hands them to other converters.
+pages converted, by converter. ``document_metrics_for`` hands them to other converters; so do
+``failed_conversion`` (the failure mapping) and ``DocumentSteps.envelope`` (step 8), which the
+Docling worker uses for its conversions.
 """
 
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
 from weakref import WeakKeyDictionary
@@ -95,6 +97,7 @@ _POOL_MARGIN_SECONDS: Final = 0.25
 
 _FAILED_MESSAGE: Final = "The document could not be converted."
 _UNAVAILABLE_MESSAGE: Final = "The document converter is not available. Try again later."
+_TIMEOUT_MESSAGE: Final = "The document did not convert in time."
 # Seconds of one conversion: MarkItDown takes up to the extraction's deadline, Docling (OCR) up
 # to DOCLING_TIMEOUT_SECONDS.
 _SECONDS_BUCKETS: Final = (0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600)
@@ -191,6 +194,12 @@ class _Judged:
 
 Converter = Literal["markitdown", "docling"]
 
+# Converts a document another way than the pipeline's MarkItDown children (the Docling worker's
+# conversion): its reply, or the failed envelope of the run.
+type DocumentConvert = Callable[
+    [DocumentRun, DocumentInput], Awaitable[DocumentConversion | Envelope[ExtractResult]]
+]
+
 
 @dataclass(frozen=True)
 class DocumentMetrics:
@@ -211,6 +220,21 @@ class DocumentMetrics:
         self.seconds.labels(converter=converter).observe(seconds)
         if pages:
             self.pages.labels(converter=converter).inc(pages)
+
+    def observe_outcome(
+        self,
+        converter: Converter,
+        kind: DocumentKind,
+        outcome: DocumentConversion | Envelope[ExtractResult],
+        seconds: float,
+    ) -> None:
+        """One conversion by what it ended in: its reply (``success``, with its pages) or its
+        failed envelope (the error code)."""
+        if isinstance(outcome, DocumentConversion):
+            self.observe(converter, kind, "success", seconds, outcome.pages_converted)
+            return
+        code = outcome.error.code.value if outcome.error is not None else "unknown"
+        self.observe(converter, kind, code, seconds)
 
 
 # One set of metrics per registry, so several pipelines (tests, app factories) can share one.
@@ -335,20 +359,70 @@ class DocumentSteps:
         conversion = await self._convert(run, document, deadline)
         if isinstance(conversion, Envelope):
             return conversion
-        started = time.perf_counter()
-        try:
-            judged = await self._threads.run(self._judged, document, conversion)
-        except RuntimeError as error:  # the conversion pool is shut down
-            return self._unavailable(run, error)
-        except Exception as error:  # e.g. metadata that is no PageMetadata
-            return self._our_fault(run, kind, type(error).__name__)
-        finally:
-            run.convert_ms += _ms(started)
+        judged = await self._judged_in_pool(run, document, conversion)
+        if isinstance(judged, Envelope):
+            return judged
         handing_on = needs_ocr(kind, conversion, req.ocr, self._settings)
-        warnings = [*run.warnings, *conversion.warnings]
+        warnings = list(conversion.warnings)
         if not handing_on and wants_ocr(kind, conversion, req.ocr):
             warnings.append(OCR_UNAVAILABLE_WARNING)
-        envelope = self._judge(
+        envelope = self._enveloped(
+            run, document, conversion, judged, converter="markitdown", ocr=False, warnings=warnings
+        )
+        if not handing_on:
+            return envelope
+        meta = document.meta.model_copy(update={"needs_ocr": conversion.needs_ocr})
+        return OcrNeeded(draft=envelope, input=DocumentInput(document.body, meta))
+
+    async def envelope(
+        self,
+        run: DocumentRun,
+        document: DocumentInput,
+        conversion: DocumentConversion,
+        *,
+        converter: Converter,
+        ocr: bool,
+        warnings: list[str],
+    ) -> Envelope[ExtractResult]:
+        """The envelope of a document another converter converted (step 8, as for MarkItDown's
+        results): ``warnings`` follow the run's own; ``ocr`` says whether the text comes from
+        OCR."""
+        judged = await self._judged_in_pool(run, document, conversion)
+        if isinstance(judged, Envelope):
+            return judged
+        return self._enveloped(
+            run, document, conversion, judged, converter=converter, ocr=ocr, warnings=warnings
+        )
+
+    async def _judged_in_pool(
+        self, run: DocumentRun, document: DocumentInput, conversion: DocumentConversion
+    ) -> _Judged | Envelope[ExtractResult]:
+        """``_judged`` on the conversion pool, or the failed envelope."""
+        started = time.perf_counter()
+        try:
+            return await self._threads.run(self._judged, document, conversion)
+        except RuntimeError as error:  # the conversion pool is shut down
+            return _unavailable(run, error)
+        except Exception as error:  # e.g. metadata that is no PageMetadata
+            return _our_fault(run, document.meta.kind, type(error).__name__)
+        finally:
+            run.convert_ms += _ms(started)
+
+    def _enveloped(
+        self,
+        run: DocumentRun,
+        document: DocumentInput,
+        conversion: DocumentConversion,
+        judged: _Judged,
+        *,
+        converter: Converter,
+        ocr: bool,
+        warnings: list[str],
+    ) -> Envelope[ExtractResult]:
+        """The result of a judged conversion, in its envelope: the quality verdict decides the
+        status."""
+        req = run.req
+        return self._judge(
             run.result(
                 content_type=document.meta.content_type,
                 language=judged.language,
@@ -359,20 +433,16 @@ class DocumentSteps:
                 metadata=judged.metadata if req.metadata else None,
                 links=[] if req.links else None,
                 fingerprint=judged.fingerprint,
-                warnings=warnings,
+                warnings=[*run.warnings, *warnings],
                 document=DocumentInfo(
-                    kind=kind,
-                    converter="markitdown",
+                    kind=document.meta.kind,
+                    converter=converter,
                     pages=conversion.pages,
                     pages_converted=conversion.pages_converted,
-                    ocr=False,
+                    ocr=ocr,
                 ),
             )
         )
-        if not handing_on:
-            return envelope
-        meta = document.meta.model_copy(update={"needs_ocr": conversion.needs_ocr})
-        return OcrNeeded(draft=envelope, input=DocumentInput(document.body, meta))
 
     async def _convert(
         self, run: DocumentRun, document: DocumentInput, deadline: float
@@ -396,46 +466,16 @@ class DocumentSteps:
             await self.pool.start()  # at once when the process started it already
             reply = await self.pool.run("markitdown", payload, deadline - _POOL_MARGIN_SECONDS)
             outcome = DocumentConversion.from_reply(reply)
-        except ConversionError as error:
-            known = _DOCUMENT_ERRORS.get(error.type_name)
-            if known is None:  # never its message: it may quote the document
-                outcome = self._our_fault(run, meta.kind, error.type_name)
-            else:
-                outcome = run.failed(*known)
-        except ConversionTimeout:
-            outcome = run.failed(
-                ErrorCode.TIMEOUT, "The document did not convert in time.", retryable=True
+        except CONVERSION_FAILURES as error:
+            # Retryable: the child only gets what the fetch left of the extraction's deadline.
+            outcome = failed_conversion(
+                run, meta.kind, error, timeout_message=_TIMEOUT_MESSAGE, timeout_retryable=True
             )
-        except ConversionOutOfMemory:
-            outcome = run.failed(
-                ErrorCode.TOO_LARGE, "The document needs more memory than this service allows."
-            )
-        except (ConversionCrashed, ValueError, LookupError, TypeError) as error:
-            outcome = self._our_fault(run, meta.kind, type(error).__name__)
-        except RuntimeError as error:  # the pool is shut down, or its children do not start
-            outcome = self._unavailable(run, error)
         finally:
             run.convert_ms += _ms(started)
-        self._observe(meta.kind, outcome, time.perf_counter() - started)
+        seconds = time.perf_counter() - started
+        self._metrics.observe_outcome("markitdown", meta.kind, outcome, seconds)
         return outcome
-
-    def _observe(
-        self,
-        kind: DocumentKind,
-        outcome: DocumentConversion | Envelope[ExtractResult],
-        seconds: float,
-    ) -> None:
-        if isinstance(outcome, DocumentConversion):
-            self._metrics.observe("markitdown", kind, "success", seconds, outcome.pages_converted)
-            return
-        code = outcome.error.code.value if outcome.error is not None else "unknown"
-        self._metrics.observe("markitdown", kind, code, seconds)
-
-    @staticmethod
-    def _unavailable(run: DocumentRun, error: RuntimeError) -> Envelope[ExtractResult]:
-        # The document pool or the conversion pool is shut down, or children do not start.
-        _log.error("document_converter_unavailable", host=run.host, error_type=type(error).__name__)
-        return run.failed(ErrorCode.INTERNAL_ERROR, _UNAVAILABLE_MESSAGE, retryable=True)
 
     def _judged(self, document: DocumentInput, conversion: DocumentConversion) -> _Judged:
         """Quality, language, metadata and fingerprint, like a ``text/plain`` page (F9).
@@ -456,11 +496,57 @@ class DocumentSteps:
             fingerprint=None if failed else compute_fingerprint(document.meta.raw_sha256, content),
         )
 
-    @staticmethod
-    def _our_fault(
-        run: DocumentRun, kind: DocumentKind, error_type: str
-    ) -> Envelope[ExtractResult]:
-        # The type only, and no traceback: the message of a child's exception, or of a
-        # validation error, may quote the document.
-        _log.error("document_conversion_failed", host=run.host, kind=kind, error_type=error_type)
-        return run.failed(ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE)
+
+# What a ``DocumentPool`` call can end in besides its reply, and ``from_reply``'s ``ValueError``.
+CONVERSION_FAILURES: Final = (
+    ConversionError,
+    ConversionTimeout,
+    ConversionOutOfMemory,
+    ConversionCrashed,
+    ValueError,
+    LookupError,
+    TypeError,
+    RuntimeError,
+)
+
+
+def failed_conversion(
+    run: DocumentRun,
+    kind: DocumentKind,
+    error: Exception,
+    *,
+    timeout_message: str,
+    timeout_retryable: bool,
+) -> Envelope[ExtractResult]:
+    """The failed envelope of a conversion that ended in ``error`` (one of
+    ``CONVERSION_FAILURES``). A document the converter refused (a bomb, a password, an unreadable
+    file) or that needs too much memory is not retryable: the same bytes would fail again. The
+    deadline is ``timeout`` with the converter's own message and verdict. Our own faults are
+    logged by their type, never with a message."""
+    if isinstance(error, ConversionError):
+        known = _DOCUMENT_ERRORS.get(error.type_name)
+        if known is None:  # never its message: it may quote the document
+            return _our_fault(run, kind, error.type_name)
+        return run.failed(*known)
+    if isinstance(error, ConversionTimeout):
+        return run.failed(ErrorCode.TIMEOUT, timeout_message, retryable=timeout_retryable)
+    if isinstance(error, ConversionOutOfMemory):
+        return run.failed(
+            ErrorCode.TOO_LARGE, "The document needs more memory than this service allows."
+        )
+    if isinstance(error, RuntimeError):  # the pool is shut down, or its children do not start
+        return _unavailable(run, error)
+    return _our_fault(run, kind, type(error).__name__)  # a dead child, a malformed reply
+
+
+def _unavailable(run: DocumentRun, error: RuntimeError) -> Envelope[ExtractResult]:
+    # The document pool or the conversion pool is shut down, or children do not start.
+    _log.error("document_converter_unavailable", host=run.host, error_type=type(error).__name__)
+    return run.failed(ErrorCode.INTERNAL_ERROR, _UNAVAILABLE_MESSAGE, retryable=True)
+
+
+def _our_fault(run: DocumentRun, kind: DocumentKind, error_type: str) -> Envelope[ExtractResult]:
+    # The type only, and no traceback: the message of a child's exception, or of a validation
+    # error, may quote the document.
+    _log.error("document_conversion_failed", host=run.host, kind=kind, error_type=error_type)
+    return run.failed(ErrorCode.CONVERSION_FAILED, _FAILED_MESSAGE)

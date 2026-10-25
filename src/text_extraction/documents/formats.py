@@ -24,6 +24,7 @@ from text_extraction.convert import OutputFormat
 _CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 _TRAILING_BLANKS = re.compile(r"[ \t]+$", re.MULTILINE)
 _BLANK_RUNS = re.compile(r"\n{3,}")
+_HEADING = re.compile(r"^#{1,2} +(.+?) *#* *$", re.MULTILINE)
 
 
 @cache
@@ -41,6 +42,12 @@ def from_markdown(markdown: str, fmt: OutputFormat) -> str:
     if fmt == "html":
         return f"<html><body>{_parser().render(normalised)}</body></html>"
     return _text(_parser().parse(normalised))
+
+
+def first_heading(markdown: str) -> str | None:
+    """The text of the first heading of level 1 or 2, a title for a document without one."""
+    match = _HEADING.search(markdown)
+    return match.group(1) if match else None
 
 
 def _normalise(markdown: str) -> str:

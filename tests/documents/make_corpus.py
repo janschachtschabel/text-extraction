@@ -4,7 +4,8 @@ committed, so the tests do not need this script, reportlab, python-docx or Pillo
     uv run python tests/documents/make_corpus.py
 
 The output is deterministic (fixed dates and ids), so a re-run changes a file only when this
-script or the system font changes. Later tasks add their files here. Office files come from
+script or the system font changes. Later tasks add their files here. It also writes the Docling
+worker's built-in scan, ``src/text_extraction/documents/scan_check.png``. Office files come from
 python-docx, python-pptx and openpyxl, the old Excel format from xlwt (BSD-3-Clause, dev only:
 no other permissive library writes it), the EPUB is assembled entry by entry.
 """
@@ -27,6 +28,8 @@ from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 CORPUS = Path(__file__).parent / "corpus"
+# Not a test file: the Docling worker's self-check reads it (it ships in the package).
+SCAN_CHECK = Path(__file__).parents[2] / "src/text_extraction/documents/scan_check.png"
 
 _FONT_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -398,6 +401,72 @@ def _book_epub() -> bytes:
     return out.getvalue()
 
 
+def _image_bytes(image: Image.Image, fmt: str) -> bytes:
+    buffer = io.BytesIO()
+    if fmt == "JPEG":
+        image.save(buffer, "JPEG", quality=90)
+    else:
+        image.save(buffer, fmt, optimize=True)
+    return buffer.getvalue()
+
+
+_ODF_NAMESPACES = (
+    'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" '
+    'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" '
+    'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+    'xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"'
+)
+
+
+def _text_odt() -> bytes:
+    """An OpenDocument text with a heading and two paragraphs, assembled entry by entry;
+    ``mimetype`` first and stored, as the format requires."""
+    lines = GERMAN_PAGES[0]
+    paragraphs = "".join(f"<text:p>{line}</text:p>" for line in lines[1:])
+    entries = {
+        "mimetype": "application/vnd.oasis.opendocument.text",
+        "content.xml": (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<office:document-content {_ODF_NAMESPACES} office:version="1.3"><office:body>'
+            f'<office:text><text:h text:outline-level="1">{lines[0]}</text:h>{paragraphs}'
+            "</office:text></office:body></office:document-content>"
+        ),
+        "meta.xml": (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<office:document-meta {_ODF_NAMESPACES} office:version="1.3"><office:meta>'
+            "<dc:title>Die Photosynthese</dc:title><dc:language>de</dc:language>"
+            "</office:meta></office:document-meta>"
+        ),
+        "META-INF/manifest.xml": (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<manifest:manifest {_ODF_NAMESPACES} manifest:version="1.3">'
+            '<manifest:file-entry manifest:full-path="/" '
+            'manifest:media-type="application/vnd.oasis.opendocument.text"/>'
+            '<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>'
+            '<manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/>'
+            "</manifest:manifest>"
+        ),
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, text in entries.items():
+            entry = zipfile.ZipInfo(name, date_time=(2000, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_STORED if name == "mimetype" else zipfile.ZIP_DEFLATED
+            archive.writestr(entry, text.encode())
+    return out.getvalue()
+
+
+def _scan_check_png() -> bytes:
+    """The Docling worker's built-in one-page scan (``documents/scan_check.png``): two lines of
+    German with umlauts, whose words the self-check looks for."""
+    font = ImageFont.truetype(_font_path(), 32)
+    image = Image.new("L", (900, 160), 255)
+    draw = ImageDraw.Draw(image)
+    draw.text((40, 30), "Selbsttest der Texterkennung", font=font, fill=0)
+    draw.text((40, 90), "Die Prüfung läuft über Bücher.", font=font, fill=0)
+    return _image_bytes(image, "PNG")
+
+
 def _latin1_csv() -> bytes:
     return "Name,Größe,Gewicht\nAnna,1.62,55\nJörg,1.80,80\n".encode("latin-1")
 
@@ -418,6 +487,9 @@ def main() -> None:
         "sheets.xls": _sheets_xls(),
         "book.epub": _book_epub(),
         "latin1.csv": _latin1_csv(),
+        "page.png": _image_bytes(pages[0], "PNG"),
+        "photo.jpeg": _image_bytes(pages[1], "JPEG"),
+        "text.odt": _text_odt(),
         "scan.expected.txt": (
             "\n\n".join("\n".join(lines) for lines in GERMAN_PAGES) + "\n"
         ).encode(),
@@ -425,6 +497,9 @@ def main() -> None:
     for name, data in files.items():
         (CORPUS / name).write_bytes(data)
         print(f"{name}: {len(data)} bytes")
+    check = _scan_check_png()
+    SCAN_CHECK.write_bytes(check)
+    print(f"{SCAN_CHECK.name}: {len(check)} bytes")
 
 
 if __name__ == "__main__":

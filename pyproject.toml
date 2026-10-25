@@ -37,6 +37,7 @@ dependencies = [
 text-extraction = "text_extraction.server:main"
 text-extraction-worker = "text_extraction.worker:main"
 text-extraction-browser-worker = "text_extraction.browser_worker:main"
+text-extraction-docling-worker = "text_extraction.docling_worker:main"
 
 [project.optional-dependencies]
 browser = [
@@ -90,7 +91,7 @@ python_version = "3.13"
 files = ["src", "tests"]
 
 [[tool.mypy.overrides]]
-module = ["defusedxml.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*"]
+module = ["defusedxml.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -98,6 +99,10 @@ testpaths = ["tests"]
 # tests/live needs a running service and the internet: only run_live.py runs it, by hand or in CI.
 # tests/e2e starts its own processes: only run_batch.py runs it (.github/workflows/e2e.yml).
 # Browser tests need Chromium: `pytest -m browser` runs them (CI job `browser`).
-addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser'"
-markers = ["browser: needs a real Chromium (run with `-m browser`)"]
+# Docling tests need the extra `docling`, Tesseract and the models: `pytest -m docling`.
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser and not docling'"
+markers = [
+    "browser: needs a real Chromium (run with `-m browser`)",
+    "docling: needs Docling, Tesseract and the models (run with `-m docling`)",
+]
 xfail_strict = true

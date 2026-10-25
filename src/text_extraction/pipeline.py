@@ -32,6 +32,10 @@ An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on 
 hand: no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor
 stored (ruling F17).
 
+The Docling worker builds the result of a document that waited for OCR with
+``convert_queued_document``: step 8 on its Docling conversion, the better of it and MarkItDown's
+draft, and for a URL the fingerprint and the cache as above (F14).
+
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
 compliance mode (403) and a Valkey outage of the outbound gate (503) leave as ``ServiceError``.
@@ -127,6 +131,8 @@ from text_extraction.outbound import (
 from text_extraction.pipeline_documents import (
     OCR_NOT_HANDED_MESSAGE,
     OCR_NOT_HANDED_REASON,
+    OCR_UNAVAILABLE_WARNING,
+    DocumentConvert,
     DocumentInput,
     DocumentInputMeta,
     DocumentRequest,
@@ -175,6 +181,8 @@ _DOCUMENT_TYPES = frozenset(
     {media_type(kind) for kind in get_args(DocumentKind)} | {"application/octet-stream"}
 )
 DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
+# Kinds Docling converts without OCR: OpenDocument files have their text.
+_NO_OCR_KINDS: frozenset[DocumentKind] = frozenset({"odt", "ods", "odp"})
 # Fetch errors that say the host itself is in trouble; they count towards its circuit breaker.
 _HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
@@ -622,6 +630,89 @@ class Pipeline:
             # Kind and size only: never the file name.
             self._record("upload", run.started, outcome, kind=run.kind, size=len(body))
 
+    async def convert_queued_document(
+        self,
+        req: ExtractRequest | FileForm,
+        principal: Principal,
+        document: DocumentInput,
+        draft: Envelope[ExtractResult] | None,
+        convert: DocumentConvert,
+    ) -> Envelope[ExtractResult]:
+        """The result of a document the Docling worker converts (ruling F14): ``req`` is the
+        request of its job (an ``ExtractRequest`` for a URL, the ``FileForm`` of an upload),
+        ``document`` its stored input, ``draft`` MarkItDown's result of it (None for an image or
+        an OpenDocument file), ``convert`` the Docling conversion.
+
+        The result is built like the inline one (F7-F9): the run starts from what the input's
+        meta knows (final URL, status, compliance report, attempts), ``mode_used`` is ``fast``
+        (``upload`` for an upload), ``document.converter`` is ``docling``. Of the draft and the
+        OCR result the better one is kept (``escalation.better``; on a tie the OCR result); a
+        draft kept because the OCR failed gets the warning ``ocr_unavailable``. For a URL the
+        kept result is compared with the URL's previous fingerprint and stored in the result
+        cache, with the input's validators, like any fast result (``_finish``). An upload's is
+        not: its fingerprint is computed, but neither compared nor stored (F17)."""
+        meta = document.meta
+        run: _Run | _UploadRun
+        if isinstance(req, FileForm):
+            run = _UploadRun(
+                req=_UploadOptions(format=req.format, metadata=req.metadata, ocr=req.ocr),
+                report=ComplianceReport(
+                    mode=resolve_mode(None, principal, self._settings), decision="skipped"
+                ),
+                file_name=meta.file_name,
+                kind=meta.kind,
+                content_type=meta.content_type,
+            )
+        else:
+            run = self._queued_run(req, principal, meta)
+        converted = await convert(run, document)
+        if isinstance(converted, Envelope):
+            ocr = converted
+        else:
+            ocr = await self._documents.envelope(
+                run,
+                document,
+                converted,
+                converter="docling",
+                ocr=meta.kind not in _NO_OCR_KINDS,
+                warnings=list(converted.warnings),
+            )
+        kept = ocr if draft is None else better(draft, ocr)
+        if kept is draft and ocr.status == "failed" and kept.data is not None:
+            warnings = [*kept.data.warnings, OCR_UNAVAILABLE_WARNING]
+            kept = kept.model_copy(
+                update={"data": kept.data.model_copy(update={"warnings": warnings})}
+            )
+        if isinstance(run, _Run):
+            validators = Validators(etag=meta.etag, last_modified=meta.last_modified)
+            kept = await self._finish(run, kept, validators)
+        kept.trace_id = current_trace_id()
+        return kept
+
+    def _queued_run(
+        self, req: ExtractRequest, principal: Principal, meta: DocumentInputMeta
+    ) -> _Run:
+        """The run state of a URL's queued document, from what its fetch learned."""
+        report = meta.compliance or ComplianceReport(
+            mode=resolve_mode(req.compliance, principal, self._settings), decision="skipped"
+        )
+        private = not req.secrets().empty()
+        cacheable = req.cache and not private and not req.screenshot
+        return _Run(
+            req=req,
+            report=report,
+            cache="miss" if cacheable else "bypass",
+            started=time.perf_counter(),
+            cacheable=cacheable,
+            private=private,
+            host=urlsplit(req.url).hostname,
+            final_url=meta.final_url,
+            upstream_status=meta.upstream_status,
+            content_type=meta.content_type,
+            attempts=meta.attempts,
+            target=req.url,
+        )
+
     # --- steps ---------------------------------------------------------------------------------
 
     async def _within_deadline(self, run: _Run) -> Envelope[ExtractResult]:
@@ -1026,7 +1117,9 @@ class Pipeline:
             }
         )
         # Not compared again, so renew the baseline the next real extraction compares with.
-        await self._fingerprints.touch(run.req.url, variant=run.req.format)
+        await self._fingerprints.touch(
+            run.req.url, variant=_fingerprint_variant(run.req, stored.result)
+        )
         fresh = Validators.from_headers(fetched.headers)
         validators = Validators(
             etag=fresh.etag or stored.entry.validators.etag,
@@ -1108,7 +1201,7 @@ class Pipeline:
             return envelope
         if result.fingerprint is not None and not run.private:
             fingerprint = await self._fingerprints.compare_and_save(
-                run.req.url, result.fingerprint, variant=run.req.format
+                run.req.url, result.fingerprint, variant=_fingerprint_variant(run.req, result)
             )
             result = result.model_copy(update={"fingerprint": fingerprint})
             envelope = envelope.model_copy(update={"data": result})
@@ -1721,6 +1814,17 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
         "compliance": mode,
         "ocr": req.ocr,
     }
+
+
+def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
+    """Which previous fingerprint a result is compared with: the one of the same output format,
+    and for a document also of the same ``ocr`` option. ``auto``, ``never`` and ``always`` may
+    read the same file with different converters (MarkItDown, Docling), so alternating them must
+    not report a change; the result cache keeps them apart the same way (``_cache_options``).
+    Pages keep the variant of package 4 (the format), so their stored fingerprints stay valid."""
+    if result.document is None:
+        return req.format
+    return f"{req.format}|ocr={req.ocr}"
 
 
 def _html_lang(html: str) -> str | None:

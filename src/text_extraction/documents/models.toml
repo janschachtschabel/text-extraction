@@ -1,0 +1,29 @@
+# The model files of the Docling worker, as `text-extraction-docling-worker --download-models`
+# puts them under DOCLING_MODELS_PATH (ruling F15). Each file is fetched from its `url`, which
+# names a fixed commit, and must have exactly `size` bytes and this SHA-256; otherwise nothing
+# is put in place. A change of this file (its SHA-256) makes the next run download again.
+#
+# Paths are relative to DOCLING_MODELS_PATH: Docling's models under `docling/` (its
+# `artifacts_path`, one folder per Hugging Face repository, named `<owner>--<name>`), Tesseract's
+# data under `tessdata/` (TESSDATA_PREFIX). To add or update a file: download it from a URL at a
+# commit, then record `sha256sum` and the byte size here. The licences are in NOTICE.
+
+# Tesseract's best LSTM models (Apache-2.0), tesseract-ocr/tessdata_best at commit e12c65a
+# (2024-03-09; the three files last changed in ed5410b, 2018-02-01).
+[[files]]
+path = "tessdata/deu.traineddata"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/deu.traineddata"
+sha256 = "8407331d6aa0229dc927685c01a7938fc5a641d1a9524f74838cdac599f0d06e"
+size = 8628461
+
+[[files]]
+path = "tessdata/eng.traineddata"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/eng.traineddata"
+sha256 = "8280aed0782fe27257a68ea10fe7ef324ca0f8d85bd2fd145d1c2b560bcb66ba"
+size = 15400601
+
+[[files]]
+path = "tessdata/osd.traineddata"
+url = "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/e12c65a915945e4c28e237a9b52bc4a8f39a0cec/osd.traineddata"
+sha256 = "9cf5d576fcc47564f11265841e5ca839001e7e6f38ff7f7aacf46d15a96b00ff"
+size = 10562727

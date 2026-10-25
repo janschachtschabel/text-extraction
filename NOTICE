@@ -10,3 +10,8 @@ content, link handling and the linked-document handling of the HTML converter).
 
 src/text_extraction/data/domain_boilerplate.json contains boilerplate line lists from
 openeduhub/text-extraction (learned lines per domain; hosts stored without a leading "www.").
+
+The Docling worker downloads model files onto its models volume (they are never part of an
+image; see src/text_extraction/documents/models.toml):
+- Tesseract's tessdata_best models deu, eng and osd (tesseract-ocr/tessdata_best),
+  Apache License 2.0.

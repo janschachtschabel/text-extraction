@@ -36,7 +36,7 @@ from markitdown.converters import (
 
 from text_extraction.convert import OutputFormat
 from text_extraction.convert.decode import decode_html
-from text_extraction.documents.formats import from_markdown
+from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.meta import document_metadata
 from text_extraction.documents.pdf import broken_text, probe_pdf, scan_verdict, truncate_pdf
 from text_extraction.documents.sniff import DocumentUnreadable, check_container, media_type
@@ -55,7 +55,6 @@ _FORMATS = frozenset({"markdown", "text", "html"})
 # MarkItDown's slide markers in a presentation: an HTML comment, which the HTML output would
 # show as escaped text. The slide titles stay as headings.
 _SLIDE_MARKER = re.compile(r"^<!-- Slide number: \d+ -->\n?", re.MULTILINE)
-_HEADING = re.compile(r"^#{1,2} +(.+?) *#* *$", re.MULTILINE)
 
 
 def convert(payload: dict[str, Any]) -> dict[str, Any]:
@@ -98,7 +97,7 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "content": normalised if fmt == "markdown" else from_markdown(normalised, fmt),
-        "title": metadata.title or converter_title or _first_heading(normalised),
+        "title": metadata.title or converter_title or first_heading(normalised),
         "warnings": warnings,
         "pages": pages,
         "pages_converted": pages_converted,
@@ -131,8 +130,3 @@ def _markitdown(
         markdown = _SLIDE_MARKER.sub("", markdown)
     title = result.title.strip() if isinstance(result.title, str) else None
     return markdown, title or None
-
-
-def _first_heading(markdown: str) -> str | None:
-    match = _HEADING.search(markdown)
-    return match.group(1) if match else None
