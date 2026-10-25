@@ -3,49 +3,77 @@ too much memory is killed, not waited for.
 
 Documents are hostile input in a way HTML is not: a PDF can make pdfminer spin for minutes, a
 spreadsheet can expand to gigabytes. Python cannot stop a thread, so ``ConversionPool`` is no
-containment for them. ``DocumentPool`` keeps ``processes`` children instead (start method
-``spawn``, so no state of the parent is shared). Each runs one call at a time and is replaced
-when it is killed, dies, runs out of memory or has served ``max_tasks`` calls.
+containment for them. ``DocumentPool`` keeps ``processes`` children instead. Each runs one call
+at a time and is replaced when it is killed, dies, runs out of memory or has served
+``max_tasks`` calls.
 
+- **The child.** A plain interpreter, ``python -m text_extraction.documents.pool_child``, in a
+  session of its own, not a ``multiprocessing`` child: that one would re-run the parent's
+  ``__main__`` (the whole API, about 1 s and 300 MB of address space) before its limit is set.
+  It gets an allowlisted environment (no API keys, no Valkey password, no LLM keys) and talks
+  over a socket pair in ``multiprocessing.connection`` frames; stdin and stdout are not used.
 - **What a child may run.** ``target`` is a module path; the child imports it and calls the
   functions of its ``FUNCTIONS`` dict by name. Nothing callable is pickled from the parent, and
   the parent never imports the target, so the heavy converter libraries live in the children
-  only. Payloads and results travel pickled over a duplex pipe, one per child.
+  only. The child parses hostile files, so the parent unpickles its replies with builtin types
+  only and at most ``max_result_bytes`` of them.
 - **Memory.** The child sets ``RLIMIT_AS`` to ``memory_limit_mb`` before it imports the target.
-  A ``MemoryError`` in a call is ``ConversionOutOfMemory``, and the child is replaced, as its
-  heap may be left fragmented.
+  A ``MemoryError`` in a call, or a result over ``max_result_bytes``, is
+  ``ConversionOutOfMemory``, and the child is replaced, as its heap may be left fragmented.
 - **Deadline.** ``run`` takes the caller's deadline (``loop.time()``). Waiting for a free child
-  counts against it, as with ``ConversionPool``. When it passes, the child gets SIGKILL and the
-  caller ``ConversionTimeout``. A cancelled caller's child is killed too: it may be
-  mid-conversion, and nobody waits for its answer any more.
-- **Signals.** Children ignore SIGINT and SIGTERM, so a Ctrl+C or a signal to the process group
-  does not kill a conversion that the parent still waits for: the parent stops them in
-  ``shutdown``, and an exit hook kills them if the parent exits without it.
+  counts against it, as with ``ConversionPool``. When it passes, the child's process group gets
+  SIGKILL (so do tools the converter started, such as tesseract) and the caller
+  ``ConversionTimeout``. A cancelled caller's child is killed too: it may be mid-conversion, and
+  nobody waits for its answer any more.
+- **Signals.** Children ignore SIGINT and SIGTERM: the parent stops them in ``shutdown``, and an
+  exit hook kills them if the parent exits without it.
 
-The blocking pipe I/O and process starts run on short-lived threads of their own, never on the
-event loop or asyncio's default executor (which also resolves host names, see
+The blocking socket I/O, pickling and process starts run on short-lived threads of their own,
+never on the event loop or asyncio's default executor (which also resolves host names, see
 ``conversion_pool``).
 """
 
 import asyncio
 import atexit
 import concurrent.futures
-import importlib
+import contextlib
+import io
+import os
 import pickle
-import resource
 import signal
+import socket
+import subprocess
+import sys
 import threading
 import weakref
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from multiprocessing import get_context
 from multiprocessing.connection import Connection
-from multiprocessing.process import BaseProcess
 from typing import Any
 
+import structlog
+
+_log = structlog.get_logger(__name__)
+
 _CLOSED = "the document pool is shut down"
-_MESSAGE_LIMIT = 500  # characters of a child's exception message that reach the parent
+_CHILD_MODULE = "text_extraction.documents.pool_child"
+_MESSAGE_LIMIT = 500  # characters of an exception message that reach the caller
+_RESPAWN_BACKOFF_SECONDS = 1.0  # between attempts to start a child while that keeps failing
+# What a child inherits from the parent's environment; ``extra_env`` adds to it.
+_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TZ",
+    "PYTHONPATH",
+    "VIRTUAL_ENV",
+    "TESSDATA_PREFIX",
+    "OMP_NUM_THREADS",
+)
 
 
 class ConversionTimeout(Exception):  # noqa: N818 - the name is part of the task's interface
@@ -57,12 +85,16 @@ class ConversionCrashed(Exception):  # noqa: N818 - the name is part of the task
 
 
 class ConversionOutOfMemory(Exception):  # noqa: N818 - the name is part of the task's interface
-    """The call reached the child's memory limit."""
+    """The call reached the child's memory limit, or its result was over the size limit."""
 
 
 class ConversionError(Exception):
-    """The function raised in the child. ``message`` is the exception's own text, cut to 500
-    characters; the pool adds nothing from the payload."""
+    """The function raised in the child.
+
+    ``message`` is the exception's own text, cut to 500 characters. The pool adds nothing from
+    the payload, but a converter's message may quote the document: callers log ``type_name``
+    only.
+    """
 
     def __init__(self, type_name: str, message: str) -> None:
         super().__init__(f"{type_name}: {message}" if message else type_name)
@@ -70,64 +102,17 @@ class ConversionError(Exception):
         self.message = message
 
 
-# --- the child -----------------------------------------------------------------------------
+class _StartFailed(RuntimeError):  # noqa: N818 - a start that failed, named as such
+    """A child did not get ready; ``type_name`` is the child's exception, when it sent one."""
 
-
-def _child_main(conn: Connection, target: str, memory_limit_mb: int) -> None:
-    """The child's entry point: limit memory, import the target, then answer calls until the
-    parent closes the pipe."""
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    _limit_memory(memory_limit_mb)
-    try:
-        functions: dict[str, Callable[[Any], Any]] = importlib.import_module(target).FUNCTIONS
-    except BaseException as exc:  # also MemoryError and SystemExit: start() reports it
-        conn.send_bytes(_dump(("failed", type(exc).__name__, _message(exc))))
-        return
-    conn.send_bytes(_dump(("ready",)))
-    while True:
-        try:
-            request = conn.recv_bytes()
-        except EOFError:
-            return  # the parent is gone
-        conn.send_bytes(_answer(functions, request))
-
-
-def _limit_memory(megabytes: int) -> None:
-    limit = megabytes * 1024 * 1024
-    _soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    if hard != resource.RLIM_INFINITY:
-        limit = min(limit, hard)
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-
-
-def _answer(functions: dict[str, Callable[[Any], Any]], request: bytes) -> bytes:
-    try:
-        name, payload = pickle.loads(request)  # noqa: S301 - from our own parent
-        function = functions.get(name)
-        if function is None:
-            return _dump(("unknown", name))
-        return _dump(("ok", function(payload)))
-    except MemoryError:
-        return _dump(("oom",))
-    except Exception as exc:
-        return _dump(("error", type(exc).__name__, _message(exc)))
-
-
-def _dump(message: tuple[Any, ...]) -> bytes:
-    return pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-def _message(exc: BaseException) -> str:
-    return str(exc)[:_MESSAGE_LIMIT]
-
-
-# --- the parent ----------------------------------------------------------------------------
+    def __init__(self, message: str, type_name: str | None = None) -> None:
+        super().__init__(message)
+        self.type_name = type_name
 
 
 @dataclass(eq=False)
 class _Child:
-    process: BaseProcess
+    process: subprocess.Popen[bytes]
     conn: Connection
     calls: int = 0
     exchange: concurrent.futures.Future[tuple[Any, ...]] | None = None  # the call in flight
@@ -144,6 +129,8 @@ class DocumentPool:
         *,
         max_tasks: int = 50,
         target: str,
+        max_result_bytes: int = 64 * 1024 * 1024,
+        extra_env: Mapping[str, str] | None = None,
         start_timeout: float = 60.0,
     ) -> None:
         if processes < 1:
@@ -152,17 +139,23 @@ class DocumentPool:
             raise ValueError("memory_limit_mb must be at least 1")
         if max_tasks < 1:
             raise ValueError("max_tasks must be at least 1")
+        if max_result_bytes < 1:
+            raise ValueError("max_result_bytes must be at least 1")
         self._processes = processes
         self._memory_limit_mb = memory_limit_mb
         self._max_tasks = max_tasks
         self._target = target
+        self._max_result_bytes = max_result_bytes
         self._start_timeout = start_timeout
-        self._context = get_context("spawn")
+        self._env = {name: os.environ[name] for name in _ENV_ALLOWLIST if name in os.environ}
+        self._env.update(extra_env or {})
         # Free children; None stands for a slot whose child could not be started yet.
         self._idle: asyncio.Queue[_Child | None] = asyncio.Queue()
         self._lock = threading.Lock()  # guards _children and _closed across the I/O threads
         self._children: set[_Child] = set()  # every child that is started and not yet reaped
         self._tasks: set[asyncio.Task[None]] = set()  # replacements in progress
+        self._closing = asyncio.Event()  # ends a replacement's back-off
+        self._respawn_failing = False  # logged once per streak of failed starts
         self._started = False
         self._closed = False
         _live_pools.add(self)
@@ -193,7 +186,8 @@ class DocumentPool:
 
         Raises ``ConversionTimeout``, ``ConversionCrashed``, ``ConversionOutOfMemory``,
         ``ConversionError`` for what the function raised, ``LookupError`` for a name the target
-        does not offer, and ``RuntimeError`` once the pool is shut down.
+        does not offer, ``TypeError`` for a payload that cannot be pickled, and ``RuntimeError``
+        once the pool is shut down.
         """
         if self._closed:
             raise RuntimeError(_CLOSED)
@@ -201,9 +195,9 @@ class DocumentPool:
             raise RuntimeError("the document pool is not started")
         if deadline <= asyncio.get_running_loop().time():
             raise ConversionTimeout("the deadline passed before the conversion started")
-        request = _dump((function_name, payload))
         child = await self._take(deadline)
-        child.exchange = exchange = _start_thread(partial(_exchange, child.conn, request))
+        call = partial(_exchange, child.conn, function_name, payload, self._max_result_bytes)
+        child.exchange = exchange = _start_thread(call)
         try:
             async with asyncio.timeout_at(deadline):
                 reply = await asyncio.wrap_future(exchange)
@@ -224,6 +218,12 @@ class DocumentPool:
         if status == "oom":
             self._retire(child)
             raise ConversionOutOfMemory("the conversion reached the memory limit")
+        if status == "too_large":
+            self._retire(child)
+            raise ConversionOutOfMemory("the conversion result is over the size limit")
+        if status == "unpicklable":
+            self._give_back(child)  # nothing was sent
+            raise TypeError(f"the payload cannot be pickled ({reply[1]})")
         if status == "unknown":
             self._give_back(child)
             raise LookupError(f"the document pool target has no function {reply[1]!r}")
@@ -239,6 +239,7 @@ class DocumentPool:
         with self._lock:
             self._closed = True
             children = list(self._children)
+        self._closing.set()
         for child in children:
             _kill(child.process)
         if self._tasks:
@@ -254,7 +255,7 @@ class DocumentPool:
     def child_pids(self) -> list[int]:
         """The process ids of the children (for tests and diagnostics)."""
         with self._lock:
-            return [child.process.pid for child in self._children if child.process.pid]
+            return [child.process.pid for child in self._children]
 
     async def _take(self, deadline: float) -> _Child:
         try:
@@ -292,64 +293,84 @@ class DocumentPool:
             if old is not None:
                 await _in_thread(partial(self._reap, old))
             child = await _in_thread(self._spawn)
-        except Exception:
-            child = None  # the slot stays empty; the next caller that takes it tries again
+        except Exception as exc:
+            # The slot stays empty; the next caller that takes it tries again, after a pause.
+            if not self._closed:
+                self._log_respawn_failure(exc)
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self._closing.wait(), _RESPAWN_BACKOFF_SECONDS)
+        else:
+            self._respawn_failing = False
         finally:
             self._idle.put_nowait(child)
 
+    def _log_respawn_failure(self, exc: Exception) -> None:
+        if self._respawn_failing:
+            return
+        self._respawn_failing = True
+        # Types only: a child's message may quote the document it choked on.
+        fields = {"error": type(exc).__name__}
+        if isinstance(exc, _StartFailed) and exc.type_name:
+            fields["child_error"] = exc.type_name
+        _log.warning("document_pool_respawn_failed", **fields)
+
     def _spawn(self) -> _Child:
         """Start a child and wait for its readiness message (blocking; runs on a thread)."""
-        ours, theirs = self._context.Pipe(duplex=True)
-        process = self._context.Process(
-            target=_child_main,
-            args=(theirs, self._target, self._memory_limit_mb),
-            name="document-pool",
-            daemon=True,
-        )
-        child = _Child(process, ours)
-        with self._lock:
-            if self._closed:
-                ours.close()
-                theirs.close()
-                raise RuntimeError(_CLOSED)
-            try:
-                process.start()
-            except BaseException:
-                ours.close()
-                theirs.close()
-                raise
-            self._children.add(child)
-        theirs.close()  # the child has its copy; ours must go, or its death is never seen
+        ours, theirs = socket.socketpair()
+        conn = Connection(ours.detach())
+        child_fd = theirs.detach()
         try:
-            if not ours.poll(self._start_timeout):
-                raise RuntimeError(
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError(_CLOSED)
+                command = [sys.executable, "-m", _CHILD_MODULE, str(child_fd), self._target]
+                process = subprocess.Popen(  # noqa: S603 - our own interpreter and module
+                    [*command, str(self._memory_limit_mb)],
+                    pass_fds=(child_fd,),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,  # converters print; stderr stays for crashes
+                    env=self._env,
+                    start_new_session=True,  # its own process group, killed as a whole
+                )
+                child = _Child(process, conn)
+                self._children.add(child)
+        except BaseException:
+            conn.close()
+            raise
+        finally:
+            os.close(child_fd)  # the child has its copy; ours must go, or its death is never seen
+        try:
+            if not conn.poll(self._start_timeout):
+                raise _StartFailed(
                     f"a document pool child did not start within {self._start_timeout:g} s"
                 )
-            reply = pickle.loads(ours.recv_bytes())  # noqa: S301 - from our own child
+            reply = _load_reply(conn.recv_bytes(self._max_result_bytes))
         except (EOFError, OSError):
             self._reap(child)
-            raise RuntimeError(
-                f"a document pool child exited at start (exit code {process.exitcode})"
+            raise _StartFailed(
+                f"a document pool child exited at start (exit code {process.returncode})"
             ) from None
         except BaseException:
             self._reap(child)
             raise
         if reply[0] != "ready":
             self._reap(child)
-            raise RuntimeError(f"a document pool child failed to start: {reply[1]}: {reply[2]}")
+            raise _StartFailed(
+                f"a document pool child failed to start: {reply[1]}: {reply[2]}", reply[1]
+            )
         return child
 
     def _reap(self, child: _Child) -> None:
-        """Kill, join and close ``child`` once (blocking; runs on a thread)."""
+        """Kill, wait for and close ``child`` once (blocking; runs on a thread)."""
         with self._lock:
             if child not in self._children:
                 return
             self._children.discard(child)
-        _kill(child.process)
+        _kill(child.process)  # also when it died by itself: its own children go with it
         if child.exchange is not None:
-            # The killed child ends the call's recv; only then may its pipe be closed.
+            # The killed child ends the call's recv; only then may its socket be closed.
             concurrent.futures.wait([child.exchange])
-        child.process.join()
+        child.process.wait()
         child.conn.close()
 
     def _reap_all(self, children: list[_Child]) -> None:
@@ -361,21 +382,47 @@ class DocumentPool:
             _kill(child.process)
 
 
-def _exchange(conn: Connection, request: bytes) -> tuple[Any, ...]:
+def _exchange(
+    conn: Connection, function_name: str, payload: Any, max_result_bytes: int
+) -> tuple[Any, ...]:
     """Send a call, wait for its answer (blocking; runs on a thread). Raises ``EOFError`` or
     ``OSError`` when the child dies."""
-    conn.send_bytes(request)
-    answer = conn.recv_bytes()
     try:
-        reply: tuple[Any, ...] = pickle.loads(answer)  # noqa: S301 - from our own child
-    except Exception as exc:  # a result the parent cannot unpickle
-        return ("error", type(exc).__name__, _message(exc))
+        request = pickle.dumps((function_name, payload), protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as exc:
+        return ("unpicklable", type(exc).__name__)
+    conn.send_bytes(request)
+    try:
+        answer = conn.recv_bytes(max_result_bytes)
+    except OSError as exc:
+        if exc.args == ("bad message length",):  # over the limit; the body was not read
+            return ("too_large",)
+        raise
+    return _load_reply(answer)
+
+
+class _BuiltinsOnly(pickle.Unpickler):
+    """Unpickles builtin containers and scalars, and refuses every class or function."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        raise pickle.UnpicklingError(f"a reply may hold builtin values only, not {module}.{name}")
+
+
+def _load_reply(answer: bytes) -> tuple[Any, ...]:
+    try:
+        reply = _BuiltinsOnly(io.BytesIO(answer)).load()
+    except Exception as exc:
+        return ("error", type(exc).__name__, str(exc)[:_MESSAGE_LIMIT])
+    if not isinstance(reply, tuple) or not reply:
+        return ("error", "UnpicklingError", "a reply must be a non-empty tuple")
     return reply
 
 
-def _kill(process: BaseProcess) -> None:
-    if process.pid is not None:
-        process.kill()  # a no-op once the process is reaped
+def _kill(process: subprocess.Popen[bytes]) -> None:
+    """SIGKILL the child's process group, unless the child is reaped already."""
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
 def _start_thread[T](function: Callable[[], T]) -> concurrent.futures.Future[T]:
@@ -407,7 +454,7 @@ _live_pools: weakref.WeakSet[DocumentPool] = weakref.WeakSet()
 
 @atexit.register
 def _kill_children_at_exit() -> None:
-    # Runs before multiprocessing's own exit hook (registered earlier, so run later), which
-    # sends SIGTERM to daemonic children and joins them: ours ignore SIGTERM.
+    # Children ignore SIGTERM and live in sessions of their own: a parent that exits without
+    # ``shutdown`` must kill them, or a busy one would run on until its conversion ends.
     for pool in list(_live_pools):
         pool._kill_now()
