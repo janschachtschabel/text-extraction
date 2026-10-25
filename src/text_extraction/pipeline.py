@@ -647,10 +647,12 @@ class Pipeline:
         meta knows (final URL, status, compliance report, attempts), ``mode_used`` is ``fast``
         (``upload`` for an upload), ``document.converter`` is ``docling``. Of the draft and the
         OCR result the better one is kept (``escalation.better``; on a tie the OCR result); a
-        draft kept because the OCR failed gets the warning ``ocr_unavailable``. For a URL the
-        kept result is compared with the URL's previous fingerprint and stored in the result
-        cache, with the input's validators, like any fast result (``_finish``). An upload's is
-        not: its fingerprint is computed, but neither compared nor stored (F17)."""
+        draft kept because the OCR failed gets the warning ``ocr_unavailable``; when that
+        failure is retryable, the draft also loses its fingerprint, so it is neither compared
+        nor cached and the next request gets the OCR. For a URL the kept result is compared
+        with the URL's previous fingerprint and stored in the result cache, with the input's
+        validators (none for a file a render ended on), like any fast result (``_finish``). An
+        upload's is not: its fingerprint is computed, but neither compared nor stored (F17)."""
         meta = document.meta
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
@@ -679,12 +681,19 @@ class Pipeline:
             )
         kept = ocr if draft is None else better(draft, ocr)
         if kept is draft and ocr.status == "failed" and kept.data is not None:
-            warnings = [*kept.data.warnings, OCR_UNAVAILABLE_WARNING]
-            kept = kept.model_copy(
-                update={"data": kept.data.model_copy(update={"warnings": warnings})}
-            )
+            update: dict[str, Any] = {"warnings": [*kept.data.warnings, OCR_UNAVAILABLE_WARNING]}
+            if ocr.error is not None and ocr.error.retryable:
+                # The OCR may work next time (models missing, the pool unavailable): the draft
+                # answers, but is neither compared nor stored, as a sync request's fallback.
+                update["fingerprint"] = None
+            kept = kept.model_copy(update={"data": kept.data.model_copy(update=update)})
         if isinstance(run, _Run):
-            validators = Validators(etag=meta.etag, last_modified=meta.last_modified)
+            # The validators fit the request URL only, not a file a render ended on (F18).
+            validators = (
+                Validators()
+                if run.direct
+                else Validators(etag=meta.etag, last_modified=meta.last_modified)
+            )
             kept = await self._finish(run, kept, validators)
         kept.trace_id = current_trace_id()
         return kept
@@ -692,7 +701,8 @@ class Pipeline:
     def _queued_run(
         self, req: ExtractRequest, principal: Principal, meta: DocumentInputMeta
     ) -> _Run:
-        """The run state of a URL's queued document, from what its fetch learned."""
+        """The run state of a URL's queued document, from what its fetch learned: the target
+        (a file a render ended on, F18) and the run's warnings included."""
         report = meta.compliance or ComplianceReport(
             mode=resolve_mode(req.compliance, principal, self._settings), decision="skipped"
         )
@@ -710,7 +720,9 @@ class Pipeline:
             upstream_status=meta.upstream_status,
             content_type=meta.content_type,
             attempts=meta.attempts,
-            target=req.url,
+            warnings=list(meta.warnings),
+            target=meta.target or req.url,
+            direct=meta.target is not None,
         )
 
     # --- steps ---------------------------------------------------------------------------------
@@ -918,7 +930,14 @@ class Pipeline:
         when = run.deadline.when() if run.deadline is not None else None
         if when is None:  # pragma: no cover - the run always has a deadline
             when = asyncio.get_running_loop().time() + self._settings.extract_timeout_seconds
-        document = document_input(fetched, kind, run.report, run.attempts)
+        document = document_input(
+            fetched,
+            kind,
+            run.report,
+            run.attempts,
+            target=run.target if run.direct else None,
+            warnings=run.warnings,
+        )
         outcome = await self._documents.extract(run, document, when)
         if isinstance(outcome, OcrNeeded):
             if run.ocr_handoff is not None and not run.comparing:

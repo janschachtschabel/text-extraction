@@ -47,7 +47,8 @@ result. Input, then draft, then the queue, then the completion: a crash in betwe
 item leased here, and the rerun moves it once more. While the memory guard is high nothing is
 stored: the item keeps its draft with the warning ``ocr_unavailable`` (an image without one fails
 ``rate_limited``, retryable). The ``docling_dispatch`` module docstring has what the Docling worker
-reads.
+reads. A worker of the ``docling`` pool deletes an item's input and draft once its result is
+written (an exhausted item's too).
 
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
@@ -492,7 +493,10 @@ class Worker:
 
     async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
         """Delete the item's bytes once it has its result: an upload's, or a document's that
-        was queued for OCR (pool ``docling``)."""
+        was queued for OCR (pool ``docling``), with its draft. Only after the result is
+        written: an item that runs again (a failed write, a lost lease) needs both."""
+        if self._queue.pool == DOCLING_POOL:
+            await self._store.drop_draft(item.job_id, item.index)
         if job.kind == "file" or self._queue.pool == DOCLING_POOL:
             await self._store.delete_input(item.job_id, item.index)
 

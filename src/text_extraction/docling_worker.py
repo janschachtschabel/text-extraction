@@ -18,8 +18,9 @@ seconds. For each item it:
 3. runs ``Pipeline.convert_queued_document`` with the Docling conversion (``DoclingConverter``):
    the result is built as inline, the better of draft and OCR result is kept, and a URL's kept
    result goes to the result cache and the fingerprints (an upload's does not);
-4. deletes the draft once the item has its outcome; the ``Worker`` deletes the input after the
-   result write. An item given back (a Valkey error, a cancelled shutdown) keeps both.
+4. leaves the input and the draft to the ``Worker``, which deletes both after the result write
+   (also of an exhausted item). An item that runs again (a failed write, a Valkey error, a
+   cancelled shutdown) finds both.
 
 **The conversion** runs in one of ``DOCLING_CONCURRENCY`` children (``DocumentPool``, one slot
 loop each), each with ``DOCLING_MEMORY_LIMIT_MB`` of address space, by a deadline of its own:
@@ -35,9 +36,11 @@ count the conversions with ``converter="docling"`` (F19).
 (``documents/model_store``): a file of the manifest that is missing under ``DOCLING_MODELS_PATH``
 ends the process with exit code 1 and a log line naming that path. Then it starts the children
 (each imports Docling), and each converts the built-in one-page scan
-(``documents/scan_check.png``), which loads the models; a failure ends the process before
-``/ready``. On SIGTERM the loops stop claiming, the items in flight get 30 s, then they are
-cancelled and the children killed; their leases expire and the items run again.
+(``documents/scan_check.png``), which loads the models; children that do not start
+(``docling_start_failed``) or a failed check (``docling_self_check_failed``) end the process
+before ``/ready`` with exit code 1 and a JSON log line naming the models' path. On SIGTERM
+the loops stop claiming, the items in flight get 30 s, then they are cancelled and the children
+killed; their leases expire and the items run again.
 
 - ``--download-models`` fills ``DOCLING_MODELS_PATH`` from the manifest (the Helm init container
   and the compose one-shot service run it; idempotent) and exits 0, or 1 when a file fails.
@@ -62,7 +65,6 @@ from typing import Any, Final, Literal, Protocol
 import structlog
 from prometheus_client import REGISTRY, CollectorRegistry
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.docling_dispatch import docling_queue
@@ -74,7 +76,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.jobs import JobLost, JobRecord, JobStore, docling_lease_seconds
+from text_extraction.jobs import JobRecord, JobStore, docling_lease_seconds
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import (
@@ -107,12 +109,21 @@ _CHILD_START_SECONDS: Final = 180.0
 # The built-in scan of the self-check and words its OCR must find (they prove the German model).
 _CHECK_IMAGE: Final = "scan_check.png"
 _CHECK_WORDS: Final = ("selbsttest", "prüfung", "läuft")
+# Docling's own ``document_timeout``, as a share of DOCLING_TIMEOUT_SECONDS: it stops between
+# pages and answers what it has (``pages_partial``) before the child is killed at the deadline.
+DOCLING_TIMEOUT_SHARE: Final = 0.9
 
 
 class DocumentRunner(Protocol):
     """The part of ``DocumentPool`` the conversion uses (a fake in tests)."""
 
     async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any: ...
+
+
+class DocumentChildren(DocumentRunner, Protocol):
+    """``DocumentRunner`` with the start of the children (a fake in tests)."""
+
+    async def start(self) -> None: ...
 
 
 def create_docling_pool(settings: Settings) -> DocumentPool:
@@ -151,7 +162,7 @@ def docling_payload(
         "threads": settings.docling_threads,
         "max_pages": settings.docling_max_pages,
         "models_path": str(settings.docling_models_path),
-        "timeout": settings.docling_timeout_seconds,
+        "timeout": settings.docling_timeout_seconds * DOCLING_TIMEOUT_SHARE,
         "metadata": True,  # for the language; the result keeps it only when asked
         "base": meta.final_url,
         "content_language": meta.content_language,
@@ -227,41 +238,22 @@ class DoclingRunner:
         *,
         gate_refusals: Literal["fail", "raise"],
     ) -> Envelope[ExtractResult] | None:
-        finished = False  # the item gets its outcome now: its draft is done with
-        try:
-            stored = await self._store.get_input(job.id, item.index, DocumentInputMeta)
-            if stored is None:
-                finished = True
-                _log.info("docling_input_expired")
-                return failed_extract(ErrorCode.TIMEOUT, INPUT_EXPIRED_MESSAGE, retryable=True)
-            body, meta = stored
-            draft = await self._store.draft(job.id, item.index)
-            request = (
-                form_of(job.options)
-                if job.kind == "file"
-                else ExtractRequest(url=url, **job.options.model_dump())
-            )
-            envelope = await self._pipeline.convert_queued_document(
-                request, job_principal(job), DocumentInput(body, meta), draft, self._convert
-            )
-            finished = True
-            return envelope
-        except (RedisError, OSError, JobLost):
-            raise  # given back: the item runs again with its draft
-        except Exception:
-            finished = True  # the worker stores it as the item's failure
-            raise
-        finally:
-            if finished:
-                await self._drop_draft(job.id, item.index)
-
-    async def _drop_draft(self, job_id: str, index: int) -> None:
-        """Delete the item's draft; a failure leaves it to the job's TTL rather than the
-        result."""
-        try:
-            await self._store.drop_draft(job_id, index)
-        except (RedisError, OSError) as error:
-            _log.warning("job_draft_not_dropped", error_type=type(error).__name__)
+        # The worker deletes the input and the draft once the result is written (``Worker.
+        # _drop_input``): an item that runs again finds both.
+        stored = await self._store.get_input(job.id, item.index, DocumentInputMeta)
+        if stored is None:
+            _log.info("docling_input_expired")
+            return failed_extract(ErrorCode.TIMEOUT, INPUT_EXPIRED_MESSAGE, retryable=True)
+        body, meta = stored
+        draft = await self._store.draft(job.id, item.index)
+        request = (
+            form_of(job.options)
+            if job.kind == "file"
+            else ExtractRequest(url=url, **job.options.model_dump())
+        )
+        return await self._pipeline.convert_queued_document(
+            request, job_principal(job), DocumentInput(body, meta), draft, self._convert
+        )
 
 
 # --- start-up: the models and the self-check ----------------------------------------------------
@@ -312,6 +304,26 @@ async def self_check(pool: DocumentRunner, settings: Settings, *, children: int)
     _log.info("docling_self_check_passed", children=children)
 
 
+class DoclingStartFailed(Exception):  # noqa: N818 - a failed start, named as such
+    """The Docling children did not start (Docling or torch do not load)."""
+
+
+async def start_children(pool: DocumentChildren, settings: Settings, *, children: int) -> None:
+    """Start ``pool``'s children, then the self-check in each. Children that do not start are
+    logged with the models' path (never more than the error's type) and raise
+    ``DoclingStartFailed``; a failed check raises ``SelfCheckFailed``."""
+    try:
+        await pool.start()
+    except Exception as error:
+        _log.error(
+            "docling_start_failed",
+            models_path=str(settings.docling_models_path),
+            error_type=type(error).__name__,
+        )
+        raise DoclingStartFailed("the Docling children did not start") from None
+    await self_check(pool, settings, children=children)
+
+
 def models_missing(settings: Settings) -> bool:
     """Whether a file of the models manifest is missing on the volume; logs the volume's path
     when one is."""
@@ -339,8 +351,7 @@ class DoclingWorkerParts:
 
     async def start(self) -> None:
         """Start the children, then the self-check in each (before ``/ready``)."""
-        await self.docling_pool.start()
-        await self_check(
+        await start_children(
             self.docling_pool, self.settings, children=self.settings.docling_concurrency
         )
 
@@ -417,13 +428,9 @@ async def _check(settings: Settings) -> int:
     """Convert the built-in scan in one child: 0 when its text was found, else 1."""
     pool = create_docling_pool(settings.model_copy(update={"docling_concurrency": 1}))
     try:
-        await pool.start()
-        await self_check(pool, settings, children=1)
-    except SelfCheckFailed:
-        return 1
-    except Exception as error:  # a child that does not start: Docling or torch do not load
-        _log.error("docling_check_failed", error_type=type(error).__name__)
-        return 1
+        await start_children(pool, settings, children=1)
+    except (SelfCheckFailed, DoclingStartFailed):
+        return 1  # logged, with the models' path
     finally:
         await pool.shutdown()
     return 0
@@ -456,8 +463,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         sys.exit(asyncio.run(_check(settings)))
     try:
         asyncio.run(_run(settings))
-    except SelfCheckFailed:
-        sys.exit(1)
+    except (SelfCheckFailed, DoclingStartFailed):
+        sys.exit(1)  # logged, with the models' path
 
 
 def _download(settings: Settings) -> int:

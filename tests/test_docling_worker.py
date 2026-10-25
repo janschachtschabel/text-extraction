@@ -13,11 +13,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from pytest_httpserver import HTTPServer
+from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from tests.test_worker import (
+    OPTIONS,
     OWNER,
     SCAN_BODY,
     SCAN_URL,
@@ -28,13 +31,16 @@ from tests.test_worker import (
     scenario,
 )
 from text_extraction import docling_worker
+from text_extraction.compliance import ComplianceReport
 from text_extraction.docling_worker import (
     OCR_TIMEOUT_MESSAGE,
     DoclingConverter,
     DoclingRunner,
+    DoclingStartFailed,
     SelfCheckFailed,
     create_docling_pool,
     self_check,
+    start_children,
 )
 from text_extraction.documents import model_store
 from text_extraction.documents.pool import (
@@ -47,7 +53,8 @@ from text_extraction.extract_models import ExtractRequest
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import docling_lease_seconds
-from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING
+from text_extraction.pipeline import DOCUMENT_FETCHED_DIRECTLY_WARNING
+from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
 from text_extraction.worker import Worker
 
 OCR_TEXT = " ".join(
@@ -200,6 +207,113 @@ async def test_runner_keeps_the_draft_when_ocr_reads_less() -> None:
 
 
 @scenario
+async def test_runner_keeps_a_better_draft_without_ocr_unavailable() -> None:
+    """The OCR succeeded, but read less than the text layer: the draft is kept as it is."""
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool(reply("Kurz.")))  # one word: partial, not failed
+    job_id = await moved_scan(harness)
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.status != "failed"
+    data = item.result.data
+    assert data is not None
+    assert data.content == "Thin text layer."
+    assert data.document is not None
+    assert data.document.converter == "markitdown"
+    assert OCR_UNAVAILABLE_WARNING not in data.warnings
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [ConversionError("ModelsMissing", "x"), RuntimeError("pool shut down")],
+    ids=["models-missing", "pool-unavailable"],
+)
+@scenario
+async def test_a_retryable_ocr_failure_keeps_the_draft_unstored(answer: BaseException) -> None:
+    """The OCR may work on the next try: the draft answers, but is neither fingerprinted nor
+    cached, so the next request gets the OCR."""
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool(answer))
+    job_id = await moved_scan(harness)
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content == "Thin text layer."
+    assert OCR_UNAVAILABLE_WARNING in data.warnings
+    assert data.fingerprint is None
+    assert await harness.valkey.keys("res:*") == []
+    assert await harness.valkey.keys("fp:*") == []
+
+
+@scenario
+async def test_a_final_ocr_failure_stores_the_draft() -> None:
+    """The same bytes would fail again (here: too much memory): the draft is the result."""
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool(ConversionOutOfMemory("limit")))
+    job_id = await moved_scan(harness)
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.fingerprint is not None
+    assert await harness.valkey.keys("res:*") != []
+    assert await harness.valkey.keys("fp:*") != []
+
+
+PAGE_URL = "https://docs.example.org/lesson.html"
+
+
+@scenario
+async def test_a_queued_direct_fetch_keeps_its_run_context() -> None:
+    """A file a render ended on (F18), queued for OCR: the result keeps the run's target and
+    warnings, and its cache entry has no validators (the file's do not fit the page)."""
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool())
+    job_id = await harness.store.create("batch", OWNER, OPTIONS, [PAGE_URL])
+    meta = DocumentInputMeta(
+        kind="pdf",
+        content_type="application/pdf",
+        final_url=SCAN_URL,
+        upstream_status=200,
+        etag='"v1"',  # not to be applied, even if an input carried them
+        last_modified="Tue, 01 Sep 2026 10:00:00 GMT",
+        raw_sha256=hashlib.sha256(SCAN_BODY).hexdigest(),
+        needs_ocr=True,
+        compliance=ComplianceReport(mode="enforce", decision="allowed"),
+        attempts=2,
+        target=SCAN_URL,
+        warnings=[DOCUMENT_FETCHED_DIRECTLY_WARNING],
+    )
+    await harness.store.put_input(job_id, 0, SCAN_BODY, meta, 600)
+    await harness.docling_queue.enqueue_items(job_id, OWNER.name, [(0, PAGE_URL)])
+
+    await docling.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.status == "success", item.result.error
+    data = item.result.data
+    assert data is not None
+    assert (data.url, data.final_url, data.mode_used) == (PAGE_URL, SCAN_URL, "fast")
+    assert data.warnings[0] == DOCUMENT_FETCHED_DIRECTLY_WARNING
+    assert data.attempts == 2
+    (key,) = await harness.valkey.keys("res:*")
+    raw = await harness.valkey.get(key)
+    assert raw is not None
+    entry = json.loads(raw)
+    assert entry["validators"] == {"etag": None, "last_modified": None}
+
+
+@scenario
 async def test_runner_writes_cache_for_url_items() -> None:
     harness = ocr_harness()
     docling = Docling(harness, FakeDoclingPool())
@@ -280,6 +394,39 @@ async def test_input_deleted_after_outcome(answer: dict[str, Any] | BaseExceptio
 
 
 @scenario
+async def test_a_failed_result_write_keeps_the_draft_for_the_rerun() -> None:
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool())
+    job_id = await moved_scan(harness)
+
+    async def write_result(*_args: Any, **_kwargs: Any) -> Any:
+        raise RedisConnectionError("valkey went away")
+
+    harness.store.write_result = write_result  # type: ignore[method-assign]
+    with pytest.raises(RedisConnectionError):
+        await docling.process_next()
+
+    assert await harness.store.draft(job_id, 0) is not None
+    assert await harness.valkey.keys("job:*:input:*") != []
+
+
+@scenario
+async def test_an_exhausted_item_drops_its_draft() -> None:
+    harness = ocr_harness()
+    docling = Docling(harness, FakeDoclingPool(AssertionError("not converted")))
+    job_id = await moved_scan(harness)
+    claim = await harness.docling_queue.claim(docling.runner.lease_seconds)
+    assert claim.item is not None
+
+    await docling.worker.process(claim.item, exhausted=True)
+
+    code, retryable, _message = error_of(await only_item(harness, job_id))
+    assert (code, retryable) == (ErrorCode.INTERNAL_ERROR, True)
+    assert await harness.store.draft(job_id, 0) is None
+    assert await harness.valkey.keys("job:*:input:*") == []
+
+
+@scenario
 async def test_child_timeout_fails_item() -> None:
     harness = Harness(document_pool=OcrPool(), docling_enabled=True)
     docling = Docling(harness, FakeDoclingPool(ConversionTimeout("killed")))
@@ -346,7 +493,7 @@ async def test_payload_sent_to_the_child() -> None:
         "threads": 3,
         "max_pages": 7,
         "models_path": "/srv/models",
-        "timeout": 300.0,
+        "timeout": 270.0,  # Docling's own: 0.9 of DOCLING_TIMEOUT_SECONDS, for a partial result
         "metadata": True,
         "base": SCAN_URL,
         "content_language": None,
@@ -479,6 +626,53 @@ def test_check_exits_1_without_models(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert exit_info.value.code == 1
 
 
+class NotStarting(FakeDoclingPool):
+    """Children that do not start (Docling or torch do not load)."""
+
+    async def start(self) -> None:
+        raise RuntimeError("the child did not start")
+
+
+def test_children_that_do_not_start_are_logged_with_the_models_path() -> None:
+    settings = ocr_harness(docling_models_path="/srv/models").settings
+
+    with capture_logs() as logs, pytest.raises(DoclingStartFailed):
+        asyncio.run(start_children(NotStarting(), settings, children=1))
+
+    (line,) = [log for log in logs if log["event"] == "docling_start_failed"]
+    assert line["models_path"] == "/srv/models"
+    assert line["error_type"] == "RuntimeError"
+    assert line["log_level"] == "error"
+
+
+@pytest.mark.parametrize("argv", [[], ["--check"]], ids=["serve", "check"])
+def test_children_that_do_not_start_exit_1(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    monkeypatch.setenv("DOCLING_MODELS_PATH", str(tmp_path))
+    monkeypatch.setattr(docling_worker, "models_missing", lambda _settings: False)
+    monkeypatch.setattr(docling_worker, "create_docling_pool", lambda _settings: NotStarting())
+
+    async def run(settings: Any) -> None:  # the process without its servers: the start-up only
+        await start_children(NotStarting(), settings, children=1)
+
+    monkeypatch.setattr(docling_worker, "_run", run)
+
+    with pytest.raises(SystemExit) as exit_info:
+        docling_worker.main(argv)
+
+    assert exit_info.value.code == 1
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    (failed,) = [line for line in lines if line["event"] == "docling_start_failed"]
+    assert failed["models_path"] == str(tmp_path)
+    assert failed["level"] == "error"
+
+
 def test_docling_pool_gets_model_paths_through_its_own_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -523,7 +717,7 @@ MODEL_FILES = {
 
 
 def test_download_models_is_idempotent(httpserver: HTTPServer, tmp_path: Path) -> None:
-    manifest = model_store.load_manifest(manifest_for(httpserver, MODEL_FILES))
+    manifest = model_store.load_manifest(manifest_for(httpserver, MODEL_FILES), allow_http=True)
 
     assert model_store.download_models(tmp_path, manifest) is True
 
@@ -546,7 +740,7 @@ def test_download_models_is_idempotent(httpserver: HTTPServer, tmp_path: Path) -
 
 def test_wrong_sha256_fails_and_leaves_no_marker(httpserver: HTTPServer, tmp_path: Path) -> None:
     data = manifest_for(httpserver, MODEL_FILES, wrong="docling/layout/model.safetensors")
-    manifest = model_store.load_manifest(data)
+    manifest = model_store.load_manifest(data, allow_http=True)
 
     failing = re.escape("docling/layout/model.safetensors")
     with pytest.raises(model_store.ModelDownloadFailed, match=failing):
@@ -557,11 +751,11 @@ def test_wrong_sha256_fails_and_leaves_no_marker(httpserver: HTTPServer, tmp_pat
 
 
 def test_a_new_manifest_replaces_the_old_files(httpserver: HTTPServer, tmp_path: Path) -> None:
-    old = model_store.load_manifest(manifest_for(httpserver, MODEL_FILES))
+    old = model_store.load_manifest(manifest_for(httpserver, MODEL_FILES), allow_http=True)
     model_store.download_models(tmp_path, old)
     httpserver.clear()
     newer = {"tessdata/deu.traineddata": b"better deu model" * 100}
-    new = model_store.load_manifest(manifest_for(httpserver, newer))
+    new = model_store.load_manifest(manifest_for(httpserver, newer), allow_http=True)
 
     assert model_store.download_models(tmp_path, new) is True
 
@@ -578,14 +772,56 @@ def test_a_new_manifest_replaces_the_old_files(httpserver: HTTPServer, tmp_path:
         + '"\nsize = 1',
         'path = "/abs"\nurl = "https://example.org/a"\nsha256 = "' + "0" * 64 + '"\nsize = 1',
         'path = "tessdata/a"\nurl = "ftp://example.org/a"\nsha256 = "' + "0" * 64 + '"\nsize = 1',
+        'path = "tessdata/a"\nurl = "http://example.org/a"\nsha256 = "' + "0" * 64 + '"\nsize = 1',
         'path = "tessdata/a"\nurl = "https://example.org/a"\nsha256 = "abc"\nsize = 1',
         'path = "tessdata/a"\nurl = "https://example.org/a"\nsha256 = "' + "0" * 64 + '"\nsize = 0',
     ],
-    ids=["dotdot", "absolute", "scheme", "hash", "size"],
+    ids=["dotdot", "absolute", "scheme", "http", "hash", "size"],
 )
 def test_manifest_refuses_bad_entries(entry: str) -> None:
     with pytest.raises(ValueError, match="manifest"):
         model_store.load_manifest(f"[[files]]\n{entry}\n".encode())
+
+
+def test_a_trickling_mirror_fails_at_the_file_deadline(
+    httpserver: HTTPServer, tmp_path: Path
+) -> None:
+    manifest = model_store.load_manifest(manifest_for(httpserver, MODEL_FILES), allow_http=True)
+    now = [0.0]
+
+    def clock() -> float:  # every look at the clock: ten minutes later
+        now[0] += 600.0
+        return now[0]
+
+    with pytest.raises(model_store.ModelDownloadFailed, match="did not arrive within"):
+        model_store.download_models(tmp_path, manifest, clock=clock)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_redirect_away_from_https_fails(tmp_path: Path) -> None:
+    body = b"tessdata" * 10
+    entry = (
+        '[[files]]\npath = "tessdata/deu.traineddata"\nurl = "https://models.example.org/deu"\n'
+        f'sha256 = "{hashlib.sha256(body).hexdigest()}"\nsize = {len(body)}\n'
+    )
+    manifest = model_store.load_manifest(entry.encode())
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.scheme == "https":
+            return httpx.Response(302, headers={"location": "http://mirror.example.org/deu"})
+        return httpx.Response(200, content=body)
+
+    with pytest.raises(model_store.ModelDownloadFailed, match="away from https"):
+        model_store.download_models(tmp_path, manifest, transport=httpx.MockTransport(answer))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_the_file_deadline_grows_with_the_size() -> None:
+    small, large = model_store.file_deadline_seconds(1), model_store.file_deadline_seconds(10**9)
+    assert 60 <= small <= 300
+    assert large > 3600  # a gigabyte at the slowest rate accepted (256 KiB/s)
 
 
 def test_built_in_manifest_pins_its_files() -> None:

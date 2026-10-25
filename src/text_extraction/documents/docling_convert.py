@@ -16,11 +16,13 @@ converts one document:
    for OCR (``languages``, the data in ``<models_path>/tessdata``), full-page OCR when the probe
    said "scan" (``full_page_ocr``; always for an image), the layout model and TableFormer in
    fast mode from ``<models_path>/docling`` (``artifacts_path``), on the CPU with ``threads``
-   threads, and ``timeout`` as Docling's ``document_timeout``; OpenDocument files through its
-   simple pipeline (no OCR, no models). Nothing is fetched: the parent starts the child with
-   ``HF_HUB_OFFLINE``. Models that are not on the volume are ``ModelsMissing``; any other
-   failure of Docling is ``DocumentUnreadable``, with a message of our own (Docling's may quote
-   the document).
+   threads, and ``timeout`` as Docling's ``document_timeout`` (0.9 of DOCLING_TIMEOUT_SECONDS,
+   so it stops between pages before the parent kills the child; what it read then is a
+   ``PARTIAL_SUCCESS``, answered with the warning ``pages_partial``, as is a page Docling could
+   not read); OpenDocument files through its simple pipeline (no OCR, no models). Nothing is
+   fetched: the parent starts the child with ``HF_HUB_OFFLINE``. Models that are not on the
+   volume are ``ModelsMissing``; any other failure of Docling is ``DocumentUnreadable``, with a
+   message of our own (Docling's may quote the document).
 4. The output (F6): ``markdown`` is Docling's ``export_to_markdown`` (whitespace normalised as
    for MarkItDown), ``text`` its ``export_to_text``. ``html`` renders that Markdown with
    markdown-it-py (``formats.from_markdown``), as for MarkItDown, instead of Docling's
@@ -101,6 +103,8 @@ _EXTENSIONS: Final[dict[str, str]] = {
 _IMAGE_KINDS: Final = frozenset({"png", "jpeg", "tiff", "webp", "bmp"})
 _OUTPUTS: Final = frozenset({"markdown", "text", "html"})
 _OK: Final = frozenset({ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS})
+# Docling stopped early (its ``document_timeout``) or skipped pages it could not read.
+PAGES_PARTIAL_WARNING: Final = "pages_partial"
 
 
 class ModelsMissing(Exception):  # noqa: N818 - a state of the volume, named as such
@@ -137,7 +141,9 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
     if pages == 0:
         markdown, text = "", ""  # nothing to convert (as for MarkItDown: empty content)
     else:
-        markdown, text = _docling(source, kind, payload)
+        markdown, text, partial = _docling(source, kind, payload)
+        if partial:
+            warnings.append(PAGES_PARTIAL_WARNING)
     normalised = from_markdown(markdown, "markdown")
     content = {
         "markdown": normalised,
@@ -171,8 +177,8 @@ def _check_image(body: bytes) -> None:
         raise DocumentTooLarge("The image has too many pixels.")
 
 
-def _docling(body: bytes, kind: DocumentKind, payload: dict[str, Any]) -> tuple[str, str]:
-    """Docling's Markdown and text of the document."""
+def _docling(body: bytes, kind: DocumentKind, payload: dict[str, Any]) -> tuple[str, str, bool]:
+    """Docling's Markdown and text of the document, and whether it read only a part of it."""
     extension = _EXTENSIONS[kind]
     converter = _converter(
         full_page=bool(payload["full_page_ocr"]) or kind in _IMAGE_KINDS,
@@ -197,7 +203,7 @@ def _docling(body: bytes, kind: DocumentKind, payload: dict[str, Any]) -> tuple[
     document = result.document
     markdown: str = document.export_to_markdown(image_placeholder="")
     text: str = document.export_to_text()
-    return markdown, text
+    return markdown, text, result.status == ConversionStatus.PARTIAL_SUCCESS
 
 
 @cache

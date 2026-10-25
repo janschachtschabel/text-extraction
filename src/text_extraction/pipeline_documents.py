@@ -37,7 +37,7 @@ Docling worker uses for its conversions.
 """
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
 from weakref import WeakKeyDictionary
@@ -122,7 +122,9 @@ class DocumentInputMeta(BaseModel):
     file_name: str | None = None  # uploads only
     final_url: str | None = None  # None for an upload
     upstream_status: int | None = None
-    etag: str | None = None  # the answer's validators, for the result cache
+    # The answer's validators, for the result cache; None when ``target`` is set: they fit the
+    # request URL only.
+    etag: str | None = None
     last_modified: str | None = None
     content_language: str | None = None
     charset: str | None = None  # of the Content-Type header
@@ -130,6 +132,9 @@ class DocumentInputMeta(BaseModel):
     needs_ocr: bool = False  # the PDF probe's verdict: a scan or a broken text layer (F4)
     compliance: ComplianceReport | None = None  # the checks the document passed
     attempts: int = 0  # fetches of the target so far
+    # The URL fetched when it is not the request's: the file a render ended on (F18).
+    target: str | None = None
+    warnings: list[str] = []  # the run's so far (``document_fetched_directly``)
 
 
 @dataclass(frozen=True)
@@ -284,9 +289,13 @@ def document_input(
     kind: DocumentKind,
     compliance: ComplianceReport,
     attempts: int,
+    *,
+    target: str | None = None,
+    warnings: Sequence[str] = (),
 ) -> DocumentInput:
-    """The input of a fetched document."""
-    validators = Validators.from_headers(fetched.headers)
+    """The input of a fetched document. ``target`` is the URL fetched when it is not the
+    request's (F18): the input then has no validators. ``warnings`` are the run's so far."""
+    validators = Validators() if target else Validators.from_headers(fetched.headers)
     return DocumentInput(
         body=fetched.content,
         meta=DocumentInputMeta(
@@ -301,6 +310,8 @@ def document_input(
             raw_sha256=fetched.raw_sha256,
             compliance=compliance,
             attempts=attempts,
+            target=target,
+            warnings=list(warnings),
         ),
     )
 

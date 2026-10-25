@@ -17,8 +17,11 @@ container that mounts the volume writable (``text-extraction-docling-worker
 
 The downloads use plain httpx, not the SSRF-guarded fetcher of the pipeline: the URLs are ours
 (the manifest), never a caller's, and an operator may route them through a proxy (``HTTPS_PROXY``,
-which httpx reads). Redirects are followed (Hugging Face serves its files from a CDN); the size
-and the hash decide what is kept.
+which httpx reads). They are https only (a manifest with an http URL is refused; tests opt in
+with ``allow_http``), and so is every redirect they follow (Hugging Face serves its files from a
+CDN); the size and the hash decide what is kept. Each file has a total deadline that grows with
+its size (``file_deadline_seconds``: 120 s plus 256 KiB/s), on top of the 60 s for each read, so
+a mirror that trickles cannot hold the init container.
 
 ``missing_models`` is the worker's check before ``/ready``: the files of the manifest that are
 absent or have another size (the hash of gigabytes is not read at every start).
@@ -31,8 +34,9 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path, PurePosixPath
@@ -46,9 +50,11 @@ _log = structlog.get_logger(__name__)
 _MARKER_PREFIX: Final = ".complete-"
 _STAGING_PREFIX: Final = ".download-"
 _SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
-_CHUNK_BYTES: Final = 1024 * 1024
 # A slow mirror may take long for a large file, but not for its first byte.
 _TIMEOUT: Final = httpx.Timeout(60.0, connect=15.0)
+# The total time of one file: a fixed part, then the slowest rate accepted.
+_FILE_BASE_SECONDS: Final = 120.0
+_MIN_BYTES_PER_SECOND: Final = 256 * 1024
 
 
 class ModelDownloadFailed(Exception):  # noqa: N818 - a failed run, named as such
@@ -74,20 +80,22 @@ class Manifest:
         return f"{_MARKER_PREFIX}{self.digest[:16]}"
 
 
-def load_manifest(data: bytes | None = None) -> Manifest:
+def load_manifest(data: bytes | None = None, *, allow_http: bool = False) -> Manifest:
     """The manifest from ``data`` (TOML), by default the built-in ``models.toml``. Raises
-    ``ValueError`` for an entry that is not a safe relative path, an http(s) URL, a SHA-256 in
-    lower-case hex and a positive size."""
+    ``ValueError`` for an entry that is not a safe relative path, an https URL (http too with
+    ``allow_http``, for tests against a local server), a SHA-256 in lower-case hex and a positive
+    size."""
     if data is None:
         data = resources.files("text_extraction.documents").joinpath("models.toml").read_bytes()
     parsed = tomllib.loads(data.decode("utf-8"))
-    files = tuple(_model_file(entry) for entry in parsed.get("files", []))
+    schemes = ("https", "http") if allow_http else ("https",)
+    files = tuple(_model_file(entry, schemes) for entry in parsed.get("files", []))
     if len({file.path for file in files}) != len(files):
         raise ValueError("the models manifest names a path twice")
     return Manifest(files=files, digest=hashlib.sha256(data).hexdigest())
 
 
-def _model_file(entry: Mapping[str, Any]) -> ModelFile:
+def _model_file(entry: Mapping[str, Any], schemes: tuple[str, ...]) -> ModelFile:
     path, url, sha256, size = (
         entry.get("path"),
         entry.get("url"),
@@ -96,8 +104,8 @@ def _model_file(entry: Mapping[str, Any]) -> ModelFile:
     )
     if not isinstance(path, str) or not _safe_path(path):
         raise ValueError("a models manifest path must be relative, without '..'")
-    if not isinstance(url, str) or httpx.URL(url).scheme not in ("http", "https"):
-        raise ValueError(f"the models manifest entry {path} needs an http(s) URL")
+    if not isinstance(url, str) or httpx.URL(url).scheme not in schemes:
+        raise ValueError(f"the models manifest entry {path} needs an https URL")
     if not isinstance(sha256, str) or not _SHA256.match(sha256):
         raise ValueError(f"the models manifest entry {path} needs a SHA-256 in hex")
     if type(size) is not int or size < 1:
@@ -126,15 +134,22 @@ def missing_models(root: Path, manifest: Manifest) -> list[str]:
     return sorted(missing)
 
 
+def file_deadline_seconds(size: int) -> float:
+    """The total time one file of ``size`` bytes may take to download."""
+    return _FILE_BASE_SECONDS + size / _MIN_BYTES_PER_SECOND
+
+
 def download_models(
     root: Path,
     manifest: Manifest | None = None,
     *,
     transport: httpx.BaseTransport | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> bool:
     """Put the manifest's files under ``root`` (see the module docstring). True when it
     downloaded them, False when the marker said they are there. Raises
-    ``ModelDownloadFailed``; ``root`` then has no marker and no new file."""
+    ``ModelDownloadFailed``; ``root`` then has no marker and no new file. ``clock`` measures
+    each file's deadline."""
     manifest = manifest if manifest is not None else load_manifest()
     root.mkdir(parents=True, exist_ok=True)
     marker = root / manifest.marker
@@ -145,7 +160,7 @@ def download_models(
     try:
         with httpx.Client(follow_redirects=True, timeout=_TIMEOUT, transport=transport) as client:
             for file in manifest.files:
-                _download(client, file, staging / file.path)
+                _download(client, file, staging / file.path, clock)
         for old in root.glob(f"{_MARKER_PREFIX}*"):
             old.unlink()
         for top in sorted({PurePosixPath(file.path).parts[0] for file in manifest.files}):
@@ -159,16 +174,26 @@ def download_models(
     return True
 
 
-def _download(client: httpx.Client, file: ModelFile, target: Path) -> None:
-    """Stream one file to ``target``, checking its size and SHA-256 on the way."""
+def _download(
+    client: httpx.Client, file: ModelFile, target: Path, clock: Callable[[], float]
+) -> None:
+    """Stream one file to ``target``, checking its size, SHA-256 and deadline on the way."""
     target.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
     size = 0
+    seconds = file_deadline_seconds(file.size)
+    deadline = clock() + seconds
     try:
         with client.stream("GET", file.url) as response, target.open("wb") as out:
+            if httpx.URL(file.url).scheme == "https" and response.url.scheme != "https":
+                raise ModelDownloadFailed(f"{file.path}: redirected away from https")
             if response.status_code != 200:
                 raise ModelDownloadFailed(f"{file.path}: HTTP status {response.status_code}")
-            for chunk in response.iter_bytes(_CHUNK_BYTES):
+            for chunk in response.iter_bytes():  # as it arrives, so the deadline is seen
+                if clock() > deadline:
+                    raise ModelDownloadFailed(
+                        f"{file.path}: did not arrive within {round(seconds)} seconds"
+                    )
                 size += len(chunk)
                 if size > file.size:
                     raise ModelDownloadFailed(f"{file.path}: more than {file.size} bytes")

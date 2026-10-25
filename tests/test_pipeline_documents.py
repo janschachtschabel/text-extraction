@@ -577,6 +577,7 @@ def test_scan_with_docling_returns_ocr_needed() -> None:
     assert meta.needs_ocr is True
     assert meta.compliance is not None
     assert meta.compliance.decision == "allowed"
+    assert (meta.target, meta.warnings) == (None, [])  # the request URL, nothing to carry over
     assert json.loads(meta.model_dump_json())["kind"] == "pdf"  # stored as JSON (F12)
     # The handoff's answer is returned as it is: the OCR pool stores what it keeps.
     assert envelope.error is not None
@@ -1093,6 +1094,43 @@ def test_a_direct_fetch_is_compared_with_the_draft_and_stored_once() -> None:
     fingerprint = data.fingerprint
     assert fingerprint is not None
     assert fingerprint.changed is None  # compared once: the first
+
+
+def test_a_direct_fetch_hands_its_run_context_to_ocr() -> None:
+    """A file a render ended on that needs OCR (F18): its queued input carries the run's target
+    and warnings, and not the file's validators, which do not fit the request URL."""
+    result = replace(rendered("", responses=[response(PAGE)]), download_url=SHEET)
+    headers = {"etag": '"v1"', "last-modified": "Tue, 01 Sep 2026 10:00:00 GMT"}
+    harness = Harness(
+        None,
+        {
+            SHEET: fetched(
+                SHEET, corpus("text.pdf"), content_type="application/pdf", headers=headers
+            )
+        },
+        pool=FakePool(reply(content="", needs_ocr=True)),
+        renderer=FakeRenderer(result),
+        docling_enabled=True,
+        **BROWSER,
+    )
+    handed: list[OcrNeeded] = []
+
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        return without
+
+    harness.run(handoff, mode="browser", url=PAGE)
+
+    (needed,) = handed
+    meta = needed.input.meta
+    assert meta.target == SHEET
+    assert meta.final_url == SHEET
+    assert meta.warnings == ["document_fetched_directly"]
+    assert (meta.etag, meta.last_modified) == (None, None)
+    assert needed.draft is not None
+    assert data_of(needed.draft).warnings[0] == "document_fetched_directly"
 
 
 def test_app_wires_one_lazy_document_pool() -> None:

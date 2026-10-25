@@ -133,3 +133,39 @@ def test_page_cap_warning(child: Child) -> None:
     assert conversion.warnings == ["pages_truncated"]
     assert "Photosynthese" in conversion.content
     assert "Chlorophyll" not in conversion.content  # on page 2
+
+
+def test_a_partial_conversion_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Docling stopped at its own ``document_timeout`` (or skipped a page): what it read is
+    answered with the warning ``pages_partial``. In this process, with Docling's converter
+    replaced: the status is what is under test, not the models."""
+    docling_convert = pytest.importorskip("text_extraction.documents.docling_convert")
+    from docling.datamodel.base_models import ConversionStatus
+
+    class Document:
+        def export_to_markdown(self, image_placeholder: str) -> str:
+            return "# Die Photosynthese\n\nErste Seite."
+
+        def export_to_text(self) -> str:
+            return "Die Photosynthese\n\nErste Seite."
+
+    class Result:
+        status = ConversionStatus.PARTIAL_SUCCESS
+        document = Document()
+
+    class Converter:
+        def convert(self, *_args: Any, **_kwargs: Any) -> Result:
+            return Result()
+
+    monkeypatch.setattr(docling_convert, "_converter", lambda **_options: Converter())
+    meta = DocumentInputMeta(kind="odt", content_type=media_type("odt"), raw_sha256="0" * 64)
+    payload = docling_payload(
+        DocumentInput((CORPUS / "text.odt").read_bytes(), meta),
+        "markdown",
+        Settings(auth_mode="none"),
+    )
+
+    reply = docling_convert.convert(payload)
+
+    assert reply["warnings"] == ["pages_partial"]
+    assert "Erste Seite." in reply["content"]
