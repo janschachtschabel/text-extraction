@@ -18,6 +18,12 @@ on:
         description: Fail below this ok rate, in percent
         type: string
         default: "80"
+      service_ref:
+        description: >-
+          Measure the service of this branch, tag or full commit SHA (empty: this commit), with
+          this run's harness and URL lists
+        type: string
+        default: ""
   pull_request:
     types: [labeled, synchronize, opened, reopened]
   schedule:
@@ -27,11 +33,13 @@ permissions:
   contents: read
 
 # A new run for the same ref cancels the one in progress. Adding any other label than `live`
-# gets a group of its own, so it neither cancels a live run nor runs itself (see `if` below).
+# gets a group of its own, so it neither cancels a live run nor runs itself (see `if` below), and
+# so does a manual run of another service_ref: both halves of an A/B comparison run side by side.
 concurrency:
   group: >-
     live-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'live'
-    && format('-other-label-{0}', github.run_id) || '' }}
+    && format('-other-label-{0}', github.run_id) || '' }}${{ inputs.service_ref
+    && format('-service-{0}', inputs.service_ref) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -64,6 +72,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # An A/B comparison: the service (src, pyproject.toml, uv.lock) of another commit, measured
+      # with this harness and these URL lists, so a change of the ok rate can be told from a
+      # change of the sites. Compare the "URLs not ok" tables of both runs.
+      - name: Take the service from ${{ inputs.service_ref }}
+        if: inputs.service_ref != ''
+        env:
+          SERVICE_REF: ${{ inputs.service_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$SERVICE_REF"
+          rm -rf src
+          git checkout FETCH_HEAD -- src pyproject.toml uv.lock
+          git log -1 --format='service under test: %H %s' FETCH_HEAD
 
       # uv reads .python-version (3.13) and provisions its own managed Python.
       - uses: astral-sh/setup-uv@v7

@@ -202,8 +202,8 @@ def _percent(count: int, total: int) -> str:
 
 def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> str:
     """The Markdown summary: buckets overall, ok rate, would-be blocks, answers whose browser
-    worker did not answer in time, results per mode that produced them, buckets per domain and
-    the error codes of the answers."""
+    worker did not answer in time, results per mode that produced them, buckets per domain, the
+    error codes of the answers and every URL that is not ok."""
     total = len(records)
     counts = Counter(record.bucket for record in records)
     lines = [
@@ -256,7 +256,24 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
             for domain, c in top
         ]
     lines += _error_codes(records)
+    lines += _not_ok(records)
     return "\n".join(lines) + "\n"
+
+
+def _not_ok(records: Sequence[Record]) -> list[str]:
+    """Every URL whose bucket is not ``ok``, by domain and URL: two runs can be compared URL by
+    URL, which the domain table cannot show."""
+    failed = sorted((r for r in records if r.bucket != "ok"), key=lambda r: (r.domain, r.url))
+    if not failed:
+        return []
+    lines = ["", "### URLs not ok", "", "| URL | Bucket | Code | Mode | Words |"]
+    lines.append("| --- | --- | --- | --- | ---: |")
+    lines += [
+        f"| {r.url} | {r.bucket} | {r.error_code or '-'} | {r.mode_used or '-'} | "
+        f"{'-' if r.word_count is None else r.word_count} |"
+        for r in failed
+    ]
+    return lines
 
 
 def _error_codes(records: Sequence[Record]) -> list[str]:
