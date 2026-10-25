@@ -29,7 +29,10 @@ its size (``file_deadline_seconds``: 120 s plus 256 KiB/s), on top of the 60 s f
 a mirror that trickles cannot hold the init container.
 
 ``missing_models`` is the worker's check before ``/ready``: the files of the manifest that are
-absent or have another size (the hash of gigabytes is not read at every start).
+absent or have another size (the hash of the files is not read at every start).
+``require_models`` repeats that check in the Docling child before it builds a converter, so a
+file that went missing later is ``ModelsMissing`` (Docling itself raises a plain
+``RuntimeError`` for a missing ``config.json``, which would read as an unreadable document).
 
 Logs name the files' paths in the manifest and the volume's path, never a URL.
 """
@@ -60,6 +63,11 @@ _TIMEOUT: Final = httpx.Timeout(60.0, connect=15.0)
 # The total time of one file: a fixed part, then the slowest rate accepted.
 _FILE_BASE_SECONDS: Final = 120.0
 _MIN_BYTES_PER_SECOND: Final = 256 * 1024
+
+
+class ModelsMissing(Exception):  # noqa: N818 - a state of the volume, named as such
+    """A model file of the manifest is not on the models volume. The Docling worker maps this
+    type name to ``internal_error`` (retryable)."""
 
 
 class ModelDownloadFailed(Exception):  # noqa: N818 - a failed run, named as such
@@ -137,6 +145,17 @@ def missing_models(root: Path, manifest: Manifest) -> list[str]:
         if not target.is_file() or target.stat().st_size != file.size:
             missing.append(file.path)
     return sorted(missing)
+
+
+def require_models(root: Path, manifest: Manifest | None = None) -> None:
+    """Raise ``ModelsMissing`` unless every file of the manifest (by default the built-in one)
+    is under ``root`` with its size. The message counts the files; it names no path."""
+    manifest = manifest or load_manifest()
+    missing = missing_models(root, manifest)
+    if missing:
+        raise ModelsMissing(
+            f"{len(missing)} of {len(manifest.files)} model files are missing on the models volume."
+        )
 
 
 def file_deadline_seconds(size: int) -> float:

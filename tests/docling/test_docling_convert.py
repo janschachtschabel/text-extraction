@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from text_extraction.docling_worker import create_docling_pool, docling_payload
-from text_extraction.documents.pool import DocumentPool
+from text_extraction.documents.pool import ConversionError, DocumentPool
 from text_extraction.documents.sniff import media_type
 from text_extraction.documents.types import DocumentConversion, DocumentKind
 from text_extraction.pipeline_documents import DocumentInput, DocumentInputMeta
@@ -133,6 +133,30 @@ def test_page_cap_warning(child: Child) -> None:
     assert conversion.warnings == ["pages_truncated"]
     assert "Photosynthese" in conversion.content
     assert "Chlorophyll" not in conversion.content  # on page 2
+
+
+def test_a_missing_layout_config_is_models_missing(child: Child, tmp_path: Path) -> None:
+    """Docling raises a plain RuntimeError for the layout model's missing config.json; the
+    check before the converter answers ModelsMissing (internal_error, retryable) instead of an
+    unreadable document. The volume is the real one linked file by file, without that file."""
+    source = child.settings.docling_models_path
+    config = "docling/docling-project--docling-layout-heron/config.json"
+    for file in source.rglob("*"):
+        relative = file.relative_to(source).as_posix()
+        if file.is_file() and relative != config:
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / relative).symlink_to(file)
+
+    with pytest.raises(ConversionError) as caught:
+        child.convert("scan.pdf", "pdf", models_path=str(tmp_path))
+
+    assert caught.value.type_name == "ModelsMissing"
+
+
+def test_open_document_needs_no_models(child: Child, tmp_path: Path) -> None:
+    conversion = child.convert("text.odt", "odt", models_path=str(tmp_path))
+
+    assert "Die Photosynthese" in conversion.content
 
 
 def test_a_partial_conversion_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:

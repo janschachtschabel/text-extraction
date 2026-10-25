@@ -21,8 +21,11 @@ converts one document:
    so it stops between pages before the parent kills the child; what it read then is a
    ``PARTIAL_SUCCESS``, answered with the warning ``pages_partial``, as is a page Docling could
    not read); OpenDocument files through its simple pipeline (no OCR, no models). Nothing is
-   fetched: the parent starts the child with ``HF_HUB_OFFLINE``. Models that are not on the
-   volume are ``ModelsMissing``; any other failure of Docling is ``DocumentUnreadable``, with a
+   fetched: the parent starts the child with ``HF_HUB_OFFLINE``. Before a PDF or an image, the
+   files of the models manifest are checked on the volume (``model_store.require_models``, a
+   stat of each): a missing one is ``ModelsMissing``, because Docling raises a plain
+   ``RuntimeError`` for a missing ``config.json``. A ``FileNotFoundError`` from Docling is
+   ``ModelsMissing`` too; any other failure of Docling is ``DocumentUnreadable``, with a
    message of our own (Docling's may quote the document).
 4. The output (F6): ``markdown`` is Docling's ``export_to_markdown`` (whitespace normalised as
    for MarkItDown), ``text`` its ``export_to_text``. ``html`` renders that Markdown with
@@ -44,9 +47,10 @@ returning a ``ConversionResult`` (``status``: ``ConversionStatus``, ``document``
 ``accelerator_options``, ``document_timeout``), ``TesseractCliOcrOptions(lang, path, mode)``,
 ``OcrMode.FULL_PAGE``, ``TableStructureOptions(mode=TableFormerMode.FAST)``;
 ``docling.datamodel.accelerator_options.AcceleratorOptions(num_threads, device=
-AcceleratorDevice.CPU)``. A missing model raises ``FileNotFoundError`` when the pipeline is
-built. Docling's own downloader (``docling.utils.model_downloader.download_models``, Hugging
-Face snapshots) is not used: ``documents/models.toml`` pins each file with its SHA-256.
+AcceleratorDevice.CPU)``. A missing model file raises ``FileNotFoundError`` or, for the
+layout model's ``config.json``, ``RuntimeError`` when the pipeline is built. Docling's own
+downloader (``docling.utils.model_downloader.download_models``, Hugging Face snapshots) is not
+used: ``documents/models.toml`` pins each file with its SHA-256.
 
 The reply is a dict of builtins (the pool unpickles nothing else); the parent reads it with
 ``DocumentConversion.from_reply``.
@@ -81,6 +85,7 @@ from text_extraction.convert import OutputFormat
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.images import check_image
 from text_extraction.documents.meta import document_metadata
+from text_extraction.documents.model_store import ModelsMissing, require_models
 from text_extraction.documents.pdf import probe_pdf, truncate_pdf
 from text_extraction.documents.sniff import DocumentUnreadable, check_container
 from text_extraction.documents.types import DocumentKind
@@ -98,14 +103,11 @@ _EXTENSIONS: Final[dict[str, str]] = {
     "odp": ".odp",
 }
 _IMAGE_KINDS: Final = frozenset({"png", "jpeg", "tiff", "webp", "bmp"})
+_OPEN_DOCUMENT_KINDS: Final = frozenset({"odt", "ods", "odp"})
 _OUTPUTS: Final = frozenset({"markdown", "text", "html"})
 _OK: Final = frozenset({ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS})
 # Docling stopped early (its ``document_timeout``) or skipped pages it could not read.
 PAGES_PARTIAL_WARNING: Final = "pages_partial"
-
-
-class ModelsMissing(Exception):  # noqa: N818 - a state of the volume, named as such
-    """A model Docling needs is not under ``<models_path>/docling``."""
 
 
 def convert(payload: dict[str, Any]) -> dict[str, Any]:
@@ -164,6 +166,8 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
 def _docling(body: bytes, kind: DocumentKind, payload: dict[str, Any]) -> tuple[str, str, bool]:
     """Docling's Markdown and text of the document, and whether it read only a part of it."""
     extension = _EXTENSIONS[kind]
+    if kind not in _OPEN_DOCUMENT_KINDS:  # the PDF pipeline loads the models
+        require_models(Path(payload["models_path"]))
     converter = _converter(
         full_page=bool(payload["full_page_ocr"]) or kind in _IMAGE_KINDS,
         languages=tuple(payload["languages"]),

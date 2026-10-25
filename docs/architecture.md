@@ -575,7 +575,7 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   the fast phase and then the wait for the worker. Callers that need a shorter bound send
   `wait_seconds` or lower `DOCLING_SYNC_WAIT_SECONDS` (at 0 a sync request does not wait).
 - **D3, the Docling worker is off by default.** Helm `workers.docling.enabled: false`, compose
-  profile `docling`; it needs an image of about 2 GB and about 2 GiB of models. Without it a
+  profile `docling`; it needs an image of about 2 GB and about 335 MiB of models (9 files). Without it a
   scan keeps its text layer (`ocr_unavailable`), and images and OpenDocument files answer
   `unsupported_content_type` ("OCR is not enabled on this service.").
 
@@ -751,7 +751,10 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   when that failure is retryable (models missing, the conversion pool unavailable) the draft also
   loses its fingerprint and is neither compared nor stored. A Docling timeout is not retryable,
   unlike MarkItDown's: the child had all of `DOCLING_TIMEOUT_SECONDS`, and the same file would time
-  out again. Models missing on the volume are `internal_error`, retryable. An item lost too often
+  out again. Models missing on the volume are `internal_error`, retryable: before a PDF or an
+  image the child checks the manifest's files on the volume (a stat of each, `require_models`),
+  because Docling raises a plain `RuntimeError` for a missing layout `config.json`, which would
+  otherwise read as `conversion_failed`. An item lost too often
   (`JOB_ITEM_MAX_ATTEMPTS`) answers its draft with `ocr_unavailable`, unstored (no draft:
   `internal_error`, retryable). Before `/ready` the
   worker checks the manifest's files, starts its children and converts a built-in one-page scan

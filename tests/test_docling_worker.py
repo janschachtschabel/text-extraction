@@ -900,6 +900,42 @@ MODEL_FILES = {
 }
 
 
+def filled_volume(root: Path, manifest: model_store.Manifest) -> None:
+    """Sparse files of the manifest's sizes: what ``missing_models`` looks at."""
+    for file in manifest.files:
+        target = root / file.path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as handle:
+            handle.truncate(file.size)
+
+
+def test_require_models_passes_on_a_complete_volume(tmp_path: Path) -> None:
+    manifest = model_store.load_manifest()
+    filled_volume(tmp_path, manifest)
+
+    model_store.require_models(tmp_path, manifest)  # no error
+
+
+def test_require_models_names_a_missing_layout_config(tmp_path: Path) -> None:
+    # Docling itself raises a RuntimeError for a missing config.json, which would read as an
+    # unreadable document; the check before the converter makes it ModelsMissing.
+    manifest = model_store.load_manifest()
+    filled_volume(tmp_path, manifest)
+    config = "docling/docling-project--docling-layout-heron/config.json"
+    (tmp_path / config).unlink()
+
+    with pytest.raises(model_store.ModelsMissing, match="1 of 9") as caught:
+        model_store.require_models(tmp_path, manifest)
+
+    assert type(caught.value).__name__ == "ModelsMissing"  # the type name the worker maps
+    assert str(tmp_path) not in str(caught.value)
+
+
+def test_require_models_on_an_empty_volume(tmp_path: Path) -> None:
+    with pytest.raises(model_store.ModelsMissing, match="9 of 9"):
+        model_store.require_models(tmp_path)
+
+
 def test_download_models_is_idempotent(httpserver: HTTPServer, tmp_path: Path) -> None:
     manifest = model_store.load_manifest(manifest_for(httpserver, MODEL_FILES), allow_http=True)
 
