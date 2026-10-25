@@ -810,3 +810,64 @@ def test_only_the_sent_headers_are_reported(event: str, reported: bool) -> None:
     asyncio.run(report())
 
     assert sent == (["example.org"] if reported else [])
+
+
+def test_fetch_keeps_head_of_declared_media(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/episode.mp3").respond_with_data(
+        b"ID3" + b"\x00" * (50_000_000 - 3), content_type="audio/mpeg"
+    )
+
+    result = fetch(httpserver.url_for("/episode.mp3"), max_bytes=1_000_000)
+
+    assert result.status == 200
+    assert result.truncated is True
+    assert len(result.content) == 65_536
+    assert result.content.startswith(b"ID3")
+    assert result.headers["content-length"] == "50000000"
+
+
+@pytest.mark.parametrize("content_type", ["video/mp4", "application/ogg", "audio/ogg; codecs=opus"])
+def test_fetch_keeps_head_of_every_declared_media_type(
+    httpserver: HTTPServer, content_type: str
+) -> None:
+    httpserver.expect_request("/media").respond_with_data(b"x" * 300_000, content_type=content_type)
+
+    result = fetch(httpserver.url_for("/media"), max_bytes=100_000)
+
+    assert result.truncated is True
+    assert len(result.content) == 65_536
+
+
+def test_fetch_of_declared_media_without_content_length_is_truncated(
+    httpserver: HTTPServer,
+) -> None:
+    def handler(_request: Request) -> Response:
+        return Response((b"x" * 10_000 for _ in range(100)), content_type="audio/mpeg")
+
+    httpserver.expect_request("/stream").respond_with_handler(handler)
+
+    result = fetch(httpserver.url_for("/stream"), max_bytes=100_000)
+
+    assert result.truncated is True
+    assert len(result.content) == 65_536
+
+
+def test_small_declared_media_is_returned_whole(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/small.mp3").respond_with_data(
+        b"x" * 1000, content_type="audio/mpeg"
+    )
+
+    result = fetch(httpserver.url_for("/small.mp3"))
+
+    assert result.truncated is False
+    assert len(result.content) == 1000
+
+
+def test_other_types_over_the_cap_are_still_too_large(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/blob").respond_with_data(
+        b"x" * 200_000, content_type="application/octet-stream"
+    )
+
+    error = fetch_error(httpserver.url_for("/blob"), max_bytes=100_000)
+
+    assert error.code is ErrorCode.TOO_LARGE

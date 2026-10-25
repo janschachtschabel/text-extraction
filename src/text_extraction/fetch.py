@@ -7,7 +7,10 @@ What it enforces, for the first request and every redirect hop alike:
 * one overall deadline for the whole call, redirects included;
 * a cap on the *decoded* body size. ``gzip`` and ``deflate`` are inflated here in bounded steps,
   so a compression bomb cannot allocate more than one step beyond the cap. With ``truncate`` the
-  body is cut at the cap instead (robots.txt is read from its first 500 KiB, RFC 9309);
+  body is cut at the cap instead (robots.txt is read from its first 500 KiB, RFC 9309). A
+  response declared ``audio/*``, ``video/*`` or ``application/ogg`` is always cut, at
+  ``MEDIA_HEAD_BYTES`` (or the cap, if that is lower): a media file is sniffed from its head,
+  never refused as ``too_large``, and a declared ``Content-Length`` over the cap does not matter;
 * cache validators go only to the origin they came from: once a redirect leaves it, the
   conditional headers are dropped for the rest of the chain.
 
@@ -45,6 +48,7 @@ import structlog
 
 from text_extraction import __version__
 from text_extraction.envelope import ErrorCode
+from text_extraction.media.sniff import MEDIA_HEAD_BYTES, is_declared_media
 from text_extraction.netguard import (
     AddressPolicy,
     BlockedAddressError,
@@ -485,9 +489,13 @@ class Fetcher:
     async def _read_body(self, response: httpx.Response, limits: _Limits) -> tuple[bytes, bool]:
         """The decoded body and whether it was cut at the limit."""
         max_bytes = limits.max_bytes
+        truncate = limits.truncate
+        if is_declared_media(response.headers.get("content-type")):
+            max_bytes = min(max_bytes, MEDIA_HEAD_BYTES)
+            truncate = True
         declared = response.headers.get("content-length", "")
         if (
-            not limits.truncate
+            not truncate
             and declared.isdigit()
             and int(declared) > max_bytes
             and not response.headers.get("content-encoding")
@@ -498,7 +506,7 @@ class Fetcher:
             async for chunk in chunks:
                 body += chunk
                 if len(body) > max_bytes:
-                    if not limits.truncate:
+                    if not truncate:
                         raise self._too_large(response.status_code)
                     return bytes(body[:max_bytes]), True
         return bytes(body), False
