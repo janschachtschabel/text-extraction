@@ -4,7 +4,9 @@ committed, so the tests do not need this script, reportlab, python-docx or Pillo
     uv run python tests/documents/make_corpus.py
 
 The output is deterministic (fixed dates and ids), so a re-run changes a file only when this
-script or the system font changes. Later tasks add their files here.
+script or the system font changes. Later tasks add their files here. Office files come from
+python-docx, python-pptx and openpyxl, the old Excel format from xlwt (BSD-3-Clause, dev only:
+no other permissive library writes it), the EPUB is assembled entry by entry.
 """
 
 import datetime
@@ -14,6 +16,10 @@ import zipfile
 from pathlib import Path
 
 import docx
+import openpyxl
+import pptx
+import xlwt
+from openpyxl.writer.excel import ExcelWriter
 from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib import pdfencrypt
 from reportlab.lib.pagesizes import A4
@@ -251,6 +257,151 @@ def _core_docx() -> bytes:
     return _fix_zip_dates(buffer.getvalue())
 
 
+SCRIPT_LINE = "Der Quelltext <script>alert(1)</script> bleibt Text."
+
+SHEETS = (
+    ("Noten", (("Name", "Note"), ("Anna", "1"), ("Jörg", "2"))),
+    ("Termine", (("Datum", "Thema"), ("15.03.2024", "Photosynthese"))),
+)
+
+
+def _lesson_docx() -> bytes:
+    """Headings, a paragraph, a table and a line that quotes HTML markup."""
+    document = docx.Document()
+    document.add_heading("Photosynthese", level=1)
+    document.add_paragraph(GERMAN_PAGES[0][1])
+    document.add_heading("Wichtige Stoffe", level=2)
+    table = document.add_table(rows=len(TABLE_ROWS), cols=len(TABLE_ROWS[0]))
+    for row, values in zip(table.rows, TABLE_ROWS, strict=True):
+        for cell, value in zip(row.cells, values, strict=True):
+            cell.text = value
+    document.add_paragraph(SCRIPT_LINE)
+    properties = document.core_properties
+    properties.title = "Photosynthese"
+    properties.created = datetime.datetime(2024, 3, 15, 9, 30, tzinfo=datetime.UTC)
+    properties.modified = datetime.datetime(2024, 4, 1, 12, 0, tzinfo=datetime.UTC)
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return _fix_zip_dates(buffer.getvalue())
+
+
+def _slides_pptx() -> bytes:
+    """Two slides with a title and a body each; the first has speaker notes."""
+    presentation = pptx.Presentation()
+    layout = presentation.slide_layouts[1]  # Title and Content
+    for number, lines in enumerate(GERMAN_PAGES):
+        slide = presentation.slides.add_slide(layout)
+        slide.shapes.title.text = lines[0]
+        slide.placeholders[1].text = lines[1]
+        if number == 0:
+            slide.notes_slide.notes_text_frame.text = "Notiz: Chlorophyll an der Tafel erklären."
+    properties = presentation.core_properties
+    properties.title = "Photosynthese"
+    properties.created = datetime.datetime(2024, 3, 15, 9, 30)
+    properties.modified = datetime.datetime(2024, 4, 1, 12, 0)
+    properties.last_printed = datetime.datetime(2024, 4, 1, 12, 0)
+    buffer = io.BytesIO()
+    presentation.save(buffer)
+    return _fix_zip_dates(buffer.getvalue())
+
+
+def _sheets_xlsx() -> bytes:
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    for name, rows in SHEETS:
+        sheet = workbook.create_sheet(name)
+        for row in rows:
+            sheet.append(row)
+    workbook.properties.created = datetime.datetime(2024, 3, 15, 9, 30)
+    workbook.properties.modified = datetime.datetime(2024, 4, 1, 12, 0)
+    buffer = io.BytesIO()
+    # ``Workbook.save`` stamps the current time into ``modified``; the writer itself does not.
+    ExcelWriter(workbook, zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED)).save()
+    return _fix_zip_dates(buffer.getvalue())
+
+
+def _sheets_xls() -> bytes:
+    workbook = xlwt.Workbook(encoding="utf-8")
+    for name, rows in SHEETS:
+        sheet = workbook.add_sheet(name)
+        for row_number, row in enumerate(rows):
+            for column, value in enumerate(row):
+                sheet.write(row_number, column, value)
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
+_EPUB_CONTAINER = """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+ <rootfiles>
+  <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+ </rootfiles>
+</container>"""
+
+_EPUB_PACKAGE = """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+ <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:identifier id="id">urn:uuid:3f1c2b4e-0000-4000-8000-000000000001</dc:identifier>
+  <dc:title>Photosynthese für Einsteiger</dc:title>
+  <dc:creator>Erika Mustermann</dc:creator>
+  <dc:language>de</dc:language>
+  <meta property="dcterms:modified">2024-04-01T12:00:00Z</meta>
+ </metadata>
+ <manifest>
+  <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  <item id="c2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+ </manifest>
+ <spine>
+  <itemref idref="c1"/>
+  <itemref idref="c2"/>
+ </spine>
+</package>"""
+
+_EPUB_NAV = """<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>Inhalt</title></head>
+<body><nav epub:type="toc"><ol>
+ <li><a href="chapter1.xhtml">Die Photosynthese</a></li>
+ <li><a href="chapter2.xhtml">Wichtige Stoffe</a></li>
+</ol></nav></body>
+</html>"""
+
+
+def _epub_chapter(lines: tuple[str, ...]) -> str:
+    paragraphs = "".join(f"<p>{line}</p>" for line in lines[1:])
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml">'
+        f"<head><title>{lines[0]}</title></head>"
+        f"<body><h1>{lines[0]}</h1>{paragraphs}</body></html>"
+    )
+
+
+def _book_epub() -> bytes:
+    """An EPUB 3 with two chapters; ``mimetype`` first and stored, as the format requires."""
+    entries = {
+        "mimetype": "application/epub+zip",
+        "META-INF/container.xml": _EPUB_CONTAINER,
+        "OEBPS/content.opf": _EPUB_PACKAGE,
+        "OEBPS/nav.xhtml": _EPUB_NAV,
+        "OEBPS/chapter1.xhtml": _epub_chapter(GERMAN_PAGES[0]),
+        "OEBPS/chapter2.xhtml": _epub_chapter(GERMAN_PAGES[1]),
+    }
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, text in entries.items():
+            entry = zipfile.ZipInfo(name, date_time=(2000, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_STORED if name == "mimetype" else zipfile.ZIP_DEFLATED
+            archive.writestr(entry, text.encode())
+    return out.getvalue()
+
+
+def _latin1_csv() -> bytes:
+    return "Name,Größe,Gewicht\nAnna,1.62,55\nJörg,1.80,80\n".encode("latin-1")
+
+
 def main() -> None:
     CORPUS.mkdir(parents=True, exist_ok=True)
     pages = _scan_pages()
@@ -261,6 +412,12 @@ def main() -> None:
         "empty.pdf": _empty_pdf(),
         "xmp-cc-by-sa.pdf": _xmp_pdf(),
         "core.docx": _core_docx(),
+        "lesson.docx": _lesson_docx(),
+        "slides.pptx": _slides_pptx(),
+        "sheets.xlsx": _sheets_xlsx(),
+        "sheets.xls": _sheets_xls(),
+        "book.epub": _book_epub(),
+        "latin1.csv": _latin1_csv(),
         "scan.expected.txt": (
             "\n\n".join("\n".join(lines) for lines in GERMAN_PAGES) + "\n"
         ).encode(),
