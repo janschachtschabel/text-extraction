@@ -4,6 +4,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
@@ -80,7 +81,8 @@ def _read_api_keys_file(path: Path) -> list[ApiKey]:
 
 
 class Settings(BaseSettings):
-    """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content."""
+    """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content and
+    ``ASR_EXTERNAL_API_KEY``."""
 
     model_config = SettingsConfigDict(
         case_sensitive=False, extra="ignore", hide_input_in_errors=True
@@ -211,6 +213,40 @@ class Settings(BaseSettings):
     docling_ocr_languages: str = Field(default="deu,eng", pattern=r"^[a-z_]{3,}(,[a-z_]{3,})*$")
     # Volume with the models: Docling's in docling/, Tesseract's data in tessdata/.
     docling_models_path: Path = Path("/models")
+    # Audio and video: subtitles of platform videos and HTML5 tracks, in child processes of the pod
+    # that holds the request. Speech recognition goes to the ASR worker.
+    media_enabled: bool = True
+    media_concurrency: int = Field(default=2, ge=1)  # media child processes per pod
+    media_memory_limit_mb: int = Field(default=1024, ge=256)  # address space of one child
+    # Bytes all requests of one media call may pull through the egress proxy (player APIs,
+    # caption files), and the largest subtitle track a child hands back.
+    media_extract_max_bytes: int = Field(default=30_000_000, ge=1024)
+    media_subtitle_max_bytes: int = Field(default=5_000_000, ge=1024)
+    media_max_tracks: int = Field(default=3, ge=0, le=10)  # HTML5 tracks added to one page
+    media_max_duration_seconds: int = Field(default=10_800, ge=60)  # longer is media_too_long
+    media_max_bytes: int = Field(default=500_000_000, ge=1_000_000)  # a download for ASR
+    # Largest uploaded audio or video file; its bytes travel through Valkey, so with ASR_ENABLED
+    # at most DOCLING_INPUT_BUDGET_BYTES.
+    media_upload_max_bytes: int = Field(default=25_000_000, ge=1_000_000)
+    media_download_timeout_seconds: int = Field(default=600, ge=30, le=3600)  # one download
+    # ASR worker (speech recognition). Off by default: the API image has no models.
+    asr_enabled: bool = False
+    asr_backend: Literal["local", "openai"] = "local"
+    asr_model: Literal["small", "large-v3-turbo"] = "large-v3-turbo"  # the model manifest's names
+    asr_models_path: Path = Path("/models")  # volume with the Whisper models, one folder each
+    asr_compute_type: str = Field(default="int8", min_length=1)  # CTranslate2 compute type
+    asr_threads: int = Field(default=4, ge=1)  # CPU threads of one transcription
+    asr_concurrency: int = Field(default=1, ge=1)  # transcriptions at once per ASR worker
+    asr_memory_limit_mb: int = Field(default=4096, ge=256)  # address space of one child
+    asr_timeout_seconds: int = Field(default=3600, ge=60, le=14_400)  # one item
+    asr_input_ttl_seconds: int = Field(default=21_600, ge=600)  # an uploaded file's bytes
+    asr_max_open_per_client: int = Field(default=3, ge=1)  # unfinished ASR jobs per key
+    asr_scratch_path: Path = Path("/tmp/asr")  # noqa: S108 - an emptyDir for downloaded media
+    # External backend (``ASR_BACKEND=openai``): an OpenAI-compatible transcription endpoint.
+    asr_external_base_url: str | None = None  # https only
+    asr_external_model: str = Field(default="whisper-1", min_length=1)
+    asr_external_api_key: str | None = Field(default=None, repr=False)  # secret
+    asr_external_timeout_seconds: float = Field(default=300, ge=1)  # per audio chunk
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -230,12 +266,27 @@ class Settings(BaseSettings):
             raise ValueError(f"unknown resource type; known: {', '.join(_RESOURCE_TYPES)}")
         return ",".join(types)
 
+    @field_validator("asr_external_base_url")
+    @classmethod
+    def _external_asr_is_https(cls, value: str | None) -> str | None:
+        """Empty means unset (the Helm chart renders an unset value so); the URL is not echoed,
+        it may carry credentials."""
+        if value is None or not value.strip():
+            return None
+        parts = urlsplit(value.strip())
+        if parts.scheme.lower() != "https" or not parts.hostname:
+            raise ValueError("the external ASR endpoint must be an https URL")
+        return value.strip()
+
     @model_validator(mode="after")
     def _document_limit_within_fetch_limit(self) -> Self:
         if self.document_max_bytes > self.fetch_max_bytes:
             raise ValueError("DOCUMENT_MAX_BYTES must not exceed FETCH_MAX_BYTES")
         if self.document_max_bytes > self.docling_input_budget_bytes:
             raise ValueError("DOCUMENT_MAX_BYTES must not exceed DOCLING_INPUT_BUDGET_BYTES")
+        # Uploaded media only travel through the input budget when the service transcribes.
+        if self.asr_enabled and self.media_upload_max_bytes > self.docling_input_budget_bytes:
+            raise ValueError("MEDIA_UPLOAD_MAX_BYTES must not exceed DOCLING_INPUT_BUDGET_BYTES")
         return self
 
     @model_validator(mode="after")

@@ -211,6 +211,8 @@ async def create_batch(
         compliance=resolve_mode(body.compliance, principal, settings),
         cache=body.cache,
         ocr=body.ocr,
+        transcribe=body.transcribe,
+        languages=body.languages,
     )
     if guard.high:
         raise _memory_high()

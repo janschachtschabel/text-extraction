@@ -117,6 +117,7 @@ Keep these out of ConfigMaps, images and logs.
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
 | `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
+| `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. Never logged. | Not rendered by the chart yet: set it in the ASR worker's environment from a Secret. |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -330,6 +331,49 @@ Docling worker and its models volume. The Helm keys (the full table is in the
 | `workers.docling.models.download` | `true` | An init container fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
 | `workers.docling.models.persistence.*` | `5Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`DOCLING_MODELS_PATH`), read-only in the worker. |
 | `workers.docling.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-docling`, chart version | The Docling image. |
+
+## Audio and video
+
+Audio and video become text in three tiers. A URL of a supported platform (YouTube, Vimeo, ARD,
+ZDF, ARTE, 3sat) answers with the video's subtitles (manual first, then automatic captions), its
+title, description, duration and licence; without subtitles it answers the metadata
+(`transcript_source: metadata_only`, `partial`/`no_transcript_available`). Subtitles are read by
+child processes of the pod that holds the request (youtube-transcript-api, yt-dlp). Speech
+recognition (`transcribe: true`, and every uploaded audio or video file) runs in the ASR worker and
+is always a job. ASR is off by default: the API image has neither Whisper nor models.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MEDIA_ENABLED` | `true` | Switch audio and video on: URLs of supported platforms (YouTube, Vimeo, ARD, ZDF, ARTE, 3sat) answer with the video's subtitles or metadata, media files are recognised by their bytes, and pages gain the text of their HTML5 `<track>` elements and the list of their embedded players (`data.media`). Off, these URLs and files are handled as before. |
+| `MEDIA_CONCURRENCY` | `2` | Media child processes per pod (subtitle and metadata calls of youtube-transcript-api and yt-dlp); each handles one call at a time. A request waits for a free one within its time budget. Minimum 1. |
+| `MEDIA_MEMORY_LIMIT_MB` | `1024` | Address space limit of one media child, in MiB. Minimum 256. Keep `MEDIA_CONCURRENCY` x this below the container's memory limit minus what the process itself needs. |
+| `MEDIA_EXTRACT_MAX_BYTES` | `30000000` | Most bytes one media call may pull from the platform (player APIs, caption files), counted at the egress proxy, in bytes. A call over it fails. Minimum 1024. |
+| `MEDIA_SUBTITLE_MAX_BYTES` | `5000000` | Largest subtitle track that is read, in bytes: a platform's caption file or an HTML5 `<track>`. A larger track is skipped. Minimum 1024. |
+| `MEDIA_MAX_TRACKS` | `3` | HTML5 `<track>` subtitle tracks added to one page, one per `<video>` or `<audio>` element. More are cut (warning `tracks_truncated`). 0 to 10; 0 adds none. |
+| `MEDIA_MAX_DURATION_SECONDS` | `10800` | Longest audio or video that is transcribed, in seconds (3 hours). A longer one fails with `media_too_long` (not retryable) before transcription. Minimum 60. |
+| `MEDIA_MAX_BYTES` | `500000000` | Largest media file the ASR worker downloads for transcription, in bytes. Must fit the worker's scratch volume (`ASR_SCRATCH_PATH`). Minimum 1000000. |
+| `MEDIA_UPLOAD_MAX_BYTES` | `25000000` | Largest audio or video file that can be uploaded for transcription, in bytes (about 25 minutes of MP3 at 128 kbit/s). The bytes travel through Valkey and count in the input budget (`DOCLING_INPUT_BUDGET_BYTES`, which holds the inputs of all kinds), so with `ASR_ENABLED=true` it must not exceed it, or the service exits with code 2 at start-up. At least 1000000. Larger media: send the URL. The Helm chart sets it from `workers.asr.uploadMaxBytes`. |
+| `MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Time budget of one media download by the ASR worker, in seconds. 30 to 3600. |
+| `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request`. The Helm chart sets it from `workers.asr.enabled` on every pod. |
+| `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`); the worker then needs no models. |
+| `ASR_MODEL` | `large-v3-turbo` | Whisper model of the local backend: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, faster on CPU, more errors). Any other value makes the service exit with code 2. |
+| `ASR_MODELS_PATH` | `/models` | Volume with the Whisper models, one folder per model. The image holds no models; the ASR worker mounts the volume read-only. |
+| `ASR_COMPUTE_TYPE` | `int8` | CTranslate2 compute type of the local backend (`int8` is the fast and small choice on CPU). |
+| `ASR_THREADS` | `4` | CPU threads of one transcription. Minimum 1. |
+| `ASR_CONCURRENCY` | `1` | Transcriptions one ASR worker pod runs at once, each in a child process of its own. Minimum 1. |
+| `ASR_MEMORY_LIMIT_MB` | `4096` | Address space limit of one ASR child, in MiB. Minimum 256. |
+| `ASR_TIMEOUT_SECONDS` | `3600` | Time budget of one transcription item (download, decoding, recognition), in seconds; the child is killed after it and the item fails with `transcription_failed` (not retryable). 60 to 14400. |
+| `ASR_INPUT_TTL_SECONDS` | `21600` | How long the bytes of an uploaded audio or video file wait in Valkey for the ASR worker, in seconds; never longer than the job. They are deleted when the item is done. Minimum 600. |
+| `ASR_MAX_OPEN_PER_CLIENT` | `3` | Unfinished ASR jobs one API key may have. Beyond it nothing is queued for transcription and the request answers without it (`asr_unavailable`, or `rate_limited` for a media file). Minimum 1. |
+| `ASR_SCRATCH_PATH` | `/tmp/asr` | Directory where the ASR worker keeps the media it is transcribing; the file is deleted when the item ends. The Helm chart mounts an emptyDir with a size limit here. |
+| `ASR_EXTERNAL_BASE_URL` | unset | Base URL of the OpenAI-compatible transcription endpoint (`<base>/audio/transcriptions`) for `ASR_BACKEND=openai`. https only; anything else makes the service exit with code 2. Empty counts as unset. |
+| `ASR_EXTERNAL_MODEL` | `whisper-1` | Model name sent to the external endpoint. |
+| `ASR_EXTERNAL_TIMEOUT_SECONDS` | `300` | Time budget of the external endpoint for one audio chunk of at most 20 minutes, in seconds. Minimum 1. |
+
+The request fields `transcribe` (default `false`) and `languages` (preferred subtitle and
+transcription languages, ISO 639 codes such as `de` or `en-GB`, at most 5; default: the video's
+original language) are part of `POST /v1/extract` and `POST /v1/batch`. `transcribe: true` answers
+400 `invalid_request` while the service has no transcription.
 
 ## Headers
 

@@ -4,7 +4,8 @@ Licences get SPDX-style ids (``CC-BY-SA-4.0``). ``LicenseCollector`` gathers the
 page offers, each with the source it came from and how far to trust it: the page's own
 ``rel=license`` link or structured ``license`` property is ``high``, a meta tag or OpenGraph
 property ``medium``, and a licence mentioned in the footer ``low``. A document's XMP packet
-(``xmp``) counts like structured data: ``cc:license`` is ``high``. The best candidate has the
+(``xmp``) counts like structured data: ``cc:license`` is ``high``. The licence a video platform
+states (``platform``) is the platform's own data and ``high`` too. The best candidate has the
 highest confidence, then a recognised id, then comes first.
 """
 
@@ -18,7 +19,7 @@ from pydantic import BaseModel, Field
 from text_extraction.convert.links import absolute_url
 
 LicenseSource = Literal[
-    "rel-license", "json-ld", "microdata", "rdfa", "meta", "opengraph", "text", "xmp"
+    "rel-license", "json-ld", "microdata", "rdfa", "meta", "opengraph", "text", "xmp", "platform"
 ]
 Confidence = Literal["high", "medium", "low"]
 
@@ -152,7 +153,7 @@ class License(BaseModel):
     source: LicenseSource = Field(
         description="Where the licence was found: the page's `rel-license` link, its "
         "`json-ld`, `microdata` or `rdfa` data, a `meta` or `opengraph` tag, the page `text`, "
-        "or a document's XMP packet (`xmp`, PDF)."
+        "a document's XMP packet (`xmp`, PDF), or the `platform` a video comes from."
     )
     confidence: Confidence
 

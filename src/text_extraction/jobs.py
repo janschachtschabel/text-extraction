@@ -3,11 +3,11 @@
 A job lives in four keys; the braces around the id are a literal cluster hash tag, so one job's
 keys share a slot and a Lua script can touch all of them:
 
-- ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON; ``ocr`` only when it
-                          is not ``auto``), state, created_at, finished_at, total, done,
-                          success, partial, failed, lease_until, trace_id (of the request that
-                          created the job, when it had one), secrets (``1`` when the job was
-                          created with caller secrets)
+- ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON; ``ocr``, ``transcribe``
+                          and ``languages`` only when not the default), state, created_at,
+                          finished_at, total, done, success, partial, failed, lease_until,
+                          trace_id (of the request that created the job, when it had one),
+                          secrets (``1`` when the job was created with caller secrets)
 - ``job:{<id>}:urls``     list: the URLs in input order; an empty string for an uploaded file's
                           item, which has no URL (kind ``file``)
 - ``job:{<id>}:results``  hash: item index -> ``Envelope[ExtractResult]`` as JSON
@@ -350,10 +350,17 @@ def _artifact_key(job_id: str, name: str) -> str:
 
 
 def _options_json(options: JobOptions) -> str:
-    """The stored form of a job's options. ``ocr`` is left out while it is the default
-    (``auto``): pods of a release before it parse the options strictly, and during a rolling
-    upgrade they read the jobs that new pods create."""
-    return options.model_dump_json(exclude={"ocr"} if options.ocr == "auto" else None)
+    """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false) and
+    ``languages`` (none) are left out while they are the default: pods of a release before them
+    parse the options strictly, and during a rolling upgrade they read the jobs that new pods
+    create."""
+    defaults = JobOptions.model_fields
+    omit = {
+        name
+        for name in ("ocr", "transcribe", "languages")
+        if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
+    }
+    return options.model_dump_json(exclude=omit or None)
 
 
 def _budget_member(job_id: str, index: int) -> str:

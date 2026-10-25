@@ -85,6 +85,8 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         screenshot=req.screenshot,
         full_page=req.full_page,
         ocr=req.ocr,
+        transcribe=req.transcribe,
+        languages=req.languages,
     )
 
 

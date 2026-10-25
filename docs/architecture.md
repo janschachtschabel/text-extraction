@@ -111,10 +111,15 @@ add a note of its own):
   `pages_partial` (Docling stopped at its own time limit or skipped a page; the pages it read),
   `document_fetched_directly` (a render ended on a file, which was fetched and converted in fast
   mode, F18).
+- Media: `subtitles_blocked` (the platform refused the subtitles; the metadata answers),
+  `asr_unavailable` (no transcription in time or the ASR failed; the metadata answers),
+  `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed` (every `<track>` of
+  a page failed).
 - Jobs: `content_not_stored_too_large` (an item stored without its content).
 
 A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
-`meta`, `opengraph`, `text`, or `xmp` (a PDF's XMP packet, F8).
+`meta`, `opengraph`, `text`, `xmp` (a PDF's XMP packet, F8), or `platform` (the licence a video
+platform states, e.g. YouTube's Creative Commons).
 
 Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `dns_error`, `connection_error`, `timeout`, `target_http_error`, `bot_protection`,
