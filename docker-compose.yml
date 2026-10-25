@@ -5,7 +5,7 @@
 # OCR (the Docling worker, image target `docling`, about 2 GB) is off by default: set
 # DOCLING_ENABLED=true in .env and start with `docker compose --profile docling up -d --wait`.
 # The one-shot service `docling-models` first downloads the models into the volume `docling-models`
-# (about 2 GiB, once), then `docling-worker` reads them read-only.
+# (9 files, about 335 MiB, once), then `docling-worker` reads them read-only.
 
 # Shared by the API and the workers: same settings, same hardening. The API and the extract worker
 # use the default image (no browser); the browser worker builds the target `browser`.

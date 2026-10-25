@@ -46,7 +46,7 @@
   - (a, recommended) `POST /v1/extract` without `wait_seconds` waits up to `DOCLING_SYNC_WAIT_SECONDS` (20) for the Docling worker, then answers the text-layer result with the warning `ocr_unavailable` (an image, which has none, fails `timeout`, retryable). With `wait_seconds` it becomes a 202 job as today. `POST /v1/extract/file` is new, so it defaults to `wait_seconds: 25`: an upload that needs longer answers 202 with the job.
   - (b) Every request that needs OCR answers 202 with a job at once, even without `wait_seconds` (changes the sync contract of `/v1/extract`).
   - (c) Sync requests wait for OCR as long as it takes, up to `DOCLING_TIMEOUT_SECONDS` (breaks the 30 s rule).
-- **D3, the Docling worker by default.** It needs an image of about 2 GB and a PVC of about 2 GiB for the models.
+- **D3, the Docling worker by default.** It needs an image of about 2 GB and a PVC for the models (planned as about 2 GiB; the pinned files take about 335 MiB).
   - (a, recommended) Off by default: Helm `workers.docling.enabled: false`, compose profile `docling`. Without it scans keep their text layer (`ocr_unavailable`) and images answer `unsupported_content_type`.
   - (b) On by default, like the browser worker.
 

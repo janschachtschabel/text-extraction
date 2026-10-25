@@ -37,7 +37,7 @@ The internal port 9090 (`/health`, `/ready`, `/metrics`) is not published. For K
 [Helm chart](deploy/helm/text-extraction/README.md).
 
 OCR for scans and images runs in the Docling worker, which is off by default (an image of about
-2 GB and about 2 GiB of models). Set `DOCLING_ENABLED=true` in `.env` and start the profile
+2 GB and about 335 MiB of models). Set `DOCLING_ENABLED=true` in `.env` and start the profile
 `docling`: `docker compose --profile docling up --build`. The first start downloads the models
 into a volume.
 

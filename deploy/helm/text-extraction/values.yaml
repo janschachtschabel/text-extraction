@@ -260,8 +260,9 @@ workers:
         minReplicas: 1
         maxReplicas: 4
         targetCPUUtilizationPercentage: 70
-    # The models (Docling's layout and table models, Tesseract's data; about 2 GiB) live on a
-    # volume mounted at /models (DOCLING_MODELS_PATH, set by the chart). The image holds none.
+    # The models (Docling's layout and table models, Tesseract's data; 9 files, about 335 MiB)
+    # live on a volume mounted at /models (DOCLING_MODELS_PATH, set by the chart). The image
+    # holds none.
     models:
       # An init container runs `text-extraction-docling-worker --download-models` with the
       # volume mounted writable: it downloads the files of the manifest, checks their SHA-256 and
@@ -270,6 +271,8 @@ workers:
       # required then). The worker mounts the volume read-only either way.
       download: true
       persistence:
+        # The models take about 335 MiB; a changed manifest stages a full copy beside the old
+        # one (about 670 MiB at once). 5Gi leaves room for later models; 1Gi suffices today.
         size: 5Gi
         # ReadWriteMany lets replicas on any node share one volume. With ReadWriteOnce keep the
         # replicas on one node (or at 1). The volume must be writable by uid/gid 10001 (fsGroup).

@@ -185,7 +185,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.docling.autoscaling.keda.*` | as for the extract workers, `threshold` `4`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="docling"})`; the API pods export it while `JOBS_ENABLED` and `DOCLING_ENABLED` are true. With no replica a sync request answers without OCR after `DOCLING_SYNC_WAIT_SECONDS` and batch items wait. |
 | `workers.docling.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
 | `workers.docling.models.download` | `true` | An init container runs `text-extraction-docling-worker --download-models` with the volume mounted writable. `false` needs `persistence.existingClaim` (a pre-filled volume), or the render fails. |
-| `workers.docling.models.persistence.size` | `5Gi` | The models take about 2 GiB; the download stages a full copy beside the old one when the manifest changes. |
+| `workers.docling.models.persistence.size` | `5Gi` | The models take about 335 MiB (9 files); the download stages a full copy beside the old one when the manifest changes, so about 670 MiB at once. 5Gi leaves room for later models; 1Gi suffices today. |
 | `workers.docling.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
 | `workers.docling.models.persistence.storageClass` | `""` | Cluster default when empty. |
 | `workers.docling.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
@@ -283,7 +283,7 @@ warns when `networkPolicy` and the ServiceMonitor are both on with the default.
 ## Docling workers and the models volume
 
 OCR is off by default (`workers.docling.enabled: false`): the Docling image is about 2 GB and the
-models need a volume of about 2 GiB. With it on:
+models take about 335 MiB on a volume. With it on:
 
 - The PVC `<release>-text-extraction-docling-models` (or `models.persistence.existingClaim`) is
   mounted at `/models` (`DOCLING_MODELS_PATH`): Docling's layout and table models in `docling/`,
