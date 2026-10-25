@@ -294,11 +294,19 @@ def create_browsers(settings: Settings, registry: CollectorRegistry) -> Browsers
 # --- the process ------------------------------------------------------------------------------
 
 
-def browser_graceful_seconds(settings: Settings) -> int:
-    """How long the items in flight may finish after SIGTERM: the longest render deadline."""
+def browser_deadline_seconds(settings: Settings) -> float:
+    """The longest deadline of this worker's pipeline: ``BROWSER_TIMEOUT_SECONDS``, or the
+    unblock timeout where unblock mode is on. A media probe of an ``auto`` item runs under it,
+    so the media fetcher's tunnels must live that long."""
     deadline = settings.browser_timeout_seconds
     if settings.browser_unblock_enabled:
         deadline = max(deadline, settings.browser_unblock_timeout_seconds)
+    return deadline
+
+
+def browser_graceful_seconds(settings: Settings) -> int:
+    """How long the items in flight may finish after SIGTERM: the longest render deadline."""
+    deadline = browser_deadline_seconds(settings)
     return max(
         extraction_graceful_seconds(settings), math.ceil(deadline + _SHUTDOWN_MARGIN_SECONDS)
     )
@@ -336,7 +344,11 @@ def build_browser_worker(
     gate, fetcher = create_outbound(settings, valkey)
     conversion_pool = ConversionPool(settings.convert_concurrency)
     document_pool = create_document_pool(settings)
-    media = create_media_fetcher(settings, registry) if settings.media_enabled else None
+    media = (
+        create_media_fetcher(settings, registry, call_seconds=browser_deadline_seconds(settings))
+        if settings.media_enabled
+        else None
+    )
     browsers = create_browsers(settings, registry)
     unblock = browsers.unblock_renderer is not None
     pipeline = create_pipeline(
@@ -352,6 +364,7 @@ def build_browser_worker(
         clearance=ValkeyClearance(valkey, settings) if unblock else None,
         timeout_seconds=settings.browser_timeout_seconds,
         document_pool=document_pool,
+        media_fetcher=media,
     )
     store = JobStore(valkey, settings)
     worker = Worker(

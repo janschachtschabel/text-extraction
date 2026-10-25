@@ -49,10 +49,12 @@ class MediaEmbed(BaseModel):
 
 
 class MediaInfo(BaseModel):
-    """What a result says about the audio or video it was extracted from."""
+    """What a result says about the audio or video it was extracted from. ``transcript_source``
+    is None where there is no transcript at all: a page whose players have no track we could
+    read (only ``embeds``), or a media file that was not transcribed."""
 
     platform: Platform
-    transcript_source: TranscriptSource
+    transcript_source: TranscriptSource | None
     transcript_language: str | None = None
     available_languages: list[str] = []  # the manual subtitle tracks
     duration_seconds: float | None = None

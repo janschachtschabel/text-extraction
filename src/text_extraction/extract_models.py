@@ -65,7 +65,7 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         "a job: the answer is then 202 with the job's id and `status_url`, and "
         "`GET /v1/jobs/{id}` has the result. 0 hands over at once. Ignored when jobs are "
         "disabled (`JOBS_ENABLED=false`). A request that waits for the browser when the time "
-        "is up answers 202 with the browser's job.",
+        "is up answers 202 with the browser's job. With `transcribe: true` the default is 20.",
     )
     actions: ActionList = Field(
         default=[], repr=False, description=f"{ACTIONS_DESCRIPTION} Not with `mode: fast`."

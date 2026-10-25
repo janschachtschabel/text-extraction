@@ -646,6 +646,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         gate=gate,
         memory_guard=guard,
         document_pool=document_pool,
+        media_fetcher=media,
     )
     store = JobStore(valkey, settings)
     browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None

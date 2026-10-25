@@ -10,8 +10,10 @@ what a parent may call by name:
   recognition in the video's language (translations are separate there), so they are keyed
   ``<lang>-orig`` as yt-dlp keys them, and the first one's language stands for the original
   language. The fetched snippets go back as a ``json3`` track. A video whose captions are
-  disabled answers empty lists; every other failure of the library is raised as it is, and the
-  parent classifies it by its type name.
+  disabled answers empty lists. A failure after YouTube answered HTTP 429 answers ``error``
+  ``rate_limited`` with the answer's ``retry_after`` (the library raises ``IpBlocked`` for it,
+  as for a bot check); every other failure of the library is raised as it is, and the parent
+  classifies it by its type name.
 - ``ytdlp_info``: yt-dlp's info without a download (title, description, uploader, date,
   duration, licence, chapters, tags, original language, live status and the tracks), and with
   ``fetch_track`` the chosen track's bytes. A track that is an HLS playlist (``#EXTM3U``, as
@@ -110,7 +112,9 @@ class _QuietLogger:
 
 class _Session(requests.Session):
     """A session that never waits longer than ``timeout`` for a connection or a read, and
-    ignores the environment's proxies and netrc."""
+    ignores the environment's proxies and netrc. It notes an HTTP 429 answer (and its
+    ``Retry-After``): youtube-transcript-api raises ``IpBlocked`` for it as for a bot check, and
+    only the status tells the rate limit apart."""
 
     def __init__(self, timeout: float, user_agent: str, proxy: str) -> None:
         super().__init__()
@@ -118,14 +122,34 @@ class _Session(requests.Session):
         self.headers["User-Agent"] = user_agent
         self.proxies = {"http": proxy, "https": proxy}
         self._timeout = timeout
+        self.rate_limited = False
+        self.retry_after: str | None = None
+        self.hooks["response"].append(self._note_status)
 
     def request(self, *args: Any, **kwargs: Any) -> requests.Response:
         kwargs.setdefault("timeout", self._timeout)
         return super().request(*args, **kwargs)
 
+    def _note_status(self, response: requests.Response, *_args: Any, **_kwargs: Any) -> None:
+        if response.status_code == 429:
+            self.rate_limited = True
+            value = response.headers.get("retry-after")
+            self.retry_after = value[:MAX_SHORT_TEXT] if value else None
+
 
 def youtube_transcript(payload: dict[str, Any]) -> dict[str, Any]:
+    """See the module docstring. A failure after an HTTP 429 answer is ``rate_limited`` (with
+    the answer's ``retry_after``), whatever the library raised for it."""
     session = _Session(_socket_timeout(payload), payload["user_agent"], payload["proxy"])
+    try:
+        return _youtube_transcript(payload, session)
+    except Exception:
+        if not session.rate_limited:
+            raise
+        return {**_empty_result(), "error": "rate_limited", "retry_after": session.retry_after}
+
+
+def _youtube_transcript(payload: dict[str, Any], session: _Session) -> dict[str, Any]:
     result = _empty_result()
     try:
         listing = YouTubeTranscriptApi(http_client=session).list(payload["video_id"])

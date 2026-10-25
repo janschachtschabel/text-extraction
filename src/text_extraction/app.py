@@ -189,6 +189,7 @@ def create_public_app(
         gate=gate,
         memory_guard=app.state.memory_guard,
         document_pool=app.state.document_pool,
+        media_fetcher=app.state.media_fetcher,
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)

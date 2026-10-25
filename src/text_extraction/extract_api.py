@@ -4,8 +4,9 @@ workers.
 **The flow** (``_flow``) of one request:
 
 1. The request is checked first: browser options while browser mode is off answer 400 (B9), so
-   does ``ocr: always`` while the service has no OCR (F11); an ``evaluate`` action of a
-   non-admin key 403, a compliance mode the key may not choose 403.
+   does ``ocr: always`` while the service has no OCR (F11), and ``transcribe: true`` while it
+   has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``, M9); an ``evaluate`` action of a non-admin
+   key 403, a compliance mode the key may not choose 403.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
@@ -20,7 +21,9 @@ workers.
    phase is done (``docling_dispatch.DoclingHandoff``, F12), with its text layer as the draft.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
-running in this pod, as the same task, and the job only stores its result:
+running in this pod, as the same task, and the job only stores its result. A request with
+``transcribe: true`` and no ``wait_seconds`` waits 20 seconds (M9): a transcription is always a
+job, and a video with subtitles still answers at once.
 
 1. the flow runs as a task, and the route waits ``wait_seconds`` for it (the wait does not
    cancel it);
@@ -85,6 +88,11 @@ from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
 from text_extraction.pipeline import Pipeline
+from text_extraction.pipeline_media import (
+    TRANSCRIBE_WAIT_SECONDS,
+    TRANSCRIPTION_DISABLED_MESSAGE,
+    asr_available,
+)
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
@@ -159,6 +167,20 @@ def check_ocr_request(ocr: OcrOption, settings: Settings) -> None:
         raise ServiceError(ErrorCode.INVALID_REQUEST, OCR_DISABLED_MESSAGE, 400)
 
 
+def check_transcribe_request(transcribe: bool, settings: Settings) -> None:
+    """400 for ``transcribe: true`` while the service has no ASR (M9): the request could not
+    get what it asks for."""
+    if transcribe and not asr_available(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, TRANSCRIPTION_DISABLED_MESSAGE, 400)
+
+
+def request_wait_seconds(body: ExtractRequest) -> float | None:
+    """The request's ``wait_seconds``; with ``transcribe: true`` and none set, 20 (M9)."""
+    if body.wait_seconds is None and body.transcribe:
+        return TRANSCRIBE_WAIT_SECONDS
+    return body.wait_seconds
+
+
 def check_browser_request(body: ExtractRequest, principal: Principal, settings: Settings) -> None:
     """400 for browser work while browser mode is off (B9), 403 for an ``evaluate`` action of a
     non-admin key (B6)."""
@@ -179,15 +201,17 @@ async def respond(
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
     check_ocr_request(body.ocr, settings)
+    check_transcribe_request(body.transcribe, settings)
+    wait_seconds = request_wait_seconds(body)
     handover = Handover()
-    wait_until = handover_time(body.wait_seconds, settings)
+    wait_until = handover_time(wait_seconds, settings)
     flow = partial(_flow, state, body, principal, compliance, handover, kind, wait_until)
     options = job_options(body, compliance)
     return await answer_or_hand_over(
         state,
         flow,
         handover,
-        wait_seconds=body.wait_seconds,
+        wait_seconds=wait_seconds,
         kind=kind,
         renders_first=renders_first(body),
         hand_over=partial(create_p1_job, state.job_store, settings, principal, options, body.url),

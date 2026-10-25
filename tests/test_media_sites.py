@@ -68,6 +68,19 @@ def test_youtube_playlist_without_video_is_none_target_with_flag(url: str) -> No
     assert target.canonical_url == "https://www.youtube.com/playlist?list=PLabc_123-xyz"
 
 
+@pytest.mark.parametrize("host", ["https://www.youtube.com", "https://www.youtube-nocookie.com"])
+def test_an_embedded_playlist_player_is_a_playlist_not_a_video(host: str) -> None:
+    """``/embed/videoseries`` is YouTube's playlist player: "videoseries" has the shape of a
+    video id (11 characters) but names none."""
+    target = media_target(f"{host}/embed/videoseries?list=PLabc_123-xyz")
+
+    assert target is not None
+    assert target.video_id is None
+    assert target.canonical_url == "https://www.youtube.com/playlist?list=PLabc_123-xyz"
+    assert media_target(f"{host}/embed/videoseries") is None
+    assert media_target(f"{host}/embed/videoseries?list=bad%20id") is None
+
+
 def test_a_video_in_a_playlist_is_the_video() -> None:
     target = media_target(f"https://www.youtube.com/watch?v={YT_ID}&list=PLabc")
 

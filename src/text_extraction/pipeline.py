@@ -4,6 +4,14 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 
 1. ``resolve_mode``: the compliance mode that applies; a refused choice is a 403.
 2. ``validate_url``.
+2b. A URL of a supported video platform (``media/sites.py``) in a fast or ``auto`` request
+   without browser options, a screenshot or a draft takes the media path (``pipeline_media``,
+   M1), with the media fetcher and ``MEDIA_ENABLED``: a playlist is ``unsupported_content_type``
+   at once; otherwise the canonical URL passes the result cache (filed under it, with ``media``
+   and the requested ``languages``; a stored ``metadata_only`` answer is no hit for
+   ``transcribe: true``) and the compliance checks of step 4, and the media steps run in the
+   turn of its host, held until they end. Their answer goes through step 8's comparison and
+   cache, without validators (a stale entry is extracted again). Steps 3 to 7 below do not run.
 3. Result cache: a fresh entry is served as it is (``cache: hit``).
 4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here. When the
    origin's files are cached, this takes no request. Otherwise the host's ``DomainGate`` turn is
@@ -24,9 +32,20 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    ``DOCUMENT_MAX_BYTES``, header checks, then ``pipeline_documents`` converts it (F10). One that
    needs OCR is handed to ``ocr_handoff``; without one, or while the service has no OCR, it
    answers its text layer with the warning ``ocr_unavailable`` (an image fails
-   ``unsupported_content_type``). Anything else: ``unsupported_content_type``.
+   ``unsupported_content_type``). With the media steps, a body not declared as HTML that sniffs
+   as audio or video (``media/sniff.py``, on its first 64 KiB: the fetcher reads a declared
+   audio or video type to that head only) passes the header checks and goes to
+   ``MediaSteps.media_file``. A cut body that is no media is ``unsupported_content_type``, as is
+   anything else.
 8. Quality verdict, language, metadata, links, fingerprint and cache. A document's result is
    final: it never goes to the browser, and a cached one is served even with ``ocr_unavailable``.
+   An HTML page that does not escalate (fast) or was rendered gets the transcripts of its
+   players' ``<track>`` elements appended and its embeds listed (``MediaSteps.tracks``), before
+   its verdict.
+
+Media that needs speech recognition (``transcribe: true``) becomes an ``AsrNeeded`` for
+``asr_handoff``, which ``run`` calls once the deadline's steps are done, with the answer without
+a transcription as its stand-in (never stored), as a document is handed to ``ocr_handoff``.
 
 An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on the bytes in
 hand: no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor
@@ -119,6 +138,10 @@ from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators, 
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
 from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
+from text_extraction.media.pool import MediaFetcher
+from text_extraction.media.sites import MediaTarget, media_target
+from text_extraction.media.sniff import MEDIA_HEAD_BYTES, media_type_of, sniff_media
+from text_extraction.media.types import MediaKind
 from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
 from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.outbound import (
@@ -142,6 +165,15 @@ from text_extraction.pipeline_documents import (
     create_document_pool,
     document_input,
     without_ocr,
+)
+from text_extraction.pipeline_media import (
+    PLAYLIST_MESSAGE,
+    TRANSCRIPTION_DISABLED_MESSAGE,
+    TRANSCRIPTION_NOT_HANDED_MESSAGE,
+    AsrNeeded,
+    MediaSteps,
+    asr_available,
+    without_asr,
 )
 from text_extraction.pipeline_render import (
     CHALLENGE_STATUSES,
@@ -207,6 +239,11 @@ _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30)
 # Hands a document that needs OCR to the Docling pool and answers for it. It gets the answer
 # without OCR too (``pipeline_documents.without_ocr``), for a fallback of its own.
 type OcrHandoff = Callable[[OcrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
+# Hands media that needs speech recognition to the ASR queue and answers for it; it gets the
+# answer without a transcription too (``pipeline_media.without_asr``), as its stand-in.
+type TranscriptionHandoff = Callable[
+    [AsrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]
+]
 
 _BLOCK_MESSAGES = {
     ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",
@@ -307,6 +344,15 @@ class _Run:
     # is fetched only to convert a document.
     target: str = ""
     direct: bool = False
+    media: MediaTarget | None = None  # the platform video the request URL is (step 2b)
+    asr_handoff: TranscriptionHandoff | None = None
+    asr_needed: AsrNeeded | None = None  # for the handoff, once the deadline's steps are done
+
+    @property
+    def cache_url(self) -> str:
+        """The URL the result cache and the fingerprints file the result under: a platform
+        video's canonical URL (its short forms share it), else the request URL."""
+        return self.media.canonical_url if self.media is not None else self.req.url
 
     def timings(self) -> Timings:
         return Timings(
@@ -490,10 +536,13 @@ class Pipeline:
         clearance: ClearanceStore | None = None,
         timeout_seconds: float | None = None,
         document_pool: DocumentPool | None = None,
+        media_fetcher: MediaFetcher | None = None,
     ) -> None:
         """``pool`` runs the CPU-bound steps; without one the pipeline makes its own. So does
         ``document_pool``, the MarkItDown children; the pipeline starts it with the first
-        document, unless its owner started it already.
+        document, unless its owner started it already. ``media_fetcher`` (started by its owner)
+        probes platform videos; without it, or with ``MEDIA_ENABLED`` off, a platform URL is a
+        page, a media file is ``unsupported_content_type`` and pages get no HTML5 tracks.
 
         Only the browser worker passes a ``renderer`` (and, with unblock mode enabled, the
         ``unblock_renderer`` and the ``clearance`` store). ``timeout_seconds`` replaces
@@ -520,6 +569,13 @@ class Pipeline:
             self._envelope,
             registry,
         )
+        self._media = (
+            MediaSteps(
+                media_fetcher, fetcher, gate, settings, self._envelope, registry, threads=self._pool
+            )
+            if media_fetcher is not None and settings.media_enabled
+            else None
+        )
 
     async def run(
         self,
@@ -530,6 +586,7 @@ class Pipeline:
         artifacts: ArtifactSink | None = None,
         draft: Envelope[ExtractResult] | None = None,
         ocr_handoff: OcrHandoff | None = None,
+        asr_handoff: TranscriptionHandoff | None = None,
     ) -> Envelope[ExtractResult]:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
         and an unavailable Valkey (503).
@@ -547,6 +604,10 @@ class Pipeline:
         the answer (the pool it hands to stores the result it keeps). Without it, the
         document's text layer answers with the warning ``ocr_unavailable``; an image fails
         ``unsupported_content_type``.
+
+        Media that needs speech recognition (``transcribe: true``) goes to ``asr_handoff`` the
+        same way, with the answer without a transcription (``pipeline_media.without_asr``).
+        Without it that answer is final.
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
         private = not req.secrets().empty()
@@ -565,6 +626,7 @@ class Pipeline:
             artifacts=artifacts,
             ocr_handoff=ocr_handoff,
             target=req.url,
+            asr_handoff=asr_handoff,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -573,6 +635,9 @@ class Pipeline:
                 # After the deadline's steps: the handoff waits for OCR on a clock of its own
                 # (DOCLING_SYNC_WAIT_SECONDS, F12).
                 envelope = await run.ocr_handoff(run.ocr_needed, envelope)
+            if run.asr_needed is not None and run.asr_handoff is not None:
+                # Likewise: a transcription is always a job (M9).
+                envelope = await run.asr_handoff(run.asr_needed, envelope)
             if envelope.data is not None:
                 envelope.data.timings = run.timings()
             envelope.trace_id = current_trace_id()
@@ -761,10 +826,19 @@ class Pipeline:
         except InvalidUrlError as error:
             return run.failed(ErrorCode.INVALID_URL, str(error))
         run.host = urlsplit(req.url).hostname
+        target = self._platform_target(run)
+        if target is not None and target.video_id is None:
+            return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, PLAYLIST_MESSAGE)
+        run.media = target
 
-        stored = await self._cached(req, run.report.mode) if run.cacheable else None
+        stored = await self._cached(run) if run.cacheable else None
+        if stored is not None and req.transcribe and _metadata_only(stored.result):
+            stored = None  # the details only: a transcription may do better
         if stored is not None and stored.fresh:
             return self._serve_hit(run, stored)
+        if target is not None:
+            # A platform result has no validators: a stale one is extracted again.
+            return await self._guarded(run, self._platform(run, target))
         if stored is not None and stored.result.mode_used == "browser":
             stored = None  # a rendered result has no validators and is never revalidated (B10)
         if self._renders_first(run):
@@ -811,8 +885,76 @@ class Pipeline:
                 retryable=True,
             ) from None
 
-    async def _cached(self, req: ExtractRequest, mode: ComplianceMode) -> _Stored | None:
-        key = cache_key(req.url, _cache_options(req, mode))
+    def _platform_target(self, run: _Run) -> MediaTarget | None:
+        """Step 2b: the platform video the request URL is, when the media path takes it: media
+        on, a fast or ``auto`` request without browser options, a screenshot or a draft (those
+        want the page itself)."""
+        req = run.req
+        if (
+            self._media is None
+            or req.mode == "browser"
+            or run.private
+            or req.screenshot
+            or run.draft is not None
+        ):
+            return None
+        return media_target(req.url)
+
+    async def _platform(self, run: _Run, target: MediaTarget) -> Envelope[ExtractResult]:
+        """A platform video (M1): the canonical URL passes the compliance checks of step 4,
+        then the media steps run in its host's turn, which is held until they end."""
+        if self._media is None:  # pragma: no cover - only called with media on
+            raise RuntimeError("no media steps")
+        run.final_url = target.canonical_url
+        turn = _Turn(self._gate)
+        try:
+            run.report = await self._check_origin(run, target.canonical_url, turn)
+            if (code := blocking_code(run.report)) is not None:
+                return run.failed(code, _BLOCK_MESSAGES[code])
+            waited = time.perf_counter()
+            await turn.take(urlsplit(target.canonical_url).hostname or "", run.report.crawl_delay)
+            run.fetch_ms += _ms(waited)
+            outcome = await self._media.platform(run, target)
+        finally:
+            await turn.give_back()
+        if isinstance(outcome, AsrNeeded):
+            return self._without_asr(run, outcome)
+        return await self._finish(run, outcome, Validators())
+
+    async def _media_file(
+        self, run: _Run, fetched: FetchResult, kind: MediaKind
+    ) -> Envelope[ExtractResult]:
+        """Step 7 for an audio or video file: the header checks, then the media steps."""
+        if self._media is None:  # pragma: no cover - only called with media on
+            raise RuntimeError("no media steps")
+        run.content_type = media_type_of(kind)
+        started = time.perf_counter()
+        run.report = await self._pool.run(self._checker.after_fetch, run.report, fetched, None)
+        run.compliance_ms += _ms(started)
+        if (code := blocking_code(run.report)) is not None:
+            return run.failed(code, _BLOCK_MESSAGES[code])
+        outcome = await self._media.media_file(run, fetched, kind)
+        if isinstance(outcome, AsrNeeded):
+            return self._without_asr(run, outcome)
+        return outcome  # failed: nothing to compare or store
+
+    def _without_asr(self, run: _Run, needed: AsrNeeded) -> Envelope[ExtractResult]:
+        """The answer while ``needed`` is not transcribed, never stored: with a handoff, its
+        stand-in until ``run`` hands it over; without one (or for a render's extraction, which
+        hands nothing on) the final answer."""
+        if run.asr_handoff is not None and not run.comparing and not run.direct:
+            run.asr_needed = needed  # `run` hands it over once the deadline is off
+            return without_asr(needed, run)
+        message = (
+            TRANSCRIPTION_NOT_HANDED_MESSAGE
+            if asr_available(self._settings)
+            else TRANSCRIPTION_DISABLED_MESSAGE
+        )
+        return without_asr(needed, run, message=message)
+
+    async def _cached(self, run: _Run) -> _Stored | None:
+        options = _cache_options(run.req, run.report.mode, media=run.media is not None)
+        key = cache_key(run.cache_url, options)
         found = await self._cache.get(key)
         if found is None:
             return None
@@ -864,6 +1006,18 @@ class Pipeline:
             if failed.data is not None and self._assesses_challenge(run, fetched):
                 failed.data.quality = await self._challenge_quality(run, fetched)
             return failed
+        if self._media is not None and _KINDS.get(fetched.content_type or "") != "html":
+            media_kind = await self._pool.run(
+                sniff_media, fetched.content[:MEDIA_HEAD_BYTES], fetched.content_type
+            )
+            if media_kind is not None:
+                return await self._media_file(run, fetched, media_kind)
+        if fetched.truncated:  # a declared audio or video type, read to its head only
+            return run.failed(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+                f"Content type {fetched.content_type or 'unknown'} is not an audio or video "
+                "file that can be read.",
+            )
         kind = await self._kind(fetched)
         if kind is None:
             return run.failed(
@@ -1147,7 +1301,7 @@ class Pipeline:
         )
         # Not compared again, so renew the baseline the next real extraction compares with.
         await self._fingerprints.touch(
-            run.req.url, variant=_fingerprint_variant(run.req, stored.result)
+            run.cache_url, variant=_fingerprint_variant(run.req, stored.result)
         )
         fresh = Validators.from_headers(fetched.headers)
         validators = Validators(
@@ -1176,22 +1330,25 @@ class Pipeline:
         if isinstance(processed, Envelope):
             return processed
         run.validators = Validators.from_headers(fetched.headers)
-        envelope = self._envelope(
-            run.result(
-                language=processed.language,
-                word_count=processed.quality.word_count,
-                title=processed.title,
-                content=processed.content,
-                quality=processed.quality,
-                metadata=processed.metadata,
-                links=processed.links,
-                fingerprint=processed.fingerprint,
-                warnings=processed.warnings,
-            )
+        result = run.result(
+            language=processed.language,
+            word_count=processed.quality.word_count,
+            title=processed.title,
+            content=processed.content,
+            quality=processed.quality,
+            metadata=processed.metadata,
+            links=processed.links,
+            fingerprint=processed.fingerprint,
+            warnings=processed.warnings,
         )
+        envelope = self._envelope(result)
         if self._escalates(run, envelope):
             # B5: the browser's result, or the better of both, is stored instead of this one.
             return envelope
+        if kind == "html" and self._media is not None:
+            tracked = await self._media.tracks(run, text, result, raw_sha256=fetched.raw_sha256)
+            if tracked is not result:
+                envelope = self._envelope(tracked)
         return await self._finish(run, envelope, run.validators)
 
     async def _converted(
@@ -1230,7 +1387,7 @@ class Pipeline:
             return envelope
         if result.fingerprint is not None and not run.private:
             fingerprint = await self._fingerprints.compare_and_save(
-                run.req.url, result.fingerprint, variant=_fingerprint_variant(run.req, result)
+                run.cache_url, result.fingerprint, variant=_fingerprint_variant(run.req, result)
             )
             result = result.model_copy(update={"fingerprint": fingerprint})
             envelope = envelope.model_copy(update={"data": result})
@@ -1243,7 +1400,10 @@ class Pipeline:
             and complete
         ):
             await self._cache.put(
-                cache_key(run.req.url, _cache_options(run.req, run.report.mode)),
+                cache_key(
+                    run.cache_url,
+                    _cache_options(run.req, run.report.mode, media=run.media is not None),
+                ),
                 CachedEntry(
                     stored_at=time.time(),
                     validators=validators,
@@ -1610,6 +1770,10 @@ class Pipeline:
             warnings=[*processed.warnings, *rendered.warnings],
             screenshot=screenshot,
         )
+        if self._media is not None and screenshot is None:
+            result = await self._media.tracks(
+                run, rendered.html, result, raw_sha256=fetched.raw_sha256
+            )
         # B7: a stored screenshot is the answer; the page's quality is reported, not judged.
         envelope = Envelope(status="success", data=result) if screenshot else self._envelope(result)
         # B6: with caller secrets the render's cookies may be the caller's own, or a session they
@@ -1798,13 +1962,14 @@ def create_pipeline(
     clearance: ClearanceStore | None = None,
     timeout_seconds: float | None = None,
     document_pool: DocumentPool | None = None,
+    media_fetcher: MediaFetcher | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
 
     ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
     without it a new gate is made, which then counts its spacing from the turn starts only.
     With ``memory_guard`` the result cache skips its writes while Valkey's memory is high.
-    The browser options and ``document_pool`` go to ``Pipeline`` unchanged."""
+    The browser options, ``document_pool`` and ``media_fetcher`` go to ``Pipeline`` unchanged."""
     if gate is None:
         gate = DomainGate(valkey, settings)
     return Pipeline(
@@ -1821,13 +1986,16 @@ def create_pipeline(
         clearance=clearance,
         timeout_seconds=timeout_seconds,
         document_pool=document_pool,
+        media_fetcher=media_fetcher,
     )
 
 
 # --- helpers -------------------------------------------------------------------------------------
 
 
-def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
+def _cache_options(
+    req: ExtractRequest, mode: ComplianceMode, *, media: bool = False
+) -> dict[str, Any]:
     """Every request option that changes the result; the cache key covers them.
 
     ``mode`` keeps the results of each mode apart: ``browser`` renders, and ``auto`` keeps a
@@ -1836,6 +2004,10 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
     (``auto``), so the keys of pages and of default requests stay those of the release before
     it and a deploy keeps the cache. The browser options that are not here (actions, cookies,
     headers, a screenshot) keep a request out of the cache altogether.
+
+    A platform video's result (``media``) is filed under its canonical URL with ``media: true``,
+    apart from a page result of the same URL, and with the requested ``languages``, which choose
+    its subtitle track; both are left out for pages, whose keys stay as they were.
     """
     options: dict[str, Any] = {
         "mode": req.mode,
@@ -1846,6 +2018,10 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
     }
     if req.ocr != "auto":
         options["ocr"] = req.ocr
+    if media:
+        options["media"] = True
+        if req.languages:
+            options["languages"] = list(req.languages)
     return options
 
 
@@ -1854,10 +2030,18 @@ def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
     and for a document also of the same ``ocr`` option. ``auto``, ``never`` and ``always`` may
     read the same file with different converters (MarkItDown, Docling), so alternating them must
     not report a change; the result cache keeps them apart the same way (``_cache_options``).
-    Pages keep the variant of package 4 (the format), so their stored fingerprints stay valid."""
-    if result.document is None:
-        return req.format
-    return f"{req.format}|ocr={req.ocr}"
+    Pages keep the variant of package 4 (the format), so their stored fingerprints stay valid,
+    also with HTML5 tracks; a platform video or a media file has ``<format>|media``."""
+    if result.document is not None:
+        return f"{req.format}|ocr={req.ocr}"
+    if result.media is not None and result.media.platform != "html5":
+        return f"{req.format}|media"
+    return req.format
+
+
+def _metadata_only(result: ExtractResult) -> bool:
+    """Whether a stored result is a platform video's details without a transcript."""
+    return result.media is not None and result.media.transcript_source == "metadata_only"
 
 
 def _html_lang(html: str) -> str | None:

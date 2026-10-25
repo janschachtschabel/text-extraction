@@ -847,3 +847,124 @@ def test_blocked_survives_a_refused_side_request() -> None:
             assert probe.error == "blocked"
 
     run(scenario)
+
+
+# --- rate limits and deadlines (Review Focus 1, the tunnel's lifetime) -------------------------
+
+RATE_LIMIT_TARGET = "tests.media_pool_rate_limit_targets"
+
+
+def watch_url_env(httpserver: HTTPServer) -> dict[str, str]:
+    return {"FAKE_WATCH_URL": httpserver.url_for("/watch") + "?v={video_id}"}
+
+
+def test_a_youtube_429_is_rate_limited_with_its_retry_after(httpserver: HTTPServer) -> None:
+    """youtube-transcript-api raises ``IpBlocked`` for an HTTP 429; the child's session notes
+    the status, so the probe says ``rate_limited`` (for the gate's backoff), with the answer's
+    ``Retry-After``, and yt-dlp is not asked to call YouTube again."""
+    httpserver.expect_request("/watch").respond_with_data(
+        "slow down", status=429, headers={"Retry-After": "120"}
+    )
+
+    async def scenario() -> None:
+        config = settings()
+        async with fetcher(
+            config, target=RATE_LIMIT_TARGET, env=watch_url_env(httpserver)
+        ) as media:
+            probe = await media.probe(youtube("ratelimited"), ["de"], deadline_in(30))
+
+            assert probe.rate_limited
+            assert probe.retry_after == "120"
+            assert probe.error == "rate_limited"
+            assert probe.blocked  # no track, and the platform refused the service (D1)
+            assert probe.track is None
+
+    run(scenario)
+    assert len(httpserver.log) == 1  # one request to YouTube, through the proxy
+
+
+def test_a_youtube_bot_check_without_429_stays_blocked(httpserver: HTTPServer) -> None:
+    """The same library exception (``IpBlocked``) for a reCAPTCHA page is a block, not a rate
+    limit: only the status decides."""
+    httpserver.expect_request("/watch").respond_with_data(
+        '<html><div class="g-recaptcha"></div></html>', content_type="text/html"
+    )
+
+    async def scenario() -> None:
+        config = settings()
+        env = watch_url_env(httpserver)
+        async with fetcher(config, target=RATE_LIMIT_TARGET, env=env) as media:
+            probe = await media.probe(youtube("botcheck000"), ["de"], deadline_in(30))
+
+            assert not probe.rate_limited
+            assert probe.blocked
+            assert probe.retry_after is None
+
+    run(scenario)
+
+
+def test_the_probe_deadline_never_outlives_the_proxy_tunnel() -> None:
+    """A tunnel lives ``call_seconds`` + grace from its start; a probe never gets a deadline
+    later than ``call_seconds`` from its own start, so no tunnel it opens dies under it."""
+    seen: list[tuple[float, float]] = []
+
+    async def scenario() -> None:
+        config = settings()
+        media = MediaFetcher(
+            config,
+            create_media_pool(config),
+            EgressProxy(config, registry=CollectorRegistry(), tunnel_timeout=8 + 5),
+            call_seconds=8,
+        )
+
+        async def started() -> None:
+            pass
+
+        async def fake(function_name: str, payload: Payload, deadline: float) -> Any:
+            assert isinstance(payload, dict)
+            seen.append((deadline, payload["timeout"]))
+            return {"title": "A video", "manual": {}, "automatic": {}}
+
+        media.pool.start = started  # type: ignore[method-assign]
+        media.pool.run = fake  # type: ignore[method-assign]
+        before = asyncio.get_running_loop().time()
+        await media.probe(youtube("deadline000"), [], before + 300)
+        assert len(seen) == 2  # youtube_transcript and ytdlp_info
+        for deadline, timeout in seen:
+            assert deadline <= before + 8 + 0.5
+            assert timeout <= 8 + 0.5
+        assert media.call_seconds == 8
+        await media.stop()
+
+    run(scenario)
+
+
+def test_media_calls_fit_the_tunnel_wherever_the_pipeline_runs() -> None:
+    from fakeredis import FakeAsyncRedis
+
+    from text_extraction import browser_worker
+    from text_extraction.browser_proxy import TUNNEL_GRACE_SECONDS
+
+    api = create_media_fetcher(settings(extract_timeout_seconds=25), CollectorRegistry())
+    assert api.call_seconds == 25
+    assert api.proxy.tunnel_timeout == 25 + TUNNEL_GRACE_SECONDS
+
+    # The browser worker's pipeline has BROWSER_TIMEOUT_SECONDS (or the unblock timeout).
+    for unblock, expected in ((False, 90), (True, 120)):
+        parts = browser_worker.build_browser_worker(
+            settings(
+                browser_enabled=True,
+                extract_timeout_seconds=25,
+                browser_timeout_seconds=90,
+                browser_unblock_enabled=unblock,
+                browser_unblock_timeout_seconds=120,
+            ),
+            FakeAsyncRedis(),
+            CollectorRegistry(),
+        )
+        try:
+            assert parts.media is not None
+            assert parts.media.call_seconds == expected
+            assert parts.media.proxy.tunnel_timeout == expected + TUNNEL_GRACE_SECONDS
+        finally:
+            parts.conversion_pool.shutdown()

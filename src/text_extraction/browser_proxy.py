@@ -313,6 +313,11 @@ class EgressProxy:
         self._contexts: dict[str, ProxyContext] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
+    @property
+    def tunnel_timeout(self) -> float:
+        """Seconds a tunnel or plain connection may stay open, from its start."""
+        return self._tunnel_timeout
+
     async def start(self) -> None:
         """Listen on ``127.0.0.1`` at a free port."""
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)

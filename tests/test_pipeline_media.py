@@ -1,0 +1,1019 @@
+"""Media in the URL pipeline (``pipeline_media.py``, rulings M1, M2, M5, M6, M8, M9): platform
+URLs answered from a fake ``MediaFetcher``, media files, HTML5 tracks and embeds.
+
+The sandbox reaches no platform: the probes are canned ``MediaProbe`` values, pages and tracks
+come from a fake fetcher or pytest-httpserver.
+"""
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+from ipaddress import IPv4Address, IPv6Address
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+from fakeredis import FakeAsyncRedis
+from fastapi.testclient import TestClient
+from prometheus_client import CollectorRegistry
+from pytest_httpserver import HTTPServer
+from structlog.testing import capture_logs
+
+from tests.fakes import ARTICLE, PAGE, PARAGRAPH, Answer, FakeFetcher, RecordingGate, fetched
+from text_extraction.auth import Principal
+from text_extraction.compliance import ComplianceChecker
+from text_extraction.documents.pool import ConversionTimeout
+from text_extraction.envelope import Envelope, ErrorCode
+from text_extraction.escalation import needs_browser
+from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.fetch import Fetcher
+from text_extraction.fingerprint import FingerprintStore, _store_key
+from text_extraction.media.captions import CaptionFormat
+from text_extraction.media.pool import FetchedTrack, MediaFetcher, MediaProbe
+from text_extraction.media.select import TrackRef
+from text_extraction.media.sites import MediaTarget
+from text_extraction.media.transcript import Chapter
+from text_extraction.media.types import MediaEmbed, TranscriptSource
+from text_extraction.netguard import is_public_address
+from text_extraction.outbound import DomainGate
+from text_extraction.pipeline import Pipeline
+from text_extraction.pipeline_media import AsrNeeded, MediaInputMeta
+from text_extraction.result_cache import ResultCache
+from text_extraction.settings import Settings
+
+USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
+YT_ID = "dQw4w9WgXcQ"
+YT = f"https://www.youtube.com/watch?v={YT_ID}"
+YT_SHORT = f"https://youtu.be/{YT_ID}?t=30"
+YT_ROBOTS = "https://www.youtube.com/robots.txt"
+FILE = "https://cdn.example/lessons/photosynthesis.mp3?token=secret"
+GOLDEN = Path(__file__).parent / "documents" / "golden" / "package4_answers.json"
+MP3 = b"ID3\x04\x00\x00\x00\x00\x00\x10" + b"\x00" * 64 + b"\xff\xfb\x90\x64" + b"\x00" * 400
+
+SENTENCES = [
+    "Plants use the light of the sun to make their own food.",
+    "This process is called photosynthesis and it happens in the leaves.",
+    "The green pigment chlorophyll catches the light energy.",
+    "Water comes up from the roots and carbon dioxide comes in from the air.",
+    "Out of these the plant builds sugar and it gives off oxygen.",
+    "Without photosynthesis there would be no oxygen for us to breathe.",
+    "That is why forests and oceans full of algae matter so much.",
+]
+
+
+def vtt(sentences: list[str] = SENTENCES) -> bytes:
+    cues = [
+        f"00:00:{index * 3:02d}.000 --> 00:00:{index * 3 + 2:02d}.500\n{sentence}"
+        for index, sentence in enumerate(sentences)
+    ]
+    return ("WEBVTT\n\n" + "\n\n".join(cues) + "\n").encode()
+
+
+def track(
+    source: TranscriptSource = "manual_subtitles",
+    key: str = "en",
+    body: bytes | None = None,
+    fmt: CaptionFormat = "vtt",
+) -> FetchedTrack:
+    return FetchedTrack(
+        key=key,
+        language=key.split("-")[0],
+        source=source,
+        format=fmt,
+        body=body if body is not None else vtt(),
+    )
+
+
+def probe(**fields: Any) -> MediaProbe:
+    values: dict[str, Any] = {
+        "title": "Photosynthesis for kids",
+        "description": "How plants eat light.\nA lesson for grade 5.",
+        "uploader": "Science Channel",
+        "upload_date": "20240131",
+        "duration": 212.0,
+        "license": "Creative Commons Attribution license (reuse allowed)",
+        "chapters": [],
+        "tags": ["biology", "plants"],
+        "original_language": "en",
+        "manual": {"en": [TrackRef("vtt", "English")], "deu": [TrackRef("vtt", "Deutsch")]},
+        "automatic": {"en-orig": [TrackRef("vtt", None)]},
+        "track": track(),
+    }
+    values.update(fields)
+    return MediaProbe(**values)
+
+
+type Probe = MediaProbe | BaseException | Callable[[MediaTarget], Awaitable[MediaProbe]]
+
+
+class FakeMediaFetcher:
+    """Answers every probe with ``answer``; notes the calls."""
+
+    def __init__(self, answer: Probe) -> None:
+        self.answer = answer
+        self.calls: list[tuple[MediaTarget, list[str], float]] = []
+        self.call_seconds = 25.0
+
+    async def probe(self, target: MediaTarget, languages: list[str], deadline: float) -> MediaProbe:
+        self.calls.append((target, list(languages), deadline))
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        if isinstance(self.answer, MediaProbe):
+            return self.answer
+        return await self.answer(target)
+
+
+def make_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {"auth_mode": "none", "outbound_min_delay_ms": 0}
+    values.update(overrides)
+    return Settings(**values)
+
+
+type Handoff = Callable[[AsrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
+
+
+class Harness:
+    def __init__(
+        self,
+        answers: dict[str, Answer] | None = None,
+        media: Probe | None = None,
+        *,
+        fetcher: Fetcher | None = None,
+        valkey: FakeAsyncRedis | None = None,
+        **overrides: Any,
+    ) -> None:
+        self.registry = CollectorRegistry()
+        self.fake = FakeFetcher(answers or {})
+        self.valkey = valkey if valkey is not None else FakeAsyncRedis()
+        self.settings = make_settings(**overrides)
+        self.gate = RecordingGate(DomainGate(self.valkey, self.settings))
+        if fetcher is None:
+            self.fake.before_request = self.gate.before_request
+            self.fake.on_request_sent = self.gate.mark_sent
+        used = fetcher if fetcher is not None else cast(Fetcher, self.fake)
+        self.media = FakeMediaFetcher(media) if media is not None else None
+        self.pipeline = Pipeline(
+            used,
+            cast(DomainGate, self.gate),
+            ComplianceChecker(used, self.valkey, self.settings),
+            ResultCache(self.valkey, self.settings),
+            FingerprintStore(self.valkey, self.settings),
+            self.settings,
+            self.registry,
+            media_fetcher=cast(MediaFetcher | None, self.media),
+        )
+
+    async def arun(self, handoff: Handoff | None = None, **request: Any) -> Envelope[ExtractResult]:
+        request.setdefault("url", YT)
+        return await self.pipeline.run(ExtractRequest(**request), USER, asr_handoff=handoff)
+
+    def run(self, handoff: Handoff | None = None, **request: Any) -> Envelope[ExtractResult]:
+        return asyncio.run(self.arun(handoff, **request))
+
+    def run_all(self, *requests: dict[str, Any]) -> list[Envelope[ExtractResult]]:
+        async def all_of() -> list[Envelope[ExtractResult]]:
+            return [await self.arun(**request) for request in requests]
+
+        return asyncio.run(all_of())
+
+    def probes(self) -> int:
+        return len(self.media.calls) if self.media is not None else 0
+
+    def fetched_urls(self) -> list[str]:
+        return [url for url, _ in self.fake.calls]
+
+    def keys(self, pattern: str) -> list[bytes]:
+        async def scan() -> list[bytes]:
+            return [key async for key in self.valkey.scan_iter(pattern)]
+
+        return asyncio.run(scan())
+
+
+def data_of(envelope: Envelope[ExtractResult]) -> ExtractResult:
+    assert envelope.data is not None
+    return envelope.data
+
+
+def page_files(urls: list[str]) -> list[str]:
+    """The fetched URLs that are not compliance files."""
+    return [
+        url
+        for url in urls
+        if not url.endswith(("/robots.txt", "/ai.txt", "/.well-known/tdmrep.json"))
+    ]
+
+
+# --- platform URLs ---------------------------------------------------------------------------
+
+
+def test_youtube_with_manual_subtitles() -> None:
+    harness = Harness(media=probe())
+
+    envelope = harness.run(url=YT_SHORT)
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.url == YT_SHORT  # the request's
+    assert data.final_url == YT  # the canonical URL
+    assert data.mode_used == "fast"
+    assert data.content_type == "text/vtt"
+    assert data.content is not None
+    assert data.content.startswith("# Photosynthesis for kids\n\nPlants use the light")
+    assert data.title == "Photosynthesis for kids"
+    assert data.language == "en"
+    assert data.word_count > 50
+    assert data.media is not None
+    assert data.media.platform == "youtube"
+    assert data.media.transcript_source == "manual_subtitles"
+    assert data.media.transcript_language == "en"
+    assert data.media.available_languages == ["en", "de"]
+    assert data.media.duration_seconds == 212.0
+    assert data.media.uploader == "Science Channel"
+    assert data.metadata is not None
+    assert data.metadata.license is not None
+    assert data.metadata.license.id == "CC-BY-3.0"
+    assert data.metadata.license.source == "platform"
+    assert data.metadata.license.confidence == "high"
+    assert data.metadata.description == "How plants eat light.\nA lesson for grade 5."
+    assert data.metadata.authors == ["Science Channel"]
+    assert data.metadata.published == "2024-01-31"
+    assert data.metadata.keywords == ["biology", "plants"]
+    assert data.metadata.canonical_url == YT
+    assert data.fingerprint is not None
+    assert data.attempts == 1
+    assert data.compliance.decision == "allowed"
+    # No page fetch: only the canonical origin's compliance files.
+    assert page_files(harness.fetched_urls()) == []
+    assert all(url.startswith("https://www.youtube.com/") for url in harness.fetched_urls())
+    ((target, languages, _),) = harness.media.calls  # type: ignore[union-attr]
+    assert target.canonical_url == YT
+    assert languages == []
+
+
+def test_formats_text_and_html_of_a_transcript() -> None:
+    harness = Harness(media=probe(chapters=[Chapter(0.0, "Intro"), Chapter(9.0, "Leaves")]))
+
+    text, html = harness.run_all({"format": "text"}, {"format": "html"})
+
+    assert data_of(text).content is not None
+    assert data_of(text).content.startswith("Photosynthesis for kids\nIntro\nPlants use")  # type: ignore[union-attr]
+    assert "#" not in data_of(text).content  # type: ignore[operator]
+    assert data_of(html).content is not None
+    assert "<h1>Photosynthesis for kids</h1>" in data_of(html).content  # type: ignore[operator]
+    assert "<h2>Leaves</h2>" in data_of(html).content  # type: ignore[operator]
+
+
+def test_youtube_auto_captions_only() -> None:
+    harness = Harness(media=probe(manual={}, track=track("auto_subtitles", "en-orig")))
+
+    envelope = harness.run(languages=["en"])
+
+    assert envelope.status == "success"
+    media = data_of(envelope).media
+    assert media is not None
+    assert media.transcript_source == "auto_subtitles"
+    assert media.transcript_language == "en"
+    assert media.available_languages == []
+    assert harness.media is not None
+    assert harness.media.calls[0][1] == ["en"]
+
+
+def test_no_subtitles_metadata_only() -> None:
+    harness = Harness(media=probe(manual={}, automatic={}, track=None))
+
+    first, second = harness.run_all({}, {})
+
+    assert first.status == "partial"
+    assert first.error is not None
+    assert first.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert first.error.retryable is False
+    assert "transcribe" not in first.error.message  # the service has no ASR
+    data = data_of(first)
+    assert (
+        data.content
+        == "# Photosynthesis for kids\n\nHow plants eat light.\n\nA lesson for grade 5."
+    )
+    assert data.content_type == "text/html"
+    assert data.media is not None
+    assert data.media.transcript_source == "metadata_only"
+    assert data.media.transcript_language is None
+    assert data.fingerprint is not None
+    assert data_of(second).cache == "hit"
+    assert harness.probes() == 1
+
+
+def test_metadata_only_names_transcribe_when_the_service_has_asr() -> None:
+    harness = Harness(media=probe(track=None), asr_enabled=True)
+
+    envelope = harness.run()
+
+    assert envelope.error is not None
+    assert "transcribe: true" in envelope.error.message
+
+
+def test_blocked_gives_subtitles_blocked_warning() -> None:
+    harness = Harness(
+        media=probe(manual={}, automatic={}, track=None, blocked=True, error="blocked")
+    )
+
+    first, second = harness.run_all({}, {})
+
+    assert first.status == "partial"
+    assert first.error is not None
+    assert first.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    data = data_of(first)
+    assert "subtitles_blocked" in data.warnings
+    assert data.content is not None
+    assert "How plants eat light." in data.content
+    # The block may lift: the answer is neither compared nor cached.
+    assert data.fingerprint is None
+    assert data_of(second).cache == "miss"
+    assert harness.probes() == 2
+    assert harness.keys("fp:*") == []
+
+
+def test_blocked_without_any_metadata_fails_retryable() -> None:
+    harness = Harness(media=MediaProbe(blocked=True, error="blocked"))
+
+    envelope = harness.run()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert envelope.error.retryable is True
+    assert "subtitles_blocked" in data_of(envelope).warnings
+    # A block is no reason to fetch the watch page as well.
+    assert page_files(harness.fetched_urls()) == []
+
+
+def test_a_youtube_429_reaches_the_gates_backoff() -> None:
+    """``rate_limited`` from the children is reported to the gate as the fast fetcher reports a
+    429 (``Retry-After`` included): the host pauses, and the next request is refused by the gate
+    without a child call."""
+    limited = MediaProbe(blocked=True, error="rate_limited", rate_limited=True, retry_after="120")
+    harness = Harness(media=limited)
+
+    first, second = harness.run_all({}, {})
+
+    assert first.status == "failed"
+    assert first.error is not None
+    assert first.error.code == ErrorCode.RATE_LIMITED
+    assert first.error.retryable is True
+    assert harness.keys("out:cooldown:*") == [b"out:cooldown:{www.youtube.com}"]
+    assert ("record", "www.youtube.com") in harness.gate.events
+    assert second.error is not None
+    assert second.error.code == ErrorCode.CONNECTION_ERROR  # paused
+    assert harness.probes() == 1
+    assert page_files(harness.fetched_urls()) == []  # no watch page after a 429
+
+
+def test_rate_limited_with_metadata_answers_it_with_subtitles_blocked() -> None:
+    harness = Harness(
+        media=probe(track=None, blocked=True, error="rate_limited", rate_limited=True)
+    )
+
+    envelope = harness.run()
+
+    assert envelope.status == "partial"
+    assert "subtitles_blocked" in data_of(envelope).warnings
+    assert harness.keys("out:cooldown:*") == [b"out:cooldown:{www.youtube.com}"]
+
+
+WATCH_PAGE = """<!doctype html><html><head><title>x - YouTube</title></head><body>
+<script>var ytInitialPlayerResponse = {"videoDetails": {"videoId": "dQw4w9WgXcQ",
+"title": "Leaves and light", "shortDescription": "Why leaves are green.\\nWith a quiz.",
+"author": "Biology Class", "lengthSeconds": "95", "keywords": ["leaves"], "isLive": false},
+"microformat": {"playerMicroformatRenderer": {"publishDate": "2023-05-04T01:02:03-07:00"}}};
+var other = {"a": "};"};</script></body></html>"""
+
+
+def test_youtube_metadata_from_watch_page_when_libraries_fail() -> None:
+    """M2's last tier 2: both libraries failed without a block, so the watch page's
+    ``ytInitialPlayerResponse`` gives title and description (fast fetcher, in the turn)."""
+    harness = Harness(
+        {YT: fetched(YT, WATCH_PAGE)},
+        media=MediaProbe(error="extractor_error"),
+    )
+
+    envelope = harness.run()
+
+    assert envelope.status == "partial"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    data = data_of(envelope)
+    assert data.title == "Leaves and light"
+    assert data.content == "# Leaves and light\n\nWhy leaves are green.\n\nWith a quiz."
+    assert data.media is not None
+    assert data.media.transcript_source == "metadata_only"
+    assert data.media.duration_seconds == 95.0
+    assert data.media.uploader == "Biology Class"
+    assert data.metadata is not None
+    assert data.metadata.published == "2023-05-04"
+    assert data.attempts == 2  # the probe and the watch page
+    assert page_files(harness.fetched_urls()) == [YT]
+    assert harness.gate.held() == []
+
+
+def test_a_watch_page_without_player_data_fails_without_transcript() -> None:
+    harness = Harness({YT: fetched(YT, ARTICLE)}, media=MediaProbe(error="extractor_error"))
+
+    envelope = harness.run()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+
+
+def test_robots_disallow_on_platform_enforced() -> None:
+    robots = fetched(YT_ROBOTS, "User-agent: *\nDisallow: /watch\n", content_type="text/plain")
+    harness = Harness({YT_ROBOTS: robots}, media=probe())
+
+    envelope = harness.run(url=YT_SHORT, compliance="enforce")
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.BLOCKED_BY_ROBOTS
+    assert harness.probes() == 0
+
+
+def test_platform_holds_turn_during_probe() -> None:
+    harness: Harness
+
+    async def while_held(target: MediaTarget) -> MediaProbe:
+        assert harness.gate.held() == ["www.youtube.com"]
+        return probe()
+
+    harness = Harness(media=while_held)
+
+    envelope = harness.run(url=YT_SHORT)
+
+    assert envelope.status == "success"
+    assert harness.gate.held() == []  # given back
+    assert harness.probes() == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/playlist?list=PLabc_123",
+        "https://www.youtube.com/embed/videoseries?list=PLabc_123",
+    ],
+)
+def test_playlist_unsupported(url: str) -> None:
+    harness = Harness(media=probe())
+
+    envelope = harness.run(url=url)
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert "one by one" in envelope.error.message
+    assert harness.probes() == 0
+    assert harness.fetched_urls() == []
+
+
+def test_live_unsupported() -> None:
+    harness = Harness(media=probe(track=None, is_live=True))
+
+    envelope = harness.run()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert "live" in envelope.error.message
+
+
+@pytest.mark.parametrize(
+    "request_options",
+    [{"mode": "browser"}, {"headers": {"X-Test": "1"}}, {"cookies": [{"name": "a", "value": "b"}]}],
+)
+def test_mode_browser_skips_media_path(request_options: dict[str, Any]) -> None:
+    harness = Harness({YT: fetched(YT, ARTICLE)}, media=probe())
+
+    envelope = harness.run(**request_options)
+
+    assert harness.probes() == 0
+    assert page_files(harness.fetched_urls()) == [YT]
+    assert data_of(envelope).media is None
+
+
+def test_without_media_a_platform_url_is_a_page() -> None:
+    harness = Harness({YT: fetched(YT, ARTICLE)})
+
+    envelope = harness.run()
+
+    assert envelope.status == "success"
+    assert data_of(envelope).media is None
+    assert page_files(harness.fetched_urls()) == [YT]
+
+
+def test_cache_key_has_media() -> None:
+    valkey = FakeAsyncRedis()
+    page = Harness({YT: fetched(YT, ARTICLE)}, valkey=valkey)
+    assert data_of(page.run()).cache == "miss"  # a page result of the YouTube URL is stored
+
+    media = Harness(media=probe(), valkey=valkey)
+    envelope = media.run()
+
+    assert data_of(envelope).cache == "miss"
+    assert data_of(envelope).media is not None
+    assert media.probes() == 1
+
+
+def test_the_cache_and_the_fingerprint_use_the_canonical_url() -> None:
+    harness = Harness(media=probe())
+
+    _, second = harness.run_all({"url": YT}, {"url": YT_SHORT})
+
+    assert data_of(second).cache == "hit"
+    assert data_of(second).url == YT_SHORT
+    assert harness.probes() == 1
+    assert harness.keys("fp:*") == [_store_key(YT, "markdown|media").encode()]
+
+
+def test_languages_are_part_of_the_cache_key() -> None:
+    harness = Harness(media=probe())
+
+    _, second, third = harness.run_all({}, {"languages": ["de"]}, {"languages": ["de"]})
+
+    assert data_of(second).cache == "miss"
+    assert data_of(third).cache == "hit"
+
+
+def test_metadata_only_cache_not_hit_for_transcribe() -> None:
+    handed: list[tuple[AsrNeeded, Envelope[ExtractResult]]] = []
+
+    async def handoff(
+        needed: AsrNeeded, stand_in: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append((needed, stand_in))
+        return stand_in
+
+    harness = Harness(media=probe(track=None))
+
+    async def scenario() -> list[Envelope[ExtractResult]]:
+        first = await harness.arun()
+        second = await harness.arun(handoff, transcribe=True, languages=["de"])
+        third = await harness.arun()
+        return [first, second, third]
+
+    first, _, third = asyncio.run(scenario())
+
+    assert data_of(first).cache == "miss"
+    assert harness.probes() == 2  # the stored metadata_only result is no hit for transcribe
+    ((needed, stand_in),) = handed
+    assert needed.input == MediaInputMeta(
+        source="platform",
+        platform="youtube",
+        url=YT,
+        extractor="youtube",
+        kind=None,
+        file_name=None,
+        duration=212.0,
+        languages=["de"],
+        compliance=data_of(first).compliance.model_copy(),
+        attempts=1,
+    )
+    assert needed.draft is not None
+    assert data_of(needed.draft).media is not None
+    assert data_of(needed.draft).media.transcript_source == "metadata_only"  # type: ignore[union-attr]
+    assert data_of(stand_in).fingerprint is None  # the stand-in is never stored
+    assert data_of(third).cache == "hit"  # the plain request still gets the stored result
+
+
+def test_transcribe_without_a_handoff_answers_the_draft_with_asr_unavailable() -> None:
+    harness = Harness(media=probe(track=None))
+
+    first, second = harness.run_all({"transcribe": True}, {})
+
+    assert first.status == "partial"
+    assert "asr_unavailable" in data_of(first).warnings
+    assert data_of(first).fingerprint is None
+    assert data_of(second).cache == "miss"
+
+
+def test_transcribe_with_subtitles_needs_no_asr() -> None:
+    handed: list[AsrNeeded] = []
+
+    async def handoff(
+        needed: AsrNeeded, stand_in: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        return stand_in
+
+    harness = Harness(media=probe())
+
+    envelope = harness.run(handoff, transcribe=True)
+
+    assert envelope.status == "success"
+    assert handed == []
+
+
+def test_a_probe_past_the_deadline_is_a_retryable_timeout() -> None:
+    harness = Harness(media=ConversionTimeout())
+
+    envelope = harness.run()
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TIMEOUT
+    assert envelope.error.retryable is True
+
+
+def test_the_probe_gets_the_extractions_deadline() -> None:
+    harness = Harness(media=probe(), extract_timeout_seconds=12)
+
+    async def scenario() -> float:
+        started = asyncio.get_running_loop().time()
+        await harness.arun()
+        return started
+
+    started = asyncio.run(scenario())
+
+    assert harness.media is not None
+    deadline = harness.media.calls[0][2]
+    assert started < deadline <= started + 12
+
+
+def test_user_information_is_refused_and_a_port_is_dropped() -> None:
+    """A platform URL with user information is ``invalid_url`` before anything happens; one
+    with a port is probed and checked at the canonical URL, which carries neither."""
+    harness = Harness(media=probe())
+
+    refused = harness.run(url=f"https://user:secret@www.youtube.com/watch?v={YT_ID}")
+    ported = harness.run(url=f"https://www.youtube.com:8443/watch?v={YT_ID}")
+
+    assert refused.error is not None
+    assert refused.error.code == ErrorCode.INVALID_URL
+    assert harness.probes() == 1  # the second request only
+    assert harness.media is not None
+    assert harness.media.calls[0][0].canonical_url == YT
+    assert data_of(ported).final_url == YT
+    assert "secret" not in json.dumps(data_of(ported).model_dump(mode="json"))
+    assert all(url.startswith("https://www.youtube.com/") for url in harness.fetched_urls())
+
+
+def test_media_logs_carry_no_url_or_video_id() -> None:
+    harness = Harness(media=probe(track=None))
+
+    with capture_logs() as logs:
+        harness.run(url=YT_SHORT)
+
+    text = json.dumps(logs, default=str)
+    assert YT_ID not in text
+    assert "t=30" not in text
+    assert "watch" not in text
+
+
+def test_a_media_result_never_escalates() -> None:
+    harness = Harness(media=probe(track=None, title="404 not found", description=None))
+
+    envelope = harness.run(mode="auto")
+
+    assert not needs_browser(envelope, unblock=True)
+
+
+def test_media_metrics() -> None:
+    harness = Harness(media=probe())
+
+    harness.run()
+
+    value = harness.registry.get_sample_value(
+        "text_extraction_media_extractions_total",
+        {"platform": "youtube", "source": "manual_subtitles", "outcome": "success"},
+    )
+    assert value == 1.0
+
+
+# --- media files ------------------------------------------------------------------------------
+
+
+def test_media_file_without_transcribe() -> None:
+    harness = Harness({FILE: fetched(FILE, MP3, content_type="audio/mpeg")}, media=probe())
+
+    envelope = harness.run(url=FILE)
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert envelope.error.retryable is False
+    data = data_of(envelope)
+    assert data.content_type == "audio/mpeg"
+    assert data.media is not None
+    assert data.media.platform == "file"
+    assert harness.probes() == 0
+
+
+def loopback_or_public(address: IPv4Address | IPv6Address) -> bool:
+    return address.is_loopback or is_public_address(address)
+
+
+def serve_compliance_files(httpserver: HTTPServer) -> None:
+    for path in ("/robots.txt", "/ai.txt", "/.well-known/tdmrep.json"):
+        httpserver.expect_request(path).respond_with_data("", status=404)
+
+
+def test_media_file_with_transcribe_returns_asr_needed(httpserver: HTTPServer) -> None:
+    """A large file declared as audio is read only to its head (64 KiB) and sniffed; with
+    ``transcribe`` it goes to the handoff as an ``AsrNeeded`` without a draft."""
+    serve_compliance_files(httpserver)
+    body = MP3 + b"\x00" * 300_000
+    httpserver.expect_request("/talk.mp3").respond_with_data(body, content_type="audio/mpeg")
+    url = httpserver.url_for("/talk.mp3")
+    handed: list[tuple[AsrNeeded, Envelope[ExtractResult]]] = []
+
+    async def handoff(
+        needed: AsrNeeded, stand_in: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append((needed, stand_in))
+        return stand_in
+
+    settings = make_settings()
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, policy=loopback_or_public)
+        try:
+            harness = Harness(media=probe(), fetcher=fetcher)
+            return await harness.arun(handoff, url=url, transcribe=True, languages=["de"])
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    ((needed, stand_in),) = handed
+    assert needed.draft is None
+    assert needed.input.source == "file"
+    assert needed.input.platform == "file"
+    assert needed.input.kind == "mp3"
+    assert needed.input.url == url
+    assert needed.input.extractor is None
+    assert needed.input.languages == ["de"]
+    assert needed.input.attempts == 1
+    assert needed.input.compliance is not None
+    assert envelope is stand_in
+    assert data_of(stand_in).content_type == "audio/mpeg"
+
+
+def test_a_media_file_is_unsupported_while_media_is_off() -> None:
+    harness = Harness({FILE: fetched(FILE, MP3, content_type="audio/mpeg")})
+
+    envelope = harness.run(url=FILE)
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+
+
+def test_a_truncated_body_that_is_no_media_is_not_converted(httpserver: HTTPServer) -> None:
+    serve_compliance_files(httpserver)
+    body = ("<html><body><p>" + PARAGRAPH * 1000 + "</p></body></html>").encode()
+    httpserver.expect_request("/fake.mp3").respond_with_data(body, content_type="audio/mpeg")
+    settings = make_settings()
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, policy=loopback_or_public)
+        try:
+            harness = Harness(media=probe(), fetcher=fetcher)
+            return await harness.arun(url=httpserver.url_for("/fake.mp3"))
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+
+
+# --- HTML5 tracks and embeds ---------------------------------------------------------------------
+
+
+def lesson(players: str, *, head: str = "") -> str:
+    return (
+        f'<!doctype html><html lang="en"><head><title>Lesson</title>{head}</head><body>'
+        f"<article><h1>Lesson</h1><p>{PARAGRAPH * 2}</p>{players}</article></body></html>"
+    )
+
+
+def track_vtt(words: str) -> str:
+    return f"WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n{words}\n"
+
+
+def test_html5_track_appended(httpserver: HTTPServer) -> None:
+    serve_compliance_files(httpserver)
+    players = (
+        '<video src="a.mp4"><track kind="subtitles" src="a.de.vtt" srclang="de" label="Deutsch">'
+        '<track kind="subtitles" src="a.en.vtt" srclang="en" label="English"></video>'
+        '<video src="b.mp4"><track src="b.vtt" srclang="en"></video>'
+    )
+    httpserver.expect_request("/lesson").respond_with_data(
+        lesson(players), content_type="text/html"
+    )
+    httpserver.expect_request("/a.en.vtt").respond_with_data(
+        track_vtt("Leaves are green because of chlorophyll."), content_type="text/vtt"
+    )
+    httpserver.expect_request("/b.vtt").respond_with_data(
+        track_vtt("Roots take up water."), content_type="text/vtt"
+    )
+    settings = make_settings()
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, policy=loopback_or_public)
+        try:
+            harness = Harness(media=probe(), fetcher=fetcher)
+            return await harness.arun(url=httpserver.url_for("/lesson"))
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.content is not None
+    page_part, first, second = data.content.split("\n\n## Transcript")
+    assert "Photosynthesis is the process" in page_part
+    assert first == " (English)\n\nLeaves are green because of chlorophyll."
+    assert second == "\n\nRoots take up water."
+    assert data.media is not None
+    assert data.media.platform == "html5"
+    assert data.media.transcript_source == "manual_subtitles"
+    assert data.media.transcript_language == "en"
+    assert data.media.available_languages == ["de", "en"]
+    assert data.media.embeds == [
+        MediaEmbed(url=httpserver.url_for("/a.mp4"), kind="file"),
+        MediaEmbed(url=httpserver.url_for("/b.mp4"), kind="file"),
+    ]
+    assert data.quality is not None
+    assert data.word_count == data.quality.word_count
+    assert "chlorophyll" in data.content  # counted as well
+    assert data.fingerprint is not None
+    paths = [request.path for request, _ in httpserver.log]
+    assert "/a.de.vtt" not in paths  # one track per player, by the page language
+
+
+def test_track_to_private_address_skipped(httpserver: HTTPServer) -> None:
+    serve_compliance_files(httpserver)
+    players = (
+        '<video><track src="http://169.254.169.254/latest/meta-data.vtt" srclang="en"></video>'
+    )
+    httpserver.expect_request("/lesson").respond_with_data(
+        lesson(players), content_type="text/html"
+    )
+    settings = make_settings()
+
+    async def scenario() -> Envelope[ExtractResult]:
+        fetcher = Fetcher(settings, policy=loopback_or_public)
+        try:
+            harness = Harness(media=probe(), fetcher=fetcher)
+            return await harness.arun(url=httpserver.url_for("/lesson"))
+        finally:
+            await fetcher.aclose()
+
+    envelope = asyncio.run(scenario())
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.content is not None
+    assert "## Transcript" not in data.content
+    assert "tracks_failed" in data.warnings
+    assert data.media is not None
+    assert data.media.transcript_source is None
+
+
+def test_more_players_than_the_limit_are_truncated() -> None:
+    players = "".join(
+        f'<video><track src="/t{index}.vtt" srclang="en"></video>' for index in range(3)
+    )
+    answers: dict[str, Answer] = {PAGE: fetched(PAGE, lesson(players))}
+    for index in range(3):
+        url = f"https://example.org/t{index}.vtt"
+        answers[url] = fetched(url, track_vtt(f"Track number {index}."), content_type="text/vtt")
+    harness = Harness(answers, media=probe(), media_max_tracks=2)
+
+    envelope = harness.run(url=PAGE)
+
+    data = data_of(envelope)
+    assert data.content is not None
+    assert data.content.count("## Transcript") == 2
+    assert "tracks_truncated" in data.warnings
+    assert "https://example.org/t2.vtt" not in harness.fetched_urls()
+
+
+def test_embeds_listed() -> None:
+    ld = {
+        "@context": "https://schema.org",
+        "@type": "PodcastEpisode",
+        "associatedMedia": {"@type": "AudioObject", "contentUrl": "https://cdn.example/ep1.mp3"},
+    }
+    players = (
+        f'<iframe src="https://www.youtube.com/embed/{YT_ID}?rel=0"></iframe>'
+        '<audio controls src="https://cdn.example/intro.mp3"></audio>'
+    )
+    head = f'<script type="application/ld+json">{json.dumps(ld)}</script>'
+    harness = Harness({PAGE: fetched(PAGE, lesson(players, head=head))}, media=probe())
+
+    envelope = harness.run(url=PAGE)
+
+    assert envelope.status == "success"
+    media = data_of(envelope).media
+    assert media is not None
+    assert media.platform == "html5"
+    assert media.transcript_source is None
+    assert media.embeds == [
+        MediaEmbed(url=YT, kind="platform", platform="youtube"),
+        MediaEmbed(url="https://cdn.example/intro.mp3", kind="file"),
+        MediaEmbed(url="https://cdn.example/ep1.mp3", kind="file"),
+    ]
+    assert harness.probes() == 0  # embeds are listed, never extracted (D4 a)
+    assert page_files(harness.fetched_urls()) == [PAGE]
+
+
+def test_a_page_that_escalates_fetches_no_track() -> None:
+    shell = (
+        '<html><body><div id="root"></div><script src="/app.js"></script>'
+        '<video><track src="/t.vtt" srclang="en"></video></body></html>'
+    )
+    harness = Harness({PAGE: fetched(PAGE, shell)}, media=probe(), browser_enabled=True)
+
+    harness.run(url=PAGE, mode="auto")
+
+    assert "https://example.org/t.vtt" not in harness.fetched_urls()
+
+
+def test_page_answer_unchanged_without_media() -> None:
+    """The package-4/5 answers of an HTML page and a text page are unchanged with media on
+    (apart from the timings; ``media: null`` is in the recording since Task 2)."""
+    golden = json.loads(GOLDEN.read_text())
+    cases: dict[str, tuple[Answer, dict[str, Any]]] = {
+        "article": (fetched(), {"links": True}),
+        "plain": (
+            fetched(body=PARAGRAPH * 5, content_type="text/plain"),
+            {"format": "html", "links": True},
+        ),
+    }
+    for name, (answer, request) in cases.items():
+        harness = Harness({PAGE: answer}, media=probe())
+
+        envelope = harness.run(url=PAGE, **request)
+
+        dumped = envelope.model_dump(mode="json")
+        dumped["data"].pop("timings")
+        dumped.pop("trace_id")
+        assert dumped == golden[name], name
+        assert harness.probes() == 0
+
+
+# --- the API ---------------------------------------------------------------------------------
+
+
+def api_client(**overrides: Any) -> TestClient:
+    from text_extraction.app import create_public_app
+    from text_extraction.pipeline import create_pipeline
+
+    settings = make_settings(**overrides)
+    registry = CollectorRegistry()
+    app = create_public_app(settings, FakeAsyncRedis(), registry)
+    fake = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+    app.state.pipeline = create_pipeline(settings, app.state.valkey, cast(Fetcher, fake), registry)
+    return TestClient(app)
+
+
+@pytest.mark.parametrize(("asr", "jobs"), [(False, True), (True, False), (False, False)])
+def test_transcribe_400_while_asr_off(asr: bool, jobs: bool) -> None:
+    with api_client(asr_enabled=asr, jobs_enabled=jobs) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "transcribe": True})
+        batch = client.post("/v1/batch", json={"urls": [PAGE], "transcribe": True})
+        plain = client.post("/v1/extract", json={"url": PAGE, "transcribe": False})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "Transcription is not enabled on this service."
+    assert batch.status_code in (400, 503)  # 503: jobs disabled answers first
+    if jobs:
+        assert batch.status_code == 400
+        assert batch.json()["error"]["message"] == body["error"]["message"]
+    assert plain.status_code == 200
+
+
+def test_transcribe_is_accepted_while_asr_is_on() -> None:
+    with api_client(asr_enabled=True) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "transcribe": True})
+
+    assert response.status_code == 200
+
+
+def test_transcribe_defaults_wait_seconds_to_20(monkeypatch: pytest.MonkeyPatch) -> None:
+    from text_extraction import extract_api
+
+    waited: list[float] = []
+    wait_for_flow = extract_api.wait_for_flow
+
+    async def recording(task: asyncio.Task[Any], seconds: float) -> None:
+        waited.append(seconds)
+        await wait_for_flow(task, seconds)
+
+    monkeypatch.setattr(extract_api, "wait_for_flow", recording)
+    with api_client(asr_enabled=True) as client:
+        client.post("/v1/extract", json={"url": PAGE, "transcribe": True})
+        client.post("/v1/extract", json={"url": PAGE, "transcribe": True, "wait_seconds": 5})
+        client.post("/v1/extract", json={"url": PAGE})
+
+    assert waited == [20, 5]

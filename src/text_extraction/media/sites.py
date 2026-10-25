@@ -15,6 +15,11 @@ each matches exactly its extractor in the pinned yt-dlp. A change of a name is o
 Vimeo's canonical URL is the player's, ``https://player.vimeo.com/video/<id>``: yt-dlp needs a
 login for ``vimeo.com/<id>`` but not for the player (spike, ruling M18). ZDF pages are targets
 when they end in ``.html`` or are ``/video/<section>/<show>/...`` pages.
+
+A YouTube playlist (``/playlist?list=``, ``/watch?list=`` without ``v``, and the playlist player
+``/embed/videoseries?list=``, whose name has the shape of a video id) is a target without a
+``video_id``. Only the URL's host and path count: user information and a port are dropped from
+the canonical URL, which is what the media steps fetch.
 """
 
 import re
@@ -99,25 +104,32 @@ def _youtube(host: str, segments: list[str], query: str) -> MediaTarget | None:
     if _on_domain(host, "youtu.be"):
         return _youtube_video(segments[0]) if len(segments) == 1 else None
     nocookie = _on_domain(host, "youtube-nocookie.com")
+    parameters = parse_qs(query)
+    if segments == ["embed", "videoseries"]:  # the playlist player: no video id
+        return _youtube_playlist(parameters)
     if segments[:1] and segments[0] in _YOUTUBE_ID_PREFIXES and len(segments) >= 2:
         if nocookie and segments[0] != "embed":
             return None
         return _youtube_video(segments[1])
     if nocookie:
         return None
-    parameters = parse_qs(query)
     if segments == ["watch"] and "v" in parameters:
         return _youtube_video(parameters["v"][0])
-    if segments in (["watch"], ["playlist"]) and "list" in parameters:
-        list_id = parameters["list"][0]
-        if _YOUTUBE_LIST_ID.fullmatch(list_id):
-            return MediaTarget(
-                "youtube",
-                f"https://www.youtube.com/playlist?list={list_id}",
-                EXTRACTORS["youtube"],
-                None,
-            )
+    if segments in (["watch"], ["playlist"]):
+        return _youtube_playlist(parameters)
     return None
+
+
+def _youtube_playlist(parameters: dict[str, list[str]]) -> MediaTarget | None:
+    list_id = parameters.get("list", [""])[0]
+    if not _YOUTUBE_LIST_ID.fullmatch(list_id):
+        return None
+    return MediaTarget(
+        "youtube",
+        f"https://www.youtube.com/playlist?list={list_id}",
+        EXTRACTORS["youtube"],
+        None,
+    )
 
 
 def _youtube_video(video_id: str) -> MediaTarget | None:

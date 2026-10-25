@@ -15,7 +15,9 @@ against the address policy (``is_public_address``, or anything with
 
 - YouTube: ``youtube_transcript`` first (list, then fetch the chosen track), then ``ytdlp_info``
   for the metadata. yt-dlp fetches the track itself only when youtube-transcript-api failed
-  (not when it found the video without a track we take). Each tier runs at most once.
+  (not when it found the video without a track we take). Each tier runs at most once, and
+  after YouTube answered HTTP 429 yt-dlp is not asked at all: the probe is ``rate_limited``
+  with the answer's ``retry_after``, for the caller to report to the outbound gate.
 - Every other platform: ``ytdlp_info`` with the track.
 
 A failure becomes the probe's ``error`` code, never an exception, except ``ConversionTimeout``
@@ -28,7 +30,12 @@ is shut down. The codes: ``blocked`` (a bot check, a blocked IP, a PO token dema
 instead (``blocked_address``, ``bytes_cap``, ``dns_error``, ``connect_error``), unless the call
 was ``blocked``, ``rate_limited`` or ``too_large``. ``blocked`` on
 the probe is True when no track came and a platform refused the service (``blocked``,
-``rate_limited``, or an empty YouTube caption body): the answer for ruling D1.
+``rate_limited``, or an empty YouTube caption body): the answer for ruling D1. ``rate_limited``
+on the probe is True when any call ended ``rate_limited``.
+
+The proxy's tunnels live ``call_seconds`` plus a grace from their start (``create_media_fetcher``:
+the deadline of the pipeline the fetcher serves), and a probe never runs longer than
+``call_seconds``, so no tunnel it opens dies before its deadline.
 
 Logs and errors carry codes and type names only, never a URL, a video id or a library's message
 (which quotes them).
@@ -144,6 +151,9 @@ class MediaProbe:
     is_live: bool = False
     blocked: bool = False
     error: str | None = None
+    # YouTube answered HTTP 429 (``Retry-After`` as sent, None without one), or yt-dlp said so.
+    rate_limited: bool = False
+    retry_after: str | None = None
 
 
 def create_media_pool(settings: Settings) -> DocumentPool:
@@ -173,13 +183,21 @@ class _Outcome:
         error = reply.get("error")
         return cls(reply, error if isinstance(error, str) else None, track=_track(reply))
 
+    @property
+    def retry_after(self) -> str | None:
+        return _str((self.reply or {}).get("retry_after"))
+
 
 class MediaFetcher:
     """Probes platform videos in the media children (see the module docstring). ``start``
     before ``/ready`` (``probe`` starts it otherwise), ``stop`` at shutdown.
 
     ``allowed_extractors`` are the yt-dlp extractors a target may name: the platforms' by
-    default. Tests allow ``generic`` and ``html5`` to extract a local page."""
+    default. Tests allow ``generic`` and ``html5`` to extract a local page.
+
+    ``call_seconds`` (default ``EXTRACT_TIMEOUT_SECONDS``) is the longest a probe runs: its
+    deadline is moved forward to that many seconds from its start. The proxy's tunnels must live
+    at least that long (``create_media_fetcher`` makes them so)."""
 
     def __init__(
         self,
@@ -188,13 +206,21 @@ class MediaFetcher:
         proxy: EgressProxy,
         *,
         allowed_extractors: Collection[str] = frozenset(EXTRACTORS.values()),
+        call_seconds: float | None = None,
     ) -> None:
         self._settings = settings
         self._pool = pool
         self._proxy = proxy
         self._allowed = frozenset(allowed_extractors)
+        self._call_seconds = (
+            call_seconds if call_seconds is not None else settings.extract_timeout_seconds
+        )
         self._lock = asyncio.Lock()
         self._started = False
+
+    @property
+    def call_seconds(self) -> float:
+        return self._call_seconds
 
     @property
     def pool(self) -> DocumentPool:
@@ -225,12 +251,14 @@ class MediaFetcher:
     async def probe(
         self, target: MediaTarget, languages: Sequence[str], deadline: float
     ) -> MediaProbe:
-        """Subtitles and metadata of ``target`` by ``deadline`` (``loop.time()``). Raises
-        ``ConversionTimeout`` when the deadline passes, ``RuntimeError`` once stopped."""
+        """Subtitles and metadata of ``target`` by ``deadline`` (``loop.time()``; at most
+        ``call_seconds`` from now). Raises ``ConversionTimeout`` when the deadline passes,
+        ``RuntimeError`` once stopped."""
         if target.extractor not in self._allowed:
             raise ValueError("the target names an extractor that is not allowed")
         if target.video_id is None:
             raise ValueError("the target is a playlist, not one video")
+        deadline = min(deadline, asyncio.get_running_loop().time() + self._call_seconds)
         await self.start()
         payload: dict[str, Any] = {
             "url": target.canonical_url,
@@ -244,6 +272,9 @@ class MediaFetcher:
             info = await self._call("ytdlp_info", {**payload, "fetch_track": True}, deadline)
             return _probe(info, info.track, info.error, blocked=info.error in _BLOCKING)
         listing = await self._call("youtube_transcript", payload, deadline)
+        if listing.error == "rate_limited":
+            # YouTube asked us to slow down: yt-dlp would call it again at once.
+            return _probe(listing, None, "rate_limited", blocked=True)
         # yt-dlp fetches the track only when youtube-transcript-api failed (or its track was
         # empty); a listing without a track we take would be the same there.
         retry_track = listing.track is None and listing.error not in (None, "too_large")
@@ -258,7 +289,7 @@ class MediaFetcher:
             code in _BLOCKING or code == "empty_track" for code in codes
         )
         source = info if not info.failed else listing
-        return _probe(source, track, error, blocked=blocked)
+        return _probe(source, track, error, blocked=blocked, codes=codes)
 
     async def _call(self, function: str, payload: dict[str, Any], deadline: float) -> _Outcome:
         context = self._proxy.open_context(max_bytes=self._settings.media_extract_max_bytes)
@@ -288,21 +319,28 @@ class MediaFetcher:
             context.close()
 
 
-def create_media_fetcher(settings: Settings, registry: CollectorRegistry) -> MediaFetcher:
-    """The media fetcher of a process: its pool and its egress proxy, neither started yet. A
-    tunnel of the proxy lives as long as an extraction may (``EXTRACT_TIMEOUT_SECONDS``)."""
-    proxy = EgressProxy(
-        settings,
-        registry=registry,
-        tunnel_timeout=settings.extract_timeout_seconds + TUNNEL_GRACE_SECONDS,
-    )
-    return MediaFetcher(settings, create_media_pool(settings), proxy)
+def create_media_fetcher(
+    settings: Settings, registry: CollectorRegistry, *, call_seconds: float | None = None
+) -> MediaFetcher:
+    """The media fetcher of a process: its pool and its egress proxy, neither started yet.
+    ``call_seconds`` is the deadline of the process's pipeline (default
+    ``EXTRACT_TIMEOUT_SECONDS``; the browser worker's is longer): no probe runs longer, and a
+    tunnel of the proxy lives that long plus a grace."""
+    seconds = call_seconds if call_seconds is not None else settings.extract_timeout_seconds
+    proxy = EgressProxy(settings, registry=registry, tunnel_timeout=seconds + TUNNEL_GRACE_SECONDS)
+    return MediaFetcher(settings, create_media_pool(settings), proxy, call_seconds=seconds)
 
 
 def _probe(
-    outcome: _Outcome, track: FetchedTrack | None, error: str | None, *, blocked: bool
+    outcome: _Outcome,
+    track: FetchedTrack | None,
+    error: str | None,
+    *,
+    blocked: bool,
+    codes: Sequence[str | None] = (),
 ) -> MediaProbe:
     reply = outcome.reply or {}
+    rate_limited = "rate_limited" in (error, outcome.error, *codes)
     return MediaProbe(
         title=_str(reply.get("title")),
         description=_str(reply.get("description")),
@@ -319,6 +357,8 @@ def _probe(
         is_live=reply.get("is_live") is True,
         blocked=blocked,
         error=error,
+        rate_limited=rate_limited,
+        retry_after=outcome.retry_after if rate_limited else None,
     )
 
 
