@@ -70,6 +70,10 @@ def is_running(pid: int) -> bool:
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
+def oom_score_adj(pid: int | str) -> str:
+    return Path(f"/proc/{pid}/oom_score_adj").read_text().strip()
+
+
 def open_fds() -> int:
     return len(os.listdir("/proc/self/fd"))
 
@@ -239,6 +243,16 @@ def test_children_ignore_sigterm_and_sigint() -> None:
     before, after = run_with_pool(scenario)
 
     assert before == after
+
+
+def test_children_are_the_first_choice_of_the_oom_killer() -> None:
+    # The container's OOM killer counts the parent and its children together: a child that runs
+    # the pod out of memory must be the process the kernel ends, not the server.
+    async def scenario(pool: DocumentPool) -> str:
+        return oom_score_adj(await pool.run("pid", b"", deadline_in(5)))
+
+    assert run_with_pool(scenario) == "1000"
+    assert oom_score_adj("self") != "1000"
 
 
 def test_calls_spread_over_the_children() -> None:

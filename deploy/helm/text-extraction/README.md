@@ -64,6 +64,17 @@ the chart deploys their workers.
 document and upload) are both 20000000 by default: lower them together. A `DOCUMENT_MAX_BYTES`
 above `FETCH_MAX_BYTES` makes every pod exit with code 2 at start-up.
 
+The API, extract and browser pods convert documents (MarkItDown) in `DOCUMENT_CONCURRENCY` (2)
+child processes, each with an address-space limit of `DOCUMENT_MEMORY_LIMIT_MB`. The chart
+renders that limit from the container's memory limit: `floor((limits.memory in MiB -
+documentParentReserveMiB) / DOCUMENT_CONCURRENCY)`, 768 MiB for every pod with the defaults
+(`(2048 - 512) / 2` for the API and extract pods, `(4096 - 2560) / 2` for the browser pods, whose
+reserve covers Chromium). So a child runs out of memory and answers `too_large` before the
+container's OOM killer ends the pod; the children also raise their `oom_score_adj` to 1000, so
+the kernel picks them before the server when the pod runs out anyway. A share below 256 MiB fails
+the render. `config.DOCUMENT_MEMORY_LIMIT_MB` wins when set; without a memory limit the
+service's default (2048) applies.
+
 > **Warning:** never put secrets into `config:`. It becomes a ConfigMap, which is stored and shown
 > in clear text. Use `secrets.*` and `externalValkey.existingSecret.*` for secrets.
 
@@ -130,7 +141,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
 | `secrets.existingSecretKey` | `API_KEYS` | Key inside that Secret. |
-| `resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption. The memory limit is about `CONVERT_CONCURRENCY` x 450 MB (one 5 MiB page) plus the service; raise it with `CONVERT_CONCURRENCY` or `CONVERT_MAX_BYTES`. |
+| `resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
+| `documentParentReserveMiB` | `512` | MiB of the API container's memory limit kept for everything but the document conversion children; the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
@@ -140,7 +152,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
 | `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
 | `workers.extract.nodeSelector` | `{}` | Merged over the global `nodeSelector` for the extract workers; a key set here wins. |
-| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder, sized like the API: `CONVERT_CONCURRENCY` x about 450 MB plus the service. |
+| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
+| `workers.extract.documentParentReserveMiB` | `512` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
 | `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica. |
@@ -156,6 +169,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
 | `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4Gi | Placeholder for a browser with 4 pages plus the conversions. |
+| `workers.browser.documentParentReserveMiB` | `2560` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages, so each document conversion child gets `(4096 - 2560) / 2` = 768 MiB. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
 | `workers.browser.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector` for the browser workers; a key set here wins. The browser image is linux/amd64 only (Google Chrome stable), so the default keeps its pods off arm64 nodes. Set the key to `null` to drop it. |
 | `workers.browser.autoscaling.keda.*` | as for the extract workers, `threshold` `8` | Scales on `max(text_extraction_queue_pending_items{pool="browser"})`; the API pods export it while `JOBS_ENABLED` and `BROWSER_ENABLED` are true. Keep `minReplicaCount` at 1 or more: a sync request waits only `BROWSER_QUEUE_WAIT_SECONDS` (10) for a worker. |
@@ -189,7 +203,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `valkey.auth.enabled` | `true` | Valkey requires a password. |
 | `valkey.auth.existingSecret` | `""` | Your own Secret with the password; without it the chart generates one. The password must be URL-safe, see [Valkey password](#valkey-password). |
 | `valkey.auth.existingSecretKey` | `VALKEY_PASSWORD` | Key inside that Secret (also used for the chart-managed one). |
-| `valkey.maxmemory` | `768mb` | `--maxmemory`. The eviction policy is fixed to `noeviction`. Size it for the batches open at once (about `BATCH_MAX_URLS` × the average result, plus as much in the result cache); from `VALKEY_MEMORY_GUARD_RATIO` (0.8) of it the API refuses new batches. |
+| `valkey.maxmemory` | `768mb` | `--maxmemory`. The eviction policy is fixed to `noeviction`. Size it for the batches open at once (about `BATCH_MAX_URLS` × the average result, plus as much in the result cache) and, with Docling workers, for the documents queued for OCR and slow uploads, at most `DOCLING_INPUT_BUDGET_BYTES` (200000000) in all; from `VALKEY_MEMORY_GUARD_RATIO` (0.8) of it the API refuses new batches and nothing more is queued for OCR. With Docling workers and the default maxmemory, the install notes say so. |
 | `valkey.persistence.enabled` | `false` | `false`: `emptyDir`, data (jobs, queued items, counters) is lost on restart. `true`: PVC and append-only file. |
 | `valkey.persistence.size` | `1Gi` | |
 | `valkey.persistence.storageClass` | `""` | Cluster default when empty. |

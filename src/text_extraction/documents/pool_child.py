@@ -33,6 +33,7 @@ def main(argv: list[str]) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     fd, target, memory_limit_mb = int(argv[0]), argv[1], int(argv[2])
+    _prefer_for_oom_kill()
     _limit_memory(memory_limit_mb)
     conn = Connection(fd)
     try:
@@ -47,6 +48,20 @@ def main(argv: list[str]) -> None:
         except EOFError:
             return  # the parent is gone
         conn.send_bytes(_answer(functions, request))
+
+
+def _prefer_for_oom_kill() -> None:
+    """Make this child the kernel's first choice when the container runs out of memory.
+
+    The cgroup's OOM killer counts the parent and all its children; without this it may end
+    the parent (the API or worker process) for a child's document. Raising the score needs no
+    privilege. Where /proc is not writable the child runs with the parent's score.
+    """
+    try:
+        with open("/proc/self/oom_score_adj", "w") as score:
+            score.write("1000")
+    except OSError:
+        pass
 
 
 def _limit_memory(megabytes: int) -> None:

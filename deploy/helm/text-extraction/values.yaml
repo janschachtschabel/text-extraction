@@ -43,6 +43,11 @@ config:
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both
   # 20000000 by default. Lower them together: DOCUMENT_MAX_BYTES must not exceed FETCH_MAX_BYTES,
   # or every pod exits with code 2 at start-up.
+  # DOCUMENT_MEMORY_LIMIT_MB (the address space of one conversion child) is rendered from each
+  # pod's memory limit unless set here; see `documentParentReserveMiB`.
+  # DOCLING_INPUT_BUDGET_BYTES (200000000): the most bytes that documents queued for OCR and slow
+  # uploads may hold in Valkey at once, across all pods. Beyond it nothing more is queued (the
+  # text layer answers with ocr_unavailable). Size valkey.maxmemory for it.
 
 # Secrets. API_KEYS is a JSON list of {"name", "role", "sha256", "rate_limit_per_minute"} objects.
 # Set `apiKeys` for a chart-managed Secret, or point `existingSecret` at your own Secret.
@@ -53,16 +58,28 @@ secrets:
   # Key inside the existing Secret.
   existingSecretKey: API_KEYS
 
-# Placeholder values until package 11 measures real consumption. The memory limit follows
-# CONVERT_CONCURRENCY x the peak of one conversion: a page at CONVERT_MAX_BYTES (5 MiB) peaks at
-# about 450 MB, so 2 conversions plus the service itself need about 1Gi. Raise it with either.
+# Placeholder values until package 11 measures real consumption. The memory limit covers the
+# service with CONVERT_CONCURRENCY page conversions (a page at CONVERT_MAX_BYTES, 5 MiB, peaks at
+# about 450 MB) and the DOCUMENT_CONCURRENCY (2) document conversion children (MarkItDown; about
+# 150 MB each when idle, more with a large document). The chart gives each child an even share
+# of the limit after `documentParentReserveMiB` as its address space (DOCUMENT_MEMORY_LIMIT_MB):
+# (2048 - 512) / 2 = 768 MiB here, so a child runs out of memory (too_large) before the
+# container's OOM killer ends the pod (and the children raise their oom_score_adj, so the killer
+# picks a child over the server). Raise the limit with either concurrency.
 resources:
   requests:
     cpu: 100m
     memory: 256Mi
   limits:
     cpu: "1"
-    memory: 1Gi
+    memory: 2Gi
+
+# MiB of the API container's memory limit kept for everything but the document conversion
+# children: the server, its page conversions and its caches. DOCUMENT_MEMORY_LIMIT_MB is
+# floor((resources.limits.memory - this) / DOCUMENT_CONCURRENCY), at least 256 (else the render
+# fails); config.DOCUMENT_MEMORY_LIMIT_MB wins when set, and without a memory limit the
+# service's default (2048) applies.
+documentParentReserveMiB: 512
 
 autoscaling:
   enabled: false
@@ -96,16 +113,18 @@ workers:
     # The render fails when that is above this value minus 10 s (config.EXTRACT_TIMEOUT_SECONDS,
     # default 25): raise this value with the timeout.
     terminationGracePeriodSeconds: 45
-    # Placeholder values until package 11 measures real consumption. The memory limit follows
-    # CONVERT_CONCURRENCY x the peak of one conversion: a page at CONVERT_MAX_BYTES (5 MiB) peaks at
-    # about 450 MB, so 2 conversions plus the service itself need about 1Gi. Raise it with either.
+    # Placeholder values until package 11 measures real consumption. As for the API pods: the
+    # worker with its page conversions and its document conversion children, each child with
+    # (limit - documentParentReserveMiB) / DOCUMENT_CONCURRENCY of address space (768 MiB).
     resources:
       requests:
         cpu: 100m
         memory: 256Mi
       limits:
         cpu: "1"
-        memory: 1Gi
+        memory: 2Gi
+    # As the top-level documentParentReserveMiB, for these pods.
+    documentParentReserveMiB: 512
     # Merged over the global `nodeSelector` for these pods; a key set here wins.
     nodeSelector: {}
     # KEDA and the HPA are mutually exclusive: enabling both fails the render. With either one on,
@@ -162,6 +181,10 @@ workers:
       limits:
         cpu: "2"
         memory: 4Gi
+    # As the top-level documentParentReserveMiB, for these pods: the reserve covers Chromium with
+    # `concurrency` pages as well, so each document conversion child gets (4096 - 2560) / 2 = 768
+    # MiB of address space (DOCUMENT_MEMORY_LIMIT_MB).
+    documentParentReserveMiB: 2560
     # Size limit of the emptyDir at /tmp: browser profiles, Chrome's caches and Xvfb's socket.
     # The browsers use it instead of /dev/shm (--disable-dev-shm-usage).
     tmpSizeLimit: 2Gi
@@ -304,9 +327,13 @@ valkey:
   # fork of an append-only-file rewrite or a background save. Keep it near 60 % of the limit.
   # Sizing: job results are the bulk, about BATCH_MAX_URLS x the average result JSON per open
   # batch (1,000 x ~80 KB = ~80 MB), plus as much again in the result cache, held for
-  # JOB_TTL_SECONDS / RESULT_STORE_TTL_SECONDS (24 h). At VALKEY_MEMORY_GUARD_RATIO (0.8) of
-  # maxmemory the API stops accepting batches (503) and all pods skip result-cache writes, so plan
-  # maxmemory for the batches you expect to be open at once with room to spare below 80 %.
+  # JOB_TTL_SECONDS / RESULT_STORE_TTL_SECONDS (24 h). Documents queued for OCR (Docling workers)
+  # and slow uploads keep their bytes here too, at most DOCLING_INPUT_BUDGET_BYTES (200 MB) in all
+  # (up to DOCLING_INPUT_TTL_SECONDS each): 80 + 80 + 200 MB fit below 80 % of 768mb, larger
+  # batches or a larger budget do not. At VALKEY_MEMORY_GUARD_RATIO (0.8) of maxmemory the API
+  # stops accepting batches (503), all pods skip result-cache writes and nothing more is queued
+  # for OCR, so plan maxmemory for the batches and documents you expect at once with room to
+  # spare below 80 %.
   maxmemory: 768mb
   persistence:
     # false: data lives in an emptyDir and is lost on restart (jobs and queued items are lost too).

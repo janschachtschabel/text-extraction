@@ -80,6 +80,20 @@ expect_render_fails() {
   fi
 }
 
+# NOTES.txt as `helm install` would print it (`helm template` leaves it out): a copy of the chart
+# renders the file through `tpl` in a ConfigMap.
+render_notes() {
+  local copy status=0
+  copy="$(mktemp -d)"
+  cp -r "$CHART" "$copy/chart"
+  cp "$CHART/templates/NOTES.txt" "$copy/chart/notes.txt"
+  printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: notes' 'data:' '  notes: |' \
+    '{{ tpl (.Files.Get "notes.txt") . | indent 4 }}' >"$copy/chart/templates/zz-notes.yaml"
+  "$HELM" template "$RELEASE" "$copy/chart" --namespace "$NAMESPACE" --show-only templates/zz-notes.yaml "$@" || status=$?
+  rm -rf "$copy"
+  return "$status"
+}
+
 expect_render_succeeds() {
   local label="$1"
   shift
@@ -211,6 +225,44 @@ expect_absent "no browser alerts without browser workers" \
 expect_absent "workers keep the image's init process" "$extract$browser" "command:"
 expect_contains "extract worker passes its entry point as args" "$extract" "- text-extraction-worker"
 
+# --- Document conversion memory -----------------------------------------------------------------
+
+# Each MarkItDown child gets floor((limit MiB - documentParentReserveMiB) / DOCUMENT_CONCURRENCY)
+# of address space: (2048 - 512) / 2 in the API and extract pods, (4096 - 2560) / 2 in the
+# browser pods.
+expect_contains "API memory limit" "$api" "memory: 2Gi"
+expect_contains "extract worker memory limit" "$extract" "memory: 2Gi"
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_values "document memory ($name)" "$(document "$on" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
+done
+expect_values "config.DOCUMENT_MEMORY_LIMIT_MB wins (API)" \
+  "$(document "$(render --set-string config.DOCUMENT_MEMORY_LIMIT_MB=1000)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB ""
+expect_values "config.DOCUMENT_MEMORY_LIMIT_MB wins (browser worker)" \
+  "$(document "$(render --set-string config.DOCUMENT_MEMORY_LIMIT_MB=1000)" Deployment "$BROWSER")" DOCUMENT_MEMORY_LIMIT_MB ""
+expect_values "document memory follows the limit" \
+  "$(document "$(render --set resources.limits.memory=3Gi)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "1280"
+expect_values "document memory follows DOCUMENT_CONCURRENCY" \
+  "$(document "$(render --set resources.limits.memory=3Gi --set-string config.DOCUMENT_CONCURRENCY=4)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "640"
+expect_values "document memory from Mi" \
+  "$(document "$(render --set workers.extract.resources.limits.memory=2560Mi)" Deployment "$EXTRACT")" DOCUMENT_MEMORY_LIMIT_MB "1024"
+# 2G = 1907.3 MiB: floor((1907.3 - 512) / 2)
+expect_values "document memory from G" \
+  "$(document "$(render --set resources.limits.memory=2G)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "697"
+expect_values "document memory from bytes" \
+  "$(document "$(render --set-string resources.limits.memory=2147483648)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "768"
+expect_values "document memory follows the reserve" \
+  "$(document "$(render --set workers.browser.documentParentReserveMiB=2048)" Deployment "$BROWSER")" DOCUMENT_MEMORY_LIMIT_MB "1024"
+expect_values "no memory limit, no document memory" \
+  "$(document "$(render --set resources.limits.memory=null)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB ""
+# (1024 - 512) / 2 = 256 is the minimum; 1000Mi leaves 244.
+expect_render_succeeds "document memory at the minimum" --set resources.limits.memory=1Gi
+expect_render_fails "document memory below the minimum (API)" "resources.limits.memory (1000Mi) leaves 244 MiB" \
+  --set resources.limits.memory=1000Mi
+expect_render_fails "document memory below the minimum (extract worker)" "workers.extract.resources.limits.memory (1000Mi) leaves 244 MiB" \
+  --set workers.extract.resources.limits.memory=1000Mi
+expect_render_succeeds "config.DOCUMENT_MEMORY_LIMIT_MB skips the minimum" \
+  --set resources.limits.memory=1000Mi --set-string config.DOCUMENT_MEMORY_LIMIT_MB=400
+
 # --- Docling workers ----------------------------------------------------------------------------
 
 expect_absent "docling off renders nothing" "$on" "docling"
@@ -233,6 +285,7 @@ expect_values "docling on (docling worker and init container)" "$docling" DOCLIN
 expect_values "docling worker and init container" "$docling" DOCLING_MODELS_PATH "/models /models"
 expect_values "docling worker" "$docling" DOCLING_CONCURRENCY "1 1"
 expect_absent "docling worker gets no WORKER_CONCURRENCY" "$docling" "name: WORKER_CONCURRENCY"
+expect_absent "docling worker gets no DOCUMENT_MEMORY_LIMIT_MB" "$docling" "name: DOCUMENT_MEMORY_LIMIT_MB"
 expect_contains "docling worker uses the docling image" "$docling" "image: \"ghcr.io/janschachtschabel/text-extraction-docling:$APP_VERSION\""
 expect_contains "docling worker runs its entry point" "$docling" "- text-extraction-docling-worker"
 expect_absent "docling worker keeps the image's init process" "$docling" "command:"
@@ -299,6 +352,16 @@ expect_render_fails "docling worker grace period too short" "workers.docling.ter
   --set workers.docling.enabled=true --set workers.docling.terminationGracePeriodSeconds=39
 expect_render_succeeds "docling worker grace period just long enough" \
   --set workers.docling.enabled=true --set workers.docling.terminationGracePeriodSeconds=40
+
+# Valkey holds the queued Docling inputs: the notes point at maxmemory while it is the default.
+expect_contains "notes warn about the default maxmemory with docling" \
+  "$(render_notes --set workers.docling.enabled=true)" "DOCLING_INPUT_BUDGET_BYTES (200000000)"
+expect_contains "notes name config.DOCLING_INPUT_BUDGET_BYTES" \
+  "$(render_notes --set workers.docling.enabled=true --set-string config.DOCLING_INPUT_BUDGET_BYTES=50000000)" \
+  "DOCLING_INPUT_BUDGET_BYTES (50000000)"
+expect_absent "no maxmemory note with a raised maxmemory" \
+  "$(render_notes --set workers.docling.enabled=true --set valkey.maxmemory=2gb)" "DOCLING_INPUT_BUDGET_BYTES"
+expect_absent "no maxmemory note without docling" "$(render_notes)" "DOCLING_INPUT_BUDGET_BYTES"
 
 docling_policies="$(render --set workers.docling.enabled=true --set networkPolicy.enabled=true)"
 expect_contains "docling worker NetworkPolicy" "$(document "$docling_policies" NetworkPolicy "$DOCLING")" "port: 9090"

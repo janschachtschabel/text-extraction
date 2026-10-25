@@ -143,7 +143,8 @@ chart mounts it at /models (DOCLING_MODELS_PATH). */}}
 {{- end -}}
 
 {{/* The env entries of a pool's workers; call with (list $ "<pool>"). They come after envFrom,
-so they override config.*. The Docling workers read the models from /models. */}}
+so they override config.*. The Docling workers read the models from /models; the extract and
+browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
 {{- define "text-extraction.workerEnv" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
@@ -154,12 +155,70 @@ so they override config.*. The Docling workers read the models from /models. */}
 {{- if eq $pool "docling" }}
 - name: DOCLING_MODELS_PATH
   value: /models
+{{- else }}
+{{- $worker := index $root.Values.workers $pool }}
+{{- with include "text-extraction.documentMemoryEnv" (list $root $worker.resources $worker.documentParentReserveMiB (printf "workers.%s.resources" $pool)) | trim }}
+{{ . }}
+{{- end }}
 {{- end }}
 {{ include "text-extraction.switchEnv" $root }}
 {{ include "text-extraction.valkeyEnv" $root | trim }}
 {{- with include "text-extraction.apiKeysEnv" $root | trim }}
 {{ . }}
 {{- end }}
+{{- end -}}
+
+{{/* A Kubernetes memory quantity (2Gi, 1536Mi, 2G, 2147483648, ...) in whole MiB. */}}
+{{- define "text-extraction.memoryMiB" -}}
+{{- $quantity := toString . -}}
+{{- $mib := 0.0 -}}
+{{- if hasSuffix "Ti" $quantity -}}
+{{- $mib = mulf (trimSuffix "Ti" $quantity | float64) 1048576.0 -}}
+{{- else if hasSuffix "Gi" $quantity -}}
+{{- $mib = mulf (trimSuffix "Gi" $quantity | float64) 1024.0 -}}
+{{- else if hasSuffix "Mi" $quantity -}}
+{{- $mib = trimSuffix "Mi" $quantity | float64 -}}
+{{- else if hasSuffix "Ki" $quantity -}}
+{{- $mib = divf (trimSuffix "Ki" $quantity | float64) 1024.0 -}}
+{{- else if hasSuffix "T" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "T" $quantity | float64) 1000000000000.0) 1048576.0 -}}
+{{- else if hasSuffix "G" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "G" $quantity | float64) 1000000000.0) 1048576.0 -}}
+{{- else if hasSuffix "M" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "M" $quantity | float64) 1000000.0) 1048576.0 -}}
+{{- else if hasSuffix "k" $quantity -}}
+{{- $mib = divf (mulf (trimSuffix "k" $quantity | float64) 1000.0) 1048576.0 -}}
+{{- else -}}
+{{- $mib = divf ($quantity | float64) 1048576.0 -}}
+{{- end -}}
+{{- floor $mib | int -}}
+{{- end -}}
+
+{{/* DOCUMENT_MEMORY_LIMIT_MB of a pod with a DocumentPool (the API, the extract and browser
+workers), as an env entry; call with (list $ <resources> <reserve MiB> "<values path of the
+resources>"). Each of the DOCUMENT_CONCURRENCY conversion children gets an even share of the
+container's memory limit after the reserve for the rest of the pod: floor((limit MiB - reserve)
+/ DOCUMENT_CONCURRENCY).
+Nothing when config.DOCUMENT_MEMORY_LIMIT_MB is set (it wins, through envFrom) or the container
+has no memory limit (the default, 2048, applies). The cgroup's OOM killer counts every process
+of the container: with the children's address space within the limit, a child hits its own
+RLIMIT_AS (too_large) before the pod is killed. */}}
+{{- define "text-extraction.documentMemoryEnv" -}}
+{{- $root := index . 0 -}}
+{{- $resources := index . 1 | default dict -}}
+{{- $reserve := index . 2 | float64 -}}
+{{- $path := index . 3 -}}
+{{- $limit := dig "limits" "memory" "" $resources -}}
+{{- if and $limit (not (hasKey $root.Values.config "DOCUMENT_MEMORY_LIMIT_MB")) -}}
+{{- $limitMiB := include "text-extraction.memoryMiB" $limit | float64 -}}
+{{- $children := include "text-extraction.configNumber" (list $root "DOCUMENT_CONCURRENCY" 2) | float64 -}}
+{{- $share := divf (subf $limitMiB $reserve) $children | floor | int -}}
+{{- if lt $share 256 -}}
+{{- fail (printf "%s.limits.memory (%v) leaves %v MiB for each of the DOCUMENT_CONCURRENCY (%v) conversion children after the reserve (%v MiB), below the minimum of 256: raise the limit, lower config.DOCUMENT_CONCURRENCY or the reserve, or set config.DOCUMENT_MEMORY_LIMIT_MB." $path $limit $share $children $reserve) -}}
+{{- end }}
+- name: DOCUMENT_MEMORY_LIMIT_MB
+  value: {{ $share | toString | quote }}
+{{- end -}}
 {{- end -}}
 
 {{/* A number setting from config.*, else its default; call with (list $ "<NAME>" <default>). */}}
