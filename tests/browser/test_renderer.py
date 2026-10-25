@@ -588,15 +588,19 @@ def test_form_post_navigation_is_refused(settings_for: SettingsFor, site: Site) 
     scenario(settings_for, site, body)
 
 
-def test_download_is_reported_as_non_html(settings_for: SettingsFor, site: Site) -> None:
+def test_download_is_reported_with_its_url(settings_for: SettingsFor, site: Site) -> None:
     async def body(stack: Stack) -> None:
-        rendered = await render(stack, f"{site.base}/download.pdf")
-        assert [(r.url, r.content_type) for r in rendered.responses] == [
-            (f"{site.base}/download.pdf", "application/pdf")
-        ]
-        envelope = await run_pipeline(stack, url=f"{site.base}/download.pdf")
+        url = f"{site.base}/download.pdf"
+        rendered = await render(stack, url)
+        assert [(r.url, r.content_type) for r in rendered.responses] == [(url, "application/pdf")]
+        assert rendered.download_url == url
+        # F18: the pipeline fetches it directly; the stack's fake fetcher answers 404.
+        envelope = await run_pipeline(stack, url=url)
         assert envelope.error is not None
-        assert envelope.error.code is ErrorCode.UNSUPPORTED_CONTENT_TYPE
+        assert envelope.error.code is ErrorCode.TARGET_HTTP_ERROR
+        assert envelope.data is not None
+        assert envelope.data.mode_used == "fast"
+        assert "document_fetched_directly" in envelope.data.warnings
 
     scenario(settings_for, site, body)
 

@@ -68,7 +68,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
 
@@ -151,6 +151,11 @@ _KINDS: dict[str, Literal["html", "text"]] = {
     "application/xhtml+xml": "html",
     "text/plain": "text",
 }
+# A render that ends on one of these (or on a download) fetches the file directly (F18).
+_DOCUMENT_TYPES = frozenset(
+    {media_type(kind) for kind in get_args(DocumentKind)} | {"application/octet-stream"}
+)
+DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
 # Fetch errors that say the host itself is in trouble; they count towards its circuit breaker.
 _HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
@@ -257,6 +262,11 @@ class _Run:
     warnings: list[str] = field(default_factory=list)  # of the renderer, also on failures
     validators: Validators = field(default_factory=Validators)  # of the fast fetch's answer
     ocr_handoff: OcrHandoff | None = None
+    ocr_needed: OcrNeeded | None = None  # for the handoff, once the deadline's steps are done
+    # What the fast fetch asks for: the request URL, or the file a render ended on (F18), which
+    # is fetched only to convert a document.
+    target: str = ""
+    direct: bool = False
 
     def timings(self) -> Timings:
         return Timings(
@@ -406,6 +416,7 @@ class Pipeline:
             self._pool,
             settings,
             self._envelope,
+            registry,
         )
 
     async def run(
@@ -429,9 +440,10 @@ class Pipeline:
         required then), and ``draft`` is the fast result of an ``auto`` item, which the render is
         compared with instead of fetching the page again (B5).
 
-        A document that needs OCR goes to ``ocr_handoff``, whose envelope is the answer (the
-        pool it hands to stores the result it keeps). Without it, the document's text layer
-        answers with the warning ``ocr_unavailable`` (``pipeline_documents.without_ocr``).
+        A document that needs OCR goes to ``ocr_handoff``, once the steps under the deadline are
+        done; its envelope is the answer (the pool it hands to stores the result it keeps).
+        Without it, the document's text layer answers with the warning ``ocr_unavailable``
+        (``pipeline_documents.without_ocr``).
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
         private = not req.secrets().empty()
@@ -449,10 +461,15 @@ class Pipeline:
             draft=draft if req.mode == "auto" else None,
             artifacts=artifacts,
             ocr_handoff=ocr_handoff,
+            target=req.url,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
             envelope = await self._within_deadline(run)
+            if run.ocr_needed is not None and run.ocr_handoff is not None:
+                # After the deadline's steps: the handoff waits for OCR on a clock of its own
+                # (DOCLING_SYNC_WAIT_SECONDS, F12).
+                envelope = await run.ocr_handoff(run.ocr_needed)
             if envelope.data is not None:
                 envelope.data.timings = run.timings()
             envelope.trace_id = current_trace_id()
@@ -566,10 +583,9 @@ class Pipeline:
     async def _fetch_and_extract(
         self, run: _Run, stored: _Stored | None
     ) -> Envelope[ExtractResult]:
-        req = run.req
         turn = _Turn(self._gate)
         try:
-            run.report = await self._check_origin(run, req.url, turn)
+            run.report = await self._check_origin(run, run.target, turn)
             if (code := blocking_code(run.report)) is not None:
                 return run.failed(code, _BLOCK_MESSAGES[code])
             fetched = await self._fetch(run, stored.entry.validators if stored else None, turn)
@@ -605,6 +621,12 @@ class Pipeline:
             )
         if kind != "html" and kind != "text":
             return await self._document(run, fetched, kind, stored)
+        if run.direct:  # a file the render ended on, but no document after all
+            return run.failed(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+                f"Content type {fetched.content_type or 'unknown'} is not supported in "
+                "browser mode.",
+            )
 
         limit = self._settings.convert_max_bytes
         if len(fetched.content) > limit:
@@ -633,10 +655,13 @@ class Pipeline:
 
     async def _kind(self, fetched: FetchResult) -> DocumentKind | Literal["html", "text"] | None:
         """What the fetched body is (F1). A declared HTML type keeps the page path without a
-        look at the bytes; the URL's last path segment breaks the CSV tie."""
-        if _KINDS.get(fetched.content_type or "") == "html":
+        look at the bytes; the URL's last path segment breaks the CSV tie, but not for a
+        declared ``text/plain`` body: that stays plain text unless it starts with a document's
+        signature (the package-2 answer)."""
+        kind = _KINDS.get(fetched.content_type or "")
+        if kind == "html":
             return "html"
-        name = urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
+        name = None if kind == "text" else urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
         return await self._pool.run(sniff, fetched.content, fetched.content_type, name)
 
     async def _document(
@@ -665,10 +690,15 @@ class Pipeline:
         document = document_input(fetched, kind, run.report, run.attempts)
         outcome = await self._documents.extract(run, document, when)
         if isinstance(outcome, OcrNeeded):
-            if run.ocr_handoff is not None:
-                return await run.ocr_handoff(outcome)
+            if run.ocr_handoff is not None and not run.comparing:
+                run.ocr_needed = outcome  # `run` hands it over once the deadline is off
+                return without_ocr(outcome, run)  # stands in until then; never stored
             outcome = without_ocr(outcome, run)
-        run.validators = Validators.from_headers(fetched.headers)
+        # The validators fit the request URL only; a file a render ended on is not revalidated.
+        if run.target == run.req.url:
+            run.validators = Validators.from_headers(fetched.headers)
+        if run.comparing:
+            return outcome  # the render step keeps the better of it and the draft, and stores it
         return await self._finish(run, outcome, run.validators)
 
     def _assesses_challenge(self, run: _Run, fetched: FetchResult) -> bool:
@@ -725,7 +755,7 @@ class Pipeline:
         The outcome is recorded for the host that gave it, judged against the time that host's
         request actually had.
         """
-        checked = {run.req.url}
+        checked = {run.target}
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
         budget = 0.0  # seconds the request at `turn.answering` has, for `_record_failure`
@@ -759,7 +789,7 @@ class Pipeline:
             )
 
         try:
-            await turn.take(run.host or "", run.report.crawl_delay)
+            await turn.take(urlsplit(run.target).hostname or "", run.report.crawl_delay)
             budget = self._fetch_budget(run)
             if budget < _MIN_FETCH_SECONDS:
                 # Not the host's fault: the turn came too late. Nothing is fetched or recorded.
@@ -772,7 +802,7 @@ class Pipeline:
             chain_budget, chain_started = budget, time.perf_counter()
             try:
                 fetched = await self._fetcher.fetch(
-                    run.req.url,
+                    run.target,
                     validators=validators,
                     timeout_seconds=budget,  # the whole chain's budget; a hop gets what is left
                     on_redirect=on_redirect,
@@ -1134,6 +1164,9 @@ class Pipeline:
         """Judge the last document answer as fast mode would, then convert the rendered HTML."""
         req = run.req
         run.warnings = list(rendered.warnings)
+        file = self._file_of(run, rendered)
+        if file is not None:
+            return await self._fetched_directly(run, file)
         if not rendered.responses:
             return run.failed(
                 ErrorCode.INTERNAL_ERROR, "The browser reported no document.", retryable=True
@@ -1212,6 +1245,49 @@ class Pipeline:
         if run.comparing:
             return envelope
         return await self._finish(run, envelope, Validators())  # B10: never revalidated
+
+    def _file_of(self, run: _Run, rendered: Rendered) -> str | None:
+        """The URL of the file a render ended on, to fetch directly (F18): a download the main
+        frame started, or a 2xx answer of a document type. None with caller secrets: the
+        fetcher must not send the caller's cookies or headers, and without them the answer may
+        differ; nor for a screenshot, which belongs to the rendered page."""
+        if run.private or run.req.screenshot:
+            return None
+        if rendered.download_url is not None:
+            return rendered.download_url
+        last = rendered.responses[-1] if rendered.responses else None
+        if (
+            last is not None
+            and 200 <= last.status < 300
+            and (last.content_type or "") in _DOCUMENT_TYPES
+            and not challenge_not_cleared(rendered, unblock=run.unblocked)
+        ):
+            return last.url
+        return None
+
+    async def _fetched_directly(self, run: _Run, url: str) -> Envelope[ExtractResult]:
+        """Fetch the file a render ended on with the fast fetcher, in a turn of its own and with
+        the compliance checks of fast mode, and convert it if it is a document (F18). The
+        render's turn is given back already; what it learned is dropped: the result is the
+        fast one of the file, with the warning ``document_fetched_directly``. The URL passes
+        the SSRF checks of a navigation first."""
+        run.mode_used, run.unblocked = "fast", False
+        run.report = ComplianceReport(mode=run.report.mode, decision="skipped")
+        run.final_url = run.upstream_status = run.content_type = None
+        run.warnings = [DOCUMENT_FETCHED_DIRECTLY_WARNING]
+        if urlsplit(url).scheme.lower() not in ("http", "https"):  # a blob: or data: download
+            return run.failed(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE,
+                "The page started a download that cannot be fetched directly.",
+            )
+        run.target, run.direct = url, True
+
+        async def fetch_and_extract() -> Envelope[ExtractResult]:
+            check_target(url)
+            check_address(urlsplit(url).hostname or "", self._settings)
+            return await self._fetch_and_extract(run, None)
+
+        return await self._guarded(run, fetch_and_extract())
 
     async def _store_screenshot(
         self, run: _Run, rendered: Rendered

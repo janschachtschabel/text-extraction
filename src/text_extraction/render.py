@@ -92,7 +92,9 @@ class Rendered:
     ``responses`` holds every main-frame document answer, in order; the last one is the
     document ``html`` was read from. ``hosts`` are the hosts the page contacted (through the
     egress proxy). ``cookies`` are the target host's and its parent domain's, for the
-    clearance reuse of unblock mode (B14)."""
+    clearance reuse of unblock mode (B14). ``download_url`` is the URL of a download the main
+    frame started (by a navigation, also a clicked link): the render then has no document; the
+    pipeline may fetch the file directly (F18)."""
 
     html: str = field(repr=False)
     final_url: str
@@ -102,6 +104,7 @@ class Rendered:
     warnings: tuple[str, ...] = ()
     hosts: frozenset[str] = frozenset()
     cookies: tuple[CookieData, ...] = field(default=(), repr=False)
+    download_url: str | None = None
 
 
 class Renderer(Protocol):

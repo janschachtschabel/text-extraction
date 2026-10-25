@@ -805,8 +805,9 @@ def test_challenge_answer_is_assessed_only_under_unblock(
 # --- the rendered document ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("content_type", ["application/pdf", "text/plain", None])
-def test_download_or_non_html_is_unsupported_content_type(content_type: str | None) -> None:
+# A document type is fetched directly since package 5 (F18; test_pipeline_documents.py).
+@pytest.mark.parametrize("content_type", ["text/plain", "image/gif", None])
+def test_non_html_is_unsupported_content_type(content_type: str | None) -> None:
     harness = RenderHarness(
         renderer=FakeRenderer(rendered("", responses=[response(content_type=content_type)]))
     )
@@ -1055,7 +1056,7 @@ def test_which_unblock_answers_reach_the_gate(answers: list[int], records: int) 
 
 
 def test_a_non_html_final_answer_does_not_clear_a_challenge() -> None:
-    final = response(status=200, content_type="application/pdf")
+    final = response(status=200, content_type="text/plain")
     harness = unblock_harness(rendered("", responses=[response(status=503), final]))
 
     harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")

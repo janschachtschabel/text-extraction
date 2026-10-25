@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin, urlsplit
 
 import structlog
-from playwright.async_api import APIResponse, Frame, Page, Request, Response, Route
+from playwright.async_api import APIResponse, Download, Frame, Page, Request, Response, Route
 
 from text_extraction.browser_actions import run_actions
 from text_extraction.browser_driver import (
@@ -99,6 +99,8 @@ _SPECULATIVE_PURPOSES: Final = ("prefetch", "prerender")
 # The strings of a structured-field list, as in ``Speculation-Rules: "/a.json", "/b.json"``.
 _SF_STRING: Final = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _LOAD_WAIT_SECONDS: Final = 2.0  # for a document under way before it is read
+# Main-frame answers that are pages, not files.
+_HTML_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})
 
 
 @dataclass(frozen=True)
@@ -270,6 +272,7 @@ class _Render:
         self.fault: FetchError | None = None  # the route handler's own failure
         self.failure: tuple[str, str] | None = None  # (URL, error) of a failed document load
         self.download = False
+        self.download_url: str | None = None  # of the download event
         # Navigations answered by the route handler itself (a refused non-GET one, a redirect
         # step of a document with caller headers, one it aborted): not document answers or
         # load failures of the render.
@@ -535,7 +538,20 @@ class _Render:
             warnings=tuple(dict.fromkeys(warnings)),
             hosts=self.traffic.hosts if self.traffic is not None else frozenset(),
             cookies=cookies,
+            download_url=self._download_url(responses),
         )
+
+    def _download_url(self, responses: list[MainResponse]) -> str | None:
+        """The download's URL. Its event may come after the navigation's error: then the last
+        document answer's URL when that is no HTML (the download's own answer), else the URL
+        the render went to (a first navigation that became the download)."""
+        if not self.download:
+            return None
+        if self.download_url is not None:
+            return self.download_url
+        if responses and responses[-1].content_type not in _HTML_TYPES:
+            return responses[-1].url
+        return self.url
 
     def _main_responses(self) -> list[MainResponse]:
         """The document answers, without the redirects among them (their URLs become the
@@ -607,8 +623,9 @@ class _Render:
             self.failure = (request.url, error)
             self.settled.set()
 
-    def _on_download(self, _download: object) -> None:
+    def _on_download(self, download: Download) -> None:
         self.download = True
+        self.download_url = download.url
         self.moving.clear()  # the navigation became a download: no document will commit
 
     def _on_navigated(self, frame: Frame) -> None:

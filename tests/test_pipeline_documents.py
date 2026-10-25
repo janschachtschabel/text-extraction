@@ -21,11 +21,23 @@ from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from structlog.testing import capture_logs
 
-from tests.fakes import PAGE, PARAGRAPH, Answer, FakeFetcher, fetched
+from tests.fakes import (
+    ORIGIN,
+    PAGE,
+    PARAGRAPH,
+    Answer,
+    FakeFetcher,
+    FakeRenderer,
+    RecordingGate,
+    fetched,
+    rendered,
+    response,
+)
 from text_extraction import browser_worker, worker
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
-from text_extraction.compliance import ComplianceChecker
+from text_extraction.compliance import ComplianceChecker, ComplianceReport
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.documents.pool import (
     ConversionCrashed,
     ConversionError,
@@ -40,7 +52,14 @@ from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline, create_pipeline
-from text_extraction.pipeline_documents import MARKITDOWN_TARGET, OCR_UNAVAILABLE_WARNING, OcrNeeded
+from text_extraction.pipeline_documents import (
+    MARKITDOWN_TARGET,
+    OCR_UNAVAILABLE_WARNING,
+    DocumentSteps,
+    OcrNeeded,
+    document_input,
+)
+from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
 
@@ -48,6 +67,7 @@ CORPUS = Path(__file__).parent / "documents" / "corpus"
 GOLDEN = Path(__file__).parent / "documents" / "golden" / "package4_answers.json"
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 DOC = "https://example.org/files/lesson.pdf?token=secret-token"
+ARTICLE_HTML = "<html><body><p>" + PARAGRAPH * 3 + "</p></body></html>"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 64
 
 
@@ -137,24 +157,33 @@ class Harness:
         answers: dict[str, Answer],
         *,
         pool: object | None = None,
+        renderer: FakeRenderer | None = None,
         **overrides: Any,
     ) -> None:
         self.loop = loop
+        self.registry = CollectorRegistry()
         self.fetcher = FakeFetcher(answers)
         self.valkey = FakeAsyncRedis()
         self.settings = make_settings(**overrides)
         fetcher = cast(Fetcher, self.fetcher)
         self.pool = pool if pool is not None else (loop.pool if loop is not None else None)
+        self.gate = RecordingGate(DomainGate(self.valkey, self.settings))
+        self.fetcher.before_request = self.gate.before_request
+        self.fetcher.on_request_sent = self.gate.mark_sent
         self.pipeline = Pipeline(
             fetcher,
-            DomainGate(self.valkey, self.settings),
+            cast(DomainGate, self.gate),
             ComplianceChecker(fetcher, self.valkey, self.settings),
             ResultCache(self.valkey, self.settings),
             FingerprintStore(self.valkey, self.settings),
             self.settings,
-            CollectorRegistry(),
+            self.registry,
+            renderer=cast(Renderer | None, renderer),
             document_pool=cast(DocumentPool, self.pool),
         )
+
+    def metric(self, name: str, **labels: str) -> float:
+        return self.registry.get_sample_value(name, labels) or 0.0
 
     def _run[T](self, work: Coroutine[Any, Any, T]) -> T:
         return asyncio.run(work) if self.loop is None else self.loop.run(work)
@@ -162,10 +191,13 @@ class Harness:
     def run(
         self,
         handoff: Callable[[OcrNeeded], Awaitable[Envelope[ExtractResult]]] | None = None,
+        *,
+        draft: Envelope[ExtractResult] | None = None,
         **request: Any,
     ) -> Envelope[ExtractResult]:
         request.setdefault("url", DOC)
-        return self._run(self.pipeline.run(ExtractRequest(**request), USER, ocr_handoff=handoff))
+        work = self.pipeline.run(ExtractRequest(**request), USER, draft=draft, ocr_handoff=handoff)
+        return self._run(work)
 
     def keys(self, pattern: str) -> list[bytes]:
         async def scan() -> list[bytes]:
@@ -432,9 +464,9 @@ def test_scan_without_docling_answers_text_layer(loop: Loop) -> None:
 
     envelope = harness.run()
 
-    assert envelope.status in ("failed", "partial")
+    assert envelope.status == "failed"
     assert envelope.error is not None
-    assert envelope.error.code in (ErrorCode.EMPTY_CONTENT, ErrorCode.CONTENT_TOO_SHORT)
+    assert envelope.error.code == ErrorCode.EMPTY_CONTENT
     data = data_of(envelope)
     assert OCR_UNAVAILABLE_WARNING in data.warnings
     assert data.document is not None
@@ -601,7 +633,7 @@ def test_document_never_escalates(loop: Loop) -> None:
             False,
             "The PDF is password-protected.",
         ),
-        (ConversionTimeout("late"), ErrorCode.TIMEOUT, False, None),
+        (ConversionTimeout("late"), ErrorCode.TIMEOUT, True, None),
         (ConversionOutOfMemory("big"), ErrorCode.TOO_LARGE, False, None),
     ],
 )
@@ -692,6 +724,336 @@ def test_password_protected_pdf_through_the_child(loop: Loop) -> None:
 
 
 # --- wiring ---
+
+
+def test_text_plain_with_a_csv_path_stays_plain_text() -> None:
+    """The extension breaks no tie for a declared text/plain body (the package-2 answer)."""
+    url = "https://example.org/data/table.csv"
+    body = "Name,Size\n" + PARAGRAPH * 3
+    harness = Harness(
+        None,
+        {url: fetched(url, body, content_type="text/plain")},
+        pool=FakePool(AssertionError("no document")),
+    )
+
+    envelope = harness.run(url=url)
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.document is None
+    assert data.content_type == "text/plain"
+    csv = Harness(None, {url: fetched(url, body, content_type="text/csv")}, pool=FakePool(reply()))
+    assert data_of(csv.run(url=url)).document is not None  # declared CSV still converts
+
+
+# --- the OCR handoff and its deadline ---
+
+
+def test_handoff_runs_after_the_extraction_deadline() -> None:
+    """The handoff waits for OCR after the fast phase (F12): not within its deadline."""
+    harness = Harness(
+        None,
+        {DOC: pdf()},
+        pool=FakePool(reply(needs_ocr=True)),
+        docling_enabled=True,
+        extract_timeout_seconds=2,
+    )
+
+    async def handoff(needed: OcrNeeded) -> Envelope[ExtractResult]:
+        await asyncio.sleep(2.5)  # longer than the whole extraction may take
+        assert needed.draft is not None
+        assert needed.draft.data is not None
+        data = needed.draft.data.model_copy(update={"title": "From OCR"})
+        return needed.draft.model_copy(update={"data": data})
+
+    started = time.monotonic()
+    envelope = harness.run(handoff)
+
+    assert time.monotonic() - started >= 2.5
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.title == "From OCR"
+    assert data.timings.total_ms >= 2500  # the wait is part of the request
+    assert harness.keys("res:*") == []  # nothing stored: the OCR pool keeps what it keeps
+    assert harness.metric("text_extraction_extract_total", mode="auto", outcome="success") == 1
+
+
+# --- metrics (F19) ---
+
+
+def test_conversion_metrics() -> None:
+    harness = Harness(None, {DOC: pdf()}, pool=FakePool(reply(pages=12, pages_converted=5)))
+
+    harness.run()
+
+    labels = {"converter": "markitdown", "kind": "pdf"}
+    total = "text_extraction_document_conversions_total"
+    assert harness.metric(total, **labels, outcome="success") == 1
+    assert harness.metric("text_extraction_document_pages_total", converter="markitdown") == 5
+    seconds = "text_extraction_document_conversion_seconds_count"
+    assert harness.metric(seconds, converter="markitdown") == 1
+
+
+@pytest.mark.parametrize(
+    ("raised", "outcome"),
+    [
+        (ConversionError("DocumentTooLarge", "x"), "too_large"),
+        (ConversionTimeout("late"), "timeout"),
+        (ConversionCrashed("died"), "conversion_failed"),
+    ],
+)
+def test_conversion_metrics_of_failures(raised: Exception, outcome: str) -> None:
+    harness = Harness(None, {DOC: pdf()}, pool=FakePool(raised))
+
+    harness.run()
+
+    total = "text_extraction_document_conversions_total"
+    assert harness.metric(total, converter="markitdown", kind="pdf", outcome=outcome) == 1
+    assert harness.metric("text_extraction_document_pages_total", converter="markitdown") == 0
+
+
+def test_images_are_not_counted_as_conversions() -> None:
+    harness = Harness(None, {DOC: fetched(DOC, PNG, content_type="image/png")}, pool=FakePool())
+
+    harness.run()
+
+    total = "text_extraction_document_conversions_total"
+    assert harness.metric(total, converter="markitdown", kind="png", outcome="success") == 0
+
+
+class _Run:
+    """The run state ``DocumentSteps`` needs, for calls without a pipeline."""
+
+    def __init__(self, req: ExtractRequest) -> None:
+        self.req = req
+        self.host: str | None = "example.org"
+        self.convert_ms = 0
+        self.warnings: list[str] = []
+
+    def result(self, **fields: Any) -> ExtractResult:
+        raise AssertionError("no result expected")
+
+    def failed(
+        self, code: ErrorCode, message: str, *, retryable: bool = False
+    ) -> Envelope[ExtractResult]:
+        from text_extraction.envelope import ErrorInfo
+
+        error = ErrorInfo(code=code, message=message, retryable=retryable)
+        return Envelope(status="failed", error=error)
+
+
+def test_a_shut_down_conversion_pool_while_judging_is_retryable() -> None:
+    threads = ConversionPool(1)
+    threads.shutdown()
+    steps = DocumentSteps(
+        cast(DocumentPool, FakePool(reply())),
+        threads,
+        make_settings(),
+        lambda result: Envelope(status="success", data=result),
+        CollectorRegistry(),
+    )
+    report = ComplianceReport(mode="enforce", decision="allowed")
+    document = document_input(pdf(), "pdf", report, 1)
+
+    async def extract() -> Any:
+        loop = asyncio.get_running_loop()
+        return await steps.extract(_Run(ExtractRequest(url=DOC)), document, loop.time() + 10)
+
+    with capture_logs() as logs:
+        envelope = asyncio.run(extract())
+
+    assert isinstance(envelope, Envelope)
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.INTERNAL_ERROR
+    assert envelope.error.retryable is True
+    assert [line["error_type"] for line in logs] == ["RuntimeError"]
+
+
+# --- a render that ends on a file (F18) ---
+
+
+BROWSER = {"browser_enabled": True}
+SHEET = f"{ORIGIN}/files/sheet.pdf"
+
+
+def test_render_ending_on_a_document_fetches_it_directly() -> None:
+    renderer = FakeRenderer(
+        rendered("", url=DOC, responses=[response(DOC, content_type="application/pdf")])
+    )
+    pool = FakePool(reply())
+    harness = Harness(None, {DOC: pdf()}, pool=pool, renderer=renderer, **BROWSER)
+
+    envelope = harness.run(mode="browser")
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.mode_used == "fast"
+    assert data.url == DOC
+    assert data.final_url == DOC
+    assert data.content_type == "application/pdf"
+    assert "document_fetched_directly" in data.warnings
+    assert data.document is not None
+    assert data.attempts == 2  # the render's answer and the fetch
+    assert harness.fetcher.calls
+    assert harness.fetcher.calls[-1][0] == DOC
+    assert data.compliance.decision == "allowed"
+    # The fetch took a turn of its own, after the render's was given back.
+    takes = [event for event in harness.gate.events if event[0] == "take"]
+    assert len(takes) == 2
+    assert harness.gate.held() == []
+    assert len(pool.calls) == 1
+    assert harness.keys("res:*") != []  # the result is final, cached as any document
+
+
+def test_render_download_url_is_fetched_directly() -> None:
+    page = response(PAGE)
+    result = replace(rendered("", responses=[page]), download_url=SHEET)
+    harness = Harness(
+        None,
+        {SHEET: fetched(SHEET, corpus("text.pdf"), content_type="application/octet-stream")},
+        pool=FakePool(reply()),
+        renderer=FakeRenderer(result),
+        **BROWSER,
+    )
+
+    envelope = harness.run(mode="browser", url=PAGE)
+
+    data = data_of(envelope)
+    assert envelope.status == "success", envelope.error
+    assert data.url == PAGE
+    assert data.final_url == SHEET
+    assert data.content_type == "application/pdf"
+    assert "document_fetched_directly" in data.warnings
+    # Fetched from the document's own URL, so its validators would not fit the page's.
+    (entry,) = harness.keys("res:*")
+    assert entry
+
+
+def test_a_download_without_responses_is_fetched_directly() -> None:
+    result = replace(rendered("", responses=[]), download_url=SHEET)
+    harness = Harness(
+        None,
+        {SHEET: fetched(SHEET, corpus("text.pdf"), content_type="application/pdf")},
+        pool=FakePool(reply()),
+        renderer=FakeRenderer(result),
+        **BROWSER,
+    )
+
+    envelope = harness.run(mode="browser", url=PAGE)
+
+    assert envelope.status == "success", envelope.error
+    assert data_of(envelope).final_url == SHEET
+
+
+@pytest.mark.parametrize(
+    "secrets",
+    [
+        {"cookies": [{"name": "session", "value": "s"}]},
+        {"headers": {"X-Token": "t"}},
+    ],
+)
+def test_with_caller_secrets_a_render_ending_on_a_document_stays_unsupported(
+    secrets: dict[str, Any],
+) -> None:
+    renderer = FakeRenderer(
+        rendered("", url=DOC, responses=[response(DOC, content_type="application/pdf")])
+    )
+    harness = Harness(
+        None,
+        {DOC: pdf()},
+        pool=FakePool(AssertionError("not converted")),
+        renderer=renderer,
+        **BROWSER,
+    )
+
+    envelope = harness.run(mode="browser", **secrets)
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert data_of(envelope).mode_used == "browser"
+    assert DOC not in [url for url, _ in harness.fetcher.calls]  # no fetch with or without them
+
+
+@pytest.mark.parametrize(
+    ("url", "code"),
+    [
+        ("http://10.0.0.7/files/sheet.pdf", ErrorCode.BLOCKED_URL),
+        ("http://127.0.0.1:8080/sheet.pdf", ErrorCode.BLOCKED_URL),
+        ("blob:https://example.org/0b7d", ErrorCode.UNSUPPORTED_CONTENT_TYPE),
+    ],
+)
+def test_a_direct_fetch_passes_the_ssrf_guard(url: str, code: ErrorCode) -> None:
+    result = replace(rendered("", responses=[response(PAGE)]), download_url=url)
+    harness = Harness(
+        None,
+        {},
+        pool=FakePool(AssertionError("not converted")),
+        renderer=FakeRenderer(result),
+        **BROWSER,
+    )
+
+    envelope = harness.run(mode="browser", url=PAGE)
+
+    assert envelope.error is not None
+    assert envelope.error.code == code
+    assert url not in [called for called, _ in harness.fetcher.calls]
+
+
+def test_a_direct_fetch_that_is_no_document_is_unsupported() -> None:
+    result = replace(rendered("", responses=[response(PAGE)]), download_url=SHEET)
+    harness = Harness(
+        None,
+        {SHEET: fetched(SHEET, ARTICLE_HTML, content_type="text/html")},
+        pool=FakePool(AssertionError("not converted")),
+        renderer=FakeRenderer(result),
+        **BROWSER,
+    )
+
+    envelope = harness.run(mode="browser", url=PAGE)
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert "document_fetched_directly" in data_of(envelope).warnings
+    assert harness.keys("res:*") == []
+
+
+def test_a_direct_fetch_is_checked_like_a_fast_one() -> None:
+    renderer = FakeRenderer(
+        rendered("", url=DOC, responses=[response(DOC, content_type="application/pdf")])
+    )
+    harness = Harness(
+        None,
+        {DOC: pdf(headers={"x-robots-tag": "noai"})},
+        pool=FakePool(AssertionError("not converted")),
+        renderer=renderer,
+        **BROWSER,
+    )
+
+    envelope = harness.run(mode="browser")
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.TDM_RESERVED
+    assert data_of(envelope).mode_used == "fast"
+
+
+def test_a_direct_fetch_is_compared_with_the_draft_and_stored_once() -> None:
+    renderer = FakeRenderer(
+        rendered("", url=DOC, responses=[response(DOC, content_type="application/pdf")])
+    )
+    harness = Harness(None, {DOC: pdf()}, pool=FakePool(reply()), renderer=renderer, **BROWSER)
+    draft = Harness(None, {DOC: fetched(DOC, "<html><body></body></html>")}, pool=FakePool()).run()
+    assert draft.status == "failed"
+
+    envelope = harness.run(mode="auto", draft=draft)
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.document is not None
+    assert data.attempts == 3  # the draft's fetch, the render's answer and the direct fetch
+    assert len(harness.keys("res:*")) == 1
+    fingerprint = data.fingerprint
+    assert fingerprint is not None
+    assert fingerprint.changed is None  # compared once: the first
 
 
 def test_app_wires_one_lazy_document_pool() -> None:
