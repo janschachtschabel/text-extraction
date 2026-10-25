@@ -17,10 +17,16 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    compliance checks of step 4 before it is requested; one on another host gives the first
    host's turn back and takes the new host's, in which its missing files are fetched too.
 6. Any other final status than 2xx (or a 304 to our validators) ends as ``target_http_error``.
-7. HTML and XHTML: decode, compliance after the fetch (headers, meta tags, ``noai``; may block),
-   convert, strip domain boilerplate. ``text/plain``: decode, header checks, ``convert_plain``.
-   Anything else: ``unsupported_content_type``.
-8. Quality verdict, language, metadata, links, fingerprint and cache.
+7. ``documents.sniff`` names the body's kind: the declared type for HTML and XHTML, the bytes
+   first otherwise (ruling F1). HTML and XHTML: decode, compliance after the fetch (headers,
+   meta tags, ``noai``; may block), convert, strip domain boilerplate. ``text/plain``: decode,
+   header checks, ``convert_plain``. A document (PDF, Office, EPUB, CSV, an image ...): up to
+   ``DOCUMENT_MAX_BYTES``, header checks, then ``pipeline_documents`` converts it (F10). One that
+   needs OCR is handed to ``ocr_handoff``; without one, or while the service has no OCR, it
+   answers its text layer with the warning ``ocr_unavailable`` (an image fails
+   ``unsupported_content_type``). Anything else: ``unsupported_content_type``.
+8. Quality verdict, language, metadata, links, fingerprint and cache. A document's result is
+   final: it never goes to the browser, and a cached one is served even with ``ocr_unavailable``.
 
 All of it runs under one deadline, ``EXTRACT_TIMEOUT_SECONDS``. Every outcome of the target is
 an envelope (HTTP 200) with ``status`` ``success``, ``partial`` or ``failed``; only a refused
@@ -46,10 +52,11 @@ Rendered results store no validators, so they are never revalidated. Unblock mod
 ``compliance: ignore``, ``BROWSER_UNBLOCK_ENABLED``) uses the unblock renderer and its clearance
 cookies.
 
-A body over ``CONVERT_MAX_BYTES`` fails with ``too_large`` before it is decoded. CPU-bound steps
+A page over ``CONVERT_MAX_BYTES`` fails with ``too_large`` before it is decoded. CPU-bound steps
 run on the ``ConversionPool`` (``CONVERT_CONCURRENCY`` threads); waiting for a slot counts
 against the deadline. The deadline cannot stop a running thread, but every step bounds its
-own cost.
+own cost. Documents convert in the child processes of the ``DocumentPool``, which are killed at
+the deadline.
 """
 
 import asyncio
@@ -59,7 +66,7 @@ import html as html_lib
 import math
 import re
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -85,6 +92,9 @@ from text_extraction.compliance import (
 )
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import Link, convert_html, convert_plain, decode_html, page_links
+from text_extraction.documents.pool import DocumentPool
+from text_extraction.documents.sniff import media_type, sniff
+from text_extraction.documents.types import DocumentKind
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import better, needs_browser, unblock_for
@@ -100,6 +110,13 @@ from text_extraction.outbound import (
     OutboundBusy,
     normalize_host,
     parse_retry_after,
+)
+from text_extraction.pipeline_documents import (
+    DocumentSteps,
+    OcrNeeded,
+    create_document_pool,
+    document_input,
+    without_ocr,
 )
 from text_extraction.pipeline_render import (
     CHALLENGE_STATUSES,
@@ -154,6 +171,9 @@ _LANG_SCAN_CHARS = 65_536
 _MAX_TAG_CHARS = 4096
 _LANG_ATTRIBUTE = re.compile(r"""(?:^|\s)(?:xml:)?lang\s*=\s*["']?([^"'\s>]+)""", re.IGNORECASE)
 _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30)
+
+# Hands a document that needs OCR to the Docling pool and answers for it.
+type OcrHandoff = Callable[[OcrNeeded], Awaitable[Envelope[ExtractResult]]]
 
 _BLOCK_MESSAGES = {
     ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",
@@ -236,6 +256,7 @@ class _Run:
     unblocked: bool = False
     warnings: list[str] = field(default_factory=list)  # of the renderer, also on failures
     validators: Validators = field(default_factory=Validators)  # of the fast fetch's answer
+    ocr_handoff: OcrHandoff | None = None
 
     def timings(self) -> Timings:
         return Timings(
@@ -356,8 +377,11 @@ class Pipeline:
         unblock_renderer: Renderer | None = None,
         clearance: ClearanceStore | None = None,
         timeout_seconds: float | None = None,
+        document_pool: DocumentPool | None = None,
     ) -> None:
-        """``pool`` runs the CPU-bound steps; without one the pipeline makes its own.
+        """``pool`` runs the CPU-bound steps; without one the pipeline makes its own. So does
+        ``document_pool``, the MarkItDown children; the pipeline starts it with the first
+        document, unless its owner started it already.
 
         Only the browser worker passes a ``renderer`` (and, with unblock mode enabled, the
         ``unblock_renderer`` and the ``clearance`` store). ``timeout_seconds`` replaces
@@ -377,6 +401,12 @@ class Pipeline:
         self._clearance = clearance
         self._timeout_seconds = timeout_seconds
         self._blocked_resources = blocked_resources(settings)
+        self._documents = DocumentSteps(
+            document_pool if document_pool is not None else create_document_pool(settings),
+            self._pool,
+            settings,
+            self._envelope,
+        )
 
     async def run(
         self,
@@ -386,6 +416,7 @@ class Pipeline:
         gate_refusals: Literal["fail", "raise"] = "fail",
         artifacts: ArtifactSink | None = None,
         draft: Envelope[ExtractResult] | None = None,
+        ocr_handoff: OcrHandoff | None = None,
     ) -> Envelope[ExtractResult]:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
         and an unavailable Valkey (503).
@@ -397,6 +428,10 @@ class Pipeline:
         With a renderer: ``artifacts`` stores the screenshot of a ``screenshot`` request (it is
         required then), and ``draft`` is the fast result of an ``auto`` item, which the render is
         compared with instead of fetching the page again (B5).
+
+        A document that needs OCR goes to ``ocr_handoff``, whose envelope is the answer (the
+        pool it hands to stores the result it keeps). Without it, the document's text layer
+        answers with the warning ``ocr_unavailable`` (``pipeline_documents.without_ocr``).
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
         private = not req.secrets().empty()
@@ -413,6 +448,7 @@ class Pipeline:
             admin=principal.role == "admin",
             draft=draft if req.mode == "auto" else None,
             artifacts=artifacts,
+            ocr_handoff=ocr_handoff,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -561,12 +597,14 @@ class Pipeline:
             if failed.data is not None and self._assesses_challenge(run, fetched):
                 failed.data.quality = await self._challenge_quality(run, fetched)
             return failed
-        kind = _KINDS.get(fetched.content_type or "")
+        kind = await self._kind(fetched)
         if kind is None:
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
                 f"Content type {fetched.content_type or 'unknown'} is not supported in fast mode.",
             )
+        if kind != "html" and kind != "text":
+            return await self._document(run, fetched, kind, stored)
 
         limit = self._settings.convert_max_bytes
         if len(fetched.content) > limit:
@@ -592,6 +630,46 @@ class Pipeline:
         ):
             return await self._revalidated(run, stored, fetched)
         return await self._extract_content(run, fetched, kind, text)
+
+    async def _kind(self, fetched: FetchResult) -> DocumentKind | Literal["html", "text"] | None:
+        """What the fetched body is (F1). A declared HTML type keeps the page path without a
+        look at the bytes; the URL's last path segment breaks the CSV tie."""
+        if _KINDS.get(fetched.content_type or "") == "html":
+            return "html"
+        name = urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
+        return await self._pool.run(sniff, fetched.content, fetched.content_type, name)
+
+    async def _document(
+        self, run: _Run, fetched: FetchResult, kind: DocumentKind, stored: _Stored | None
+    ) -> Envelope[ExtractResult]:
+        """Step 7 for a document (F10): the byte limit, the header checks, the revalidation by
+        the bytes' hash, then the conversion (``pipeline_documents``) and step 8."""
+        run.content_type = media_type(kind)
+        limit = self._settings.document_max_bytes
+        if len(fetched.content) > limit:
+            return run.failed(
+                ErrorCode.TOO_LARGE,
+                f"The document has {len(fetched.content)} bytes, more than the {limit} bytes "
+                "that are converted.",
+            )
+        started = time.perf_counter()
+        run.report = await self._pool.run(self._checker.after_fetch, run.report, fetched, None)
+        run.compliance_ms += _ms(started)
+        if (code := blocking_code(run.report)) is not None:
+            return run.failed(code, _BLOCK_MESSAGES[code])
+        if stored is not None and fetched.raw_sha256 == stored.entry.raw_sha256:
+            return await self._revalidated(run, stored, fetched)
+        when = run.deadline.when() if run.deadline is not None else None
+        if when is None:  # pragma: no cover - the run always has a deadline
+            when = asyncio.get_running_loop().time() + self._settings.extract_timeout_seconds
+        document = document_input(fetched, kind, run.report, run.attempts)
+        outcome = await self._documents.extract(run, document, when)
+        if isinstance(outcome, OcrNeeded):
+            if run.ocr_handoff is not None:
+                return await run.ocr_handoff(outcome)
+            outcome = without_ocr(outcome, run)
+        run.validators = Validators.from_headers(fetched.headers)
+        return await self._finish(run, outcome, run.validators)
 
     def _assesses_challenge(self, run: _Run, fetched: FetchResult) -> bool:
         """Whether a failed answer's body is judged as a possible challenge: only in unblock
@@ -1254,13 +1332,14 @@ def create_pipeline(
     unblock_renderer: Renderer | None = None,
     clearance: ClearanceStore | None = None,
     timeout_seconds: float | None = None,
+    document_pool: DocumentPool | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
 
     ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
     without it a new gate is made, which then counts its spacing from the turn starts only.
     With ``memory_guard`` the result cache skips its writes while Valkey's memory is high.
-    The browser options go to ``Pipeline`` unchanged."""
+    The browser options and ``document_pool`` go to ``Pipeline`` unchanged."""
     if gate is None:
         gate = DomainGate(valkey, settings)
     return Pipeline(
@@ -1276,6 +1355,7 @@ def create_pipeline(
         unblock_renderer=unblock_renderer,
         clearance=clearance,
         timeout_seconds=timeout_seconds,
+        document_pool=document_pool,
     )
 
 
@@ -1286,7 +1366,8 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
     """Every request option that changes the result; the cache key covers them.
 
     ``mode`` keeps the results of each mode apart: ``browser`` renders, and ``auto`` keeps a
-    rendered result when the fast one needed the browser. The browser options that are not
+    rendered result when the fast one needed the browser. ``ocr`` matters for documents only,
+    but which URL is one is known only after the fetch. The browser options that are not
     here (actions, cookies, headers, a screenshot) keep a request out of the cache altogether.
     """
     return {
@@ -1295,6 +1376,7 @@ def _cache_options(req: ExtractRequest, mode: ComplianceMode) -> dict[str, Any]:
         "metadata": req.metadata,
         "links": req.links,
         "compliance": mode,
+        "ocr": req.ocr,
     }
 
 

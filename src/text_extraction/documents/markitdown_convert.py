@@ -62,7 +62,8 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
     """The ``"markitdown"`` function of the child. ``payload``: ``body`` (bytes), ``kind``,
     ``format``, ``metadata`` (bool: put the document's metadata in the reply), ``base`` (its
     URL, None for an upload), ``content_language`` (the header), ``max_pages``,
-    ``max_uncompressed``."""
+    ``max_uncompressed``, and optionally ``charset`` (of the ``Content-Type`` header; CSV only,
+    default None)."""
     body: bytes = payload["body"]
     kind: DocumentKind = payload["kind"]
     fmt: OutputFormat = payload["format"]
@@ -88,7 +89,7 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
     if kind == "pdf" and pages == 0:
         markdown, converter_title = "", None  # nothing to convert (ruling: empty content)
     else:
-        markdown, converter_title = _markitdown(source, kind)
+        markdown, converter_title = _markitdown(source, kind, payload.get("charset"))
     if kind == "pdf" and not needs_ocr:
         needs_ocr = broken_text(markdown)
     normalised = from_markdown(markdown, "markdown")
@@ -106,14 +107,17 @@ def convert(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _markitdown(body: bytes, kind: DocumentKind) -> tuple[str, str | None]:
-    """MarkItDown's Markdown and title for the document."""
+def _markitdown(
+    body: bytes, kind: DocumentKind, declared_charset: str | None
+) -> tuple[str, str | None]:
+    """MarkItDown's Markdown and title for the document; ``declared_charset`` decodes a CSV."""
     converter_class, extension = _CONVERTERS[kind]
     charset = None
     if kind == "csv":
-        # Our own decoding (the one of fetched pages): MarkItDown's charset guess reads short
-        # Latin-1 text with umlauts as some other code page.
-        body = decode_html(body, None).encode("utf-8")
+        # Our own decoding (the one of fetched pages: the header's charset, then a guess):
+        # MarkItDown's charset guess reads short Latin-1 text with umlauts as some other code
+        # page.
+        body = decode_html(body, declared_charset).encode("utf-8")
         charset = "utf-8"
     info = StreamInfo(mimetype=media_type(kind), extension=extension, charset=charset)
     try:

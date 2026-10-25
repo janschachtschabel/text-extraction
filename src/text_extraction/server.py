@@ -1,8 +1,8 @@
 """Entry point: run the public and the internal app on two ports in one process.
 
 ``/ready`` (internal app) answers 200 only once the public server listens, which is after its
-start-up (the language model is loaded first). On SIGTERM or SIGINT the shutdown runs in this
-order:
+start-up (the language model is loaded and the document pool's children are started first).
+On SIGTERM or SIGINT the shutdown runs in this order:
 
 1. ``/ready`` turns 503 at once, so Kubernetes takes the pod out of the Service, while both
    servers keep serving for ``SHUTDOWN_DRAIN_SECONDS`` (a second signal ends this wait early);
@@ -183,7 +183,7 @@ async def _run(settings: Settings) -> None:
     graceful = graceful_shutdown_seconds(settings)
     readiness = Readiness()
     public = _server(
-        create_public_app(settings, valkey),
+        create_public_app(settings, valkey, start_documents=True),
         settings.public_host,
         settings.public_port,
         graceful,

@@ -55,6 +55,7 @@ class Converter:
         metadata: bool = False,
         max_pages: int = 100,
         max_uncompressed: int = 200_000_000,
+        charset: str | None = None,
         timeout: float = 60.0,
     ) -> DocumentConversion:
         payload = {
@@ -66,6 +67,7 @@ class Converter:
             "content_language": None,
             "max_pages": max_pages,
             "max_uncompressed": max_uncompressed,
+            "charset": charset,
         }
         return DocumentConversion.from_reply(self.reply(payload, timeout))
 
@@ -160,6 +162,48 @@ def test_csv_latin1(converter: Converter) -> None:
     result = converter.convert(corpus("latin1.csv"), "csv")
     assert table_row("Name", "Größe", "Gewicht").search(result.content)
     assert table_row("Jörg", "1.80", "80").search(result.content)
+
+
+def test_csv_uses_the_charset_of_the_header(converter: Converter) -> None:
+    body = "Имя,Размер\nЕль,30\n".encode("koi8-r")  # noqa: RUF001 - short: a guess misreads it
+
+    guessed = converter.convert(body, "csv")
+    declared = converter.convert(body, "csv", charset="koi8-r")
+
+    assert "Размер" not in guessed.content
+    assert "Размер" in declared.content
+
+
+def test_payload_without_a_charset_still_converts(converter: Converter) -> None:
+    payload = {
+        "body": corpus("latin1.csv"),
+        "kind": "csv",
+        "format": "markdown",
+        "metadata": False,
+        "base": None,
+        "content_language": None,
+        "max_pages": 100,
+        "max_uncompressed": 200_000_000,
+    }
+    assert "Größe" in DocumentConversion.from_reply(converter.reply(payload)).content
+
+
+def test_child_logging_and_warnings_stay_quiet() -> None:
+    """What converters log or warn (pdfminer, openpyxl) may quote the document: in a child it
+    reaches neither stderr (the pod's log stream) nor stdout."""
+    code = (
+        "import logging, warnings, structlog\n"
+        "import text_extraction.documents.child\n"
+        "logging.getLogger('pdfminer.pdfpage').warning('leak %s', 'secret')\n"
+        "logging.getLogger().error('leak')\n"
+        "warnings.warn('leak secret')\n"
+        "structlog.get_logger('x').error('leak', text='secret')\n"
+    )
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stderr == ""
+    assert out.stdout == ""
 
 
 # --- PDFs: text layer, page limit, odd files ---------------------------------------------------

@@ -3,8 +3,9 @@ workers.
 
 **The flow** (``_flow``) of one request:
 
-1. The request is checked first: browser options while browser mode is off answer 400 (B9),
-   an ``evaluate`` action of a non-admin key 403, a compliance mode the key may not choose 403.
+1. The request is checked first: browser options while browser mode is off answer 400 (B9), so
+   does ``ocr: always`` while the service has no OCR (F11); an ``evaluate`` action of a
+   non-admin key 403, a compliance mode the key may not choose 403.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
@@ -63,6 +64,8 @@ from text_extraction.browser_dispatch import (
 )
 from text_extraction.browser_options import EvaluateAction
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
+from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
+from text_extraction.documents.types import OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING, needs_browser, unblock_for
@@ -120,8 +123,9 @@ async def extract(
     too short) or `failed`, with `error.code`, `error.retryable` and, in `data`,
     `upstream_status`, `mode_used`, `compliance`, `timings` and as much of the result as was
     reached. 4xx answers are about the request itself (invalid body, key, rate limit, a
-    compliance mode the caller may not choose, browser options while browser mode is off, an
-    `evaluate` action of a non-admin key); 5xx are faults of this service.
+    compliance mode the caller may not choose, browser options while browser mode is off,
+    `ocr: always` while the service has no OCR, an `evaluate` action of a non-admin key); 5xx
+    are faults of this service.
 
     `mode: browser`, `screenshot`, browser options and an `auto` page that needs a browser are
     rendered by a browser worker. Such a request can take the fast phase plus
@@ -139,6 +143,13 @@ def renders_first(body: ExtractRequest) -> bool:
     """Whether the request goes to the browser without a fast phase: ``browser``, a screenshot,
     or browser options (the fast fetch could not use them; R8)."""
     return body.mode == "browser" or body.screenshot or not body.secrets().empty()
+
+
+def check_ocr_request(ocr: OcrOption, settings: Settings) -> None:
+    """400 for ``ocr: always`` while the service has no OCR (F11): the request could not get
+    what it asks for. ``auto`` and ``never`` are always fine."""
+    if ocr == "always" and not ocr_available(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, OCR_DISABLED_MESSAGE, 400)
 
 
 def check_browser_request(body: ExtractRequest, principal: Principal, settings: Settings) -> None:
@@ -160,6 +171,7 @@ async def respond(
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
+    check_ocr_request(body.ocr, settings)
     handover = Handover()
     flow = partial(_flow, state, body, principal, compliance, handover, kind)
     if body.wait_seconds is None or not settings.jobs_enabled:

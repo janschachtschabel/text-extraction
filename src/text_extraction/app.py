@@ -17,6 +17,7 @@ from text_extraction.auth import Principal, Role, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope
 from text_extraction.errors import install_error_handlers
 from text_extraction.extract_api import router as extract_router
@@ -27,6 +28,7 @@ from text_extraction.jobs_api import router as jobs_router
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
+from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
@@ -91,11 +93,14 @@ async def _finish_background(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request; start the memory guard and the queue
+    """Load the language model before the first request, and start the document pool's
+    children meanwhile when asked to (``start_documents``); start the memory guard and the queue
     gauges; wait for extractions handed over to a job; stop the guard and the gauges (their
     tasks read Valkey, whose client the server closes after the lifespan); close the fetcher's
-    connections and the conversion pool last."""
-    await asyncio.to_thread(load_language_model)
+    connections, the conversion pool and the document pool last."""
+    documents: DocumentPool = app.state.document_pool
+    starts = [documents.start()] if app.state.start_documents else []
+    await asyncio.gather(asyncio.to_thread(load_language_model), *starts)
     guard: MemoryGuard = app.state.memory_guard
     gauges: QueueGauges = app.state.queue_gauges
     guard.start()
@@ -113,12 +118,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         pool: ConversionPool = app.state.conversion_pool
         await fetcher.aclose()
         pool.shutdown()
+        await documents.shutdown()
 
 
 def create_public_app(
-    settings: Settings, valkey: Redis, registry: CollectorRegistry = REGISTRY
+    settings: Settings,
+    valkey: Redis,
+    registry: CollectorRegistry = REGISTRY,
+    *,
+    start_documents: bool = False,
 ) -> FastAPI:
     """Build the public app. Metrics are collected in ``registry`` but not exposed here.
+
+    ``app.state.document_pool`` holds the MarkItDown children of the pipeline. With
+    ``start_documents`` (the server's choice) the lifespan starts them, so they are ready before
+    the server listens and ``/ready`` answers 200; otherwise (tests) the first document starts
+    them. The lifespan shuts them down either way.
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
@@ -143,6 +158,8 @@ def create_public_app(
     app.state.memory_guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, app.state.fetcher = create_outbound(settings, valkey)
     app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
+    app.state.document_pool = create_document_pool(settings)
+    app.state.start_documents = start_documents
     app.state.pipeline = create_pipeline(
         settings,
         valkey,
@@ -151,6 +168,7 @@ def create_public_app(
         app.state.conversion_pool,
         gate=gate,
         memory_guard=app.state.memory_guard,
+        document_pool=app.state.document_pool,
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)

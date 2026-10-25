@@ -845,6 +845,20 @@ def test_batch_browser_mode_goes_to_browser_pool(make_api: Callable[..., Api]) -
     assert queue_counts(api, "extract").pending == 1
 
 
+def test_batch_ocr_always_while_docling_off_is_400(make_api: Callable[..., Api]) -> None:
+    api = make_api()
+    response = api.batch([PAGE], ocr="always")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "OCR is not enabled on this service."
+    assert api.keys("job*") == []
+
+    enabled = make_api(docling_enabled=True)
+    assert enabled.batch([PAGE], ocr="always").status_code == 202
+
+
 def test_batch_browser_mode_disabled_is_400(api: Api) -> None:
     response = api.batch([PAGE], mode="browser")
 

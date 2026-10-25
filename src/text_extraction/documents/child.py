@@ -5,12 +5,33 @@ The child imports this module (and with it MarkItDown, pdfminer, pdfplumber, pan
 once, after its memory limit is set; the parent never imports it. ``FUNCTIONS`` is the
 allowlist of what a parent may call by name. Docling has a target of its own, so that its
 models and torch stay out of these children.
+
+Before anything else is imported, logging is silenced: what pdfminer, openpyxl or our own
+``meta.py`` log or warn about may quote the document, and a child's stderr is the pod's log
+stream (its stdout goes nowhere). Records and warnings are dropped, structlog's included; the
+parent logs each outcome by its type.
 """
 
+import logging
+import warnings
 from collections.abc import Callable
 from typing import Any
 
-from text_extraction.documents import markitdown_convert
+import structlog
+
+
+def _silence_logging() -> None:
+    root = logging.getLogger()
+    root.handlers[:] = [logging.NullHandler()]  # so logging's last-resort handler never writes
+    root.setLevel(logging.CRITICAL + 1)
+    logging.captureWarnings(True)  # warnings become records of `py.warnings`, dropped above
+    warnings.simplefilter("ignore")
+    structlog.configure(logger_factory=structlog.ReturnLoggerFactory())
+
+
+_silence_logging()
+
+from text_extraction.documents import markitdown_convert  # noqa: E402 - after the silencing
 
 FUNCTIONS: dict[str, Callable[[Any], Any]] = {
     "markitdown": markitdown_convert.convert,

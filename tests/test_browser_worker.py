@@ -44,6 +44,7 @@ from text_extraction.browser_worker import (
     serve,
 )
 from text_extraction.compliance import ComplianceChecker
+from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher
@@ -661,6 +662,32 @@ async def test_ready_only_after_browser_started(monkeypatch: pytest.MonkeyPatch)
 
     assert browsers.events == ["start proxy", "start playwright", "stop playwright", "stop proxy"]
     assert not parts.guard.running
+    parts.conversion_pool.shutdown()
+
+
+@scenario
+async def test_document_pool_starts_before_ready_and_stops_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    browsers = FakeBrowsers(monkeypatch)
+
+    async def start(pool: DocumentPool) -> None:
+        browsers.events.append("start documents")
+
+    monkeypatch.setattr(DocumentPool, "start", start)
+    parts, readiness, internal = build(worker_concurrency=1)
+
+    serving = asyncio.create_task(
+        serve(parts, internal, readiness, graceful_seconds=1, start_documents=True)
+    )
+    await wait_for(lambda: readiness.ready)
+    assert "start documents" in browsers.events
+
+    os.kill(os.getpid(), signal.SIGTERM)
+    async with asyncio.timeout(20):
+        await serving
+    assert browsers.events.count("start documents") == 1
+    await parts.document_pool.shutdown()
     parts.conversion_pool.shutdown()
 
 

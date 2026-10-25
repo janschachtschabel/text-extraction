@@ -27,7 +27,7 @@ from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.extract_api import BROWSER_DISABLED_MESSAGE
+from text_extraction.extract_api import BROWSER_DISABLED_MESSAGE, check_ocr_request
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
     BatchRequest,
@@ -190,6 +190,7 @@ async def create_batch(
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
 
     `mode: browser` queues the URLs for the browser workers (400 while browser mode is off);
+    `ocr: always` answers 400 while the service has no OCR;
     `auto` items that need a browser move there on their own. A batch takes no `actions`,
     `cookies`, `headers` or `screenshot` (422).
     """
@@ -204,6 +205,7 @@ async def create_batch(
         if not settings.browser_enabled:
             raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
         queue = request.app.state.browser_queue
+    check_ocr_request(body.ocr, settings)  # 400 for `ocr: always` while there is no OCR
     options = JobOptions(
         mode=body.mode,
         format=body.format,

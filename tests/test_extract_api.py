@@ -93,6 +93,34 @@ def test_overlong_url_is_422(client: TestClient) -> None:
     assert response.status_code == 422
 
 
+def test_ocr_always_while_docling_off_is_400(client: TestClient) -> None:
+    response = client.post("/v1/extract", json={"url": PAGE, "ocr": "always"}, headers=AUTH)
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "OCR is not enabled on this service."
+    # The other options are always fine: a page that is no document ignores them.
+    for ocr in ("auto", "never"):
+        assert client.post("/v1/extract", json={"url": PAGE, "ocr": ocr}, headers=AUTH).is_success
+
+
+@pytest.mark.parametrize(("docling", "jobs", "status"), [(True, True, 200), (True, False, 400)])
+def test_ocr_always_needs_docling_and_jobs(
+    registry: CollectorRegistry, docling: bool, jobs: bool, status: int
+) -> None:
+    settings = make_settings(docling_enabled=docling, jobs_enabled=jobs)
+    app = create_public_app(settings, FakeAsyncRedis(), registry)
+    fake = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+    app.state.pipeline = create_pipeline(settings, app.state.valkey, cast(Fetcher, fake), registry)
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/extract", json={"url": PAGE, "ocr": "always"}, headers=AUTH
+        )
+
+    assert response.status_code == status
+
+
 def test_user_cannot_ignore_compliance_403(client: TestClient) -> None:
     response = client.post("/v1/extract", json={"url": PAGE, "compliance": "ignore"}, headers=AUTH)
 

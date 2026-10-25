@@ -47,8 +47,10 @@ A Valkey error, an ``OSError`` (a Valkey call timing out) or the gate's 503 back
 for 1, 2, 4 … 30 s; the lease of the item in hand then expires and the item is claimed again.
 No error ends a loop.
 
-The process serves only the internal port (``/health``, ``/ready``, ``/metrics``). ``/ready``
-answers 200 once the loops run, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
+The process serves only the internal port (``/health``, ``/ready``, ``/metrics``). Its start-up
+loads the language model and starts the document pool's children (``DocumentPool``, which
+converts documents fetched by URL); ``/ready`` answers 200 once the loops run after it, while
+Valkey answers. On SIGTERM or SIGINT it turns 503, the
 loops stop claiming, the items in flight get ``extraction_graceful_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
 internal server stops last. A claim already sent when the signal arrives is still processed
@@ -71,6 +73,7 @@ from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import needs_browser, unblock_for
@@ -82,6 +85,7 @@ from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
+from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.queue_metrics import job_duration_for
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.server import (
@@ -502,13 +506,20 @@ async def _load_language_model() -> None:
 
 @dataclass(frozen=True)
 class WorkerParts:
-    """What one worker process runs on: the worker, its memory guard, and the fetcher and
-    conversion pool to close at the end."""
+    """What one worker process runs on: the worker, its memory guard, and the fetcher,
+    conversion pool and document pool to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
     fetcher: Fetcher
     pool: ConversionPool
+    document_pool: DocumentPool
+
+
+async def start_up(parts: WorkerParts) -> None:
+    """The start-up of a worker process, before ``/ready``: the language model, and meanwhile
+    the document pool's children."""
+    await asyncio.gather(_load_language_model(), parts.document_pool.start())
 
 
 def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry) -> WorkerParts:
@@ -518,8 +529,16 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, fetcher = create_outbound(settings, valkey)
     pool = ConversionPool(settings.convert_concurrency)
+    document_pool = create_document_pool(settings)
     pipeline = create_pipeline(
-        settings, valkey, fetcher, registry, pool, gate=gate, memory_guard=guard
+        settings,
+        valkey,
+        fetcher,
+        registry,
+        pool,
+        gate=gate,
+        memory_guard=guard,
+        document_pool=document_pool,
     )
     store = JobStore(valkey, settings)
     browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None
@@ -531,7 +550,9 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         FairQueue(valkey, settings),
         registry,
     )
-    return WorkerParts(worker=worker, guard=guard, fetcher=fetcher, pool=pool)
+    return WorkerParts(
+        worker=worker, guard=guard, fetcher=fetcher, pool=pool, document_pool=document_pool
+    )
 
 
 async def _run(settings: Settings) -> None:
@@ -548,11 +569,17 @@ async def _run(settings: Settings) -> None:
     )
     try:
         await _serve(
-            parts.worker, internal, readiness, graceful_seconds=graceful, guard=parts.guard
+            parts.worker,
+            internal,
+            readiness,
+            graceful_seconds=graceful,
+            guard=parts.guard,
+            startup=lambda: start_up(parts),
         )
     finally:
         await parts.fetcher.aclose()
         parts.pool.shutdown()
+        await parts.document_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

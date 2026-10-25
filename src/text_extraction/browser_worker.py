@@ -29,14 +29,15 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    their short TTL, a draft with the job.
 
 **The process** serves only the internal port, like the extract worker. Before ``/ready``
-answers 200 it loads the language model, starts the egress proxy, then Xvfb (only for unblock
-mode with a headful Chrome: Patchright reads ``DISPLAY`` when its driver starts) and the
-browser pools: Playwright's Chromium, and with ``BROWSER_UNBLOCK_ENABLED`` Patchright's Chrome.
-Both pools share one semaphore, so ``BROWSER_CONCURRENCY`` pages run at once in all; the worker
-runs as many slot loops (``WORKER_CONCURRENCY`` does not apply). The pipeline's deadline is
-``BROWSER_TIMEOUT_SECONDS`` (an unblock render has ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``). After
-the loops have stopped, the pools, Xvfb and the proxy stop, in that order. A browser that does
-not start ends the process before it is ready.
+answers 200 it loads the language model (and meanwhile starts the document pool's children,
+for documents an ``auto`` item's fast step fetches), starts the egress proxy, then Xvfb (only
+for unblock mode with a headful Chrome: Patchright reads ``DISPLAY`` when its driver starts)
+and the browser pools: Playwright's Chromium, and with ``BROWSER_UNBLOCK_ENABLED``
+Patchright's Chrome. Both pools share one semaphore, so ``BROWSER_CONCURRENCY`` pages run at
+once in all; the worker runs as many slot loops (``WORKER_CONCURRENCY`` does not apply). The
+pipeline's deadline is ``BROWSER_TIMEOUT_SECONDS`` (an unblock render has
+``BROWSER_UNBLOCK_TIMEOUT_SECONDS``). After the loops have stopped, the pools, Xvfb and the
+proxy stop, in that order. A browser that does not start ends the process before it is ready.
 
 ``--check`` launches each enabled driver once, stops it and exits 0 (1 when one fails): the
 image build uses it to prove that the browsers in the image start.
@@ -63,6 +64,7 @@ from text_extraction.browser_proxy import EgressProxy
 from text_extraction.browser_unblock import PatchrightLauncher, UnblockRenderer, Xvfb
 from text_extraction.clearance import ValkeyClearance
 from text_extraction.conversion_pool import ConversionPool
+from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
@@ -78,6 +80,7 @@ from text_extraction.jobs import (
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
+from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.render import ArtifactUnavailable
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
@@ -301,13 +304,14 @@ def browser_graceful_seconds(settings: Settings) -> int:
 @dataclass(frozen=True)
 class BrowserWorkerParts:
     """What one browser worker process runs on: the worker, its memory guard, the browsers, and
-    the fetcher and conversion pool to close at the end."""
+    the fetcher, conversion pool and document pool to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
     browsers: Browsers
     fetcher: Fetcher
     conversion_pool: ConversionPool
+    document_pool: DocumentPool
     graceful_seconds: int
 
     async def start(self) -> None:
@@ -326,6 +330,7 @@ def build_browser_worker(
     guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, fetcher = create_outbound(settings, valkey)
     conversion_pool = ConversionPool(settings.convert_concurrency)
+    document_pool = create_document_pool(settings)
     browsers = create_browsers(settings, registry)
     unblock = browsers.unblock_renderer is not None
     pipeline = create_pipeline(
@@ -340,6 +345,7 @@ def build_browser_worker(
         unblock_renderer=browsers.unblock_renderer,
         clearance=ValkeyClearance(valkey, settings) if unblock else None,
         timeout_seconds=settings.browser_timeout_seconds,
+        document_pool=document_pool,
     )
     store = JobStore(valkey, settings)
     worker = Worker(
@@ -357,6 +363,7 @@ def build_browser_worker(
         browsers=browsers,
         fetcher=fetcher,
         conversion_pool=conversion_pool,
+        document_pool=document_pool,
         graceful_seconds=browser_graceful_seconds(settings),
     )
 
@@ -367,12 +374,16 @@ async def serve(
     readiness: Readiness,
     *,
     graceful_seconds: float,
+    start_documents: bool = False,
 ) -> None:
     """Start the browsers, run the worker until a signal, then stop the browsers (see the
-    module docstring). The caller closes the fetcher, the conversion pool and Valkey."""
+    module docstring). With ``start_documents`` (the process's choice) the document pool's
+    children start with the language model; otherwise the first document starts them. The
+    caller closes the fetcher, the conversion pool, the document pool and Valkey."""
 
     async def startup() -> None:
-        await _load_language_model()
+        starts = [parts.document_pool.start()] if start_documents else []
+        await asyncio.gather(_load_language_model(), *starts)
         await parts.start()
 
     try:
@@ -400,10 +411,17 @@ async def _run(settings: Settings) -> None:
         parts.graceful_seconds,
     )
     try:
-        await serve(parts, internal, readiness, graceful_seconds=parts.graceful_seconds)
+        await serve(
+            parts,
+            internal,
+            readiness,
+            graceful_seconds=parts.graceful_seconds,
+            start_documents=True,
+        )
     finally:
         await parts.fetcher.aclose()
         parts.conversion_pool.shutdown()
+        await parts.document_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 
