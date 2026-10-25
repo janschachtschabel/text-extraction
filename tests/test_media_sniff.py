@@ -143,3 +143,77 @@ def test_is_declared_media(value: str | None, expected: bool) -> None:
 
 def test_head_is_64_kib() -> None:
     assert MEDIA_HEAD_BYTES == 65_536
+
+
+def mp3_frames(count: int, *, header: bytes = b"\xff\xfb\x90\x00") -> bytes:
+    """``count`` MPEG-1 Layer III frames at 128 kbit/s and 44.1 kHz (417 bytes each)."""
+    return (header + b"\x00" * (417 - len(header))) * count
+
+
+def test_a_real_two_frame_mp3_head_is_mp3() -> None:
+    assert sniff_media(mp3_frames(2), None) == "mp3"
+    assert sniff_media(mp3_frames(8) + b"junk", "audio/mpeg") == "mp3"
+
+
+def test_an_mp3_whose_second_frame_does_not_follow_is_not_mp3() -> None:
+    head = mp3_frames(1) + b"\x00" * 200  # no frame header where the next frame must start
+    assert sniff_media(head, None) is None
+    other_rate = mp3_frames(1) + b"\xff\xfb\x94\x00" + b"\x00" * 200  # 48 kHz: not consistent
+    assert sniff_media(other_rate, None) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["hello world", "Größe und Ähnlichkeit, ein längerer Text\n" * 20, "ID3 is a tag"],
+    ids=["short", "long", "id3"],
+)
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be", "utf-32"])
+def test_utf16_text_is_not_mp3(text: str, encoding: str) -> None:
+    encoded = text.encode(encoding)
+    if encoding in ("utf-16-le", "utf-16-be"):
+        encoded = ("﻿" + text).encode(encoding)  # with the byte order mark spelled out
+    assert sniff_media(encoded, None) is None
+    assert sniff_media(b"\xff\xfe" + b"\x00" * 64, None) is None
+    assert sniff_media(b"\xfe\xff" + b"\x00" * 64, None) is None
+    assert sniff_media(b"\xff\xff" + b"\x00" * 64, None) is None
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        b"ID3,Name,Value\n1,a,b\n",
+        b"ID3 plain text that merely starts like a tag",
+        b"ID3\x05\x00\x00\x00\x00\x00\x00",  # major version 5 does not exist
+        b"ID3\x01\x00\x00\x00\x00\x00\x00",
+        b"ID3\x04\xff\x00\x00\x00\x00\x00",  # revision 0xFF
+        b"ID3\x04\x00\x00\x00\x00\x80\x00",  # a size byte with the high bit set
+        b"ID3\x04\x00\x00",  # header cut short
+    ],
+)
+def test_text_starting_with_id3_is_not_mp3(head: bytes) -> None:
+    assert sniff_media(head, None) is None
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+def test_id3v2_versions_are_mp3(version: int) -> None:
+    assert (
+        sniff_media(b"ID3" + bytes([version, 0, 0, 0, 0, 0x7F, 0x7F]) + b"\x00" * 32, None) == "mp3"
+    )
+
+
+@pytest.mark.parametrize(
+    "brand", [b"heic", b"heix", b"hevc", b"mif1", b"msf1", b"avif", b"avis", b"XXXX", b"    "]
+)
+def test_image_and_unknown_ftyp_brands_are_not_media(brand: bytes) -> None:
+    assert sniff_media(ftyp(brand), None) is None
+
+
+VIDEO_BRANDS: tuple[bytes, ...] = (
+    *(b"isom", b"iso2", b"iso9", b"mp41", b"mp42", b"mp4v", b"avc1", b"dash"),
+    *(b"M4V ", b"3gp4", b"3gp5", b"3gp6", b"3g2a", b"f4v "),
+)
+
+
+@pytest.mark.parametrize("brand", VIDEO_BRANDS)
+def test_video_ftyp_brands_are_mp4(brand: bytes) -> None:
+    assert sniff_media(ftyp(brand), None) == "mp4"
