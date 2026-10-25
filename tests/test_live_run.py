@@ -256,7 +256,7 @@ def test_summary_counts_browser_unavailable_and_error_codes() -> None:
     text = summarize(records)
 
     assert "Answers with the warning `browser_unavailable`: 1" in text
-    section = text.split("### Error codes")[1]
+    section = text.split("### Error codes")[1].split("### URLs not ok")[0]
     assert "| Code | URLs | Top domains |" in section
     assert "| timeout | 2 | b.example 2 |" in section
     assert "| content_too_short | 1 | a.example 1 |" in section
@@ -269,6 +269,36 @@ def test_summary_without_error_codes_has_no_error_table() -> None:
     text = summarize([record("a.example", "ok")])
     assert "Answers with the warning `browser_unavailable`: 0" in text
     assert "### Error codes" not in text
+
+
+def test_summary_lists_each_url_that_is_not_ok() -> None:
+    # Two runs are compared URL by URL: the domain tables hide which pages flipped.
+    records = [
+        record(
+            "b.example",
+            "too_short",
+            mode_used="browser",
+            status="partial",
+            error_code="content_too_short",
+        ),
+        record("a.example", "ok"),
+        record(
+            "a.example", "connection_error", mode_used=None, status="failed", error_code="timeout"
+        ),
+    ]
+
+    text = summarize(records)
+
+    section = text.split("### URLs not ok")[1]
+    assert "| URL | Bucket | Code | Mode | Words |" in section
+    assert "| https://a.example/ | connection_error | timeout | - | 100 |" in section
+    assert "| https://b.example/ | too_short | content_too_short | browser | 100 |" in section
+    assert section.index("a.example") < section.index("b.example")
+    assert section.count("| https://") == 2
+
+
+def test_summary_without_failures_has_no_url_table() -> None:
+    assert "### URLs not ok" not in summarize([record("a.example", "ok")])
 
 
 def test_ok_rate_counts_against_all_urls() -> None:
@@ -290,7 +320,7 @@ def test_summary_lists_buckets_rate_would_be_blocked_and_domains() -> None:
     assert "| ok | 2 | 50.0 % |" in text
     assert "| too_short | 1 | 25.0 % |" in text
     assert "| a.example | 3 | 2 | 1 |" in text
-    assert "b.example" not in text.split("### Top")[1]
+    assert "b.example" not in text.split("### Top")[1].split("### URLs not ok")[0]
 
 
 @pytest.mark.parametrize(("min_ok_rate", "exit_code"), [(None, 0), (50.0, 0), (80.0, 1)])

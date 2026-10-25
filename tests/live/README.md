@@ -60,7 +60,8 @@ rate, how many URLs `enforce` would have blocked (`compliance.decision == "repor
 answers carry the warning `browser_unavailable` (no browser worker answered in time), the URLs
 and ok count per `mode_used`, the buckets of the ten domains with the most URLs and an "Error
 codes" table: the `error.code` of every failed or partial answer and of every
-`connection_error`, most frequent first, with the three domains that gave it most. To see where the browser helps, run a set in `fast` and in
+`connection_error`, most frequent first, with the three domains that gave it most, and a "URLs
+not ok" table with each URL whose bucket is not `ok` (bucket, code, mode used, words). To see where the browser helps, run a set in `fast` and in
 `browser` mode and compare the domains, as the 2026-09-28 baseline did.
 
 ## Buckets
@@ -92,7 +93,9 @@ and worker logs as the `live-results` artifact.
 
 - **Manually** (Actions, "live", Run workflow): choose `url_set` and `min_ok_rate` (default 80), run
   in `auto` mode, then the reports below. With `url_set=smoke` the run is a report only;
-  `min_ok_rate` does not apply.
+  `min_ok_rate` does not apply. `service_ref` (a branch, tag or full commit SHA) measures the
+  service of that commit with this run's harness and URL lists: start one run with it and one
+  without, at the same time, for an A/B comparison under the same site conditions.
 - **Pull requests** that carry the label `live`: `wlo_200` with `--mode auto --min-ok-rate 80` is
   the gate. Reported alongside, with no gate: `smoke` with `--mode auto`, and `wlo_200` with
   `--mode browser`. A new push or the `live` label starts a new run and cancels the one in
@@ -100,4 +103,6 @@ and worker logs as the `live-results` artifact.
 - **Weekly**, Mondays 03:00 UTC: the same as for pull requests.
 
 If the gate misses, do not tune a setting first: compare the buckets per domain, fast against
-browser, and debug the domains that differ.
+browser, and debug the domains that differ. When the ok rate drops between two commits, run both
+with `service_ref` side by side and compare their "URLs not ok" tables: a URL that fails in both
+runs is the site, a URL that fails only under the newer service is a regression.
