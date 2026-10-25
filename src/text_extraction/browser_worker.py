@@ -30,14 +30,16 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
 
 **The process** serves only the internal port, like the extract worker. Before ``/ready``
 answers 200 it loads the language model (and meanwhile starts the document pool's children,
-for documents an ``auto`` item's fast step fetches), starts the egress proxy, then Xvfb (only
+for documents an ``auto`` item's fast step fetches, and with ``MEDIA_ENABLED`` the media
+fetcher's children and egress proxy, for platform videos), starts the egress proxy, then Xvfb (only
 for unblock mode with a headful Chrome: Patchright reads ``DISPLAY`` when its driver starts)
 and the browser pools: Playwright's Chromium, and with ``BROWSER_UNBLOCK_ENABLED``
 Patchright's Chrome. Both pools share one semaphore, so ``BROWSER_CONCURRENCY`` pages run at
 once in all; the worker runs as many slot loops (``WORKER_CONCURRENCY`` does not apply). The
 pipeline's deadline is ``BROWSER_TIMEOUT_SECONDS`` (an unblock render has
 ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``). After the loops have stopped, the pools, Xvfb and the
-proxy stop, in that order. A browser that does not start ends the process before it is ready.
+proxy stop, in that order; the document pool and the media fetcher stop with the process. A
+browser that does not start ends the process before it is ready.
 
 ``--check`` launches each enabled driver once, stops it and exits 0 (1 when one fails): the
 image build uses it to prove that the browsers in the image start.
@@ -77,6 +79,7 @@ from text_extraction.jobs import (
     JobStore,
     browser_lease_seconds,
 )
+from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
@@ -304,7 +307,8 @@ def browser_graceful_seconds(settings: Settings) -> int:
 @dataclass(frozen=True)
 class BrowserWorkerParts:
     """What one browser worker process runs on: the worker, its memory guard, the browsers, and
-    the fetcher, conversion pool and document pool to close at the end."""
+    the fetcher, conversion pool, document pool and media fetcher (None without
+    ``MEDIA_ENABLED``) to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
@@ -313,6 +317,7 @@ class BrowserWorkerParts:
     conversion_pool: ConversionPool
     document_pool: DocumentPool
     graceful_seconds: int
+    media: MediaFetcher | None = None
 
     async def start(self) -> None:
         await self.browsers.start()
@@ -331,6 +336,7 @@ def build_browser_worker(
     gate, fetcher = create_outbound(settings, valkey)
     conversion_pool = ConversionPool(settings.convert_concurrency)
     document_pool = create_document_pool(settings)
+    media = create_media_fetcher(settings, registry) if settings.media_enabled else None
     browsers = create_browsers(settings, registry)
     unblock = browsers.unblock_renderer is not None
     pipeline = create_pipeline(
@@ -365,6 +371,7 @@ def build_browser_worker(
         conversion_pool=conversion_pool,
         document_pool=document_pool,
         graceful_seconds=browser_graceful_seconds(settings),
+        media=media,
     )
 
 
@@ -378,11 +385,16 @@ async def serve(
 ) -> None:
     """Start the browsers, run the worker until a signal, then stop the browsers (see the
     module docstring). With ``start_documents`` (the process's choice) the document pool's
-    children start with the language model; otherwise the first document starts them. The
-    caller closes the fetcher, the conversion pool, the document pool and Valkey."""
+    children and the media fetcher start with the language model; otherwise the first document
+    or video starts them. The caller closes the fetcher, the conversion pool, the document pool,
+    the media fetcher and Valkey."""
 
     async def startup() -> None:
-        starts = [parts.document_pool.start()] if start_documents else []
+        starts: list[Awaitable[None]] = []
+        if start_documents:
+            starts.append(parts.document_pool.start())
+            if parts.media is not None:
+                starts.append(parts.media.start())
         await asyncio.gather(_load_language_model(), *starts)
         await parts.start()
 
@@ -422,6 +434,8 @@ async def _run(settings: Settings) -> None:
         await parts.fetcher.aclose()
         parts.conversion_pool.shutdown()
         await parts.document_pool.shutdown()
+        if parts.media is not None:
+            await parts.media.stop()
         await valkey.aclose()
         _log.info("valkey_closed")
 

@@ -31,6 +31,14 @@ dependencies = [
     "structlog>=26.1.0",
     "trafilatura>=1.8",
     "uvicorn[standard]>=0.54.0",
+    # Subtitles and metadata of media platforms, imported in media child processes only. yt-dlp
+    # without its extra `default`: that extra pulls in mutagen (GPL-2.0-or-later, CLAUDE.md rule
+    # 7) and yt-dlp-ejs (only of use with a JavaScript runtime, which the API image has none of);
+    # requests is its HTTP handler and youtube-transcript-api's session. Newest releases at
+    # least 14 days old when added.
+    "requests>=2.32.2",
+    "youtube-transcript-api==1.2.4",  # MIT
+    "yt-dlp==2026.8.19",  # Unlicense
 ]
 
 [project.scripts]
@@ -119,7 +127,7 @@ python_version = "3.13"
 files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["defusedxml.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*"]
+module = ["defusedxml.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*", "yt_dlp.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

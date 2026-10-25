@@ -67,8 +67,9 @@ No error ends a loop.
 
 The process serves only the internal port (``/health``, ``/ready``, ``/metrics``). Its start-up
 loads the language model and starts the document pool's children (``DocumentPool``, which
-converts documents fetched by URL); ``/ready`` answers 200 once the loops run after it, while
-Valkey answers. On SIGTERM or SIGINT it turns 503, the
+converts documents fetched by URL) and, with ``MEDIA_ENABLED``, the media fetcher's children and
+egress proxy (``media.pool``, subtitles of platform videos); ``/ready`` answers 200 once the
+loops run after it, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
 loops stop claiming, the items in flight get ``extraction_graceful_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
 internal server stops last. A claim already sent when the signal arrives is still processed
@@ -108,6 +109,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_models import UploadInputMeta, form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore
+from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
@@ -608,19 +610,22 @@ async def _load_language_model() -> None:
 @dataclass(frozen=True)
 class WorkerParts:
     """What one worker process runs on: the worker, its memory guard, and the fetcher,
-    conversion pool and document pool to close at the end."""
+    conversion pool, document pool and media fetcher (None without ``MEDIA_ENABLED``) to close
+    at the end."""
 
     worker: Worker
     guard: MemoryGuard
     fetcher: Fetcher
     pool: ConversionPool
     document_pool: DocumentPool
+    media: MediaFetcher | None = None
 
 
 async def start_up(parts: WorkerParts) -> None:
     """The start-up of a worker process, before ``/ready``: the language model, and meanwhile
-    the document pool's children."""
-    await asyncio.gather(_load_language_model(), parts.document_pool.start())
+    the document pool's children and the media fetcher."""
+    media = [parts.media.start()] if parts.media is not None else []
+    await asyncio.gather(_load_language_model(), parts.document_pool.start(), *media)
 
 
 def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry) -> WorkerParts:
@@ -631,6 +636,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     gate, fetcher = create_outbound(settings, valkey)
     pool = ConversionPool(settings.convert_concurrency)
     document_pool = create_document_pool(settings)
+    media = create_media_fetcher(settings, registry) if settings.media_enabled else None
     pipeline = create_pipeline(
         settings,
         valkey,
@@ -661,7 +667,12 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         registry,
     )
     return WorkerParts(
-        worker=worker, guard=guard, fetcher=fetcher, pool=pool, document_pool=document_pool
+        worker=worker,
+        guard=guard,
+        fetcher=fetcher,
+        pool=pool,
+        document_pool=document_pool,
+        media=media,
     )
 
 
@@ -690,6 +701,8 @@ async def _run(settings: Settings) -> None:
         await parts.fetcher.aclose()
         parts.pool.shutdown()
         await parts.document_pool.shutdown()
+        if parts.media is not None:
+            await parts.media.stop()
         await valkey.aclose()
         _log.info("valkey_closed")
 

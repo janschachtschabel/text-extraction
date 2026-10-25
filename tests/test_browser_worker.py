@@ -52,6 +52,7 @@ from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobKind, JobOptions
 from text_extraction.jobs import JobStore, browser_lease_seconds
+from text_extraction.media.pool import MediaFetcher
 from text_extraction.outbound import DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.render import ClearanceStore, Renderer
@@ -675,7 +676,8 @@ async def test_document_pool_starts_before_ready_and_stops_after(
         browsers.events.append("start documents")
 
     monkeypatch.setattr(DocumentPool, "start", start)
-    parts, readiness, internal = build(worker_concurrency=1)
+    # Without media: the media fetcher's children are a DocumentPool too (see the next test).
+    parts, readiness, internal = build(worker_concurrency=1, media_enabled=False)
 
     serving = asyncio.create_task(
         serve(parts, internal, readiness, graceful_seconds=1, start_documents=True)
@@ -687,6 +689,36 @@ async def test_document_pool_starts_before_ready_and_stops_after(
     async with asyncio.timeout(20):
         await serving
     assert browsers.events.count("start documents") == 1
+    await parts.document_pool.shutdown()
+    parts.conversion_pool.shutdown()
+
+
+@scenario
+async def test_media_fetcher_starts_before_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    browsers = FakeBrowsers(monkeypatch)
+
+    async def start(media: MediaFetcher) -> None:
+        browsers.events.append("start media")
+
+    async def documents(pool: DocumentPool) -> None:
+        pass
+
+    monkeypatch.setattr(MediaFetcher, "start", start)
+    monkeypatch.setattr(DocumentPool, "start", documents)
+    parts, readiness, internal = build(worker_concurrency=1)
+    assert parts.media is not None
+
+    serving = asyncio.create_task(
+        serve(parts, internal, readiness, graceful_seconds=1, start_documents=True)
+    )
+    await wait_for(lambda: readiness.ready)
+    assert browsers.events.index("start media") < browsers.events.index("start playwright")
+
+    os.kill(os.getpid(), signal.SIGTERM)
+    async with asyncio.timeout(20):
+        await serving
+    assert browsers.events.count("start media") == 1
+    await parts.media.stop()
     await parts.document_pool.shutdown()
     parts.conversion_pool.shutdown()
 

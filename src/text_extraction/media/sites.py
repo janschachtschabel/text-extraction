@@ -7,7 +7,14 @@ registrable domain or one of its subdomains (``youtube.com.evil.example`` and ``
 do not).
 
 ``EXTRACTORS`` names, per platform, the yt-dlp extractor that is allowed for it (yt-dlp's
-generic extractor, which follows anything, never runs). A change of a name is one line there.
+generic extractor, which follows anything, never runs). The names are yt-dlp's ``IE_NAME``s,
+which its ``allowed_extractors`` option matches as case-insensitive full regular expressions
+(not the class names: an unknown name silently loads no extractor at all); a unit test pins that
+each matches exactly its extractor in the pinned yt-dlp. A change of a name is one line there.
+
+Vimeo's canonical URL is the player's, ``https://player.vimeo.com/video/<id>``: yt-dlp needs a
+login for ``vimeo.com/<id>`` but not for the player (spike, ruling M18). ZDF pages are targets
+when they end in ``.html`` or are ``/video/<section>/<show>/...`` pages.
 """
 
 import re
@@ -20,11 +27,11 @@ from text_extraction.media.types import Platform
 __all__ = ["EXTRACTORS", "MediaTarget", "media_target"]
 
 EXTRACTORS: Final[dict[Platform, str]] = {
-    "youtube": "Youtube",
-    "vimeo": "Vimeo",
-    "ard": "ARDBetaMediathek",
-    "zdf": "ZDF",
-    "arte": "ArteTV",
+    "youtube": "youtube",
+    "vimeo": "vimeo",
+    "ard": "ardmediathek",
+    "zdf": "zdf",
+    "arte": "artetv",
     "3sat": "3sat",
 }
 
@@ -67,6 +74,8 @@ def media_target(url: str) -> MediaTarget | None:
             return _mediathek("ard", host, parts.path, segments)
         return None
     if _on_domain(host, "zdf.de"):
+        if segments[:1] == ["video"] and len(segments) >= 3:
+            return _mediathek("zdf", host, parts.path, segments)
         return _html_page("zdf", host, parts.path, segments)
     if _on_domain(host, "3sat.de"):
         return _html_page("3sat", host, parts.path, segments)
@@ -131,7 +140,9 @@ def _vimeo(host: str, segments: list[str]) -> MediaTarget | None:
         return None
     if not _DIGITS.fullmatch(candidate):
         return None
-    return MediaTarget("vimeo", f"https://vimeo.com/{candidate}", EXTRACTORS["vimeo"], candidate)
+    return MediaTarget(
+        "vimeo", f"https://player.vimeo.com/video/{candidate}", EXTRACTORS["vimeo"], candidate
+    )
 
 
 def _html_page(platform: Platform, host: str, path: str, segments: list[str]) -> MediaTarget | None:

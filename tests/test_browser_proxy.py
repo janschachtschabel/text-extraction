@@ -435,6 +435,31 @@ def test_bytes_are_counted_per_context_and_capped() -> None:
     run_scenario(scenario)
 
 
+def test_a_context_may_have_a_byte_cap_of_its_own() -> None:
+    """The media children's contexts take ``MEDIA_EXTRACT_MAX_BYTES``; a browser page's keep
+    ``BROWSER_MAX_BYTES``."""
+
+    async def scenario() -> None:
+        settings = Settings(auth_mode="none", browser_max_bytes=1_000_000)
+        async with running(policy=allow_all, settings=settings) as (proxy, echo_port, _registry):
+            target = f"127.0.0.1:{echo_port}"
+            small, default = proxy.open_context(max_bytes=1000), proxy.open_context()
+            for context in (small, default):
+                status, reader, writer = await open_tunnel(proxy, context, target)
+                assert status == 200
+                writer.write(b"x" * 600)  # 600 out and 600 echoed back: over 1000
+                await writer.drain()
+                with contextlib.suppress(ConnectionError):
+                    await asyncio.wait_for(reader.read(1200), 5)
+                await asyncio.sleep(0.05)
+                writer.close()
+            assert small.capped
+            assert not default.capped
+            assert default.bytes == 1200
+
+    run_scenario(scenario)
+
+
 def test_hosts_seen_and_refusals_are_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         async with running(policy=only_loopback) as (proxy, echo_port, registry):
