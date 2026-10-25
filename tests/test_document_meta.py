@@ -224,17 +224,76 @@ def test_entity_expansion_bomb_gives_empty_metadata() -> None:
     assert meta(zipped({"docProps/core.xml": core}), "docx") == EMPTY_LANGUAGE_ONLY
 
 
-def test_xmp_with_a_dtd_is_ignored_but_the_info_dictionary_still_counts() -> None:
-    body = corpus("xmp-cc-by-sa.pdf").replace(
-        b'<x:xmpmeta xmlns:x="adobe:ns:meta/">',
-        b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><!DOCTYPE x [<!ENTITY a "b">]>',
-        1,
+def test_xmp_with_a_dtd_never_expands_its_entities() -> None:
+    body = (
+        corpus("xmp-cc-by-sa.pdf")
+        .replace(b"Lizenzierte Handreichung", b"&a;")
+        .replace(b"<x:xmpmeta", b'<!DOCTYPE x [<!ENTITY a "EXPANDED">]><x:xmpmeta', 1)
     )
 
     result = meta(body, "pdf")
 
+    assert "EXPANDED" not in result.model_dump_json()
+    assert result.title is None
+
+
+def decoy_xmp(title: str, license_url: str) -> bytes:
+    return (
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF'
+        ' xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about=""'
+        ' xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:cc="http://creativecommons.org/ns#">'
+        f'<dc:title><rdf:Alt><rdf:li xml:lang="x-default">{title}</rdf:li></rdf:Alt></dc:title>'
+        f'<cc:license rdf:resource="{license_url}"/></rdf:Description></rdf:RDF></x:xmpmeta>'
+    ).encode()
+
+
+def image_stream(packet: bytes) -> bytes:
+    """An object after the document's own, like a JPEG that carries its own XMP."""
+    head = b"\n99 0 obj\n<< /Type /XObject /Subtype /Image /Filter /DCTDecode /Length 1 >>\n"
+    return head + b"stream\n\xff\xd8\xff\xe1 junk " + packet + b"\nendstream\nendobj\n"
+
+
+def typed_stream(packet: bytes) -> bytes:
+    head = b"\n98 0 obj\n<< /Type /Metadata /Subtype /XML /Length 1 >>\nstream\n"
+    return head + packet + b"\nendstream\nendobj\n"
+
+
+CAT = decoy_xmp("Photo of a cat", "https://creativecommons.org/publicdomain/zero/1.0/")
+MALFORMED = b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><broken></x:xmpmeta>'
+
+
+def assert_documents_own_xmp(result: PageMetadata) -> None:
+    assert result.title == "Lizenzierte Handreichung"
+    assert result.license is not None
+    assert result.license.id == "CC-BY-SA-4.0"
+    assert "CC0-1.0" not in [item.id for item in result.licenses]
+
+
+@pytest.mark.parametrize("decoy", [CAT, MALFORMED], ids=["valid-decoy", "malformed-decoy"])
+def test_xmp_of_an_embedded_image_does_not_replace_the_documents(decoy: bytes) -> None:
+    body = corpus("xmp-cc-by-sa.pdf") + image_stream(decoy)
+
+    assert_documents_own_xmp(meta(body, "pdf"))
+
+
+@pytest.mark.parametrize("decoy", [CAT, MALFORMED], ids=["valid-decoy", "malformed-decoy"])
+def test_xmp_is_found_by_its_metadata_type_when_the_catalog_is_not_readable(
+    decoy: bytes,
+) -> None:
+    hidden = corpus("xmp-cc-by-sa.pdf").replace(b"/Metadata 5 0 R", b"/Xetadata 5 0 R")
+
+    assert_documents_own_xmp(meta(hidden + image_stream(CAT), "pdf"))
+    assert_documents_own_xmp(meta(hidden + image_stream(decoy) + typed_stream(MALFORMED), "pdf"))
+
+
+def test_a_packet_that_is_no_metadata_stream_is_not_the_documents() -> None:
+    hidden = corpus("xmp-cc-by-sa.pdf").replace(b"/Metadata 5 0 R", b"/Xetadata 5 0 R")
+    untyped = hidden.replace(b"/Type /Metadata", b"/Type /Xetadata")
+
+    result = meta(untyped, "pdf")
+
+    assert result.title is None
     assert result.license is None
-    assert result.title is None  # this file has no info dictionary: nothing else to read
 
 
 @pytest.mark.parametrize(

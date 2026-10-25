@@ -17,7 +17,23 @@ import pypdfium2.raw as pdfium_raw
 PROBE_PAGES = 50  # pages whose text layer is looked at
 THIN_PAGE_CHARS = 50  # a page with fewer characters has no usable text layer
 _BROKEN_TOKEN_SHARE = 20  # more than 1 token in 20 (5 %) broken: the text layer is no good
-_BROKEN_TOKEN = re.compile(r"\(cid:\d+\)|�")
+_BROKEN_TOKEN = re.compile(r"\(cid:\d+\)|\ufffd")
+
+
+def _escaped(name: str) -> bytes:
+    """A regex for a PDF name in which any character may be written ``#`` and two hex digits."""
+    parts = []
+    for character in name:
+        digits = "".join(
+            f"[{digit.lower()}{digit.upper()}]" if digit.isalpha() else digit
+            for digit in f"{ord(character):02x}"
+        )
+        parts.append(f"(?:{re.escape(character)}|#{digits})")
+    return ("/" + "".join(parts)).encode()
+
+
+# ``/Encrypt`` in the trailer or the xref stream dictionary, also as ``/Encr#79pt``.
+_ENCRYPT_NAME = re.compile(_escaped("Encrypt"))
 
 
 class PasswordProtected(Exception):  # noqa: N818 - the name is part of the task's interface
@@ -40,12 +56,13 @@ def _open(body: bytes) -> pdfium.PdfDocument | None:
     """The opened document; None for a PDF without pages, which pdfium refuses to open.
 
     pdfium reports a missing page tree as a password error or as a failure without a code, so a
-    failure is a password problem only where the file carries an ``/Encrypt`` dictionary."""
+    failure is a password problem only where the file carries an ``/Encrypt`` entry, whose name
+    may be written with ``#xx`` escapes."""
     try:
         return pdfium.PdfDocument(body)
     except pdfium.PdfiumError as error:
         code = error.err_code
-        if code == pdfium_raw.FPDF_ERR_PASSWORD and b"/Encrypt" in body:
+        if code == pdfium_raw.FPDF_ERR_PASSWORD and _ENCRYPT_NAME.search(body):
             raise PasswordProtected from None
         if code in (0, pdfium_raw.FPDF_ERR_PASSWORD) and b"%PDF-" in body[:1024]:
             return None

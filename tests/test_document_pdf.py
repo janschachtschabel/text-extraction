@@ -102,6 +102,19 @@ def test_zero_pages() -> None:
 
 
 @pytest.mark.parametrize(
+    "name",
+    [b"/Encr#79pt", b"/#45ncrypt", b"/E#6Ecrypt", b"/E#6ec#72ypt", b"/#45#6e#63#72#79#70#74"],
+)
+def test_password_protected_with_an_escaped_encrypt_name(name: bytes) -> None:
+    body = corpus("encrypted.pdf").replace(b"/Encrypt", name)
+
+    with pytest.raises(PasswordProtected):
+        probe_pdf(body)
+    with pytest.raises(PasswordProtected):
+        truncate_pdf(body, 1)
+
+
+@pytest.mark.parametrize(
     "body",
     [b"", b"not a pdf at all", b"%PDF-1.7\ngarbage that is no document", corpus("text.pdf")[:300]],
 )

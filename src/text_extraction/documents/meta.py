@@ -14,7 +14,7 @@ pandas.
 import io
 import re
 import zipfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from itertools import islice
 from typing import Any
@@ -185,35 +185,95 @@ _XMP_PROPERTIES = frozenset(
 )
 
 
-def _xmp_packet(body: bytes) -> bytes | None:
-    """The last ``<x:xmpmeta>`` packet in the file, at most ``_MAX_XMP_BYTES`` long.
+_XMP_START, _XMP_END = b"<x:xmpmeta", b"</x:xmpmeta>"
+_ROOT_REFERENCE = re.compile(rb"/Root\s+(\d+)\s+(\d+)\s+R")
+_METADATA_REFERENCE = re.compile(rb"/Metadata\s+(\d+)\s+(\d+)\s+R")
+_METADATA_TYPE = re.compile(rb"/Type\s*/Metadata\b")
+# What may stand between ``stream`` and the packet: white space and the ``<?xpacket?>`` header.
+_PACKET_PREAMBLE = re.compile(rb"\s*(?:<\?xpacket[^>]{0,200}\?>\s*)?")
+_OBJECT_DICTIONARY_BYTES = 1 << 16  # looked at after ``N G obj``
+_TYPE_WINDOW_BYTES = 256  # before the ``stream`` keyword of a packet found by search
+_MAX_OBJECT_STARTS = 8
 
-    pypdfium2 has no call for the ``/Metadata`` stream, and XMP is stored uncompressed so that
-    tools without a PDF parser can find it: a bounded byte search does the same. The last
-    packet wins, as an incremental update's replaces the first. Packets inside compressed
-    streams (embedded images) are not seen."""
-    start_tag, end_tag = b"<x:xmpmeta", b"</x:xmpmeta>"
-    packet: bytes | None = None
+
+def _object_starts(body: bytes, number: bytes, generation: bytes) -> list[int]:
+    """Offsets just after ``N G obj`` for the last few definitions of an object."""
+    pattern = rb"(?<![0-9])" + number + rb"\s+" + generation + rb"\s+obj\b"
+    return [match.end() for match in re.finditer(pattern, body)][-_MAX_OBJECT_STARTS:]
+
+
+def _packet_at(body: bytes, start: int) -> bytes | None:
+    end = body.find(_XMP_END, start, start + _MAX_XMP_BYTES)
+    return body[start : end + len(_XMP_END)] if end >= 0 else None
+
+
+def _catalog_packets(body: bytes) -> Iterator[bytes]:
+    """The packet in the stream that the catalog's ``/Metadata N G R`` points to (newest
+    definition first). Fails to find one when the catalog sits in an object stream."""
+    for root in reversed(list(_ROOT_REFERENCE.finditer(body))[-_MAX_OBJECT_STARTS:]):
+        for root_start in reversed(_object_starts(body, *root.groups())):
+            reference = _METADATA_REFERENCE.search(
+                body, root_start, root_start + _OBJECT_DICTIONARY_BYTES
+            )
+            if reference is None:
+                continue
+            for start in reversed(_object_starts(body, *reference.groups())):
+                window = body[start : start + _MAX_XMP_BYTES + _OBJECT_DICTIONARY_BYTES]
+                stream = window.find(b"stream")
+                packet_start = window.find(_XMP_START, stream)
+                if stream < 0 or packet_start < 0 or not _METADATA_TYPE.search(window, 0, stream):
+                    continue
+                if _PACKET_PREAMBLE.fullmatch(window, stream + 6, packet_start):
+                    packet = _packet_at(window, packet_start)
+                    if packet:
+                        yield packet
+
+
+def _typed_packets(body: bytes) -> Iterator[bytes]:
+    """Packets whose stream says ``/Type /Metadata`` and starts with the packet, newest first:
+    the fallback where the catalog cannot be read. A packet inside another kind of stream (the
+    XMP of an embedded JPEG) is not the document's."""
+    starts = []
     position = 0
     for _ in range(_MAX_XMP_PACKETS):
-        start = body.find(start_tag, position)
-        if start < 0:
+        found = body.find(_XMP_START, position)
+        if found < 0:
             break
-        end = body.find(end_tag, start, start + _MAX_XMP_BYTES)
-        if end < 0:
-            position = start + len(start_tag)
+        starts.append(found)
+        position = found + len(_XMP_START)
+    for start in reversed(starts):
+        keyword = body.rfind(b"stream", max(0, start - 256), start)
+        if keyword < 0 or not _PACKET_PREAMBLE.fullmatch(body, keyword + 6, start):
             continue
-        end += len(end_tag)
-        packet = body[start:end]
-        position = end
-    return packet
+        if _METADATA_TYPE.search(body, max(0, keyword - _TYPE_WINDOW_BYTES), keyword):
+            packet = _packet_at(body, start)
+            if packet:
+                yield packet
+
+
+def _xmp_packets(body: bytes) -> Iterator[bytes]:
+    """The document's XMP packets, most trusted first.
+
+    pypdfium2 has no call for the ``/Metadata`` stream, and XMP is stored uncompressed so that
+    tools without a PDF parser can find it: a bounded byte search does the same. Only the
+    stream the catalog names counts, or, without a readable catalog, a stream typed
+    ``/Type /Metadata``; the XMP of an embedded image (raw JPEG) is not the document's.
+    Packets inside compressed streams are not seen."""
+    yield from _catalog_packets(body)
+    yield from _typed_packets(body)
 
 
 def _pdf_xmp(body: bytes, licenses: LicenseCollector) -> _Fields:
-    packet = _xmp_packet(body)
-    if packet is None:
+    props = None
+    for packet in _xmp_packets(body):
+        try:
+            props = _properties(_parse(packet), _XMP_PROPERTIES)
+        except Exception as error:  # a damaged packet: the next candidate may be sound
+            _log.debug("document_metadata_failed", kind="pdf-xmp", error=type(error).__name__)
+            continue
+        break
+    if props is None:
         return {}
-    props = _properties(_parse(packet), _XMP_PROPERTIES)
     for value in _get(props, _CC + "license"):
         licenses.add(value, "xmp", "high")
     for value in _get(props, _XMP_RIGHTS + "WebStatement", _XMP_RIGHTS + "UsageTerms"):
