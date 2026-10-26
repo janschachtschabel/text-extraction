@@ -15,7 +15,12 @@ rest:
      metadata, the watch page is fetched with the fast fetcher, in the same turn (its status
      goes to the gate), and its ``ytInitialPlayerResponse`` gives title, description, author,
      duration, date and keywords (M2's last tier 2). A redirect ends that attempt.
-  3. A live stream that is still running is ``unsupported_content_type``.
+  3. A target with ``page_fallback`` (a ZDF or 3sat ``.html`` page, which may be an article)
+     whose probe found no video (no track, no title, no description; the extractor failed,
+     said the video is unavailable, or said nothing) is ``NO_VIDEO``: the caller extracts the
+     URL as a page. A refusal (``blocked``, ``rate_limited``, ``blocked_address``) or a failure
+     that may pass (the children, the network) is answered as for any video.
+  3b. A live stream that is still running is ``unsupported_content_type``.
   4. A subtitle track becomes the transcript (``media/captions.py``, ``media/transcript.py``):
      ``# <title>``, ``## <chapter>`` headings, paragraphs; ``content_type`` ``text/vtt``.
      Quality is judged like ``text/plain``.
@@ -127,6 +132,7 @@ from text_extraction.settings import Settings
 __all__ = [
     "ASR_UNAVAILABLE_WARNING",
     "NO_SPEECH_WARNING",
+    "NO_VIDEO",
     "PLAYLIST_MESSAGE",
     "SUBTITLES_BLOCKED_WARNING",
     "SUBTITLES_FAILED_WARNING",
@@ -138,6 +144,7 @@ __all__ = [
     "AsrNeeded",
     "MediaInputMeta",
     "MediaSteps",
+    "NoVideo",
     "TranscribedContent",
     "asr_available",
     "asr_failed",
@@ -198,6 +205,18 @@ _MIN_SECONDS: Final = 1.0
 _SECONDS_BUCKETS: Final = (0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 60)
 _PLAYER_RESPONSE: Final = re.compile(r"ytInitialPlayerResponse\s*=\s*\{")
 _DATE: Final = re.compile(r"^(\d{4})-?(\d{2})-?(\d{2})")
+
+
+@dataclass(frozen=True)
+class NoVideo:
+    """The answer of ``MediaSteps.platform`` for a ``page_fallback`` target without a video:
+    the URL is a page after all."""
+
+
+NO_VIDEO: Final = NoVideo()
+# Probe errors that say a ``page_fallback`` page has no video (None: the extractor said
+# nothing); a refusal or a failure that may pass says nothing about the page.
+_NO_VIDEO_ERRORS: Final = frozenset({None, "extractor_error", "unavailable"})
 
 
 @dataclass(frozen=True)
@@ -551,7 +570,8 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
             extractions=Counter(
                 "text_extraction_media_extractions_total",
                 "Media extractions by platform, transcript source (none without a transcript) "
-                "and outcome (success, partial, asr_needed or the error code).",
+                "and outcome (success, partial, asr_needed, page: no video, extracted as a page, "
+                "or the error code).",
                 ["platform", "source", "outcome"],
                 registry=registry,
             ),
@@ -607,9 +627,9 @@ class MediaSteps:
 
     async def platform(
         self, run: MediaRun, target: MediaTarget
-    ) -> Envelope[ExtractResult] | AsrNeeded:
+    ) -> Envelope[ExtractResult] | AsrNeeded | NoVideo:
         """The answer for a platform video, in the turn of its canonical host (held by the
-        caller), or an ``AsrNeeded``."""
+        caller), an ``AsrNeeded``, or ``NO_VIDEO`` for a page without one."""
         started = time.perf_counter()
         outcome = await self._platform(run, target)
         self._observe(target.platform, outcome, started)
@@ -617,7 +637,7 @@ class MediaSteps:
 
     async def _platform(
         self, run: MediaRun, target: MediaTarget
-    ) -> Envelope[ExtractResult] | AsrNeeded:
+    ) -> Envelope[ExtractResult] | AsrNeeded | NoVideo:
         deadline = self._deadline(run)
         if deadline - asyncio.get_running_loop().time() < _MIN_SECONDS:
             return run.failed(
@@ -661,6 +681,9 @@ class MediaSteps:
                 f"The platform asked for fewer requests.{after}",
                 retryable=True,
             )
+        if target.page_fallback and _no_video(probe):
+            _log.info("media_no_video", platform=target.platform, error_code=probe.error)
+            return NO_VIDEO
         if probe.is_live:
             return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, _LIVE_MESSAGE)
         if probe.track is not None:
@@ -1096,11 +1119,13 @@ class MediaSteps:
     def _observe(
         self,
         platform: Platform,
-        outcome: Envelope[ExtractResult] | AsrNeeded,
+        outcome: Envelope[ExtractResult] | AsrNeeded | NoVideo,
         started: float,
     ) -> None:
         if isinstance(outcome, AsrNeeded):
             source, label = "none", "asr_needed"
+        elif isinstance(outcome, NoVideo):
+            source, label = "none", "page"
         else:
             media = outcome.data.media if outcome.data is not None else None
             source = (media.transcript_source if media is not None else None) or "none"
@@ -1133,6 +1158,19 @@ def _failed(
 ) -> Envelope[ExtractResult]:
     error = ErrorInfo(code=code, message=message, retryable=retryable)
     return Envelope(status="failed", data=result, error=error)
+
+
+def _no_video(probe: MediaProbe) -> bool:
+    """Whether the probe found no video at all, and was not refused or cut short."""
+    return (
+        probe.track is None
+        and probe.title is None
+        and probe.description is None
+        and not probe.blocked
+        and not probe.rate_limited
+        and not probe.is_live
+        and probe.error in _NO_VIDEO_ERRORS
+    )
 
 
 def _built_metadata(fmt: OutputFormat, probe: MediaProbe) -> _Built:

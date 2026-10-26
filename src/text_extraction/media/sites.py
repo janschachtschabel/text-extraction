@@ -14,7 +14,11 @@ each matches exactly its extractor in the pinned yt-dlp. A change of a name is o
 
 Vimeo's canonical URL is the player's, ``https://player.vimeo.com/video/<id>``: yt-dlp needs a
 login for ``vimeo.com/<id>`` but not for the player (spike, ruling M18). ZDF pages are targets
-when they end in ``.html`` or are ``/video/<section>/<show>/...`` pages.
+when they end in ``.html`` or are ``/video/<section>/<show>/...`` pages; 3sat pages when they
+end in ``.html``. Any such ``.html`` page is one, news articles included, so its target has
+``page_fallback``: when the probe finds no video there, the pipeline extracts the URL as a page.
+The video URLs of YouTube, Vimeo, the ARD Mediathek, arte and ZDF's ``/video/`` name a video and
+have no fallback.
 
 A YouTube playlist (``/playlist?list=``, ``/watch?list=`` without ``v``, and the playlist player
 ``/embed/videoseries?list=``, whose name has the shape of a video id) is a target without a
@@ -23,7 +27,7 @@ the canonical URL, which is what the media steps fetch.
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 from urllib.parse import parse_qs, urlsplit
 
@@ -57,6 +61,9 @@ class MediaTarget:
     canonical_url: str
     extractor: str
     video_id: str | None
+    # The pattern matches pages without a video too (ZDF and 3sat ``.html`` pages): a probe
+    # that finds no video sends the request on as a page.
+    page_fallback: bool = False
 
 
 def media_target(url: str) -> MediaTarget | None:
@@ -159,10 +166,10 @@ def _vimeo(host: str, segments: list[str]) -> MediaTarget | None:
 
 def _html_page(platform: Platform, host: str, path: str, segments: list[str]) -> MediaTarget | None:
     """ZDF and 3sat: any ``.html`` page is a target; the extractor decides whether it has a
-    video."""
+    video, and without one the page is extracted (``page_fallback``)."""
     if not segments or not segments[-1].lower().endswith(".html"):
         return None
-    return _mediathek(platform, host, path, segments)
+    return replace(_mediathek(platform, host, path, segments), page_fallback=True)
 
 
 def _mediathek(

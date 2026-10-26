@@ -1296,3 +1296,97 @@ def test_the_api_pods_media_calls_fit_its_pipelines_deadline() -> None:
 
     assert app.state.media_fetcher is not None
     assert app.state.media_fetcher.call_seconds == 17
+
+
+# --- ZDF and 3sat articles without a video ---------------------------------------------------
+
+ZDF_ARTICLE = "https://www.zdf.de/nachrichten/politik/photosynthese-100.html"
+
+
+def comparable(envelope: Envelope[ExtractResult]) -> dict[str, Any]:
+    dumped = envelope.model_dump(mode="json")
+    dumped.pop("trace_id")
+    dumped["data"].pop("timings")
+    dumped["data"].pop("attempts")
+    return dumped
+
+
+@pytest.mark.parametrize("error", ["extractor_error", "unavailable", None])
+def test_zdf_article_without_a_video_is_extracted_as_a_page(error: str | None) -> None:
+    """A ZDF ``.html`` URL is a target, but the probe finds no video on a news article: the
+    request goes on as a page, in the same request, and answers what the page path answers."""
+    page_answer = Harness({ZDF_ARTICLE: fetched(ZDF_ARTICLE, ARTICLE)}).run(url=ZDF_ARTICLE)
+    harness = Harness({ZDF_ARTICLE: fetched(ZDF_ARTICLE, ARTICLE)}, media=MediaProbe(error=error))
+
+    first, second = harness.run_all({"url": ZDF_ARTICLE}, {"url": ZDF_ARTICLE})
+
+    assert first.status == "success", first.error
+    assert comparable(first) == comparable(page_answer)
+    assert data_of(first).media is None
+    assert data_of(first).attempts == 2  # the probe read the page, then the fetch
+    assert page_files(harness.fetched_urls()) == [ZDF_ARTICLE]
+    # The page is stored as a page; the next request is served from it without a probe.
+    assert data_of(second).cache == "hit"
+    assert data_of(second).media is None
+    assert harness.probes() == 1
+    assert harness.gate.held() == []
+
+
+def test_a_3sat_article_with_transcribe_is_a_page_without_a_handoff() -> None:
+    url = "https://www.3sat.de/wissen/nano/artikel-100.html"
+    handed: list[AsrNeeded] = []
+
+    async def handoff(
+        needed: AsrNeeded, stand_in: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        return stand_in
+
+    harness = Harness({url: fetched(url, ARTICLE)}, media=MediaProbe(error="extractor_error"))
+
+    envelope = harness.run(handoff, url=url, transcribe=True)
+
+    assert envelope.status == "success"
+    assert data_of(envelope).media is None
+    assert handed == []
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        MediaProbe(blocked=True, error="blocked"),
+        MediaProbe(blocked=True, error="rate_limited", rate_limited=True),
+        MediaProbe(error="blocked_address"),
+        MediaProbe(error="crashed"),
+        MediaProbe(error="dns_error"),
+    ],
+)
+def test_a_refusal_or_a_failure_on_a_zdf_page_is_no_reason_to_fall_back(answer: MediaProbe) -> None:
+    harness = Harness({ZDF_ARTICLE: fetched(ZDF_ARTICLE, ARTICLE)}, media=answer)
+
+    envelope = harness.run(url=ZDF_ARTICLE)
+
+    assert envelope.status == "failed"
+    assert page_files(harness.fetched_urls()) == []
+
+
+def test_a_zdf_video_page_still_answers_its_subtitles() -> None:
+    harness = Harness({ZDF_ARTICLE: fetched(ZDF_ARTICLE, ARTICLE)}, media=probe())
+
+    envelope = harness.run(url=ZDF_ARTICLE)
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.media is not None
+    assert data.media.platform == "zdf"
+    assert data.media.transcript_source == "manual_subtitles"
+    assert page_files(harness.fetched_urls()) == []
+
+
+def test_vimeo_without_a_video_never_falls_back_to_the_page() -> None:
+    harness = Harness({VIMEO: fetched(VIMEO, ARTICLE)}, media=MediaProbe(error="extractor_error"))
+
+    envelope = harness.run(url=VIMEO)
+
+    assert envelope.status == "failed"
+    assert page_files(harness.fetched_urls()) == []

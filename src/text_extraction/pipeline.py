@@ -11,7 +11,10 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    and the requested ``languages``; a stored ``metadata_only`` answer is no hit for
    ``transcribe: true``) and the compliance checks of step 4, and the media steps run in the
    turn of its host, held until they end. Their answer goes through step 8's comparison and
-   cache, without validators (a stale entry is extracted again). Steps 3 to 7 below do not run.
+   cache, without validators (a stale entry is extracted again). Steps 3 to 7 below do not run,
+   except for a ZDF or 3sat ``.html`` page (``page_fallback``), which may be an article: a
+   fresh page entry of its URL answers without a probe, and a probe that finds no video there
+   sends the request on to step 3 as a page (the probe's attempt stays counted).
 3. Result cache: a fresh entry is served as it is (``cache: hit``).
 4. Compliance before the fetch (robots.txt, tdmrep.json, ai.txt); a block ends here. When the
    origin's files are cached, this takes no request. Otherwise the host's ``DomainGate`` turn is
@@ -187,6 +190,7 @@ from text_extraction.pipeline_media import (
     AsrNeeded,
     MediaInputMeta,
     MediaSteps,
+    NoVideo,
     asr_available,
     asr_failed,
     cached_details_only,
@@ -980,8 +984,19 @@ class Pipeline:
         if stored is not None and stored.fresh:
             return self._serve_hit(run, stored)
         if target is not None:
+            if target.page_fallback:
+                # A page of a platform with articles too: one already known to have no video
+                # is served from its page entry, without a probe.
+                run.media = None
+                stored = await self._cached(run) if run.cacheable else None
+                if stored is not None and stored.fresh:
+                    return self._serve_hit(run, stored)
+                run.media = target
             # A platform result has no validators: a stale one is extracted again.
-            return await self._guarded(run, self._platform(run, target))
+            answer = await self._guarded(run, self._platform(run, target))
+            if answer is not None:
+                return answer
+            # No video after all: the URL is a page (``page_fallback``), from here on as any.
         if stored is not None and stored.result.mode_used == "browser":
             stored = None  # a rendered result has no validators and is never revalidated (B10)
         if self._renders_first(run):
@@ -991,9 +1006,7 @@ class Pipeline:
             return await self._rendered(run, earlier=fast)
         return fast
 
-    async def _guarded(
-        self, run: _Run, step: Awaitable[Envelope[ExtractResult]]
-    ) -> Envelope[ExtractResult]:
+    async def _guarded[T](self, run: _Run, step: Awaitable[T]) -> T | Envelope[ExtractResult]:
         """``step``'s envelope; a failed fetch or render and a refusal of the gate become
         failed envelopes, and an unavailable gate backend a 503."""
         try:
@@ -1043,9 +1056,11 @@ class Pipeline:
             return None
         return media_target(req.url)
 
-    async def _platform(self, run: _Run, target: MediaTarget) -> Envelope[ExtractResult]:
+    async def _platform(self, run: _Run, target: MediaTarget) -> Envelope[ExtractResult] | None:
         """A platform video (M1): the canonical URL passes the compliance checks of step 4,
-        then the media steps run in its host's turn, which is held until they end."""
+        then the media steps run in its host's turn, which is held until they end. None when a
+        ``page_fallback`` target has no video: the run is reset to a page's (the probe's
+        attempt stays counted), and the caller goes on with the page path."""
         if self._media is None:  # pragma: no cover - only called with media on
             raise RuntimeError("no media steps")
         run.final_url = target.canonical_url
@@ -1060,6 +1075,11 @@ class Pipeline:
             outcome = await self._media.platform(run, target)
         finally:
             await turn.give_back()
+        if isinstance(outcome, NoVideo):
+            run.media = None
+            run.final_url = None
+            run.report = ComplianceReport(mode=run.report.mode, decision="skipped")
+            return None
         if isinstance(outcome, AsrNeeded):
             return self._without_asr(run, outcome)
         return await self._finish(run, outcome, Validators())

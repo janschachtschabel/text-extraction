@@ -162,6 +162,14 @@ def test_ard_zdf_arte_3sat_forms() -> None:
     assert sat.canonical_url == "https://www.3sat.de/wissen/nano/clip-102.html"
     assert sat.video_id == "clip-102"
 
+    # Any ZDF or 3sat ``.html`` page is a target, articles included: when the probe finds no
+    # video there, the pipeline extracts the page instead. The video URLs of ARD, ZDF and arte
+    # name a video, so they have no such fallback.
+    assert zdf.page_fallback
+    assert sat.page_fallback
+    assert not ard.page_fallback
+    assert not arte.page_fallback
+
 
 def test_zdf_video_urls_without_html() -> None:
     """The new ZDF URLs ``zdf.de/video/<section>/<show>/<episode>`` (M18)."""
@@ -172,6 +180,7 @@ def test_zdf_video_urls_without_html() -> None:
         zdf.canonical_url == "https://www.zdf.de/video/dokus/terra-x-112/ep-bau-der-pyramiden-100"
     )
     assert zdf.video_id == "ep-bau-der-pyramiden-100"
+    assert not zdf.page_fallback
 
 
 def test_extractor_names_match_exactly_one_extractor_of_the_pinned_yt_dlp() -> None:
@@ -228,3 +237,17 @@ def test_mediathek_pages_without_a_video_are_no_target(url: str) -> None:
 )
 def test_non_media_url_none(url: str) -> None:
     assert media_target(url) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://youtu.be/dQw4w9WgXcQ",
+        "https://vimeo.com/76979871",
+    ],
+)
+def test_youtube_and_vimeo_targets_never_fall_back_to_the_page(url: str) -> None:
+    target = media_target(url)
+    assert target is not None
+    assert not target.page_fallback
