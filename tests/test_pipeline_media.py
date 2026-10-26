@@ -1434,20 +1434,68 @@ def test_vimeo_details_from_the_player_page_when_ytdlp_fails() -> None:
     assert harness.gate.held() == []
 
 
-@pytest.mark.parametrize("status", [403, 404, 410])
-def test_a_vimeo_player_that_refuses_the_video_answers_unavailable(status: int) -> None:
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (403, "<p>Sorry. This video isn&#39;t available. The owner has been notified.</p>"),
+        (403, "<p>Sorry. This video isn\u2019t available.</p>"),
+        (403, "Because of its privacy settings, this video cannot be played here."),
+        (404, "Not found"),
+        (410, "Gone"),
+    ],
+)
+def test_a_vimeo_player_that_refuses_the_video_answers_unavailable(status: int, body: str) -> None:
     """Vimeo's player refuses a removed, private or domain-restricted video (yt-dlp then
-    guesses a TLS fingerprint block): no retry hint, since a retry gets the same answer."""
-    page = fetched(VIMEO, "Sorry. This video isn't available.", status=status)
+    guesses a TLS fingerprint block): no retry hint, since a retry gets the same answer. Such
+    an answer is not cached either."""
+    page = fetched(VIMEO, body, status=status)
+    harness = Harness({VIMEO: page}, media=MediaProbe(error="extractor_error"))
+
+    first, second = harness.run_all({"url": VIMEO}, {"url": VIMEO})
+
+    assert first.status == "failed"
+    assert first.error is not None
+    assert first.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert first.error.retryable is False
+    assert "private, removed or restricted" in first.error.message
+    assert data_of(second).cache == "miss"
+    assert harness.probes() == 2
+
+
+def test_a_vimeo_403_that_names_no_missing_video_stays_retryable() -> None:
+    """A 403 without the player's own words may be a block of the service's address (a bot
+    check): it says nothing about the video, so the probe's error stands."""
+    page = fetched(VIMEO, "<title>Just a moment...</title>", status=403)
     harness = Harness({VIMEO: page}, media=MediaProbe(error="extractor_error"))
 
     envelope = harness.run(url=VIMEO)
 
     assert envelope.status == "failed"
     assert envelope.error is not None
-    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
-    assert envelope.error.retryable is False
-    assert "private, removed or restricted" in envelope.error.message
+    assert envelope.error.retryable is True
+
+
+def test_a_vimeo_player_429_pauses_the_host_and_answers_rate_limited() -> None:
+    page = fetched(VIMEO, "slow down", status=429, headers={"retry-after": "30"})
+    harness = Harness({VIMEO: page}, media=MediaProbe(error="extractor_error"))
+
+    envelope = harness.run(url=VIMEO)
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.RATE_LIMITED
+    assert envelope.error.retryable is True
+    assert harness.keys("out:cooldown:*") == [b"out:cooldown:{player.vimeo.com}"]
+
+
+def test_the_vimeo_player_page_is_not_read_when_the_probe_has_the_title() -> None:
+    answer = probe(manual={}, automatic={}, track=None, error="extractor_error")
+    harness = Harness({VIMEO: fetched(VIMEO, PLAYER_PAGE)}, media=answer)
+
+    envelope = harness.run(url=VIMEO)
+
+    assert data_of(envelope).title == "Photosynthesis for kids"
+    assert page_files(harness.fetched_urls()) == []
 
 
 @pytest.mark.parametrize("error", ["connect_error", "platform_error", "unavailable", "crashed"])

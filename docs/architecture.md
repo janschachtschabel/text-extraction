@@ -991,9 +991,11 @@ OpenAI-compatible endpoint): always a job, answered 202.
   foreign-language passages) and `und` never count. When both libraries fail on YouTube without
   a refusal and give no metadata, the watch page's `ytInitialPlayerResponse` (fast fetcher, same
   turn) gives the details. When yt-dlp fails on Vimeo with an error it does not name, the player
-  page's `og:title` and `og:description` do; the player's 403, 404 or 410 (a removed, private or
-  domain-restricted video, which yt-dlp words as a TLS fingerprint block) answers
-  `no_transcript_available`, not retryable, as does yt-dlp's "embed-only video". Of the chosen track's formats (best first: VTT, json3, TTML, SRT), the
+  page's `og:title` and `og:description` do; the player's 404, 410 or 403 with its own "isn't
+  available" or "privacy settings" text (a removed, private or domain-restricted video, which
+  yt-dlp words as a TLS fingerprint block) answers `no_transcript_available`, not retryable, as
+  does yt-dlp's "embed-only video". Any other 403 may be a block of the service's address and
+  stays retryable. Of the chosen track's formats (best first: VTT, json3, TTML, SRT), the
   first whose body has a cue with text is taken; a format that fails, is too large or has no
   text gives way to the next, but a refusal of the egress proxy ends the track.
 - **M3 and M4, children and network** (`media/pool.py`, `media/child.py`). youtube-transcript-api

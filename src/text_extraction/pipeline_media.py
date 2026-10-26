@@ -16,8 +16,9 @@ rest:
      goes to the gate), and its ``ytInitialPlayerResponse`` gives title, description, author,
      duration, date and keywords (M2's last tier 2). A redirect ends that attempt. On Vimeo,
      after an ``extractor_error`` without metadata, the player page is fetched the same way:
-     its ``og:`` tags give title and description, and its 403, 404 or 410 (a removed, private
-     or domain-restricted video) makes the error ``unavailable``, not retryable.
+     its ``og:`` tags give title and description, and its 404, 410 or a 403 in its own words
+     (a removed, private or domain-restricted video) makes the error ``unavailable``, not
+     retryable; any other 403 (a block of the service's address) leaves the error as it is.
   3. A target with ``page_fallback`` (a ZDF or 3sat ``.html`` page, which may be an article)
      whose probe found no video (no track, no title, no description, and the extractor said
      so: ``no_video`` or ``unavailable``) is ``NO_VIDEO``: the caller extracts the URL as a
@@ -86,6 +87,7 @@ codes only: never a URL, a video id or a file name.
 
 import asyncio
 import hashlib
+import html
 import json
 import re
 import time
@@ -232,10 +234,12 @@ NO_VIDEO: Final = NoVideo()
 # (``media/pool.py``). A refusal, a failure that may pass, an extractor error that names no
 # missing video, or a probe that succeeded says nothing of the kind.
 _NO_VIDEO_ERRORS: Final = frozenset({"no_video", "unavailable"})
-# What Vimeo's player answers for a removed, private or domain-restricted video (yt-dlp words
-# its 403 as a TLS fingerprint block, which it is not for an honest client that gets other
-# videos).
-_GONE_STATUSES: Final = frozenset({403, 404, 410})
+# What Vimeo's player answers for a removed, private or domain-restricted video. yt-dlp words
+# its 403 as a TLS fingerprint block; a 403 counts only with the player's own words, since a
+# block of the service's address (a bot check) answers 403 too.
+_GONE_STATUSES: Final = frozenset({404, 410})
+_REFUSAL_SCAN_BYTES: Final = 65_536
+_PLAYER_REFUSALS: Final = re.compile(r"video isn'?t available|privacy settings", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -917,8 +921,8 @@ class MediaSteps:
     ) -> MediaProbe:
         """The probe with what the video's page says (YouTube's watch page, Vimeo's player),
         fetched in the held turn; the probe unchanged when the page cannot be had or says
-        nothing. A 429 marks it rate-limited; Vimeo's player refusing the video (403, 404, 410)
-        marks it unavailable."""
+        nothing. A 429 marks it rate-limited; Vimeo's player refusing the video (404, 410, a 403
+        in its own words) marks it unavailable."""
         host = urlsplit(target.canonical_url).hostname or ""
         budget = self._fetch_budget(run)
         if budget < _MIN_SECONDS:
@@ -945,7 +949,7 @@ class MediaSteps:
         await self._record(host, fetched)
         if fetched.status == 429:
             return replace(probe, rate_limited=True, retry_after=fetched.headers.get("retry-after"))
-        if target.platform == "vimeo" and fetched.status in _GONE_STATUSES:
+        if target.platform == "vimeo" and _player_refused(fetched):
             return replace(probe, error="unavailable")
         if not 200 <= fetched.status < 300:
             return probe
@@ -1369,6 +1373,18 @@ def player_details(body: bytes, charset: str | None) -> dict[str, Any] | None:
         "is_live": details.get("isLive") is True
         or (isinstance(live, dict) and live.get("isLiveNow") is True),
     }
+
+
+def _player_refused(fetched: FetchResult) -> bool:
+    """Whether Vimeo's player says the video is gone (404, 410) or refused (403 in its own
+    words)."""
+    if fetched.status in _GONE_STATUSES:
+        return True
+    if fetched.status != 403:
+        return False
+    head = fetched.content[:_REFUSAL_SCAN_BYTES]  # read in the event loop: kept small
+    text = html.unescape(decode_html(head, fetched.charset)).replace("\u2019", "'")
+    return _PLAYER_REFUSALS.search(text) is not None
 
 
 def og_details(body: bytes, charset: str | None) -> dict[str, Any] | None:
