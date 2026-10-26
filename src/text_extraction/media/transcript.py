@@ -65,6 +65,12 @@ class Transcription:
     convert_ms: int = 0
     upstream_status: int | None = None
 
+    @property
+    def has_speech(self) -> bool:
+        """Whether the speech recognition heard anything: a segment with text. The one rule for
+        the ASR worker's metrics and the pipeline's answer (``no_speech``)."""
+        return any(cue.text.strip() for cue in self.segments)
+
 
 def build_transcript(
     cues: Sequence[Cue],

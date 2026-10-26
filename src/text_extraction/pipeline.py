@@ -180,6 +180,7 @@ from text_extraction.pipeline_documents import (
     without_ocr,
 )
 from text_extraction.pipeline_media import (
+    NO_SPEECH_WARNING,
     PLAYLIST_MESSAGE,
     TRANSCRIPTION_DISABLED_MESSAGE,
     TRANSCRIPTION_NOT_HANDED_MESSAGE,
@@ -899,7 +900,7 @@ class Pipeline:
         if transcription.kind is not None:
             run.content_type = media_type_of(transcription.kind)
         run.convert_ms += transcription.convert_ms
-        if not any(cue.text.strip() for cue in transcription.segments):
+        if not transcription.has_speech:
             return no_speech(run, meta, draft, transcription)
         title = details.title if details is not None else None
         started = time.perf_counter()
@@ -2244,8 +2245,14 @@ def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
 
 
 def _metadata_only(result: ExtractResult) -> bool:
-    """Whether a stored result is a platform video's details without a transcript."""
-    return result.media is not None and result.media.transcript_source == "metadata_only"
+    """Whether a stored result is a platform video's details without a transcript that a
+    transcription may still give: not when the speech recognition ran and heard no speech
+    (``no_speech``), which is final."""
+    return (
+        result.media is not None
+        and result.media.transcript_source == "metadata_only"
+        and NO_SPEECH_WARNING not in result.warnings
+    )
 
 
 def _html_lang(html: str) -> str | None:

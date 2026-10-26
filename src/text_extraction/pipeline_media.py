@@ -125,6 +125,7 @@ from text_extraction.settings import Settings
 
 __all__ = [
     "ASR_UNAVAILABLE_WARNING",
+    "NO_SPEECH_WARNING",
     "PLAYLIST_MESSAGE",
     "SUBTITLES_BLOCKED_WARNING",
     "SUBTITLES_FAILED_WARNING",
@@ -159,6 +160,8 @@ _LIVE_MESSAGE: Final = "The URL is a live stream that is still running."
 SUBTITLES_BLOCKED_WARNING: Final = "subtitles_blocked"
 SUBTITLES_FAILED_WARNING: Final = "subtitles_failed"
 ASR_UNAVAILABLE_WARNING: Final = "asr_unavailable"
+# The speech recognition ran and heard no speech: the answer is final (also for the cache).
+NO_SPEECH_WARNING: Final = "no_speech"
 TRACKS_TRUNCATED_WARNING: Final = "tracks_truncated"
 TRACKS_FAILED_WARNING: Final = "tracks_failed"
 
@@ -406,7 +409,9 @@ def transcribed(
         media=MediaInfo(
             platform=meta.platform,
             transcript_source="asr",
-            transcript_language=transcription.language or None,
+            # The language heard, else the one the text reads as (an external endpoint may
+            # answer a language's name, which is no code).
+            transcript_language=transcription.language or language or None,
             available_languages=known.available_languages if known is not None else [],
             duration_seconds=transcription.duration,
             uploader=known.uploader if known is not None else None,
@@ -429,9 +434,12 @@ def no_speech(
 ) -> Envelope[ExtractResult]:
     """The answer when the speech recognition ran and heard nothing: the draft (a platform
     video's details) with ``no_transcript_available``, final, so it keeps its fingerprint and
-    no ``asr_unavailable``; without a draft ``failed`` with the same code, not retryable."""
+    no ``asr_unavailable``; without a draft ``failed`` with the same code, not retryable. Both
+    carry the warning ``no_speech``: a stored details-only answer with it is a cache hit for a
+    later ``transcribe: true`` request (the speech recognition would hear nothing again)."""
     if draft is not None and draft.data is not None:
-        warnings = [w for w in draft.data.warnings if w != ASR_UNAVAILABLE_WARNING]
+        kept = [w for w in draft.data.warnings if w != ASR_UNAVAILABLE_WARNING]
+        warnings = list(dict.fromkeys([*kept, NO_SPEECH_WARNING]))
         error = ErrorInfo(
             code=ErrorCode.NO_TRANSCRIPT_AVAILABLE,
             message=_NO_SPEECH_DETAILS_MESSAGE,
@@ -450,6 +458,8 @@ def no_speech(
         media=media,
         content_type=media_type_of(transcription.kind) if transcription.kind else None,
     )
+    warnings = list(dict.fromkeys([*result.warnings, NO_SPEECH_WARNING]))
+    result = result.model_copy(update={"warnings": warnings})
     return _failed(result, ErrorCode.NO_TRANSCRIPT_AVAILABLE, _NO_SPEECH_MESSAGE, False)
 
 

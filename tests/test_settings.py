@@ -1063,3 +1063,15 @@ def test_asr_external_api_key_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.asr_external_api_key == "sk-very-secret"
     assert "sk-very-secret" not in repr(settings)
     assert "sk-very-secret" not in str(settings)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_asr_external_api_key_empty_means_unset(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """An empty key (a chart that renders an unset secret so) is no key: without the caller's
+    header, ``transcribe: true`` is 400 on the external backend instead of sending no key."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_EXTERNAL_API_KEY", value)
+
+    assert load_settings().asr_external_api_key is None

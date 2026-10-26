@@ -278,6 +278,13 @@ class Settings(BaseSettings):
             raise ValueError("the external ASR endpoint must be an https URL")
         return value.strip()
 
+    @field_validator("asr_external_api_key")
+    @classmethod
+    def _empty_key_is_unset(cls, value: str | None) -> str | None:
+        """Empty means unset, as for the endpoint: no key is sent, and a request without the
+        caller's key is refused (``extract_api.check_asr_key``)."""
+        return value if value is not None and value.strip() else None
+
     @model_validator(mode="after")
     def _document_limit_within_fetch_limit(self) -> Self:
         if self.document_max_bytes > self.fetch_max_bytes:

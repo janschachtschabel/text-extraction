@@ -770,3 +770,130 @@ def test_job_view_never_shows_the_input() -> None:
 
         assert "MARKER-5e1f" not in view.text
         assert "input" not in json.dumps(view.json()["data"])
+
+
+# --- the external backend: a key is needed (M11) ---
+
+EXTERNAL: dict[str, Any] = {
+    "asr_backend": "openai",
+    "asr_external_base_url": "https://asr.example.org/v1",
+}
+OPERATOR_KEY = "sk-operator-key-on-the-api-pods-31c4"
+
+
+def batch(
+    client: TestClient, urls: list[str], headers: dict[str, str] | None = None, **body: Any
+) -> Any:
+    return client.post(
+        "/v1/batch", json={"urls": urls, **body}, headers={**AUTH, **(headers or {})}
+    )
+
+
+def test_openai_backend_without_any_key_is_400() -> None:
+    """Without the caller's header and without ``ASR_EXTERNAL_API_KEY`` (which the API pods hold
+    too), ``transcribe: true`` cannot be served: 400 before anything is fetched or stored; an
+    audio upload too, a document upload is not concerned."""
+    service = Service(**EXTERNAL)
+    with TestClient(service.app) as client:
+        refused = [
+            extract(client, YT, transcribe=True),
+            upload(client),
+            batch(client, [YT, FILE], transcribe=True),
+        ]
+        document = client.post(
+            "/v1/extract/file",
+            files={"file": ("notes.txt", b"Some plain words. " * 40, "text/plain")},
+            headers=AUTH,
+        )
+        plain = extract(client, YT)  # without transcribe: details or subtitles, no ASR
+
+    for response in refused:
+        assert response.status_code == 400, response.text
+        error = response.json()["error"]
+        assert error["code"] == "invalid_request"
+        assert ASR_KEY_HEADER in error["message"]
+    assert document.status_code == 200
+    assert plain.status_code == 200
+    assert len(service.media.calls) == 1  # only the plain request probed the video
+    assert service.stored() == []
+    assert service.pending() == 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "headers"),
+    [
+        ({"asr_external_api_key": OPERATOR_KEY}, {}),
+        ({}, {ASR_KEY_HEADER: ASR_KEY}),
+        ({"asr_backend": "local"}, {}),
+    ],
+    ids=["env-key", "header", "local-backend"],
+)
+def test_a_key_or_the_local_backend_lets_it_through(
+    overrides: dict[str, Any], headers: dict[str, str]
+) -> None:
+    service = Service(**{**EXTERNAL, **overrides})
+    with TestClient(service.app) as client:
+        accepted = [
+            extract(client, YT, headers=headers, transcribe=True),
+            upload(client, headers=headers),
+            batch(client, [YT], headers=headers, transcribe=True),
+        ]
+
+    assert [response.status_code for response in accepted] == [202, 202, 202]
+
+
+def test_the_operator_key_never_reaches_a_job_or_a_log() -> None:
+    service = Service(**EXTERNAL, asr_external_api_key=OPERATOR_KEY)
+    with TestClient(service.app) as client, capture_logs() as logs:
+        job_id = extract(client, YT, transcribe=True).json()["data"]["id"]
+        view = client.get(f"/v1/jobs/{job_id}", headers=AUTH).text
+
+    assert OPERATOR_KEY not in view
+    assert service.store(lambda store: store.asr_key(job_id)) is None  # read by the worker
+    assert not any(OPERATOR_KEY in repr(event) for event in logs)
+
+
+def test_batch_stores_the_secret_header_per_job() -> None:
+    """``POST /v1/batch`` takes ``X-ASR-Api-Key`` as the sync routes do: stored with the job
+    (for all its items, as long as the job lives), never shown or logged."""
+    service = Service(**EXTERNAL)
+    with TestClient(service.app) as client, capture_logs() as logs:
+        accepted = batch(client, [YT, FILE], headers={ASR_KEY_HEADER: ASR_KEY}, transcribe=True)
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["data"]["id"]
+        view = client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+
+    assert ASR_KEY not in view.text
+    assert service.store(lambda store: store.asr_key(job_id)) == ASR_KEY
+    ttl = service.ttl(f"job:{{{job_id}}}:asr_key")
+    assert service.settings.job_ttl_seconds - 5 < ttl <= service.settings.job_ttl_seconds
+    record = service.store(lambda store: store.get(job_id))
+    assert record.has_secrets is False
+    assert not any(ASR_KEY in repr(event) for event in logs)
+
+
+def test_batch_stores_no_key_without_transcribe() -> None:
+    service = Service(**EXTERNAL)
+    with TestClient(service.app) as client:
+        job_id = batch(client, [YT], headers={ASR_KEY_HEADER: ASR_KEY}).json()["data"]["id"]
+
+    assert service.store(lambda store: store.asr_key(job_id)) is None
+
+
+def test_batch_refuses_an_invalid_secret_header() -> None:
+    service = Service(**EXTERNAL)
+    with TestClient(service.app) as client:
+        response = batch(client, [YT], headers={ASR_KEY_HEADER: "has space"}, transcribe=True)
+
+    assert response.status_code == 400
+    assert "has space" not in response.text
+    assert service.stored() == []
+
+
+def test_batch_documents_the_secret_header() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        spec = client.get("/openapi.json").json()
+
+    names = [parameter["name"] for parameter in spec["paths"]["/v1/batch"]["post"]["parameters"]]
+    assert ASR_KEY_HEADER in names

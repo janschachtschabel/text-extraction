@@ -23,8 +23,10 @@
   ASR workers (``asr_dispatch.AsrHandoff``, built here because the bytes are in hand): a job of
   kind ``file`` on pool ``asr`` whose item keeps the bytes as its input
   (``ASR_INPUT_TTL_SECONDS``) and the ``X-ASR-Api-Key`` header as its secret, answered 202 at
-  once (the form's ``wait_seconds`` does not apply). Any other file over ``DOCUMENT_MAX_BYTES``
-  is ``too_large`` before its bytes are sniffed or hashed.
+  once (the form's ``wait_seconds`` does not apply). Where the service transcribes on an
+  external endpoint without a key of its own (``ASR_EXTERNAL_API_KEY``), such a file without
+  the header is 400 (M11), checked as soon as the bytes are read. Any other file over
+  ``DOCUMENT_MAX_BYTES`` is ``too_large`` before its bytes are sniffed or hashed.
 
 The conversion is ``Pipeline.extract_upload``: no compliance check, no result cache. With
 ``wait_seconds`` (25 by default) a slower upload becomes a job of kind ``file``, as a slow
@@ -56,6 +58,7 @@ from text_extraction.extract_api import (
     ASR_KEY_DESCRIPTION,
     answer_or_hand_over,
     asr_handoff,
+    check_asr_key,
     check_ocr_request,
     create_p1_job,
     docling_handoff,
@@ -64,6 +67,7 @@ from text_extraction.extract_api import (
 from text_extraction.extract_models import ExtractResult
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
 from text_extraction.job_models import JobAccepted, JobOptions
+from text_extraction.media.sniff import MEDIA_HEAD_BYTES, sniff_media
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_media import asr_available
 from text_extraction.pool_dispatch import Handover
@@ -186,8 +190,10 @@ async def extract_file(
     waiting, or the service is busy: `failed`/`rate_limited`, retryable). 422 for a form with
     more than one file or eight fields, or unknown fields; 413 for a body over
     `DOCUMENT_MAX_BYTES` + 64 KiB (the larger `MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where audio and
-    video are transcribed); 400 for `ocr: always` while the service has no OCR, or an
-    `X-ASR-Api-Key` header that is not 1 to 1024 visible ASCII characters.
+    video are transcribed); 400 for `ocr: always` while the service has no OCR, an
+    `X-ASR-Api-Key` header that is not 1 to 1024 visible ASCII characters, or an audio or
+    video file without that header where the service transcribes externally and has no key of
+    its own.
 
     An upload still converting after `wait_seconds` (25 by default) becomes a job: 202 with the
     job's id and `status_url` (`GET /v1/jobs/{id}`, kind `file`, its item's `url` null). A
@@ -202,6 +208,8 @@ async def extract_file(
         body = await file.read(upload_file_limit(settings) + 1)
     finally:
         await file.close()  # deletes the spooled part now, not when the answer is sent
+    if key is None and _transcribed(body, file.content_type, settings):
+        check_asr_key(settings, key)  # 400 without any key for the external endpoint (M11)
     name = sanitize_file_name(file.filename)
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)
@@ -238,6 +246,14 @@ async def extract_file(
             upload=(body, meta),
         ),
     )
+
+
+def _transcribed(body: bytes, content_type: str | None, settings: Settings) -> bool:
+    """Whether the upload goes to the ASR workers: audio or video (the pipeline's sniff of its
+    head) while the service transcribes uploads."""
+    if not (settings.media_enabled and asr_available(settings)):
+        return False
+    return sniff_media(body[:MEDIA_HEAD_BYTES], content_type) is not None
 
 
 async def _flow(

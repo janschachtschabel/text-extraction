@@ -113,6 +113,7 @@ add a note of its own):
   mode, F18).
 - Media: `subtitles_blocked` (the platform refused the subtitles; the metadata answers),
   `asr_unavailable` (no transcription in time or the ASR failed; the metadata answers),
+  `no_speech` (the speech recognition heard no speech; final, also for the cache),
   `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed` (every `<track>` of
   a page failed).
 - Jobs: `content_not_stored_too_large` (an item stored without its content).

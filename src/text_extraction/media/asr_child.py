@@ -32,7 +32,15 @@ the allowlist of what a parent may call by name:
   computes the features of a whole call at once, 3.4 GiB for an hour), each with
   ``vad_filter=True, condition_on_previous_text=False``, in ``language`` when Whisper knows it,
   else the language it detects in the first window with speech. The reply is the segments as
-  ``[start, end, text]`` on the file's clock, the language and the audio's duration.
+  ``[start, end, text]`` on the file's clock, the language and the audio's duration. With
+  ``backend: openai`` there is no model: the decoded audio goes to the external endpoint
+  (``media/asr_external.transcribe_external``: Ogg Opus chunks of at most 20 minutes, with
+  ``base_url``, ``model``, ``api_key``, ``timeout`` per chunk, ``budget`` for all and our
+  ``user_agent``); its failures raise ``ExternalRejected``, ``ExternalUnavailable``,
+  ``ExternalFailed`` or ``BudgetSpent``, the same reply otherwise.
+- ``opus_check``: the file at ``path`` (the built-in clip) decoded and encoded as Ogg Opus, for
+  the external backend's self-check; the reply is the encoded size (``EncodeFailed`` without an
+  Ogg Opus stream).
 - ``ffmpeg``: PyAV's FFmpeg libraries with their ``configuration`` and ``license``
   (``av._core.library_meta`` of PyAV 19.0.1), the codecs PyAV offers (``av.codecs_available``),
   the outside programs yt-dlp could hand a download to that are on ``PATH`` (``ffmpeg``,
@@ -76,6 +84,10 @@ from faster_whisper.tokenizer import _LANGUAGE_CODES  # noqa: E402
 from yt_dlp.networking import Request  # noqa: E402
 from yt_dlp.networking.exceptions import HTTPError  # noqa: E402
 
+from text_extraction.media.asr_external import (  # noqa: E402
+    encode_ogg_opus,
+    transcribe_external,
+)
 from text_extraction.media.asr_windows import transcribe_windows  # noqa: E402
 from text_extraction.media.child import (  # noqa: E402
     _http_url,
@@ -126,6 +138,10 @@ class DecodeFailed(Exception):  # noqa: N818 - the parent maps this type name
 
 class DownloadFailed(Exception):  # noqa: N818 - the parent maps this type name
     """yt-dlp ended without a file."""
+
+
+class EncodeFailed(Exception):  # noqa: N818 - the self-check names this type
+    """The Opus encoding gave no Ogg Opus stream."""
 
 
 # --- downloads -----------------------------------------------------------------------------
@@ -355,19 +371,53 @@ def _model(path: str, compute_type: str, threads: int) -> WhisperModel:
 
 def transcribe(payload: dict[str, Any]) -> dict[str, Any]:
     """See the module docstring."""
-    model_path = Path(payload["model_path"])
-    if not (model_path / "model.bin").is_file():
+    external = payload.get("backend") == "openai"
+    model_path = Path(payload.get("model_path") or "")
+    if not external and not (model_path / "model.bin").is_file():
         raise ModelsMissing(model_path.name)
     max_duration = float(payload["max_duration"])
     declared = probe_duration(payload["path"])
     if declared is not None and declared > max_duration:
         raise MediaTooLong(str(round(declared)))  # nothing decoded
+    language = payload.get("language")
+    known = language if language in _LANGUAGE_CODES else None
+    if external:
+        return _external(payload, max_duration, known)
     audio = decode_audio(payload["path"], max_seconds=max_duration)
     model = _model(str(model_path), payload["compute_type"], int(payload["threads"]))
-    language = payload.get("language")
-    return transcribe_windows(
-        model, audio, language=language if language in _LANGUAGE_CODES else None
+    return transcribe_windows(model, audio, language=known)
+
+
+def _external(
+    payload: Mapping[str, Any], max_duration: float, language: str | None
+) -> dict[str, Any]:
+    """``transcribe`` on the external endpoint (``media/asr_external.py``), as the same reply."""
+    transcription = transcribe_external(
+        payload["path"],
+        base_url=payload["base_url"],
+        model=payload["model"],
+        api_key=payload["api_key"],
+        timeout=float(payload["timeout"]),
+        language=language,
+        max_duration=max_duration,
+        budget=float(payload["budget"]),
+        user_agent=payload.get("user_agent"),
+        decode=lambda path: decode_audio(path, max_seconds=max_duration),
     )
+    return {
+        "segments": [[cue.start, cue.end, cue.text] for cue in transcription.segments],
+        "language": transcription.language,
+        "duration": transcription.duration,
+    }
+
+
+def opus_check(payload: dict[str, Any]) -> dict[str, Any]:
+    """See the module docstring."""
+    audio = decode_audio(payload["path"], max_seconds=float(payload["max_duration"]))
+    encoded = encode_ogg_opus(audio)
+    if not encoded.startswith(b"OggS") or b"OpusHead" not in encoded[:4096]:
+        raise EncodeFailed("no Ogg Opus")
+    return {"bytes": len(encoded)}
 
 
 def ffmpeg(_payload: dict[str, Any]) -> dict[str, Any]:
@@ -398,5 +448,6 @@ FUNCTIONS: dict[str, Callable[[Any], Any]] = {
     "platform_info": platform_info,
     "download": download,
     "transcribe": transcribe,
+    "opus_check": opus_check,
     "ffmpeg": ffmpeg,
 }

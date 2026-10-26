@@ -18,16 +18,18 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
 from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import (
+    ASR_KEY_DESCRIPTION,
     BROWSER_DISABLED_MESSAGE,
     check_ocr_request,
     check_transcribe_request,
@@ -177,6 +179,9 @@ async def create_batch(
     body: BatchRequest,
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
+    asr_key: Annotated[
+        str | None, Header(alias=ASR_KEY_HEADER, description=ASR_KEY_DESCRIPTION)
+    ] = None,
 ) -> Envelope[JobAccepted]:
     """Queue many URLs as one job and answer 202 with its id and `status_url`.
 
@@ -192,7 +197,9 @@ async def create_batch(
 
     `mode: browser` queues the URLs for the browser workers (400 while browser mode is off);
     `ocr: always` answers 400 while the service has no OCR, `transcribe: true` while it has no
-    ASR;
+    ASR, or transcribes on an external endpoint without a key of its own and the request has no
+    `X-ASR-Api-Key` header (that key, 1 to 1024 visible ASCII characters, else 400, serves all
+    items of the batch: stored with the job while it lives, never shown or logged);
     `auto` items that need a browser move there on their own. A batch takes no `actions`,
     `cookies`, `headers` or `screenshot` (422).
     """
@@ -208,7 +215,9 @@ async def create_batch(
             raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
         queue = request.app.state.browser_queue
     check_ocr_request(body.ocr, settings)  # 400 for `ocr: always` while there is no OCR
-    check_transcribe_request(body.transcribe, settings)  # 400 while there is no ASR (M9)
+    key = asr_key_of(asr_key)
+    # 400 while there is no ASR (M9), or no key for an external endpoint (M11).
+    check_transcribe_request(body.transcribe, settings, key=key)
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -234,6 +243,10 @@ async def create_batch(
             # several that passed the check above, those beyond the limit give their job back.
             if await _add_open(valkey, principal.name, job_id, settings.job_ttl_seconds) > limit:
                 raise _too_many_open(limit)
+            if key is not None and body.transcribe:
+                # The caller's key of the external endpoint, for any item that moves to the ASR
+                # workers, while the job lives (M11); the job's deletion takes it along.
+                await store.put_asr_key(job_id, key, whole_job=True)
             # Enqueued exactly once and never retried: a retry could queue some items twice.
             await queue.enqueue(job_id, principal.name, body.urls)
         except BaseException:

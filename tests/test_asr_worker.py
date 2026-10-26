@@ -57,6 +57,7 @@ LEAKY_PATH = "/srv/asr/item-x/upload.ogg"  # a path a library message may quote
 OGG = b"OggS\x00\x02" + b"\x00" * 64
 FILE_URL = "https://media.example.org/lecture.ogg"
 CANONICAL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+YOUTUBE_2 = "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
 SPEECH = (
     "Als Gregor Samsa eines Morgens aus unruhigen Träumen erwachte, fand er sich in seinem Bett "
     "zu einem ungeheueren Ungeziefer verwandelt. Er lag auf seinem panzerartig harten Rücken und "
@@ -137,6 +138,10 @@ class FakeChildren:
     def payload(self, name: str) -> dict[str, Any]:
         (payload,) = [payload for called, payload, _ in self.calls if called == name]
         return payload
+
+    def payload_of(self, name: str) -> dict[str, Any]:
+        """The payload of the last call of ``name``."""
+        return [payload for called, payload, _ in self.calls if called == name][-1]
 
 
 def note(held: dict[str, list[str]], name: str, hosts: list[str]) -> None:
@@ -1022,6 +1027,283 @@ async def test_a_download_cut_short_by_the_items_budget_is_the_asr_timeout(tmp_p
     assert "ASR_TIMEOUT_SECONDS" in message
 
 
+@scenario
+async def test_a_second_transcribe_request_for_a_speechless_video_is_a_cache_hit(
+    tmp_path: Path,
+) -> None:
+    """The answer for media without speech is final: a later ``transcribe: true`` request is
+    served from the cache and starts no new transcription."""
+    from text_extraction.extract_models import ExtractRequest
+    from text_extraction.pipeline_media import NO_SPEECH_WARNING
+
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=transcript(segments=[])))
+    await moved(harness)
+    await asr.process_next()
+    handed: list[Any] = []
+
+    async def asr_handoff(needed: Any, without: Any) -> Any:
+        handed.append(needed)
+        return without
+
+    again = await harness.pipeline.run(
+        ExtractRequest(url="https://youtu.be/dQw4w9WgXcQ", compliance="enforce", transcribe=True),
+        OWNER,
+        asr_handoff=asr_handoff,
+    )
+
+    assert handed == []  # no new ASR job
+    assert again.data is not None
+    assert again.data.cache == "hit"
+    assert NO_SPEECH_WARNING in again.data.warnings
+    assert again.data.media is not None
+    assert again.data.media.transcript_source == "metadata_only"
+
+
+@scenario
+async def test_an_upload_without_speech_says_so(tmp_path: Path) -> None:
+    from text_extraction.pipeline_media import NO_SPEECH_WARNING
+
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=transcript(segments=[[0.0, 1.0, " "]])))
+    job_id = await moved_upload(harness)
+
+    await asr.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert NO_SPEECH_WARNING in item.result.data.warnings
+    labels = {"backend": "local", "outcome": "no_transcript_available"}
+    assert harness.sample("text_extraction_asr_transcriptions_total", labels) == 1
+
+
+def test_has_speech_is_one_rule() -> None:
+    """The runner's metric label and the pipeline's answer read speech the same way."""
+    from text_extraction.media.captions import Cue
+    from text_extraction.media.transcript import Transcription
+
+    def of(*texts: str) -> Transcription:
+        cues = [Cue(float(i), float(i + 1), text) for i, text in enumerate(texts)]
+        return Transcription(segments=cues, language="de", duration=3.0, model="small")
+
+    assert of("Hallo").has_speech
+    assert of(" ", "Hallo").has_speech
+    assert not of().has_speech
+    assert not of(" ", "\n").has_speech
+
+
+# --- the external backend (ASR_BACKEND=openai) --------------------------------------------------
+
+EXTERNAL_URL = "https://asr.example.org/v1"
+OPERATOR_KEY = "sk-operator-env-key-1b2c"
+CALLER_KEY = "sk-caller-header-key-9e8d"
+
+
+def openai_settings(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "asr_backend": "openai",
+        "asr_external_base_url": EXTERNAL_URL,
+        "asr_external_api_key": OPERATOR_KEY,
+    }
+    return settings_for(tmp_path, **{**values, **overrides})
+
+
+@pytest.mark.parametrize(
+    ("caller", "expected"), [(CALLER_KEY, CALLER_KEY), (None, OPERATOR_KEY)], ids=["header", "env"]
+)
+@scenario
+async def test_header_key_wins(tmp_path: Path, caller: str | None, expected: str) -> None:
+    from tests.test_worker import queue_one_transcription
+
+    harness = asr_harness(**openai_settings(tmp_path, asr_external_timeout_seconds=120))
+    asr = Asr(harness)
+    job_id = await queue_one_transcription(harness, key=caller)
+
+    await asr.process_next()
+
+    payload = asr.children.payload("transcribe")
+    assert payload["api_key"] == expected
+    assert payload["backend"] == "openai"
+    assert payload["base_url"] == EXTERNAL_URL
+    assert payload["model"] == "whisper-1"
+    assert payload["timeout"] == 120
+    assert payload["user_agent"].startswith("text-extraction/")
+    assert 0 < payload["budget"] <= harness.settings.asr_timeout_seconds
+    assert payload["max_duration"] == harness.settings.media_max_duration_seconds
+    assert "model_path" not in payload
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "success"
+    assert item.result.data is not None
+    assert item.result.data.media is not None
+    assert item.result.data.media.asr_model == "whisper-1"
+    labels = {"backend": "openai", "outcome": "success"}
+    assert harness.sample("text_extraction_asr_transcriptions_total", labels) == 1
+    assert harness.sample("text_extraction_asr_audio_seconds_total", {"backend": "openai"}) == 30
+    assert await harness.store.asr_key(job_id) is None  # gone with the outcome
+
+
+@scenario
+async def test_an_external_answer_without_a_language_code_reads_it_from_the_text(
+    tmp_path: Path,
+) -> None:
+    """OpenAI names the language (``german``), which the child does not take: the result's
+    languages come from the transcript's text."""
+    harness = asr_harness(**openai_settings(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=transcript(language="")))
+    job_id = await moved_upload(harness)
+
+    await asr.process_next()
+
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.language == "de"
+    assert item.result.data.media is not None
+    assert item.result.data.media.transcript_language == "de"
+
+
+@scenario
+async def test_without_any_key_nothing_is_downloaded(tmp_path: Path) -> None:
+    harness = file_harness(tmp_path, **openai_settings(tmp_path, asr_external_api_key=None))
+    asr = Asr(harness)
+    job_id = await moved(harness, [FILE_URL])
+
+    await asr.process_next()
+
+    assert asr.children.names() == []
+    code, retryable, message = error_of(await only_item(harness, job_id))
+    assert (code, retryable) == (ErrorCode.TRANSCRIPTION_FAILED, False)
+    assert "X-ASR-Api-Key" in message
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "retryable"),
+    [
+        (ConversionError("ExternalRejected", "401"), ErrorCode.TRANSCRIPTION_FAILED, False),
+        (ConversionError("ExternalRejected", "403"), ErrorCode.TRANSCRIPTION_FAILED, False),
+        (ConversionError("ExternalUnavailable", "429"), ErrorCode.TRANSCRIPTION_FAILED, True),
+        (ConversionError("ExternalUnavailable", "503"), ErrorCode.TRANSCRIPTION_FAILED, True),
+        (ConversionError("ExternalUnavailable", "timeout"), ErrorCode.TRANSCRIPTION_FAILED, True),
+        (ConversionError("ExternalFailed", "400"), ErrorCode.TRANSCRIPTION_FAILED, False),
+        (ConversionError("BudgetSpent", ""), ErrorCode.TIMEOUT, False),
+        (ConversionError("DecodeFailed", ""), ErrorCode.TRANSCRIPTION_FAILED, False),
+    ],
+    ids=["401", "403", "429", "503", "timeout", "400", "budget", "decode"],
+)
+@scenario
+async def test_external_failures_map_to_codes(
+    tmp_path: Path, error: ConversionError, code: ErrorCode, retryable: bool
+) -> None:
+    harness = asr_harness(**openai_settings(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=error))
+    job_id = await moved_upload(harness)
+
+    await asr.process_next()
+
+    found_code, found_retryable, message = error_of(await only_item(harness, job_id))
+    assert (found_code, found_retryable) == (code, retryable)
+    if error.type_name.startswith("External"):
+        assert error.message in message  # the status says which
+    labels = {"backend": "openai", "outcome": code.value}
+    assert harness.sample("text_extraction_asr_transcriptions_total", labels) == 1
+
+
+@scenario
+async def test_a_refused_key_keeps_the_drafts_fingerprint(tmp_path: Path) -> None:
+    """401 is final (the same key fails again): the draft answers and stays comparable; 429 is
+    not, and the draft loses its fingerprint."""
+    from tests.test_worker import queue_one_transcription
+
+    harness = asr_harness(**openai_settings(tmp_path))
+    asr = Asr(harness, FakeChildren(transcribe=ConversionError("ExternalRejected", "401")))
+    job_id = await queue_one_transcription(harness, key=CALLER_KEY)
+
+    await asr.process_next()
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.error is not None
+    assert item.result.error.code == ErrorCode.TRANSCRIPTION_FAILED
+    assert item.result.error.retryable is False
+    assert item.result.data is not None
+    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+
+
+@scenario
+async def test_the_key_is_never_logged_by_the_external_backend(tmp_path: Path) -> None:
+    """Not in a log line, a result or the job's view: on success and on each failure, also when
+    a child's message would quote it."""
+    from tests.test_worker import queue_one_transcription
+
+    answers: list[Answer] = [
+        transcript(),
+        ConversionError("ExternalRejected", "401"),
+        ConversionError("ExternalUnavailable", f"429 {CALLER_KEY} {OPERATOR_KEY}"),
+        ConversionError("ValueError", f"{CALLER_KEY} {OPERATOR_KEY}"),
+        ConversionCrashed("died"),
+        ConversionTimeout("deadline"),
+    ]
+    dumped: list[str] = []
+    for answer in answers:
+        harness = asr_harness(**openai_settings(tmp_path))
+        asr = Asr(harness, FakeChildren(transcribe=answer))
+        job_id = await queue_one_transcription(harness, key=CALLER_KEY)
+        with capture_logs() as logs:
+            await asr.process_next()
+        view = await harness.items(job_id)
+        dumped += [
+            json.dumps(logs, default=str),
+            json.dumps([item.model_dump(mode="json") for item in view]),
+            await everything_stored(harness),
+        ]
+    assert all(CALLER_KEY not in text and OPERATOR_KEY not in text for text in dumped)
+
+
+async def everything_stored(harness: Harness) -> str:
+    """Every value in Valkey (the job, its results, the cache, the queue), as text."""
+    valkey = harness.valkey
+    parts: list[str] = []
+    for key in await valkey.keys("*"):
+        raw = await valkey.type(key)
+        kind = raw.decode() if isinstance(raw, bytes) else raw
+        if kind == "string":
+            parts.append(repr(await valkey.get(key)))
+        elif kind == "hash":
+            parts.append(repr(await valkey.hgetall(key)))
+        elif kind == "list":
+            parts.append(repr(await valkey.lrange(key, 0, -1)))
+        elif kind == "set":
+            parts.append(repr(await valkey.smembers(key)))
+        elif kind == "zset":
+            parts.append(repr(await valkey.zrange(key, 0, -1)))
+    return "\n".join(parts)
+
+
+@pytest.mark.parametrize("first_exhausted", [False, True], ids=["answered", "exhausted"])
+@scenario
+async def test_a_batchs_key_serves_all_its_items(tmp_path: Path, first_exhausted: bool) -> None:
+    """A batch's ``X-ASR-Api-Key`` is the job's: it stays while items are left (also after an
+    item was lost too often) and goes with the job's last result."""
+    harness = asr_harness(**openai_settings(tmp_path, asr_external_api_key=None))
+    asr = Asr(harness)
+    job_id = await submit_transcription(harness, [YOUTUBE, YOUTUBE_2])
+    await harness.store.put_asr_key(job_id, CALLER_KEY, whole_job=True)
+    for _ in range(2):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    claim = await harness.asr_queue.claim(asr.runner.lease_seconds)
+    assert claim.item is not None
+    await asr.worker.process(claim.item, exhausted=first_exhausted)
+
+    assert await harness.store.asr_key(job_id) == CALLER_KEY
+    await asr.process_next()
+    assert asr.children.payload_of("transcribe")["api_key"] == CALLER_KEY
+    assert await harness.completed(job_id)
+    assert await harness.store.asr_key(job_id) is None
+
+
 def test_gate_lease_covers_a_download_while_asr_is_on() -> None:
     off = Settings(auth_mode="none")
     on = Settings(auth_mode="none", asr_enabled=True, media_download_timeout_seconds=900)
@@ -1257,8 +1539,8 @@ def test_asr_proxy_tunnels_outlive_a_download() -> None:
 
 
 def test_worker_parent_imports_nothing_heavy(tmp_path: Path) -> None:
-    """The worker process imports neither faster-whisper, CTranslate2, PyAV nor yt-dlp: only its
-    children do."""
+    """The worker process imports neither faster-whisper, CTranslate2, PyAV, yt-dlp nor the
+    OpenAI SDK: only its children do."""
     script = f"""
 import sys
 from pathlib import Path
@@ -1270,7 +1552,7 @@ from text_extraction.settings import Settings
 settings = Settings(auth_mode="none", asr_enabled=True, asr_scratch_path=Path({str(tmp_path)!r}))
 parts = asr_worker.build_asr_worker(settings, FakeAsyncRedis(), CollectorRegistry())
 forbidden = {{"faster_whisper", "ctranslate2", "av", "yt_dlp", "youtube_transcript_api",
-             "onnxruntime", "tokenizers", "huggingface_hub", "deno"}}
+             "onnxruntime", "tokenizers", "huggingface_hub", "deno", "openai"}}
 loaded = sorted({{name.split(".")[0] for name in sys.modules}} & forbidden)
 parts.conversion_pool.shutdown()
 print(",".join(loaded))
@@ -1279,3 +1561,116 @@ print(",".join(loaded))
         [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=120
     )
     assert result.stdout.strip() == ""
+
+
+# --- the external backend: start-up and --check --------------------------------------------------
+
+
+def test_self_check_of_the_external_backend_skips_the_local_transcription(tmp_path: Path) -> None:
+    """FFmpeg's licence and the programs on PATH are checked, and the clip is decoded and
+    encoded as Opus (both still run locally); nothing is transcribed and no model is needed."""
+    children = FakeChildren(
+        transcribe=ConversionError("ModelsMissing", "no model.bin"),
+        opus_check={"bytes": 120_000},
+    )
+    settings = Settings(auth_mode="none", **openai_settings(tmp_path))
+
+    asyncio.run(self_check(children, settings, children=2))
+
+    assert sorted(children.names()) == ["ffmpeg", "ffmpeg", "opus_check", "opus_check"]
+    assert Path(children.payload_of("opus_check")["path"]).name == "asr_check.ogg"
+
+
+@pytest.mark.parametrize(
+    "answers",
+    [
+        {"opus_check": ConversionError("EncoderMissing", "libopus")},
+        {"opus_check": {"bytes": 0}},
+        {"ffmpeg": {"libraries": {"libavcodec": {**LGPL, "configuration": "--enable-gpl"}}}},
+        {"ffmpeg": {"libraries": LIBRARIES, "codecs": ["opus"], "tools": ["ffmpeg"]}},
+    ],
+    ids=["no-encoder", "empty", "gpl-ffmpeg", "ffmpeg-on-path"],
+)
+def test_self_check_of_the_external_backend_fails(tmp_path: Path, answers: dict[str, Any]) -> None:
+    children = FakeChildren(**{"opus_check": {"bytes": 120_000}, **answers})
+    settings = Settings(auth_mode="none", **openai_settings(tmp_path))
+
+    with capture_logs() as logs, pytest.raises(SelfCheckFailed):
+        asyncio.run(self_check(children, settings, children=1))
+
+    assert [line for line in logs if line["event"] == "asr_self_check_failed"]
+    assert "transcribe" not in children.names()
+
+
+def openai_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LOG_FORMAT", "json")
+    monkeypatch.setenv("ASR_MODELS_PATH", str(tmp_path / "empty"))  # no model at all
+    monkeypatch.setenv("ASR_BACKEND", "openai")
+    monkeypatch.setenv("ASR_EXTERNAL_BASE_URL", EXTERNAL_URL)
+    monkeypatch.setenv("ASR_EXTERNAL_API_KEY", OPERATOR_KEY)
+
+
+def test_openai_backend_needs_no_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--check`` with the external backend skips the model check and the local
+    transcription, but keeps FFmpeg's licence and the Opus encoding."""
+    openai_env(monkeypatch, tmp_path)
+    children = FakeChildren(opus_check={"bytes": 120_000})
+    monkeypatch.setattr(asr_worker, "create_asr_pool", lambda _settings: children)
+
+    with pytest.raises(SystemExit) as exit_info:
+        asr_worker.main(["--check"])
+
+    assert exit_info.value.code == 0
+    assert children.names() == ["ffmpeg", "opus_check"]
+    out = capsys.readouterr().out
+    assert "asr_models_missing" not in out
+    assert OPERATOR_KEY not in out
+
+
+def test_openai_backend_check_fails_on_a_gpl_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    openai_env(monkeypatch, tmp_path)
+    gpl = {"libavcodec": {**LGPL, "configuration": "--enable-libx264"}}
+    children = FakeChildren(ffmpeg={"libraries": gpl}, opus_check={"bytes": 120_000})
+    monkeypatch.setattr(asr_worker, "create_asr_pool", lambda _settings: children)
+
+    with pytest.raises(SystemExit) as exit_info:
+        asr_worker.main(["--check"])
+
+    assert exit_info.value.code == 1
+
+
+def test_openai_backend_downloads_no_models(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    openai_env(monkeypatch, tmp_path)
+
+    def download(root: Path, manifest: model_store.Manifest, **_kwargs: Any) -> bool:
+        raise AssertionError("nothing to download for the external backend")
+
+    monkeypatch.setattr(model_store, "download_models", download)
+
+    with pytest.raises(SystemExit) as exit_info:
+        asr_worker.main(["--download-models"])
+
+    assert exit_info.value.code == 0
+    assert "asr_models_not_needed" in capsys.readouterr().out
+
+
+def test_openai_backend_without_its_base_url_exits_2(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    openai_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("ASR_EXTERNAL_BASE_URL")
+
+    with pytest.raises(SystemExit) as exit_info:
+        asr_worker.main(["--check"])
+
+    assert exit_info.value.code == 2
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    (failed,) = [line for line in lines if line["event"] == "invalid_configuration"]
+    assert "ASR_EXTERNAL_BASE_URL" in failed["message"]

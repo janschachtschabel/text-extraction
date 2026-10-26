@@ -33,8 +33,13 @@ queued: answered 202, or put on the request's P1 job), ``backend_error`` (Valkey
 
 **The caller's key** (M11). ``X-ASR-Api-Key`` (``asr_key_of``: 1 to 1024 visible ASCII
 characters, else 400 without repeating it) is stored only with a job that waits for a
-transcription. No job view, log line or result carries it; it leaves with the job, its TTL, or
-the item's outcome (the ``Worker`` of pool ``asr``).
+transcription: a sync request's ASR job, or a batch with ``transcribe: true`` (``jobs_api``,
+for all its items, as long as the job lives). No job view, log line or result carries it; it
+leaves with the job, its TTL, the item's outcome (a sync request's job) or the batch's last
+result (the ``Worker``). Where the service transcribes on an external endpoint
+(``ASR_BACKEND=openai``) without ``ASR_EXTERNAL_API_KEY``, a request that needs a transcription
+and has no header is 400 (``extract_api.check_transcribe_request``; the API pods hold that key
+too, only to know whether there is one).
 
 **Batch items (as F13).** ``AsrMove`` is the ``asr_handoff`` of one item of the extract worker
 (``worker.ExtractRunner``): it stores the ``MediaInputMeta`` as the item's input (with the bytes
@@ -44,7 +49,7 @@ then draft, then the queue: a crash in between leaves the item leased in ``extra
 rerun moves it once more (the input and the draft are replaced). While the memory guard is high,
 or the input budget is full, nothing is stored: the item keeps its draft with
 ``asr_unavailable`` (without a draft it fails ``rate_limited``, retryable), counted as
-``memory_guard`` or ``input_budget``. A batch carries no caller key.
+``memory_guard`` or ``input_budget``. The batch's caller key, if any, is the job's already.
 
 **The ``asr`` pool's items (the contract of the ASR worker, M10).**
 
@@ -72,9 +77,10 @@ or the input budget is full, nothing is stored: the item keeps its draft with
   (``transcript_source: metadata_only``), not yet cached nor fingerprinted, or None (a media
   file, an upload).
 - Key: ``JobStore.asr_key(job)``: the caller's key of the external endpoint, which wins over
-  ``ASR_EXTERNAL_API_KEY``; None without one.
+  ``ASR_EXTERNAL_API_KEY``; None without one (a sync request's or a batch's).
 - Result: the runner returns the envelope and the ``Worker`` writes it as the item's result;
-  then it deletes the item's input and draft, and the job's key unless the job is a batch. An
+  then it deletes the item's input and draft, and the job's key unless the job is a batch (a
+  batch's key goes with its last result, whichever pool writes it). An
   item lost too often (``JOB_ITEM_MAX_ATTEMPTS``) answers ``draft_without_asr`` the same way
   (``internal_error``, retryable, without a draft). A job that is gone when the worker claims or
   writes was given up, and the item is dropped. The caller's open ASR jobs need no update: a

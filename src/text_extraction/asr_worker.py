@@ -1,13 +1,24 @@
 """The ASR worker (entry point ``text-extraction-asr-worker``): transcribes the media of the
-``asr`` pool with faster-whisper and stores the results in the job (ruling M10).
+``asr`` pool with faster-whisper, or on an external OpenAI-compatible endpoint, and stores the
+results in the job (rulings M10, M11).
 
 It is the extract worker's ``Worker`` (``worker.py``: slot loops, leases, exhausted items, result
 writes, metrics, ``/ready`` and the shutdown) with another runner. The ``asr_dispatch`` module
 docstring has the contract of the pool's items: their job, input, draft and key. This process
 never imports faster-whisper, CTranslate2, PyAV or yt-dlp: only its children do
 (``media/asr_child.py``), so a crash, a hang or a memory blow-up of a download or a
-transcription ends there. This is the local backend: the caller's key of an external endpoint
-(``JobStore.asr_key``) is not read.
+transcription ends there.
+
+**The backends** (``ASR_BACKEND``). ``local``: faster-whisper with the model on
+``ASR_MODELS_PATH``; the caller's key of an external endpoint (``JobStore.asr_key``) is not
+read. ``openai``: the child decodes as for ``local``, encodes the audio as Opus and posts it in
+chunks of at most 20 minutes to ``ASR_EXTERNAL_BASE_URL`` (``media/asr_external.py``, called
+directly, not through the egress proxy: the endpoint is the operator's), with the key the item
+has: the caller's ``X-ASR-Api-Key`` (stored with the job) wins over ``ASR_EXTERNAL_API_KEY``;
+without either the item fails ``transcription_failed``, not retryable, before anything is
+downloaded (the API answers such requests 400, so this is a fallback). The key travels in the
+child call's payload only: never in the children's environment, a log line, a result or the
+job's view. No model is needed.
 
 **The runner** (``AsrRunner``) leases an item for ``asr_lease_seconds`` (``2 *
 ASR_TIMEOUT_SECONDS + 10``). ``ASR_TIMEOUT_SECONDS`` is the budget of the whole item, from the
@@ -41,7 +52,8 @@ the budget, whichever ends first) and the transcription (the rest). For each ite
    first audio stream to 16 kHz mono float32 (stopping past the limit too) and faster-whisper
    reads that array in windows of at most 10 minutes (``media/asr_windows.py``) with
    ``ASR_MODEL`` from ``ASR_MODELS_PATH`` (``ASR_COMPUTE_TYPE``, ``ASR_THREADS``), in the first
-   requested language or the one it detects;
+   requested language or the one it detects; with the external backend each chunk gets
+   ``ASR_EXTERNAL_TIMEOUT_SECONDS`` or what is left of the item's budget, whichever is less;
 7. runs ``Pipeline.transcribed_result``: the transcript in the result's shape, the draft's
    details, ``transcript_source: asr``; a URL's result goes to the fingerprints and the result
    cache, an upload's does not. Media without speech is ``no_transcript_available``: a platform
@@ -56,7 +68,11 @@ worker. Failures map to codes, never to a library's text: a download that ran ou
 ``ASR_TIMEOUT_SECONDS`` (in the download or the transcription) is ``timeout``, not retryable (the
 same media would take as long again); a decoder error is ``transcription_failed``; a child that
 crashed is ``transcription_failed``, retryable, one out of memory not; a model missing on the volume
-is ``internal_error``, retryable; a file over ``MEDIA_MAX_BYTES`` ``too_large``; a target's HTTP
+is ``internal_error``, retryable; the external endpoint refusing the key (401, 403) is
+``transcription_failed``, not retryable, one that is busy, failing or slow (429, 5xx, a chunk's
+timeout, not reachable) retryable, any other answer not (the message names the status, never the
+endpoint's text); the item's budget ending during the external transcription is ``timeout``, not
+retryable; a file over ``MEDIA_MAX_BYTES`` ``too_large``; a target's HTTP
 error ``target_http_error`` with its status (retryable for 408, 425, 429 and 5xx); a live stream or
 bytes that are no media ``unsupported_content_type``; a request the proxy refused ``blocked_url``,
 ``too_large``, ``dns_error`` or ``connection_error`` (also when the child saw the proxy's own 403 or
@@ -70,8 +86,10 @@ through their own environment, never this process's secrets. Each loads the mode
 keeps it.
 
 **The process** serves only the internal port. Before anything else it checks the model's
-files (``model_store``, manifest ``media/models.toml``, only the folder of ``ASR_MODEL``): a
-missing one ends the process with exit code 1 and a log line naming ``ASR_MODELS_PATH``. Then
+files (``model_store``, manifest ``media/models.toml``, only the folder of ``ASR_MODEL``; not with
+the external backend): a missing one ends the process with exit code 1 and a log line naming
+``ASR_MODELS_PATH``. The external backend without ``ASR_EXTERNAL_BASE_URL`` ends it with exit
+code 2 (``invalid_configuration``). Then
 it starts the proxy and the children, and each child runs the self-check: PyAV's FFmpeg must be
 an LGPL build (``ffmpeg_gpl_findings`` on ``av._core.library_meta``, PyAV 19.0.1's per-library
 ``configuration`` and ``license``; ``av.library_versions`` has the versions only), so neither
@@ -83,16 +101,20 @@ with ``_`` read as ``-`` in its switches; no GPL or non-free encoder may be amon
 libxavs2, libdavs2); and neither ``ffmpeg`` nor ``rtmpdump`` may be on the child's ``PATH``
 (yt-dlp would hand them protocols it does not download itself, bypassing these checks; the
 child also allows only ``https?``, ``m3u8_native`` and ``http_dash_segments`` formats). The ASR
-image (Task 11) ships neither program. Last, the built-in clip
-(``media/asr_check.ogg``, German speech) must transcribe to its words. Children that do not start
+image (Task 11) ships neither program. Last, the built-in clip (``media/asr_check.ogg``,
+German speech) must transcribe to its words; with the external backend it is decoded and
+encoded as Ogg Opus instead (``opus_check``: the encoding runs locally, so PyAV's FFmpeg must
+have the ``libopus`` encoder), and nothing is sent to the endpoint. Children that do not start
 (``asr_start_failed``) or a failed check (``asr_self_check_failed``) end the process before
 ``/ready`` with exit code 1. On SIGTERM the loops stop claiming, the items in flight get 30 s,
 then they are cancelled and the children killed; their leases expire and the items run again.
 
 - ``--download-models`` fills ``ASR_MODELS_PATH`` with the files of ``ASR_MODEL`` (the Helm init
-  container and the compose one-shot service run it; idempotent) and exits 0, or 1.
+  container and the compose one-shot service run it; idempotent) and exits 0, or 1; with the
+  external backend there is nothing to download (``asr_models_not_needed``, exit 0).
 - ``--check`` checks the model, FFmpeg's licence, the programs on ``PATH`` and the built-in
-  clip in one child, then exits 0, or 1 on any failure (the image build runs it). It leaves
+  clip in one child (the external backend: no model, the clip encoded instead of transcribed),
+  then exits 0, or 1 on any failure (the image build runs it). It leaves
   ``ASR_SCRATCH_PATH`` alone: run next to a live worker (a probe, a debug shell), it must not
   delete the scratch of the items in flight.
 
@@ -104,8 +126,9 @@ The names used of the pinned libraries (``media/asr_child.py``): faster-whisper 
 yt-dlp's ``YoutubeDL.extract_info``, ``process_ie_result`` and ``sanitize_info``.
 
 Metrics: ``text_extraction_asr_transcriptions_total{backend, outcome}`` (``success`` or the error
-code), ``text_extraction_asr_audio_seconds_total{backend}`` (audio transcribed) and
-``text_extraction_asr_seconds{backend}`` (time of the transcription calls). Logs carry job ids,
+code), ``text_extraction_asr_audio_seconds_total{backend}`` (audio transcribed, the external
+backend's cost basis) and ``text_extraction_asr_seconds{backend}`` (time of the transcription
+calls); ``backend`` is ``ASR_BACKEND``. Logs carry job ids,
 sources, platforms, codes and type names only, never a URL, a video id, a file name, a key, a
 library's message or transcript text.
 """
@@ -153,7 +176,7 @@ from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_media import MediaInputMeta
 from text_extraction.scheduler import QueueItem
-from text_extraction.server import _Server, _server, configured_settings
+from text_extraction.server import EXIT_CONFIG_ERROR, _Server, _server, configured_settings
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
 from text_extraction.worker import Worker, _serve, job_principal
@@ -177,7 +200,6 @@ _log = structlog.get_logger(__name__)
 
 # The ``DocumentPool`` target of the ASR children.
 ASR_TARGET: Final = "text_extraction.media.asr_child"
-BACKEND: Final = "local"
 # What the items in flight get after SIGTERM before they are cancelled.
 GRACEFUL_SECONDS: Final = 30
 # Importing faster-whisper and CTranslate2 takes a while on a cold volume.
@@ -262,6 +284,20 @@ _OUT_OF_MEMORY_MESSAGE: Final = "The transcription needed more memory than it ma
 _DECODE_MESSAGE: Final = "The audio could not be decoded."
 _FAILED_MESSAGE: Final = "The transcription failed."
 _MODELS_MISSING_MESSAGE: Final = "Transcription is not available at the moment. Try again later."
+_NO_KEY_MESSAGE: Final = (
+    "The service transcribes with an external endpoint and has no API key for it: send yours "
+    "in the X-ASR-Api-Key header."
+)
+_REJECTED_MESSAGE: Final = "The transcription endpoint refused the API key{detail}."
+_UNAVAILABLE_MESSAGE: Final = "The transcription endpoint is unavailable{detail}. Try again later."
+_EXTERNAL_FAILED_MESSAGE: Final = (
+    "The transcription endpoint could not transcribe the audio{detail}."
+)
+# What an external failure's message may say (the child's messages are a status or these words).
+_EXTERNAL_DETAILS: Final = {
+    "timeout": " (timeout after ASR_EXTERNAL_TIMEOUT_SECONDS)",
+    "connection": " (not reachable)",
+}
 _NOT_MEDIA_MESSAGE: Final = "The file is not audio or video that can be transcribed."
 _LIVE_MESSAGE: Final = "The URL is a live stream that is still running."
 _BLOCKED_ADDRESS_MESSAGE: Final = (
@@ -399,7 +435,7 @@ class _Superseded(Exception):  # noqa: N818 - not an error: the item has its res
 
 
 class AsrRunner:
-    """The ``asr`` pool's ``ItemRunner`` (local backend); see the module docstring.
+    """The ``asr`` pool's ``ItemRunner`` (either backend); see the module docstring.
     ``children`` downloads and transcribes, ``egress`` is their proxy, ``gate`` the outbound
     gate whose turns the downloads take."""
 
@@ -420,6 +456,7 @@ class AsrRunner:
         self._egress = egress
         self._gate = gate
         self._metrics = _metrics_for(registry)
+        self._backend = settings.asr_backend
         self.lease_seconds = asr_lease_seconds(settings)
 
     async def run(
@@ -454,17 +491,23 @@ class AsrRunner:
             return draft_without_asr(draft) or failed_extract(
                 ErrorCode.INTERNAL_ERROR, _FAILED_MESSAGE, retryable=True
             )
+        backend = self._backend
         if isinstance(outcome, _Failure):
             label = outcome.code.value
             answer: Transcription | Envelope[ExtractResult] = outcome.envelope()
             upstream = outcome.upstream_status
         else:
-            spoken = any(cue.text.strip() for cue in outcome.segments)
-            label = "success" if spoken else ErrorCode.NO_TRANSCRIPT_AVAILABLE.value
+            label = "success" if outcome.has_speech else ErrorCode.NO_TRANSCRIPT_AVAILABLE.value
             answer, upstream = outcome, None
-            self._metrics.audio_seconds.labels(backend=BACKEND).inc(max(outcome.duration, 0.0))
-        self._metrics.transcriptions.labels(backend=BACKEND, outcome=label).inc()
-        _log.info("asr_item_done", source=meta.source, platform=meta.platform, outcome=label)
+            self._metrics.audio_seconds.labels(backend=backend).inc(max(outcome.duration, 0.0))
+        self._metrics.transcriptions.labels(backend=backend, outcome=label).inc()
+        _log.info(
+            "asr_item_done",
+            source=meta.source,
+            platform=meta.platform,
+            backend=backend,
+            outcome=label,
+        )
         return await self._pipeline.transcribed_result(
             request, job_principal(job), meta, draft, answer, upstream_status=upstream
         )
@@ -480,6 +523,13 @@ class AsrRunner:
         settings = self._settings
         if meta.duration is not None and meta.duration > settings.media_max_duration_seconds:
             return self._too_long(meta.duration)
+        key: str | None = None
+        if self._backend == "openai":
+            # The caller's key (X-ASR-Api-Key) wins over the service's own; without either
+            # nothing is downloaded.
+            key = await self._store.asr_key(job.id) or settings.asr_external_api_key
+            if key is None:
+                return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _NO_KEY_MESSAGE, False)
         # ASR_TIMEOUT_SECONDS is the budget of the whole item: the wait for the turn, the
         # download, the decoding and the recognition. The lease holds twice that.
         deadline = asyncio.get_running_loop().time() + settings.asr_timeout_seconds
@@ -497,7 +547,7 @@ class AsrRunner:
             if media.duration is not None and media.duration > limit:
                 return self._too_long(media.duration)
             await superseded()  # before the long transcription
-            return await self._transcribe(meta, media, deadline)
+            return await self._transcribe(meta, media, deadline, key)
         finally:
             # Synchronous, so that a cancelled item removes it too.
             shutil.rmtree(scratch, ignore_errors=True)
@@ -701,21 +751,38 @@ class AsrRunner:
             await self._gate.record(host, status=429, retry_after=None)
 
     async def _transcribe(
-        self, meta: MediaInputMeta, media: _Media, deadline: float
+        self, meta: MediaInputMeta, media: _Media, deadline: float, key: str | None
     ) -> Transcription | _Failure:
         """The transcription by the item's ``deadline`` (what the download left of
-        ``ASR_TIMEOUT_SECONDS``)."""
+        ``ASR_TIMEOUT_SECONDS``): local, or on the external endpoint with ``key``."""
         settings = self._settings
-        if deadline - asyncio.get_running_loop().time() < _MIN_CALL_SECONDS:
+        left = deadline - asyncio.get_running_loop().time()
+        if left < _MIN_CALL_SECONDS:
             return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False)
-        payload = {
+        payload: dict[str, Any] = {
+            "backend": self._backend,
             "path": str(media.path),
-            "model_path": str(settings.asr_models_path / settings.asr_model),
-            "compute_type": settings.asr_compute_type,
-            "threads": settings.asr_threads,
             "language": _primary_language(meta.languages),
             "max_duration": settings.media_max_duration_seconds,
         }
+        if self._backend == "openai":
+            # The key travels in the call only: never in the children's environment or a log.
+            payload |= {
+                "base_url": settings.asr_external_base_url,
+                "model": settings.asr_external_model,
+                "api_key": key,
+                "timeout": settings.asr_external_timeout_seconds,
+                "budget": left,
+                "user_agent": USER_AGENT,
+            }
+            model = settings.asr_external_model
+        else:
+            payload |= {
+                "model_path": str(settings.asr_models_path / settings.asr_model),
+                "compute_type": settings.asr_compute_type,
+                "threads": settings.asr_threads,
+            }
+            model = settings.asr_model
         started = time.perf_counter()
         try:
             reply = await self._children.run("transcribe", payload, deadline)
@@ -732,9 +799,9 @@ class AsrRunner:
             return self._transcription_failure(error)
         finally:
             seconds = time.perf_counter() - started
-            self._metrics.seconds.labels(backend=BACKEND).observe(seconds)
+            self._metrics.seconds.labels(backend=self._backend).observe(seconds)
         try:
-            transcription = _transcription(reply, settings.asr_model)
+            transcription = _transcription(reply, model)
         except (KeyError, TypeError, ValueError):
             _log.warning("asr_reply_unreadable")
             return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _FAILED_MESSAGE, False)
@@ -764,6 +831,18 @@ class AsrRunner:
             return self._too_long(_seconds_of(error.message))
         if name == "DecodeFailed":
             return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DECODE_MESSAGE, False)
+        if name == "BudgetSpent":
+            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False)
+        detail = _external_detail(error.message)
+        if name == "ExternalRejected":
+            message = _REJECTED_MESSAGE.format(detail=detail)
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, message, False)
+        if name == "ExternalUnavailable":
+            message = _UNAVAILABLE_MESSAGE.format(detail=detail)
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, message, True)
+        if name == "ExternalFailed":
+            message = _EXTERNAL_FAILED_MESSAGE.format(detail=detail)
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, message, False)
         return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _FAILED_MESSAGE, False)
 
     def _too_long(self, duration: float | None) -> _Failure:
@@ -811,6 +890,16 @@ def _transcription(reply: Any, model: str) -> Transcription:
         duration=float(reply.get("duration") or 0.0),
         model=model,
     )
+
+
+def _external_detail(message: str) -> str:
+    """What an external failure's message adds to the answer: its HTTP status or one of
+    ``_EXTERNAL_DETAILS``; anything else (never expected) adds nothing, so no text of the child
+    reaches the answer."""
+    text = message.strip()
+    if text.isdecimal() and len(text) == 3:
+        return f" (HTTP {text})"
+    return _EXTERNAL_DETAILS.get(text, "")
 
 
 def _seconds_of(message: str) -> float | None:
@@ -912,10 +1001,13 @@ def _check_clip() -> Path:
 
 async def self_check(pool: AsrChildren, settings: Settings, *, children: int) -> None:
     """In each of ``children`` children (they run one call at a time, so as many calls at once
-    reach each child once): FFmpeg's licence, then the built-in clip, which loads the model.
-    Raises ``SelfCheckFailed`` when a call fails, FFmpeg is not an LGPL build or the
-    transcript lacks the expected words."""
+    reach each child once): FFmpeg's licence and the programs on ``PATH``, then the built-in
+    clip: transcribed by the local backend (which loads the model), or decoded and encoded as
+    Opus for the external backend (nothing is sent; no model is needed). Raises
+    ``SelfCheckFailed`` when a call fails, FFmpeg is not an LGPL build, the transcript lacks the
+    expected words or the encoding gave nothing."""
     payload = {
+        "backend": "local",
         "path": str(_check_clip()),
         "model_path": str(settings.asr_models_path / settings.asr_model),
         "compute_type": settings.asr_compute_type,
@@ -948,6 +1040,9 @@ async def self_check(pool: AsrChildren, settings: Settings, *, children: int) ->
                 models_path=str(settings.asr_models_path),
             )
             raise SelfCheckFailed("PyAV's FFmpeg is not an LGPL build")
+        if settings.asr_backend == "openai":
+            await check_encoding()
+            return
         reply = await pool.run("transcribe", payload, deadline)
         text = " ".join(str(segment[2]) for segment in reply["segments"]).casefold()
         if not all(word in text for word in _CHECK_WORDS):
@@ -957,6 +1052,18 @@ async def self_check(pool: AsrChildren, settings: Settings, *, children: int) ->
                 models_path=str(settings.asr_models_path),
             )
             raise SelfCheckFailed("the built-in clip's words were not found")
+
+    async def check_encoding() -> None:
+        call = {"path": payload["path"], "max_duration": payload["max_duration"]}
+        reply = await pool.run("opus_check", call, deadline)
+        size = reply.get("bytes") if isinstance(reply, dict) else None
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            _log.error(
+                "asr_self_check_failed",
+                reason="opus_encoding_failed",
+                models_path=str(settings.asr_models_path),
+            )
+            raise SelfCheckFailed("the built-in clip did not encode as Opus")
 
     outcomes = await asyncio.gather(*(check_one() for _ in range(children)), return_exceptions=True)
     for outcome in outcomes:
@@ -972,7 +1079,7 @@ async def self_check(pool: AsrChildren, settings: Settings, *, children: int) ->
                 child_error=outcome.type_name if isinstance(outcome, ConversionError) else None,
                 models_path=str(settings.asr_models_path),
             )
-            raise SelfCheckFailed("the built-in clip did not transcribe") from None
+            raise SelfCheckFailed("the built-in clip failed") from None
     _log.info("asr_self_check_passed", children=children)
 
 
@@ -1137,9 +1244,19 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     settings = configured_settings()
+    external = settings.asr_backend == "openai"
+    if external and settings.asr_external_base_url is None:
+        _log.error(
+            "invalid_configuration",
+            message="Invalid configuration: ASR_BACKEND=openai needs ASR_EXTERNAL_BASE_URL",
+        )
+        sys.exit(EXIT_CONFIG_ERROR)
     if args.download_models:
+        if external:
+            _log.info("asr_models_not_needed", backend=settings.asr_backend)
+            sys.exit(0)
         sys.exit(_download(settings))
-    if models_missing(settings):
+    if not external and models_missing(settings):
         sys.exit(1)
     if args.check:
         sys.exit(asyncio.run(_check(settings)))

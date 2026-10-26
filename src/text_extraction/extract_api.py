@@ -5,8 +5,9 @@ workers.
 
 1. The request is checked first: browser options while browser mode is off answer 400 (B9), so
    does ``ocr: always`` while the service has no OCR (F11), and ``transcribe: true`` while it
-   has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``, M9); an ``evaluate`` action of a non-admin
-   key 403, a compliance mode the key may not choose 403.
+   has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``, M9) or transcribes on an external endpoint
+   without a key for it (neither ``X-ASR-Api-Key`` nor ``ASR_EXTERNAL_API_KEY``, M11); an
+   ``evaluate`` action of a non-admin key 403, a compliance mode the key may not choose 403.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
@@ -124,10 +125,16 @@ _BROWSER_TIMEOUT_MESSAGE = "No browser rendered the page in time. Try again late
 type _Background = set[asyncio.Task[Any]]
 type _Answer = Envelope[ExtractResult] | None
 
+ASR_KEY_MISSING_MESSAGE = (
+    "This service transcribes with an external endpoint and has no API key for it: send yours "
+    f"in the {ASR_KEY_HEADER} header."
+)
 ASR_KEY_DESCRIPTION = (
     "Your API key of the external transcription endpoint, where the service transcribes with "
     "one (`ASR_BACKEND=openai`); it wins over the service's own key. A secret: stored only with "
-    "a job that waits for a transcription, deleted with its outcome, never shown or logged."
+    "a job that waits for a transcription, deleted with its outcome, never shown or logged. "
+    "Required with `transcribe: true` (and for audio and video uploads) where the service has "
+    "no key of its own: without it the request is 400."
 )
 
 
@@ -157,8 +164,9 @@ async def extract(
     `upstream_status`, `mode_used`, `compliance`, `timings` and as much of the result as was
     reached. 4xx answers are about the request itself (invalid body, key, rate limit, a
     compliance mode the caller may not choose, browser options while browser mode is off,
-    `ocr: always` while the service has no OCR, an `evaluate` action of a non-admin key); 5xx
-    are faults of this service.
+    `ocr: always` while the service has no OCR, `transcribe: true` without the
+    `X-ASR-Api-Key` header where the service transcribes externally and has no key of its own,
+    an `evaluate` action of a non-admin key); 5xx are faults of this service.
 
     `mode: browser`, `screenshot`, browser options and an `auto` page that needs a browser are
     rendered by a browser worker. Such a request can take the fast phase plus
@@ -192,11 +200,31 @@ def check_ocr_request(ocr: OcrOption, settings: Settings) -> None:
         raise ServiceError(ErrorCode.INVALID_REQUEST, OCR_DISABLED_MESSAGE, 400)
 
 
-def check_transcribe_request(transcribe: bool, settings: Settings) -> None:
-    """400 for ``transcribe: true`` while the service has no ASR (M9): the request could not
-    get what it asks for."""
-    if transcribe and not asr_available(settings):
+def check_transcribe_request(
+    transcribe: bool, settings: Settings, *, key: str | None = None
+) -> None:
+    """400 for ``transcribe: true`` while the service has no ASR (M9), or transcribes on an
+    external endpoint without a key for it: neither the caller's ``key`` (``X-ASR-Api-Key``)
+    nor ``ASR_EXTERNAL_API_KEY`` (M11). The request could not get what it asks for."""
+    if not transcribe:
+        return
+    if not asr_available(settings):
         raise ServiceError(ErrorCode.INVALID_REQUEST, TRANSCRIPTION_DISABLED_MESSAGE, 400)
+    check_asr_key(settings, key)
+
+
+def check_asr_key(settings: Settings, key: str | None) -> None:
+    """400 when the service transcribes on an external endpoint (``ASR_BACKEND=openai``) and
+    has no key for it: neither the caller's ``key`` nor ``ASR_EXTERNAL_API_KEY``. The message
+    names the header, never a value."""
+    if key is None and asr_key_missing(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, ASR_KEY_MISSING_MESSAGE, 400)
+
+
+def asr_key_missing(settings: Settings) -> bool:
+    """Whether a transcription needs the caller's key: the external backend without
+    ``ASR_EXTERNAL_API_KEY``."""
+    return settings.asr_backend == "openai" and settings.asr_external_api_key is None
 
 
 def request_wait_seconds(body: ExtractRequest) -> float | None:
@@ -232,7 +260,7 @@ async def respond(
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
     check_ocr_request(body.ocr, settings)
-    check_transcribe_request(body.transcribe, settings)
+    check_transcribe_request(body.transcribe, settings, key=asr_key)
     wait_seconds = request_wait_seconds(body)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)

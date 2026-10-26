@@ -33,9 +33,11 @@ Jobs that wait for a transcription (package 6, M11) may have:
 - ``job:{<id>}:asr_key``  string: the caller's key of the external transcription endpoint (the
                           request header ``X-ASR-Api-Key``). Kept ``ASR_INPUT_TTL_SECONDS`` + the
                           ASR lease (``asr_lease_seconds``) at most, never longer than the job;
-                          deleted with the job, by ``shorten`` and ``drop_secrets``, and by the
-                          worker of pool ``asr`` once the item has its outcome. No read of the
-                          job shows it, and it is never logged.
+                          a batch's as long as the job (its items move to pool ``asr`` at any
+                          time). Deleted with the job, by ``shorten`` and ``drop_secrets``, by
+                          the worker of pool ``asr`` once a sync request's item has its outcome,
+                          and with a batch's last result. No read of the job shows it, and it is
+                          never logged.
 
 Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR; M9: media queued
 for transcription, with an empty body for a URL) have:
@@ -541,13 +543,15 @@ class JobStore:
         finished its item)."""
         await self._valkey.delete(_key(job_id, "secrets"), _key(job_id, "asr_key"))
 
-    async def put_asr_key(self, job_id: str, key: str) -> None:
+    async def put_asr_key(self, job_id: str, key: str, *, whole_job: bool = False) -> None:
         """Keep the caller's key of the external transcription endpoint for the job (M11), for
-        ``ASR_INPUT_TTL_SECONDS`` + the ASR lease, never longer than the job. Raises ``JobLost``
-        when the job is gone; nothing is stored then."""
+        ``ASR_INPUT_TTL_SECONDS`` + the ASR lease, or with ``whole_job`` (a batch) as long as the
+        job; never longer than the job. Raises ``JobLost`` when the job is gone; nothing is
+        stored then."""
+        seconds = self._ttl_seconds if whole_job else self._asr_key_ttl_seconds
         outcome = await self._put_with_job(
             keys=[_key(job_id, "meta"), _key(job_id, "asr_key")],
-            args=[key, self._asr_key_ttl_seconds * 1000],
+            args=[key, seconds * 1000],
         )
         if outcome == _NOT_FOUND:
             raise JobLost(job_id)

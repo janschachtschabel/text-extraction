@@ -559,8 +559,10 @@ class Worker:
             envelope = draft_without_asr(draft) or envelope
         outcome = await self._finish(item, job, envelope)
         # The item never runs again: its caller secrets (a browser job's, B6; an ASR key, M11)
-        # are done with.
-        await self._store.drop_secrets(item.job_id)
+        # are done with. A batch's ASR key serves its other items (a batch has no browser
+        # secrets); it goes with the batch's last result (``_finish``).
+        if job.kind != "batch":
+            await self._store.drop_secrets(item.job_id)
         return outcome
 
     async def _finish(
@@ -576,6 +578,9 @@ class Worker:
             seconds = max(self._clock() - job.created_at.timestamp(), 0.0)
             self._metrics.job_duration.labels(kind=job.kind).observe(seconds)
             _log.info("job_completed", kind=job.kind, seconds=round(seconds, 3))
+            if job.kind == "batch":
+                # Its caller's ASR key (M11) served all its items; whichever pool wrote last.
+                await self._store.drop_asr_key(item.job_id)
         await self._drop_input(job, item)
         await self._queue.complete(item)
         return None if write == "repeat" else _outcome(envelope)
@@ -583,7 +588,8 @@ class Worker:
     async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
         """Delete the item's bytes once it has its result: an upload's, or those of an item
         that was queued for OCR (pool ``docling``) or a transcription (pool ``asr``), with its
-        draft; on pool ``asr`` also the caller's key of a sync request's job (a batch has none).
+        draft; on pool ``asr`` also the caller's key of a sync request's job (a batch's serves
+        its other items and goes with its last result, ``_finish``).
         Only after the result is written: an item that runs again (a failed write, a lost lease)
         needs them."""
         pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)

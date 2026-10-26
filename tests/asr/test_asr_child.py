@@ -9,6 +9,7 @@ transcription is skipped while the model is not on the volume.
 
 import asyncio
 import importlib.util
+import json
 import os
 import re
 import secrets
@@ -540,3 +541,176 @@ def test_a_download_from_a_private_address_is_blocked(tmp_path: Path) -> None:
     assert error_of(item)[:2] == (ErrorCode.BLOCKED_URL, False)
     scratch = harness.settings.asr_scratch_path
     assert not scratch.exists() or list(scratch.iterdir()) == []
+
+
+# --- the external backend (ASR_BACKEND=openai) with real PyAV -------------------------------
+
+EXTERNAL_KEY = "sk-external-key-in-the-child-4a1b"
+
+
+def opus_facts(data: bytes) -> tuple[str, str, int, float]:
+    """Container, codec, channels and duration of an encoded chunk, read back with PyAV."""
+    import io
+
+    import av
+
+    with av.open(io.BytesIO(data), mode="r") as container:
+        stream = container.streams.audio[0]
+        duration = float((container.duration or 0) / av.time_base)
+        return container.format.name, stream.codec_context.name, stream.channels, duration
+
+
+def test_opus_encoding_is_16k_mono_32kbit_in_ogg() -> None:
+    from text_extraction.media import asr_child
+    from text_extraction.media.asr_external import encode_ogg_opus
+
+    audio = asr_child.decode_audio(CLIP, max_seconds=60)
+
+    data = encode_ogg_opus(audio)
+
+    container, codec, channels, duration = opus_facts(data)
+    assert (container, codec, channels) == ("ogg", "opus", 1)
+    assert duration == pytest.approx(len(audio) / 16_000, abs=0.1)
+    assert b"OpusHead" in data[:4096]
+    # 32 kbit/s (Opus is variable; Ogg pages add a little).
+    assert 0.5 * 32_000 / 8 * duration < len(data) < 1.5 * 32_000 / 8 * duration
+
+
+class _Endpoint:
+    """The OpenAI-compatible endpoint on pytest-httpserver: keeps each posted file and the
+    authorization it came with; answers one segment per chunk."""
+
+    def __init__(self, server: Any) -> None:
+        from werkzeug import Request, Response
+
+        self.posts: list[tuple[str | None, bytes, dict[str, str]]] = []
+
+        def handle(request: Request) -> Response:
+            self.posts.append(
+                (
+                    request.headers.get("Authorization"),
+                    request.files["file"].read(),
+                    dict(request.form),
+                )
+            )
+            body = {
+                "text": "Gregor Samsa.",
+                "language": "de",
+                "segments": [{"start": 0.5, "end": 2.0, "text": " Gregor Samsa."}],
+            }
+            return Response(json.dumps(body), content_type="application/json")
+
+        server.expect_request("/v1/audio/transcriptions", method="POST").respond_with_handler(
+            handle
+        )
+        self.base_url = server.url_for("/v1")
+
+
+def test_long_audio_goes_out_in_chunks_cut_in_pauses(long_clip: Path, httpserver: Any) -> None:
+    """The long clip (672 s) in chunks of at most 300 s: each posted file is Ogg Opus of its
+    chunk's length, and the segments are on the file's clock."""
+    from text_extraction.media.asr_external import transcribe_external
+
+    endpoint = _Endpoint(httpserver)
+
+    transcription = transcribe_external(
+        long_clip,
+        base_url=endpoint.base_url,
+        model="whisper-1",
+        api_key=EXTERNAL_KEY,
+        timeout=30.0,
+        chunk_seconds=300,
+        max_duration=7200,
+    )
+
+    assert len(endpoint.posts) == 3
+    durations = [opus_facts(data)[3] for _auth, data, _form in endpoint.posts]
+    assert all(duration <= 300.1 for duration in durations)
+    assert sum(durations) == pytest.approx(LONG_TILES * 32, abs=0.5)
+    starts = [cue.start for cue in transcription.segments]
+    assert starts[0] == pytest.approx(0.5)
+    assert starts[1] == pytest.approx(durations[0] + 0.5, abs=0.1)
+    assert starts[2] == pytest.approx(durations[0] + durations[1] + 0.5, abs=0.1)
+    assert all(auth == f"Bearer {EXTERNAL_KEY}" for auth, _data, _form in endpoint.posts)
+
+
+def test_the_child_encodes_the_clip_for_the_self_check(tmp_path: Path) -> None:
+    settings = settings_for(tmp_path, asr_models_path=tmp_path / "no-models")
+
+    reply = run(in_child(settings, "opus_check", {"path": str(CLIP), "max_duration": 60}))
+
+    assert reply["bytes"] > 10_000
+
+
+def test_an_upload_with_the_callers_key_through_the_real_child(
+    tmp_path: Path, httpserver: Any
+) -> None:
+    """A whole item on the real children with the external backend and no model: the endpoint
+    sees the caller's key (not the operator's), gets Ogg Opus, and the result is the
+    transcript; neither key is in a log line or the result."""
+    from structlog.testing import capture_logs
+
+    from tests.test_worker import submit_upload
+
+    endpoint = _Endpoint(httpserver)
+    harness = Harness(
+        asr_enabled=True,
+        asr_backend="openai",
+        asr_external_base_url="https://asr.example.org/v1",
+        asr_external_api_key="sk-operator-key-never-sent-77",
+        asr_scratch_path=tmp_path / "scratch",
+        asr_models_path=tmp_path / "no-models",
+    )
+    # The test endpoint speaks plain HTTP, which the setting itself does not allow.
+    settings = harness.settings.model_copy(update={"asr_external_base_url": endpoint.base_url})
+
+    async def scenario() -> Any:
+        job_id = await submit_upload(harness, CLIP.read_bytes(), "audio/ogg")
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+        await harness.store.put_asr_key(job_id, EXTERNAL_KEY)
+        proxy = create_asr_proxy(settings, CollectorRegistry())
+        pool: DocumentPool = create_asr_pool(settings)
+        await pool.start()
+        try:
+            runner = AsrRunner(
+                harness.pipeline,
+                harness.store,
+                settings,
+                pool,
+                proxy,
+                DomainGate(harness.valkey, settings),
+                harness.registry,
+            )
+            worker = Worker(
+                settings,
+                harness.valkey,
+                runner,
+                harness.store,
+                harness.asr_queue,
+                harness.registry,
+                clock=harness.clock,
+                concurrency=1,
+            )
+            claim = await harness.asr_queue.claim(runner.lease_seconds)
+            assert claim.item is not None
+            with capture_logs() as logs:
+                await worker.process(claim.item)
+        finally:
+            await pool.shutdown()
+        (item,) = await harness.items(job_id)
+        return item, logs
+
+    item, logs = run(scenario())
+
+    ((auth, data, form),) = endpoint.posts
+    assert auth == f"Bearer {EXTERNAL_KEY}"
+    assert opus_facts(data)[:3] == ("ogg", "opus", 1)
+    assert form["model"] == "whisper-1"
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.media is not None
+    assert item.result.data.media.asr_model == "whisper-1"
+    assert "Gregor Samsa" in (item.result.data.content or "")
+    dumped = json.dumps(logs, default=str) + item.result.model_dump_json()
+    assert EXTERNAL_KEY not in dumped
+    assert "sk-operator-key-never-sent-77" not in dumped
