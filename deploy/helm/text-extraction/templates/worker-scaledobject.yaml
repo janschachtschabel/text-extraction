@@ -4,10 +4,11 @@
 {{- $keda := $worker.autoscaling.keda }}
 {{- $args := list $ $pool }}
 ---
-# Scales the {{ $pool }} workers on the length of their pool's queue. The gauge comes from the API
-# pods (they stay up while the workers are scaled down) and needs JOBS_ENABLED=true there (for the
-# pool browser also BROWSER_ENABLED=true, for docling DOCLING_ENABLED=true, for asr
-# ASR_ENABLED=true); max() because every API pod reports the same queue.
+# Scales the {{ $pool }} workers on the length of their pool's queue{{ if $keda.countLeased }} plus the items in flight{{ end }}. The
+# gauges come from the API pods (they stay up while the workers are scaled down) and need
+# JOBS_ENABLED=true there (for the pool browser also BROWSER_ENABLED=true, for docling
+# DOCLING_ENABLED=true, for asr ASR_ENABLED=true); max() because every API pod reports the same
+# queue.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
@@ -19,11 +20,24 @@ spec:
     name: {{ include "text-extraction.workerName" $args }}
   minReplicaCount: {{ $keda.minReplicaCount }}
   maxReplicaCount: {{ $keda.maxReplicaCount }}
+  {{- $window := $worker.autoscaling.scaleDownStabilizationWindowSeconds }}
+  {{- if not (kindIs "invalid" $window) }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ $window }}
+  {{- end }}
   triggers:
     - type: prometheus
       metadata:
         serverAddress: {{ required (printf "workers.%s.autoscaling.keda.serverAddress is required" $pool) $keda.serverAddress | quote }}
-        query: {{ printf `max(text_extraction_queue_pending_items{pool="%s", namespace="%s"})` $pool $.Release.Namespace | quote }}
-        threshold: {{ $keda.threshold | toString | quote }}
+        {{- $selector := printf `{pool="%s", namespace="%s"}` $pool $.Release.Namespace }}
+        {{- $query := printf "max(text_extraction_queue_pending_items%s)" $selector }}
+        {{- if $keda.countLeased }}
+        {{- $query = printf "%s + max(text_extraction_queue_leased_items%s)" $query $selector }}
+        {{- end }}
+        query: {{ $query | quote }}
+        threshold: {{ include "text-extraction.kedaThreshold" $args | quote }}
 {{- end }}
 {{- end }}

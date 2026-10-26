@@ -1536,6 +1536,19 @@ def test_asr_pool_gets_its_settings_through_its_own_environment(
     assert pool._target == "text_extraction.media.asr_child"
 
 
+def test_asr_worker_gives_items_cancelled_by_a_shutdown_back_at_once(tmp_path: Path) -> None:
+    """Its leases last hours: an item cancelled at the shutdown's end must not wait for one."""
+    from fakeredis import FakeAsyncRedis
+    from prometheus_client import CollectorRegistry
+
+    settings = Settings(auth_mode="none", asr_enabled=True, **settings_for(tmp_path))
+    parts = asr_worker.build_asr_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    try:
+        assert parts.worker._give_back_on_cancel
+    finally:
+        parts.conversion_pool.shutdown()
+
+
 def test_asr_proxy_tunnels_outlive_a_download() -> None:
     from prometheus_client import CollectorRegistry
 

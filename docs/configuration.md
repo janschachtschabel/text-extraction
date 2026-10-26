@@ -194,8 +194,14 @@ started the egress proxy and its children, and each child passed the self-check:
 an LGPL build, neither `ffmpeg` nor `rtmpdump` is on `PATH`, and the built-in clip transcribes
 (with the external backend: encodes as Ogg Opus). Without the model it exits with code 1 (log
 `asr_models_missing`). On SIGTERM it stops claiming and gives the transcriptions in flight 30 s,
-then kills its children; their leases expire and the items run again (nothing waits for a
-transcription, which is always a job). The image builds PyAV against an LGPL FFmpeg
+then kills its children and gives their items back to the queue at once (`attempts` + 1; nothing
+waits for a transcription, which is always a job), so they do not wait hours for their leases.
+Another replica starts them again from the beginning, and with `ASR_BACKEND=openai` the endpoint
+bills them again; an item interrupted `JOB_ITEM_MAX_ATTEMPTS` times fails as lost. A scale-down, a
+rolling update or a node drain therefore interrupts the transcriptions in flight: prefer fixed
+replicas for steady load. With a scaler, the chart's KEDA query counts the items in flight as well
+(threshold = `workers.asr.concurrency`), and KEDA and the HPA wait an hour of lower load before
+they remove a replica (`workers.asr.autoscaling.scaleDownStabilizationWindowSeconds`). The image builds PyAV against an LGPL FFmpeg
 (BtbN/FFmpeg-Builds `lgpl-shared`, pinned by release and SHA-256 in the `Dockerfile`, decision D5)
 whose shared libraries are its only FFmpeg: no `ffmpeg` program. It runs as uid 10001 with `HOME`
 under `/tmp`, `ASR_MODELS_PATH=/models` and `ASR_SCRATCH_PATH=/scratch`, and holds no models.
@@ -262,7 +268,7 @@ The grace periods in the Helm chart, each with a 10 s margin:
 | Extract workers | `workers.extract.terminationGracePeriodSeconds` | 45 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (30 s) |
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
-| ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items run again after the lease) |
+| ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items go back to the queue at once and start again elsewhere) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -355,6 +361,7 @@ Docling worker and its models volume. The Helm keys (the full table is in the
 | `workers.docling.nodeSelector` | `kubernetes.io/arch: amd64` | The image is built for linux/amd64 only. |
 | `workers.docling.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `docling` queue or on CPU. |
 | `workers.docling.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`, needs `ReadWriteMany` or one node) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.docling.models.resources` | 100m / 256Mi to 1 / 1Gi | Of the init container or the hook Job (the download streams). |
 | `workers.docling.models.persistence.*` | `5Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`DOCLING_MODELS_PATH`), read-only in the worker. |
 | `workers.docling.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-docling`, chart version | The Docling image. |
 
@@ -411,9 +418,12 @@ the [chart README](../deploy/helm/text-extraction/README.md#asr-workers-and-the-
 | `workers.asr.terminationGracePeriodSeconds` | `60` | See Response times. |
 | `workers.asr.resources` | 2 / 3Gi to 4 / 6Gi | Sized for one transcription with `large-v3-turbo`. |
 | `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`). |
+| `workers.asr.tmpSizeLimit` | `1Gi` | The emptyDir at `/tmp`. |
 | `workers.asr.nodeSelector` | `kubernetes.io/arch: amd64` | The image is published for linux/amd64. |
-| `workers.asr.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `asr` queue or on CPU. |
+| `workers.asr.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `asr` queue (pending plus leased items, a replica per `concurrency`) or on CPU. A scale-down interrupts transcriptions (see above). |
+| `workers.asr.autoscaling.scaleDownStabilizationWindowSeconds` | `3600` | An hour of lower load before KEDA or the HPA removes a replica (the Kubernetes maximum). |
 | `workers.asr.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.asr.models.resources` | 100m / 256Mi to 1 / 1Gi | Of the init container or the hook Job (the download streams). |
 | `workers.asr.models.persistence.*` | `4Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`ASR_MODELS_PATH`), read-only in the worker. |
 | `workers.asr.external.baseUrl`, `.model` | unset, `whisper-1` | `ASR_EXTERNAL_BASE_URL` (https only) and `ASR_EXTERNAL_MODEL` on the ASR workers. |
 | `workers.asr.external.apiKey`, `.existingSecret` | unset | `ASR_EXTERNAL_API_KEY` from a Secret, on the API pods and the ASR workers (see Secrets). |

@@ -107,7 +107,13 @@ encoded as Ogg Opus instead (``opus_check``: the encoding runs locally, so PyAV'
 have the ``libopus`` encoder), and nothing is sent to the endpoint. Children that do not start
 (``asr_start_failed``) or a failed check (``asr_self_check_failed``) end the process before
 ``/ready`` with exit code 1. On SIGTERM the loops stop claiming, the items in flight get 30 s,
-then they are cancelled and the children killed; their leases expire and the items run again.
+then they are cancelled and the children killed. A cancelled item goes back to the queue at once
+(``Worker`` with ``give_back_on_cancel``: the front of its domain, ``attempts + 1``), not when
+its lease of hours expires; another worker runs it again from the start (a download, a
+transcription and, with the external backend, the endpoint's bill again). An item given back
+``JOB_ITEM_MAX_ATTEMPTS`` times is failed as lost. A scale-down or a rolling update thus
+interrupts the transcriptions in flight: the Helm chart counts leased items in the pool's
+scaling metric and keeps a long scale-down stabilisation window for that reason.
 
 - ``--download-models`` fills ``ASR_MODELS_PATH`` with the files of ``ASR_MODEL`` (the Helm init
   container and the compose one-shot service run it; idempotent) and exits 0, or 1; with the
@@ -1164,6 +1170,7 @@ def build_asr_worker(
         asr_queue(valkey, settings),
         registry,
         concurrency=settings.asr_concurrency,
+        give_back_on_cancel=True,  # the lease lasts hours: a cancelled item must not wait for it
     )
     return AsrWorkerParts(
         worker=worker,

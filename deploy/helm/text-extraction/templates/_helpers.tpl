@@ -482,6 +482,15 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and $worker.autoscaling.keda.enabled (not $jobs) -}}
 {{- fail (printf "workers.%s.autoscaling.keda.enabled reads the queue gauges that API pods export only with JOBS_ENABLED=true; do not set jobs.enabled=false with KEDA." $pool) -}}
 {{- end -}}
+{{- $window := $worker.autoscaling.scaleDownStabilizationWindowSeconds -}}
+{{- if and (not (kindIs "invalid" $window)) (or (lt (float64 $window) 0.0) (gt (float64 $window) 3600.0)) -}}
+{{- fail (printf "workers.%s.autoscaling.scaleDownStabilizationWindowSeconds must be between 0 and 3600 (the Kubernetes limit), or null for the default; got %v." $pool $window) -}}
+{{- end -}}
+{{- if $worker.autoscaling.keda.enabled -}}
+{{- if le (include "text-extraction.kedaThreshold" (list $root $pool) | float64) 0.0 -}}
+{{- fail (printf "workers.%s.autoscaling.keda.threshold must be a positive number, or null for workers.%s.concurrency." $pool $pool) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if and .Values.workers.browser.unblock (not .Values.workers.browser.enabled) -}}
 {{- fail "workers.browser.unblock needs workers.browser.enabled=true: unblock mode runs in the browser workers." -}}
@@ -567,3 +576,16 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- fail (printf "workers.asr.terminationGracePeriodSeconds (%v) is too short: the ASR workers give transcriptions in flight %v s + a 10 s margin must fit." $asr.terminationGracePeriodSeconds $asrGraceful) -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+The KEDA threshold of a pool (list $root $pool): items per replica. autoscaling.keda.threshold,
+or the pool's concurrency when it is null.
+*/}}
+{{- define "text-extraction.kedaThreshold" -}}
+{{- $worker := index (index . 0).Values.workers (index . 1) -}}
+{{- $threshold := $worker.autoscaling.keda.threshold -}}
+{{- if kindIs "invalid" $threshold -}}
+{{- $threshold = $worker.concurrency -}}
+{{- end -}}
+{{- $threshold | toString -}}
+{{- end }}

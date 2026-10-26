@@ -137,8 +137,11 @@ workers:
         enabled: false
         # Prometheus that KEDA queries. Change it to your Prometheus Service.
         serverAddress: http://prometheus-operated.monitoring.svc:9090
-        # Pending queue items per worker replica.
+        # Pending queue items per worker replica. null: the pool's `concurrency`.
         threshold: 50
+        # Also count the items the workers hold (leased), not only the pending ones: true keeps
+        # a replica per `threshold` items in flight (the asr pool's default).
+        countLeased: false
         minReplicaCount: 1
         maxReplicaCount: 10
       hpa:
@@ -146,6 +149,10 @@ workers:
         minReplicas: 2
         maxReplicas: 10
         targetCPUUtilizationPercentage: 70
+      # How long (0 to 3600 s) the load must stay lower before KEDA or the HPA removes a
+      # replica: Kubernetes keeps the highest recommendation of that window. null: the
+      # Kubernetes default (300 s).
+      scaleDownStabilizationWindowSeconds: null
 
   # Browser workers: they claim the items of the pool `browser` (mode "browser", screenshots,
   # "auto" results that need a browser) and render them in Chromium; in unblock mode in Google
@@ -277,6 +284,15 @@ workers:
       # until the models are there; `helm install --wait` waits for the workers before it runs
       # the hook, so install the first release without --wait or use `init`.
       downloadMode: init
+      # Of the init container or the hook Job: the download streams each file to the volume and
+      # hashes it on the way, so it needs little memory (not the worker's resources).
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
       persistence:
         # The models take about 335 MiB; a changed manifest stages a full copy beside the old
         # one (about 670 MiB at once). 5Gi leaves room for later models; 1Gi suffices today.
@@ -326,8 +342,10 @@ workers:
     # must not exceed (the render fails). Larger media: send the URL.
     uploadMaxBytes: 25000000
     # No drain wait. On SIGTERM the worker stops claiming and gives transcriptions in flight 30 s,
-    # then kills its children; their leases expire and the items run again elsewhere (a
-    # transcription of an hour is not waited for). The render fails below 30 + a 10 s margin.
+    # then kills its children and gives their items back to the queue at once (attempts + 1):
+    # another replica transcribes them again from the start (a transcription of an hour is not
+    # waited for). The render fails below 30 + a 10 s margin. A scale-down, a rolling update or a
+    # node drain thus interrupts the transcriptions in flight; see `autoscaling`.
     terminationGracePeriodSeconds: 60
     # Placeholder values until package 11 measures real consumption: one child with
     # `large-v3-turbo` (about 2 GB resident, ASR_MEMORY_LIMIT_MB 4096 of address space) and
@@ -343,6 +361,8 @@ workers:
     # concurrency x (MEDIA_MAX_BYTES (500000000) + 5 MB) must fit, or the render fails.
     scratch:
       sizeLimit: 2Gi
+    # /tmp of the worker and its init container (HOME, caches of the libraries): small files only.
+    tmpSizeLimit: 1Gi
     # Merged over the global `nodeSelector` for these pods; a key set here wins. The ASR image is
     # published for linux/amd64.
     nodeSelector:
@@ -350,12 +370,19 @@ workers:
     # As for the extract workers. KEDA reads the pool `asr` gauges that API pods export with
     # JOBS_ENABLED=true and ASR_ENABLED=true. With no replica, transcriptions wait in the queue
     # (up to ASR_INPUT_TTL_SECONDS for an upload's bytes).
+    # Removing a replica interrupts its transcriptions: they go back to the queue and start again
+    # elsewhere (with `backend: openai` the endpoint bills them again), and Kubernetes does not
+    # pick the idle pod. For steady load prefer fixed replicas (both scalers off, `replicaCount`);
+    # with a scaler, KEDA counts the items in flight too and both wait an hour of lower load
+    # before they scale down.
     autoscaling:
       keda:
         enabled: false
         serverAddress: http://prometheus-operated.monitoring.svc:9090
-        # Pending queue items per worker replica (a transcription takes up to hours).
-        threshold: 2
+        # Pending plus leased queue items per worker replica. null: `concurrency`, a replica for
+        # every `concurrency` transcriptions queued or in flight.
+        threshold: null
+        countLeased: true
         minReplicaCount: 1
         maxReplicaCount: 4
       hpa:
@@ -363,6 +390,8 @@ workers:
         minReplicas: 1
         maxReplicas: 4
         targetCPUUtilizationPercentage: 70
+      # The Kubernetes maximum: an hour of lower load before a replica is removed.
+      scaleDownStabilizationWindowSeconds: 3600
     # The Whisper model (local backend only) lives on a volume mounted at /models
     # (ASR_MODELS_PATH, set by the chart), read-only in the workers. The image holds none.
     models:
@@ -372,6 +401,14 @@ workers:
       download: true
       # `init` or `job`, as for the Docling workers.
       downloadMode: init
+      # Of the init container or the hook Job, as for the Docling workers.
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
       persistence:
         # `large-v3-turbo` takes about 1.6 GiB; an update stages a full copy beside it.
         size: 4Gi

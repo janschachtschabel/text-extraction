@@ -76,6 +76,11 @@ expect_contains() {
   if grep -qF -- "$needle" <<<"$output"; then pass "$label"; else fail "$label: '$needle' missing"; fi
 }
 
+# The output $1 on one line, runs of blanks squeezed: multi-line YAML paths become greppable.
+flat() {
+  tr '\n' ' ' <<<"$1" | tr -s ' '
+}
+
 expect_absent() {
   local label="$1" output="$2" needle="$3"
   if grep -qF -- "$needle" <<<"$output"; then fail "$label: '$needle' present"; else pass "$label"; fi
@@ -174,8 +179,15 @@ scaled="$(document "$keda" ScaledObject "$BROWSER")"
 expect_contains "browser KEDA query names pool browser" "$scaled" 'pool=\"browser\"'
 expect_contains "browser KEDA threshold" "$scaled" 'threshold: "8"'
 expect_absent "browser Deployment leaves replicas to KEDA" "$(document "$keda" Deployment "$BROWSER")" "replicas:"
-expect_contains "extract KEDA keeps pool extract" \
-  "$(document "$(render --set workers.extract.autoscaling.keda.enabled=true)" ScaledObject "$EXTRACT")" 'pool=\"extract\"'
+extract_keda="$(document "$(render --set workers.extract.autoscaling.keda.enabled=true)" ScaledObject "$EXTRACT")"
+expect_contains "extract KEDA keeps pool extract" "$extract_keda" 'pool=\"extract\"'
+expect_absent "extract KEDA counts only pending items" "$extract_keda" "leased_items"
+expect_absent "extract KEDA keeps the default scale-down behaviour" "$extract_keda" "horizontalPodAutoscalerConfig"
+expect_absent "extract HPA keeps the default scale-down behaviour" \
+  "$(document "$(render --set workers.extract.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$EXTRACT")" "behavior:"
+expect_contains "a pool's scale-down window reaches its ScaledObject" \
+  "$(flat "$(document "$(render --set workers.extract.autoscaling.keda.enabled=true --set workers.extract.autoscaling.scaleDownStabilizationWindowSeconds=900)" ScaledObject "$EXTRACT")")" \
+  "advanced: horizontalPodAutoscalerConfig: behavior: scaleDown: stabilizationWindowSeconds: 900"
 expect_contains "browser HPA" "$(document "$(render --set workers.browser.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$BROWSER")" "name: $BROWSER"
 expect_render_fails "browser KEDA and HPA are exclusive" "mutually exclusive" \
   --set workers.browser.autoscaling.keda.enabled=true --set workers.browser.autoscaling.hpa.enabled=true
@@ -405,6 +417,8 @@ for pool in docling asr; do
   expect_contains "$pool models Job root filesystem is read-only" "$job" "readOnlyRootFilesystem: true"
   expect_contains "$pool models Job runs as the image's user" "$job" "runAsUser: 10001"
   expect_absent "$pool models Job keeps the image's init process" "$job" "command:"
+  expect_contains "$pool models Job requests little memory" "$(flat "$job")" "requests: cpu: 100m memory: 256Mi"
+  expect_contains "$pool models Job has a small memory limit" "$(flat "$job")" "limits: cpu: \"1\" memory: 1Gi"
   deployment="$(document "$jobs_mode" Deployment "$name")"
   expect_absent "downloadMode job renders no init container ($pool)" "$deployment" "initContainers:"
   expect_absent "downloadMode job: the $pool worker does not download" "$deployment" "--download-models"
@@ -473,11 +487,17 @@ expect_contains "asr init container downloads the models" "$init" "- --download-
 expect_contains "asr init container mounts the models" "$init" "mountPath: /models"
 expect_absent "asr init container mount is writable" "$init" "readOnly: true"
 expect_contains "asr init container root filesystem is read-only" "$init" "readOnlyRootFilesystem: true"
+expect_contains "asr init container requests little memory" "$(flat "$init")" "requests: cpu: 100m memory: 256Mi"
+expect_absent "asr init container does not take the worker's resources" "$init" "memory: 3Gi"
+expect_contains "models resources follow workers.asr.models.resources" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.models.resources.limits.memory=2Gi)" Deployment "$ASR")" \
+  "memory: 2Gi"
 expect_contains "asr worker mounts the models" "$worker" "mountPath: /models"
 expect_contains "asr worker models mount is read-only" "$worker" "readOnly: true"
 expect_absent "asr worker does not download" "$worker" "--download-models"
 expect_contains "asr worker mounts the scratch volume" "$worker" "mountPath: /scratch"
 expect_contains "asr scratch is a bounded emptyDir" "$volumes" "sizeLimit: 2Gi"
+expect_contains "asr /tmp is a bounded emptyDir" "$(flat "$volumes")" "- name: tmp emptyDir: sizeLimit: 1Gi"
 asr_pvc="$(document "$asr_on" PersistentVolumeClaim "$ASR_MODELS")"
 expect_contains "asr models PVC is rendered" "$asr_pvc" "storage: 4Gi"
 expect_contains "asr models PVC is ReadWriteMany" "$asr_pvc" "- ReadWriteMany"
@@ -567,7 +587,33 @@ expect_render_succeeds "asr worker grace period just long enough" \
 
 asr_keda="$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true)" ScaledObject "$ASR")"
 expect_contains "asr KEDA query names pool asr" "$asr_keda" 'pool=\"asr\"'
-expect_contains "asr KEDA threshold" "$asr_keda" 'threshold: "2"'
+expect_contains "asr KEDA query counts the transcriptions in flight" "$asr_keda" \
+  "query: \"max(text_extraction_queue_pending_items{pool=\\\"asr\\\", namespace=\\\"$NAMESPACE\\\"}) + max(text_extraction_queue_leased_items{pool=\\\"asr\\\", namespace=\\\"$NAMESPACE\\\"})\""
+expect_contains "asr KEDA threshold is the concurrency" "$asr_keda" 'threshold: "1"'
+expect_contains "asr KEDA threshold follows the concurrency" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true --set workers.asr.concurrency=2)" ScaledObject "$ASR")" \
+  'threshold: "2"'
+expect_contains "asr KEDA threshold can be set" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true --set workers.asr.autoscaling.keda.threshold=3)" ScaledObject "$ASR")" \
+  'threshold: "3"'
+expect_contains "asr KEDA scales down after an hour of less work" "$(flat "$asr_keda")" \
+  "advanced: horizontalPodAutoscalerConfig: behavior: scaleDown: stabilizationWindowSeconds: 3600"
+asr_hpa="$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$ASR")"
+expect_contains "asr HPA scales down after an hour of less work" "$(flat "$asr_hpa")" \
+  "behavior: scaleDown: stabilizationWindowSeconds: 3600"
+expect_contains "asr HPA scale-down window can be set" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.hpa.enabled=true --set workers.asr.autoscaling.scaleDownStabilizationWindowSeconds=1800)" HorizontalPodAutoscaler "$ASR")" \
+  "stabilizationWindowSeconds: 1800"
+expect_contains "a scale-down window of 0 is rendered, not dropped" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.hpa.enabled=true --set workers.asr.autoscaling.scaleDownStabilizationWindowSeconds=0)" HorizontalPodAutoscaler "$ASR")" \
+  "stabilizationWindowSeconds: 0"
+expect_render_fails "scale-down window at most an hour (the Kubernetes limit)" \
+  "workers.asr.autoscaling.scaleDownStabilizationWindowSeconds must be between 0 and 3600" \
+  --set workers.asr.enabled=true --set workers.asr.autoscaling.scaleDownStabilizationWindowSeconds=7200
+expect_render_fails "KEDA threshold is positive" "workers.asr.autoscaling.keda.threshold must be" \
+  --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true --set workers.asr.autoscaling.keda.threshold=0
+expect_contains "notes say a scale-down interrupts transcriptions" \
+  "$(render_notes --set workers.asr.enabled=true)" "interrupts the transcriptions in flight"
 expect_render_fails "asr KEDA and HPA are exclusive" "mutually exclusive" \
   --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true \
   --set workers.asr.autoscaling.hpa.enabled=true

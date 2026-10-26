@@ -66,6 +66,7 @@ Backend: the external endpoint {{ $asr.external.baseUrl }} (model {{ $asr.extern
 {{- $download := include "text-extraction.modelsDownload" (list . "asr") }}
 Backend: faster-whisper with {{ $asr.model }} from PVC {{ include "text-extraction.asrModelsClaim" . }}, {{ if eq $download "init" }}filled by the init container on the first start{{ else if eq $download "job" }}filled by the models Job after each install and upgrade{{ else }}pre-filled (no download){{ end }}{{ if $download }} (needs egress to huggingface.co){{ end }}. A worker without the model exits with code 1 and logs asr_models_missing.
 {{- end }}
+Removing an ASR pod (a scale-down, a rolling update, a node drain) interrupts the transcriptions in flight: after 30 s they go back to the queue and start again on another replica{{ if eq (toString $asr.backend) "openai" }}, and the endpoint bills them again{{ end }}. Prefer fixed replicas for steady load.
 {{- else }}
 
 No ASR workers are deployed: transcription is off (ASR_ENABLED=false), so transcribe: true answers

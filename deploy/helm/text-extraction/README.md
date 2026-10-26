@@ -24,7 +24,7 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
 | Secret `<release>-text-extraction-asr` | `workers.asr.backend: openai`, `workers.asr.external.apiKey` set and no `workers.asr.external.existingSecret` | Holds `ASR_EXTERNAL_API_KEY`. |
 | Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
-| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`. |
+| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`). |
 | HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
 | Secret `<release>-text-extraction-valkey-auth` | `valkey.enabled`, `valkey.auth.enabled` and no `valkey.auth.existingSecret` | Holds `VALKEY_PASSWORD`, generated once (32 alphanumeric characters) and kept across upgrades. |
 | NetworkPolicy (Valkey, API, each worker pool) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
@@ -165,11 +165,13 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.documentParentReserveMiB` | `512` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
-| `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica. |
+| `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica (pending plus leased with `countLeased`). `null`: the pool's `concurrency`. Must be positive. |
+| `workers.extract.autoscaling.keda.countLeased` | `false` | Also count the items the workers hold (`text_extraction_queue_leased_items`), so the replicas busy with them are part of the target. |
 | `workers.extract.autoscaling.keda.minReplicaCount` / `maxReplicaCount` | `1` / `10` | |
 | `workers.extract.autoscaling.hpa.enabled` | `false` | CPU-based HorizontalPodAutoscaler of the workers. **Mutually exclusive with KEDA**: enabling both fails the render, because KEDA manages its own HPA. |
 | `workers.extract.autoscaling.hpa.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `workers.extract.autoscaling.hpa.targetCPUUtilizationPercentage` | `70` | |
+| `workers.<pool>.autoscaling.scaleDownStabilizationWindowSeconds` | `null` (`asr`: `3600`) | How long the load must stay lower before KEDA or the HPA removes a replica (`advanced.horizontalPodAutoscalerConfig.behavior.scaleDown` of the ScaledObject, `behavior.scaleDown` of the HPA). `null`: the Kubernetes default (300 s). 0 to 3600, or the render fails. |
 | `workers.browser.enabled` | `true` | Deploy the browser workers. Also renders `BROWSER_ENABLED` into every pod: false switches browser mode off (`mode: "browser"` and screenshots answer 400, `auto` never escalates). |
 | `workers.browser.unblock` | `false` | Unblock mode (`BROWSER_UNBLOCK_ENABLED` in every pod): admins with `compliance: "ignore"` get a Chrome that clears bot challenges. Needs `workers.browser.enabled`, or the render fails. |
 | `workers.browser.image.repository` | `ghcr.io/janschachtschabel/text-extraction-browser` | Browser worker image (Playwright's Chromium shell, Google Chrome stable, Xvfb; linux/amd64). |
@@ -195,6 +197,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.docling.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
 | `workers.docling.models.download` | `true` | Runs `text-extraction-docling-worker --download-models` with the volume mounted writable. `false` needs `persistence.existingClaim` (a pre-filled volume), or the render fails. |
 | `workers.docling.models.downloadMode` | `init` | `init`: an init container of every worker pod (works with `ReadWriteOnce`). `job`: a Helm post-install/post-upgrade hook Job, once per release; the worker pods only check the marker (a pod that starts before the Job is done exits with code 1 and restarts). Needs `ReadWriteMany` or one node. `helm install --wait` waits for the workers before it runs the hook: install the first release without `--wait`, or use `init`. |
+| `workers.docling.models.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Of the init container or the hook Job (not the worker's `resources`): the download streams each file to the volume and hashes it on the way. |
 | `workers.docling.models.persistence.size` | `5Gi` | The models take about 335 MiB (9 files); the download stages a full copy beside the old one when the manifest changes, so about 670 MiB at once. 5Gi leaves room for later models; 1Gi suffices today. |
 | `workers.docling.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
 | `workers.docling.models.persistence.storageClass` | `""` | Cluster default when empty. |
@@ -207,14 +210,17 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.asr.replicaCount` | `1` | Ignored with KEDA or HPA. |
 | `workers.asr.concurrency` | `1` | `ASR_CONCURRENCY`: transcriptions per pod at once, each in a child process of its own. |
 | `workers.asr.uploadMaxBytes` | `25000000` | `MEDIA_UPLOAD_MAX_BYTES` on every pod: the largest audio or video upload (decision D3). Its bytes travel through Valkey; above `DOCLING_INPUT_BUDGET_BYTES` the render fails. |
-| `workers.asr.terminationGracePeriodSeconds` | `60` | Transcriptions in flight get 30 s after SIGTERM, then the children are killed and their items run again after their lease. The render fails below 40. |
+| `workers.asr.terminationGracePeriodSeconds` | `60` | Transcriptions in flight get 30 s after SIGTERM, then the children are killed and their items go back to the queue at once (attempts + 1) to start again on another replica. The render fails below 40. |
 | `workers.asr.resources` | requests 2 / 3Gi, limits 4 / 6Gi | Placeholder for one transcription with `large-v3-turbo` (about 2 GB resident, `ASR_MEMORY_LIMIT_MB` 4096 of address space) and `ASR_THREADS` (4) threads. |
 | `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`) for downloaded media. `concurrency` × (`MEDIA_MAX_BYTES` (500000000) + 5 MB) must fit, or the render fails. |
+| `workers.asr.tmpSizeLimit` | `1Gi` | sizeLimit of the `/tmp` emptyDir (`HOME`, library caches). |
 | `workers.asr.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector`; the ASR image is published for linux/amd64. |
-| `workers.asr.autoscaling.keda.*` | as for the extract workers, `threshold` `2`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="asr"})`; the API pods export it while `JOBS_ENABLED` and `ASR_ENABLED` are true. |
+| `workers.asr.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (= `concurrency`), `countLeased` `true`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="asr"}) + max(text_extraction_queue_leased_items{pool="asr"})`: a replica per `concurrency` transcriptions queued or in flight. The API pods export both while `JOBS_ENABLED` and `ASR_ENABLED` are true. |
 | `workers.asr.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
+| `workers.asr.autoscaling.scaleDownStabilizationWindowSeconds` | `3600` | The Kubernetes maximum: an hour of lower load before a replica goes. See "ASR workers and the models volume" on interrupted transcriptions. |
 | `workers.asr.models.download` | `true` | Runs `text-extraction-asr-worker --download-models` (only `model`, from huggingface.co) with the volume mounted writable. `false` needs `persistence.existingClaim`, or the render fails. Local backend only. |
 | `workers.asr.models.downloadMode` | `init` | `init` or `job`, as for the Docling workers. |
+| `workers.asr.models.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Of the init container or the hook Job, as for the Docling workers. |
 | `workers.asr.models.persistence.size` | `4Gi` | `large-v3-turbo` takes about 1.6 GiB, and an update stages a full copy beside it. |
 | `workers.asr.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
 | `workers.asr.models.persistence.storageClass` | `""` | Cluster default when empty. |
@@ -370,6 +376,16 @@ waits for them, so the API pods keep their grace period.
   the render fails when the input TTL does not outlast the lease (2 × `ASR_TIMEOUT_SECONDS` + 10).
   Upload bytes wait in Valkey for up to `ASR_INPUT_TTL_SECONDS` and count in
   `DOCLING_INPUT_BUDGET_BYTES`: size `valkey.maxmemory` for it.
+- **Removing a pod interrupts its transcriptions.** A scale-down, a rolling update (`helm
+  upgrade` with a changed pod template) or a node drain sends SIGTERM: the transcriptions in flight
+  get 30 s, then their items go back to the queue at once (`attempts` + 1) and start again from the
+  beginning on another replica; with `backend: openai` the endpoint bills them again. An item
+  interrupted `JOB_ITEM_MAX_ATTEMPTS` times fails as lost. Kubernetes does not pick the idle pod
+  when it scales down. So: for steady load prefer fixed replicas (both scalers off,
+  `replicaCount`) and upgrade when the queue is quiet. With a scaler, KEDA counts the items in
+  flight as well (`countLeased`, threshold = `concurrency`), so it does not scale below the
+  transcriptions running, and both scalers wait `scaleDownStabilizationWindowSeconds` (3600, the
+  Kubernetes maximum) of lower load before they remove a replica.
 
 ## Local checks
 

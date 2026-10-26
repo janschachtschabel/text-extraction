@@ -63,7 +63,7 @@ spec:
           env:
             {{- include "text-extraction.workerEnv" $args | nindent 12 }}
           resources:
-            {{- toYaml $worker.resources | nindent 12 }}
+            {{- toYaml $worker.models.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp

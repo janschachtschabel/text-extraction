@@ -84,8 +84,12 @@ egress proxy (``media.pool``, subtitles of platform videos); ``/ready`` answers 
 loops run after it, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
 loops stop claiming, the items in flight get ``extraction_graceful_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
-internal server stops last. A claim already sent when the signal arrives is still processed
-within that time, since its item is leased to this worker already.
+internal server stops last. A worker built with ``give_back_on_cancel`` (the ASR worker, whose
+leases last hours) gives a cancelled item back to its queue at once instead (``FairQueue.defer``
+to now: the front of its domain, ``attempts + 1``, so the item is failed as lost once it was
+given back ``JOB_ITEM_MAX_ATTEMPTS`` times); when Valkey does not answer within
+``_GIVE_BACK_SECONDS`` the lease expires as without it. A claim already sent when the signal
+arrives is still processed within that time, since its item is leased to this worker already.
 """
 
 import asyncio
@@ -160,6 +164,8 @@ _MAX_VALKEY_BACKOFF_SECONDS = 30.0
 _ERROR_PAUSE_SECONDS = 1.0
 # How long a shutdown waits for a cancelled start-up to unwind.
 _START_UNWIND_SECONDS = 5.0
+# How long a cancelled item's give-back may take before its lease is left to expire.
+_GIVE_BACK_SECONDS = 5.0
 
 _LOST_MESSAGE = "The item was lost by a worker too often."
 _INPUT_EXPIRED_MESSAGE = "The uploaded file expired before it was extracted. Upload it again."
@@ -387,6 +393,8 @@ class Worker:
 
     ``valkey`` is the client behind ``store`` and ``queue``; the caller closes it. ``clock``
     (epoch seconds), ``sleep`` and ``random`` (for the jitter) can be replaced in tests.
+    ``give_back_on_cancel``: an item cancelled while it runs (the shutdown's end) goes back to
+    the queue at once, instead of when its lease expires.
     """
 
     def __init__(
@@ -402,6 +410,7 @@ class Worker:
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random: Callable[[], float] = random.random,
+        give_back_on_cancel: bool = False,
     ) -> None:
         self._settings = settings
         self._valkey = valkey
@@ -414,6 +423,7 @@ class Worker:
         self._random = random
         self._concurrency = concurrency if concurrency is not None else settings.worker_concurrency
         self._lease_seconds = runner.lease_seconds
+        self._give_back_on_cancel = give_back_on_cancel
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the slot loops until ``stop`` is set and the items in flight have finished."""
@@ -516,6 +526,10 @@ class Worker:
         gate_refusals: Literal["fail", "raise"] = "fail" if at_limit else "raise"
         try:
             envelope = await self._runner.run(job, item, url, gate_refusals=gate_refusals)
+        except asyncio.CancelledError:
+            if self._give_back_on_cancel:
+                await self._give_back(item)
+            raise
         except JobLost:
             return await self._drop(item)
         except (OutboundBusy, CircuitOpen) as refusal:
@@ -534,6 +548,18 @@ class Worker:
         if envelope is None:
             return await self._moved(item)
         return await self._finish(item, job, envelope)
+
+    async def _give_back(self, item: QueueItem) -> None:
+        """Give a cancelled item back to its queue, claimable now. Shielded from the
+        cancellation in progress; a Valkey error or a timeout leaves the lease to expire."""
+        try:
+            async with asyncio.timeout(_GIVE_BACK_SECONDS):
+                given_back = await asyncio.shield(self._queue.defer(item, self._clock()))
+        except (RedisError, OSError) as error:  # a builtin TimeoutError too
+            _log.warning("job_item_give_back_failed", error_type=type(error).__name__)
+            return
+        if given_back:
+            _log.info("job_item_given_back", attempts=item.attempts + 1)
 
     async def _moved(self, item: QueueItem) -> str | None:
         """Complete an item the runner queued on another pool, without a result. A worker whose

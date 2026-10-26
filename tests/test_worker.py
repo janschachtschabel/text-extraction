@@ -115,6 +115,7 @@ class Harness:
         random: Callable[[], float] = lambda: 0.5,  # no jitter
         document_pool: Any = None,
         media_fetcher: Any = None,
+        give_back_on_cancel: bool = False,
         **overrides: Any,
     ) -> None:
         self.valkey = FakeAsyncRedis()
@@ -164,6 +165,7 @@ class Harness:
             clock=self.clock,
             sleep=self.sleeps,
             random=random,
+            give_back_on_cancel=give_back_on_cancel,
         )
 
     async def submit(self, urls: list[str]) -> str:
@@ -855,6 +857,91 @@ async def test_shutdown_cancels_items_that_outlive_the_grace_period() -> None:
 
     assert any(log["event"] == "worker_shutdown_timeout" for log in logs)
     assert (await harness.queue.counts()).leased == 1  # the lease expires and the item returns
+
+
+class FailingDeferQueue(FairQueue):
+    """A queue whose ``defer`` fails as a Valkey outage would."""
+
+    async def defer(self, item: QueueItem, until: float) -> bool:
+        raise RedisConnectionError("valkey is gone")
+
+
+async def serve_until_cancelled(harness: Harness, started: Started) -> None:
+    """Serve the harness's worker, send SIGTERM once an item runs, and wait for the shutdown,
+    which cancels the item after a grace period of 0.2 s."""
+    readiness = Readiness()
+    app = create_internal_app(
+        harness.settings, harness.valkey, harness.registry, readiness=readiness
+    )
+    internal = _server(app, "127.0.0.1", free_port())
+    serving = asyncio.create_task(_serve(harness.worker, internal, readiness, graceful_seconds=0.2))
+    await started.reach(1)
+    os.kill(os.getpid(), signal.SIGTERM)
+    async with asyncio.timeout(20):
+        await serving
+
+
+@scenario
+async def test_shutdown_gives_a_cancelled_item_back_at_once_when_asked() -> None:
+    urls = [page("a.example")]
+    started = Started()
+    release = asyncio.Event()  # never set
+    harness = Harness(
+        slow_answers(urls, started, release), worker_concurrency=1, give_back_on_cancel=True
+    )
+    job_id = await harness.submit(urls)
+
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await serve_until_cancelled(harness, started)
+
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (1, 0)  # no wait for the lease to expire
+    (given_back,) = [log for log in logs if log["event"] == "job_item_given_back"]
+    assert (given_back["job_id"], given_back["item"]) == (job_id, 0)
+    again = await harness.claim()  # claimable right away, at the same time
+    assert again.item is not None
+    assert (again.item.index, again.item.attempts) == (0, 1)
+
+
+@scenario
+async def test_item_given_back_at_the_attempt_limit_is_failed_when_claimed_again() -> None:
+    urls = [page("a.example")]
+    started = Started()
+    release = asyncio.Event()  # never set
+    harness = Harness(
+        slow_answers(urls, started, release),
+        worker_concurrency=1,
+        give_back_on_cancel=True,
+        job_item_max_attempts=1,
+    )
+    await harness.submit(urls)
+    await serve_until_cancelled(harness, started)
+    started = Started()
+    harness.fetcher.answers.update(slow_answers(urls, started, release))
+    await serve_until_cancelled(harness, started)
+
+    again = await harness.claim()
+    assert again.exhausted  # each give-back counts as an attempt: an endless rerun is not possible
+
+
+@scenario
+async def test_cancelled_item_stays_cancelled_when_its_give_back_fails() -> None:
+    urls = [page("a.example")]
+    started = Started()
+    release = asyncio.Event()  # never set
+    harness = Harness(
+        slow_answers(urls, started, release),
+        worker_concurrency=1,
+        give_back_on_cancel=True,
+        make_queue=lambda valkey, settings, clock: FailingDeferQueue(valkey, settings, clock=clock),
+    )
+    await harness.submit(urls)
+
+    with capture_logs() as logs:
+        await serve_until_cancelled(harness, started)
+
+    assert any(log["event"] == "job_item_give_back_failed" for log in logs)
+    assert (await harness.queue.counts()).leased == 1  # its lease expires as without the give-back
 
 
 @pytest.fixture(autouse=True)

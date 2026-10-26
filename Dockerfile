@@ -89,18 +89,27 @@ RUN case "$TARGETARCH" in \
     && rm -rf /tmp/ffmpeg.tar.xz /opt/ffmpeg/bin /opt/ffmpeg/doc /opt/ffmpeg/man /opt/ffmpeg/presets \
     && echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/ffmpeg.conf \
     && ldconfig
-# The build tools of PyAV's sdist, pinned (14-day rule); its build-system asks for setuptools>=78
-# and cython>=3.3,<4.
-RUN mkdir -p /build && printf '%s\n' cython==3.3.0 setuptools==84.0.0 > /build/av-build-constraints.txt
+# The build tools of PyAV's sdist, pinned (14-day rule) with the SHA-256 of their PyPI wheels
+# (cython: cp313 manylinux x86_64 and aarch64, and the pure-Python fallback); `uv build
+# --require-hashes` refuses anything else. Its build-system asks for setuptools>=78 and
+# cython>=3.3,<4. Moving either: take the sums from https://pypi.org/pypi/<name>/<version>/json.
+RUN mkdir -p /build && printf '%s\n' \
+    'cython==3.3.0 --hash=sha256:23942b0662642927a55676e4b26e6840fb166dd7d76436384685227e7e8619a4 --hash=sha256:bc2f2a6b65a991666cfd35a35bab0cd88ffba4df2f601edb6e76cc8116de24b9 --hash=sha256:9b24b5c8cd536946b62086fcafee6d5509d3f549f72d553d2336af87ffbe0da1' \
+    'setuptools==84.0.0 --hash=sha256:51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670' \
+    > /build/av-build-constraints.txt
 # PyAV's sdist exactly as uv.lock pins it (URL and SHA-256), built into a wheel against the FFmpeg
-# above (pkg-config finds it), then the extra `asr` without av's PyPI wheel, then the built wheel.
+# above (pkg-config finds it; its .pc files go afterwards), then the extra `asr` without av's PyPI
+# wheel, then the built wheel.
 RUN --mount=type=cache,target=/root/.cache/uv <<BUILD
 set -eu
 python - <<'SDIST'
 import hashlib, tomllib, urllib.request
 with open("/app/uv.lock", "rb") as file:
     lock = tomllib.load(file)
-(av,) = [package for package in lock["package"] if package["name"] == "av"]
+avs = [package for package in lock["package"] if package["name"] == "av"]
+if len(avs) != 1:
+    raise SystemExit(f"uv.lock holds {len(avs)} av packages, this build handles exactly one")
+(av,) = avs
 sdist = av["sdist"]
 with urllib.request.urlopen(sdist["url"]) as response:
     data = response.read()
@@ -110,7 +119,9 @@ with open(f"/build/av-{av['version']}.tar.gz", "wb") as file:
     file.write(data)
 SDIST
 PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig uv build --wheel --python /usr/local/bin/python3 \
-    --build-constraints /build/av-build-constraints.txt --out-dir /build/wheels /build/av-*.tar.gz
+    --build-constraints /build/av-build-constraints.txt --require-hashes \
+    --out-dir /build/wheels /build/av-*.tar.gz
+rm -rf /opt/ffmpeg/lib/pkgconfig
 uv sync --locked --no-dev --no-editable --extra asr --no-install-package av
 uv pip install --python /app/.venv/bin/python --no-deps /build/wheels/av-*.whl
 BUILD
@@ -204,8 +215,7 @@ COPY --from=build-asr /opt/ffmpeg/lib /opt/ffmpeg/lib
 COPY --from=build-asr /opt/ffmpeg/LICENSE.txt /opt/ffmpeg/LICENSE.txt
 # /models and /scratch stay empty: they are mount points, owned by the user, so a new docker volume
 # mounted there is writable (Kubernetes uses fsGroup instead).
-RUN rm -rf /opt/ffmpeg/lib/pkgconfig \
-    && echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/ffmpeg.conf \
+RUN echo /opt/ffmpeg/lib > /etc/ld.so.conf.d/ffmpeg.conf \
     && ldconfig \
     && install -d -o 10001 -g 10001 /models /scratch
 COPY --from=tini /tini /usr/bin/tini
