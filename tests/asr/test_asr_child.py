@@ -89,6 +89,44 @@ async def in_child(settings: Settings, function: str, payload: dict[str, Any]) -
         await pool.shutdown()
 
 
+async def in_child_with_memory(
+    settings: Settings, function: str, payload: dict[str, Any]
+) -> tuple[Any, dict[str, int]]:
+    """``in_child``, plus the child's peak memory afterwards (``child_memory``)."""
+    pool: DocumentPool = create_asr_pool(settings.model_copy(update={"asr_concurrency": 1}))
+    await pool.start()
+    try:
+        deadline = asyncio.get_running_loop().time() + settings.asr_timeout_seconds
+        reply = await pool.run(function, payload, deadline)
+        return reply, child_memory(pool)
+    finally:
+        await pool.shutdown()
+
+
+def child_memory(pool: DocumentPool) -> dict[str, int]:
+    """``VmPeak`` (address space, which ``ASR_MEMORY_LIMIT_MB`` caps) and ``VmHWM`` (resident
+    memory) of the pool's one child over its life so far, in KiB (Linux ``/proc``)."""
+    (child,) = pool._children
+    status = Path(f"/proc/{child.process.pid}/status").read_text(encoding="ascii")
+    fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
+    return {name: int(fields[name].split()[0]) for name in ("VmPeak", "VmHWM")}
+
+
+def report_memory(label: str, memory: dict[str, int], settings: Settings) -> None:
+    """One line with the child's peak memory against ``ASR_MEMORY_LIMIT_MB``, on stdout (run
+    pytest with ``-s``) and in the GitHub step summary when there is one."""
+    limit = settings.asr_memory_limit_mb
+    line = (
+        f"{label} ({settings.asr_model}): child VmPeak {memory['VmPeak'] // 1024} MiB, "
+        f"VmHWM {memory['VmHWM'] // 1024} MiB, ASR_MEMORY_LIMIT_MB {limit}"
+    )
+    print(line)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as file:
+            file.write(line + "\n")
+
+
 def transcribe_payload(settings: Settings, path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
@@ -457,6 +495,15 @@ def test_the_child_reports_its_codecs_and_the_tools_on_path(tmp_path: Path) -> N
     assert set(reply["tools"]) <= {"ffmpeg", "rtmpdump"}
 
 
+def test_the_childs_peak_memory_is_read_from_proc(tmp_path: Path) -> None:
+    settings = settings_for(tmp_path)
+
+    _reply, memory = run(in_child_with_memory(settings, "ffmpeg", {}))
+
+    assert set(memory) == {"VmPeak", "VmHWM"}
+    assert 0 < memory["VmHWM"] <= memory["VmPeak"] <= settings.asr_memory_limit_mb * 1024
+
+
 def test_platform_formats_are_plain_http_and_native_streams() -> None:
     from text_extraction.media import asr_child
 
@@ -470,7 +517,10 @@ def test_transcribes_a_long_clip_across_windows(tmp_path: Path, long_clip: Path)
     if not (settings.asr_models_path / settings.asr_model / "model.bin").is_file():
         pytest.skip(f"no {settings.asr_model} model under {settings.asr_models_path}")
 
-    reply = run(in_child(settings, "transcribe", transcribe_payload(settings, long_clip)))
+    reply, memory = run(
+        in_child_with_memory(settings, "transcribe", transcribe_payload(settings, long_clip))
+    )
+    report_memory("long clip, 672 s", memory, settings)
 
     expected = (CORPUS / "speech_de.expected.txt").read_text(encoding="utf-8")
     late = " ".join(text for start, _end, text in reply["segments"] if start >= 640.0)

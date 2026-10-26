@@ -1,7 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- if .Values.valkey.enabled }}
-# Valkey accepts connections from the API and worker pods (extract, browser, docling) of this
-# release only.
+# Valkey accepts connections from the API and worker pods (extract, browser, docling, asr) of
+# this release only.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -60,7 +60,8 @@ spec:
 {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
 {{- if (index $.Values.workers $pool).enabled }}
 ---
-# Workers take no traffic except the metrics scrape of `networkPolicy.metricsFrom`.
+# Workers take no traffic except the metrics scrape of `networkPolicy.metricsFrom`. Egress stays
+# open: sites, model downloads and the external ASR endpoint.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

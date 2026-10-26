@@ -6,8 +6,8 @@
 ---
 # Scales the {{ $pool }} workers on the length of their pool's queue. The gauge comes from the API
 # pods (they stay up while the workers are scaled down) and needs JOBS_ENABLED=true there (for the
-# pool browser also BROWSER_ENABLED=true, for docling DOCLING_ENABLED=true); max() because every
-# API pod reports the same queue.
+# pool browser also BROWSER_ENABLED=true, for docling DOCLING_ENABLED=true, for asr
+# ASR_ENABLED=true); max() because every API pod reports the same queue.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:

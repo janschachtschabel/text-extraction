@@ -117,7 +117,7 @@ Keep these out of ConfigMaps, images and logs.
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
 | `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
-| `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | Not rendered by the chart yet (package 6 Task 11 renders it into the API pods and the ASR workers): set it from a Secret. |
+| `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -188,6 +188,31 @@ shutdown ends. The worker needs the same `API_KEYS` as the API while `AUTH_MODE`
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
 
+The ASR worker (`text-extraction-asr-worker`, image `text-extraction-asr`) serves only port 9090.
+Its `/ready` answers 200 once it has checked the model under `ASR_MODELS_PATH` (local backend),
+started the egress proxy and its children, and each child passed the self-check: PyAV's FFmpeg is
+an LGPL build, neither `ffmpeg` nor `rtmpdump` is on `PATH`, and the built-in clip transcribes
+(with the external backend: encodes as Ogg Opus). Without the model it exits with code 1 (log
+`asr_models_missing`). On SIGTERM it stops claiming and gives the transcriptions in flight 30 s,
+then kills its children; their leases expire and the items run again (nothing waits for a
+transcription, which is always a job). The image builds PyAV against an LGPL FFmpeg
+(BtbN/FFmpeg-Builds `lgpl-shared`, pinned by release and SHA-256 in the `Dockerfile`, decision D5)
+whose shared libraries are its only FFmpeg: no `ffmpeg` program. It runs as uid 10001 with `HOME`
+under `/tmp`, `ASR_MODELS_PATH=/models` and `ASR_SCRATCH_PATH=/scratch`, and holds no models.
+Deno, yt-dlp's JavaScript runtime, is the binary of the `deno` package in the image's venv; yt-dlp
+is given its path, so it needs no `PATH` entry. `text-extraction-asr-worker --check` runs the
+self-check in one child and exits 0 (1 on a failure, 2 for invalid settings); it needs no Valkey.
+
+docker compose starts the ASR worker only with the profile `asr`:
+`docker compose --profile asr up -d --wait` with `ASR_ENABLED=true` in `.env` (compose passes
+`ASR_ENABLED` from `.env` or the shell to every service, default false; the other ASR settings,
+such as `ASR_BACKEND`, `ASR_MODEL` and `ASR_EXTERNAL_API_KEY`, reach every service from `.env`).
+The service `asr-models` runs `--download-models` into the volume `asr-models` first (it needs
+huggingface.co once; with `ASR_BACKEND=openai` it does nothing), then `asr-worker` mounts it
+read-only and keeps downloaded media on the volume `asr-scratch` (`/scratch`, not the tmpfs `/tmp`,
+which is memory); compose sets `ASR_MODELS_PATH` and `ASR_SCRATCH_PATH` for both, over `.env`. Its
+stop grace period is 45 s.
+
 The Docling worker (`text-extraction-docling-worker`, image `text-extraction-docling`) serves only
 port 9090 as well. Its `/ready` answers 200 once it has checked the models under
 `DOCLING_MODELS_PATH`, started its conversion children and converted a built-in scan; without the
@@ -237,6 +262,7 @@ The grace periods in the Helm chart, each with a 10 s margin:
 | Extract workers | `workers.extract.terminationGracePeriodSeconds` | 45 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (30 s) |
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
+| ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items run again after the lease) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -328,7 +354,7 @@ Docling worker and its models volume. The Helm keys (the full table is in the
 | `workers.docling.resources` | 1 / 3Gi to 4 / 8Gi | Sized for one conversion. |
 | `workers.docling.nodeSelector` | `kubernetes.io/arch: amd64` | The image is built for linux/amd64 only. |
 | `workers.docling.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `docling` queue or on CPU. |
-| `workers.docling.models.download` | `true` | An init container fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.docling.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`, needs `ReadWriteMany` or one node) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
 | `workers.docling.models.persistence.*` | `5Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`DOCLING_MODELS_PATH`), read-only in the worker. |
 | `workers.docling.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-docling`, chart version | The Docling image. |
 
@@ -365,10 +391,38 @@ is always a job. ASR is off by default: the API image has neither Whisper nor mo
 | `ASR_TIMEOUT_SECONDS` | `10800` | Time budget of one transcription item (the wait for the host's turn, the download, decoding and recognition), in seconds (3 hours, decision D6; the local backend took about 0.9 s per second of audio with `large-v3-turbo` and 4 threads in the spike). The transcription gets what the download left; the child is killed at the end of the budget and the item fails with `timeout` (not retryable: the same media would time out again). The ASR worker's lease of an item is 2 × this + 10 s. 60 to 14400. |
 | `ASR_INPUT_TTL_SECONDS` | `28800` | How long the bytes of an uploaded audio or video file wait in Valkey for the ASR worker, in seconds (8 hours, decision D6); never longer than the job. They are deleted when the item is done. With `ASR_ENABLED=true` it must be longer than the ASR lease (2 × `ASR_TIMEOUT_SECONDS` + 10), so an item that runs again after a lost lease still finds its bytes, or the service exits with code 2 at start-up. Minimum 600. |
 | `ASR_MAX_OPEN_PER_CLIENT` | `3` | Unfinished ASR jobs one API key may have. Beyond it nothing is queued for transcription and the request answers without it (`asr_unavailable`, or `rate_limited` for a media file). Minimum 1. |
-| `ASR_SCRATCH_PATH` | `/tmp/asr` | Directory where the ASR worker keeps the media it is transcribing; the file is deleted when the item ends. The Helm chart mounts an emptyDir with a size limit here. |
+| `ASR_SCRATCH_PATH` | `/tmp/asr` | Directory where the ASR worker keeps the media it is transcribing; the file is deleted when the item ends. The ASR image sets `/scratch`; the Helm chart mounts an emptyDir with a size limit there (`workers.asr.scratch.sizeLimit`, 2Gi, which must hold `ASR_CONCURRENCY` × (`MEDIA_MAX_BYTES` + 5 MB) or the render fails), docker compose the volume `asr-scratch`. |
 | `ASR_EXTERNAL_BASE_URL` | unset | Base URL of the OpenAI-compatible transcription endpoint (`<base>/audio/transcriptions`) for `ASR_BACKEND=openai`. https only; anything else makes the service exit with code 2. Empty counts as unset. |
 | `ASR_EXTERNAL_MODEL` | `whisper-1` | Model name sent to the external endpoint. |
 | `ASR_EXTERNAL_TIMEOUT_SECONDS` | `300` | Time budget of the external endpoint for one audio chunk of at most 20 minutes, in seconds: it bounds the chunk's whole request (upload, the endpoint's work and the answer), within the item's `ASR_TIMEOUT_SECONDS` (a chunk gets what is left of it when that is less; running out of that is `timeout`, not retryable). A chunk that runs out of its own fails the item with `transcription_failed`, retryable, as do 429 and 5xx answers; 401 and 403 (the key refused) are not retryable. The SDK does not retry. A retry runs the whole item again, so the chunks already transcribed are sent and paid for again. Minimum 1. |
+
+Transcription needs `ASR_ENABLED=true` on every pod, `JOBS_ENABLED=true` on the API pods, at least
+one ASR worker and, for the local backend, its models volume. The Helm keys (the full table is in
+the [chart README](../deploy/helm/text-extraction/README.md#asr-workers-and-the-models-volume)):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.asr.enabled` | `false` | Deploys the ASR workers and, for the local backend, the models PVC; renders `ASR_ENABLED` into every pod. Needs jobs on the API pods. |
+| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `openai` needs `external.baseUrl` and renders no models volume. |
+| `workers.asr.model` | `large-v3-turbo` | `ASR_MODEL` on the ASR workers; only this model is downloaded. |
+| `workers.asr.uploadMaxBytes` | `25000000` | `MEDIA_UPLOAD_MAX_BYTES` on every pod; at most `DOCLING_INPUT_BUDGET_BYTES`, or the render fails. |
+| `workers.asr.concurrency` | `1` | `ASR_CONCURRENCY` on the ASR workers. |
+| `workers.asr.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. |
+| `workers.asr.terminationGracePeriodSeconds` | `60` | See Response times. |
+| `workers.asr.resources` | 2 / 3Gi to 4 / 6Gi | Sized for one transcription with `large-v3-turbo`. |
+| `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`). |
+| `workers.asr.nodeSelector` | `kubernetes.io/arch: amd64` | The image is published for linux/amd64. |
+| `workers.asr.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `asr` queue or on CPU. |
+| `workers.asr.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.asr.models.persistence.*` | `4Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`ASR_MODELS_PATH`), read-only in the worker. |
+| `workers.asr.external.baseUrl`, `.model` | unset, `whisper-1` | `ASR_EXTERNAL_BASE_URL` (https only) and `ASR_EXTERNAL_MODEL` on the ASR workers. |
+| `workers.asr.external.apiKey`, `.existingSecret` | unset | `ASR_EXTERNAL_API_KEY` from a Secret, on the API pods and the ASR workers (see Secrets). |
+| `workers.asr.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-asr`, chart version | The ASR image. |
+
+The length limits of decision D6 (`MEDIA_MAX_DURATION_SECONDS` 7200, `ASR_TIMEOUT_SECONDS` 10800,
+`ASR_INPUT_TTL_SECONDS` 28800) are the service's defaults and are set in the chart's `config`; the
+render fails when the input TTL does not outlast the lease (2 × `ASR_TIMEOUT_SECONDS` + 10), as the
+service would at start-up.
 
 The request fields `transcribe` (default `false`) and `languages` (preferred subtitle and
 transcription languages, ISO 639 codes such as `de` or `en-GB`, at most 5; default: the video's

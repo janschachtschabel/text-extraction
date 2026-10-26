@@ -270,6 +270,13 @@ workers:
       # huggingface.co. false: for an air-gapped, pre-filled volume (`persistence.existingClaim`,
       # required then). The worker mounts the volume read-only either way.
       download: true
+      # When the download runs: `init` (an init container of every worker pod; works with
+      # ReadWriteOnce) or `job` (a Helm post-install/post-upgrade hook Job fills the volume once
+      # per release, and worker pods only check the marker; needs ReadWriteMany or one node). With
+      # `job`, a worker pod that starts before the Job finished exits with code 1 and restarts
+      # until the models are there; `helm install --wait` waits for the workers before it runs
+      # the hook, so install the first release without --wait or use `init`.
+      downloadMode: init
       persistence:
         # The models take about 335 MiB; a changed manifest stages a full copy beside the old
         # one (about 670 MiB at once). 5Gi leaves room for later models; 1Gi suffices today.
@@ -282,6 +289,115 @@ workers:
         storageClass: ""
         # Use this PVC instead of creating one.
         existingClaim: ""
+
+  # ASR workers (transcription, ruling M12: off by default): they claim the items of the pool
+  # `asr` (`transcribe: true` on media without subtitles, uploaded audio and video) and transcribe
+  # them with faster-whisper on the CPU, or on an external OpenAI-compatible endpoint
+  # (`backend: openai`). Image `workers.asr.image` (PyAV built against an LGPL FFmpeg, no
+  # `ffmpeg` program, no models), internal port 9090 only, no ingress, same ConfigMap and Secrets
+  # as the API pods. The chart renders ASR_ENABLED from `enabled`, ASR_BACKEND from `backend` and
+  # MEDIA_UPLOAD_MAX_BYTES from `uploadMaxBytes` into every pod (API, extract, browser, Docling
+  # and ASR workers): config.* entries for them are ignored. Needs JOBS_ENABLED=true on the API
+  # pods (see `jobs.enabled`). Nothing waits for a transcription (it is always a job), so the API
+  # pods' grace period does not change.
+  # The length limits of decision D6 are service defaults, set in `config` to change them:
+  # MEDIA_MAX_DURATION_SECONDS (7200), ASR_TIMEOUT_SECONDS (10800, one whole item) and
+  # ASR_INPUT_TTL_SECONDS (28800). The render fails when the input TTL does not outlast the lease
+  # (2 x ASR_TIMEOUT_SECONDS + 10), as the service would at start-up.
+  asr:
+    enabled: false
+    # `local` (faster-whisper with the model from the volume) or `openai` (the endpoint in
+    # `external`; no models volume, no download).
+    backend: local
+    # Whisper model of the local backend (ASR_MODEL): `large-v3-turbo` (about 1.6 GB, better
+    # German) or `small` (about 0.5 GB, about twice as fast on CPU). Only this one is downloaded.
+    model: large-v3-turbo
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-asr
+      # Defaults to image.tag, then the chart appVersion. The pull policy is image.pullPolicy.
+      tag: ""
+    replicaCount: 1
+    # Transcriptions one pod runs at once, each in a child process of its own (ASR_CONCURRENCY).
+    # Rendered into the pod env: a config.ASR_CONCURRENCY entry is ignored. The resources and the
+    # scratch volume below are sized for one.
+    concurrency: 1
+    # Largest uploaded audio or video file (MEDIA_UPLOAD_MAX_BYTES, decision D3), in bytes. The
+    # bytes travel through Valkey and count in DOCLING_INPUT_BUDGET_BYTES (200000000), which it
+    # must not exceed (the render fails). Larger media: send the URL.
+    uploadMaxBytes: 25000000
+    # No drain wait. On SIGTERM the worker stops claiming and gives transcriptions in flight 30 s,
+    # then kills its children; their leases expire and the items run again elsewhere (a
+    # transcription of an hour is not waited for). The render fails below 30 + a 10 s margin.
+    terminationGracePeriodSeconds: 60
+    # Placeholder values until package 11 measures real consumption: one child with
+    # `large-v3-turbo` (about 2 GB resident, ASR_MEMORY_LIMIT_MB 4096 of address space) and
+    # ASR_THREADS (4) threads. Raise both with `concurrency`.
+    resources:
+      requests:
+        cpu: "2"
+        memory: 3Gi
+      limits:
+        cpu: "4"
+        memory: 6Gi
+    # Downloaded media (ASR_SCRATCH_PATH=/scratch): an emptyDir per pod, deleted after each item.
+    # concurrency x (MEDIA_MAX_BYTES (500000000) + 5 MB) must fit, or the render fails.
+    scratch:
+      sizeLimit: 2Gi
+    # Merged over the global `nodeSelector` for these pods; a key set here wins. The ASR image is
+    # published for linux/amd64.
+    nodeSelector:
+      kubernetes.io/arch: amd64
+    # As for the extract workers. KEDA reads the pool `asr` gauges that API pods export with
+    # JOBS_ENABLED=true and ASR_ENABLED=true. With no replica, transcriptions wait in the queue
+    # (up to ASR_INPUT_TTL_SECONDS for an upload's bytes).
+    autoscaling:
+      keda:
+        enabled: false
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        # Pending queue items per worker replica (a transcription takes up to hours).
+        threshold: 2
+        minReplicaCount: 1
+        maxReplicaCount: 4
+      hpa:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 4
+        targetCPUUtilizationPercentage: 70
+    # The Whisper model (local backend only) lives on a volume mounted at /models
+    # (ASR_MODELS_PATH, set by the chart), read-only in the workers. The image holds none.
+    models:
+      # Downloads `model` from huggingface.co (pinned commits, SHA-256 checked) with the volume
+      # mounted writable; does nothing when it is in place. false: for an air-gapped, pre-filled
+      # volume (`persistence.existingClaim`, required then).
+      download: true
+      # `init` or `job`, as for the Docling workers.
+      downloadMode: init
+      persistence:
+        # `large-v3-turbo` takes about 1.6 GiB; an update stages a full copy beside it.
+        size: 4Gi
+        # ReadWriteMany lets replicas on any node share one volume. With ReadWriteOnce keep the
+        # replicas on one node (or at 1). The volume must be writable by uid/gid 10001 (fsGroup).
+        accessModes:
+          - ReadWriteMany
+        # The cluster default when empty.
+        storageClass: ""
+        # Use this PVC instead of creating one.
+        existingClaim: ""
+    # The external OpenAI-compatible endpoint (`backend: openai`), called directly by the ASR
+    # workers (egress stays open; see networkPolicy).
+    external:
+      # Base URL (https only) of `<baseUrl>/audio/transcriptions` (ASR_EXTERNAL_BASE_URL).
+      # Required with `backend: openai`.
+      baseUrl: ""
+      # ASR_EXTERNAL_MODEL.
+      model: whisper-1
+      # ASR_EXTERNAL_API_KEY, optional: without it callers must send their own key
+      # (X-ASR-Api-Key). Set `apiKey` for a chart-managed Secret, or point `existingSecret` at your
+      # own Secret. The API pods get it too (only to answer 400 when there is no key at all).
+      apiKey: ""
+      existingSecret: ""
+      # Key inside the existing Secret (the chart-managed one uses it as well).
+      existingSecretKey: ASR_EXTERNAL_API_KEY
 
 service:
   type: ClusterIP
@@ -369,7 +485,7 @@ externalValkey:
 
 metrics:
   # Needs the Prometheus Operator CRDs. Scrapes the internal Services of the API pods and of the
-  # workers (extract, browser, docling), port `internal`, path /metrics.
+  # workers (extract, browser, docling, asr), port `internal`, path /metrics.
   serviceMonitor:
     enabled: false
     interval: 30s
@@ -389,17 +505,20 @@ alerts:
   queueBacklogItems: 1000
   # The same for the pool docling, whose items take minutes each.
   doclingQueueBacklogItems: 100
+  # The same for the pool asr, whose items take up to hours.
+  asrQueueBacklogItems: 50
   # TextExtractionValkeyMemoryHigh fires while Valkey's used memory stays above this share of
   # its maxmemory for 10 minutes. Keep it at or below config.VALKEY_MEMORY_GUARD_RATIO (0.8),
   # from which the API refuses new batches.
   valkeyMemoryRatio: 0.8
 
 # Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
-# limited: the API must reach arbitrary sites, so egress stays open.
-#   Valkey   accepts 6379 from the API and worker pods (extract, browser, docling) of this release
-#            only.
+# limited: the API must reach arbitrary sites, so egress stays open (it also covers the model
+# downloads from huggingface.co and the external ASR endpoint).
+#   Valkey   accepts 6379 from the API and worker pods (extract, browser, docling, asr) of this
+#            release only.
 #   API      accepts 8080 from anywhere and 9090 from `metricsFrom`.
-#   Workers  (extract, browser, docling) accept 9090 from `metricsFrom` only.
+#   Workers  (extract, browser, docling, asr) accept 9090 from `metricsFrom` only.
 # Probes of the kubelet run from the node and are normally allowed by the CNI.
 networkPolicy:
   enabled: false

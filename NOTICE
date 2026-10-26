@@ -31,6 +31,13 @@ Whisper models (openai/whisper, MIT License, Copyright (c) 2022 OpenAI):
 - faster-whisper "large-v3-turbo" (mobiuslabsgmbh/faster-whisper-large-v3-turbo, revision main
   at commit 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf), MIT License.
 
+The ASR worker image (Dockerfile target `asr`) contains the shared libraries of FFmpeg n9.0.2
+(ffmpeg.org, tag n9.0.2-17-g2a571b6068), licensed under the GNU Lesser General Public License,
+version 3 or later, as built by BtbN/FFmpeg-Builds (release autobuild-2026-09-30-13-08, variant
+lgpl-shared; the build scripts and the configuration are at github.com/BtbN/FFmpeg-Builds). The
+licence text is in the image at /opt/ffmpeg/LICENSE.txt. PyAV is built against these libraries and
+links them dynamically; no FFmpeg program is included.
+
 src/text_extraction/media/asr_check.ogg and tests/media/corpus/speech_de.ogg are read from
 Franz Kafka's "Die Verwandlung" (LibriVox recording, public domain); see
 tests/media/corpus/SOURCES.md.

@@ -1,0 +1,22 @@
+{{- $asr := .Values.workers.asr }}
+{{- if and $asr.enabled (eq (toString $asr.backend) "local") (not $asr.models.persistence.existingClaim) }}
+# The Whisper model of the ASR workers (ASR_MODELS_PATH=/models, only ASR_MODEL is downloaded):
+# filled by their init container or the models Job, read-only in the workers. ReadWriteMany by
+# default, so replicas on any node share it. The external backend needs no models and no volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "text-extraction.asrModelsClaim" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: asr-models
+spec:
+  accessModes:
+    {{- toYaml $asr.models.persistence.accessModes | nindent 4 }}
+  {{- with $asr.models.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $asr.models.persistence.size }}
+{{- end }}
