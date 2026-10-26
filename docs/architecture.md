@@ -954,6 +954,15 @@ OpenAI-compatible endpoint): always a job, answered 202.
   | `arte` | `arte.tv/<lang>/videos/...` | `artetv` |
   | `3sat` | `3sat.de/...html` | `3sat` |
 
+  A ZDF or 3sat `.html` URL may be a news article without a video: when the probe finds none
+  there (no track, no title, no description; the extractor failed, said the video is
+  unavailable, or said nothing) the request goes on as a page, in the same request and under the
+  page's turn, compliance and cache rules, so it answers what the page path answers (`media`
+  null or the page's embeds; the probe's fetch counts in `attempts`); a fresh page entry of such
+  a URL answers without a probe. A refusal (`blocked`, `rate_limited`, `blocked_url`) or a
+  failure that may pass is answered as for any video. YouTube, Vimeo, ARD, arte and ZDF's
+  `/video/` URLs name a video and have no such fallback.
+
   The extractor is yt-dlp's only `allowed_extractors` entry, so the generic extractor (which
   follows anything) never runs; a unit test pins that each name matches exactly one extractor of
   the pinned yt-dlp. The URL is normalised to its canonical form (`https://www.youtube.com/watch?v=<id>`;
@@ -977,7 +986,9 @@ OpenAI-compatible endpoint): always a job, answered 202.
   (every other automatic language is a machine translation); arte's `-forced` tracks (only the
   foreign-language passages) and `und` never count. When both libraries fail on YouTube without
   a refusal and give no metadata, the watch page's `ytInitialPlayerResponse` (fast fetcher, same
-  turn) gives the details.
+  turn) gives the details. Of the chosen track's formats (best first: VTT, json3, TTML, SRT), the
+  first whose body has a cue with text is taken; a format that fails, is too large or has no
+  text gives way to the next, but a refusal of the egress proxy ends the track.
 - **M3 and M4, children and network** (`media/pool.py`, `media/child.py`). youtube-transcript-api
   and yt-dlp run in `DocumentPool` children (`MEDIA_CONCURRENCY` 2, `MEDIA_MEMORY_LIMIT_MB` 1024)
   in API pods, extract workers and the browser worker (not the Docling worker), started before
@@ -1048,8 +1059,16 @@ OpenAI-compatible endpoint): always a job, answered 202.
   transcribe it."). Batches: the extract worker moves an item that needs ASR to pool `asr`
   (input, draft, queue, completion), as F13. The result cache key of a platform video gains
   `media` (so results cached before the deploy are not served) and `languages`; a cached
-  `metadata_only` answer is no hit for `transcribe: true`, except one with `no_speech` (final).
-  The fingerprint variant of a platform or file result is `<format>|media`.
+  `metadata_only` answer is no hit for `transcribe: true`, except a final one: with `no_speech`,
+  or with `asr_unavailable` (stored only after a transcription that failed for good). With
+  `transcribe: true`, a video without a usable track that the platform says is longer than
+  `MEDIA_MAX_DURATION_SECONDS` answers `media_too_long` at once with its details (final, stored),
+  without a job; a media file's duration is known only after its download, so the ASR worker
+  checks it. The fingerprint variant of a platform or file result is `<format>|media`, so the
+  details-only draft and a later transcript of a video share it and have different
+  fingerprints (the first transcript reports `changed: true`); a transcribed media file's result
+  is cached under the plain URL's key (`transcribe` is not part of it) and served to later
+  requests without `transcribe` too.
 - **M10, the ASR worker** (`asr_worker.py`, `media/asr_child.py`, `media/asr_windows.py`).
   `text-extraction-asr-worker`, pool `asr`, internal port only: the package-3 `Worker` with an
   `AsrRunner`, `ASR_CONCURRENCY` (1) slots, each with a child (`ASR_MEMORY_LIMIT_MB` 4096) that
@@ -1194,8 +1213,8 @@ the media set without gating it (D1).
   run; package 11 sets the final resources.
 - **Cached final failures.** A transcription that failed for good (`media_too_long`, a refused
   key, the item's budget) leaves the video's details cached; a later request without
-  `transcribe` is served "could not be transcribed", without the failure's own code, and a later
-  `transcribe: true` tries again.
+  `transcribe` is served "could not be transcribed", without the failure's own code, and so is a
+  later `transcribe: true`, which does not try again until the entry expires.
 - **Model switch.** Switching `ASR_MODEL` downloads the new model beside the old one, which stays
   on the volume until removed by hand.
 - **Batch keys.** A batch's `X-ASR-Api-Key` lives as long as the job (`JOB_TTL_SECONDS`); a batch

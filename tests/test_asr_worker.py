@@ -197,7 +197,15 @@ class Asr:
     """An ASR worker next to a harness: its runner on the harness's store, queue ``asr`` and
     pipeline, with ``children`` as its pool."""
 
-    def __init__(self, harness: Harness, children: FakeChildren | None = None) -> None:
+    def __init__(
+        self,
+        harness: Harness,
+        children: FakeChildren | None = None,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
+        """``settings`` replace the harness's for the runner only (the extraction that
+        dispatched the item had the harness's)."""
         self.harness = harness
         self.children = children or FakeChildren()
         self.egress = FakeEgress()
@@ -205,7 +213,7 @@ class Asr:
         self.runner = AsrRunner(
             harness.pipeline,
             harness.store,
-            harness.settings,
+            settings or harness.settings,
             self.children,
             self.egress,
             self.gate,
@@ -230,6 +238,11 @@ class Asr:
     def scratch_entries(self) -> list[Path]:
         root = self.harness.settings.asr_scratch_path
         return sorted(root.iterdir()) if root.exists() else []
+
+
+def lowered_limit(harness: Harness) -> Settings:
+    """The harness's settings with ``MEDIA_MAX_DURATION_SECONDS`` at 120 s."""
+    return harness.settings.model_copy(update={"media_max_duration_seconds": 120})
 
 
 async def moved(harness: Harness, urls: list[str] | None = None) -> str:
@@ -371,10 +384,11 @@ async def test_too_long_before_transcription(tmp_path: Path) -> None:
 
 @scenario
 async def test_a_known_duration_over_the_limit_downloads_nothing(tmp_path: Path) -> None:
-    """The platform said how long the video is (the draft's probe): over the limit it is not even
-    downloaded."""
-    harness = asr_harness(**settings_for(tmp_path, media_max_duration_seconds=120))
-    asr = Asr(harness)
+    """The platform said how long the video is (the draft's probe): over the worker's limit it is
+    not even downloaded. (The extraction answers ``media_too_long`` itself over its own limit;
+    the worker's may be lower, after a change of ``MEDIA_MAX_DURATION_SECONDS``.)"""
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness, settings=lowered_limit(harness))
     job_id = await moved(harness)  # the probe says 212 s
 
     await asr.process_next()
@@ -404,8 +418,8 @@ async def test_a_cached_final_transcription_failure_asks_for_no_transcription_ag
     the item that tried, and without the hint to send ``transcribe: true``, which was sent."""
     from text_extraction.extract_models import ExtractRequest
 
-    harness = asr_harness(**settings_for(tmp_path, media_max_duration_seconds=120))
-    asr = Asr(harness)
+    harness = asr_harness(**settings_for(tmp_path))
+    asr = Asr(harness, settings=lowered_limit(harness))
     job_id = await moved(harness)  # the probe says 212 s: media_too_long, not retryable
     await asr.process_next()
     fresh = (await only_item(harness, job_id)).result

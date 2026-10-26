@@ -183,7 +183,6 @@ from text_extraction.pipeline_documents import (
     without_ocr,
 )
 from text_extraction.pipeline_media import (
-    NO_SPEECH_WARNING,
     PLAYLIST_MESSAGE,
     TRANSCRIPTION_DISABLED_MESSAGE,
     TRANSCRIPTION_NOT_HANDED_MESSAGE,
@@ -197,6 +196,7 @@ from text_extraction.pipeline_media import (
     no_speech,
     transcribed,
     transcribed_content,
+    transcription_final,
     without_asr,
 )
 from text_extraction.pipeline_render import (
@@ -2268,12 +2268,12 @@ def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:
 
 def _metadata_only(result: ExtractResult) -> bool:
     """Whether a stored result is a platform video's details without a transcript that a
-    transcription may still give: not when the speech recognition ran and heard no speech
-    (``no_speech``), which is final."""
+    transcription may still give: not when the speech recognition heard no speech or failed for
+    good (``pipeline_media.transcription_final``)."""
     return (
         result.media is not None
         and result.media.transcript_source == "metadata_only"
-        and NO_SPEECH_WARNING not in result.warnings
+        and not transcription_final(result)
     )
 
 

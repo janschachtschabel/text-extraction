@@ -180,7 +180,7 @@ from text_extraction.media.types import MediaKind
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
-from text_extraction.pipeline_media import MediaInputMeta
+from text_extraction.pipeline_media import MediaInputMeta, media_too_long_message
 from text_extraction.scheduler import QueueItem
 from text_extraction.server import EXIT_CONFIG_ERROR, _Server, _server, configured_settings
 from text_extraction.settings import Settings
@@ -852,12 +852,7 @@ class AsrRunner:
         return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _FAILED_MESSAGE, False)
 
     def _too_long(self, duration: float | None) -> _Failure:
-        limit = self._settings.media_max_duration_seconds
-        length = f"is {round(duration)} s long, " if duration is not None else "is "
-        message = (
-            f"The media {length}longer than the {limit} s that are transcribed "
-            "(MEDIA_MAX_DURATION_SECONDS)."
-        )
+        message = media_too_long_message(duration, self._settings.media_max_duration_seconds)
         return _Failure(ErrorCode.MEDIA_TOO_LONG, message, False)
 
     def _too_large(self) -> _Failure:

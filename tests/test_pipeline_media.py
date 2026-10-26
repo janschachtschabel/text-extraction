@@ -33,7 +33,7 @@ from tests.fakes import (
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.documents.pool import ConversionTimeout
-from text_extraction.envelope import Envelope, ErrorCode
+from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.escalation import needs_browser
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher
@@ -1390,3 +1390,93 @@ def test_vimeo_without_a_video_never_falls_back_to_the_page() -> None:
 
     assert envelope.status == "failed"
     assert page_files(harness.fetched_urls()) == []
+
+
+# --- transcriptions that cannot be, and cached ASR failures --------------------------------
+
+
+def capture_handoff() -> tuple[list[AsrNeeded], Handoff]:
+    handed: list[AsrNeeded] = []
+
+    async def handoff(
+        needed: AsrNeeded, stand_in: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        return stand_in
+
+    return handed, handoff
+
+
+def test_a_video_over_the_duration_limit_answers_media_too_long_without_a_job() -> None:
+    """With ``transcribe: true``, no usable track and a duration over
+    ``MEDIA_MAX_DURATION_SECONDS``, the answer is ``media_too_long`` with the video's details at
+    once; nothing is handed to the speech recognition."""
+    handed, handoff = capture_handoff()
+    harness = Harness(media=probe(track=None, duration=7300.0), asr_enabled=True)
+
+    async def scenario() -> list[Envelope[ExtractResult]]:
+        first = await harness.arun(handoff, transcribe=True)
+        again = await harness.arun(handoff, transcribe=True)
+        plain = await harness.arun()
+        return [first, again, plain]
+
+    first, again, plain = asyncio.run(scenario())
+
+    assert handed == []
+    assert first.status == "partial"
+    assert first.error is not None
+    assert first.error.code == ErrorCode.MEDIA_TOO_LONG
+    assert first.error.retryable is False
+    assert "7300 s" in first.error.message
+    assert "How plants eat light." in (data_of(first).content or "")
+    # Final: the next transcribe request is served from the cache, as is a plain one.
+    assert harness.probes() == 1
+    for later in (again, plain):
+        assert data_of(later).cache == "hit"
+        assert later.error is not None
+        assert "could not be transcribed" in later.error.message
+
+
+def test_a_video_within_the_duration_limit_is_still_handed_on() -> None:
+    handed, handoff = capture_handoff()
+    harness = Harness(media=probe(track=None, duration=7200.0), asr_enabled=True)
+
+    harness.run(handoff, transcribe=True)
+
+    assert len(handed) == 1
+
+
+@pytest.mark.parametrize(("retryable", "probes"), [(False, 1), (True, 2)])
+def test_a_cached_draft_of_a_failed_transcription_is_final_only_when_not_retryable(
+    retryable: bool, probes: int
+) -> None:
+    """An ASR failure for good stores the details; a later ``transcribe: true`` request is
+    served from them instead of probing and downloading again. A failure that may pass is not
+    stored, so the next request tries again."""
+    handed, handoff = capture_handoff()
+    harness = Harness(media=probe(track=None), asr_enabled=True)
+    failed = Envelope[ExtractResult](
+        status="failed",
+        error=ErrorInfo(
+            code=ErrorCode.TRANSCRIPTION_FAILED, message="It failed.", retryable=retryable
+        ),
+    )
+
+    async def scenario() -> Envelope[ExtractResult]:
+        await harness.arun(handoff, transcribe=True)
+        (needed,) = handed
+        stored = await harness.pipeline.transcribed_result(
+            ExtractRequest(url=YT, transcribe=True), USER, needed.input, needed.draft, failed
+        )
+        assert stored.error is not None
+        assert stored.error.code == ErrorCode.TRANSCRIPTION_FAILED
+        return await harness.arun(handoff, transcribe=True)
+
+    later = asyncio.run(scenario())
+
+    assert harness.probes() == probes
+    if not retryable:
+        assert data_of(later).cache == "hit"
+        assert later.error is not None
+        assert "could not be transcribed" in later.error.message
+        assert len(handed) == 1

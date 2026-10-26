@@ -39,7 +39,9 @@ rest:
      after a refusal, else with the failure's own code (``internal_error``, ``dns_error``,
      ``connection_error``, ``too_large`` or ``no_transcript_available``). With
      ``transcribe: true`` this answer is the draft of an ``AsrNeeded`` for the caller to hand
-     on.
+     on, unless the platform says the video is longer than ``MEDIA_MAX_DURATION_SECONDS``: then
+     it is answered at once with ``media_too_long`` (``asr_failed``, final, so stored), as the
+     ASR worker would answer it.
 
   The description, uploader, date, keywords and licence go to ``metadata`` (a licence with
   source ``platform`` and confidence ``high``; YouTube's "Creative Commons Attribution license"
@@ -149,9 +151,11 @@ __all__ = [
     "asr_available",
     "asr_failed",
     "cached_details_only",
+    "media_too_long_message",
     "no_speech",
     "transcribed",
     "transcribed_content",
+    "transcription_final",
     "without_asr",
 ]
 
@@ -464,6 +468,26 @@ def _details_only_error(message: str, settings: Settings, *, retryable: bool) ->
     return ErrorInfo(code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=message, retryable=retryable)
 
 
+def transcription_final(result: ExtractResult) -> bool:
+    """Whether a stored platform video's details say that a transcription will not do better:
+    the speech recognition heard no speech (``no_speech``), or it failed for good
+    (``asr_unavailable``). A stored details-only result carries ``asr_unavailable`` only after
+    such a failure (``asr_failed`` keeps the fingerprint only when the error is not retryable,
+    ``media_too_long`` for example), since every answer without a transcription that may still
+    come drops its fingerprint and is never stored (``without_asr``, a retryable ``asr_failed``,
+    an expired input). So the marker of a stored result is that warning, as ``no_speech`` is."""
+    return NO_SPEECH_WARNING in result.warnings or ASR_UNAVAILABLE_WARNING in result.warnings
+
+
+def media_too_long_message(duration: float | None, limit: int) -> str:
+    """The message of ``media_too_long`` for media ``duration`` seconds long."""
+    length = f"is {round(duration)} s long, " if duration is not None else "is "
+    return (
+        f"The media {length}longer than the {limit} s that are transcribed "
+        "(MEDIA_MAX_DURATION_SECONDS)."
+    )
+
+
 def cached_details_only(
     result: ExtractResult, settings: Settings
 ) -> Envelope[ExtractResult] | None:
@@ -483,7 +507,7 @@ def cached_details_only(
         return None
     if NO_SPEECH_WARNING in result.warnings:
         error = _NO_SPEECH_DETAILS_ERROR
-    elif ASR_UNAVAILABLE_WARNING in result.warnings:
+    elif transcription_final(result):  # failed for good
         error = _NOT_TRANSCRIBED_DETAILS_ERROR
         warnings = [w for w in result.warnings if w != ASR_UNAVAILABLE_WARNING]
         result = result.model_copy(update={"warnings": warnings})
@@ -697,21 +721,26 @@ class MediaSteps:
         draft = await self._metadata_only(run, target, probe)
         if not run.req.transcribe:
             return draft
-        return AsrNeeded(
-            draft=draft,
-            input=MediaInputMeta(
-                source="platform",
-                platform=target.platform,
-                url=target.canonical_url,
-                extractor=target.extractor,
-                kind=None,
-                file_name=None,
-                duration=probe.duration,
-                languages=list(run.req.languages),
-                compliance=run.report,
-                attempts=run.attempts,
-            ),
+        meta = MediaInputMeta(
+            source="platform",
+            platform=target.platform,
+            url=target.canonical_url,
+            extractor=target.extractor,
+            kind=None,
+            file_name=None,
+            duration=probe.duration,
+            languages=list(run.req.languages),
+            compliance=run.report,
+            attempts=run.attempts,
         )
+        limit = self._settings.media_max_duration_seconds
+        if probe.duration is not None and probe.duration > limit:
+            # Known too long: answered now as the ASR worker would, without a job. Final, so
+            # the details keep their fingerprint and the next request is a hit.
+            message = media_too_long_message(probe.duration, limit)
+            too_long = ErrorInfo(code=ErrorCode.MEDIA_TOO_LONG, message=message, retryable=False)
+            return asr_failed(run, meta, draft, too_long)
+        return AsrNeeded(draft=draft, input=meta)
 
     async def _transcript(
         self, run: MediaRun, target: MediaTarget, probe: MediaProbe, track: FetchedTrack
