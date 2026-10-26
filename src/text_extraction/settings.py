@@ -239,7 +239,7 @@ class Settings(BaseSettings):
     asr_concurrency: int = Field(default=1, ge=1)  # transcriptions at once per ASR worker
     asr_memory_limit_mb: int = Field(default=4096, ge=256)  # address space of one child
     asr_timeout_seconds: int = Field(default=10_800, ge=60, le=14_400)  # one whole item (D6)
-    asr_input_ttl_seconds: int = Field(default=28_800, ge=600)  # an uploaded file's bytes (D6)
+    asr_input_ttl_seconds: int = Field(default=28_800, ge=600)  # an ASR item's input (D6)
     asr_max_open_per_client: int = Field(default=3, ge=1)  # unfinished ASR jobs per key
     asr_scratch_path: Path = Path("/tmp/asr")  # noqa: S108 - an emptyDir for downloaded media
     # External backend (``ASR_BACKEND=openai``): an OpenAI-compatible transcription endpoint.

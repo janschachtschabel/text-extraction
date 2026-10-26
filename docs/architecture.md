@@ -15,6 +15,8 @@ Clients / AI agents ──(8080: REST /v1, /mcp, /ui)──▶ API pods (FastAPI
 Prometheus ──(9090: /health /ready /metrics)──────▶ API pods
 API pods ──fetch (SSRF guard)──▶ target websites and files
 API pods, workers ──▶ document children (MarkItDown: PDF text layers, Office, EPUB, CSV)
+API pods, workers ──▶ media children (youtube-transcript-api, yt-dlp: subtitles, metadata)
+                      ──egress proxy (SSRF guard)──▶ video platforms
 API pods ──▶ LLM endpoint (OpenAI-compatible, default model gpt-6-luna)
 API pods ──jobs──▶ Valkey (queues, results, cache, rate limits, fingerprints)
 Valkey ◀──▶ extract-worker  (fast pipeline: batch items from the fair queue)
@@ -23,22 +25,27 @@ Valkey ◀──▶ browser-worker  (Chromium behind an egress proxy: auto fallb
 Valkey ◀──▶ docling-worker  (Docling and Tesseract: scans, broken text layers, images,
                              OpenDocument files, PDFs with `ocr: always`)
 Valkey ◀──▶ nlp-worker      (Presidio)
-Valkey ◀──▶ asr-worker      (faster-whisper transcription)
-workers ──▶ model volume (PVC, read-only: spaCy, Docling and Tesseract, Whisper models)
+Valkey ◀──▶ asr-worker      (faster-whisper on CPU, or an external OpenAI-compatible
+                             endpoint; downloads media through its egress proxy)
+workers ──▶ model volumes (one PVC per worker type, read-only: Docling and Tesseract,
+            Whisper models; spaCy for the nlp-worker)
 optional: S3-compatible store for screenshots and large results
 ```
 
 Images: `api` (slim), `browser-worker` (image `text-extraction-browser`: Chromium headless
 shell, Google Chrome stable, Xvfb), `docling-worker` (image `text-extraction-docling`: Docling,
-CPU torch, the Tesseract CLI, no models), `nlp-worker`, `asr-worker`. Each worker is a
-Helm toggle and scales on queue length (KEDA or HPA). The API image holds no browser and no
-Playwright or Patchright, and no Docling, torch or Tesseract; the details are in "Browser
-worker" and "Documents and OCR" below. Every image runs tini as PID 1, which forwards signals
+CPU torch, the Tesseract CLI, no models), `nlp-worker`, `asr-worker` (image
+`text-extraction-asr`: faster-whisper, CTranslate2, PyAV built against an LGPL FFmpeg, Deno, no
+models). Each worker is a Helm toggle and scales on queue length (KEDA or HPA). The API image
+holds no browser and no Playwright or Patchright, no Docling, torch or Tesseract, and no
+faster-whisper, CTranslate2, PyAV or Deno; the details are in "Browser worker", "Documents and
+OCR" and "Audio and video" below. Every image runs tini as PID 1, which forwards signals
 and reaps orphaned processes (a tesseract whose conversion child was killed).
 
 MarkItDown runs where the bytes are (package 5, D1): in child processes of the API pods, the
-extract workers and the browser worker, never in their parent processes. The nlp-worker keeps
-Presidio (package 7).
+extract workers and the browser worker, never in their parent processes. So do
+youtube-transcript-api and yt-dlp for subtitles (package 6), behind the pod's egress proxy. The
+nlp-worker keeps Presidio (package 7).
 
 ## Extraction pipeline
 
@@ -83,7 +90,12 @@ Presidio (package 7).
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
    Tesseract OCR, in the Docling worker. A document never escalates to the browser. See
-   "Documents and OCR". Vision LLM opt-in (package 8). Video/audio → see below.
+   "Documents and OCR". Vision LLM opt-in (package 8). Video and audio (package 6): a URL of a
+   supported platform (YouTube, Vimeo, ARD, ZDF, arte, 3sat) is recognised before step 3,
+   passes step 2 under its canonical URL and is not fetched: the media children read its
+   subtitles and details in the host's turn. A body that sniffs as audio or video is a media
+   file (transcribed with `transcribe: true`), and an HTML page's `<track>` text is appended
+   after its conversion. Speech recognition is a job of the ASR worker. See "Audio and video".
 6. **Post-process (optional):** DOM metadata, PII, links, structured output, chunking,
    screenshot.
 7. **Fingerprint and classify:** see change detection; return the result envelope.
@@ -95,8 +107,10 @@ Fields: `status` (`success|partial|failed`), `error.code`, `error.message`,
 `final_url`, `content_type`, `language`, `word_count`, `quality`, `timings` (`render_ms` is the
 time in the browser, 0 in fast mode), `compliance`, `metadata`, `fingerprint`, `warnings`, for
 browser results `unblocked` (unblock mode rendered the page) and `screenshot` (the artifact
-reference), and for documents `document` (`kind`, `converter`, `pages`, `pages_converted`,
-`ocr`, `file_name`; F7). For a browser result `attempts` counts the main-frame document
+reference), for documents `document` (`kind`, `converter`, `pages`, `pages_converted`,
+`ocr`, `file_name`; F7), and for audio and video `media` (`platform`, `transcript_source`,
+`transcript_language`, `available_languages`, `duration_seconds`, `uploader`, `asr_model`,
+`embeds`; M6). For a browser result `attempts` counts the main-frame document
 responses of the render, redirect hops included.
 
 `warnings` names what did not go as asked while the result still answers (the HTML converter may
@@ -112,7 +126,8 @@ add a note of its own):
   `document_fetched_directly` (a render ended on a file, which was fetched and converted in fast
   mode, F18).
 - Media: `subtitles_blocked` (the platform refused the subtitles; the metadata answers),
-  `asr_unavailable` (no transcription in time or the ASR failed; the metadata answers),
+  `subtitles_failed` (the subtitles could not be fetched or read; the metadata answers),
+  `asr_unavailable` (the transcription could not be queued or failed; the metadata answers),
   `no_speech` (the speech recognition heard no speech; final, also for the cache),
   `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed` (every `<track>` of
   a page failed).
@@ -158,13 +173,13 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
-| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1) |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9) |
 | `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
 | `POST /v1/chunk` | Text/Markdown/URL → chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`) | sync |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
-| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr` as for `/v1/extract`), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
+| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `transcribe`, `languages` as for `/v1/extract`; header `X-ASR-Api-Key` as for it), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `/mcp` | MCP tools (optional, `MCP_ENABLED`) | streamable HTTP |
@@ -207,10 +222,15 @@ optional rate limit.
 - **DOM metadata:** extruct (JSON-LD, microdata, RDFa, OpenGraph) + Trafilatura. License
   normalized (e.g. `CC-BY-SA-4.0`) with source and confidence; author, dates, canonical,
   language, LRMI educational fields, images with alt text.
-- **Audio/video:** tier 1 subtitles (youtube-transcript-api, yt-dlp, HTML5 `<track>`),
-  tier 2 metadata, tier 3 ASR (faster-whisper local, external OpenAI-compatible
-  transcription switchable), opt-in `transcribe: true`, always a job.
-  `transcript_source`: `manual_subtitles|auto_subtitles|asr|metadata_only`.
+- **Audio/video:** tier 1 subtitles (youtube-transcript-api and yt-dlp for YouTube, Vimeo and
+  the Mediatheken of ARD, ZDF, arte and 3sat; HTML5 `<track>` on any page), tier 2 metadata
+  (`metadata_only`: title, description, licence; also when YouTube refuses the service, with
+  `subtitles_blocked`, D1), tier 3 speech recognition (faster-whisper on CPU in the ASR worker,
+  or an external OpenAI-compatible endpoint, `ASR_BACKEND`) for `transcribe: true` and every
+  uploaded audio or video file: always a job (202), never waited for. Players embedded in a page
+  are listed in `data.media.embeds`, not transcribed (D4). `transcript_source`:
+  `manual_subtitles|auto_subtitles|asr|metadata_only`. Off by default: ASR (`ASR_ENABLED`); on:
+  subtitles (`MEDIA_ENABLED`). Details in "Audio and video".
 - **Change detection:** before extraction ETag/Last-Modified + SHA-256 of raw bytes
   (unchanged → stored result). After extraction the text is normalized (no Markdown
   syntax, case, whitespace) and gets SHA-256 + 128-permutation MinHash.
@@ -867,13 +887,339 @@ through the Docling path, and the two-page scan yields its text with a word reca
   of inputs (package 11), legacy binary `.doc` and `.ppt`, RTF, e-mail files and archives
   (`unsupported_content_type`).
 
+## Audio and video
+
+Package 6: `media/` (`sites.py`, `sniff.py`, `select.py`, `captions.py`, `transcript.py`,
+`html5.py`, `types.py`, `pool.py`, `child.py`, `asr_child.py`, `asr_windows.py`,
+`asr_external.py`, `models.toml`, `asr_check.ogg`), `pipeline_media.py`, `asr_dispatch.py`,
+`asr_worker.py`, `model_store.py` (made manifest-generic). Settings are in
+[configuration.md](configuration.md) ("Audio and video"); the plan with all rulings is
+`docs/superpowers/plans/2026-10-25-package-6-audio-and-video.md`, the spike's measurements
+`docs/superpowers/plans/2026-10-25-package-6-spike.md`.
+
+Three tiers. **Tier 1, subtitles:** a URL of a supported platform answers with the video's
+subtitles (manual first, then the platform's automatic captions in the spoken language), read by
+youtube-transcript-api and yt-dlp in child processes of the pod that holds the request; an HTML
+page gains the text of its `<track>` elements. **Tier 2, metadata:** without subtitles the answer
+is the video's title, description, uploader, date, duration, chapters, tags and licence
+(`transcript_source: metadata_only`, `partial`/`no_transcript_available`). **Tier 3, speech
+recognition:** with `transcribe: true` a video without subtitles or a media file, and every
+uploaded audio or video file, goes to the ASR worker (faster-whisper on CPU, or an external
+OpenAI-compatible endpoint): always a job, answered 202.
+
+**Decisions of Jan (2026-10-25).**
+
+- **D1, YouTube refuses the service: answer honestly (a).** YouTube blocks many data-centre IPs
+  ("confirm you're not a bot") and asks for a proof-of-origin token on a growing share of caption
+  tracks. Such an answer is the video's details (tier 2) with `transcript_source: metadata_only`,
+  the warning `subtitles_blocked`, `partial`/`no_transcript_available`, neither fingerprinted
+  nor cached (the block may lift); an HTTP 429 goes to the outbound gate's backoff. No proxy, no
+  PO-token plugin (`bgutil-ytdlp-pot-provider` is GPL-3.0) and no browser fallback in this
+  package. Not taken: (b) one fixed upstream proxy for media requests, (c) a browser fallback
+  that opens the watch page's transcript panel.
+- **D2, default Whisper model: `large-v3-turbo` (a).** CPU only, `int8`; about 1.6 GB on the
+  volume. The spike measured a real-time factor of 0.88 on 4 threads (`small`: 0.43) and a peak
+  RSS of 1.9 GB; Jan re-confirmed it after the spike. `small` stays selectable (`ASR_MODEL`).
+- **D3, uploads of audio and video: through Valkey up to `MEDIA_UPLOAD_MAX_BYTES` (a).**
+  25,000,000 bytes by default (about 25 minutes of MP3 at 128 kbit/s, hours of Opus), adjustable
+  by env and Helm (`workers.asr.uploadMaxBytes`), bounded only by the input budget
+  (`DOCLING_INPUT_BUDGET_BYTES`, checked at start-up and by the chart). Larger media go by URL;
+  S3 lifts the limit in package 11. Not taken: (b) extracting the audio track in the API pod.
+- **D4, players embedded in a page: listed, not transcribed (a).** `data.media.embeds` names
+  them (platform URL or file URL, at most 10), so the caller can extract each with a request of
+  its own; only `<track>` text is added inline.
+- **D5, PyAV and FFmpeg: an LGPL build (a).** The PyPI wheel of PyAV bundles GPL `libx264` and
+  `libx265`, which its metadata does not show. The ASR image builds PyAV from its sdist against
+  a pinned BtbN `lgpl-shared` FFmpeg (9.0, `--enable-version3`, no `--enable-gpl` or
+  `--enable-nonfree`, with `libopus`), checked by SHA-256. How it is enforced: see "Images and
+  processes".
+- **D6, length limits: 2 h media, 3 h per item, 8 h inputs (a).** `MEDIA_MAX_DURATION_SECONDS`
+  7200, `ASR_TIMEOUT_SECONDS` 10800 (the budget of one whole item), `ASR_INPUT_TTL_SECONDS`
+  28800 (longer than the item's lease of 2 × 10800 + 10 s, checked at start-up and by the chart),
+  all adjustable. Not taken: 1 h media with a 90 min timeout; 3 h media with `small` past 1 h.
+
+**Rulings, as built.**
+
+- **M1, media targets** (`media/sites.py`, `media/sniff.py`). A platform URL is recognised by its
+  parsed host and path before any fetch, only in a `fast` or `auto` request without browser
+  options, a screenshot or a draft (`mode: browser`, `actions`, `cookies`, `headers` and
+  `screenshot` render the page as before):
+
+  | Platform | URLs | yt-dlp extractor (`IE_NAME`) |
+  | --- | --- | --- |
+  | `youtube` | `youtube.com/watch?v=`, `/shorts/`, `/embed/`, `/live/`, `m.` and `music.` hosts, `youtu.be/<id>`, `youtube-nocookie.com/embed/` | `youtube` |
+  | `vimeo` | `vimeo.com/<digits>`, `player.vimeo.com/video/<digits>` | `vimeo` |
+  | `ard` | `ardmediathek.de/video/...` | `ardmediathek` |
+  | `zdf` | `zdf.de/...html` and `zdf.de/video/<section>/<show>/...` | `zdf` |
+  | `arte` | `arte.tv/<lang>/videos/...` | `artetv` |
+  | `3sat` | `3sat.de/...html` | `3sat` |
+
+  The extractor is yt-dlp's only `allowed_extractors` entry, so the generic extractor (which
+  follows anything) never runs; a unit test pins that each name matches exactly one extractor of
+  the pinned yt-dlp. The URL is normalised to its canonical form (`https://www.youtube.com/watch?v=<id>`;
+  Vimeo's player URL, which needs no login) for the cache key, the fingerprint, the compliance
+  check and every fetch; user information and a port are dropped, `url` in the result stays the
+  request's and `final_url` is the canonical URL. A playlist (`/playlist?list=`, `/watch?list=`
+  without `v`, `/embed/videoseries?list=`) and a live stream that is still running answer
+  `unsupported_content_type`. A media file is a fetched or uploaded body whose bytes say MP3,
+  MP4/M4A/MOV (`ftyp` with a media brand; HEIC and AVIF are images), WebM/Matroska, Ogg, WAV,
+  FLAC or ADTS AAC; the bytes decide, never the declared type or the file name. A response
+  declared `audio/*`, `video/*` or `application/ogg` is read only to its first 64 KiB, so a large
+  file is sniffed, not refused as `too_large`.
+- **M2, tiers and selection** (`media/select.py`). YouTube asks youtube-transcript-api first
+  (list, then fetch the chosen track) and yt-dlp for the metadata, and for the track only when
+  youtube-transcript-api failed; the other platforms ask yt-dlp. Each tier runs at most once per
+  request, and after a YouTube 429 yt-dlp is not asked at all. The track: manual tracks in the
+  order of `languages`, automatic captions in that order, a manual track in the video's original
+  language, any manual track, automatic captions in the original language. Languages compare by
+  primary subtag after normalisation (ISO 639-2 `deu` is `de`; YouTube's named keys such as
+  `de-XwLwiJMB_Xs` count as `de`); of YouTube's automatic captions only `<lang>-orig` counts
+  (every other automatic language is a machine translation); arte's `-forced` tracks (only the
+  foreign-language passages) and `und` never count. When both libraries fail on YouTube without
+  a refusal and give no metadata, the watch page's `ytInitialPlayerResponse` (fast fetcher, same
+  turn) gives the details.
+- **M3 and M4, children and network** (`media/pool.py`, `media/child.py`). youtube-transcript-api
+  and yt-dlp run in `DocumentPool` children (`MEDIA_CONCURRENCY` 2, `MEDIA_MEMORY_LIMIT_MB` 1024)
+  in API pods, extract workers and the browser worker (not the Docling worker), started before
+  `/ready` and killed at the run's deadline (`timeout`, retryable). The parent never imports
+  them. Their only way out is the pod's own `EgressProxy` (the package-4 SSRF proxy): each call
+  gets a `ProxyContext` with its own credentials and `MEDIA_EXTRACT_MAX_BYTES` (30 MB), so every
+  connection, redirect and player sub-request is address-checked and byte-capped; yt-dlp's
+  request handlers take http and https only, so no `ftp:` or `file:` URL leaves past the proxy.
+  yt-dlp runs with one allowed extractor, no playlist, no download, no cache, no cookies, no
+  retries, no JavaScript runtime and no remote components. Page requests carry our honest user
+  agent; no impersonation (`curl_cffi`). A track is at most `MEDIA_SUBTITLE_MAX_BYTES` (5 MB);
+  arte and Vimeo deliver subtitles as HLS, whose VTT segments the child concatenates within that
+  cap. yt-dlp is installed without its `default` extra (it pulls in GPL `mutagen`).
+- **M5, compliance and outbound.** The canonical URL passes robots.txt, TDMRep and ai.txt like a
+  page, and the run holds the host's outbound turn while the children work (as a render does).
+  The libraries' own requests (player APIs, caption files) are the player's sub-requests:
+  SSRF-checked and byte-capped by the proxy, not robots-checked or gated. A media file fetched by
+  URL gets the header checks of a document (F10).
+- **M6, the result.** `data.media` (`MediaInfo`): `platform` (M1's, `file`, `upload` or
+  `html5`), `transcript_source` (`manual_subtitles`, `auto_subtitles`, `asr`, `metadata_only`;
+  null where there is no transcript at all: a page with embeds only, a file not transcribed),
+  `transcript_language`, `available_languages` (the manual tracks), `duration_seconds`,
+  `uploader`, `asr_model` and `embeds`; null for every result without media. `content` is the
+  transcript as paragraphs (a new one after a pause of 2 s, after 6 sentences, or after 120
+  words of unpunctuated captions) under `# <title>`, with `## <chapter>` headings where the
+  platform has chapters; everything a speaker says is escaped, so it cannot become markup.
+  `metadata_only` content is the title and the description. `content_type` is `text/vtt` for a
+  subtitle result, `text/html` for `metadata_only`, the media type for a transcription;
+  `mode_used` is `fast` (`upload` for uploads). The description, uploader, date, keywords and
+  licence go to `metadata` (licence source `platform`, confidence `high`; YouTube's "Creative
+  Commons Attribution license" is `CC-BY-3.0`). Quality is judged like `text/plain`. Only a
+  probe that succeeded and found no usable track says the video "has no subtitles" (not
+  retryable, cached, served from the cache with the same error); a refusal (D1) or any other
+  failure of the probe (children, network, track, a limit) says what failed, mostly with the
+  warning `subtitles_failed`, is retryable where it may pass, and is neither compared nor cached.
+  A proxy refusal (a private address) is `failed`/`blocked_url`. Warnings: `subtitles_blocked`,
+  `subtitles_failed`, `asr_unavailable`, `no_speech`, `tracks_truncated`, `tracks_failed`.
+- **M7, captions** (`media/captions.py`, `media/transcript.py`). WebVTT (cue settings, `NOTE`,
+  `STYLE`, `REGION`, voice and class spans), SRT, TTML (defusedxml, any namespace prefix,
+  absolute times) and YouTube's `json3` become cues; tags and entities go, a byte order mark and
+  a non-UTF-8 charset are handled, and the rolling duplicates of automatic captions are dropped.
+  A track that is not what its format says is skipped to the next tier.
+- **M8, HTML5 tracks and embeds** (`media/html5.py`). After an HTML page's conversion (fast or
+  rendered; not on a challenge, error page or login wall), each `<video>` or `<audio>` with a
+  `<track>` of kind `subtitles`, `captions` or none gives one track (by `languages`, the page's
+  language, `default`, the first), up to `MEDIA_MAX_TRACKS` (3; more: `tracks_truncated`). Each
+  is fetched by the fast fetcher in a turn of its host, SSRF-checked and gated, without
+  compliance files (a sub-resource of a page that passed); a redirect to another host, a track
+  over `MEDIA_SUBTITLE_MAX_BYTES` or a turn that does not come within the run's deadline skips it
+  (`tracks_failed` only when every one failed). The text follows the page's as `## Transcript`
+  (with the track's label). The page's cache key and fingerprint variant gain `languages` when
+  the request sets them. A page with neither tracks nor embeds keeps `media: null` and its
+  package-5 answer.
+- **M9, `transcribe` and the ASR dispatch** (`asr_dispatch.py`). `POST /v1/extract`,
+  `POST /v1/batch` and jobs take `transcribe` (default false) and `languages` (at most 5 ISO 639
+  codes such as `de` or `en-GB`). `transcribe: true` while the service has no ASR (`ASR_ENABLED`
+  and `JOBS_ENABLED`) is 400 `invalid_request`, and so is a request that needs a transcription on
+  the external backend with neither a caller key nor `ASR_EXTERNAL_API_KEY`. Without
+  `wait_seconds`, `transcribe: true` sets it to 20, so a video with subtitles still answers 200.
+  When a transcription is needed (no subtitles, a media file, an upload), a one-item job (kind
+  `extract` or `file`) goes to pool `asr` with the details result as its draft and the
+  `MediaInputMeta` (plus an upload's bytes) as its input (`ASR_INPUT_TTL_SECONDS`, in the shared
+  input budget), and the route answers 202 at once: nothing waits for a transcription, so the API
+  pods' grace period is unchanged. Back-pressure as F12: the memory guard high,
+  `ASR_MAX_OPEN_PER_CLIENT` (3) unfinished ASR jobs, or the input budget full answer the draft
+  with `asr_unavailable`, unstored (without a draft `failed`/`rate_limited`, retryable). A media
+  file without `transcribe` is `failed`/`no_transcript_available` ("Send transcribe: true to
+  transcribe it."). Batches: the extract worker moves an item that needs ASR to pool `asr`
+  (input, draft, queue, completion), as F13. The result cache key of a platform video gains
+  `media` (so results cached before the deploy are not served) and `languages`; a cached
+  `metadata_only` answer is no hit for `transcribe: true`, except one with `no_speech` (final).
+  The fingerprint variant of a platform or file result is `<format>|media`.
+- **M10, the ASR worker** (`asr_worker.py`, `media/asr_child.py`, `media/asr_windows.py`).
+  `text-extraction-asr-worker`, pool `asr`, internal port only: the package-3 `Worker` with an
+  `AsrRunner`, `ASR_CONCURRENCY` (1) slots, each with a child (`ASR_MEMORY_LIMIT_MB` 4096) that
+  loads the model once. Leases are `2 × ASR_TIMEOUT_SECONDS + 10` s (about 6 h), and
+  `ASR_TIMEOUT_SECONDS` is the budget of the whole item from the claim. Per item: an upload's
+  bytes are written to a directory of its own under `ASR_SCRATCH_PATH`; a platform video is
+  `platform_info` (yt-dlp's info, format `bestaudio/best[height<=360]` over plain HTTP(S),
+  native HLS or native DASH only) in the host's outbound turn, then its `download` outside the
+  turn; a media file URL is one download in its host's turn; each through the worker's
+  `EgressProxy`, capped at `MEDIA_MAX_BYTES` (500 MB) within `MEDIA_DOWNLOAD_TIMEOUT_SECONDS`
+  (600). The duration (the platform's, yt-dlp's, PyAV's probe, and the decoded audio itself) over
+  `MEDIA_MAX_DURATION_SECONDS` is `media_too_long` before any transcription. PyAV (files only,
+  `protocol_whitelist=file`) decodes the first audio stream to 16 kHz mono float32, and
+  faster-whisper (`device="cpu"`, `ASR_COMPUTE_TYPE` int8, `ASR_THREADS` 4, `vad_filter=True`,
+  `condition_on_previous_text=False`, the first requested language or the detected one) reads
+  that array in windows of at most 10 minutes cut in pauses: faster-whisper computes the
+  features of a whole call at once (3.4 GiB for an hour), and a cut in a pause needs no overlap
+  or dedupe. `Pipeline.transcribed_result` builds the result (the draft's details,
+  `transcript_source: asr`, `asr_model`) and, for a URL, compares and caches it under the
+  canonical URL, so the next request is a hit; an upload's is never stored. Media without speech
+  answers the draft (final, warning `no_speech`) or fails `no_transcript_available`. The scratch
+  directory is deleted in a `finally`. Failures: the item's budget spent is `timeout`, not
+  retryable; a download that ran out of its own time is `timeout`, retryable; a decoder error
+  `transcription_failed`; a missing model `internal_error`, retryable. With a draft the draft
+  answers with the failure's error and `asr_unavailable`, and keeps its fingerprint only when the
+  failure is final (then it is cached; served from the cache it drops `asr_unavailable` and says
+  the video could not be transcribed, without the failure's code). An input that expired before
+  the claim answers the draft with `asr_unavailable` (an upload: `timeout`, retryable).
+- **M11, external ASR** (`media/asr_external.py`). `ASR_BACKEND=openai`: the child decodes as
+  above, encodes chunks of at most 20 minutes (cut in pauses) as 16 kHz mono Opus at 32 kbit/s
+  in Ogg (about 6 MB each) and posts them to `ASR_EXTERNAL_BASE_URL` `/audio/transcriptions`
+  (OpenAI SDK, `ASR_EXTERNAL_MODEL` `whisper-1`, `verbose_json`, falling back to `json`),
+  directly, not through the egress proxy (operator configuration, https only), without
+  redirects or SDK retries. Key order (CLAUDE.md rule 3): the caller's `X-ASR-Api-Key` (on
+  `POST /v1/extract`, `/v1/extract/file` and `/v1/batch`; stored as the job's secret, deleted
+  with the item's outcome or the batch's last result, never in a job view or a log) wins over
+  `ASR_EXTERNAL_API_KEY` (a secret, also in the API pods, only to know whether there is one).
+  401/403 is `transcription_failed`, not retryable; 429, 5xx, a chunk's timeout
+  (`ASR_EXTERNAL_TIMEOUT_SECONDS`, 300, for its whole request) or an unreachable endpoint
+  retryable. No models are needed.
+- **M12, switches.** `MEDIA_ENABLED` (default true: platform URLs, media files, tracks, embeds).
+  `ASR_ENABLED` (default false): Helm renders it into every pod from `workers.asr.enabled`;
+  compose has the profile `asr` with `ASR_ENABLED=true` in `.env`.
+- **M13 and M17, models and volumes** (`model_store.py`, `media/models.toml`). `--download-models`
+  fills `ASR_MODELS_PATH/<model>` with only the configured `ASR_MODEL` from Hugging Face at a
+  pinned commit per file, size- and SHA-256-checked, staged and renamed, with a
+  `.complete-<manifest hash>` marker. No model or downloaded media in an image, on the root
+  filesystem or on a shared data volume: the ASR workers have their own models PVC (`asr-models`,
+  4Gi: `large-v3-turbo` plus a staged copy), mounted read-only, filled by an init container
+  (`models.downloadMode: init`, the default) or a post-install/post-upgrade hook Job (`job`;
+  install without `helm --wait`, as the workers wait for the models); `download: false` with
+  `existingClaim` for an air-gapped volume. Downloaded media live on a per-pod emptyDir with a
+  `sizeLimit` (2Gi; the render fails unless it holds `ASR_CONCURRENCY` × (`MEDIA_MAX_BYTES` +
+  5 MB)). Compose: the one-shot `asr-models` on the volume `asr-models`, the worker's scratch on
+  the volume `asr-scratch`.
+- **M14, uploads** (`file_api.py`). A part whose bytes are audio or video is transcribed, no form
+  field needed: up to `MEDIA_UPLOAD_MAX_BYTES` as the item's input, a job of kind `file` on pool
+  `asr`, 202 at once (the form's `wait_seconds` does not apply). The path's body limit becomes the
+  larger of `DOCUMENT_MAX_BYTES` and `MEDIA_UPLOAD_MAX_BYTES`, plus 64 KiB, while media and ASR are
+  on; a document over `DOCUMENT_MAX_BYTES` still answers `too_large`. Without ASR an audio upload
+  answers `failed`/`unsupported_content_type` ("Transcription is not enabled on this service.").
+- **M15, metrics and alerts.** `text_extraction_media_extractions_total{platform, source,
+  outcome}` and `text_extraction_media_seconds{platform}` (API pods and workers);
+  `text_extraction_asr_dispatch_total{outcome}` (API pods, extract workers);
+  `text_extraction_asr_transcriptions_total{backend, outcome}`,
+  `text_extraction_asr_audio_seconds_total{backend}` (the external backend's cost basis) and
+  `text_extraction_asr_seconds{backend}` (ASR workers); the queue gauges for pool `asr`. The
+  media children's proxy refusals count in `text_extraction_browser_proxy_refused_total` (the
+  same `EgressProxy`). Helm alerts: `TextExtractionQueueBacklog` for pool `asr`
+  (`alerts.asrQueueBacklogItems`, 50) and `TextExtractionWorkersDown` for the ASR workers.
+- **M16, yt-dlp versions.** The 14-day rule holds (yt-dlp 2026.8.19, youtube-transcript-api
+  1.2.4). A pinned yt-dlp that a platform broke is replaced by the newest stable release in its
+  own small PR (CONTRIBUTING.md), since the platforms change their players without notice.
+- **M18, spike findings** (Task 1, from Jan's line). YouTube answered subtitles for every row
+  that has them, with and without Deno; Vimeo needs a login for `vimeo.com/<id>` but not for the
+  player URL, and an embed-restricted video (player 403) can only answer its details; the
+  extractor names are `IE_NAME`s; faster-whisper 1.2.1's own `decode_audio` breaks on PyAV 19,
+  so the child always decodes itself and passes an array.
+
+**Scaling and shutdown.** A transcription runs for minutes to hours, and its lease lasts
+`2 × ASR_TIMEOUT_SECONDS + 10` s (about 6 h with D6). On SIGTERM the worker stops claiming,
+gives the items in flight 30 s, then cancels them and kills its children; a cancelled item goes
+back to the front of its domain at once (`attempts` + 1), not when its lease expires, and runs
+again from the start on another worker (an item given back `JOB_ITEM_MAX_ATTEMPTS` times fails as
+lost). Only a worker killed without SIGTERM (an OOM kill, a node failure) leaves its item to the
+lease, so that item waits up to about 6 h. The Helm chart scales the ASR workers on pending plus
+leased items (`keda.countLeased`, a replica per `concurrency`) with a scale-down stabilisation of
+3600 s, the Kubernetes maximum; Kubernetes still picks the pod to remove without knowing which is
+idle, so a scale-down, a rolling update or a node drain interrupts transcriptions in flight.
+Prefer fixed replicas for steady load.
+
+**Images and processes.** The API image gets yt-dlp and youtube-transcript-api (MIT, Unlicense),
+no faster-whisper, CTranslate2, PyAV, Deno or models (image.yml checks it), and its parent
+processes never import yt-dlp or youtube-transcript-api. The ASR image (target `asr`, image
+`text-extraction-asr`, linux/amd64, about 1.4 GB uncompressed) holds the venv with the extra `asr`
+(faster-whisper 1.2.1, CTranslate2 4.8.2, PyAV 19.0.1 built against FFmpeg, `yt-dlp[deno]` with
+`yt-dlp-ejs` for YouTube's player challenges, the OpenAI SDK), the FFmpeg shared libraries and
+their licence (`/opt/ffmpeg`, registered with `ldconfig`), no `ffmpeg`, `ffprobe` or `rtmpdump`
+program and no models; non-root, tini. The LGPL build (D5) is enforced four times: the build
+checks the FFmpeg archive's SHA-256 and fails unless `ffmpeg_gpl_findings` over PyAV's libraries
+and codecs is empty, the `libopus` encoder exists and no such program is on `PATH`; every ASR
+child runs the same check in the worker's self-check before `/ready` (no `--enable-gpl` or
+`--enable-nonfree`, no GPL or non-free external library or encoder such as libx264, every
+library's licence LGPL, neither `ffmpeg` nor `rtmpdump` on `PATH`, which yt-dlp could hand
+protocols it does not download itself), so a worker on the PyPI wheel never becomes ready;
+image.yml runs `--check` in the built image; and the licence gate covers the extra `asr` in the
+CI job `media` (metadata only, which cannot see inside the wheel). Before `/ready` the worker
+also checks the model's files and transcribes the built-in clip (`media/asr_check.ogg`) in each
+child (the external backend encodes it as Opus instead); a failure exits 1 naming
+`ASR_MODELS_PATH`.
+
+**Done when (package 6):** `tests/media/test_corpus.py` sends the caption fixtures
+(`tests/media/captions`: YouTube's json3 and rolling automatic captions, ARD's TTML, ZDF's and a
+lecture's WebVTT, a Latin-1 SRT) through `POST /v1/extract` of the public app as the tracks of
+YouTube, ARD, ZDF, Vimeo and arte videos (a fake media fetcher, as the sandbox reaches no
+platform) and gets each transcript in order without tags, entities or repeated lines; an empty
+track answers the details, and a page's `<track>` is appended as `## Transcript`. Under the
+marker `asr` (CI job `media`, with the `small` model; weekly also `large-v3-turbo`) the German
+clip `tests/media/corpus/speech_de.ogg` is uploaded to `POST /v1/extract/file`, answered 202,
+transcribed by the ASR worker's runner on the real children and model, and read back from
+`GET /v1/jobs/{id}` with a word recall of at least 0.8. Live (from Jan's line, compose profile
+`asr`): every YouTube and Mediathek row of `tests/live/urls/media.csv` that has subtitles answers
+`manual_subtitles` or `auto_subtitles`, and an upload is transcribed; the live workflow reports
+the media set without gating it (D1).
+
+**Known limits.**
+
+- **YouTube from data-centre IPs (D1).** From a cluster or a CI runner YouTube may refuse most
+  requests (bot check, PO token, 429): the answer is then the video's details with
+  `subtitles_blocked`, and `transcribe: true` may fail too, as the ASR worker downloads from the
+  same IPs. There is no proxy, no PO token and no browser fallback.
+- **Interrupted transcriptions.** A scale-down, rolling update or node drain restarts the
+  transcriptions in flight elsewhere from the beginning; with the external backend the chunks
+  already sent are billed again, and so is every retry of a retryable failure. A worker killed
+  without SIGTERM leaves its item to its lease of about 6 h.
+- **Lengths and sizes.** Media over 2 h (`media_too_long`), files over `MEDIA_MAX_BYTES` and
+  uploads over `MEDIA_UPLOAD_MAX_BYTES` (`too_large`; larger media by URL) are not transcribed. At
+  RTF 0.88 a 2 h video takes about 1 h 45 min of one worker slot. An audio upload larger than
+  `DOCUMENT_MAX_BYTES` while ASR is off is a 413 (the path limit widens only with ASR).
+- **What the ASR child needs in memory** (`ASR_MEMORY_LIMIT_MB`, 4096, an address-space limit)
+  is first measured in CI's `media` job (the long clip prints VmPeak and VmHWM) and in the live
+  run; package 11 sets the final resources.
+- **Cached final failures.** A transcription that failed for good (`media_too_long`, a refused
+  key, the item's budget) leaves the video's details cached; a later request without
+  `transcribe` is served "could not be transcribed", without the failure's own code, and a later
+  `transcribe: true` tries again.
+- **Model switch.** Switching `ASR_MODEL` downloads the new model beside the old one, which stays
+  on the volume until removed by hand.
+- **Batch keys.** A batch's `X-ASR-Api-Key` lives as long as the job (`JOB_TTL_SECONDS`); a batch
+  that runs longer loses it, and its later items fail `transcription_failed`.
+- **Tracks.** A `<track>` that redirects to another host (a CDN) is skipped. An `auto` request
+  whose browser worker did not answer in time (`browser_unavailable`) gets the fast result
+  without its tracks and embeds.
+- **Platforms.** Vimeo videos restricted to their uploader's domains answer their details only;
+  arte videos whose only German track is `-forced` answer their details; Mediathek items expire.
+  Tier 1 runs without a JavaScript runtime in the API image (Deno is in the ASR image only).
+- Not in this package: transcripts of players embedded in a page (D4), speaker diarisation,
+  translation, timestamps in the content, HLS or DASH URLs outside the platform extractors, S3
+  offload of inputs (package 11), PII in transcripts (package 7 applies to them like to any
+  content).
+
 ## Observability
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
 duration, extraction outcome by error code and mode, browser pool usage (pages in use, pages by
 outcome, render seconds, launches, proxy refusals), sync browser dispatches by outcome (API pods:
 rendered, not claimed, no result, handed over, backend error), document conversions by converter,
-kind and outcome with their seconds and pages, sync Docling dispatches by outcome, LLM calls,
+kind and outcome with their seconds and pages, sync Docling dispatches by outcome, media
+extractions by platform, transcript source and outcome with their seconds, ASR dispatches by
+outcome, transcriptions by backend and outcome with their seconds and audio seconds, LLM calls,
 tokens and failures, rate-limit rejections. Alert rules ship in the Helm chart
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.
@@ -883,7 +1229,7 @@ are never logged.
 | Topic | Source | Taken over |
 | --- | --- | --- |
 | Auto mode: < 500 visible chars + JS → browser; bot challenges qualify | Selenium service 3.2 | Yes |
-| YouTube text from embedded page data; MathML → LaTeX; linked files kept | Selenium service | Yes |
+| YouTube text from embedded page data; MathML → LaTeX; linked files kept | Selenium service | Yes (YouTube: subtitles first; the watch page's `ytInitialPlayerResponse` is the last tier-2 fallback, M2) |
 | Domain boilerplate lists, cookie auto-consent, soft-404 detection | Playwright service (kidra) | Yes (opt-out by default, own rules for GSB and MediaWiki dialogs) |
 | WLO URL sets (25 / 200 / 4,000) and live result buckets | Playwright service | Regression harness |
 | Baseline 2026-09-28 on 4,000 URLs: fast 68 %, browser 80 %; medians 0.5 s / 9-10 s | Playwright service | Bar to beat: the live gate is `wlo_200` in `auto` mode at 80 % (D2) |

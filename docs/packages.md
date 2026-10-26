@@ -34,3 +34,12 @@ job. The sync contract of `POST /v1/extract` stays; a sync request that needs OC
 `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` (25 + 20 = 45 s by default), more than the
 ~30 s of the job rule, because it waits for the worker only when the document turns out to need
 OCR. Details in [architecture.md](architecture.md), "Documents and OCR".
+
+Package 6 note (Jan, D1): YouTube blocks many data-centre IPs and asks for a proof-of-origin token
+on a growing share of caption tracks. The service answers such a refusal honestly: the video's
+details (`transcript_source: metadata_only`, `partial`/`no_transcript_available`) with the warning
+`subtitles_blocked`, and a 429 goes to the outbound gate's backoff; no proxy, no PO-token plugin,
+no browser fallback. The done-when check therefore runs from Jan's line (`tests/live/urls/media.csv`
+with the compose profile `asr`); the live workflow reports the media set from GitHub's runners
+without gating it. Transcription (`transcribe: true`, uploads) is always a job, and ASR is off by
+default (`ASR_ENABLED`). Details in [architecture.md](architecture.md), "Audio and video".

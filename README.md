@@ -64,6 +64,59 @@ default: an upload that takes longer answers 202 with a job to poll). PDFs keep 
 (ODT, ODS, ODP) are converted too; without it a scan answers its text layer with the warning
 `ocr_unavailable`, and images and OpenDocument files answer `unsupported_content_type`.
 
+### Audio and video
+
+A video URL of YouTube, Vimeo or the Mediatheken of ARD, ZDF, arte and 3sat answers with the
+video's subtitles (manual ones first, then the platform's automatic captions), its title,
+description, duration and licence. The page itself is not fetched:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://www.youtube.com/watch?v=<id>", "languages": ["de"]}' \
+  http://localhost:8080/v1/extract
+# {"status": "success", "data": {"content_type": "text/vtt", "content": "# <title>\n\n...",
+#  "media": {"platform": "youtube", "transcript_source": "manual_subtitles",
+#  "transcript_language": "de", "duration_seconds": 754.0, "embeds": [], ...}, ...}, ...}
+```
+
+A video without subtitles answers its details only (`"transcript_source": "metadata_only"`,
+`status: partial`, `error.code: no_transcript_available`); so does a video whose platform refused
+the service (warning `subtitles_blocked`: YouTube blocks many data-centre IPs). An HTML page whose
+`<video>` or `<audio>` has a `<track>` gets that text after its own, under `## Transcript`, and
+`data.media.embeds` lists the players a page embeds, for you to extract one by one.
+
+Speech recognition is off by default. Start the ASR worker with the profile `asr` and
+`ASR_ENABLED=true` in `.env` (the first start downloads the Whisper model `large-v3-turbo`, about
+1.6 GB, into a volume): `docker compose --profile asr up --build`. Then `"transcribe": true`
+transcribes a video without subtitles or an audio or video file URL. A video with subtitles still
+answers at once; a transcription is always a job, answered 202 at once:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/podcast/episode-12.mp3", "transcribe": true}' \
+  http://localhost:8080/v1/extract
+# 202 {"status": "success", "data": {"id": "<job id>", "kind": "extract", "state": "running",
+#  "total": 1, "status_url": "/v1/jobs/<job id>"}, ...}
+curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/jobs/<job id>
+# once "state" is "completed": items[0].result is the extraction result, with
+#  "media": {"transcript_source": "asr", "asr_model": "large-v3-turbo", ...}
+```
+
+An uploaded audio or video file is always transcribed (no form field needed; the bytes decide),
+up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB; larger media by URL), and answers 202 with its job the same
+way:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/v1/extract/file
+# 202 {"status": "success", "data": {"id": "<job id>", "kind": "file", ...,
+#  "status_url": "/v1/jobs/<job id>"}, ...}
+```
+
+A transcription runs at about real time on 4 CPU threads (media up to 2 hours). With
+`ASR_BACKEND=openai` the worker sends the audio to an OpenAI-compatible endpoint instead
+(`ASR_EXTERNAL_BASE_URL`); a caller's own key in the header `X-ASR-Api-Key` wins over the
+operator's `ASR_EXTERNAL_API_KEY`.
+
 ### Batch
 
 `POST /v1/batch` queues many URLs as one job (at most `BATCH_MAX_URLS`, 1,000 by default) and

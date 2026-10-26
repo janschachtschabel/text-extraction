@@ -51,7 +51,7 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'live')
           && (github.event.action != 'labeled' || github.event.label.name == 'live'))
     runs-on: ubuntu-latest
-    # Three runs: the gate, the smoke report and wlo_200 forced through the browser.
+    # Four runs: the gate, the smoke report, wlo_200 forced through the browser and the media set.
     timeout-minutes: 90
     env:
       # The gate: wlo_200 in auto mode at the 80 % browser baseline (measured on 4,000 URLs,
@@ -172,6 +172,22 @@ jobs:
             --timeout 120 \
             --out results/live_wlo_200_browser.jsonl \
             --summary-out results/summary_wlo_200_browser.md
+
+      # Report only, no gate: the media set (YouTube, Vimeo, the Mediatheken, media files, HTML5
+      # tracks). This rig runs no ASR worker, so the rows' `transcribe` is not sent and the media
+      # files answer without a transcript. From the runners' data-centre IPs YouTube may refuse
+      # the subtitles (decision D1: metadata_only with subtitles_blocked). The summary's media
+      # table counts the transcript sources per platform against each row's expected source.
+      - name: Run media in auto mode (report only)
+        if: always()
+        run: |
+          uv run python -m tests.live.run_live \
+            --urls tests/live/urls/media.csv \
+            --mode auto \
+            --no-transcribe \
+            --timeout 120 \
+            --out results/live_media_auto.jsonl \
+            --summary-out results/summary_media_auto.md
 
       - name: Add the summaries to the job summary
         if: always()

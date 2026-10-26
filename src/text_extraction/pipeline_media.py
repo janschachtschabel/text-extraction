@@ -429,6 +429,12 @@ _NO_SPEECH_MESSAGE: Final = "The audio has no speech that could be transcribed."
 _NO_SPEECH_DETAILS_ERROR: Final = ErrorInfo(
     code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=_NO_SPEECH_DETAILS_MESSAGE, retryable=False
 )
+_NOT_TRANSCRIBED_DETAILS_ERROR: Final = ErrorInfo(
+    code=ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+    message="The video has no subtitles and could not be transcribed: the answer has its "
+    "details only.",
+    retryable=False,
+)
 
 
 def _details_only_error(message: str, settings: Settings, *, retryable: bool) -> ErrorInfo:
@@ -443,15 +449,25 @@ def cached_details_only(
     result: ExtractResult, settings: Settings
 ) -> Envelope[ExtractResult] | None:
     """The envelope of a stored platform video's details without a transcript
-    (``metadata_only``), the same as the fresh answer's: ``partial`` with
-    ``no_transcript_available`` and the fresh message, never a quality verdict; None for any
-    other result. Only two such answers are stored (the others carry no fingerprint): the
-    video without subtitles and, with ``no_speech``, the one the speech recognition heard
-    nothing in."""
+    (``metadata_only``): ``partial`` with ``no_transcript_available``, never a quality verdict;
+    None for any other result. Three such answers are stored (the others carry no
+    fingerprint), and each is served with its fresh answer's message:
+
+    - the video without subtitles (with the hint to send ``transcribe: true`` when the service
+      transcribes);
+    - with ``no_speech``, the one the speech recognition heard nothing in;
+    - with ``asr_unavailable``, the draft of a transcription that failed for good (not
+      retryable, ``asr_failed``, for example ``media_too_long``): the warning belonged to the
+      item that tried and is dropped, and the message says the video could not be transcribed
+      instead of asking for ``transcribe: true`` again. The failure's own code is not stored."""
     if result.media is None or result.media.transcript_source != "metadata_only":
         return None
     if NO_SPEECH_WARNING in result.warnings:
         error = _NO_SPEECH_DETAILS_ERROR
+    elif ASR_UNAVAILABLE_WARNING in result.warnings:
+        error = _NOT_TRANSCRIBED_DETAILS_ERROR
+        warnings = [w for w in result.warnings if w != ASR_UNAVAILABLE_WARNING]
+        result = result.model_copy(update={"warnings": warnings})
     else:
         error = _details_only_error(_NO_SUBTITLES_MESSAGE, settings, retryable=False)
     return Envelope(status="partial", data=result, error=error)

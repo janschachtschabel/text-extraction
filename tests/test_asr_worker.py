@@ -396,6 +396,43 @@ async def test_a_known_duration_over_the_limit_downloads_nothing(tmp_path: Path)
 
 
 @scenario
+async def test_a_cached_final_transcription_failure_asks_for_no_transcription_again(
+    tmp_path: Path,
+) -> None:
+    """A final failure (not retryable) keeps the draft's fingerprint, so the draft is cached.
+    Served from the cache, it is the video's details without the warning ``asr_unavailable`` of
+    the item that tried, and without the hint to send ``transcribe: true``, which was sent."""
+    from text_extraction.extract_models import ExtractRequest
+
+    harness = asr_harness(**settings_for(tmp_path, media_max_duration_seconds=120))
+    asr = Asr(harness)
+    job_id = await moved(harness)  # the probe says 212 s: media_too_long, not retryable
+    await asr.process_next()
+    fresh = (await only_item(harness, job_id)).result
+    assert fresh is not None
+    assert fresh.data is not None
+    assert fresh.data.fingerprint is not None  # kept, so the draft is cached
+
+    again = await harness.pipeline.run(
+        ExtractRequest(url="https://youtu.be/dQw4w9WgXcQ", compliance="enforce"), OWNER
+    )
+
+    assert again.data is not None
+    assert again.data.cache == "hit"
+    assert again.data.media is not None
+    assert again.data.media.transcript_source == "metadata_only"
+    assert again.status == "partial"
+    assert again.error is not None
+    assert (again.error.code, again.error.retryable) == (
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+        False,
+    )
+    assert "transcribe: true" not in again.error.message
+    assert "could not be transcribed" in again.error.message
+    assert ASR_UNAVAILABLE_WARNING not in again.data.warnings
+
+
+@scenario
 async def test_platform_info_duration_over_the_limit_downloads_nothing(tmp_path: Path) -> None:
     harness = asr_harness(**settings_for(tmp_path, media_max_duration_seconds=600))
     asr = Asr(harness, FakeChildren(platform_info={"info": "{}", "duration": 4 * 3600.0}))
