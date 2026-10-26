@@ -1440,6 +1440,10 @@ def test_vimeo_details_from_the_player_page_when_ytdlp_fails() -> None:
         (403, "<p>Sorry. This video isn&#39;t available. The owner has been notified.</p>"),
         (403, "<p>Sorry. This video isn\u2019t available.</p>"),
         (403, "Because of its privacy settings, this video cannot be played here."),
+        # The fetcher asks for German first, so Vimeo answers in German.
+        (403, "<title>Es tut uns leid.</title><p>Dieses Video ist nicht verfügbar.</p>"),
+        (403, "<p>Dieses Video ist nicht verf&uuml;gbar.</p>"),
+        (403, "Aufgrund der Datenschutzeinstellungen kann dieses Video hier nicht laufen."),
         (404, "Not found"),
         (410, "Gone"),
     ],

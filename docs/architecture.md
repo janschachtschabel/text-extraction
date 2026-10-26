@@ -992,7 +992,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
   a refusal and give no metadata, the watch page's `ytInitialPlayerResponse` (fast fetcher, same
   turn) gives the details. When yt-dlp fails on Vimeo with an error it does not name, the player
   page's `og:title` and `og:description` do; the player's 404, 410 or 403 with its own "isn't
-  available" or "privacy settings" text (a removed, private or domain-restricted video, which
+  available" or "privacy settings" text (in German, as the fetcher asks for German first: "nicht
+  verfügbar", "Datenschutzeinstellungen") (a removed, private or domain-restricted video, which
   yt-dlp words as a TLS fingerprint block) answers `no_transcript_available`, not retryable, as
   does yt-dlp's "embed-only video". Any other 403 may be a block of the service's address and
   stays retryable. Of the chosen track's formats (best first: VTT, json3, TTML, SRT), the

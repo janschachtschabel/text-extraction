@@ -236,10 +236,14 @@ NO_VIDEO: Final = NoVideo()
 _NO_VIDEO_ERRORS: Final = frozenset({"no_video", "unavailable"})
 # What Vimeo's player answers for a removed, private or domain-restricted video. yt-dlp words
 # its 403 as a TLS fingerprint block; a 403 counts only with the player's own words, since a
-# block of the service's address (a bot check) answers 403 too.
+# block of the service's address (a bot check) answers 403 too. The fetcher asks for German
+# first, so the player answers in German, else in English.
 _GONE_STATUSES: Final = frozenset({404, 410})
 _REFUSAL_SCAN_BYTES: Final = 65_536
-_PLAYER_REFUSALS: Final = re.compile(r"video isn'?t available|privacy settings", re.IGNORECASE)
+_PLAYER_REFUSALS: Final = re.compile(
+    r"video isn'?t available|privacy settings|nicht verfügbar|datenschutzeinstellungen",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)

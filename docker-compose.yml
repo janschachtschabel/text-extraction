@@ -60,7 +60,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 10s
+      # Ready once the document and media children run: up to ~30 s after a rebuild.
+      start_period: 60s
     # SIGTERM starts a 5 s drain and a graceful shutdown that covers a sync request waiting for
     # the browser: 75 s, with unblock mode 105 s at the default timeouts. Raise this with
     # SHUTDOWN_DRAIN_SECONDS or the extract and browser timeouts (docs/configuration.md).
