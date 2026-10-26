@@ -1034,3 +1034,59 @@ def test_a_proxy_refusal_of_a_format_ends_the_track(httpserver: HTTPServer) -> N
 
     run(scenario)
     assert "/de.srt" not in [request.path for request, _response in httpserver.log]
+
+
+@pytest.mark.parametrize(
+    ("type_name", "message", "code"),
+    [
+        (
+            "DownloadError",
+            "ERROR: [zdf] x-100: Failed to download video metadata: HTTP Error 503: "
+            "Service Unavailable",
+            "platform_error",
+        ),
+        (
+            "DownloadError",
+            "ERROR: [3sat] x: Unable to download webpage: HTTP Error 502",
+            "platform_error",
+        ),
+        (
+            "DownloadError",
+            "ERROR: [zdf] x: Unable to download JSON metadata: timed out",
+            "connect_error",
+        ),
+        ("DownloadError", "ERROR: [zdf] x: <urlopen error [Errno 104] reset>", "connect_error"),
+        (
+            "DownloadError",
+            "ERROR: [zdf] x: Remote end closed connection without response",
+            "connect_error",
+        ),
+        ("DownloadError", "ERROR: [zdf] x: IncompleteRead(100 bytes read)", "connect_error"),
+        (
+            "DownloadError",
+            "ERROR: [zdf] x-100: Failed to download fallback metadata: HTTP Error 404: Not Found",
+            "unavailable",
+        ),
+        ("DownloadError", "ERROR: [zdf] x-100: Unable to extract PTMD URL", "no_video"),
+        (
+            "DownloadError",
+            "ERROR: [3sat] x: Unable to extract player JSON; please report",
+            "no_video",
+        ),
+        (
+            "DownloadError",
+            "ERROR: [3sat] x: An extractor error has occurred. (caused by KeyError)",
+            "extractor_error",
+        ),
+        ("DownloadError", "ERROR: [youtube] x: HTTP Error 429: Too Many Requests", "rate_limited"),
+    ],
+)
+def test_ytdlp_failures_are_classified_before_the_generic_code(
+    type_name: str, message: str, code: str
+) -> None:
+    """yt-dlp runs without retries: a server error or a broken connection is a failure that may
+    pass, not an ``extractor_error``; a ZDF or 3sat page without a video has codes of its own
+    (the fallback document 404, no PTMD URL, no player)."""
+    from text_extraction.media.pool import _failure_code
+
+    assert _failure_code(ConversionError(type_name, message)) == code

@@ -25,7 +25,10 @@ A failure becomes the probe's ``error`` code, never an exception, except ``Conve
 is shut down. The codes: ``blocked`` (a bot check, a blocked IP, a PO token demanded),
 ``rate_limited`` (HTTP 429), ``unavailable`` (private, removed, age- or region-restricted),
 ``empty_track`` (a 200 caption body without text), ``too_large`` (over
-``MEDIA_SUBTITLE_MAX_BYTES``), ``track_failed``, ``extractor_error``, ``crashed`` and
+``MEDIA_SUBTITLE_MAX_BYTES``), ``track_failed``, ``no_video`` (a ZDF or 3sat page without a
+video: no stream, no player; a missing document's 404 is ``unavailable``), ``platform_error``
+(the platform answered 5xx), ``connect_error`` (also a timeout or a broken connection inside
+the call: yt-dlp runs without retries), ``extractor_error`` (anything else), ``crashed`` and
 ``out_of_memory``; a request the proxy refused during a failed call gives its refusal reason
 instead (``blocked_address``, ``bytes_cap``, ``dns_error``, ``connect_error``), unless the call
 was ``blocked``, ``rate_limited`` or ``too_large``. ``blocked`` on
@@ -107,6 +110,19 @@ _YTDLP_MESSAGES: Final = (
     ("geo restrict", "unavailable"),
     ("geo-restrict", "unavailable"),
     ("not available in your country", "unavailable"),
+    # A page of ZDF or 3sat without a video: ZDF's fallback document is missing (404), or it
+    # has no stream; 3sat's page has no player.
+    ("http error 404", "unavailable"),
+    ("unable to extract ptmd url", "no_video"),
+    ("unable to extract player json", "no_video"),
+    # yt-dlp runs without retries: a server error or a broken connection may pass.
+    ("http error 5", "platform_error"),
+    ("timed out", "connect_error"),
+    ("urlopen error", "connect_error"),
+    ("remote end closed", "connect_error"),
+    ("incompleteread", "connect_error"),
+    ("incomplete read", "connect_error"),
+    ("connection", "connect_error"),
 )
 
 

@@ -16,10 +16,11 @@ rest:
      goes to the gate), and its ``ytInitialPlayerResponse`` gives title, description, author,
      duration, date and keywords (M2's last tier 2). A redirect ends that attempt.
   3. A target with ``page_fallback`` (a ZDF or 3sat ``.html`` page, which may be an article)
-     whose probe found no video (no track, no title, no description; the extractor failed,
-     said the video is unavailable, or said nothing) is ``NO_VIDEO``: the caller extracts the
-     URL as a page. A refusal (``blocked``, ``rate_limited``, ``blocked_address``) or a failure
-     that may pass (the children, the network) is answered as for any video.
+     whose probe found no video (no track, no title, no description, and the extractor said
+     so: ``no_video`` or ``unavailable``) is ``NO_VIDEO``: the caller extracts the URL as a
+     page. A refusal (``blocked``, ``rate_limited``, ``blocked_address``), a failure that may
+     pass (the children, the network, a 5xx) or an ``extractor_error`` is answered as for any
+     video.
   3b. A live stream that is still running is ``unsupported_content_type``.
   4. A subtitle track becomes the transcript (``media/captions.py``, ``media/transcript.py``):
      ``# <title>``, ``## <chapter>`` headings, paragraphs; ``content_type`` ``text/vtt``.
@@ -218,9 +219,10 @@ class NoVideo:
 
 
 NO_VIDEO: Final = NoVideo()
-# Probe errors that say a ``page_fallback`` page has no video (None: the extractor said
-# nothing); a refusal or a failure that may pass says nothing about the page.
-_NO_VIDEO_ERRORS: Final = frozenset({None, "extractor_error", "unavailable"})
+# Probe errors that say a ``page_fallback`` page has no video: the extractor's own words for it
+# (``media/pool.py``). A refusal, a failure that may pass, an extractor error that names no
+# missing video, or a probe that succeeded says nothing of the kind.
+_NO_VIDEO_ERRORS: Final = frozenset({"no_video", "unavailable"})
 
 
 @dataclass(frozen=True)
@@ -253,6 +255,12 @@ _PROBE_FAILURES: Final[dict[str, _ProbeFailure]] = {
     "out_of_memory": _CHILD_FAILED,
     "connect_error": _ProbeFailure(
         ErrorCode.CONNECTION_ERROR, True, "The platform could not be reached."
+    ),
+    "platform_error": _ProbeFailure(
+        ErrorCode.TARGET_HTTP_ERROR, True, "The platform answered with a server error."
+    ),
+    "no_video": _ProbeFailure(
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, "The page has no video.", warning=None
     ),
     "dns_error": _ProbeFailure(
         ErrorCode.DNS_ERROR, True, "The platform's host name could not be resolved."
@@ -470,12 +478,13 @@ def _details_only_error(message: str, settings: Settings, *, retryable: bool) ->
 
 def transcription_final(result: ExtractResult) -> bool:
     """Whether a stored platform video's details say that a transcription will not do better:
-    the speech recognition heard no speech (``no_speech``), or it failed for good
-    (``asr_unavailable``). A stored details-only result carries ``asr_unavailable`` only after
-    such a failure (``asr_failed`` keeps the fingerprint only when the error is not retryable,
-    ``media_too_long`` for example), since every answer without a transcription that may still
-    come drops its fingerprint and is never stored (``without_asr``, a retryable ``asr_failed``,
-    an expired input). So the marker of a stored result is that warning, as ``no_speech`` is."""
+    the speech recognition heard no speech (``no_speech``), or it failed for a reason of the
+    media's own (``asr_unavailable``). A stored details-only result carries ``asr_unavailable``
+    only after such a failure (``asr_failed`` keeps the fingerprint only when the failure is
+    ``final``, ``media_too_long`` for example), since every other answer without a transcription
+    drops its fingerprint and is never stored (``without_asr``, a retryable or a caller's
+    ``asr_failed`` such as a refused key, an expired input). So the marker of a stored result is
+    that warning, as ``no_speech`` is."""
     return NO_SPEECH_WARNING in result.warnings or ASR_UNAVAILABLE_WARNING in result.warnings
 
 
@@ -499,10 +508,11 @@ def cached_details_only(
     - the video without subtitles (with the hint to send ``transcribe: true`` when the service
       transcribes);
     - with ``no_speech``, the one the speech recognition heard nothing in;
-    - with ``asr_unavailable``, the draft of a transcription that failed for good (not
-      retryable, ``asr_failed``, for example ``media_too_long``): the warning belonged to the
-      item that tried and is dropped, and the message says the video could not be transcribed
-      instead of asking for ``transcribe: true`` again. The failure's own code is not stored."""
+    - with ``asr_unavailable``, the draft of a transcription that failed for a reason of the
+      media's own (``asr_failed`` with ``final``, for example ``media_too_long``): the warning
+      belonged to the item that tried and is dropped, and the message says the video could not
+      be transcribed instead of asking for ``transcribe: true`` again. The failure's own code
+      is not stored."""
     if result.media is None or result.media.transcript_source != "metadata_only":
         return None
     if NO_SPEECH_WARNING in result.warnings:
@@ -558,16 +568,20 @@ def asr_failed(
     error: ErrorInfo,
     *,
     upstream_status: int | None = None,
+    final: bool = False,
 ) -> Envelope[ExtractResult]:
     """The answer when the transcription failed with ``error``: the draft (a platform video's
-    details) keeps its status, adds ``asr_unavailable`` and takes the error, and loses its
-    fingerprint when the error is retryable (the next request may get the transcription;
-    F14's rule); without a draft ``failed`` with the error and ``upstream_status``."""
+    details) keeps its status, adds ``asr_unavailable`` and takes the error, and keeps its
+    fingerprint (so it is stored as the video's answer) only when the failure is ``final``:
+    it belongs to the media (``media_too_long``, undecodable, the item's own budget) and is not
+    retryable. A failure of the caller or of the endpoint (a refused or missing key) is never
+    final, retryable or not: the result cache is shared by every caller. Without a draft
+    ``failed`` with the error and ``upstream_status``."""
     if draft is not None and draft.data is not None:
         update: dict[str, Any] = {
             "warnings": list(dict.fromkeys([*draft.data.warnings, ASR_UNAVAILABLE_WARNING]))
         }
-        if error.retryable:
+        if error.retryable or not final:
             update["fingerprint"] = None
         answered = error.model_copy(update={"message": error.message + _DETAILS_ONLY})
         return draft.model_copy(
@@ -739,7 +753,7 @@ class MediaSteps:
             # the details keep their fingerprint and the next request is a hit.
             message = media_too_long_message(probe.duration, limit)
             too_long = ErrorInfo(code=ErrorCode.MEDIA_TOO_LONG, message=message, retryable=False)
-            return asr_failed(run, meta, draft, too_long)
+            return asr_failed(run, meta, draft, too_long, final=True)
         return AsrNeeded(draft=draft, input=meta)
 
     async def _transcript(

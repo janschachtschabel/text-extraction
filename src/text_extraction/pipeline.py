@@ -842,12 +842,14 @@ class Pipeline:
         transcription: Transcription | Envelope[ExtractResult],
         *,
         upstream_status: int | None = None,
+        final: bool = False,
     ) -> Envelope[ExtractResult]:
         """The result of media the ASR worker transcribed (ruling M10): ``req`` is the request
         of its job (an ``ExtractRequest`` for a URL, the ``FileForm`` of an upload), ``meta``
         its stored input, ``draft`` a platform video's metadata result (None for a file or an
         upload), ``transcription`` the speech recognition, or the failed envelope that says why
-        there is none (``upstream_status``: the target's answer to a failed download).
+        there is none (``upstream_status``: the target's answer to a failed download; ``final``:
+        the failure belongs to the media, so a draft answering it is stored).
 
         A transcription becomes the result as the media steps build one (M6): ``# <title>`` (the
         draft's) and paragraphs, ``transcript_source: asr`` with ``asr_model``, the draft's metadata
@@ -877,7 +879,9 @@ class Pipeline:
             error = transcription.error or ErrorInfo(
                 code=ErrorCode.INTERNAL_ERROR, message="The transcription failed.", retryable=True
             )
-            envelope = asr_failed(run, meta, draft, error, upstream_status=upstream_status)
+            envelope = asr_failed(
+                run, meta, draft, error, upstream_status=upstream_status, final=final
+            )
         else:
             envelope = await self._transcribed(run, meta, draft, transcription)
         if isinstance(run, _Run):

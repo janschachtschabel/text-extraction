@@ -955,11 +955,15 @@ OpenAI-compatible endpoint): always a job, answered 202.
   | `3sat` | `3sat.de/...html` | `3sat` |
 
   A ZDF or 3sat `.html` URL may be a news article without a video: when the probe finds none
-  there (no track, no title, no description; the extractor failed, said the video is
-  unavailable, or said nothing) the request goes on as a page, in the same request and under the
+  there (no track, no title, no description, and the extractor says so: ZDF's fallback
+  document answers 404 or has no stream, 3sat's page has no player, or the video is
+  unavailable) the request goes on as a page, in the same request and under the
   page's turn, compliance and cache rules, so it answers what the page path answers (`media`
   null or the page's embeds; the probe's fetch counts in `attempts`); a fresh page entry of such
-  a URL answers without a probe. A refusal (`blocked`, `rate_limited`, `blocked_url`) or a
+  a URL answers without a probe. yt-dlp runs without retries, so its 5xx, timeouts and broken
+  connections are failures that may pass (`target_http_error` or `connection_error`,
+  retryable), never "no video". A refusal (`blocked`, `rate_limited`, `blocked_url`), any other
+  extractor error or a
   failure that may pass is answered as for any video. YouTube, Vimeo, ARD, arte and ZDF's
   `/video/` URLs name a video and have no such fallback.
 
@@ -1060,7 +1064,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
   (input, draft, queue, completion), as F13. The result cache key of a platform video gains
   `media` (so results cached before the deploy are not served) and `languages`; a cached
   `metadata_only` answer is no hit for `transcribe: true`, except a final one: with `no_speech`,
-  or with `asr_unavailable` (stored only after a transcription that failed for good). With
+  or with `asr_unavailable` (stored only after a transcription that failed for a reason of the
+  media's own). With
   `transcribe: true`, a video without a usable track that the platform says is longer than
   `MEDIA_MAX_DURATION_SECONDS` answers `media_too_long` at once with its details (final, stored),
   without a job; a media file's duration is known only after its download, so the ASR worker
@@ -1094,8 +1099,13 @@ OpenAI-compatible endpoint): always a job, answered 202.
   retryable; a download that ran out of its own time is `timeout`, retryable; a decoder error
   `transcription_failed`; a missing model `internal_error`, retryable. With a draft the draft
   answers with the failure's error and `asr_unavailable`, and keeps its fingerprint only when the
-  failure is final (then it is cached; served from the cache it drops `asr_unavailable` and says
-  the video could not be transcribed, without the failure's code). An input that expired before
+  failure is final, which is when it belongs to the media (too long, too large, not media,
+  undecodable, the item's own budget, out of memory, a refused address, the site's own error
+  answer): then it is cached; served from the cache it drops `asr_unavailable` and says the video
+  could not be transcribed, without the failure's code. A failure of the caller or of the
+  endpoint (a refused or missing key, another 4xx of the endpoint) is never final, retryable or
+  not: the result cache is shared by every caller, so nothing is stored and the next
+  `transcribe: true` is handed on again. An input that expired before
   the claim answers the draft with `asr_unavailable` (an upload: `timeout`, retryable).
 - **M11, external ASR** (`media/asr_external.py`). `ASR_BACKEND=openai`: the child decodes as
   above, encodes chunks of at most 20 minutes (cut in pauses) as 16 kHz mono Opus at 32 kbit/s
@@ -1211,8 +1221,9 @@ the media set without gating it (D1).
 - **What the ASR child needs in memory** (`ASR_MEMORY_LIMIT_MB`, 4096, an address-space limit)
   is first measured in CI's `media` job (the long clip prints VmPeak and VmHWM) and in the live
   run; package 11 sets the final resources.
-- **Cached final failures.** A transcription that failed for good (`media_too_long`, a refused
-  key, the item's budget) leaves the video's details cached; a later request without
+- **Cached final failures.** A transcription that failed for a reason of the media's own
+  (`media_too_long`, undecodable media, the item's budget) leaves the video's details cached (a
+  refused key does not); a later request without
   `transcribe` is served "could not be transcribed", without the failure's own code, and so is a
   later `transcribe: true`, which does not try again until the entry expires.
 - **Model switch.** Switching `ASR_MODEL` downloads the new model beside the old one, which stays

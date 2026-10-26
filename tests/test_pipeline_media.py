@@ -1095,6 +1095,17 @@ PROBE_FAILURES: list[tuple[str | None, bool, str, ErrorCode, bool, str | None]] 
     ("bytes_cap", False, "failed", ErrorCode.TOO_LARGE, False, None),
     ("unavailable", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
     ("unavailable", False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
+    (
+        "platform_error",
+        True,
+        "partial",
+        ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+        True,
+        "subtitles_failed",
+    ),
+    ("platform_error", False, "failed", ErrorCode.TARGET_HTTP_ERROR, True, None),
+    ("no_video", True, "partial", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
+    ("no_video", False, "failed", ErrorCode.NO_TRANSCRIPT_AVAILABLE, False, None),
     ("blocked_address", True, "failed", ErrorCode.BLOCKED_URL, False, None),
     ("blocked_address", False, "failed", ErrorCode.BLOCKED_URL, False, None),
 ]
@@ -1311,8 +1322,8 @@ def comparable(envelope: Envelope[ExtractResult]) -> dict[str, Any]:
     return dumped
 
 
-@pytest.mark.parametrize("error", ["extractor_error", "unavailable", None])
-def test_zdf_article_without_a_video_is_extracted_as_a_page(error: str | None) -> None:
+@pytest.mark.parametrize("error", ["no_video", "unavailable"])
+def test_zdf_article_without_a_video_is_extracted_as_a_page(error: str) -> None:
     """A ZDF ``.html`` URL is a target, but the probe finds no video on a news article: the
     request goes on as a page, in the same request, and answers what the page path answers."""
     page_answer = Harness({ZDF_ARTICLE: fetched(ZDF_ARTICLE, ARTICLE)}).run(url=ZDF_ARTICLE)
@@ -1342,7 +1353,7 @@ def test_a_3sat_article_with_transcribe_is_a_page_without_a_handoff() -> None:
         handed.append(needed)
         return stand_in
 
-    harness = Harness({url: fetched(url, ARTICLE)}, media=MediaProbe(error="extractor_error"))
+    harness = Harness({url: fetched(url, ARTICLE)}, media=MediaProbe(error="no_video"))
 
     envelope = harness.run(handoff, url=url, transcribe=True)
 
@@ -1446,12 +1457,17 @@ def test_a_video_within_the_duration_limit_is_still_handed_on() -> None:
     assert len(handed) == 1
 
 
-@pytest.mark.parametrize(("retryable", "probes"), [(False, 1), (True, 2)])
-def test_a_cached_draft_of_a_failed_transcription_is_final_only_when_not_retryable(
-    retryable: bool, probes: int
+@pytest.mark.parametrize(
+    ("retryable", "final", "probes"),
+    [(False, True, 1), (False, False, 2), (True, False, 2)],
+    ids=["final", "not_retryable_but_not_the_medias", "retryable"],
+)
+def test_a_cached_draft_of_a_failed_transcription_is_final_only_when_the_media_failed(
+    retryable: bool, final: bool, probes: int
 ) -> None:
-    """An ASR failure for good stores the details; a later ``transcribe: true`` request is
-    served from them instead of probing and downloading again. A failure that may pass is not
+    """An ASR failure that belongs to the media (``final``) stores the details; a later
+    ``transcribe: true`` request is served from them instead of probing and downloading again.
+    Any other failure (one that may pass, or one of the caller, such as a refused key) is not
     stored, so the next request tries again."""
     handed, handoff = capture_handoff()
     harness = Harness(media=probe(track=None), asr_enabled=True)
@@ -1466,7 +1482,12 @@ def test_a_cached_draft_of_a_failed_transcription_is_final_only_when_not_retryab
         await harness.arun(handoff, transcribe=True)
         (needed,) = handed
         stored = await harness.pipeline.transcribed_result(
-            ExtractRequest(url=YT, transcribe=True), USER, needed.input, needed.draft, failed
+            ExtractRequest(url=YT, transcribe=True),
+            USER,
+            needed.input,
+            needed.draft,
+            failed,
+            final=final,
         )
         assert stored.error is not None
         assert stored.error.code == ErrorCode.TRANSCRIPTION_FAILED
@@ -1475,8 +1496,26 @@ def test_a_cached_draft_of_a_failed_transcription_is_final_only_when_not_retryab
     later = asyncio.run(scenario())
 
     assert harness.probes() == probes
-    if not retryable:
+    assert harness.keys("res:*") != [] if final else harness.keys("res:*") == []
+    if final:
         assert data_of(later).cache == "hit"
         assert later.error is not None
         assert "could not be transcribed" in later.error.message
         assert len(handed) == 1
+
+
+@pytest.mark.parametrize("error", ["platform_error", "connect_error", "extractor_error"])
+def test_a_transient_platform_error_on_a_zdf_page_is_no_reason_to_fall_back(error: str) -> None:
+    """ZDF's API answering 5xx, a read timeout through the tunnel, or an extractor failure that
+    names no missing video: the video page is not taken for an article."""
+    harness = Harness({ZDF_ARTICLE: fetched(ZDF_ARTICLE, ARTICLE)}, media=MediaProbe(error=error))
+
+    first, second = harness.run_all({"url": ZDF_ARTICLE}, {"url": ZDF_ARTICLE})
+
+    assert first.status == "failed"
+    assert first.error is not None
+    assert first.error.retryable is True
+    assert page_files(harness.fetched_urls()) == []
+    assert data_of(second).cache == "miss"
+    assert harness.probes() == 2
+    assert harness.keys("res:*") == []

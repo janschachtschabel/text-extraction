@@ -45,7 +45,7 @@ from text_extraction.documents.pool import (
     ConversionOutOfMemory,
     ConversionTimeout,
 )
-from text_extraction.envelope import ErrorCode
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import asr_lease_seconds
 from text_extraction.outbound import DomainGate, lease_ttl_seconds
@@ -1269,25 +1269,79 @@ async def test_external_failures_map_to_codes(
     assert harness.sample("text_extraction_asr_transcriptions_total", labels) == 1
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConversionError("ExternalRejected", "401"),
+        ConversionError("ExternalRejected", "403"),
+        ConversionError("ExternalFailed", "400"),
+    ],
+    ids=["401", "403", "400"],
+)
 @scenario
-async def test_a_refused_key_keeps_the_drafts_fingerprint(tmp_path: Path) -> None:
-    """401 is final (the same key fails again): the draft answers and stays comparable; 429 is
-    not, and the draft loses its fingerprint."""
-    from tests.test_worker import queue_one_transcription
+async def test_a_refused_key_leaves_nothing_cached_and_the_next_request_hands_off_again(
+    tmp_path: Path, error: ConversionError
+) -> None:
+    """The cache is shared by every caller, the key is one caller's: a refused key (or another
+    4xx of the endpoint) answers the draft without its fingerprint, nothing is stored, and the
+    next ``transcribe: true`` request is handed to the speech recognition again."""
+    from text_extraction.extract_models import ExtractRequest, ExtractResult
+    from text_extraction.pipeline_media import AsrNeeded
 
     harness = asr_harness(**openai_settings(tmp_path))
-    asr = Asr(harness, FakeChildren(transcribe=ConversionError("ExternalRejected", "401")))
-    job_id = await queue_one_transcription(harness, key=CALLER_KEY)
+    asr = Asr(harness, FakeChildren(transcribe=error))
+    job_id = await moved(harness)
 
     await asr.process_next()
 
-    (item,) = await harness.items(job_id)
-    assert item.result is not None
-    assert item.result.error is not None
-    assert item.result.error.code == ErrorCode.TRANSCRIPTION_FAILED
-    assert item.result.error.retryable is False
-    assert item.result.data is not None
-    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+    result = (await only_item(harness, job_id)).result
+    assert result is not None
+    assert result.error is not None
+    assert (result.error.code, result.error.retryable) == (ErrorCode.TRANSCRIPTION_FAILED, False)
+    assert result.data is not None
+    assert ASR_UNAVAILABLE_WARNING in result.data.warnings
+    assert result.data.fingerprint is None
+    assert await harness.valkey.keys("res:*") == []
+
+    handed: list[AsrNeeded] = []
+
+    async def handoff(
+        needed: AsrNeeded, stand_in: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        handed.append(needed)
+        return stand_in
+
+    again = await harness.pipeline.run(
+        ExtractRequest(url=YOUTUBE, compliance="enforce", transcribe=True),
+        OWNER,
+        asr_handoff=handoff,
+    )
+
+    assert again.data is not None
+    assert again.data.cache == "miss"
+    assert len(handed) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "final"),
+    [
+        (ConversionError("MediaTooLong", "7300"), True),
+        (ConversionError("DecodeFailed", ""), True),
+        (ConversionError("BudgetSpent", ""), True),
+        (ConversionError("ExternalRejected", "401"), False),
+        (ConversionError("ExternalFailed", "400"), False),
+        (ConversionError("ExternalUnavailable", "503"), False),
+        (ConversionError("ModelsMissing", ""), False),
+        (ConversionError("ValueError", "something"), False),
+    ],
+    ids=["too_long", "decode", "budget", "401", "400", "503", "models", "unknown"],
+)
+def test_only_failures_of_the_media_are_final(
+    tmp_path: Path, error: ConversionError, final: bool
+) -> None:
+    harness = asr_harness(**openai_settings(tmp_path))
+
+    assert Asr(harness).runner._transcription_failure(error).final is final
 
 
 @scenario

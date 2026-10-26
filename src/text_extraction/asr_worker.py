@@ -414,12 +414,18 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
 
 @dataclass(frozen=True)
 class _Failure:
-    """Why an item has no transcription: its error and the target's status."""
+    """Why an item has no transcription: its error and the target's status. ``final`` says
+    that the failure belongs to the media (too long, too large, not media, undecodable, the
+    item's own budget, out of memory, a refused address, the site's own error answer), so a
+    platform video's details may be stored as its answer; a failure of the caller or of the
+    endpoint (a refused or missing key, the endpoint's 4xx) or one that may pass is never
+    final, whether retryable or not: the result cache is shared by every caller."""
 
     code: ErrorCode
     message: str
     retryable: bool
     upstream_status: int | None = None
+    final: bool = False
 
     def envelope(self) -> Envelope[ExtractResult]:
         return failed_extract(self.code, self.message, retryable=self.retryable)
@@ -515,7 +521,13 @@ class AsrRunner:
             outcome=label,
         )
         return await self._pipeline.transcribed_result(
-            request, job_principal(job), meta, draft, answer, upstream_status=upstream
+            request,
+            job_principal(job),
+            meta,
+            draft,
+            answer,
+            upstream_status=upstream,
+            final=isinstance(outcome, _Failure) and outcome.final,
         )
 
     async def _transcription(
@@ -569,7 +581,9 @@ class AsrRunner:
     ) -> _Media | _Failure:
         if meta.source == "upload":
             if meta.kind is None:
-                return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, _NOT_MEDIA_MESSAGE, False)
+                return _Failure(
+                    ErrorCode.UNSUPPORTED_CONTENT_TYPE, _NOT_MEDIA_MESSAGE, False, final=True
+                )
             path = scratch / f"upload.{meta.kind}"
             await asyncio.to_thread(path.write_bytes, body)
             return _Media(path, meta.kind, None)
@@ -659,7 +673,9 @@ class AsrRunner:
             _log.warning("asr_download_without_file")
             return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DOWNLOAD_FAILED_MESSAGE, True)
         if kind not in get_args(MediaKind):
-            return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, _NOT_MEDIA_MESSAGE, False)
+            return _Failure(
+                ErrorCode.UNSUPPORTED_CONTENT_TYPE, _NOT_MEDIA_MESSAGE, False, final=True
+            )
         status = reply.get("status")
         return _Media(
             path,
@@ -696,7 +712,7 @@ class AsrRunner:
                 reply = await self._children.run(function, call, deadline)
             except ConversionTimeout:
                 if deadline >= item_deadline:
-                    return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False)
+                    return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False, final=True)
                 return _Failure(ErrorCode.TIMEOUT, _DOWNLOAD_TIMEOUT_MESSAGE, True)
             except ConversionError as error:
                 failure = self._download_failure(error, context)
@@ -708,7 +724,9 @@ class AsrRunner:
                 return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _CRASHED_MESSAGE, True)
             except ConversionOutOfMemory:
                 _log.warning("asr_child_out_of_memory", function=function)
-                return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _OUT_OF_MEMORY_MESSAGE, False)
+                return _Failure(
+                    ErrorCode.TRANSCRIPTION_FAILED, _OUT_OF_MEMORY_MESSAGE, False, final=True
+                )
             if context.capped:
                 return self._too_large()
             if host is not None and function == "download":
@@ -734,7 +752,7 @@ class AsrRunner:
             return self._too_large()
         if name in ("NotMedia", "IsLive"):
             message = _LIVE_MESSAGE if name == "IsLive" else _NOT_MEDIA_MESSAGE
-            return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, message, False)
+            return _Failure(ErrorCode.UNSUPPORTED_CONTENT_TYPE, message, False, final=True)
         if name == "MediaTooLong":
             return self._too_long(_seconds_of(error.message))
         if name == "HttpStatus" and error.message.strip().isdecimal():
@@ -743,7 +761,13 @@ class AsrRunner:
             message = f"The media's site answered with HTTP status {status}."
             if retryable:
                 message += " Try again later."
-            return _Failure(ErrorCode.TARGET_HTTP_ERROR, message, retryable, upstream_status=status)
+            return _Failure(
+                ErrorCode.TARGET_HTTP_ERROR,
+                message,
+                retryable,
+                upstream_status=status,
+                final=not retryable,
+            )
         return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DOWNLOAD_FAILED_MESSAGE, True)
 
     async def _record(self, host: str, error: ConversionError, failure: _Failure) -> None:
@@ -764,7 +788,7 @@ class AsrRunner:
         settings = self._settings
         left = deadline - asyncio.get_running_loop().time()
         if left < _MIN_CALL_SECONDS:
-            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False)
+            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False, final=True)
         payload: dict[str, Any] = {
             "backend": self._backend,
             "path": str(media.path),
@@ -794,13 +818,15 @@ class AsrRunner:
             reply = await self._children.run("transcribe", payload, deadline)
         except ConversionTimeout:
             # Not retryable: the same media would take as long again.
-            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False)
+            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False, final=True)
         except ConversionCrashed:
             _log.warning("asr_child_crashed", function="transcribe")
             return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _CRASHED_MESSAGE, True)
         except ConversionOutOfMemory:
             _log.warning("asr_child_out_of_memory", function="transcribe")
-            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _OUT_OF_MEMORY_MESSAGE, False)
+            return _Failure(
+                ErrorCode.TRANSCRIPTION_FAILED, _OUT_OF_MEMORY_MESSAGE, False, final=True
+            )
         except ConversionError as error:
             return self._transcription_failure(error)
         finally:
@@ -836,9 +862,9 @@ class AsrRunner:
         if name == "MediaTooLong":
             return self._too_long(_seconds_of(error.message))
         if name == "DecodeFailed":
-            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DECODE_MESSAGE, False)
+            return _Failure(ErrorCode.TRANSCRIPTION_FAILED, _DECODE_MESSAGE, False, final=True)
         if name == "BudgetSpent":
-            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False)
+            return _Failure(ErrorCode.TIMEOUT, _ITEM_TIMEOUT_MESSAGE, False, final=True)
         detail = _external_detail(error.message)
         if name == "ExternalRejected":
             message = _REJECTED_MESSAGE.format(detail=detail)
@@ -853,7 +879,7 @@ class AsrRunner:
 
     def _too_long(self, duration: float | None) -> _Failure:
         message = media_too_long_message(duration, self._settings.media_max_duration_seconds)
-        return _Failure(ErrorCode.MEDIA_TOO_LONG, message, False)
+        return _Failure(ErrorCode.MEDIA_TOO_LONG, message, False, final=True)
 
     def _too_large(self) -> _Failure:
         limit = self._settings.media_max_bytes
@@ -861,6 +887,7 @@ class AsrRunner:
             ErrorCode.TOO_LARGE,
             f"The media is larger than the {limit} bytes that are downloaded (MEDIA_MAX_BYTES).",
             False,
+            final=True,
         )
 
 
@@ -868,10 +895,13 @@ def _refusal(reason: str) -> _Failure | None:
     """A request the proxy refused, as the item's error; None for a reason that says nothing
     about the target (a malformed request, the proxy's own authentication)."""
     if reason == "blocked_address":
-        return _Failure(ErrorCode.BLOCKED_URL, _BLOCKED_ADDRESS_MESSAGE, False)
+        return _Failure(ErrorCode.BLOCKED_URL, _BLOCKED_ADDRESS_MESSAGE, False, final=True)
     if reason == "bytes_cap":
         return _Failure(
-            ErrorCode.TOO_LARGE, "The download needed more bytes than it may use.", False
+            ErrorCode.TOO_LARGE,
+            "The download needed more bytes than it may use.",
+            False,
+            final=True,
         )
     if reason == "dns_error":
         return _Failure(ErrorCode.DNS_ERROR, _DNS_MESSAGE, True)
