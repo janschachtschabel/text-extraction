@@ -1038,8 +1038,10 @@ async def test_a_second_transcribe_request_for_a_speechless_video_is_a_cache_hit
 
     harness = asr_harness(**settings_for(tmp_path))
     asr = Asr(harness, FakeChildren(transcribe=transcript(segments=[])))
-    await moved(harness)
+    job_id = await moved(harness)
     await asr.process_next()
+    fresh = (await only_item(harness, job_id)).result
+    assert fresh is not None
     handed: list[Any] = []
 
     async def asr_handoff(needed: Any, without: Any) -> Any:
@@ -1058,6 +1060,12 @@ async def test_a_second_transcribe_request_for_a_speechless_video_is_a_cache_hit
     assert NO_SPEECH_WARNING in again.data.warnings
     assert again.data.media is not None
     assert again.data.media.transcript_source == "metadata_only"
+    # The same answer as the fresh one: the media error, not a quality verdict.
+    assert again.error is not None
+    assert again.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert (again.status, again.error) == (fresh.status, fresh.error)
+    assert fresh.data is not None
+    assert again.data.warnings == fresh.data.warnings
 
 
 @scenario

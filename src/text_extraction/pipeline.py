@@ -189,6 +189,7 @@ from text_extraction.pipeline_media import (
     MediaSteps,
     asr_available,
     asr_failed,
+    cached_details_only,
     no_speech,
     transcribed,
     transcribed_content,
@@ -1113,7 +1114,8 @@ class Pipeline:
         result = stored.result.model_copy(
             update={"url": run.req.url, "attempts": 0, "cache": "hit"}
         )
-        return self._envelope(result)
+        # A video's details only keep their media error (M6), as in the fresh answer.
+        return cached_details_only(result, self._settings) or self._envelope(result)
 
     async def _fetch_and_extract(
         self, run: _Run, stored: _Stored | None

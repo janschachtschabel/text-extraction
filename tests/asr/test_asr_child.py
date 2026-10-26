@@ -609,6 +609,8 @@ class _Endpoint:
 def test_long_audio_goes_out_in_chunks_cut_in_pauses(long_clip: Path, httpserver: Any) -> None:
     """The long clip (672 s) in chunks of at most 300 s: each posted file is Ogg Opus of its
     chunk's length, and the segments are on the file's clock."""
+    from faster_whisper.tokenizer import _LANGUAGE_CODES
+
     from text_extraction.media.asr_external import transcribe_external
 
     endpoint = _Endpoint(httpserver)
@@ -619,6 +621,7 @@ def test_long_audio_goes_out_in_chunks_cut_in_pauses(long_clip: Path, httpserver
         model="whisper-1",
         api_key=EXTERNAL_KEY,
         timeout=30.0,
+        languages=_LANGUAGE_CODES,
         chunk_seconds=300,
         max_duration=7200,
     )

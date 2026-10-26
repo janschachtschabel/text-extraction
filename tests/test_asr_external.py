@@ -30,6 +30,8 @@ SR = 16_000
 KEY = "sk-external-asr-key-7f3a9c"
 PATH = "/srv/asr/item-x/upload.ogg"  # never opened: the decoding is a fake
 ENDPOINT = "/v1/audio/transcriptions"
+# Whisper's language codes (``faster_whisper.tokenizer._LANGUAGE_CODES`` in the child): a few.
+WHISPER_CODES = frozenset({"de", "en", "fr", "haw"})
 
 
 def tone(seconds: float, *, quiet_at: tuple[float, ...] = ()) -> np.ndarray[Any, Any]:
@@ -94,6 +96,7 @@ def run(endpoint: Endpoint, audio: np.ndarray[Any, Any], **kwargs: Any) -> Any:
         "model": "whisper-1",
         "api_key": KEY,
         "timeout": 10.0,
+        "languages": WHISPER_CODES,
         "decode": decoded(audio),
         "encode": fake_encode,
     }
@@ -173,6 +176,26 @@ def test_a_language_name_is_no_code(httpserver: HTTPServer) -> None:
 
     assert transcription.language == ""
     assert all("language" not in request["form"] for request in endpoint.requests)
+
+
+def test_a_code_whisper_does_not_know_is_not_sent_on(httpserver: HTTPServer) -> None:
+    """A detected code goes to the later chunks only when Whisper knows it; otherwise no
+    language is sent and none is claimed."""
+    endpoint = Endpoint(httpserver, lambda index, _r: verbose(index, language="xx"))
+
+    transcription = run(endpoint, tone(1500, quiet_at=(1200.0,)))
+
+    assert all("language" not in request["form"] for request in endpoint.requests)
+    assert transcription.language == ""
+
+
+def test_a_three_letter_code_whisper_knows_is_sent_on(httpserver: HTTPServer) -> None:
+    endpoint = Endpoint(httpserver, lambda index, _r: verbose(index, language="haw"))
+
+    transcription = run(endpoint, tone(1500, quiet_at=(1200.0,)))
+
+    assert endpoint.requests[1]["form"]["language"] == "haw"
+    assert transcription.language == "haw"
 
 
 def test_verbose_json_fallback_to_json(httpserver: HTTPServer) -> None:
@@ -271,6 +294,39 @@ def test_429_and_timeout_retryable(httpserver: HTTPServer) -> None:
     assert str(error.value) == "timeout"
 
 
+def trickle(_index: int, _request: Request) -> Response:
+    """An answer that sends a byte every 0.2 s for 2 s: no read waits long, the whole does."""
+
+    def body() -> Any:
+        for _ in range(10):
+            yield b" "
+            time.sleep(0.2)
+        yield json.dumps({"text": "late", "language": "de", "segments": []}).encode()
+
+    return Response(body(), content_type="application/json")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "raised"),
+    [
+        ({"timeout": 0.6}, ExternalUnavailable),
+        ({"timeout": 60.0, "budget": 1.6}, BudgetSpent),
+    ],
+    ids=["chunk-timeout", "item-budget"],
+)
+def test_a_trickling_answer_is_cut_at_the_chunks_total_bound(
+    httpserver: HTTPServer, kwargs: dict[str, Any], raised: type[Exception]
+) -> None:
+    """The chunk's timeout bounds its whole request, not each read."""
+    endpoint = Endpoint(httpserver, trickle)
+    started = time.monotonic()
+
+    with pytest.raises(raised):
+        run(endpoint, tone(30), **kwargs)
+
+    assert time.monotonic() - started < (2.0 if "budget" in kwargs else 1.5)
+
+
 def test_a_timeout_cut_by_the_items_budget_is_the_budget(httpserver: HTTPServer) -> None:
     """When the item's budget (``ASR_TIMEOUT_SECONDS``, what is left of it) ends before the
     chunk's own timeout, the answer is the budget's."""
@@ -302,6 +358,7 @@ def test_an_unreachable_endpoint_is_retryable() -> None:
             model="whisper-1",
             api_key=KEY,
             timeout=5.0,
+            languages=WHISPER_CODES,
             decode=decoded(tone(30)),
             encode=fake_encode,
         )

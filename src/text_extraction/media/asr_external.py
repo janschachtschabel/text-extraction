@@ -12,9 +12,10 @@ transcriptions`` (``model``, ``response_format=verbose_json``, ``language`` when
 segments of a chunk are moved by the chunk's start onto the file's clock. An endpoint that
 refuses ``verbose_json`` (400 or 422) gets the chunk again as ``json``, and so do the later
 chunks; a ``json`` answer, or a ``verbose_json`` one without segments, is one segment over its
-chunk. The language: the requested one, else the code the first chunk with speech answers with
-(an ISO 639 code; OpenAI answers a name such as ``german``, which is not taken, and the pipeline
-then reads the language from the text), passed on to the later chunks.
+chunk. The language: the requested one, else the code the first chunk with speech answers with,
+passed on to the later chunks, when it is one of Whisper's language codes (``languages``);
+anything else (OpenAI answers a name such as ``german``) is not taken: no language is sent, and
+the pipeline then reads the language from the text.
 
 **The client** (OpenAI SDK 3.29, on httpx2) is the operator's endpoint, called directly, not
 through the egress proxy (``ASR_EXTERNAL_BASE_URL`` is https-only operator configuration, see
@@ -22,8 +23,9 @@ through the egress proxy (``ASR_EXTERNAL_BASE_URL`` is https-only operator confi
 which the child's allowlisted environment does not carry anyway), no redirects (a ``3xx`` is a
 failure, so a request with the key never goes to another host), ``max_retries=0`` (the item's
 outcome says whether to try again; retries would multiply the time a chunk takes) and our user
-agent. Each chunk gets ``timeout`` (``ASR_EXTERNAL_TIMEOUT_SECONDS``) or what is left of
-``budget`` (the item's ``ASR_TIMEOUT_SECONDS``), whichever is less.
+agent. Each chunk's whole request (upload, the endpoint's work, the answer) gets ``timeout``
+(``ASR_EXTERNAL_TIMEOUT_SECONDS``) or what is left of ``budget`` (the item's
+``ASR_TIMEOUT_SECONDS``), whichever is less.
 
 **Failures** are raised as the types the worker maps, with a status code or a fixed word as the
 message and outside the SDK's exception, so neither the message nor a traceback's context can
@@ -41,9 +43,9 @@ The key is an argument, never logged; the child silences all logging before it i
 
 import io
 import json
-import re
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from pathlib import Path
 from typing import Any, Final, TypeGuard
 
@@ -73,7 +75,6 @@ _CONTENT_TYPE: Final = "audio/ogg"
 _REJECTED: Final = frozenset({401, 403})
 _RETRYABLE: Final = frozenset({408, 409, 425, 429})
 _NO_VERBOSE: Final = frozenset({"400", "422"})  # the endpoint takes no ``verbose_json``
-_LANGUAGE_CODE: Final = re.compile(r"[a-z]{2,3}", re.ASCII)
 # A chunk's request gets at least this long; a budget with less left sends nothing more.
 _MIN_SECONDS: Final = 1.0
 
@@ -151,6 +152,7 @@ def transcribe_external(
     model: str,
     api_key: str,
     timeout: float,
+    languages: Container[str],
     chunk_seconds: float = CHUNK_SECONDS,
     language: str | None = None,
     max_duration: float | None = None,
@@ -160,9 +162,10 @@ def transcribe_external(
     encode: Callable[[Audio], bytes] = encode_ogg_opus,
 ) -> Transcription:
     """The transcription of the media at ``path`` by the endpoint at ``base_url``; see the
-    module docstring. ``budget`` is the seconds the item has left (None: no limit),
-    ``max_duration`` the decoder's limit (``MEDIA_MAX_DURATION_SECONDS``). ``decode`` and
-    ``encode`` default to PyAV."""
+    module docstring. ``languages`` are the codes a detected language must be one of
+    (Whisper's, ``faster_whisper.tokenizer._LANGUAGE_CODES``), ``budget`` the seconds the item
+    has left (None: no limit), ``max_duration`` the decoder's limit
+    (``MEDIA_MAX_DURATION_SECONDS``). ``decode`` and ``encode`` default to PyAV."""
     if budget is not None and budget < _MIN_SECONDS:
         raise BudgetSpent
     deadline = time.monotonic() + budget if budget is not None else None
@@ -183,7 +186,7 @@ def transcribe_external(
             segments.extend(cues)
             if chosen is None and cues:  # a chunk of silence or music does not decide it
                 answered = data.get("language")
-                if isinstance(answered, str) and _LANGUAGE_CODE.fullmatch(answered):
+                if isinstance(answered, str) and answered in languages:
                     chosen = answered
     finally:
         client.close()
@@ -240,28 +243,55 @@ def _request(
     capped: bool,
 ) -> tuple[Exception | None, dict[str, Any]]:
     """The request, with its failure as a value: raised by the caller, outside the SDK's
-    exception (see the module docstring)."""
+    exception (see the module docstring). ``timeout`` bounds the whole request: the SDK's own
+    timeout bounds each phase (connect, each write, each read), so an answer that trickles in
+    could outlast it; the request runs on a thread of its own that is given up at the bound (its
+    own timeouts end it soon after, and the client is closed when the transcription ends)."""
     extra: dict[str, Any] = {"language": language} if language else {}
-    try:
-        raw = client.audio.transcriptions.with_raw_response.create(
-            model=model,
-            file=(_FILE_NAME, chunk, _CONTENT_TYPE),
-            response_format=response_format,
-            timeout=timeout,
-            **extra,
-        )
-        data = json.loads(raw.text)
-    except openai.APITimeoutError:
-        return (BudgetSpent() if capped else ExternalUnavailable("timeout")), {}
-    except openai.APIConnectionError:
-        return ExternalUnavailable("connection"), {}
-    except openai.APIStatusError as error:
-        return _status_failure(error.status_code), {}
-    except (openai.OpenAIError, httpx2.HTTPError, ValueError, UnicodeError):
+    outcome: list[object] = []
+
+    def call() -> None:
+        try:
+            raw = client.audio.transcriptions.with_raw_response.create(
+                model=model,
+                file=(_FILE_NAME, chunk, _CONTENT_TYPE),
+                response_format=response_format,
+                timeout=timeout,
+                **extra,
+            )
+            outcome.append(json.loads(raw.text))
+        except BaseException as error:  # mapped by the caller, never printed
+            outcome.append(error)
+
+    worker = threading.Thread(target=call, name="asr-external-request", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if not outcome:  # the whole request outlasted its bound
+        return _timed_out(capped), {}
+    found = outcome[0]
+    if isinstance(found, BaseException):
+        return _failure_of(found, capped), {}
+    if not isinstance(found, dict):
         return ExternalFailed("unreadable"), {}
-    if not isinstance(data, dict):
-        return ExternalFailed("unreadable"), {}
-    return None, data
+    return None, found
+
+
+def _timed_out(capped: bool) -> Exception:
+    return BudgetSpent() if capped else ExternalUnavailable("timeout")
+
+
+def _failure_of(error: BaseException, capped: bool) -> Exception:
+    """The failure an exception of the request maps to; one that is not the request's own (a
+    ``MemoryError``, say) is raised as it is."""
+    if isinstance(error, openai.APITimeoutError):
+        return _timed_out(capped)
+    if isinstance(error, openai.APIConnectionError):
+        return ExternalUnavailable("connection")
+    if isinstance(error, openai.APIStatusError):
+        return _status_failure(error.status_code)
+    if isinstance(error, openai.OpenAIError | httpx2.HTTPError | ValueError | UnicodeError):
+        return ExternalFailed("unreadable")
+    raise error
 
 
 def _status_failure(status: int) -> Exception:

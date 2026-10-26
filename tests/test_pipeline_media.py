@@ -321,6 +321,35 @@ def test_metadata_only_names_transcribe_when_the_service_has_asr() -> None:
     assert "transcribe: true" in envelope.error.message
 
 
+LONG_DESCRIPTION = " ".join(f"Plants turn light into sugar, step {n}." for n in range(20))
+
+
+@pytest.mark.parametrize(
+    ("description", "asr_enabled"),
+    [
+        ("How plants eat light.\nA lesson for grade 5.", False),
+        ("How plants eat light.\nA lesson for grade 5.", True),
+        (LONG_DESCRIPTION, False),  # QUALITY_MIN_WORDS or more: no quality verdict either
+    ],
+    ids=["short", "transcribe-hint", "long-description"],
+)
+def test_a_cached_details_only_answer_is_the_fresh_one(description: str, asr_enabled: bool) -> None:
+    """A details-only answer served from the cache has the media error of the fresh one
+    (M6: partial with no_transcript_available), not a quality verdict."""
+    harness = Harness(
+        media=probe(manual={}, automatic={}, track=None, description=description),
+        asr_enabled=asr_enabled,
+    )
+
+    first, second = harness.run_all({}, {})
+
+    assert data_of(second).cache == "hit"
+    assert first.error is not None
+    assert first.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert (second.status, second.error) == (first.status, first.error)
+    assert data_of(second).warnings == data_of(first).warnings
+
+
 def test_blocked_gives_subtitles_blocked_warning() -> None:
     harness = Harness(
         media=probe(manual={}, automatic={}, track=None, blocked=True, error="blocked")

@@ -398,6 +398,7 @@ def _external(
         model=payload["model"],
         api_key=payload["api_key"],
         timeout=float(payload["timeout"]),
+        languages=_LANGUAGE_CODES,
         language=language,
         max_duration=max_duration,
         budget=float(payload["budget"]),

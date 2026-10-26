@@ -26,7 +26,8 @@ rest:
      of the description, ``content_type`` ``text/html``, ``partial`` with
      ``no_transcript_available``. Only a probe that succeeded and found no usable track says
      the video "has no subtitles" (not retryable), and only that answer is fingerprinted and
-     cached. A platform that refused the service (D1) adds ``subtitles_blocked``; any other
+     cached; the cache serves it with this error again (``cached_details_only``). A platform
+     that refused the service (D1) adds ``subtitles_blocked``; any other
      failure of the probe (``_PROBE_FAILURES``: the children, the network, the track, a limit)
      says what failed, mostly with ``subtitles_failed``, and is retryable when it may pass.
      Neither is compared or cached. Without title and description it is ``failed``: retryable
@@ -140,6 +141,7 @@ __all__ = [
     "TranscribedContent",
     "asr_available",
     "asr_failed",
+    "cached_details_only",
     "no_speech",
     "transcribed",
     "transcribed_content",
@@ -424,6 +426,35 @@ _NO_SPEECH_DETAILS_MESSAGE: Final = (
     "The video has no speech that could be transcribed: the answer has its details only."
 )
 _NO_SPEECH_MESSAGE: Final = "The audio has no speech that could be transcribed."
+_NO_SPEECH_DETAILS_ERROR: Final = ErrorInfo(
+    code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=_NO_SPEECH_DETAILS_MESSAGE, retryable=False
+)
+
+
+def _details_only_error(message: str, settings: Settings, *, retryable: bool) -> ErrorInfo:
+    """The error of a platform video's details without a transcript (M6): ``message``, with
+    the hint to send ``transcribe: true`` when the service transcribes."""
+    if asr_available(settings):
+        message += _TRANSCRIBE_HINT
+    return ErrorInfo(code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=message, retryable=retryable)
+
+
+def cached_details_only(
+    result: ExtractResult, settings: Settings
+) -> Envelope[ExtractResult] | None:
+    """The envelope of a stored platform video's details without a transcript
+    (``metadata_only``), the same as the fresh answer's: ``partial`` with
+    ``no_transcript_available`` and the fresh message, never a quality verdict; None for any
+    other result. Only two such answers are stored (the others carry no fingerprint): the
+    video without subtitles and, with ``no_speech``, the one the speech recognition heard
+    nothing in."""
+    if result.media is None or result.media.transcript_source != "metadata_only":
+        return None
+    if NO_SPEECH_WARNING in result.warnings:
+        error = _NO_SPEECH_DETAILS_ERROR
+    else:
+        error = _details_only_error(_NO_SUBTITLES_MESSAGE, settings, retryable=False)
+    return Envelope(status="partial", data=result, error=error)
 
 
 def no_speech(
@@ -440,13 +471,11 @@ def no_speech(
     if draft is not None and draft.data is not None:
         kept = [w for w in draft.data.warnings if w != ASR_UNAVAILABLE_WARNING]
         warnings = list(dict.fromkeys([*kept, NO_SPEECH_WARNING]))
-        error = ErrorInfo(
-            code=ErrorCode.NO_TRANSCRIPT_AVAILABLE,
-            message=_NO_SPEECH_DETAILS_MESSAGE,
-            retryable=False,
-        )
         return draft.model_copy(
-            update={"data": draft.data.model_copy(update={"warnings": warnings}), "error": error}
+            update={
+                "data": draft.data.model_copy(update={"warnings": warnings}),
+                "error": _NO_SPEECH_DETAILS_ERROR,
+            }
         )
     media = MediaInfo(
         platform=meta.platform,
@@ -737,11 +766,7 @@ class MediaSteps:
             retryable = failure.retryable
         else:
             message = _NO_SUBTITLES_MESSAGE
-        if asr_available(self._settings):
-            message += _TRANSCRIBE_HINT
-        error = ErrorInfo(
-            code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message=message, retryable=retryable
-        )
+        error = _details_only_error(message, self._settings, retryable=retryable)
         return Envelope(status="partial", data=result, error=error)
 
     def _result(
