@@ -50,8 +50,9 @@ import requests  # noqa: E402
 from youtube_transcript_api import TranscriptsDisabled, YouTubeTranscriptApi  # noqa: E402
 from yt_dlp import YoutubeDL  # noqa: E402
 from yt_dlp.networking import Request  # noqa: E402
-from yt_dlp.networking.exceptions import RequestError  # noqa: E402
+from yt_dlp.networking.exceptions import HTTPError, ProxyError, RequestError  # noqa: E402
 
+from text_extraction.media.captions import CaptionError, parse_captions  # noqa: E402
 from text_extraction.media.select import TrackRef, choose_track, track_language  # noqa: E402
 
 SOCKET_TIMEOUT_SECONDS: Final = 10.0  # one connection or read (M4)
@@ -332,15 +333,64 @@ def _ytdlp_tracks(tracks: object) -> _Tracks:
 def _download_track(
     ydl: YoutubeDL, formats: list[dict[str, Any]], max_bytes: int
 ) -> tuple[str | None, bytes, str | None]:
-    """The best format we read: ``(parser format, body, charset)``; ``(None, b"", None)`` when
-    the track has none."""
+    """The first format, best first, whose body has a cue with text: ``(parser format, body,
+    charset)``; ``(None, b"", None)`` when the track has no format we read. A format that fails
+    (an error answer, a broken playlist, over ``max_bytes``) or has no text gives way to the
+    next. Without any with text, the last body that came is returned (the caller calls it
+    empty or unreadable), else ``_TooLarge`` when a format was too large, else the last
+    failure. A refusal of the egress proxy (a proxy error, or a 403 or 407 answer, which the
+    proxy also gives for an address it refuses or a spent byte cap) ends the track at once: its
+    reason stays the call's. The call's byte cap counts every format fetched."""
     ranked = sorted(
         (f for f in formats if _parser_format(f) is not None),
         key=lambda f: list(_FORMATS).index(_parser_format(f) or "vtt"),
     )
     if not ranked:
         return None, b"", None
-    fmt = ranked[0]
+    came: tuple[str | None, bytes, str | None] | None = None
+    too_large = False
+    failure: Exception | None = None
+    for fmt in ranked:
+        try:
+            parser, body, charset = _fetch_format(ydl, fmt, max_bytes)
+        except ProxyError:
+            raise
+        except HTTPError as error:
+            if error.status in (403, 407):
+                raise
+            failure = error
+            continue
+        except _TooLarge as error:
+            too_large, failure = True, error
+            continue
+        except (RequestError, _BadPlaylist, _NotHttp, OSError) as error:
+            failure = error
+            continue
+        if _has_text(body, parser, charset, max_bytes):
+            return parser, body, charset
+        came = (parser, body, charset)
+    if came is not None:
+        return came
+    if too_large:
+        raise _TooLarge
+    raise failure or _BadPlaylist()  # every format failed in one of the branches above
+
+
+def _has_text(body: bytes, parser: str | None, charset: str | None, max_bytes: int) -> bool:
+    """Whether ``body`` parses as ``parser`` into at least one cue with text."""
+    if parser is None or not body.strip():
+        return False
+    try:
+        cues = parse_captions(body, parser, charset, max_bytes=max_bytes)  # type: ignore[arg-type]
+    except CaptionError:
+        return False
+    return any(cue.text.strip() for cue in cues)
+
+
+def _fetch_format(
+    ydl: YoutubeDL, fmt: dict[str, Any], max_bytes: int
+) -> tuple[str | None, bytes, str | None]:
+    """One format of a track: ``(parser format, body, charset)``."""
     response = ydl.urlopen(Request(_http_url(fmt["url"]), headers=_headers(fmt)))
     body = _read_capped(response, max_bytes)
     charset = _charset(response.headers.get("Content-Type"))

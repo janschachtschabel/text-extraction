@@ -968,3 +968,69 @@ def test_media_calls_fit_the_tunnel_wherever_the_pipeline_runs() -> None:
             assert parts.media.proxy.tunnel_timeout == expected + TUNNEL_GRACE_SECONDS
         finally:
             parts.conversion_pool.shutdown()
+
+
+# --- the formats of one track (final fix round) ------------------------------------------------
+
+SRT = "1\n00:00:01,000 --> 00:00:02,000\nDas ist der erste Satz.\n"
+
+
+def serve_two_formats(httpserver: HTTPServer) -> str:
+    """A page whose German track comes as WebVTT (ranked first) and as SRT."""
+    httpserver.expect_request("/lesson.html").respond_with_data(
+        "<html><head><title>Lesson</title></head><body>"
+        '<video controls><source src="clip.mp4" type="video/mp4">'
+        '<track kind="subtitles" src="de.vtt" srclang="de" label="Deutsch">'
+        '<track kind="subtitles" src="de.srt" srclang="de" label="Deutsch"></video>'
+        "</body></html>",
+        content_type="text/html",
+    )
+    httpserver.expect_request("/de.srt").respond_with_data(SRT, content_type="text/plain")
+    return httpserver.url_for("/lesson.html")
+
+
+@pytest.mark.parametrize(
+    "vtt_answer",
+    [
+        {"response_data": "gone", "status": 404},
+        {"response_data": "", "status": 200},
+        {"response_data": "WEBVTT\n\nnot a cue at all", "status": 200},
+    ],
+    ids=["fetch_error", "empty", "unreadable"],
+)
+def test_a_format_that_fails_gives_way_to_the_next(
+    httpserver: HTTPServer, vtt_answer: dict[str, Any]
+) -> None:
+    url = serve_two_formats(httpserver)
+    httpserver.expect_request("/de.vtt").respond_with_data(
+        vtt_answer["response_data"], status=vtt_answer["status"], content_type="text/vtt"
+    )
+
+    async def scenario() -> None:
+        async with fetcher(settings()) as media:
+            probe = await media.probe(local_target(url), ["de"], deadline_in(60))
+
+            assert probe.error is None
+            assert probe.track is not None
+            assert probe.track.format == "srt"
+            cues = parse_captions(probe.track.body, probe.track.format, probe.track.charset)
+            assert [cue.text for cue in cues] == ["Das ist der erste Satz."]
+
+    run(scenario)
+
+
+def test_a_proxy_refusal_of_a_format_ends_the_track(httpserver: HTTPServer) -> None:
+    url = serve_two_formats(httpserver)
+    httpserver.expect_request("/de.vtt").respond_with_data(
+        "", status=302, headers={"Location": "http://169.254.169.254/latest/de.vtt"}
+    )
+
+    async def scenario() -> None:
+        async with fetcher(settings()) as media:
+            probe = await media.probe(local_target(url), ["de"], deadline_in(60))
+
+            assert probe.track is None
+            assert probe.error == "blocked_address"
+
+    run(scenario)
+    assert "/de.srt" not in [request.path for request, _response in httpserver.log]
