@@ -523,8 +523,11 @@ def test_transcribes_a_long_clip_across_windows(tmp_path: Path, long_clip: Path)
     report_memory("long clip, 672 s", memory, settings)
 
     expected = (CORPUS / "speech_de.expected.txt").read_text(encoding="utf-8")
-    late = " ".join(text for start, _end, text in reply["segments"] if start >= 640.0)
-    assert recall(expected, late) >= 0.8  # the last tile, in the second window
+    # The last tile starts at 640 s, in the second window. Whisper may join its first sentence
+    # with the end of the tile before into one segment that starts earlier, so take every
+    # segment that reaches into the last tile.
+    late = " ".join(text for _start, end, text in reply["segments"] if end > 640.0)
+    assert recall(expected, late) >= 0.8
     assert reply["duration"] == pytest.approx(672.0, abs=0.5)
     starts = [start for start, _end, _text in reply["segments"]]
     assert starts == sorted(starts)
