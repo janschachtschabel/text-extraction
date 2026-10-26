@@ -17,6 +17,12 @@ spec:
     name: {{ include "text-extraction.workerName" $args }}
   minReplicas: {{ $hpa.minReplicas }}
   maxReplicas: {{ $hpa.maxReplicas }}
+  {{- $window := $worker.autoscaling.scaleDownStabilizationWindowSeconds }}
+  {{- if not (kindIs "invalid" $window) }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: {{ $window }}
+  {{- end }}
   metrics:
     - type: Resource
       resource:

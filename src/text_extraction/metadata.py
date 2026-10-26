@@ -5,6 +5,11 @@ microdata and RDFa through extruct, OpenGraph, meta tags, links and images by XP
 can be broken or hostile, so a failing reader costs the page that one source and nothing else.
 Licences are ranked in ``text_extraction.licenses``.
 
+``declared_media`` reads the audio and video a page declares in its JSON-LD (``VideoObject`` and
+``AudioObject`` anywhere in an item, also as ``associatedMedia`` of an episode) and OpenGraph
+(``og:video``, ``og:audio``): the players listed in a result's ``media.embeds`` (ruling M8, with
+``media/html5.py``).
+
 Structured data is read from the page's own items only: top-level items, ``@graph`` members and
 ``mainEntity``. What hangs off them (list entries, parts, sources, media) describes other things.
 
@@ -16,7 +21,7 @@ import re
 from collections.abc import Iterable, Iterator, Mapping
 from functools import cache
 from itertools import chain, islice
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 import jstyleson
@@ -62,6 +67,21 @@ _MIN_DETECTION_WORDS = 50
 _MAX_DETECTION_CHARS = 10_000
 _MIN_DETECTION_CONFIDENCE = 0.5
 
+# Media items of JSON-LD whose files and players a page declares (``declared_media``).
+_MEDIA_ITEM_TYPES = frozenset({"VideoObject", "AudioObject"})
+_OPENGRAPH_MEDIA = frozenset(
+    {
+        "og:video",
+        "og:video:url",
+        "og:video:secure_url",
+        "og:audio",
+        "og:audio:url",
+        "og:audio:secure_url",
+    }
+)
+_MAX_MEDIA_REFERENCES = 50
+_MAX_MEDIA_DEPTH = 6  # of a media item inside a JSON-LD item (an episode's associatedMedia: 1)
+_MAX_VALUES_PER_PROPERTY = 5
 # Items that carry their own licence and details: a picture, a comment, a person.
 _OTHER_ITEM_TYPES = frozenset(
     {
@@ -592,6 +612,72 @@ def _parse(html: str) -> HtmlElement:
     except Exception as error:  # an empty document, or lxml giving up
         _log.debug("metadata_parse_failed", error=type(error).__name__)
         return fromstring(b"<html></html>", parser=HTMLParser(encoding="utf-8"))
+
+
+def page_tree(html: str) -> HtmlElement:
+    """The page parsed as ``extract_metadata`` parses it: an empty document when it cannot be
+    parsed."""
+    return _parse(html)
+
+
+MediaRole = Literal["file", "player"]
+
+
+def declared_media(tree: HtmlElement, base: str) -> list[tuple[str, MediaRole]]:
+    """The absolute http(s) URLs of the audio and video the page declares, in this order: each
+    JSON-LD ``VideoObject`` or ``AudioObject`` (its ``embedUrl``, a ``player``, then its
+    ``contentUrl``, a ``file``), then ``og:video`` and ``og:audio`` (``file``). Media items are
+    looked for anywhere in a JSON-LD item, a few levels deep. ``base`` is the page's base URL
+    (``base_url``). At most 50, without repeats; never raises on bad data."""
+    found: dict[str, MediaRole] = {}
+
+    def add(value: Any, role: MediaRole) -> None:
+        for text in islice(_strings(value), _MAX_VALUES_PER_PROPERTY):
+            url = _http_url(base, text)
+            if url and len(found) < _MAX_MEDIA_REFERENCES:
+                found.setdefault(url, role)
+
+    for node in _media_nodes(_json_ld_items(tree)):
+        add(node.get("embedUrl"), "player")
+        add(node.get("contentUrl"), "file")
+    for key, content in _meta_pairs(tree):
+        if key in _OPENGRAPH_MEDIA:
+            add(content, "file")
+    return list(found.items())
+
+
+def base_url(tree: HtmlElement, url: str) -> str:
+    """The URL that relative references of the page resolve against: ``<base href>`` when it
+    is usable, else ``url``."""
+    return _base_url(tree, url)
+
+
+def _media_nodes(items: list[Any]) -> list[dict[str, Any]]:
+    """The ``VideoObject`` and ``AudioObject`` nodes in the items, at any of a few levels."""
+    nodes: list[dict[str, Any]] = []
+    visited = 0
+
+    def walk(raw: Any, depth: int) -> None:
+        nonlocal visited
+        if depth > _MAX_MEDIA_DEPTH or visited >= _MAX_NODES:
+            return
+        if isinstance(raw, list):
+            for item in raw[:_MAX_ITEMS_SCANNED]:
+                walk(item, depth + 1)
+            return
+        if not isinstance(raw, dict):
+            return
+        visited += 1
+        node = _node(raw)
+        if _type_names(node) & _MEDIA_ITEM_TYPES:
+            nodes.append(node)
+        for value in node.values():
+            if isinstance(value, dict | list):
+                walk(value, depth + 1)
+
+    for item in items[:_MAX_NODES]:
+        walk(item, 0)
+    return nodes
 
 
 def extract_metadata(html: str, url: str, headers: Mapping[str, str]) -> PageMetadata:

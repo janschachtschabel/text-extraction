@@ -85,10 +85,10 @@ from text_extraction.convert import OutputFormat
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.images import check_image
 from text_extraction.documents.meta import document_metadata
-from text_extraction.documents.model_store import ModelsMissing, require_models
 from text_extraction.documents.pdf import probe_pdf, truncate_pdf
 from text_extraction.documents.sniff import DocumentUnreadable, check_container
 from text_extraction.documents.types import DocumentKind
+from text_extraction.model_store import ModelsMissing, load_manifest, require_models
 
 # The file name extension Docling recognises each kind by.
 _EXTENSIONS: Final[dict[str, str]] = {
@@ -167,7 +167,7 @@ def _docling(body: bytes, kind: DocumentKind, payload: dict[str, Any]) -> tuple[
     """Docling's Markdown and text of the document, and whether it read only a part of it."""
     extension = _EXTENSIONS[kind]
     if kind not in _OPEN_DOCUMENT_KINDS:  # the PDF pipeline loads the models
-        require_models(Path(payload["models_path"]))
+        require_models(Path(payload["models_path"]), load_manifest("docling"))
     converter = _converter(
         full_page=bool(payload["full_page_ocr"]) or kind in _IMAGE_KINDS,
         languages=tuple(payload["languages"]),

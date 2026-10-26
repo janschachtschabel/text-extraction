@@ -1,7 +1,7 @@
 """The public API app (port 8080)."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from redis.asyncio import Redis
 
 from text_extraction import __version__
+from text_extraction.asr_dispatch import AsrDispatcher, asr_queue
 from text_extraction.auth import Principal, Role, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
@@ -30,10 +31,12 @@ from text_extraction.file_api import upload_body_limit
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
+from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
+from text_extraction.pipeline_media import asr_available
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
@@ -99,12 +102,18 @@ async def _finish_background(app: FastAPI) -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Load the language model before the first request, and start the document pool's
-    children meanwhile when asked to (``start_documents``); start the memory guard and the queue
-    gauges; wait for extractions handed over to a job; stop the guard and the gauges (their
-    tasks read Valkey, whose client the server closes after the lifespan); close the fetcher's
-    connections, the conversion pool and the document pool last."""
+    children and the media fetcher (its children and its egress proxy, with ``MEDIA_ENABLED``)
+    meanwhile when asked to (``start_documents``); start the memory guard and the queue gauges;
+    wait for extractions handed over to a job; stop the guard and the gauges (their tasks read
+    Valkey, whose client the server closes after the lifespan); close the fetcher's
+    connections, the conversion pool, the document pool and the media fetcher last."""
     documents: DocumentPool = app.state.document_pool
-    starts = [documents.start()] if app.state.start_documents else []
+    media: MediaFetcher | None = app.state.media_fetcher
+    starts: list[Awaitable[None]] = []
+    if app.state.start_documents:
+        starts.append(documents.start())
+        if media is not None:
+            starts.append(media.start())
     await asyncio.gather(asyncio.to_thread(load_language_model), *starts)
     guard: MemoryGuard = app.state.memory_guard
     gauges: QueueGauges = app.state.queue_gauges
@@ -124,6 +133,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await fetcher.aclose()
         pool.shutdown()
         await documents.shutdown()
+        if media is not None:
+            await media.stop()
 
 
 def create_public_app(
@@ -135,10 +146,11 @@ def create_public_app(
 ) -> FastAPI:
     """Build the public app. Metrics are collected in ``registry`` but not exposed here.
 
-    ``app.state.document_pool`` holds the MarkItDown children of the pipeline. With
-    ``start_documents`` (the server's choice) the lifespan starts them, so they are ready before
-    the server listens and ``/ready`` answers 200; otherwise (tests) the first document starts
-    them. The lifespan shuts them down either way.
+    ``app.state.document_pool`` holds the MarkItDown children of the pipeline, and
+    ``app.state.media_fetcher`` the media children with their egress proxy (None without
+    ``MEDIA_ENABLED``). With ``start_documents`` (the server's choice) the lifespan starts both,
+    so they are ready before the server listens and ``/ready`` answers 200; otherwise (tests)
+    the first document or video starts them. The lifespan shuts them down either way.
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
@@ -146,7 +158,9 @@ def create_public_app(
     ``app.state.browser_queue`` is the ``browser`` pool's queue and
     ``app.state.browser_dispatcher`` sends sync requests there (both None otherwise); while the
     service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), ``app.state.docling_queue`` and
-    ``app.state.docling_dispatcher`` do the same for documents that need OCR;
+    ``app.state.docling_dispatcher`` do the same for documents that need OCR; while it has ASR
+    (``ASR_ENABLED`` and ``JOBS_ENABLED``), ``app.state.asr_queue`` and
+    ``app.state.asr_dispatcher`` for media that needs a transcription;
     ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
@@ -166,6 +180,9 @@ def create_public_app(
     gate, app.state.fetcher = create_outbound(settings, valkey)
     app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
     app.state.document_pool = create_document_pool(settings)
+    app.state.media_fetcher = (
+        create_media_fetcher(settings, registry) if settings.media_enabled else None
+    )
     app.state.start_documents = start_documents
     app.state.pipeline = create_pipeline(
         settings,
@@ -176,6 +193,7 @@ def create_public_app(
         gate=gate,
         memory_guard=app.state.memory_guard,
         document_pool=app.state.document_pool,
+        media_fetcher=app.state.media_fetcher,
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
@@ -196,6 +214,14 @@ def create_public_app(
             app.state.job_store, app.state.docling_queue, settings, registry=registry
         )
         queues.append(app.state.docling_queue)
+    app.state.asr_queue = None
+    app.state.asr_dispatcher = None
+    if asr_available(settings):
+        app.state.asr_queue = asr_queue(valkey, settings)
+        app.state.asr_dispatcher = AsrDispatcher(
+            app.state.job_store, app.state.asr_queue, settings, registry=registry
+        )
+        queues.append(app.state.asr_queue)
     app.state.job_metrics = job_metrics_for(registry)
     app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()

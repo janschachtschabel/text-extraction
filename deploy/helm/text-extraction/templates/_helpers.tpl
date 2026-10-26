@@ -51,7 +51,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Worker pools, in the order their objects are rendered. Each has a `workers.<pool>` block. */}}
 {{- define "text-extraction.workerPools" -}}
-extract browser docling
+extract browser docling asr
 {{- end -}}
 
 {{/* Names and labels of the worker objects of a pool; call with (list $ "<pool>"). The pod name
@@ -79,11 +79,12 @@ app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 {{- end -}}
 
 {{/* Image of a pool's workers; call with (list $ "<pool>"). Extract workers run the API image;
-browser and Docling workers their own, with image.tag and then the appVersion as the default tag. */}}
+browser, Docling and ASR workers their own, with image.tag and then the appVersion as the default
+tag. */}}
 {{- define "text-extraction.workerImage" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
-{{- if or (eq $pool "browser") (eq $pool "docling") -}}
+{{- if has $pool (list "browser" "docling" "asr") -}}
 {{- $image := (index $root.Values.workers $pool).image -}}
 {{- printf "%s:%s" $image.repository ($image.tag | default $root.Values.image.tag | default $root.Chart.AppVersion) -}}
 {{- else -}}
@@ -96,6 +97,7 @@ reaps orphaned children) stays PID 1. */}}
 {{- define "text-extraction.workerCommand" -}}
 {{- if eq . "browser" -}}text-extraction-browser-worker
 {{- else if eq . "docling" -}}text-extraction-docling-worker
+{{- else if eq . "asr" -}}text-extraction-asr-worker
 {{- else -}}text-extraction-worker{{- end -}}
 {{- end -}}
 
@@ -103,6 +105,7 @@ reaps orphaned children) stays PID 1. */}}
 {{- define "text-extraction.workerConcurrencyVar" -}}
 {{- if eq . "browser" -}}BROWSER_CONCURRENCY
 {{- else if eq . "docling" -}}DOCLING_CONCURRENCY
+{{- else if eq . "asr" -}}ASR_CONCURRENCY
 {{- else -}}WORKER_CONCURRENCY{{- end -}}
 {{- end -}}
 
@@ -121,8 +124,14 @@ worker toggles. */}}
 {{- ternary "true" "false" (.Values.workers.docling.enabled | default false) -}}
 {{- end -}}
 
-{{/* The browser and Docling switches as env entries. They come after envFrom, so they override
-config.*. */}}
+{{/* ASR_ENABLED ("true"/"false") of every pod, from the ASR worker toggle. */}}
+{{- define "text-extraction.asrEnabled" -}}
+{{- ternary "true" "false" (.Values.workers.asr.enabled | default false) -}}
+{{- end -}}
+
+{{/* The browser, Docling and ASR switches as env entries, with the ASR settings every pod reads:
+the backend (the API answers 400 for the external one without a key) and the upload limit (the
+API's body limit). They come after envFrom, so they override config.*. */}}
 {{- define "text-extraction.switchEnv" -}}
 - name: BROWSER_ENABLED
   value: {{ include "text-extraction.browserEnabled" . | quote }}
@@ -130,6 +139,12 @@ config.*. */}}
   value: {{ include "text-extraction.browserUnblockEnabled" . | quote }}
 - name: DOCLING_ENABLED
   value: {{ include "text-extraction.doclingEnabled" . | quote }}
+- name: ASR_ENABLED
+  value: {{ include "text-extraction.asrEnabled" . | quote }}
+- name: ASR_BACKEND
+  value: {{ .Values.workers.asr.backend | quote }}
+- name: MEDIA_UPLOAD_MAX_BYTES
+  value: {{ .Values.workers.asr.uploadMaxBytes | int64 | toString | quote }}
 {{- end -}}
 
 {{/* The models volume of the Docling workers: the existing claim, or the chart-managed one. The
@@ -142,9 +157,70 @@ chart mounts it at /models (DOCLING_MODELS_PATH). */}}
 {{- end -}}
 {{- end -}}
 
+{{/* The models volume of the ASR workers (local backend): the existing claim, or the
+chart-managed one, mounted at /models (ASR_MODELS_PATH). */}}
+{{- define "text-extraction.asrModelsClaim" -}}
+{{- with .Values.workers.asr.models.persistence.existingClaim -}}
+{{- . -}}
+{{- else -}}
+{{- printf "%s-asr-models" (include "text-extraction.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* "true" when a pool's workers read models from a volume; call with (list $ "<pool>"): the
+Docling workers always, the ASR workers with the local backend. */}}
+{{- define "text-extraction.workerHasModels" -}}
+{{- $root := index . 0 -}}
+{{- $pool := index . 1 -}}
+{{- if or (eq $pool "docling") (and (eq $pool "asr") (eq (toString $root.Values.workers.asr.backend) "local")) -}}true{{- end -}}
+{{- end -}}
+
+{{/* The models claim of a pool with models; call with (list $ "<pool>"). */}}
+{{- define "text-extraction.workerModelsClaim" -}}
+{{- if eq (index . 1) "asr" -}}
+{{- include "text-extraction.asrModelsClaim" (index . 0) -}}
+{{- else -}}
+{{- include "text-extraction.doclingModelsClaim" (index . 0) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* "init" or "job" when the chart downloads a pool's models, else nothing; call with (list $
+"<pool>"). */}}
+{{- define "text-extraction.modelsDownload" -}}
+{{- $root := index . 0 -}}
+{{- $pool := index . 1 -}}
+{{- $worker := index $root.Values.workers $pool -}}
+{{- if and $worker.enabled (include "text-extraction.workerHasModels" .) $worker.models.download -}}
+{{- $worker.models.downloadMode | default "init" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Secret that holds ASR_EXTERNAL_API_KEY: the existing one, or the chart-managed one. */}}
+{{- define "text-extraction.asrSecretName" -}}
+{{- if .Values.workers.asr.external.existingSecret -}}
+{{- .Values.workers.asr.external.existingSecret -}}
+{{- else -}}
+{{- printf "%s-asr" (include "text-extraction.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* ASR_EXTERNAL_API_KEY from its Secret, while the ASR workers use the external backend and a key
+is configured. The API pods and the ASR workers get it, no other pod. */}}
+{{- define "text-extraction.asrKeyEnv" -}}
+{{- $asr := .Values.workers.asr -}}
+{{- if and $asr.enabled (eq (toString $asr.backend) "openai") (or $asr.external.existingSecret $asr.external.apiKey) }}
+- name: ASR_EXTERNAL_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "text-extraction.asrSecretName" . }}
+      key: {{ $asr.external.existingSecretKey }}
+{{- end }}
+{{- end -}}
+
 {{/* The env entries of a pool's workers; call with (list $ "<pool>"). They come after envFrom,
-so they override config.*. The Docling workers read the models from /models; the extract and
-browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
+so they override config.*. The Docling workers read the models from /models; the ASR workers
+too (local backend), keep downloaded media on /scratch and get the backend's settings; the
+extract and browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
 {{- define "text-extraction.workerEnv" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
@@ -155,6 +231,23 @@ browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
 {{- if eq $pool "docling" }}
 - name: DOCLING_MODELS_PATH
   value: /models
+{{- else if eq $pool "asr" }}
+{{- $asr := $root.Values.workers.asr }}
+- name: ASR_MODELS_PATH
+  value: /models
+- name: ASR_MODEL
+  value: {{ $asr.model | quote }}
+- name: ASR_SCRATCH_PATH
+  value: /scratch
+{{- if eq (toString $asr.backend) "openai" }}
+- name: ASR_EXTERNAL_BASE_URL
+  value: {{ $asr.external.baseUrl | quote }}
+- name: ASR_EXTERNAL_MODEL
+  value: {{ $asr.external.model | quote }}
+{{- with include "text-extraction.asrKeyEnv" $root | trim }}
+{{ . }}
+{{- end }}
+{{- end }}
 {{- else }}
 {{- $worker := index $root.Values.workers $pool }}
 {{- with include "text-extraction.documentMemoryEnv" (list $root $worker.resources $worker.documentParentReserveMiB (printf "workers.%s.resources" $pool)) | trim }}
@@ -268,6 +361,9 @@ mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. Docling worker: a fix
 {{- end -}}
 
 {{- define "text-extraction.doclingGracefulSeconds" -}}30{{- end -}}
+
+{{/* ASR worker: a fixed 30 s (asr_worker.GRACEFUL_SECONDS); nothing waits for a transcription. */}}
+{{- define "text-extraction.asrGracefulSeconds" -}}30{{- end -}}
 
 {{- define "text-extraction.browserGracefulSeconds" -}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
@@ -386,6 +482,15 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and $worker.autoscaling.keda.enabled (not $jobs) -}}
 {{- fail (printf "workers.%s.autoscaling.keda.enabled reads the queue gauges that API pods export only with JOBS_ENABLED=true; do not set jobs.enabled=false with KEDA." $pool) -}}
 {{- end -}}
+{{- $window := $worker.autoscaling.scaleDownStabilizationWindowSeconds -}}
+{{- if and (not (kindIs "invalid" $window)) (or (lt (float64 $window) 0.0) (gt (float64 $window) 3600.0)) -}}
+{{- fail (printf "workers.%s.autoscaling.scaleDownStabilizationWindowSeconds must be between 0 and 3600 (the Kubernetes limit), or null for the default; got %v." $pool $window) -}}
+{{- end -}}
+{{- if $worker.autoscaling.keda.enabled -}}
+{{- if le (include "text-extraction.kedaThreshold" (list $root $pool) | float64) 0.0 -}}
+{{- fail (printf "workers.%s.autoscaling.keda.threshold must be a positive number, or null for workers.%s.concurrency." $pool $pool) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if and .Values.workers.browser.unblock (not .Values.workers.browser.enabled) -}}
 {{- fail "workers.browser.unblock needs workers.browser.enabled=true: unblock mode runs in the browser workers." -}}
@@ -396,6 +501,55 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- end -}}
 {{- if and $docling.enabled (not $docling.models.download) (not $docling.models.persistence.existingClaim) -}}
 {{- fail "workers.docling.models.download=false needs workers.docling.models.persistence.existingClaim: a volume that already holds the models. A new volume stays empty without the download." -}}
+{{- end -}}
+{{- range $pool := list "docling" "asr" -}}
+{{- $mode := toString ((index $root.Values.workers $pool).models.downloadMode | default "init") -}}
+{{- if not (has $mode (list "init" "job")) -}}
+{{- fail (printf "workers.%s.models.downloadMode must be init or job, not %s." $pool $mode) -}}
+{{- end -}}
+{{- end -}}
+{{- $asr := .Values.workers.asr -}}
+{{- if $asr.enabled -}}
+{{- if not $jobs -}}
+{{- fail "workers.asr.enabled needs JOBS_ENABLED=true on the API pods: transcription always runs as a job of the pool asr. Do not set jobs.enabled=false with ASR workers." -}}
+{{- end -}}
+{{- $backend := toString $asr.backend -}}
+{{- if not (has $backend (list "local" "openai")) -}}
+{{- fail (printf "workers.asr.backend must be local or openai, not %s." $backend) -}}
+{{- end -}}
+{{- if not (has (toString $asr.model) (list "small" "large-v3-turbo")) -}}
+{{- fail (printf "workers.asr.model must be small or large-v3-turbo (the models of the manifest), not %s." $asr.model) -}}
+{{- end -}}
+{{- if eq $backend "openai" -}}
+{{- if not $asr.external.baseUrl -}}
+{{- fail "workers.asr.external.baseUrl is required with workers.asr.backend=openai: the ASR workers exit with code 2 without it." -}}
+{{- end -}}
+{{- if not (hasPrefix "https://" (toString $asr.external.baseUrl)) -}}
+{{- fail "workers.asr.external.baseUrl must start with https:// (the service refuses any other URL)." -}}
+{{- end -}}
+{{- else if and (not $asr.models.download) (not $asr.models.persistence.existingClaim) -}}
+{{- fail "workers.asr.models.download=false needs workers.asr.models.persistence.existingClaim: a volume that already holds the model. A new volume stays empty without the download." -}}
+{{- end -}}
+{{- /* Downloaded media: concurrency x (MEDIA_MAX_BYTES + the 5 MB of slack the download may use). */ -}}
+{{- if not $asr.scratch.sizeLimit -}}
+{{- fail "workers.asr.scratch.sizeLimit is required: the downloaded media of the ASR workers live on an emptyDir that must be bounded." -}}
+{{- end -}}
+{{- $mediaMax := include "text-extraction.configNumber" (list . "MEDIA_MAX_BYTES" 500000000) | float64 -}}
+{{- $neededMiB := divf (mulf (float64 $asr.concurrency) (addf $mediaMax 5000000.0)) 1048576.0 | ceil -}}
+{{- $scratchMiB := include "text-extraction.memoryMiB" $asr.scratch.sizeLimit | float64 -}}
+{{- if lt $scratchMiB $neededMiB -}}
+{{- fail (printf "workers.asr.scratch.sizeLimit (%v) is smaller than workers.asr.concurrency (%v) x (MEDIA_MAX_BYTES (%v) + 5 MB of download slack) = %v MiB: raise the size limit or lower config.MEDIA_MAX_BYTES." $asr.scratch.sizeLimit $asr.concurrency (int64 $mediaMax) (int64 $neededMiB)) -}}
+{{- end -}}
+{{- /* The service's own start-up checks (settings.py), so a bad combination fails here already. */ -}}
+{{- $budget := include "text-extraction.configNumber" (list . "DOCLING_INPUT_BUDGET_BYTES" 200000000) | float64 -}}
+{{- if gt (float64 $asr.uploadMaxBytes) $budget -}}
+{{- fail (printf "workers.asr.uploadMaxBytes (%v) exceeds DOCLING_INPUT_BUDGET_BYTES (%v), the budget of all queued inputs: every pod would exit with code 2. Lower it or raise config.DOCLING_INPUT_BUDGET_BYTES (and valkey.maxmemory)." (int64 $asr.uploadMaxBytes) (int64 $budget)) -}}
+{{- end -}}
+{{- $asrTimeout := include "text-extraction.configNumber" (list . "ASR_TIMEOUT_SECONDS" 10800) | float64 -}}
+{{- $inputTtl := include "text-extraction.configNumber" (list . "ASR_INPUT_TTL_SECONDS" 28800) | float64 -}}
+{{- if le $inputTtl (addf (mulf 2.0 $asrTimeout) 10.0) -}}
+{{- fail (printf "ASR_INPUT_TTL_SECONDS (%v) must be longer than the ASR lease, 2 x ASR_TIMEOUT_SECONDS (%v) + 10: every pod would exit with code 2. Raise config.ASR_INPUT_TTL_SECONDS with the timeout." (int64 $inputTtl) (int64 $asrTimeout)) -}}
+{{- end -}}
 {{- end -}}
 {{- /* Shutdown budgets (see text-extraction.apiGracefulSeconds), plus a 10 s margin before the kill. */ -}}
 {{- $timeout := include "text-extraction.configNumber" (list . "EXTRACT_TIMEOUT_SECONDS" 25) | float64 -}}
@@ -417,4 +571,21 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and $docling.enabled (gt $doclingGraceful (subf (float64 $docling.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.docling.terminationGracePeriodSeconds (%v) is too short: the Docling workers give conversions in flight %v s + a 10 s margin must fit." $docling.terminationGracePeriodSeconds $doclingGraceful) -}}
 {{- end -}}
+{{- $asrGraceful := include "text-extraction.asrGracefulSeconds" . | float64 -}}
+{{- if and $asr.enabled (gt $asrGraceful (subf (float64 $asr.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.asr.terminationGracePeriodSeconds (%v) is too short: the ASR workers give transcriptions in flight %v s + a 10 s margin must fit." $asr.terminationGracePeriodSeconds $asrGraceful) -}}
 {{- end -}}
+{{- end -}}
+
+{{/*
+The KEDA threshold of a pool (list $root $pool): items per replica. autoscaling.keda.threshold,
+or the pool's concurrency when it is null.
+*/}}
+{{- define "text-extraction.kedaThreshold" -}}
+{{- $worker := index (index . 0).Values.workers (index . 1) -}}
+{{- $threshold := $worker.autoscaling.keda.threshold -}}
+{{- if kindIs "invalid" $threshold -}}
+{{- $threshold = $worker.concurrency -}}
+{{- end -}}
+{{- $threshold | toString -}}
+{{- end }}

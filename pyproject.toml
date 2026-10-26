@@ -31,6 +31,14 @@ dependencies = [
     "structlog>=26.1.0",
     "trafilatura>=1.8",
     "uvicorn[standard]>=0.54.0",
+    # Subtitles and metadata of media platforms, imported in media child processes only. yt-dlp
+    # without its extra `default`: that extra pulls in mutagen (GPL-2.0-or-later, CLAUDE.md rule
+    # 7) and yt-dlp-ejs (only of use with a JavaScript runtime, which the API image has none of);
+    # requests is its HTTP handler and youtube-transcript-api's session. Newest releases at
+    # least 14 days old when added.
+    "requests>=2.32.2",
+    "youtube-transcript-api==1.2.4",  # MIT
+    "yt-dlp==2026.8.19",  # Unlicense
 ]
 
 [project.scripts]
@@ -38,6 +46,7 @@ text-extraction = "text_extraction.server:main"
 text-extraction-worker = "text_extraction.worker:main"
 text-extraction-browser-worker = "text_extraction.browser_worker:main"
 text-extraction-docling-worker = "text_extraction.docling_worker:main"
+text-extraction-asr-worker = "text_extraction.asr_worker:main"
 
 [project.optional-dependencies]
 browser = [
@@ -56,6 +65,24 @@ docling = [
     "torch==2.14.1",
     "torchvision==0.29.1",
 ]
+# The ASR worker (text-extraction-asr-worker): faster-whisper on CTranslate2, PyAV to decode the
+# media (its children pass faster-whisper a float32 array, never a path), and yt-dlp with Deno
+# for YouTube's player challenges when it downloads audio. yt-dlp-ejs (the challenge solver
+# scripts, so no remote components are fetched) is pinned to what yt-dlp 2026.8.19 asks for; never
+# yt-dlp's extra `default` (mutagen is GPL-2.0-or-later). The ASR image builds PyAV from source
+# against an LGPL FFmpeg (decision D5): the PyPI wheel of av bundles libx264 and libx265 (GPL),
+# so the worker's --check refuses it; it serves local development and tests only. The OpenAI SDK
+# serves the external backend (ASR_BACKEND=openai, imported in the children only). Each pinned to
+# a release at least 14 days old (ruling R16).
+asr = [
+    "av==19.0.1",  # BSD-3-Clause
+    "ctranslate2==4.8.2",  # MIT
+    "deno==2.9.7",  # MIT
+    "faster-whisper==1.2.1",  # MIT
+    "openai==3.29.0",  # Apache-2.0; the external backend (ASR_BACKEND=openai)
+    "yt-dlp[deno]==2026.8.19",  # Unlicense
+    "yt-dlp-ejs==0.8.0",  # Unlicense AND MIT AND ISC
+]
 
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
@@ -65,7 +92,7 @@ build-backend = "uv_build"
 # The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
 # `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
 # does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
-exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days" }
+exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days" }
 
 # torch and torchvision only from the PyTorch CPU index: its wheels carry no CUDA libraries.
 [tool.uv.sources]
@@ -92,6 +119,7 @@ dev = [
     "playwright>=1.64",
     "patchright==1.63.0",  # as in the extra `browser`
     "duckduckgo-autoconsent-py>=16",
+    "openai==3.29.0",  # as in the extra `asr`: the external backend's tests run in the default suite
     # Build the document corpus in tests/documents (dev only), 14-day rule as above.
     "reportlab==5.0.1",
     "python-docx==1.2.0",
@@ -119,7 +147,7 @@ python_version = "3.13"
 files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["defusedxml.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*"]
+module = ["av.*", "defusedxml.*", "deno.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "faster_whisper.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*", "yt_dlp.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -128,9 +156,11 @@ testpaths = ["tests"]
 # tests/e2e starts its own processes: only run_batch.py runs it (.github/workflows/e2e.yml).
 # Browser tests need Chromium: `pytest -m browser` runs them (CI job `browser`).
 # Docling tests need the extra `docling`, Tesseract and the models: `pytest -m docling`.
-addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser and not docling'"
+# ASR tests need the extra `asr` and a Whisper model under ASR_MODELS_PATH: `pytest -m asr`.
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser and not docling and not asr'"
 markers = [
     "browser: needs a real Chromium (run with `-m browser`)",
     "docling: needs Docling, Tesseract and the models (run with `-m docling`)",
+    "asr: needs the extra `asr` and a Whisper model under ASR_MODELS_PATH (run with `-m asr`)",
 ]
 xfail_strict = true

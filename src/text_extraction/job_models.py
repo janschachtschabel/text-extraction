@@ -10,6 +10,7 @@ from text_extraction.convert import OutputFormat
 from text_extraction.documents.types import OcrOption
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
+from text_extraction.media.types import MAX_LANGUAGES, LanguageCode
 from text_extraction.netguard import MAX_URL_LENGTH
 
 JobKind = Literal["extract", "batch", "screenshot", "file"]
@@ -55,6 +56,17 @@ class BatchRequest(BaseModel, extra="forbid"):
         default="auto",
         description="As for `/v1/extract`: `auto`, `never` or `always` OCR for documents.",
     )
+    transcribe: bool = Field(
+        default=False,
+        description="As for `/v1/extract`: transcribe audio and video that have no subtitles. "
+        "400 while the service has no transcription.",
+    )
+    languages: list[LanguageCode] = Field(
+        default=[],
+        max_length=MAX_LANGUAGES,
+        description="As for `/v1/extract`: preferred subtitle and transcription languages, at "
+        "most 5.",
+    )
 
 
 class JobOptions(BaseModel, extra="forbid"):
@@ -70,6 +82,8 @@ class JobOptions(BaseModel, extra="forbid"):
     screenshot: bool = False
     full_page: bool = True
     ocr: OcrOption = "auto"
+    transcribe: bool = False
+    languages: list[LanguageCode] = Field(default=[], max_length=MAX_LANGUAGES)
 
     @model_validator(mode="after")
     def _screenshot_needs_browser(self) -> Self:

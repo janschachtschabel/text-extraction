@@ -21,6 +21,7 @@ from text_extraction.convert import Link, OutputFormat
 from text_extraction.documents.types import DocumentInfo, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.fingerprint import Fingerprint
+from text_extraction.media.types import MAX_LANGUAGES, LanguageCode, MediaInfo
 from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.quality import Quality
@@ -64,7 +65,7 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         "a job: the answer is then 202 with the job's id and `status_url`, and "
         "`GET /v1/jobs/{id}` has the result. 0 hands over at once. Ignored when jobs are "
         "disabled (`JOBS_ENABLED=false`). A request that waits for the browser when the time "
-        "is up answers 202 with the browser's job.",
+        "is up answers 202 with the browser's job. With `transcribe: true` the default is 20.",
     )
     actions: ActionList = Field(
         default=[], repr=False, description=f"{ACTIONS_DESCRIPTION} Not with `mode: fast`."
@@ -91,6 +92,18 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="OCR of documents. `auto`: scans, broken text layers and images are read "
         "with OCR where the service has it. `never`: no OCR. `always`: every PDF is read with "
         "OCR. Pages that are not documents ignore it.",
+    )
+    transcribe: bool = Field(
+        default=False,
+        description="Transcribe audio and video that have no subtitles with speech recognition; "
+        "always a job: the answer is 202 with the job when transcription is needed. 400 while "
+        "the service has no transcription.",
+    )
+    languages: list[LanguageCode] = Field(
+        default=[],
+        max_length=MAX_LANGUAGES,
+        description="Preferred subtitle and transcription languages, ISO 639 codes, at most 5; "
+        "default: the video's original language.",
     )
 
     @model_validator(mode="after")
@@ -153,14 +166,21 @@ class ExtractResult(BaseModel):
         "answers its text layer, or nothing), `pages_truncated` (pages after the page limit "
         "were cut), `pages_partial` (OCR stopped at its time limit or skipped a page: the pages "
         "it read), `document_fetched_directly` (a render ended on a file, which was fetched "
-        "and converted in fast mode) (documents); `content_not_stored_too_large` (a job item "
-        "stored without its content). Converter notes may follow."
+        "and converted in fast mode) (documents); `subtitles_blocked` (the platform refused the "
+        "subtitles: the metadata answers), `subtitles_failed` (the subtitles could not be "
+        "had or read this time: the metadata answers), `asr_unavailable` (no transcription in "
+        "time, or it failed: the metadata answers), `tracks_truncated` (more tracks than the "
+        "limit: the first ones), `tracks_failed` (no track of the page could be read) (media); "
+        "`content_not_stored_too_large` (a job item stored without its content). Converter "
+        "notes may follow."
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
     unblocked: bool = False  # the page was loaded in unblock mode
     # Documents only; the default keeps results cached before documents valid.
     document: DocumentInfo | None = None
+    # Audio and video only (and pages with players); the default keeps older results valid.
+    media: MediaInfo | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

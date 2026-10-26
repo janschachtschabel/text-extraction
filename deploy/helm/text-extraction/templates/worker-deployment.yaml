@@ -1,12 +1,16 @@
-{{- /* One Deployment per enabled worker pool (workers.extract, workers.browser, workers.docling).
-The Docling workers also mount the models volume: read-only, after an init container that
-downloads the models into it (writable) unless workers.docling.models.download is false. */ -}}
+{{- /* One Deployment per enabled worker pool (workers.extract, workers.browser, workers.docling,
+workers.asr). The Docling workers and the ASR workers of the local backend also mount their models
+volume read-only; with models.downloadMode init (the default) an init container first downloads
+the models into it (writable), with job the hook Job of models-job.yaml does, and with
+models.download false nobody does. The ASR workers keep downloaded media on a bounded emptyDir at
+/scratch. */ -}}
 {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
 {{- $worker := index $.Values.workers $pool }}
 {{- if $worker.enabled }}
 {{- $args := list $ $pool }}
-{{- $docling := eq $pool "docling" }}
-{{- /* The env of the worker (and of the Docling init container). */}}
+{{- $models := include "text-extraction.workerHasModels" $args }}
+{{- $asr := eq $pool "asr" }}
+{{- /* The env of the worker (and of its models init container). */}}
 {{- $env := include "text-extraction.workerEnv" $args }}
 ---
 apiVersion: apps/v1
@@ -27,7 +31,7 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") $ | sha256sum }}
-        {{- if and $.Values.secrets.apiKeys (not $.Values.secrets.existingSecret) }}
+        {{- if or (and $.Values.secrets.apiKeys (not $.Values.secrets.existingSecret)) (and $asr $.Values.workers.asr.external.apiKey (not $.Values.workers.asr.external.existingSecret)) }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") $ | sha256sum }}
         {{- end }}
         {{- with $.Values.podAnnotations }}
@@ -49,7 +53,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      {{- if and $docling $worker.models.download }}
+      {{- if eq (include "text-extraction.modelsDownload" $args) "init" }}
       initContainers:
         # Fills the models volume from the manifest (SHA-256 checked); does nothing when the
         # volume already holds this manifest's files.
@@ -71,7 +75,7 @@ spec:
           env:
             {{- $env | nindent 12 }}
           resources:
-            {{- toYaml $worker.resources | nindent 12 }}
+            {{- toYaml $worker.models.resources | nindent 12 }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -120,10 +124,14 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            {{- if $docling }}
+            {{- if $models }}
             - name: models
               mountPath: /models
               readOnly: true
+            {{- end }}
+            {{- if $asr }}
+            - name: scratch
+              mountPath: /scratch
             {{- end }}
       volumes:
         - name: tmp
@@ -133,10 +141,15 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        {{- if $docling }}
+        {{- if $models }}
         - name: models
           persistentVolumeClaim:
-            claimName: {{ include "text-extraction.doclingModelsClaim" $ }}
+            claimName: {{ include "text-extraction.workerModelsClaim" $args }}
+        {{- end }}
+        {{- if $asr }}
+        - name: scratch
+          emptyDir:
+            sizeLimit: {{ $worker.scratch.sizeLimit }}
         {{- end }}
       {{- /* The pool's nodeSelector wins over the global one, key by key. */}}
       {{- with merge (deepCopy ($worker.nodeSelector | default dict)) (deepCopy ($.Values.nodeSelector | default dict)) }}

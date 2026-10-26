@@ -46,19 +46,40 @@ screenshots answer 400 and mode "auto" never uses a browser.
 {{- if .Values.workers.docling.enabled }}
 
 Docling workers (OCR): {{ include "text-extraction.workerName" (list . "docling") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" .Values.workers.docling.autoscaling.hpa.enabled) .Values.workers.docling.autoscaling.keda.enabled }}), image {{ include "text-extraction.workerImage" (list . "docling") }}; internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "docling") }}.
-OCR is on (DOCLING_ENABLED=true in every pod). Models volume: PVC {{ include "text-extraction.doclingModelsClaim" . }}, {{ ternary "filled by the init container on the first start (needs egress to raw.githubusercontent.com and huggingface.co)" "pre-filled (no download)" .Values.workers.docling.models.download }}. A worker without the models exits with code 1 and logs docling_models_missing.
-{{- if and .Values.valkey.enabled (eq (toString .Values.valkey.maxmemory) "768mb") }}
-
-NOTE: Valkey keeps its default maxmemory (768mb). With Docling workers it also holds the bytes of
-  documents queued for OCR and of slow uploads, up to DOCLING_INPUT_BUDGET_BYTES ({{ get .Values.config "DOCLING_INPUT_BUDGET_BYTES" | default "200000000" }}) in all,
-  next to job results and the result cache. That fits for batches of about 1,000 URLs; for larger
-  batches or a larger budget raise valkey.maxmemory with valkey.resources (60 % of the limit).
-{{- end }}
+{{- $download := include "text-extraction.modelsDownload" (list . "docling") }}
+OCR is on (DOCLING_ENABLED=true in every pod). Models volume: PVC {{ include "text-extraction.doclingModelsClaim" . }}, {{ if eq $download "init" }}filled by the init container on the first start{{ else if eq $download "job" }}filled by the models Job after each install and upgrade{{ else }}pre-filled (no download){{ end }}{{ if $download }} (needs egress to raw.githubusercontent.com and huggingface.co){{ end }}. A worker without the models exits with code 1 and logs docling_models_missing.
 {{- else }}
 
 No Docling workers are deployed: OCR is off (DOCLING_ENABLED=false), so scans keep their text layer
 (warning ocr_unavailable), images and OpenDocument files answer unsupported_content_type, and
 ocr "always" answers 400.
+{{- end }}
+
+{{- $asr := .Values.workers.asr }}
+{{- if $asr.enabled }}
+
+ASR workers (transcription): {{ include "text-extraction.workerName" (list . "asr") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" $asr.autoscaling.hpa.enabled) $asr.autoscaling.keda.enabled }}), image {{ include "text-extraction.workerImage" (list . "asr") }}; internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "asr") }}.
+Transcription is on (ASR_ENABLED=true in every pod): transcribe: true and audio or video uploads (up to {{ $asr.uploadMaxBytes | int64 }} bytes) become jobs of the pool asr.
+{{- if eq (toString $asr.backend) "openai" }}
+Backend: the external endpoint {{ $asr.external.baseUrl }} (model {{ $asr.external.model }}), {{ if or $asr.external.existingSecret $asr.external.apiKey }}with the key from Secret {{ include "text-extraction.asrSecretName" . }}; a caller's X-ASR-Api-Key wins{{ else }}without a service key: callers must send X-ASR-Api-Key{{ end }}. No models volume.
+{{- else }}
+{{- $download := include "text-extraction.modelsDownload" (list . "asr") }}
+Backend: faster-whisper with {{ $asr.model }} from PVC {{ include "text-extraction.asrModelsClaim" . }}, {{ if eq $download "init" }}filled by the init container on the first start{{ else if eq $download "job" }}filled by the models Job after each install and upgrade{{ else }}pre-filled (no download){{ end }}{{ if $download }} (needs egress to huggingface.co){{ end }}. A worker without the model exits with code 1 and logs asr_models_missing.
+{{- end }}
+Removing an ASR pod (a scale-down, a rolling update, a node drain) interrupts the transcriptions in flight: after 30 s they go back to the queue and start again on another replica{{ if eq (toString $asr.backend) "openai" }}, and the endpoint bills them again{{ end }}. Prefer fixed replicas for steady load.
+{{- else }}
+
+No ASR workers are deployed: transcription is off (ASR_ENABLED=false), so transcribe: true answers
+400, and videos without subtitles answer their details only.
+{{- end }}
+
+{{- if and .Values.valkey.enabled (eq (toString .Values.valkey.maxmemory) "768mb") (or .Values.workers.docling.enabled $asr.enabled) }}
+
+NOTE: Valkey keeps its default maxmemory (768mb). With Docling or ASR workers it also holds the bytes
+  of queued inputs (documents for OCR, slow uploads, audio and video uploads for transcription), up
+  to DOCLING_INPUT_BUDGET_BYTES ({{ get .Values.config "DOCLING_INPUT_BUDGET_BYTES" | default "200000000" }}) in all,
+  next to job results and the result cache. That fits for batches of about 1,000 URLs; for larger
+  batches or a larger budget raise valkey.maxmemory with valkey.resources (60 % of the limit).
 {{- end }}
 
 {{- if and .Values.networkPolicy.enabled .Values.metrics.serviceMonitor.enabled (eq (toJson .Values.networkPolicy.metricsFrom) "[{\"podSelector\":{}}]") }}

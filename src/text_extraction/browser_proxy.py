@@ -12,11 +12,12 @@ A plain request is the only one of its connection: only its head and the body it
 ``Content-Length`` declares go to the origin (a chunked or otherwise ambiguous request is
 refused), and the response head tells the browser to close the connection.
 
-One proxy serves one browser process. Every browser page gets its own ``ProxyContext`` from
-``open_context()`` with random credentials, which the browser sends as ``Proxy-Authorization``.
-The context counts the bytes of its page (both directions), the hosts it reached and the requests
-that were refused, and closing it ends its tunnels. Requests without the credentials of an open
-context get ``407``.
+One proxy serves one browser process (or the media children of a process, ``media.pool``).
+Every browser page gets its own ``ProxyContext`` from ``open_context()`` with random credentials,
+which the browser sends as ``Proxy-Authorization``. The context counts the bytes of its page
+(both directions) up to its cap (``BROWSER_MAX_BYTES``, or what ``open_context`` is given), the
+hosts it reached and the requests that were refused, and closing it ends its tunnels. Requests
+without the credentials of an open context get ``407``.
 
 Refusals answer ``403`` (forbidden address, byte cap), ``502`` (DNS or connect failure), ``400``
 (malformed request), ``407`` (credentials) or ``503`` (too many connections), always with
@@ -312,6 +313,11 @@ class EgressProxy:
         self._contexts: dict[str, ProxyContext] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
+    @property
+    def tunnel_timeout(self) -> float:
+        """Seconds a tunnel or plain connection may stay open, from its start."""
+        return self._tunnel_timeout
+
     async def start(self) -> None:
         """Listen on ``127.0.0.1`` at a free port."""
         self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -340,9 +346,10 @@ class EgressProxy:
         sock = self._server.sockets[0]
         return f"http://127.0.0.1:{sock.getsockname()[1]}"
 
-    def open_context(self) -> ProxyContext:
-        """New credentials, new counters: one per browser page."""
-        context = ProxyContext(self._max_bytes, self._forget)
+    def open_context(self, max_bytes: int | None = None) -> ProxyContext:
+        """New credentials, new counters: one per browser page, or one per media child call.
+        ``max_bytes`` caps the context's bytes (default ``BROWSER_MAX_BYTES``)."""
+        context = ProxyContext(self._max_bytes if max_bytes is None else max_bytes, self._forget)
         self._contexts[context.username] = context
         return context
 

@@ -15,7 +15,7 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- if and .Values.secrets.apiKeys (not .Values.secrets.existingSecret) }}
+        {{- if or (and .Values.secrets.apiKeys (not .Values.secrets.existingSecret)) (and .Values.workers.asr.external.apiKey (not .Values.workers.asr.external.existingSecret)) }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
@@ -70,6 +70,9 @@ spec:
             {{- include "text-extraction.switchEnv" . | nindent 12 }}
             {{- include "text-extraction.valkeyEnv" . | trim | nindent 12 }}
             {{- with include "text-extraction.apiKeysEnv" . | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with include "text-extraction.asrKeyEnv" . | trim }}
             {{- . | nindent 12 }}
             {{- end }}
           livenessProbe:

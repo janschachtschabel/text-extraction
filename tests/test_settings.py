@@ -69,6 +69,32 @@ SETTING_ENV_VARS = (
     "DOCLING_MEMORY_LIMIT_MB",
     "DOCLING_OCR_LANGUAGES",
     "DOCLING_MODELS_PATH",
+    "MEDIA_ENABLED",
+    "MEDIA_CONCURRENCY",
+    "MEDIA_MEMORY_LIMIT_MB",
+    "MEDIA_EXTRACT_MAX_BYTES",
+    "MEDIA_SUBTITLE_MAX_BYTES",
+    "MEDIA_MAX_TRACKS",
+    "MEDIA_MAX_DURATION_SECONDS",
+    "MEDIA_MAX_BYTES",
+    "MEDIA_UPLOAD_MAX_BYTES",
+    "MEDIA_DOWNLOAD_TIMEOUT_SECONDS",
+    "ASR_ENABLED",
+    "ASR_BACKEND",
+    "ASR_MODEL",
+    "ASR_MODELS_PATH",
+    "ASR_COMPUTE_TYPE",
+    "ASR_THREADS",
+    "ASR_CONCURRENCY",
+    "ASR_MEMORY_LIMIT_MB",
+    "ASR_TIMEOUT_SECONDS",
+    "ASR_INPUT_TTL_SECONDS",
+    "ASR_MAX_OPEN_PER_CLIENT",
+    "ASR_SCRATCH_PATH",
+    "ASR_EXTERNAL_BASE_URL",
+    "ASR_EXTERNAL_MODEL",
+    "ASR_EXTERNAL_API_KEY",
+    "ASR_EXTERNAL_TIMEOUT_SECONDS",
 )
 
 
@@ -865,3 +891,187 @@ def test_docling_ocr_languages_validated(monkeypatch: pytest.MonkeyPatch, value:
 
     if value:
         assert value not in str(error.value)
+
+
+def test_media_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.media_enabled is True
+    assert settings.media_concurrency == 2
+    assert settings.media_memory_limit_mb == 1024
+    assert settings.media_extract_max_bytes == 30_000_000
+    assert settings.media_subtitle_max_bytes == 5_000_000
+    assert settings.media_max_tracks == 3
+    assert settings.media_max_duration_seconds == 7200  # D6: 2 h
+    assert settings.media_max_bytes == 500_000_000
+    assert settings.media_upload_max_bytes == 25_000_000
+    assert settings.media_download_timeout_seconds == 600
+    assert settings.asr_enabled is False
+    assert settings.asr_backend == "local"
+    assert settings.asr_model == "large-v3-turbo"
+    assert settings.asr_models_path == Path("/models")
+    assert settings.asr_compute_type == "int8"
+    assert settings.asr_threads == 4
+    assert settings.asr_concurrency == 1
+    assert settings.asr_memory_limit_mb == 4096
+    assert settings.asr_timeout_seconds == 10_800  # D6: 3 h for the whole item
+    assert settings.asr_input_ttl_seconds == 28_800  # D6: longer than the lease
+    assert settings.asr_max_open_per_client == 3
+    assert settings.asr_scratch_path == Path("/tmp/asr")  # noqa: S108 - the default of an emptyDir
+    assert settings.asr_external_base_url is None
+    assert settings.asr_external_model == "whisper-1"
+    assert settings.asr_external_api_key is None
+    assert settings.asr_external_timeout_seconds == 300
+
+
+@pytest.mark.parametrize(
+    ("name", "good", "bad"),
+    [
+        ("MEDIA_CONCURRENCY", ["1", "8"], ["0", "-1"]),
+        ("MEDIA_MEMORY_LIMIT_MB", ["256", "4096"], ["255", "0"]),
+        ("MEDIA_MAX_TRACKS", ["0", "10"], ["-1", "11"]),
+        ("MEDIA_MAX_DURATION_SECONDS", ["60", "86400"], ["59", "0"]),
+        ("MEDIA_DOWNLOAD_TIMEOUT_SECONDS", ["30", "3600"], ["29", "3601"]),
+        ("ASR_BACKEND", ["local", "openai"], ["remote", "OPENAI "]),
+        ("ASR_MODEL", ["small", "large-v3-turbo"], ["large-v3", "../small", ""]),
+        ("ASR_TIMEOUT_SECONDS", ["60", "14400"], ["59", "14401"]),
+        ("ASR_INPUT_TTL_SECONDS", ["600", "86400"], ["599", "0"]),
+        ("ASR_THREADS", ["1", "16"], ["0"]),
+        ("ASR_CONCURRENCY", ["1", "4"], ["0"]),
+        ("ASR_MAX_OPEN_PER_CLIENT", ["1", "10"], ["0"]),
+    ],
+)
+def test_media_setting_bounds(
+    monkeypatch: pytest.MonkeyPatch, name: str, good: list[str], bad: list[str]
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    for value in good:
+        monkeypatch.setenv(name, value)
+        load_settings()
+    for value in bad:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ConfigError, match=name.lower()):
+            load_settings()
+
+
+def test_asr_input_ttl_outlives_the_lease_while_asr_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An upload waits in its input until the ASR worker reads it; a lease that outlives the
+    input would let a reclaimed item find its bytes gone (lease: 2 x ASR_TIMEOUT_SECONDS + 10)."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
+    monkeypatch.setenv("ASR_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("ASR_INPUT_TTL_SECONDS", "1211")
+    load_settings()
+
+    monkeypatch.setenv("ASR_INPUT_TTL_SECONDS", "1210")
+    with pytest.raises(ConfigError, match="ASR_INPUT_TTL_SECONDS"):
+        load_settings()
+
+    monkeypatch.setenv("ASR_ENABLED", "false")
+    load_settings()  # no ASR worker, no lease
+
+
+def test_asr_defaults_keep_the_input_past_the_lease(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
+
+    settings = load_settings()
+
+    assert settings.asr_input_ttl_seconds > 2 * settings.asr_timeout_seconds + 10
+
+
+@pytest.mark.parametrize(
+    "value", ["https://asr.example.org/v1", "https://asr.example.org:8443/v1", "HTTPS://A.org/v1"]
+)
+def test_asr_external_base_url_accepts_https(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_EXTERNAL_BASE_URL", value)
+
+    assert load_settings().asr_external_base_url == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://asr.example.org/v1",
+        "asr.example.org",
+        "ftp://asr.example.org/",
+        "https://",
+        "https:///v1",
+    ],
+)
+def test_asr_external_base_url_https_only(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_EXTERNAL_BASE_URL", value)
+
+    with pytest.raises(ConfigError, match="asr_external_base_url") as error:
+        load_settings()
+
+    assert value not in str(error.value)
+
+
+def test_asr_external_base_url_empty_means_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Helm chart renders an unset value as an empty string."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_EXTERNAL_BASE_URL", "")
+
+    assert load_settings().asr_external_base_url is None
+
+
+def test_media_upload_max_bytes_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("MEDIA_UPLOAD_MAX_BYTES", "1000000")
+    assert load_settings().media_upload_max_bytes == 1_000_000
+    monkeypatch.setenv("MEDIA_UPLOAD_MAX_BYTES", "999999")
+    with pytest.raises(ConfigError, match="media_upload_max_bytes"):
+        load_settings()
+
+    # With ASR on, at most the input budget: a larger upload could never be queued.
+    monkeypatch.setenv("ASR_ENABLED", "true")
+    monkeypatch.setenv("MEDIA_UPLOAD_MAX_BYTES", "200000000")
+    assert load_settings().media_upload_max_bytes == 200_000_000
+    monkeypatch.setenv("MEDIA_UPLOAD_MAX_BYTES", "200000001")
+    with pytest.raises(ConfigError, match="MEDIA_UPLOAD_MAX_BYTES") as error:
+        load_settings()
+    assert "200000001" not in str(error.value)
+    monkeypatch.setenv("DOCLING_INPUT_BUDGET_BYTES", "300000000")
+    assert load_settings().media_upload_max_bytes == 200_000_001
+
+
+def test_media_upload_max_bytes_is_unbound_by_the_budget_without_asr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without ASR no media upload is queued: a small input budget (OCR only) stays valid."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("DOCLING_INPUT_BUDGET_BYTES", "10000000")
+    monkeypatch.setenv("DOCUMENT_MAX_BYTES", "10000000")
+
+    assert load_settings().media_upload_max_bytes == 25_000_000
+    monkeypatch.setenv("ASR_ENABLED", "true")
+    with pytest.raises(ConfigError, match="MEDIA_UPLOAD_MAX_BYTES"):
+        load_settings()
+
+
+def test_asr_external_api_key_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_EXTERNAL_API_KEY", "sk-very-secret")
+
+    settings = load_settings()
+
+    assert settings.asr_external_api_key == "sk-very-secret"
+    assert "sk-very-secret" not in repr(settings)
+    assert "sk-very-secret" not in str(settings)
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_asr_external_api_key_empty_means_unset(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """An empty key (a chart that renders an unset secret so) is no key: without the caller's
+    header, ``transcribe: true`` is 400 on the external backend instead of sending no key."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_EXTERNAL_API_KEY", value)
+
+    assert load_settings().asr_external_api_key is None

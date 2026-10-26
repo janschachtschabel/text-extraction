@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly: the job `media` also transcribes with the configured default model (large-v3-turbo).
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -88,6 +92,68 @@ jobs:
       - run: uv run text-extraction-docling-worker --check
       - run: uv run pytest -m docling -q
 
+  # faster-whisper, CTranslate2 and PyAV with real Whisper models (tests/asr, marker `asr`). The
+  # model `small` is downloaded on every run (fast); the configured default `large-v3-turbo` only
+  # on the weekly schedule and on manual runs. Each is cached by the manifest's hash in a folder of
+  # its own. The runner has `ffmpeg` on PATH and installs PyPI's av wheel (GPL libx264), so the
+  # worker's self-check (`--check`) would refuse both here: it runs inside the ASR image instead
+  # (workflow `image`, variant asr), where PyAV is built against the LGPL FFmpeg.
+  media:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AUTH_MODE: none
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked --extra asr
+
+      # The gate on the environment with the extra `asr` (faster-whisper, CTranslate2, PyAV, Deno).
+      - name: licence gate (asr)
+        run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser --extra asr
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/asr-models-small
+          key: asr-models-small-${{ hashFiles('src/text_extraction/media/models.toml') }}
+      # Does nothing when the cache restored the model (its marker is there).
+      - name: download the model small
+        run: uv run text-extraction-asr-worker --download-models
+        env:
+          ASR_MODEL: small
+          ASR_MODELS_PATH: ${{ runner.temp }}/asr-models-small
+      # -s: the long clip's test prints the child's peak memory (VmPeak, VmHWM) against
+      # ASR_MEMORY_LIMIT_MB.
+      - name: pytest -m asr (small)
+        run: uv run pytest -m asr -q -s
+        env:
+          ASR_MODEL: small
+          ASR_MODELS_PATH: ${{ runner.temp }}/asr-models-small
+
+      - if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/asr-models-large-v3-turbo
+          key: asr-models-large-v3-turbo-${{ hashFiles('src/text_extraction/media/models.toml') }}
+      - name: download the model large-v3-turbo
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: uv run text-extraction-asr-worker --download-models
+        env:
+          ASR_MODEL: large-v3-turbo
+          ASR_MODELS_PATH: ${{ runner.temp }}/asr-models-large-v3-turbo
+      - name: pytest -m asr (large-v3-turbo)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: uv run pytest -m asr -q -s
+        env:
+          ASR_MODEL: large-v3-turbo
+          ASR_MODELS_PATH: ${{ runner.temp }}/asr-models-large-v3-turbo
+
   helm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -114,6 +180,19 @@ jobs:
           --set workers.docling.models.download=false
           --set workers.docling.models.persistence.existingClaim=models
           --set workers.docling.autoscaling.keda.enabled=true
+      - name: helm lint (ASR workers on)
+        run: helm lint --strict deploy/helm/text-extraction --set workers.asr.enabled=true
+      - name: helm lint (ASR and Docling workers, models by hook Job, KEDA)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.asr.enabled=true
+          --set workers.asr.models.downloadMode=job --set workers.asr.autoscaling.keda.enabled=true
+          --set workers.docling.enabled=true --set workers.docling.models.downloadMode=job
+      - name: helm lint (ASR workers with the external backend, policies and alerts)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.asr.enabled=true
+          --set workers.asr.backend=openai --set workers.asr.external.baseUrl=https://asr.example.org/v1
+          --set workers.asr.external.existingSecret=asr-key --set networkPolicy.enabled=true
+          --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true
       # Render checks: toggles, env, grace periods, KEDA queries, network policies, alerts.
       - run: deploy/helm/test.sh
 
@@ -171,6 +250,37 @@ jobs:
           # Without the profile there is no Docling service.
           if docker compose config --services | grep -q docling; then
             echo "a Docling service runs without the profile" >&2; exit 1
+          fi
+          rm compose.json
+
+      # The profile `asr`: the one-shot models service writes the volume, the worker reads it
+      # read-only after it and keeps media on its own scratch volume (not the tmpfs); the mount
+      # paths win over .env; transcription is off unless the environment switches it on, then on
+      # everywhere.
+      - name: docker compose config (profile asr)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose --profile asr config --format json > compose.json
+          jq -e '.services["asr-models"]
+            | .build.target == "asr" and .command == ["text-extraction-asr-worker", "--download-models"]
+              and .volumes == [{"type": "volume", "source": "asr-models", "target": "/models", "volume": {}}]
+              and .environment.ASR_MODELS_PATH == "/models"' compose.json
+          jq -e '.services["asr-worker"]
+            | .build.target == "asr" and .read_only == true and .tmpfs == ["/tmp"]
+              and (.volumes | length == 2)
+              and (.volumes[0] | .source == "asr-models" and .target == "/models" and .read_only == true)
+              and (.volumes[1] | .source == "asr-scratch" and .target == "/scratch")
+              and .environment.ASR_SCRATCH_PATH == "/scratch" and .environment.ASR_MODELS_PATH == "/models"
+              and .depends_on["asr-models"].condition == "service_completed_successfully"
+              and .stop_grace_period == "45s"
+              and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "false")' compose.json
+          ASR_ENABLED=true docker compose --profile asr config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.ASR_ENABLED == "true")'
+          # Without the profile there is no ASR service.
+          if docker compose config --services | grep -q asr; then
+            echo "an ASR service runs without the profile" >&2; exit 1
           fi
           rm compose.json
 

@@ -16,6 +16,7 @@ kept; a row without a URL is skipped with a warning.
 | `wlo_200.csv` | 200 | Sample of the corpus. **The gate:** in `auto` mode at or above 80 % ok (the browser baseline). Also reported in `browser` mode. |
 | `wlo_50.csv` | 50 | Quicker sample for local runs. |
 | `smoke.csv` | 24 | Curated watchlist of known-hard pages and expected failures, with `category`, `expected_lang` and `notes`. Reported in `auto` mode, never a gate: its ok rate is not comparable to the baseline. |
+| `media.csv` | 28 | The media set (package 6): YouTube, Vimeo, ARD, ZDF, arte and 3sat videos, two media files and two pages with HTML5 tracks, with `platform`, `expected_source` (the `transcript_source` the row should get), `expected_lang`, `transcribe` (`true` for the media files, which only ASR can answer) and `notes`. Reported, never a gate. See "The media set" below. |
 
 ## Run it
 
@@ -35,7 +36,9 @@ after `BROWSER_QUEUE_WAIT_SECONDS`, and `browser` fails with `timeout`.
 | --- | --- | --- |
 | `--base-url` | `http://127.0.0.1:8080` | The service's public API. |
 | `--api-key` | env `LIVE_API_KEY` | Sent as `Authorization: Bearer`; not needed with `AUTH_MODE=none`. |
-| `--urls` | `urls/wlo_200.csv` | CSV with a `url` column. |
+| `--urls` | `urls/wlo_200.csv` | CSV with a `url` column (and optionally `transcribe`, `platform`, `expected_source`); none by default when `--upload` is given. |
+| `--upload` | none | An audio or video file to send to `POST /v1/extract/file` and transcribe; repeatable. Its row is `upload:<file name>` with platform `upload` and expected source `asr`. |
+| `--no-transcribe` | off | Never send `transcribe`, whatever a row says (a service without ASR answers it 400). |
 | `--concurrency` | 8 | Requests in flight in total. |
 | `--min-words` | 50 | Fewer words than this is `too_short`. |
 | `--mode` | `auto` | Sent as the request's `mode`: `fast`, `auto` or `browser`. |
@@ -43,16 +46,26 @@ after `BROWSER_QUEUE_WAIT_SECONDS`, and `browser` fails with `timeout`.
 | `--min-ok-rate` | none | Exit 1 when the ok rate (percent of all URLs) is below this. |
 | `--out` | `results/live_<UTC time>.jsonl` | One JSON line per URL. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
+| `--job-timeout` | 3600 | Seconds to wait for a job (a transcription answered 202) to complete; longer is `client_TimeoutError`. |
+| `--poll-seconds` | 5 | Seconds between two reads of a job. |
 | `--timeout` | 90 | Total client deadline per request in seconds (a slower answer is recorded as `client_TimeoutError`); keep it above the longest answer: `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + `BROWSER_TIMEOUT_SECONDS` + 5 s for an escalating `auto` request (70 s by default; the live workflow sets the queue wait to 30 s and passes 120). |
 
-Every request is `POST /v1/extract` with the `--mode` (default `auto`), `format=text` and `cache=false`. Each domain
-has its own queue and at most one request in flight; the domains take turns under the global
+Every request is `POST /v1/extract` with the `--mode` (default `auto`), `format=text` and `cache=false`,
+plus `transcribe: true` where the row says so (unless `--no-transcribe`); an upload is
+`POST /v1/extract/file` with `format=text`. An answer that is a job (202 with a `status_url`: a
+transcription is always one) is read every `--poll-seconds` until its state is `completed`, and
+its item's result is recorded with `http_status` 200. Each domain
+has its own queue and at most one request in flight (a job holds its domain's turn until it
+completes); the domains take turns under the global
 `--concurrency`. A domain with many URLs (GeoGebra is about a quarter of the corpus) therefore
 sets the run time. Run the service with the default per-domain outbound limits to see what
 production sees.
 
 Each JSONL line has `url`, `domain`, `bucket`, `http_status`, `status`, `error_code`,
-`word_count`, `compliance_decision`, `mode_used`, `warnings` and `elapsed_ms`. `error_code` is
+`word_count`, `compliance_decision`, `mode_used`, `warnings`, `elapsed_ms`, `platform`
+(`data.media.platform`, else the row's `platform`), `transcript_source`
+(`data.media.transcript_source`), `expected_source` (the row's) and `transcribe` (whether the
+request asked for a transcription). `error_code` is
 the envelope's code, or `client_<ExceptionName>` when the request got no answer; `mode_used` is
 the envelope's `data.mode_used` (`fast` or `browser`: what produced the answer, null without
 data); `warnings` is `data.warnings`. The summary on stdout lists the buckets overall, the ok
@@ -60,9 +73,46 @@ rate, how many URLs `enforce` would have blocked (`compliance.decision == "repor
 answers carry the warning `browser_unavailable` (no browser worker answered in time), the URLs
 and ok count per `mode_used`, the buckets of the ten domains with the most URLs and an "Error
 codes" table: the `error.code` of every failed or partial answer and of every
-`connection_error`, most frequent first, with the three domains that gave it most, and a "URLs
+`connection_error`, most frequent first, with the three domains that gave it most, for a list with
+an `expected_source` column (the media set) a "Media" table (per platform: the URLs, how many got
+each `transcript_source` or none, and how many got the expected one; a row expecting subtitles
+counts with manual or automatic ones, as platforms move tracks between the two), and a "URLs
 not ok" table with each URL whose bucket is not `ok` (bucket, code, mode used, words). To see where the browser helps, run a set in `fast` and in
 `browser` mode and compare the domains, as the 2026-09-28 baseline did.
+
+## The media set
+
+`media.csv` holds the samples of the spike (2026-10-25): videos with manual subtitles, with
+automatic captions only and without subtitles on every platform, the two WLO Vimeo videos that
+only give their details (embed-restricted), an arte video whose only German track is `-forced`,
+two media files for transcription and two Wikimedia Commons pages with `<track>`. Mediathek items
+and the tagesschau MP4 expire; replace a row when its URL is gone, with the same kind of sample.
+
+Its rows count as `ok` like any other (50 words or more); what matters is the Media table:
+
+```bash
+# Subtitles and metadata only (no ASR worker), as the live workflow runs it:
+uv run python -m tests.live.run_live --urls tests/live/urls/media.csv --no-transcribe
+# With transcription (docker compose --profile asr up, ASR_ENABLED=true): the media files are
+# transcribed as jobs, and an upload of the corpus clip with them.
+uv run python -m tests.live.run_live --urls tests/live/urls/media.csv \
+  --upload tests/media/corpus/speech_de.ogg --timeout 120
+```
+
+Package 6 is done when every YouTube and Mediathek row that has subtitles answers
+`manual_subtitles` or `auto_subtitles` and the upload is transcribed (`asr`). From a data-centre
+IP (the GitHub runners) YouTube may refuse the service: the answer is then the video's details
+(`metadata_only`, `partial`/`no_transcript_available`, warning `subtitles_blocked`; decision D1),
+so CI reports the media set but does not judge it. Run it from an office or home line for the
+done-when check.
+
+The upload alone, without the harness (`$KEY` only with `AUTH_MODE=api_key`):
+
+```bash
+curl -H "Authorization: Bearer $KEY" -F file=@tests/media/corpus/speech_de.ogg \
+  http://localhost:8080/v1/extract/file          # 202 with data.status_url
+curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/jobs/<job id>
+```
 
 ## Buckets
 
@@ -101,6 +151,8 @@ and worker logs as the `live-results` artifact.
   `--mode browser`. A new push or the `live` label starts a new run and cancels the one in
   progress; adding any other label does neither.
 - **Weekly**, Mondays 03:00 UTC: the same as for pull requests.
+- **Every run** also reports the media set (`media.csv`, `--mode auto --no-transcribe`; no ASR
+  worker runs there), never as a gate: YouTube may refuse the runners' data-centre IPs (D1).
 
 If the gate misses, do not tune a setting first: compare the buckets per domain, fast against
 browser, and debug the domains that differ. When the ok rate drops between two commits, run both

@@ -1,7 +1,9 @@
 """Sync requests' work on another worker pool: a one-item job, queued, waited for, and deleted.
 
-API pods hand two kinds of work to worker pools and wait for it: renders (pool ``browser``,
-``browser_dispatch.py``) and OCR (pool ``docling``). ``PoolDispatcher`` is what both share:
+API pods hand three kinds of work to worker pools: renders (pool ``browser``,
+``browser_dispatch.py``) and OCR (pool ``docling``), which they wait for, and transcriptions
+(pool ``asr``, ``asr_dispatch.py``), which they never wait for. ``PoolDispatcher`` is what all
+share:
 
 1. ``submit_job`` creates a job with one item (or reuses the request's P1 job), stores the item's
    draft, and queues item 0 on the pool under the client ``<key name>#live``, so that the key's
@@ -25,9 +27,12 @@ browser or a Docling job; ``pool`` names it). The route then answers 202 with th
 pool job it detaches the task, which stops waiting and leaves the job to the worker. A task that
 gives up releases the job first; detaching and releasing exclude each other (both are
 synchronous), so a job answered with 202 is never deleted, and a job being deleted is never
-answered with 202.
+answered with 202. A task that dispatched a job it does not wait for (a transcription) ``adopt``s
+it to the route and answers None: the route answers 202 with that job, also when it had claimed
+the hand-over for a P1 job that it could not create.
 
-The ``docling`` pool's policy (OCR) and the contract of its worker are in ``docling_dispatch.py``.
+The ``docling`` pool's policy (OCR) and the contract of its worker are in ``docling_dispatch.py``,
+the ``asr`` pool's in ``asr_dispatch.py``.
 
 Logs carry job ids only, never a URL, header, cookie, action or document byte.
 """
@@ -85,6 +90,8 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         screenshot=req.screenshot,
         full_page=req.full_page,
         ocr=req.ocr,
+        transcribe=req.transcribe,
+        languages=req.languages,
     )
 
 
@@ -93,8 +100,9 @@ class Handover:
     share; see the module docstring.
 
     ``job_id`` is the P1 job the route created, ``pool_job`` the job the task dispatched to
-    ``pool`` (``browser`` or ``docling``). The side that claimed calls ``settle`` once its job
-    exists, or failed to; the other side waits for ``settled`` before it looks at the ids.
+    ``pool`` (``browser``, ``docling`` or ``asr``). The side that claimed calls ``settle`` once
+    its job exists, or failed to; the other side waits for ``settled`` before it looks at the
+    ids.
     """
 
     def __init__(self) -> None:
@@ -158,6 +166,15 @@ class Handover:
     @property
     def detached(self) -> bool:
         return self._detached
+
+    def adopt(self, pool: str, job_id: str) -> None:
+        """The task dispatched ``job_id`` to ``pool`` and does not wait for it (a transcription):
+        the job is the route's to answer 202 with, once the task answers None, whatever side
+        claimed the hand-over (the route's P1 job could not be created). Called after the job
+        exists, and never by a task that may still release its job."""
+        self.pool = pool
+        self.pool_job = job_id
+        self._detached = True
 
 
 class PoolDispatcher:

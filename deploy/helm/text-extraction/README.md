@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR (off by default), and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR and optional ASR workers for transcription (both off by default), and an optional single-replica Valkey (with a password).
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -19,8 +19,12 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | Worker Deployment `<release>-text-extraction-worker-browser` | `workers.browser.enabled` | Runs `text-extraction-browser-worker` from the browser image (`workers.browser.image`): claims the items of the pool `browser` and renders them in Chromium, in unblock mode in Google Chrome under Xvfb. Serves only port 9090. Same ConfigMap and Secrets as the API. |
 | Worker Deployment `<release>-text-extraction-worker-docling` | `workers.docling.enabled` | Runs `text-extraction-docling-worker` from the Docling image (`workers.docling.image`): claims the items of the pool `docling` (scans, broken text layers, images, OpenDocument files) and converts them with Docling and Tesseract. An init container downloads the models first. Serves only port 9090. Same ConfigMap and Secrets as the API. See [Docling workers](#docling-workers-and-the-models-volume). |
 | PersistentVolumeClaim `<release>-text-extraction-docling-models` | `workers.docling.enabled` and no `workers.docling.models.persistence.existingClaim` | The models volume of the Docling workers, `ReadWriteMany` by default. |
+| Worker Deployment `<release>-text-extraction-worker-asr` | `workers.asr.enabled` | Runs `text-extraction-asr-worker` from the ASR image (`workers.asr.image`): claims the items of the pool `asr` (`transcribe: true` without subtitles, audio and video uploads) and transcribes them with faster-whisper, or on an external endpoint (`workers.asr.backend: openai`). An init container downloads the model first (local backend). Downloaded media live on a bounded emptyDir at `/scratch`. Serves only port 9090. Same ConfigMap and Secrets as the API. See [ASR workers](#asr-workers-and-the-models-volume). |
+| PersistentVolumeClaim `<release>-text-extraction-asr-models` | `workers.asr.enabled`, `workers.asr.backend: local` and no `workers.asr.models.persistence.existingClaim` | The Whisper model volume of the ASR workers, `ReadWriteMany` by default. |
+| Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
+| Secret `<release>-text-extraction-asr` | `workers.asr.backend: openai`, `workers.asr.external.apiKey` set and no `workers.asr.external.existingSecret` | Holds `ASR_EXTERNAL_API_KEY`. |
 | Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
-| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`. |
+| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`). |
 | HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
 | Secret `<release>-text-extraction-valkey-auth` | `valkey.enabled`, `valkey.auth.enabled` and no `valkey.auth.existingSecret` | Holds `VALKEY_PASSWORD`, generated once (32 alphanumeric characters) and kept across upgrades. |
 | NetworkPolicy (Valkey, API, each worker pool) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
@@ -54,11 +58,15 @@ Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`) on the API po
 `WORKER_CONCURRENCY` (from `workers.extract.concurrency`) on the extract workers,
 `BROWSER_CONCURRENCY` (from `workers.browser.concurrency`) on the browser workers,
 `DOCLING_CONCURRENCY` (from `workers.docling.concurrency`) and `DOCLING_MODELS_PATH` (`/models`,
-the mount of the models volume) on the Docling workers, and `BROWSER_ENABLED` (from
-`workers.browser.enabled`), `BROWSER_UNBLOCK_ENABLED` (from `workers.browser.unblock`) and
-`DOCLING_ENABLED` (from `workers.docling.enabled`) on every pod (API, extract, browser and Docling
-workers): entries for them under `config` are ignored. So browser mode and OCR are on exactly when
-the chart deploys their workers.
+the mount of the models volume) on the Docling workers, `ASR_CONCURRENCY`, `ASR_MODEL`,
+`ASR_MODELS_PATH` (`/models`), `ASR_SCRATCH_PATH` (`/scratch`) and, with the external backend,
+`ASR_EXTERNAL_BASE_URL` and `ASR_EXTERNAL_MODEL` on the ASR workers, and `BROWSER_ENABLED` (from
+`workers.browser.enabled`), `BROWSER_UNBLOCK_ENABLED` (from `workers.browser.unblock`),
+`DOCLING_ENABLED` (from `workers.docling.enabled`), `ASR_ENABLED` (from `workers.asr.enabled`),
+`ASR_BACKEND` (from `workers.asr.backend`) and `MEDIA_UPLOAD_MAX_BYTES` (from
+`workers.asr.uploadMaxBytes`) on every pod (API, extract, browser, Docling and ASR workers):
+entries for them under `config` are ignored. So browser mode, OCR and transcription are on exactly
+when the chart deploys their workers.
 
 `config.FETCH_MAX_BYTES` (the download limit) and `config.DOCUMENT_MAX_BYTES` (the largest
 document and upload) are both 20000000 by default: lower them together. A `DOCUMENT_MAX_BYTES`
@@ -85,6 +93,7 @@ Secrets, listed separately:
 | `API_KEYS` | `secrets.apiKeys` (chart-managed Secret) or `secrets.existingSecret` + `secrets.existingSecretKey`. Only SHA-256 hashes of keys are stored. |
 | `VALKEY_PASSWORD` | Only with the in-chart Valkey: the generated Secret, or `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`. API and worker pods get it as an env var and build `VALKEY_URL=redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` with it. |
 | `VALKEY_URL` | Plain `externalValkey.url`, or for a URL with a password `externalValkey.existingSecret.name` + `.key`. The in-chart Valkey sets it from `VALKEY_PASSWORD`. |
+| `ASR_EXTERNAL_API_KEY` | Only with `workers.asr.backend: openai`, optional: `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`. Rendered into the API pods (which answer 400 when neither it nor the caller's `X-ASR-Api-Key` is there) and the ASR workers, no other pod. |
 
 ### Valkey password
 
@@ -156,11 +165,13 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.documentParentReserveMiB` | `512` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
-| `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica. |
+| `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica (pending plus leased with `countLeased`). `null`: the pool's `concurrency`. Must be positive. |
+| `workers.extract.autoscaling.keda.countLeased` | `false` | Also count the items the workers hold (`text_extraction_queue_leased_items`), so the replicas busy with them are part of the target. |
 | `workers.extract.autoscaling.keda.minReplicaCount` / `maxReplicaCount` | `1` / `10` | |
 | `workers.extract.autoscaling.hpa.enabled` | `false` | CPU-based HorizontalPodAutoscaler of the workers. **Mutually exclusive with KEDA**: enabling both fails the render, because KEDA manages its own HPA. |
 | `workers.extract.autoscaling.hpa.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `workers.extract.autoscaling.hpa.targetCPUUtilizationPercentage` | `70` | |
+| `workers.<pool>.autoscaling.scaleDownStabilizationWindowSeconds` | `null` (`asr`: `3600`) | How long the load must stay lower before KEDA or the HPA removes a replica (`advanced.horizontalPodAutoscalerConfig.behavior.scaleDown` of the ScaledObject, `behavior.scaleDown` of the HPA). `null`: the Kubernetes default (300 s). 0 to 3600, or the render fails. |
 | `workers.browser.enabled` | `true` | Deploy the browser workers. Also renders `BROWSER_ENABLED` into every pod: false switches browser mode off (`mode: "browser"` and screenshots answer 400, `auto` never escalates). |
 | `workers.browser.unblock` | `false` | Unblock mode (`BROWSER_UNBLOCK_ENABLED` in every pod): admins with `compliance: "ignore"` get a Chrome that clears bot challenges. Needs `workers.browser.enabled`, or the render fails. |
 | `workers.browser.image.repository` | `ghcr.io/janschachtschabel/text-extraction-browser` | Browser worker image (Playwright's Chromium shell, Google Chrome stable, Xvfb; linux/amd64). |
@@ -184,11 +195,41 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.docling.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector`; the Docling image is built for linux/amd64 only. |
 | `workers.docling.autoscaling.keda.*` | as for the extract workers, `threshold` `4`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="docling"})`; the API pods export it while `JOBS_ENABLED` and `DOCLING_ENABLED` are true. With no replica a sync request answers without OCR after `DOCLING_SYNC_WAIT_SECONDS` and batch items wait. |
 | `workers.docling.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
-| `workers.docling.models.download` | `true` | An init container runs `text-extraction-docling-worker --download-models` with the volume mounted writable. `false` needs `persistence.existingClaim` (a pre-filled volume), or the render fails. |
+| `workers.docling.models.download` | `true` | Runs `text-extraction-docling-worker --download-models` with the volume mounted writable. `false` needs `persistence.existingClaim` (a pre-filled volume), or the render fails. |
+| `workers.docling.models.downloadMode` | `init` | `init`: an init container of every worker pod (works with `ReadWriteOnce`). `job`: a Helm post-install/post-upgrade hook Job, once per release; the worker pods only check the marker (a pod that starts before the Job is done exits with code 1 and restarts). Needs `ReadWriteMany` or one node. `helm install --wait` waits for the workers before it runs the hook: install the first release without `--wait`, or use `init`. |
+| `workers.docling.models.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Of the init container or the hook Job (not the worker's `resources`): the download streams each file to the volume and hashes it on the way. |
 | `workers.docling.models.persistence.size` | `5Gi` | The models take about 335 MiB (9 files); the download stages a full copy beside the old one when the manifest changes, so about 670 MiB at once. 5Gi leaves room for later models; 1Gi suffices today. |
 | `workers.docling.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
 | `workers.docling.models.persistence.storageClass` | `""` | Cluster default when empty. |
 | `workers.docling.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
+| `workers.asr.enabled` | `false` | Deploy the ASR workers (transcription). Also renders `ASR_ENABLED` into every pod: false makes `transcribe: true` answer 400 and audio or video uploads `unsupported_content_type`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
+| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `local`: faster-whisper with the model from the volume. `openai`: the external endpoint below; no models volume, no download. |
+| `workers.asr.model` | `large-v3-turbo` | `ASR_MODEL`: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, about twice as fast on CPU). Only this one is downloaded. Anything else fails the render. |
+| `workers.asr.image.repository` | `ghcr.io/janschachtschabel/text-extraction-asr` | ASR worker image (faster-whisper, PyAV on an LGPL FFmpeg, yt-dlp with Deno; no models, no `ffmpeg` program; linux/amd64). |
+| `workers.asr.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
+| `workers.asr.replicaCount` | `1` | Ignored with KEDA or HPA. |
+| `workers.asr.concurrency` | `1` | `ASR_CONCURRENCY`: transcriptions per pod at once, each in a child process of its own. |
+| `workers.asr.uploadMaxBytes` | `25000000` | `MEDIA_UPLOAD_MAX_BYTES` on every pod: the largest audio or video upload (decision D3). Its bytes travel through Valkey; above `DOCLING_INPUT_BUDGET_BYTES` the render fails. |
+| `workers.asr.terminationGracePeriodSeconds` | `60` | Transcriptions in flight get 30 s after SIGTERM, then the children are killed and their items go back to the queue at once (attempts + 1) to start again on another replica. The render fails below 40. |
+| `workers.asr.resources` | requests 2 / 3Gi, limits 4 / 6Gi | Placeholder for one transcription with `large-v3-turbo` (about 2 GB resident, `ASR_MEMORY_LIMIT_MB` 4096 of address space) and `ASR_THREADS` (4) threads. |
+| `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`) for downloaded media. `concurrency` × (`MEDIA_MAX_BYTES` (500000000) + 5 MB) must fit, or the render fails. |
+| `workers.asr.tmpSizeLimit` | `1Gi` | sizeLimit of the `/tmp` emptyDir (`HOME`, library caches). |
+| `workers.asr.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector`; the ASR image is published for linux/amd64. |
+| `workers.asr.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (= `concurrency`), `countLeased` `true`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="asr"}) + max(text_extraction_queue_leased_items{pool="asr"})`: a replica per `concurrency` transcriptions queued or in flight. The API pods export both while `JOBS_ENABLED` and `ASR_ENABLED` are true. |
+| `workers.asr.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
+| `workers.asr.autoscaling.scaleDownStabilizationWindowSeconds` | `3600` | The Kubernetes maximum: an hour of lower load before a replica goes. See "ASR workers and the models volume" on interrupted transcriptions. |
+| `workers.asr.models.download` | `true` | Runs `text-extraction-asr-worker --download-models` (only `model`, from huggingface.co) with the volume mounted writable. `false` needs `persistence.existingClaim`, or the render fails. Local backend only. |
+| `workers.asr.models.downloadMode` | `init` | `init` or `job`, as for the Docling workers. |
+| `workers.asr.models.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Of the init container or the hook Job, as for the Docling workers. |
+| `workers.asr.models.persistence.size` | `4Gi` | `large-v3-turbo` takes about 1.6 GiB, and an update stages a full copy beside it. |
+| `workers.asr.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
+| `workers.asr.models.persistence.storageClass` | `""` | Cluster default when empty. |
+| `workers.asr.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
+| `workers.asr.external.baseUrl` | `""` | `ASR_EXTERNAL_BASE_URL` of `backend: openai` (required then, https only, or the render fails). |
+| `workers.asr.external.model` | `whisper-1` | `ASR_EXTERNAL_MODEL`. |
+| `workers.asr.external.apiKey` | `""` | `ASR_EXTERNAL_API_KEY` for a chart-managed Secret. Optional: without a key callers must send `X-ASR-Api-Key`. |
+| `workers.asr.external.existingSecret` | `""` | Your own Secret with the key; takes precedence over `apiKey`. |
+| `workers.asr.external.existingSecretKey` | `ASR_EXTERNAL_API_KEY` | Key inside that Secret (also used for the chart-managed one). |
 | `networkPolicy.enabled` | `false` | Needs a CNI that enforces NetworkPolicy. |
 | `networkPolicy.metricsFrom` | `[{podSelector: {}}]` | Peers (`from` entries) allowed to scrape port 9090: by default every pod of the release namespace. |
 | `service.type` | `ClusterIP` | Type of the public Service. |
@@ -219,8 +260,9 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `metrics.prometheusRule.labels` | `{}` | |
 | `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog` for the pools `extract` and `browser`. |
 | `alerts.doclingQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `docling` (an item takes minutes). |
+| `alerts.asrQueueBacklogItems` | `50` | Threshold of `TextExtractionQueueBacklog` for the pool `asr` (an item takes up to hours). |
 | `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling) get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling, asr) and the models Jobs get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.
@@ -232,19 +274,19 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
-| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000; for `docling` `alerts.doclingQueueBacklogItems`, 100) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
+| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000; for `docling` `alerts.doclingQueueBacklogItems`, 100; for `asr` `alerts.asrQueueBacklogItems`, 50) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
 | `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
 `TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the alerts of the
-pools `browser` and `docling` need `workers.browser.enabled` or `workers.docling.enabled` (without
-it there is no such queue). For the pool `docling` the two alerts are the Docling backlog and
-"Docling workers down" (for example models missing on the volume: the workers exit before
-`/ready`). The item counter has no `pool` label, so the pools are told apart by the scrape target:
-the browser and docling pools count the series of their workers' internal Service, the extract
-pool all others. The queue gauges come from the API
+pools `browser`, `docling` and `asr` need `workers.browser.enabled`, `workers.docling.enabled` or
+`workers.asr.enabled` (without it there is no such queue). For the pools `docling` and `asr` the two
+alerts are the backlog and "workers down" (for example models missing on the volume: the workers
+exit before `/ready`). The item counter has no `pool` label, so the pools are told apart by the
+scrape target: the browser, docling and asr pools count the series of their workers' internal
+Service, the extract pool all others. The queue gauges come from the API
 pods and every pod reports the same queue, so the rules use `max()`, never `sum()`. The counter
 `text_extraction_job_items_total` appears with the first item a worker handles and the kube-state
 series can be missing, so the rules use `or vector(0)` where "nothing yet" has to count as 0:
@@ -266,12 +308,14 @@ enabled. Only 5xx answers from the public API count; a target failure is a `200`
 
 With `networkPolicy.enabled` the chart creates a policy for Valkey, the API and each enabled worker
 pool, all for ingress only (the API and the workers must reach arbitrary sites, so egress stays
-open):
+open; that also covers the model downloads and the external ASR endpoint, which the ASR workers
+call directly):
 
-- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling) of this release
-  only.
+- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling, asr) of this
+  release only.
 - The API accepts port 8080 from anywhere and port 9090 from `networkPolicy.metricsFrom`.
-- The extract, browser and Docling workers accept port 9090 from `networkPolicy.metricsFrom` only.
+- The extract, browser, Docling and ASR workers accept port 9090 from `networkPolicy.metricsFrom`
+  only.
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
 Prometheus in another namespace add for example
@@ -303,11 +347,52 @@ models take about 335 MiB on a volume. With it on:
 - The volume must be writable by uid/gid 10001 for the download (`fsGroup` 10001 covers most
   volume types; some NFS provisioners ignore it).
 
+## ASR workers and the models volume
+
+Transcription is off by default (`workers.asr.enabled: false`). With it on, `transcribe: true` on
+media without subtitles and every audio or video upload become jobs of the pool `asr`; nothing
+waits for them, so the API pods keep their grace period.
+
+- Local backend (default): the PVC `<release>-text-extraction-asr-models` (or
+  `models.persistence.existingClaim`) is mounted at `/models` (`ASR_MODELS_PATH`), one folder per
+  model; only `workers.asr.model` is downloaded (from `huggingface.co` at pinned commits, each file
+  SHA-256 checked, manifest `src/text_extraction/media/models.toml`). The init container `models`
+  (or, with `models.downloadMode: job`, the hook Job) runs `text-extraction-asr-worker
+  --download-models` with the volume writable; the worker mounts it read-only. A worker without the
+  model exits with code 1 and logs `asr_models_missing`. Air-gapped: fill a volume elsewhere, then
+  set `models.persistence.existingClaim` and `models.download: false`.
+- External backend (`backend: openai`): no models volume, no download. The worker posts 16 kHz mono
+  Opus chunks to `external.baseUrl` with the caller's `X-ASR-Api-Key`, else
+  `ASR_EXTERNAL_API_KEY` (`external.apiKey` or `external.existingSecret`), which the API pods get
+  too.
+- Downloaded media go to an emptyDir at `/scratch` (`ASR_SCRATCH_PATH`) bounded by
+  `scratch.sizeLimit` (2Gi): Kubernetes evicts a pod that writes more. `concurrency` ×
+  (`MEDIA_MAX_BYTES` + 5 MB) must fit, which the render checks.
+- Before `/ready` each child checks that PyAV's FFmpeg is an LGPL build, that neither `ffmpeg` nor
+  `rtmpdump` is on `PATH`, and transcribes a built-in clip (external backend: encodes it as Opus).
+  The image is built for exactly that (PyAV against BtbN's LGPL FFmpeg, no FFmpeg programs).
+- The length limits of decision D6 come from `config` (service defaults:
+  `MEDIA_MAX_DURATION_SECONDS` 7200, `ASR_TIMEOUT_SECONDS` 10800, `ASR_INPUT_TTL_SECONDS` 28800);
+  the render fails when the input TTL does not outlast the lease (2 × `ASR_TIMEOUT_SECONDS` + 10).
+  Upload bytes wait in Valkey for up to `ASR_INPUT_TTL_SECONDS` and count in
+  `DOCLING_INPUT_BUDGET_BYTES`: size `valkey.maxmemory` for it.
+- **Removing a pod interrupts its transcriptions.** A scale-down, a rolling update (`helm
+  upgrade` with a changed pod template) or a node drain sends SIGTERM: the transcriptions in flight
+  get 30 s, then their items go back to the queue at once (`attempts` + 1) and start again from the
+  beginning on another replica; with `backend: openai` the endpoint bills them again. An item
+  interrupted `JOB_ITEM_MAX_ATTEMPTS` times fails as lost. Kubernetes does not pick the idle pod
+  when it scales down. So: for steady load prefer fixed replicas (both scalers off,
+  `replicaCount`) and upgrade when the queue is quiet. With a scaler, KEDA counts the items in
+  flight as well (`countLeased`, threshold = `concurrency`), so it does not scale below the
+  transcriptions running, and both scalers wait `scaleDownStabilizationWindowSeconds` (3600, the
+  Kubernetes maximum) of lower load before they remove a replica.
+
 ## Local checks
 
 ```bash
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.docling.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.asr.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

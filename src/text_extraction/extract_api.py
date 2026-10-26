@@ -4,8 +4,10 @@ workers.
 **The flow** (``_flow``) of one request:
 
 1. The request is checked first: browser options while browser mode is off answer 400 (B9), so
-   does ``ocr: always`` while the service has no OCR (F11); an ``evaluate`` action of a
-   non-admin key 403, a compliance mode the key may not choose 403.
+   does ``ocr: always`` while the service has no OCR (F11), and ``transcribe: true`` while it
+   has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``, M9) or transcribes on an external endpoint
+   without a key for it (neither ``X-ASR-Api-Key`` nor ``ASR_EXTERNAL_API_KEY``, M11); an
+   ``evaluate`` action of a non-admin key 403, a compliance mode the key may not choose 403.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
@@ -18,14 +20,24 @@ workers.
    (one with a screenshot is kept as long as the screenshot).
 5. While the service has OCR, a document that needs it goes to the Docling workers once the fast
    phase is done (``docling_dispatch.DoclingHandoff``, F12), with its text layer as the draft.
+6. While the service has ASR, media that needs a transcription (``transcribe: true``: a platform
+   video without subtitles, a media file) goes to the ASR workers once the fast phase is done
+   (``asr_dispatch.AsrHandoff``, M9), with the video's metadata as the draft and the
+   ``X-ASR-Api-Key`` header as the job's secret. Nothing waits for a transcription: the route
+   answers 202 with the ASR job at once.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
-running in this pod, as the same task, and the job only stores its result:
+running in this pod, as the same task, and the job only stores its result. A request with
+``transcribe: true`` and no ``wait_seconds`` waits 20 seconds (M9): a transcription is always a
+job, and a video with subtitles still answers at once.
 
 1. the flow runs as a task, and the route waits ``wait_seconds`` for it (the wait does not
    cancel it);
 2. if the flow waits for a browser or a Docling job by then (or will, step 2 above), the route
-   answers 202 with that job and detaches the task: the pool's worker writes the job's result;
+   answers 202 with that job and detaches the task: the pool's worker writes the job's result.
+   A flow that dispatched an ASR job answers None and leaves the job to the route
+   (``Handover.adopt``), which answers 202 with it as soon as the flow ends, whether or not
+   ``wait_seconds`` has passed;
 3. otherwise an ``extract`` job with one URL is created and marked running with a lease of
    ``EXTRACT_TIMEOUT_SECONDS + 10`` seconds, and the route answers 202;
 4. a done-callback of the task stores its envelope as item 0 of the job. A task that raised is
@@ -56,10 +68,11 @@ from functools import partial
 from typing import Annotated, Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 
+from text_extraction.asr_dispatch import ASR_KEY_HEADER, AsrDispatcher, AsrHandoff, asr_key_of
 from text_extraction.auth import Principal, require_role
 from text_extraction.browser_dispatch import (
     BrowserDispatcher,
@@ -85,6 +98,11 @@ from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
 from text_extraction.pipeline import Pipeline
+from text_extraction.pipeline_media import (
+    TRANSCRIBE_WAIT_SECONDS,
+    TRANSCRIPTION_DISABLED_MESSAGE,
+    asr_available,
+)
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
@@ -107,6 +125,18 @@ _BROWSER_TIMEOUT_MESSAGE = "No browser rendered the page in time. Try again late
 type _Background = set[asyncio.Task[Any]]
 type _Answer = Envelope[ExtractResult] | None
 
+ASR_KEY_MISSING_MESSAGE = (
+    "This service transcribes with an external endpoint and has no API key for it: send yours "
+    f"in the {ASR_KEY_HEADER} header."
+)
+ASR_KEY_DESCRIPTION = (
+    "Your API key of the external transcription endpoint, where the service transcribes with "
+    "one (`ASR_BACKEND=openai`); it wins over the service's own key. A secret: stored only with "
+    "a job that waits for a transcription, deleted with its outcome, never shown or logged. "
+    "Required with `transcribe: true` (and for audio and video uploads) where the service has "
+    "no key of its own: without it the request is 400."
+)
+
 
 @router.post(
     "/v1/extract",
@@ -123,6 +153,9 @@ async def extract(
     body: ExtractRequest,
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
+    asr_key: Annotated[
+        str | None, Header(alias=ASR_KEY_HEADER, description=ASR_KEY_DESCRIPTION)
+    ] = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Fetch a URL and return its main content as Markdown, text or HTML.
 
@@ -131,8 +164,9 @@ async def extract(
     `upstream_status`, `mode_used`, `compliance`, `timings` and as much of the result as was
     reached. 4xx answers are about the request itself (invalid body, key, rate limit, a
     compliance mode the caller may not choose, browser options while browser mode is off,
-    `ocr: always` while the service has no OCR, an `evaluate` action of a non-admin key); 5xx
-    are faults of this service.
+    `ocr: always` while the service has no OCR, `transcribe: true` without the
+    `X-ASR-Api-Key` header where the service transcribes externally and has no key of its own,
+    an `evaluate` action of a non-admin key); 5xx are faults of this service.
 
     `mode: browser`, `screenshot`, browser options and an `auto` page that needs a browser are
     rendered by a browser worker. Such a request can take the fast phase plus
@@ -142,8 +176,15 @@ async def extract(
 
     With `wait_seconds`, an extraction that takes longer becomes a job: 202 with the job's id
     and `status_url` (`GET /v1/jobs/{id}`). Without it the request always waits for the result.
+
+    `transcribe: true` (where the service has speech recognition) waits 20 s by default: a
+    video with subtitles answers 200 as usual, and media that needs a transcription (a video
+    without subtitles, an audio or video file) answers 202 at once with a job, whose draft is
+    the video's metadata. While the key has `ASR_MAX_OPEN_PER_CLIENT` transcriptions waiting, or
+    the service is busy, the answer is the metadata with the warning `asr_unavailable` (a media
+    file: `failed`/`rate_limited`, retryable).
     """
-    return await respond(request, body, principal, "extract")
+    return await respond(request, body, principal, "extract", asr_key=asr_key_of(asr_key))
 
 
 def renders_first(body: ExtractRequest) -> bool:
@@ -159,6 +200,40 @@ def check_ocr_request(ocr: OcrOption, settings: Settings) -> None:
         raise ServiceError(ErrorCode.INVALID_REQUEST, OCR_DISABLED_MESSAGE, 400)
 
 
+def check_transcribe_request(
+    transcribe: bool, settings: Settings, *, key: str | None = None
+) -> None:
+    """400 for ``transcribe: true`` while the service has no ASR (M9), or transcribes on an
+    external endpoint without a key for it: neither the caller's ``key`` (``X-ASR-Api-Key``)
+    nor ``ASR_EXTERNAL_API_KEY`` (M11). The request could not get what it asks for."""
+    if not transcribe:
+        return
+    if not asr_available(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, TRANSCRIPTION_DISABLED_MESSAGE, 400)
+    check_asr_key(settings, key)
+
+
+def check_asr_key(settings: Settings, key: str | None) -> None:
+    """400 when the service transcribes on an external endpoint (``ASR_BACKEND=openai``) and
+    has no key for it: neither the caller's ``key`` nor ``ASR_EXTERNAL_API_KEY``. The message
+    names the header, never a value."""
+    if key is None and asr_key_missing(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, ASR_KEY_MISSING_MESSAGE, 400)
+
+
+def asr_key_missing(settings: Settings) -> bool:
+    """Whether a transcription needs the caller's key: the external backend without
+    ``ASR_EXTERNAL_API_KEY``."""
+    return settings.asr_backend == "openai" and settings.asr_external_api_key is None
+
+
+def request_wait_seconds(body: ExtractRequest) -> float | None:
+    """The request's ``wait_seconds``; with ``transcribe: true`` and none set, 20 (M9)."""
+    if body.wait_seconds is None and body.transcribe:
+        return TRANSCRIBE_WAIT_SECONDS
+    return body.wait_seconds
+
+
 def check_browser_request(body: ExtractRequest, principal: Principal, settings: Settings) -> None:
     """400 for browser work while browser mode is off (B9), 403 for an ``evaluate`` action of a
     non-admin key (B6)."""
@@ -169,25 +244,35 @@ def check_browser_request(body: ExtractRequest, principal: Principal, settings: 
 
 
 async def respond(
-    request: Request, body: ExtractRequest, principal: Principal, kind: BrowserJobKind
+    request: Request,
+    body: ExtractRequest,
+    principal: Principal,
+    kind: BrowserJobKind,
+    *,
+    asr_key: str | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run the flow for ``body``, or hand it over to a job after ``wait_seconds`` (the module
-    docstring). ``kind`` is the kind of a browser job the request creates."""
+    docstring). ``kind`` is the kind of a browser job the request creates; ``asr_key`` the
+    caller's ``X-ASR-Api-Key``, stored with an ASR job only."""
     state = request.app.state
     settings: Settings = state.settings
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
     check_ocr_request(body.ocr, settings)
+    check_transcribe_request(body.transcribe, settings, key=asr_key)
+    wait_seconds = request_wait_seconds(body)
     handover = Handover()
-    wait_until = handover_time(body.wait_seconds, settings)
-    flow = partial(_flow, state, body, principal, compliance, handover, kind, wait_until)
+    wait_until = handover_time(wait_seconds, settings)
+    flow = partial(
+        _flow, state, body, principal, compliance, handover, kind, wait_until, asr_key=asr_key
+    )
     options = job_options(body, compliance)
     return await answer_or_hand_over(
         state,
         flow,
         handover,
-        wait_seconds=body.wait_seconds,
+        wait_seconds=wait_seconds,
         kind=kind,
         renders_first=renders_first(body),
         hand_over=partial(create_p1_job, state.job_store, settings, principal, options, body.url),
@@ -223,7 +308,7 @@ async def answer_or_hand_over(
     the browser at once. Shared with ``POST /v1/extract/file`` (``file_api.py``)."""
     settings: Settings = state.settings
     if wait_seconds is None or not settings.jobs_enabled:
-        return _answered(await flow())
+        return await _answer(state, await flow(), handover, kind)
 
     background: _Background = state.background
     task = asyncio.create_task(flow())
@@ -237,7 +322,7 @@ async def answer_or_hand_over(
         raise
     if task.done():
         background.discard(task)
-        return _answered(task.result())
+        return await _answer(state, task.result(), handover, kind)
     if renders_first or handover.claimed == "pool":
         return await _detach(state, task, handover, kind)
 
@@ -262,9 +347,10 @@ async def answer_or_hand_over(
             handover.settle(job_id)
     if job_id is None:
         try:
-            return _answered(await task)
+            answer = await task
         finally:
             background.discard(task)
+        return await _answer(state, answer, handover, kind)
     p1_kind: JobKind = "file" if kind == "file" else "extract"
     metrics: JobMetrics = state.job_metrics
     metrics.created.labels(kind=p1_kind).inc()
@@ -279,6 +365,27 @@ def _answered(answer: _Answer) -> Envelope[ExtractResult]:
     if answer is None:  # pragma: no cover - only a flow that handed over answers None
         raise RuntimeError("the flow answered nothing without a hand-over")
     return answer
+
+
+async def _answer(
+    state: Any, answer: _Answer, handover: Handover, kind: JobKind
+) -> Envelope[ExtractResult] | JSONResponse:
+    """The flow's envelope; for a flow that answered None after leaving a pool job to the route
+    (``Handover.adopt``: an ASR job), 202 with that job."""
+    if answer is None and handover.detached and handover.pool_job is not None:
+        return await _pool_job_accepted(state, handover, kind)
+    return _answered(answer)
+
+
+async def _pool_job_accepted(state: Any, handover: Handover, kind: JobKind) -> JSONResponse:
+    """202 with the pool job the flow handed over, counted as a job of ``kind``."""
+    job_id = handover.pool_job
+    if job_id is None:  # pragma: no cover - only called with a pool job
+        raise RuntimeError("no pool job to answer with")
+    metrics: JobMetrics = state.job_metrics
+    metrics.created.labels(kind=kind).inc()
+    _log.info(f"{handover.pool}_job_accepted", job_id=job_id, kind=kind)
+    return _accepted(job_id, kind, await _job_state(state.job_store, job_id))
 
 
 def _accepted(job_id: str, kind: JobKind, state: JobState) -> JSONResponse:
@@ -312,14 +419,12 @@ async def _detach(
     # A flow that released its job (it gave up and deletes it) answers on its own.
     if task.done() or job_id is None or not handover.detach():
         try:
-            return _answered(await task)
+            answer = await task
         finally:
             background.discard(task)
+        return await _answer(state, answer, handover, kind)
     task.add_done_callback(partial(_forget, background))
-    metrics: JobMetrics = state.job_metrics
-    metrics.created.labels(kind=kind).inc()
-    _log.info(f"{handover.pool}_job_accepted", job_id=job_id, kind=kind)
-    return _accepted(job_id, kind, await _job_state(state.job_store, job_id))
+    return await _pool_job_accepted(state, handover, kind)
 
 
 async def _job_state(store: JobStore, job_id: str) -> JobState:
@@ -349,29 +454,49 @@ async def _flow(
     handover: Handover,
     kind: BrowserJobKind,
     wait_until: float | None = None,
+    *,
+    asr_key: str | None = None,
 ) -> _Answer:
     """The envelope of the request, or None when its job's result is written by a pool's
     worker (after a hand-over); see the module docstring. ``wait_until`` is when the route
-    turns the request into a job (``handover_time``)."""
+    turns the request into a job (``handover_time``); ``asr_key`` the caller's key of the
+    external transcription endpoint."""
     started = time.perf_counter()
     if renders_first(body):
         return await _in_browser(state, body, principal, compliance, handover, kind, None, started)
     pipeline: Pipeline = state.pipeline
+    options = job_options(body, compliance)
     ocr = docling_handoff(
         state,
         handover,
         kind="extract",
-        options=job_options(body, compliance),
+        options=options,
         principal=principal,
         url=body.url,
         wait_until=wait_until,
     )
-    if ocr is None:
-        fast = await pipeline.run(body, principal)
-    else:
-        fast = await pipeline.run(body, principal, ocr_handoff=ocr)
-        if ocr.handed_over:
-            return None  # the Docling worker writes the job's result
+    asr = (
+        asr_handoff(
+            state,
+            handover,
+            kind="extract",
+            options=options,
+            principal=principal,
+            url=body.url,
+            key=asr_key,
+        )
+        if body.transcribe
+        else None
+    )
+    handoffs: dict[str, Any] = {}
+    if ocr is not None:
+        handoffs["ocr_handoff"] = ocr
+    if asr is not None:
+        handoffs["asr_handoff"] = asr
+    # Without a handoff, the call of package 3.
+    fast = await pipeline.run(body, principal, **handoffs)
+    if (ocr is not None and ocr.handed_over) or (asr is not None and asr.handed_over):
+        return None  # the Docling or ASR worker writes the job's result
     settings: Settings = state.settings
     unblock = unblock_for(principal, compliance, settings)
     if (
@@ -406,6 +531,34 @@ def docling_handoff(
         principal=principal,
         url=url,
         wait_until=wait_until,
+    )
+
+
+def asr_handoff(
+    state: Any,
+    handover: Handover,
+    *,
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    body: bytes = b"",
+    key: str | None = None,
+) -> AsrHandoff | None:
+    """The ASR handoff of one request (M9); None while the service has no ASR."""
+    dispatcher: AsrDispatcher | None = state.asr_dispatcher
+    if dispatcher is None:
+        return None
+    return AsrHandoff(
+        dispatcher,
+        state.memory_guard,
+        handover,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        body=body,
+        key=key,
     )
 
 

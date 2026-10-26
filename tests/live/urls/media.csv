@@ -1,0 +1,29 @@
+url,platform,expected_source,expected_lang,transcribe,notes
+https://www.youtube.com/watch?v=uN1Zx-Ia-SE,youtube,manual_subtitles,de,,"MrWissen2go; the manual track has a named key (de-<name>) in yt-dlp, plain de in youtube-transcript-api"
+https://www.youtube.com/watch?v=5At8hsfPHqU,youtube,manual_subtitles,de,,Terra X History; 6 chapters
+https://www.youtube.com/watch?v=BFmsurpE-Ho,youtube,manual_subtitles,de,,MAITHINK X (maiLab)
+https://www.youtube.com/watch?v=8rLrQFRkrgE,youtube,manual_subtitles,de,,Kurzgesagt German
+https://www.youtube.com/watch?v=T8fgOmSrigo,youtube,manual_subtitles,de,,MrWissen2go Geschichte; 5 chapters
+https://www.youtube.com/watch?v=HPjZDlQexeY,youtube,auto_subtitles,de,,"Kurzgesagt German, automatic captions only (yt-dlp: de-orig)"
+https://www.youtube.com/watch?v=1b3SJ2z1b2I,youtube,auto_subtitles,de,,"MrWissen2go Geschichte, automatic captions only; 6 chapters"
+https://youtu.be/6g6X353YgKk,youtube,metadata_only,de,,"WLO row; subtitles disabled (TranscriptsDisabled), 23 s, licence CC BY"
+https://youtu.be/XAgqWLNlseg,youtube,auto_subtitles,de,,WLO row; licence CC BY
+https://vimeo.com/47677979,vimeo,metadata_only,de,,"WLO row; the player URL answers 403 ""This video isn't available"" and vimeo.com/<id> a bot check, so the answer is failed, not retryable, without details"
+https://vimeo.com/70845432,vimeo,metadata_only,de,,WLO row; same as above
+https://player.vimeo.com/video/76979871,vimeo,manual_subtitles,de,,public Vimeo staff video with de/en/es/fr tracks; the player URL works without login and without impersonation
+https://www.ardmediathek.de/video/extra-3/therapie-zwecklos-ehehoelle-koalition/ndr/Y3JpZDovL25kci5kZS85YWVjYjNlNy00ZTIzLTQwOTMtOWI2ZS0wZDc5NDk5NjgxNDhfZ2FuemVTZW5kdW5n,ard,manual_subtitles,de,,"NDR satire, UT (deu); 8 chapters; Mediathek items expire"
+https://www.ardmediathek.de/video/einspruch-schatz/einspruch-schatz-rosenkrieg/ard/Y3JpZDovL2FyZC5kZS9wbGFuQVJEXzQxZmEyZTBjLWY0ZWEtNGVmYy1hODkzLTJkOWEwYzg1YTdmMV9nYW56ZVNlbmR1bmc,ard,manual_subtitles,de,,"ARD series, UT (deu); Mediathek items expire"
+https://www.ardmediathek.de/video/tatort/tatort-gottesgarten-oder-team-franken/br/Y3JpZDovL2JyLmRlL2Jyb2FkY2FzdC9lOTU5NGYyMy02MjUzLTQ1OTUtYTBiZS1lYTRkMmRmNDdiZmFfb25saW5lYnJvYWRjYXN0,ard,manual_subtitles,de,,"BR Tatort, UT (deu); Mediathek items expire"
+https://www.ardmediathek.de/video/auf-spurensuche-oder-ard-wissen/chip-im-kopf-oder-doku-ueber-gehirnimplantate/hr/NzU5NmI1ZTEtM2NmMi00YTQ0LThkNGMtYTFiMjNiZjA1MTgw,ard,metadata_only,de,,hr documentary without UT
+https://www.zdf.de/video/dokus/terra-x-ozeane-eine-menschheitsgeschichte-100/terra-x-ozeane-eine-menschheitsgeschichte-atlantik-ozean-der-stuerme-doku-100,zdf,manual_subtitles,de,,"Terra X, UT (deu); new /video/ URL scheme"
+https://www.zdf.de/video/dokus/zdfzeit-106/die-tricks-der-moebelhaeuser---mit-pia-osterhaus-100,zdf,manual_subtitles,de,,"ZDFzeit, UT (deu)"
+https://www.zdf.de/video/dokus/die-akte-trump-100/zdfinfo-die-akte-trump-amerikas-krieg-im-inneren-ice-100,zdf,manual_subtitles,de,,"ZDFinfo, UT (deu)"
+https://www.zdf.de/dokumentation/terra-x/terra-x-ozeane-eine-menschheitsgeschichte-trailer-100.html,zdf,metadata_only,de,,old /dokumentation/...html URL scheme still works; trailer without UT
+https://www.arte.tv/de/videos/134660-000-A/die-muetter-von-cherson/,arte,manual_subtitles,de,,arte documentary with a full de track; most arte videos only have de-forced (foreign-language parts only)
+https://www.arte.tv/de/videos/122150-000-A/byzanz-goldenes-erbe-europas/,arte,manual_subtitles,de,,"only de-forced (199 bytes) and en: the forced track never counts, so M2 takes the en track (transcript_language en)"
+https://www.3sat.de/kultur/starke-stuecke/theatertreffen-2026-il-gattopardo-100.html,3sat,manual_subtitles,de,,3sat with UT (deu); 3 h; UT is rare on 3sat
+https://www.3sat.de/wissen/nano-doku/261015-nano-doku-sendung-arten-retten-im-zoo-ndk-100.html,3sat,metadata_only,de,,nano doku without UT
+https://media.neuland.br.de/file/2112613/c/feed/warum-singen-gluecklich-macht-von-innerem-klang-und-gemeinsamer-freude.mp3,file,asr,de,true,"BR radioWissen podcast MP3 (ID3), 21.7 MB"
+https://tagesschau-progressive.ard-mcdn.de/video/2026/1025/TV-20261025-1946-1700.webxl.h264.mp4,file,asr,de,true,"tagesschau in 100 Sekunden MP4 from the podcast feed, 32 MB; short-lived, replace when gone"
+https://commons.wikimedia.org/wiki/File:Die_Schichten_der_Erdatmosph%C3%A4re.webm,html5,manual_subtitles,de,,"Wikimedia Commons file page: video element with track children (TimedText, text/vtt)"
+https://commons.wikimedia.org/wiki/File:Tropfsteine_als_Indikatoren_f%C3%BCr_den_Klimawandel.webm,html5,manual_subtitles,de,,"Wikimedia Commons file page: video element with track children (TimedText, text/vtt)"

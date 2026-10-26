@@ -11,7 +11,7 @@ import httpx
 import pytest
 
 from tests.live import run_live
-from tests.live.run_live import Record, domain_of, ok_rate, read_urls, summarize
+from tests.live.run_live import Record, Row, domain_of, ok_rate, read_rows, read_urls, summarize
 
 
 def ok_body(url: str) -> dict[str, object]:
@@ -101,6 +101,10 @@ def test_run_sends_the_documented_request_and_writes_one_line_per_url() -> None:
         "mode_used",
         "warnings",
         "elapsed_ms",
+        "platform",
+        "transcript_source",
+        "expected_source",
+        "transcribe",
     }
 
 
@@ -226,6 +230,31 @@ def record(
         mode_used=mode_used,
         warnings=list(warnings),
         elapsed_ms=1,
+    )
+
+
+def media_record(
+    platform: str | None,
+    source: str | None,
+    expected: str | None,
+    *,
+    bucket: str = "ok",
+) -> Record:
+    return Record(
+        url=f"https://{platform}.example/v",
+        domain=f"{platform}.example",
+        bucket=bucket,  # type: ignore[arg-type]
+        http_status=200,
+        status="success" if source not in (None, "metadata_only") else "partial",
+        error_code=None if source not in (None, "metadata_only") else "no_transcript_available",
+        word_count=100,
+        compliance_decision="allowed",
+        mode_used="fast",
+        warnings=[],
+        elapsed_ms=1,
+        platform=platform,
+        transcript_source=source,
+        expected_source=expected,
     )
 
 
@@ -414,3 +443,208 @@ def test_run_gives_each_request_a_total_deadline() -> None:
     assert time.monotonic() - started < 10
     assert only.bucket == "service_error"
     assert only.error_code == "client_TimeoutError"
+
+
+# --- the media set: transcribe per row, jobs, uploads, the media summary ----------------------
+
+
+def test_read_rows_takes_transcribe_platform_and_expected_source(tmp_path: Path) -> None:
+    path = tmp_path / "media.csv"
+    path.write_text(
+        "url,platform,expected_source,transcribe,notes\n"
+        "https://www.youtube.com/watch?v=a,youtube,manual_subtitles,,x\n"
+        "https://cdn.example/a.mp3,file,asr,true,y\n"
+        "https://cdn.example/b.mp3,file,asr,FALSE,z\n"
+    )
+
+    assert read_rows(path) == [
+        Row("https://www.youtube.com/watch?v=a", False, "youtube", "manual_subtitles"),
+        Row("https://cdn.example/a.mp3", True, "file", "asr"),
+        Row("https://cdn.example/b.mp3", False, "file", "asr"),
+    ]
+    # A list without those columns has rows without them.
+    plain = tmp_path / "urls.csv"
+    plain.write_text("url\nhttps://a.example/\n")
+    assert read_rows(plain) == [Row("https://a.example/")]
+
+
+def test_read_rows_refuses_an_unknown_transcribe_value(tmp_path: Path) -> None:
+    path = tmp_path / "media.csv"
+    path.write_text("url,transcribe\nhttps://a.example/,maybe\n")
+    with pytest.raises(ValueError, match="line 2"):
+        read_rows(path)
+
+
+def test_the_shipped_media_set_transcribes_exactly_the_files_that_need_it() -> None:
+    rows = read_rows(Path(run_live.__file__).parent / "urls" / "media.csv")
+
+    assert rows
+    assert all(row.platform and row.expected_source for row in rows)
+    assert {row.url for row in rows if row.transcribe} == {
+        row.url for row in rows if row.expected_source == "asr"
+    }
+
+
+def job_service(
+    result: dict[str, object], *, polls_before_done: int = 1, accepted: int = 202
+) -> tuple[httpx.MockTransport, list[tuple[str, str, object]]]:
+    """A service that answers ``POST`` with a job and finishes it after ``polls_before_done``
+    status reads; notes each request (method, path, JSON body or form)."""
+    seen: list[tuple[str, str, object]] = []
+    polls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal polls
+        if request.method == "POST":
+            if request.url.path == "/v1/extract":
+                body: object = json.loads(request.content)
+            else:
+                body = request.headers["content-type"].split(";")[0]
+            seen.append(("POST", request.url.path, body))
+            job = {"id": "j1", "kind": "file", "state": "queued", "total": 1}
+            job["status_url"] = "/v1/jobs/j1"
+            return httpx.Response(accepted, json={"status": "success", "data": job})
+        seen.append(("GET", request.url.path, None))
+        polls += 1
+        done = polls > polls_before_done
+        item: dict[str, object] = {"index": 0, "url": None, "state": "done" if done else "pending"}
+        item["result"] = result if done else None
+        view = {"id": "j1", "state": "completed" if done else "running", "items": [item]}
+        return httpx.Response(200, json={"status": "success", "data": view})
+
+    return httpx.MockTransport(handler), seen
+
+
+TRANSCRIBED: dict[str, object] = {
+    "status": "success",
+    "error": None,
+    "data": {
+        "word_count": 300,
+        "mode_used": "fast",
+        "compliance": {"decision": "allowed"},
+        "media": {"platform": "file", "transcript_source": "asr"},
+    },
+}
+
+
+def run_rows(
+    transport: httpx.MockTransport, rows: list[Row], **options: object
+) -> tuple[list[Record], list[dict[str, object]]]:
+    sink = io.StringIO()
+
+    async def scenario() -> list[Record]:
+        async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+            return await run_live.run(
+                rows,
+                client,
+                concurrency=2,
+                compliance="report",
+                min_words=50,
+                sink=sink,
+                poll_seconds=0.01,
+                **options,  # type: ignore[arg-type]
+            )
+
+    records = asyncio.run(scenario())
+    return records, [json.loads(line) for line in sink.getvalue().splitlines()]
+
+
+def test_a_row_with_transcribe_sends_it_and_follows_its_job() -> None:
+    transport, seen = job_service(TRANSCRIBED, polls_before_done=2)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    (only,), (line,) = run_rows(transport, [row])
+
+    method, path, body = seen[0]
+    assert (method, path) == ("POST", "/v1/extract")
+    assert body["transcribe"] is True  # type: ignore[index]
+    assert [entry[:2] for entry in seen[1:]] == [("GET", "/v1/jobs/j1")] * 3
+    assert (only.bucket, only.http_status, only.status) == ("ok", 200, "success")
+    assert (only.platform, only.transcript_source, only.expected_source) == ("file", "asr", "asr")
+    assert only.transcribe is True
+    assert line["transcript_source"] == "asr"
+
+
+def test_no_transcribe_drops_the_rows_transcribe() -> None:
+    transport, seen = job_service(TRANSCRIBED, accepted=200)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    run_rows(transport, [row], transcribe=False)
+
+    assert "transcribe" not in seen[0][2]  # type: ignore[operator]
+
+
+def test_a_job_that_does_not_finish_in_time_is_a_client_timeout() -> None:
+    transport, _ = job_service(TRANSCRIBED, polls_before_done=10_000)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    started = time.monotonic()
+    (only,), _ = run_rows(transport, [row], job_timeout_seconds=0.2)
+
+    assert time.monotonic() - started < 10
+    assert (only.bucket, only.error_code, only.http_status) == (
+        "service_error",
+        "client_TimeoutError",
+        202,
+    )
+    assert only.platform == "file"  # the row's, as the answer had none
+
+
+def test_an_upload_row_posts_the_file_and_follows_its_job(tmp_path: Path) -> None:
+    clip = tmp_path / "speech_de.ogg"
+    clip.write_bytes(b"OggS" + b"\x00" * 64)
+    result = json.loads(json.dumps(TRANSCRIBED))
+    result["data"]["media"]["platform"] = "upload"
+    result["data"]["mode_used"] = "upload"
+    transport, seen = job_service(result)
+
+    (only,), _ = run_rows(transport, [Row.for_upload(clip)])
+
+    assert seen[0] == ("POST", "/v1/extract/file", "multipart/form-data")
+    assert (only.url, only.platform, only.transcript_source) == (
+        "upload:speech_de.ogg",
+        "upload",
+        "asr",
+    )
+    assert (only.mode_used, only.bucket, only.expected_source) == ("upload", "ok", "asr")
+
+
+def test_upload_option_runs_only_the_uploads_unless_urls_are_given(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.ogg"
+    clip.write_bytes(b"OggS")
+
+    assert run_live.parse_args([]).urls == run_live.DEFAULT_URLS
+    only_upload = run_live.parse_args(["--upload", str(clip)])
+    assert (only_upload.urls, only_upload.upload) == (None, [clip])
+    both = run_live.parse_args(["--upload", str(clip), "--urls", "x.csv"])
+    assert both.urls == Path("x.csv")
+    assert run_live.parse_args([]).transcribe is True
+    assert run_live.parse_args(["--no-transcribe"]).transcribe is False
+
+
+def test_summary_has_a_media_table_by_platform_and_transcript_source() -> None:
+    records = [
+        media_record("youtube", "manual_subtitles", "manual_subtitles"),
+        media_record("youtube", "auto_subtitles", "manual_subtitles"),  # subtitles all the same
+        media_record("youtube", "metadata_only", "auto_subtitles"),  # refused (D1)
+        media_record("ard", "manual_subtitles", "manual_subtitles"),
+        media_record("file", None, "asr", bucket="no_content"),
+    ]
+
+    text = summarize(records)
+
+    section = text.split("### Media")[1].split("###")[0]
+    assert "Media rows as expected: 3 of 5" in section
+    assert (
+        "| Platform | URLs | manual_subtitles | auto_subtitles | asr | metadata_only | none "
+        "| As expected |" in section
+    )
+    assert "| ard | 1 | 1 | 0 | 0 | 0 | 0 | 1 of 1 |" in section
+    assert "| file | 1 | 0 | 0 | 0 | 0 | 1 | 0 of 1 |" in section
+    assert "| youtube | 3 | 1 | 1 | 0 | 1 | 0 | 2 of 3 |" in section
+    assert section.index("| ard |") < section.index("| file |") < section.index("| youtube |")
+    assert "https://" not in section  # the URLs are in the table of URLs not ok and the JSONL
+
+
+def test_summary_without_media_has_no_media_table() -> None:
+    assert "### Media" not in summarize([record("a.example", "ok")])

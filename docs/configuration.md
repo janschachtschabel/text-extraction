@@ -117,6 +117,7 @@ Keep these out of ConfigMaps, images and logs.
 | `API_KEYS_FILE` | Path to a JSON file with the same shape as `API_KEYS`, merged with it. The file content is the secret. | None. The chart mounts no key file; use `API_KEYS`. |
 | `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
+| `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -187,6 +188,37 @@ shutdown ends. The worker needs the same `API_KEYS` as the API while `AUTH_MODE`
 written for them. Change `PUBLIC_PORT` or `INTERNAL_PORT` there and you must edit
 `docker-compose.yml` as well. The Helm chart pins both ports.
 
+The ASR worker (`text-extraction-asr-worker`, image `text-extraction-asr`) serves only port 9090.
+Its `/ready` answers 200 once it has checked the model under `ASR_MODELS_PATH` (local backend),
+started the egress proxy and its children, and each child passed the self-check: PyAV's FFmpeg is
+an LGPL build, neither `ffmpeg` nor `rtmpdump` is on `PATH`, and the built-in clip transcribes
+(with the external backend: encodes as Ogg Opus). Without the model it exits with code 1 (log
+`asr_models_missing`). On SIGTERM it stops claiming and gives the transcriptions in flight 30 s,
+then kills its children and gives their items back to the queue at once (`attempts` + 1; nothing
+waits for a transcription, which is always a job), so they do not wait hours for their leases.
+Another replica starts them again from the beginning, and with `ASR_BACKEND=openai` the endpoint
+bills them again; an item interrupted `JOB_ITEM_MAX_ATTEMPTS` times fails as lost. A scale-down, a
+rolling update or a node drain therefore interrupts the transcriptions in flight: prefer fixed
+replicas for steady load. With a scaler, the chart's KEDA query counts the items in flight as well
+(threshold = `workers.asr.concurrency`), and KEDA and the HPA wait an hour of lower load before
+they remove a replica (`workers.asr.autoscaling.scaleDownStabilizationWindowSeconds`). The image builds PyAV against an LGPL FFmpeg
+(BtbN/FFmpeg-Builds `lgpl-shared`, pinned by release and SHA-256 in the `Dockerfile`, decision D5)
+whose shared libraries are its only FFmpeg: no `ffmpeg` program. It runs as uid 10001 with `HOME`
+under `/tmp`, `ASR_MODELS_PATH=/models` and `ASR_SCRATCH_PATH=/scratch`, and holds no models.
+Deno, yt-dlp's JavaScript runtime, is the binary of the `deno` package in the image's venv; yt-dlp
+is given its path, so it needs no `PATH` entry. `text-extraction-asr-worker --check` runs the
+self-check in one child and exits 0 (1 on a failure, 2 for invalid settings); it needs no Valkey.
+
+docker compose starts the ASR worker only with the profile `asr`:
+`docker compose --profile asr up -d --wait` with `ASR_ENABLED=true` in `.env` (compose passes
+`ASR_ENABLED` from `.env` or the shell to every service, default false; the other ASR settings,
+such as `ASR_BACKEND`, `ASR_MODEL` and `ASR_EXTERNAL_API_KEY`, reach every service from `.env`).
+The service `asr-models` runs `--download-models` into the volume `asr-models` first (it needs
+huggingface.co once; with `ASR_BACKEND=openai` it does nothing), then `asr-worker` mounts it
+read-only and keeps downloaded media on the volume `asr-scratch` (`/scratch`, not the tmpfs `/tmp`,
+which is memory); compose sets `ASR_MODELS_PATH` and `ASR_SCRATCH_PATH` for both, over `.env`. Its
+stop grace period is 45 s.
+
 The Docling worker (`text-extraction-docling-worker`, image `text-extraction-docling`) serves only
 port 9090 as well. Its `/ready` answers 200 once it has checked the models under
 `DOCLING_MODELS_PATH`, started its conversion children and converted a built-in scan; without the
@@ -236,6 +268,7 @@ The grace periods in the Helm chart, each with a 10 s margin:
 | Extract workers | `workers.extract.terminationGracePeriodSeconds` | 45 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` (30 s) |
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
+| ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items go back to the queue at once and start again elsewhere) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -299,7 +332,7 @@ worker. Docling is off by default: without it a scan keeps its text layer and an
 | `DOCLING_TIMEOUT_SECONDS` | `300` | Time budget of one Docling conversion, in seconds; the conversion child is killed after it. Docling itself stops at 0.9 of it and answers the pages it read (warning `pages_partial`). 30 to 1800. |
 | `DOCLING_SYNC_WAIT_SECONDS` | `20` | How long a synchronous request that needs OCR waits for the Docling worker, in seconds. Then it answers the text layer with the warning `ocr_unavailable` (an image fails with `timeout`, retryable). 0 to 25. |
 | `DOCLING_INPUT_TTL_SECONDS` | `3600` | How long the bytes of a document queued for the Docling worker, or of an upload that became a job (`wait_seconds`), stay in Valkey, in seconds; never longer than the job. They are deleted when the item is done. Minimum 600. |
-| `DOCLING_INPUT_BUDGET_BYTES` | `200000000` | The most bytes the inputs of all jobs may hold in Valkey at once: documents queued for the Docling worker and uploads that became a job (`wait_seconds`), across all pods. A document that would exceed it is not queued: a sync request answers its text layer with `ocr_unavailable` (an image fails with `rate_limited`, retryable), a batch item keeps its text layer the same way, and a slow upload stays synchronous instead of becoming a job. Counted as `input_budget` in `text_extraction_docling_dispatch_total`. Inputs leave it when their item is done or their TTL ends. Plan Valkey's `maxmemory` for it (see the chart's `valkey.maxmemory`). At least 1024 and at least `DOCUMENT_MAX_BYTES`, or the service exits with code 2 at start-up. |
+| `DOCLING_INPUT_BUDGET_BYTES` | `200000000` | The most bytes the inputs of all jobs may hold in Valkey at once: documents queued for the Docling worker, media queued for the ASR worker (an upload's bytes) and uploads that became a job (`wait_seconds`), across all pods. A document that would exceed it is not queued: a sync request answers its text layer with `ocr_unavailable` (an image fails with `rate_limited`, retryable), a batch item keeps its text layer the same way, and a slow upload stays synchronous instead of becoming a job. Media for transcription that would exceed it is not queued either (`asr_unavailable`, or `rate_limited` for a media file or an upload). Counted as `input_budget` in `text_extraction_docling_dispatch_total` and `text_extraction_asr_dispatch_total`. Inputs leave it when their item is done or their TTL ends. Plan Valkey's `maxmemory` for it (see the chart's `valkey.maxmemory`). At least 1024 and at least `DOCUMENT_MAX_BYTES`, or the service exits with code 2 at start-up. |
 | `DOCLING_MAX_OPEN_PER_CLIENT` | `5` | Unfinished Docling jobs one API key may have. Beyond it nothing is queued for OCR and the request answers without it (`ocr_unavailable`). Minimum 1. |
 | `DOCLING_CONCURRENCY` | `1` | Documents one Docling worker pod converts at once, each in a child process of its own. Minimum 1. |
 | `DOCLING_THREADS` | `4` | CPU threads of one Docling conversion. Minimum 1. |
@@ -327,9 +360,85 @@ Docling worker and its models volume. The Helm keys (the full table is in the
 | `workers.docling.resources` | 1 / 3Gi to 4 / 8Gi | Sized for one conversion. |
 | `workers.docling.nodeSelector` | `kubernetes.io/arch: amd64` | The image is built for linux/amd64 only. |
 | `workers.docling.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `docling` queue or on CPU. |
-| `workers.docling.models.download` | `true` | An init container fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.docling.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`, needs `ReadWriteMany` or one node) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.docling.models.resources` | 100m / 256Mi to 1 / 1Gi | Of the init container or the hook Job (the download streams). |
 | `workers.docling.models.persistence.*` | `5Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`DOCLING_MODELS_PATH`), read-only in the worker. |
 | `workers.docling.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-docling`, chart version | The Docling image. |
+
+## Audio and video
+
+Audio and video become text in three tiers. A URL of a supported platform (YouTube, Vimeo, ARD,
+ZDF, ARTE, 3sat) answers with the video's subtitles (manual first, then automatic captions), its
+title, description, duration and licence; without subtitles it answers the metadata
+(`transcript_source: metadata_only`, `partial`/`no_transcript_available`). Subtitles are read by
+child processes of the pod that holds the request (youtube-transcript-api, yt-dlp). Speech
+recognition (`transcribe: true`, and every uploaded audio or video file) runs in the ASR worker and
+is always a job. ASR is off by default: the API image has neither Whisper nor models.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MEDIA_ENABLED` | `true` | Switch audio and video on: URLs of supported platforms (YouTube, Vimeo, ARD, ZDF, ARTE, 3sat) answer with the video's subtitles or metadata, media files are recognised by their bytes, and pages gain the text of their HTML5 `<track>` elements and the list of their embedded players (`data.media`). Off, these URLs and files are handled as before. |
+| `MEDIA_CONCURRENCY` | `2` | Media child processes per pod (subtitle and metadata calls of youtube-transcript-api and yt-dlp); each handles one call at a time. A request waits for a free one within its time budget. Minimum 1. |
+| `MEDIA_MEMORY_LIMIT_MB` | `1024` | Address space limit of one media child, in MiB. Minimum 256. Keep `MEDIA_CONCURRENCY` x this below the container's memory limit minus what the process itself needs. |
+| `MEDIA_EXTRACT_MAX_BYTES` | `30000000` | Most bytes one media call may pull from the platform (player APIs, caption files), counted at the egress proxy, in bytes. A call over it fails. Minimum 1024. |
+| `MEDIA_SUBTITLE_MAX_BYTES` | `5000000` | Largest subtitle track that is read, in bytes: a platform's caption file or an HTML5 `<track>`. A larger track is skipped. Minimum 1024. |
+| `MEDIA_MAX_TRACKS` | `3` | HTML5 `<track>` subtitle tracks added to one page, one per `<video>` or `<audio>` element. More are cut (warning `tracks_truncated`). 0 to 10; 0 adds none. |
+| `MEDIA_MAX_DURATION_SECONDS` | `7200` | Longest audio or video that is transcribed, in seconds (2 hours, decision D6). A longer one fails with `media_too_long` (not retryable) before transcription: the platform's duration before the download, a media file's or an upload's (PyAV's probe) before it is decoded, and the decoded audio itself. Minimum 60. |
+| `MEDIA_MAX_BYTES` | `500000000` | Largest media file the ASR worker downloads for transcription, in bytes. The download's egress context allows it plus 5 MB for headers and segment overhead; a platform video's info call has its own context capped at `MEDIA_EXTRACT_MAX_BYTES`. Must fit the worker's scratch volume (`ASR_SCRATCH_PATH`). Minimum 1000000. |
+| `MEDIA_UPLOAD_MAX_BYTES` | `25000000` | Largest audio or video file that can be uploaded for transcription, in bytes (about 25 minutes of MP3 at 128 kbit/s). The bytes travel through Valkey and count in the input budget (`DOCLING_INPUT_BUDGET_BYTES`, which holds the inputs of all kinds), so with `ASR_ENABLED=true` it must not exceed it, or the service exits with code 2 at start-up. At least 1000000. Larger media: send the URL. The Helm chart sets it from `workers.asr.uploadMaxBytes`. |
+| `MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Time budget of one media download by the ASR worker, in seconds (a platform video's info and its download together), within the item's `ASR_TIMEOUT_SECONDS`: the download gets this or what is left of the item's budget, whichever is less. A download that runs out of it fails with `timeout`, retryable (out of the item's budget: not retryable). A media file's download holds its host's turn at the outbound gate, so with `ASR_ENABLED` a turn's lease lasts at least this long plus 30 s. 30 to 3600. |
+| `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request`. The Helm chart sets it from `workers.asr.enabled` on every pod. |
+| `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`, called directly, not through the egress proxy); the worker then needs no models (no model check, `--download-models` downloads nothing, the start-up self-check and `--check` encode the built-in clip as Opus instead of transcribing it, and still check FFmpeg's licence and the programs on `PATH`). The worker decodes the media itself, encodes it as 16 kHz mono Opus at 32 kbit/s in Ogg and posts it in chunks of at most 20 minutes, cut in pauses. The key is the caller's `X-ASR-Api-Key` (on `POST /v1/extract`, `POST /v1/extract/file` and `POST /v1/batch`; stored with the job, never shown or logged), else `ASR_EXTERNAL_API_KEY`; without either, `transcribe: true` and audio or video uploads answer 400 `invalid_request`. Set it on the API pods too. With `openai` and no `ASR_EXTERNAL_BASE_URL` the ASR worker exits with code 2. |
+| `ASR_MODEL` | `large-v3-turbo` | Whisper model of the local backend: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, faster on CPU, more errors). Any other value makes the service exit with code 2. |
+| `ASR_MODELS_PATH` | `/models` | Volume with the Whisper models, one folder per model. The image holds no models; the ASR worker mounts the volume read-only. |
+| `ASR_COMPUTE_TYPE` | `int8` | CTranslate2 compute type of the local backend (`int8` is the fast and small choice on CPU). |
+| `ASR_THREADS` | `4` | CPU threads of one transcription. Minimum 1. |
+| `ASR_CONCURRENCY` | `1` | Transcriptions one ASR worker pod runs at once, each in a child process of its own. Minimum 1. |
+| `ASR_MEMORY_LIMIT_MB` | `4096` | Address space limit of one ASR child, in MiB. Minimum 256. |
+| `ASR_TIMEOUT_SECONDS` | `10800` | Time budget of one transcription item (the wait for the host's turn, the download, decoding and recognition), in seconds (3 hours, decision D6; the local backend took about 0.9 s per second of audio with `large-v3-turbo` and 4 threads in the spike). The transcription gets what the download left; the child is killed at the end of the budget and the item fails with `timeout` (not retryable: the same media would time out again). The ASR worker's lease of an item is 2 × this + 10 s. 60 to 14400. |
+| `ASR_INPUT_TTL_SECONDS` | `28800` | How long the input of an item queued for transcription waits in Valkey for the ASR worker, in seconds (8 hours, decision D6); never longer than the job. The input is an upload's bytes, or for a URL what the worker needs to fetch it (its media metadata). It is deleted when the item is done. An input that expired before the worker claimed the item answers with the video's details and `asr_unavailable` (a platform video), or fails `timeout`, retryable (a media file or an upload). With `ASR_ENABLED=true` it must be longer than the ASR lease (2 × `ASR_TIMEOUT_SECONDS` + 10), so an item that runs again after a lost lease still finds its bytes, or the service exits with code 2 at start-up. Minimum 600. |
+| `ASR_MAX_OPEN_PER_CLIENT` | `3` | Unfinished ASR jobs one API key may have. Beyond it nothing is queued for transcription and the request answers without it (`asr_unavailable`, or `rate_limited` for a media file). Minimum 1. |
+| `ASR_SCRATCH_PATH` | `/tmp/asr` | Directory where the ASR worker keeps the media it is transcribing; the file is deleted when the item ends. The ASR image sets `/scratch`; the Helm chart mounts an emptyDir with a size limit there (`workers.asr.scratch.sizeLimit`, 2Gi, which must hold `ASR_CONCURRENCY` × (`MEDIA_MAX_BYTES` + 5 MB) or the render fails), docker compose the volume `asr-scratch`. |
+| `ASR_EXTERNAL_BASE_URL` | unset | Base URL of the OpenAI-compatible transcription endpoint (`<base>/audio/transcriptions`) for `ASR_BACKEND=openai`. https only; anything else makes the service exit with code 2. Empty counts as unset. |
+| `ASR_EXTERNAL_API_KEY` | unset | **Secret**, see [Secrets](#secrets): API key of the external transcription endpoint for `ASR_BACKEND=openai`; the caller's `X-ASR-Api-Key` wins over it. Empty counts as unset. |
+| `ASR_EXTERNAL_MODEL` | `whisper-1` | Model name sent to the external endpoint. |
+| `ASR_EXTERNAL_TIMEOUT_SECONDS` | `300` | Time budget of the external endpoint for one audio chunk of at most 20 minutes, in seconds: it bounds the chunk's whole request (upload, the endpoint's work and the answer), within the item's `ASR_TIMEOUT_SECONDS` (a chunk gets what is left of it when that is less; running out of that is `timeout`, not retryable). A chunk that runs out of its own fails the item with `transcription_failed`, retryable, as do 429 and 5xx answers; 401 and 403 (the key refused) are not retryable. The SDK does not retry. A retry runs the whole item again, so the chunks already transcribed are sent and paid for again. Minimum 1. |
+
+Transcription needs `ASR_ENABLED=true` on every pod, `JOBS_ENABLED=true` on the API pods, at least
+one ASR worker and, for the local backend, its models volume. The Helm keys (the full table is in
+the [chart README](../deploy/helm/text-extraction/README.md#asr-workers-and-the-models-volume)):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.asr.enabled` | `false` | Deploys the ASR workers and, for the local backend, the models PVC; renders `ASR_ENABLED` into every pod. Needs jobs on the API pods. |
+| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `openai` needs `external.baseUrl` and renders no models volume. |
+| `workers.asr.model` | `large-v3-turbo` | `ASR_MODEL` on the ASR workers; only this model is downloaded. |
+| `workers.asr.uploadMaxBytes` | `25000000` | `MEDIA_UPLOAD_MAX_BYTES` on every pod; at most `DOCLING_INPUT_BUDGET_BYTES`, or the render fails. |
+| `workers.asr.concurrency` | `1` | `ASR_CONCURRENCY` on the ASR workers. |
+| `workers.asr.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. |
+| `workers.asr.terminationGracePeriodSeconds` | `60` | See Response times. |
+| `workers.asr.resources` | 2 / 3Gi to 4 / 6Gi | Sized for one transcription with `large-v3-turbo`. |
+| `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`). |
+| `workers.asr.tmpSizeLimit` | `1Gi` | The emptyDir at `/tmp`. |
+| `workers.asr.nodeSelector` | `kubernetes.io/arch: amd64` | The image is published for linux/amd64. |
+| `workers.asr.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `asr` queue (pending plus leased items, a replica per `concurrency`) or on CPU. A scale-down interrupts transcriptions (see above). |
+| `workers.asr.autoscaling.scaleDownStabilizationWindowSeconds` | `3600` | An hour of lower load before KEDA or the HPA removes a replica (the Kubernetes maximum). |
+| `workers.asr.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.asr.models.resources` | 100m / 256Mi to 1 / 1Gi | Of the init container or the hook Job (the download streams). |
+| `workers.asr.models.persistence.*` | `4Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`ASR_MODELS_PATH`), read-only in the worker. |
+| `workers.asr.external.baseUrl`, `.model` | unset, `whisper-1` | `ASR_EXTERNAL_BASE_URL` (https only) and `ASR_EXTERNAL_MODEL` on the ASR workers. |
+| `workers.asr.external.apiKey`, `.existingSecret` | unset | `ASR_EXTERNAL_API_KEY` from a Secret, on the API pods and the ASR workers (see Secrets). |
+| `workers.asr.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-asr`, chart version | The ASR image. |
+
+The length limits of decision D6 (`MEDIA_MAX_DURATION_SECONDS` 7200, `ASR_TIMEOUT_SECONDS` 10800,
+`ASR_INPUT_TTL_SECONDS` 28800) are the service's defaults and are set in the chart's `config`; the
+render fails when the input TTL does not outlast the lease (2 × `ASR_TIMEOUT_SECONDS` + 10), as the
+service would at start-up.
+
+The request fields `transcribe` (default `false`) and `languages` (preferred subtitle and
+transcription languages, ISO 639 codes such as `de` or `en-GB`, at most 5; default: the video's
+original language) are part of `POST /v1/extract` and `POST /v1/batch`. `transcribe: true` answers
+400 `invalid_request` while the service has no transcription.
 
 ## Headers
 
@@ -427,15 +536,23 @@ the batch when the owner has `BATCH_MAX_OPEN_PER_CLIENT` open ones. The name is 
 `%25`, `{` as `%7B`, `}` as `%7D`), so the braces always enclose exactly the name. No script
 touches this key together with a job key or a queue key.
 
-The bytes of an item (an upload, a document queued for OCR) are kept in
-`job:{<id>}:input:<index>` (a hash of `body` and `meta`) for `DOCLING_INPUT_TTL_SECONDS` at most,
-and deleted when the item is done. All of them together stay within `DOCLING_INPUT_BUDGET_BYTES`,
+The bytes of an item (an upload, a document queued for OCR, media queued for transcription) are
+kept in `job:{<id>}:input:<index>` (a hash of `body` and `meta`) for `DOCLING_INPUT_TTL_SECONDS`
+at most (`ASR_INPUT_TTL_SECONDS` for media queued for transcription, whose body is empty for a
+URL), and deleted when the item is done. All of them together stay within `DOCLING_INPUT_BUDGET_BYTES`,
 accounted in three keys of the hash tag `{budget}`: `inputs:{budget}:size` (hash of
 `<id>:<index>` to the input's bytes), `inputs:{budget}:expiry` (sorted set of the same members,
 scored by when the input expires, in Valkey's milliseconds) and `inputs:{budget}:total` (their
 sum). A script on these keys checks and reserves an input's bytes in one step before the input is
 written; it also removes the reservations whose expiry has passed, so an input that expires by
 its TTL leaves the budget without anyone deleting it. Deleting an input gives its bytes back.
+
+A job queued for transcription may keep the caller's `X-ASR-Api-Key` header in
+`job:{<id>}:asr_key` (a string), for `ASR_INPUT_TTL_SECONDS` plus the ASR lease
+(2 × `ASR_TIMEOUT_SECONDS` + 10) at most and never longer than the job. No read of the job shows
+it; it is deleted with the job and once its item is done. `jobs:{owner:<name>}:asr` counts the
+owner's unfinished ASR jobs for `ASR_MAX_OPEN_PER_CLIENT`, as `jobs:{owner:<name>}:docling` does
+for `DOCLING_MAX_OPEN_PER_CLIENT`.
 
 ## Queue keys
 
@@ -482,16 +599,20 @@ The job system exports these besides the HTTP and extraction metrics:
 
 | Metric | Type | Labels | Exported by | Meaning |
 | --- | --- | --- | --- | --- |
-| `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. Pools: `extract`, `browser` while `BROWSER_ENABLED`, and `docling` while `DOCLING_ENABLED`. |
+| `text_extraction_queue_pending_items` | gauge | `pool` | API pods | Items waiting in the pool's queue, claimable or deferred; leased items are not counted. Pools: `extract`, `browser` while `BROWSER_ENABLED`, `docling` while `DOCLING_ENABLED`, and `asr` while `ASR_ENABLED` (with `JOBS_ENABLED`). |
 | `text_extraction_queue_leased_items` | gauge | `pool` | API pods | Items of the pool that a worker has leased (also leases that expired and are not taken back yet). |
 | `text_extraction_queue_clients` | gauge | `pool` | API pods | Clients (API key names) with items waiting. |
 | `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
 | `text_extraction_valkey_used_memory_bytes` | gauge | none | API pods, workers | Valkey's `used_memory` (`INFO memory`), read every 5 s; exported from the first successful read on and left unchanged while Valkey fails. Every pod reads the same Valkey: use `max()`. |
 | `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
-| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser or the Docling worker answers 202 with that job. |
+| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser or the Docling worker answers 202 with that job, or one that needs a transcription answers 202 with its ASR job. |
 | `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
 | `text_extraction_browser_dispatch_total` | counter | `outcome` (`rendered`, `not_claimed`, `no_result`, `handed_over`, `backend_error`) | API pods (with `BROWSER_ENABLED`) | Sync requests (`POST /v1/extract`, `POST /v1/screenshot`) the pod sent to the browser workers, by how the wait ended: `rendered` (the worker's result came back), `not_claimed` (no worker took the page within `BROWSER_QUEUE_WAIT_SECONDS`), `no_result` (taken, but no result by the render deadline + 5 s, or the job was gone), `handed_over` (answered 202; the worker writes the job's result) or `backend_error` (Valkey failed). `not_claimed`, `no_result` and `backend_error` answer `auto` with its fast result and the warning `browser_unavailable`, and `browser` and screenshots with `timeout` (or 503): alert on their rate to see sync requests that silently fell back to fast mode. Every outcome is exported as 0 from the start. Use `sum()` over pods. |
 | `text_extraction_docling_dispatch_total` | counter | `outcome` (`answered`, `not_claimed`, `no_result`, `handed_over`, `backend_error`, `memory_guard`, `open_limit`, `input_budget`) | API pods and extract workers (with `DOCLING_ENABLED` and `JOBS_ENABLED`) | Sync requests (`POST /v1/extract`, `POST /v1/extract/file`) that needed OCR, by how the hand-over to the Docling workers ended: `answered` (the worker's result came back), `not_claimed` (no worker claimed the item within `DOCLING_SYNC_WAIT_SECONDS`), `no_result` (claimed, but no result in time, or the job was gone), `handed_over` (answered 202, or the document joined the request's own job), `backend_error` (Valkey failed), `memory_guard` (Valkey's memory guard was high), `open_limit` (the key had `DOCLING_MAX_OPEN_PER_CLIENT` unfinished Docling jobs) or `input_budget` (the inputs of all jobs would exceed `DOCLING_INPUT_BUDGET_BYTES`); the last three dispatch nothing. Extract workers count the batch items they could not move to the Docling workers (`memory_guard`, `input_budget`). Every outcome but `answered` and `handed_over` answers without OCR (`ocr_unavailable`, or a retryable failure for an image). Every outcome is exported as 0 from the start. Use `sum()` over pods. |
+| `text_extraction_asr_dispatch_total` | counter | `outcome` (`handed_over`, `backend_error`, `memory_guard`, `open_limit`, `input_budget`) | API pods and extract workers (with `ASR_ENABLED` and `JOBS_ENABLED`) | Media that needed a transcription (`transcribe: true` on `POST /v1/extract`, an audio or video upload on `POST /v1/extract/file`), by how the hand-over to the ASR workers ended: `handed_over` (the job was queued and answered 202, or the media joined the request's own job), `backend_error` (Valkey failed), `memory_guard` (Valkey's memory guard was high), `open_limit` (the key had `ASR_MAX_OPEN_PER_CLIENT` unfinished ASR jobs) or `input_budget` (the inputs of all jobs would exceed `DOCLING_INPUT_BUDGET_BYTES`); the last four answer without a transcription (`asr_unavailable`, or a retryable failure for a media file or an upload). Nothing waits for a transcription, so there is no `answered`. Extract workers count the batch items they could not move to the ASR workers (`memory_guard`, `input_budget`). Every outcome is exported as 0 from the start. Use `sum()` over pods. |
+| `text_extraction_asr_transcriptions_total` | counter | `backend` (`ASR_BACKEND`: `local` or `openai`), `outcome` (`success` or the error code) | ASR workers | Media the ASR worker handled: `success` (a transcript), or why there is none (`media_too_long`, `transcription_failed`, `timeout`, `too_large`, `target_http_error`, `no_transcript_available` for media without speech, ...). A copy of an item whose result was already written is not counted. |
+| `text_extraction_asr_audio_seconds_total` | counter | `backend` | ASR workers | Seconds of audio transcribed (as the speech recognition measured them; with `openai` the decoded audio sent, the cost basis). |
+| `text_extraction_asr_seconds` | histogram | `backend` | ASR workers | Seconds of one transcription call (decoding and speech recognition; not the download), the wait for the child included. Buckets 5 s to 4 h. |
 | `text_extraction_document_conversions_total` | counter | `converter` (`markitdown`, `docling`), `kind` (`pdf`, `docx`, ...), `outcome` (`success` or the error code) | API pods, workers (extract, browser, docling) | Document conversions, where they run: MarkItDown in API pods (URLs and uploads) and in the extract and browser workers, Docling in the Docling workers. |
 | `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
 | `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |

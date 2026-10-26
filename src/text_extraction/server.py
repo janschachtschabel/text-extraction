@@ -20,8 +20,9 @@ On SIGTERM or SIGINT the shutdown runs in this order:
 While ``BROWSER_ENABLED`` the graceful phase also covers a sync request waiting for the browser
 (``graceful_shutdown_seconds``, B13): 75 s by default, 105 s with unblock mode. While
 ``DOCLING_ENABLED`` it also covers a sync request waiting for OCR: the fast phase,
-``DOCLING_SYNC_WAIT_SECONDS`` and 5 s (50 s by default; F12). The Helm chart computes the
-grace period with the same formula and refuses a set value that is too short
+``DOCLING_SYNC_WAIT_SECONDS`` and 5 s (50 s by default; F12). ``ASR_ENABLED`` adds nothing: no
+request waits for a transcription, which answers 202 with its job at once (M9). The Helm chart
+computes the grace period with the same formula and refuses a set value that is too short
 (``_helpers.tpl``: 45, 65 with Docling workers only, 90 with browser workers or 120 s).
 """
 

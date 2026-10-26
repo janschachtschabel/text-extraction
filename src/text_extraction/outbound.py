@@ -230,12 +230,14 @@ def _key(kind: str, host: str) -> str:
 def lease_ttl_seconds(settings: Settings) -> float:
     """How long a turn's lease lasts: past the longest deadline of an extraction that holds a
     turn (``EXTRACT_TIMEOUT_SECONDS``, ``BROWSER_TIMEOUT_SECONDS``,
-    ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``), so it never frees a turn that is still held, and at
-    least 120 s. Only a holder that died waits it out."""
+    ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``, and with ``ASR_ENABLED`` the ASR worker's download of a
+    media file, ``MEDIA_DOWNLOAD_TIMEOUT_SECONDS``), so it never frees a turn that is still
+    held, and at least 120 s. Only a holder that died waits it out."""
     longest = max(
         settings.extract_timeout_seconds,
         settings.browser_timeout_seconds,
         settings.browser_unblock_timeout_seconds,
+        settings.media_download_timeout_seconds if settings.asr_enabled else 0,
     )
     return max(_LEASE_TTL_SECONDS, longest + _LEASE_MARGIN_SECONDS)
 

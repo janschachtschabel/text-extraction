@@ -1162,8 +1162,12 @@ def test_app_starts_the_document_pool_before_it_serves(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(DocumentPool, "start", start)
     monkeypatch.setattr(DocumentPool, "shutdown", shutdown)
+    # Without media: the media fetcher's children are a DocumentPool too (test_media_child).
     app = create_public_app(
-        make_settings(), FakeAsyncRedis(), CollectorRegistry(), start_documents=True
+        make_settings(media_enabled=False),
+        FakeAsyncRedis(),
+        CollectorRegistry(),
+        start_documents=True,
     )
 
     with TestClient(app):
@@ -1182,7 +1186,7 @@ def test_workers_wire_and_start_their_document_pools(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(DocumentPool, "start", start)
     monkeypatch.setattr(worker, "_load_language_model", nothing)
-    settings = make_settings()
+    settings = make_settings(media_enabled=False)  # the media fetcher: test_media_child
     parts = worker.build_worker(settings, FakeAsyncRedis(), CollectorRegistry())
     try:
         runner = parts.worker._runner

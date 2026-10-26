@@ -14,6 +14,8 @@ EXTRACT="$RELEASE-text-extraction-worker-extract"
 BROWSER="$RELEASE-text-extraction-worker-browser"
 DOCLING="$RELEASE-text-extraction-worker-docling"
 MODELS="$RELEASE-text-extraction-docling-models"
+ASR="$RELEASE-text-extraction-worker-asr"
+ASR_MODELS="$RELEASE-text-extraction-asr-models"
 APP_VERSION="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CHART/Chart.yaml")"
 
 failures=0
@@ -58,9 +60,25 @@ expect_values() {
   fi
 }
 
+# Every value of env var $3 in $2 is $4, and there is at least one.
+expect_every_value() {
+  local label="$1" output="$2" var="$3" expected="$4" values
+  values="$(env_values "$output" "$var")"
+  if [[ -n "$values" ]] && ! grep -qvxF -- "$expected" <<<"$values"; then
+    pass "$label: every $var = $expected"
+  else
+    fail "$label: $var is '$(tr '\n' ' ' <<<"$values")', expected only '$expected'"
+  fi
+}
+
 expect_contains() {
   local label="$1" output="$2" needle="$3"
   if grep -qF -- "$needle" <<<"$output"; then pass "$label"; else fail "$label: '$needle' missing"; fi
+}
+
+# The output $1 on one line, runs of blanks squeezed: multi-line YAML paths become greppable.
+flat() {
+  tr '\n' ' ' <<<"$1" | tr -s ' '
 }
 
 expect_absent() {
@@ -161,8 +179,15 @@ scaled="$(document "$keda" ScaledObject "$BROWSER")"
 expect_contains "browser KEDA query names pool browser" "$scaled" 'pool=\"browser\"'
 expect_contains "browser KEDA threshold" "$scaled" 'threshold: "8"'
 expect_absent "browser Deployment leaves replicas to KEDA" "$(document "$keda" Deployment "$BROWSER")" "replicas:"
-expect_contains "extract KEDA keeps pool extract" \
-  "$(document "$(render --set workers.extract.autoscaling.keda.enabled=true)" ScaledObject "$EXTRACT")" 'pool=\"extract\"'
+extract_keda="$(document "$(render --set workers.extract.autoscaling.keda.enabled=true)" ScaledObject "$EXTRACT")"
+expect_contains "extract KEDA keeps pool extract" "$extract_keda" 'pool=\"extract\"'
+expect_absent "extract KEDA counts only pending items" "$extract_keda" "leased_items"
+expect_absent "extract KEDA keeps the default scale-down behaviour" "$extract_keda" "horizontalPodAutoscalerConfig"
+expect_absent "extract HPA keeps the default scale-down behaviour" \
+  "$(document "$(render --set workers.extract.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$EXTRACT")" "behavior:"
+expect_contains "a pool's scale-down window reaches its ScaledObject" \
+  "$(flat "$(document "$(render --set workers.extract.autoscaling.keda.enabled=true --set workers.extract.autoscaling.scaleDownStabilizationWindowSeconds=900)" ScaledObject "$EXTRACT")")" \
+  "advanced: horizontalPodAutoscalerConfig: behavior: scaleDown: stabilizationWindowSeconds: 900"
 expect_contains "browser HPA" "$(document "$(render --set workers.browser.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$BROWSER")" "name: $BROWSER"
 expect_render_fails "browser KEDA and HPA are exclusive" "mutually exclusive" \
   --set workers.browser.autoscaling.keda.enabled=true --set workers.browser.autoscaling.hpa.enabled=true
@@ -373,9 +398,245 @@ expect_contains "docling backlog alert" "$docling_rules" "text_extraction_queue_
 expect_contains "extract backlog keeps its threshold" "$docling_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"extract\"}) > 1000"
 expect_contains "docling workers-down alert" "$docling_rules" "deployment=\"$DOCLING\""
 expect_contains "docling items are counted on the docling workers" "$docling_rules" "service=\"$DOCLING-internal\""
-expect_contains "extract items leave out the browser and docling workers" "$docling_rules" "service!~\"$BROWSER-internal|$DOCLING-internal\""
-expect_contains "Valkey memory alert reads the docling workers" "$docling_rules" "|$DOCLING-internal\"})"
+expect_contains "extract items leave out the browser, docling and asr workers" "$docling_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal\""
+expect_contains "Valkey memory alert reads the docling workers" "$docling_rules" "|$DOCLING-internal|$ASR-internal\"})"
 expect_absent "no docling alerts without docling workers" "$rules" 'pool="docling"'
+
+# --- Model downloads as a hook Job (models.downloadMode job) -----------------------------------
+
+jobs_mode="$(render --set workers.docling.enabled=true --set workers.docling.models.downloadMode=job \
+  --set workers.asr.enabled=true --set workers.asr.models.downloadMode=job)"
+for pool in docling asr; do
+  name="$RELEASE-text-extraction-worker-$pool"
+  job="$(document "$jobs_mode" Job "$name-models")"
+  if [[ -n "$job" ]]; then pass "downloadMode job renders a $pool models Job"; else fail "no $pool models Job"; fi
+  expect_contains "$pool models Job is a post-install and post-upgrade hook" "$job" '"helm.sh/hook": post-install,post-upgrade'
+  expect_contains "$pool models Job downloads the models" "$job" "- --download-models"
+  expect_contains "$pool models Job mounts the models" "$job" "mountPath: /models"
+  expect_absent "$pool models Job mount is writable" "$job" "readOnly: true"
+  expect_contains "$pool models Job root filesystem is read-only" "$job" "readOnlyRootFilesystem: true"
+  expect_contains "$pool models Job runs as the image's user" "$job" "runAsUser: 10001"
+  expect_absent "$pool models Job keeps the image's init process" "$job" "command:"
+  expect_contains "$pool models Job requests little memory" "$(flat "$job")" "requests: cpu: 100m memory: 256Mi"
+  expect_contains "$pool models Job has a small memory limit" "$(flat "$job")" "limits: cpu: \"1\" memory: 1Gi"
+  deployment="$(document "$jobs_mode" Deployment "$name")"
+  expect_absent "downloadMode job renders no init container ($pool)" "$deployment" "initContainers:"
+  expect_absent "downloadMode job: the $pool worker does not download" "$deployment" "--download-models"
+  expect_contains "downloadMode job: the $pool worker mounts the models read-only" "$deployment" "readOnly: true"
+done
+expect_contains "docling models Job uses the docling image" "$(document "$jobs_mode" Job "$DOCLING-models")" \
+  "image: \"ghcr.io/janschachtschabel/text-extraction-docling:$APP_VERSION\""
+expect_contains "asr models Job uses the asr image" "$(document "$jobs_mode" Job "$ASR-models")" \
+  "image: \"ghcr.io/janschachtschabel/text-extraction-asr:$APP_VERSION\""
+expect_values "asr models Job downloads the configured model" "$(document "$jobs_mode" Job "$ASR-models")" ASR_MODEL "large-v3-turbo"
+expect_absent "downloadMode init (the default) renders no Job" "$(render --set workers.docling.enabled=true --set workers.asr.enabled=true)" "kind: Job"
+expect_absent "download false renders no Job" \
+  "$(render --set workers.docling.enabled=true --set workers.docling.models.downloadMode=job --set workers.docling.models.download=false --set workers.docling.models.persistence.existingClaim=m)" \
+  "kind: Job"
+expect_render_fails "downloadMode is init or job" "workers.docling.models.downloadMode must be init or job" \
+  --set workers.docling.enabled=true --set workers.docling.models.downloadMode=sidecar
+
+# --- ASR workers --------------------------------------------------------------------------------
+
+expect_absent "asr off renders nothing" "$on" "worker-asr"
+expect_absent "asr off renders no models PVC" "$on" "$ASR_MODELS"
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_values "asr off ($name)" "$(document "$on" Deployment "$name")" ASR_ENABLED "false"
+done
+expect_values "config.ASR_ENABLED ignored (API)" \
+  "$(document "$(render --set config.ASR_ENABLED=true)" Deployment "$API")" ASR_ENABLED "false"
+expect_values "API gets the upload limit" "$api" MEDIA_UPLOAD_MAX_BYTES "25000000"
+
+asr_on="$(render --set workers.asr.enabled=true --set workers.docling.enabled=true)"
+asr="$(document "$asr_on" Deployment "$ASR")"
+if [[ -n "$asr" ]]; then pass "asr worker Deployment is rendered when enabled"; else fail "no asr worker Deployment"; fi
+# Every container of every pod (the Docling init container included).
+for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR"; do
+  deployment="$(document "$asr_on" Deployment "$name")"
+  expect_every_value "asr on ($name)" "$deployment" ASR_ENABLED "true"
+  expect_every_value "asr backend ($name)" "$deployment" ASR_BACKEND "local"
+done
+# The init container and the worker.
+expect_values "asr on (asr worker and init container)" "$asr" ASR_ENABLED "true true"
+expect_values "asr worker and init container" "$asr" ASR_MODELS_PATH "/models /models"
+expect_values "asr worker and init container" "$asr" ASR_MODEL "large-v3-turbo large-v3-turbo"
+expect_values "asr worker" "$asr" ASR_CONCURRENCY "1 1"
+expect_values "asr worker" "$asr" ASR_SCRATCH_PATH "/scratch /scratch"
+expect_values "asr worker gets the upload limit" "$asr" MEDIA_UPLOAD_MAX_BYTES "25000000 25000000"
+expect_values "upload limit follows workers.asr.uploadMaxBytes" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.uploadMaxBytes=50000000)" Deployment "$API")" \
+  MEDIA_UPLOAD_MAX_BYTES "50000000"
+expect_absent "asr worker gets no WORKER_CONCURRENCY" "$asr" "name: WORKER_CONCURRENCY"
+expect_absent "asr worker gets no DOCUMENT_MEMORY_LIMIT_MB" "$asr" "name: DOCUMENT_MEMORY_LIMIT_MB"
+expect_absent "asr worker gets no external key without the openai backend" "$asr" "ASR_EXTERNAL_API_KEY"
+expect_contains "asr worker uses the asr image" "$asr" "image: \"ghcr.io/janschachtschabel/text-extraction-asr:$APP_VERSION\""
+expect_contains "asr worker runs its entry point" "$asr" "- text-extraction-asr-worker"
+expect_absent "asr worker keeps the image's init process" "$asr" "command:"
+expect_contains "asr worker serves the internal port" "$asr" "containerPort: 9090"
+expect_absent "asr worker has no public port" "$asr" "containerPort: 8080"
+expect_contains "asr worker grace period" "$asr" "terminationGracePeriodSeconds: 60"
+expect_contains "asr worker memory request" "$asr" "memory: 3Gi"
+expect_contains "asr worker memory limit" "$asr" "memory: 6Gi"
+expect_contains "asr worker CPU limit" "$asr" 'cpu: "4"'
+expect_contains "asr workers stay on amd64 nodes" "$asr" "kubernetes.io/arch: amd64"
+expect_contains "asr worker internal Service" "$(document "$asr_on" Service "$ASR-internal")" "port: 9090"
+init="$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$asr")"
+worker="$(awk '/^      containers:/ { f = 1 } /^      volumes:/ { f = 0 } f' <<<"$asr")"
+volumes="$(awk '/^      volumes:/ { f = 1 } /^      nodeSelector:/ { f = 0 } f' <<<"$asr")"
+expect_contains "asr init container downloads the models" "$init" "- --download-models"
+expect_contains "asr init container mounts the models" "$init" "mountPath: /models"
+expect_absent "asr init container mount is writable" "$init" "readOnly: true"
+expect_contains "asr init container root filesystem is read-only" "$init" "readOnlyRootFilesystem: true"
+expect_contains "asr init container requests little memory" "$(flat "$init")" "requests: cpu: 100m memory: 256Mi"
+expect_absent "asr init container does not take the worker's resources" "$init" "memory: 3Gi"
+expect_contains "models resources follow workers.asr.models.resources" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.models.resources.limits.memory=2Gi)" Deployment "$ASR")" \
+  "memory: 2Gi"
+expect_contains "asr worker mounts the models" "$worker" "mountPath: /models"
+expect_contains "asr worker models mount is read-only" "$worker" "readOnly: true"
+expect_absent "asr worker does not download" "$worker" "--download-models"
+expect_contains "asr worker mounts the scratch volume" "$worker" "mountPath: /scratch"
+expect_contains "asr scratch is a bounded emptyDir" "$volumes" "sizeLimit: 2Gi"
+expect_contains "asr /tmp is a bounded emptyDir" "$(flat "$volumes")" "- name: tmp emptyDir: sizeLimit: 1Gi"
+asr_pvc="$(document "$asr_on" PersistentVolumeClaim "$ASR_MODELS")"
+expect_contains "asr models PVC is rendered" "$asr_pvc" "storage: 4Gi"
+expect_contains "asr models PVC is ReadWriteMany" "$asr_pvc" "- ReadWriteMany"
+expect_absent "asr models PVC uses the default storage class" "$asr_pvc" "storageClassName"
+expect_contains "asr worker uses the models PVC" "$asr" "claimName: $ASR_MODELS"
+expect_contains "docling keeps its own models PVC" "$(document "$asr_on" Deployment "$DOCLING")" "claimName: $MODELS"
+expect_contains "API grace period does not wait for asr" "$(document "$asr_on" Deployment "$API")" "terminationGracePeriodSeconds: 90"
+expect_values "asr model follows workers.asr.model" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.model=small)" Deployment "$ASR")" ASR_MODEL "small small"
+expect_render_fails "asr model is one of the manifest's" "workers.asr.model must be" \
+  --set workers.asr.enabled=true --set workers.asr.model=tiny
+
+asr_claimed="$(render --set workers.asr.enabled=true --set workers.asr.models.persistence.existingClaim=whisper)"
+expect_absent "existingClaim skips the asr PVC" "$asr_claimed" "kind: PersistentVolumeClaim"
+expect_contains "asr existingClaim is mounted" "$(document "$asr_claimed" Deployment "$ASR")" "claimName: whisper"
+expect_absent "asr download false skips the init container" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.models.persistence.existingClaim=whisper --set workers.asr.models.download=false)" Deployment "$ASR")" \
+  "initContainers:"
+expect_render_fails "asr download false needs a pre-filled existingClaim" "workers.asr.models.download=false needs" \
+  --set workers.asr.enabled=true --set workers.asr.models.download=false
+
+# MEDIA_MAX_BYTES (500000000) plus 5 MB of slack per transcription slot must fit the scratch volume.
+expect_render_fails "scratch sizeLimit smaller than MEDIA_MAX_BYTES fails the render" "workers.asr.scratch.sizeLimit (400Mi)" \
+  --set workers.asr.enabled=true --set workers.asr.scratch.sizeLimit=400Mi
+expect_render_succeeds "scratch sizeLimit follows config.MEDIA_MAX_BYTES" \
+  --set workers.asr.enabled=true --set workers.asr.scratch.sizeLimit=400Mi --set-string config.MEDIA_MAX_BYTES=300000000
+expect_render_fails "scratch sizeLimit covers every transcription slot" "workers.asr.scratch.sizeLimit (2Gi)" \
+  --set workers.asr.enabled=true --set workers.asr.concurrency=5
+expect_render_fails "scratch sizeLimit is required" "workers.asr.scratch.sizeLimit" \
+  --set workers.asr.enabled=true --set workers.asr.scratch.sizeLimit=null
+
+asr_external="$(render --set workers.asr.enabled=true --set workers.asr.backend=openai \
+  --set workers.asr.external.baseUrl=https://asr.example.org/v1 --set workers.asr.external.existingSecret=asr-key)"
+asr_ext="$(document "$asr_external" Deployment "$ASR")"
+expect_absent "external backend renders no PVC" "$asr_external" "kind: PersistentVolumeClaim"
+expect_absent "external backend renders no init container" "$asr_ext" "initContainers:"
+expect_absent "external backend mounts no models" "$asr_ext" "mountPath: /models"
+expect_absent "external backend renders no models Job" \
+  "$(render --set workers.asr.enabled=true --set workers.asr.backend=openai --set workers.asr.external.baseUrl=https://asr.example.org/v1 --set workers.asr.models.downloadMode=job)" \
+  "kind: Job"
+expect_values "external backend (asr worker)" "$asr_ext" ASR_BACKEND "openai"
+expect_values "external backend (asr worker)" "$asr_ext" ASR_EXTERNAL_BASE_URL "https://asr.example.org/v1"
+expect_values "external backend (asr worker)" "$asr_ext" ASR_EXTERNAL_MODEL "whisper-1"
+for name in "$API" "$ASR"; do
+  deployment="$(document "$asr_external" Deployment "$name")"
+  expect_contains "external backend takes the key from the secret ($name)" "$deployment" "name: asr-key"
+  expect_contains "external backend key is a secret reference ($name)" \
+    "$(grep -A4 -- "- name: ASR_EXTERNAL_API_KEY" <<<"$deployment")" "key: ASR_EXTERNAL_API_KEY"
+  expect_values "external backend ($name)" "$deployment" ASR_BACKEND "openai"
+done
+for name in "$EXTRACT" "$BROWSER"; do
+  expect_absent "external key stays out of $name" "$(document "$asr_external" Deployment "$name")" "ASR_EXTERNAL_API_KEY"
+done
+expect_absent "external key never in the ConfigMap" "$(document "$asr_external" ConfigMap "$API")" "ASR_EXTERNAL_API_KEY"
+
+asr_managed="$(render --set workers.asr.enabled=true --set workers.asr.backend=openai \
+  --set workers.asr.external.baseUrl=https://asr.example.org/v1 --set workers.asr.external.apiKey=sk-test-key)"
+expect_contains "external key in a chart-managed Secret" "$(document "$asr_managed" Secret "$RELEASE-text-extraction-asr")" "ASR_EXTERNAL_API_KEY: \"sk-test-key\""
+expect_contains "API reads the chart-managed key" "$(document "$asr_managed" Deployment "$API")" "name: $RELEASE-text-extraction-asr"
+expect_absent "external key never in clear text in a pod" "$(document "$asr_managed" Deployment "$ASR")" "sk-test-key"
+expect_absent "no key Secret for the local backend" \
+  "$(render --set workers.asr.enabled=true --set workers.asr.external.apiKey=sk-test-key)" "sk-test-key"
+expect_absent "external backend without a key renders no key" \
+  "$(render --set workers.asr.enabled=true --set workers.asr.backend=openai --set workers.asr.external.baseUrl=https://asr.example.org/v1)" \
+  "ASR_EXTERNAL_API_KEY"
+expect_render_fails "external backend needs a base URL" "workers.asr.external.baseUrl is required" \
+  --set workers.asr.enabled=true --set workers.asr.backend=openai
+expect_render_fails "external base URL is https" "workers.asr.external.baseUrl must start with https://" \
+  --set workers.asr.enabled=true --set workers.asr.backend=openai --set workers.asr.external.baseUrl=http://asr.example.org/v1
+expect_render_fails "asr backend is local or openai" "workers.asr.backend must be local or openai" \
+  --set workers.asr.enabled=true --set workers.asr.backend=cloud
+
+expect_render_fails "asr needs jobs" "workers.asr.enabled needs JOBS_ENABLED=true" \
+  --set workers.asr.enabled=true --set jobs.enabled=false
+# D6: the input TTL must outlast the lease (2 x ASR_TIMEOUT_SECONDS + 10), as the service checks.
+expect_render_fails "asr input TTL shorter than the lease" "ASR_INPUT_TTL_SECONDS (28800)" \
+  --set workers.asr.enabled=true --set-string config.ASR_TIMEOUT_SECONDS=14400
+expect_render_succeeds "asr input TTL raised with the timeout" \
+  --set workers.asr.enabled=true --set-string config.ASR_TIMEOUT_SECONDS=14400 --set-string config.ASR_INPUT_TTL_SECONDS=30000
+expect_render_fails "asr upload limit above the input budget" "workers.asr.uploadMaxBytes (300000000)" \
+  --set workers.asr.enabled=true --set workers.asr.uploadMaxBytes=300000000
+# asr worker: 30 s for the items in flight + 10
+expect_render_fails "asr worker grace period too short" "workers.asr.terminationGracePeriodSeconds" \
+  --set workers.asr.enabled=true --set workers.asr.terminationGracePeriodSeconds=39
+expect_render_succeeds "asr worker grace period just long enough" \
+  --set workers.asr.enabled=true --set workers.asr.terminationGracePeriodSeconds=40
+
+asr_keda="$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true)" ScaledObject "$ASR")"
+expect_contains "asr KEDA query names pool asr" "$asr_keda" 'pool=\"asr\"'
+expect_contains "asr KEDA query counts the transcriptions in flight" "$asr_keda" \
+  "query: \"max(text_extraction_queue_pending_items{pool=\\\"asr\\\", namespace=\\\"$NAMESPACE\\\"}) + max(text_extraction_queue_leased_items{pool=\\\"asr\\\", namespace=\\\"$NAMESPACE\\\"})\""
+expect_contains "asr KEDA threshold is the concurrency" "$asr_keda" 'threshold: "1"'
+expect_contains "asr KEDA threshold follows the concurrency" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true --set workers.asr.concurrency=2)" ScaledObject "$ASR")" \
+  'threshold: "2"'
+expect_contains "asr KEDA threshold can be set" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true --set workers.asr.autoscaling.keda.threshold=3)" ScaledObject "$ASR")" \
+  'threshold: "3"'
+expect_contains "asr KEDA scales down after an hour of less work" "$(flat "$asr_keda")" \
+  "advanced: horizontalPodAutoscalerConfig: behavior: scaleDown: stabilizationWindowSeconds: 3600"
+asr_hpa="$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$ASR")"
+expect_contains "asr HPA scales down after an hour of less work" "$(flat "$asr_hpa")" \
+  "behavior: scaleDown: stabilizationWindowSeconds: 3600"
+expect_contains "asr HPA scale-down window can be set" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.hpa.enabled=true --set workers.asr.autoscaling.scaleDownStabilizationWindowSeconds=1800)" HorizontalPodAutoscaler "$ASR")" \
+  "stabilizationWindowSeconds: 1800"
+expect_contains "a scale-down window of 0 is rendered, not dropped" \
+  "$(document "$(render --set workers.asr.enabled=true --set workers.asr.autoscaling.hpa.enabled=true --set workers.asr.autoscaling.scaleDownStabilizationWindowSeconds=0)" HorizontalPodAutoscaler "$ASR")" \
+  "stabilizationWindowSeconds: 0"
+expect_render_fails "scale-down window at most an hour (the Kubernetes limit)" \
+  "workers.asr.autoscaling.scaleDownStabilizationWindowSeconds must be between 0 and 3600" \
+  --set workers.asr.enabled=true --set workers.asr.autoscaling.scaleDownStabilizationWindowSeconds=7200
+expect_render_fails "KEDA threshold is positive" "workers.asr.autoscaling.keda.threshold must be" \
+  --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true --set workers.asr.autoscaling.keda.threshold=0
+expect_contains "notes say a scale-down interrupts transcriptions" \
+  "$(render_notes --set workers.asr.enabled=true)" "interrupts the transcriptions in flight"
+expect_render_fails "asr KEDA and HPA are exclusive" "mutually exclusive" \
+  --set workers.asr.enabled=true --set workers.asr.autoscaling.keda.enabled=true \
+  --set workers.asr.autoscaling.hpa.enabled=true
+
+asr_policies="$(render --set workers.asr.enabled=true --set networkPolicy.enabled=true)"
+expect_contains "asr worker NetworkPolicy" "$(document "$asr_policies" NetworkPolicy "$ASR")" "port: 9090"
+expect_contains "Valkey accepts the asr workers" \
+  "$(document "$asr_policies" NetworkPolicy "$RELEASE-text-extraction-valkey")" "app.kubernetes.io/name: text-extraction-worker-asr"
+
+asr_rules="$(render --set workers.asr.enabled=true --set metrics.prometheusRule.enabled=true --set alerts.asrQueueBacklogItems=9)"
+expect_contains "asr backlog alert" "$asr_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"asr\"}) > 9"
+expect_contains "asr workers-down alert" "$asr_rules" "deployment=\"$ASR\""
+expect_contains "asr items are counted on the asr workers" "$asr_rules" "service=\"$ASR-internal\""
+expect_contains "extract items leave out the asr workers" "$asr_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal\""
+expect_contains "Valkey memory alert reads the asr workers" "$asr_rules" "|$ASR-internal\"})"
+expect_contains "asr backlog default threshold" \
+  "$(render --set workers.asr.enabled=true --set metrics.prometheusRule.enabled=true)" "pool=\"asr\"}) > 50"
+expect_absent "no asr alerts without asr workers" "$rules" 'pool="asr"'
+
+expect_contains "notes describe the asr workers" "$(render_notes --set workers.asr.enabled=true)" "Transcription is on (ASR_ENABLED=true in every pod)"
+expect_contains "notes warn about the default maxmemory with asr" \
+  "$(render_notes --set workers.asr.enabled=true)" "DOCLING_INPUT_BUDGET_BYTES (200000000)"
+expect_contains "notes say transcription is off" "$(render_notes)" "No ASR workers are deployed"
 
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2

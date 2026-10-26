@@ -1,0 +1,87 @@
+{{- /* models.downloadMode job (Docling workers, ASR workers of the local backend): a Helm hook Job
+per pool fills the models volume once per install and upgrade, instead of an init container in
+every worker pod. It runs `<worker> --download-models` with the volume mounted writable: that
+downloads the files of the manifest (SHA-256 checked) and does nothing when the volume already
+holds them. The worker pods only check the marker; one that starts before the Job is done exits
+with code 1 and restarts. The volume must be mountable by the Job and the workers at once
+(ReadWriteMany, or everything on one node). A succeeded Job is deleted, a failed one stays for its
+logs until the next upgrade. */ -}}
+{{- range $pool := list "docling" "asr" }}
+{{- $args := list $ $pool }}
+{{- if eq (include "text-extraction.modelsDownload" $args) "job" }}
+{{- $worker := index $.Values.workers $pool }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-models" (include "text-extraction.workerName" $args) | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "text-extraction.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $pool }}-models
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      # Not the API's pod labels: no Service may select this pod.
+      labels:
+        app.kubernetes.io/name: {{ include "text-extraction.name" $ }}-{{ $pool }}-models
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: models
+          image: {{ include "text-extraction.workerImage" $args | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args:
+            - {{ include "text-extraction.workerCommand" $pool }}
+            - --download-models
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: {{ include "text-extraction.fullname" $ }}
+          env:
+            {{- include "text-extraction.workerEnv" $args | nindent 12 }}
+          resources:
+            {{- toYaml $worker.models.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: models
+              mountPath: /models
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ include "text-extraction.workerModelsClaim" $args }}
+      {{- with merge (deepCopy ($worker.nodeSelector | default dict)) (deepCopy ($.Values.nodeSelector | default dict)) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

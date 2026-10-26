@@ -1,9 +1,12 @@
 name: image
 
-# Three images from one Dockerfile, with the same tags:
-#   api      ghcr.io/<repo>          default target: API and extract worker, no browser, no Docling;
+# Four images from one Dockerfile, with the same tags:
+#   api      ghcr.io/<repo>          default target: API and extract worker, no browser, no Docling,
+#                                    no Whisper;
 #   browser  ghcr.io/<repo>-browser  target `browser`: the browser worker;
-#   docling  ghcr.io/<repo>-docling  target `docling`: the Docling worker (no models inside).
+#   docling  ghcr.io/<repo>-docling  target `docling`: the Docling worker (no models inside);
+#   asr      ghcr.io/<repo>-asr      target `asr`: the ASR worker (PyAV on an LGPL FFmpeg, no models,
+#                                    no ffmpeg program).
 # Each image is built and checked first; pull requests stop there and push nothing.
 # Pushes to main publish `latest` (staging) and `sha-<short>`.
 # Tags vX.Y.Z publish `X.Y.Z` and `X.Y` (production uses SemVer tags only).
@@ -42,6 +45,9 @@ jobs:
           - variant: docling
             target: docling
             suffix: "-docling"
+          - variant: asr
+            target: asr
+            suffix: "-asr"
     env:
       IMAGE: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
       CHECK_TAG: text-extraction-${{ matrix.variant }}:check
@@ -104,6 +110,23 @@ jobs:
           '
           docker run --rm "$CHECK_TAG" sh -c '
           if command -v tesseract; then echo "tesseract in the API image" >&2; exit 1; fi
+          '
+
+      # The API image must not hold the transcription stack (it belongs to the ASR image): no
+      # faster-whisper, CTranslate2, PyAV or Deno, and no ffmpeg program.
+      - name: API image has no faster_whisper, ctranslate2, av, deno
+        if: matrix.variant == 'api'
+        run: |
+          docker run --rm "$CHECK_TAG" python -c '
+          import importlib.util, sys
+          names = ("faster_whisper", "ctranslate2", "av", "deno")
+          found = [name for name in names if importlib.util.find_spec(name)]
+          sys.exit(f"ASR packages in the API image: {found}" if found else 0)
+          '
+          docker run --rm "$CHECK_TAG" sh -c '
+          for tool in ffmpeg deno; do
+            if command -v "$tool"; then echo "$tool in the API image" >&2; exit 1; fi
+          done
           '
 
       # Every image runs tini as PID 1 and as the non-root user 10001.
@@ -170,6 +193,66 @@ jobs:
           docker run --rm --read-only --tmpfs /tmp:size=1g --security-opt no-new-privileges:true \
             -v "$RUNNER_TEMP/docling-models:/models:ro" -e AUTH_MODE=none -e DOCLING_ENABLED=true \
             "$CHECK_TAG" text-extraction-docling-worker --check
+
+      # No models and no FFmpeg programs in the ASR image: /models and /scratch are empty mount
+      # points, FFmpeg is there as LGPL shared libraries only, and Deno (the binary of the `deno`
+      # package that yt-dlp is given by path) runs.
+      - name: ASR image holds no models and no ffmpeg program
+        if: matrix.variant == 'asr'
+        run: |
+          docker run --rm "$CHECK_TAG" sh -c '
+          test -d /models && test -z "$(ls -A /models)"
+          test -d /scratch && test -z "$(ls -A /scratch)"
+          for tool in ffmpeg ffprobe ffplay rtmpdump; do
+            if command -v "$tool"; then echo "$tool in the ASR image" >&2; exit 1; fi
+          done
+          test ! -e /opt/ffmpeg/bin
+          test -f /opt/ffmpeg/LICENSE.txt
+          '
+          docker run --rm --read-only --tmpfs /tmp "$CHECK_TAG" python -c '
+          import subprocess, deno
+          subprocess.run([deno.find_deno_bin(), "--version"], check=True)
+          '
+
+      # The self-check of the external backend needs no model and sends nothing: FFmpeg's licence
+      # (LGPL, no GPL or non-free library or codec), no ffmpeg or rtmpdump on PATH, and the built-in
+      # clip decoded and encoded as Ogg Opus (libopus). As the pods run it: non-root, read-only root
+      # filesystem, /tmp as the only writable place. No Valkey needed.
+      - name: ASR image passes its self-check (licence, PATH, Opus)
+        if: matrix.variant == 'asr'
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --security-opt no-new-privileges:true \
+            -e AUTH_MODE=none -e ASR_BACKEND=openai -e ASR_EXTERNAL_BASE_URL=https://asr.invalid/v1 \
+            "$CHECK_TAG" text-extraction-asr-worker --check
+
+      # The model `small` (fast; the default large-v3-turbo is exercised weekly by the CI job
+      # `media`), cached by the manifest's hash as in that job. On a miss the image itself
+      # downloads it, as the Helm init container does (writable mount).
+      - name: ASR model cache
+        if: matrix.variant == 'asr'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/asr-models
+          key: asr-models-small-image-${{ hashFiles('src/text_extraction/media/models.toml') }}
+      - name: ASR image downloads the model
+        if: matrix.variant == 'asr'
+        run: |
+          mkdir -p "$RUNNER_TEMP/asr-models"
+          sudo chown -R 10001:10001 "$RUNNER_TEMP/asr-models"
+          docker run --rm --read-only --tmpfs /tmp --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/asr-models:/models" -e AUTH_MODE=none -e ASR_MODEL=small \
+            "$CHECK_TAG" text-extraction-asr-worker --download-models
+          # The cache step saves the directory after the job as the runner user.
+          sudo chmod -R a+rX "$RUNNER_TEMP/asr-models"
+
+      # The local backend's self-check: the same licence and PATH checks, then the built-in clip
+      # transcribed with the model mounted read-only, as the pods run it.
+      - name: ASR image transcribes its built-in clip
+        if: matrix.variant == 'asr'
+        run: |
+          docker run --rm --read-only --tmpfs /tmp:size=1g --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/asr-models:/models:ro" -e AUTH_MODE=none -e ASR_MODEL=small \
+            "$CHECK_TAG" text-extraction-asr-worker --check
 
       - name: Image size
         run: |

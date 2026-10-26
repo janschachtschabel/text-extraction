@@ -22,13 +22,14 @@ from structlog.testing import capture_logs
 from tests.fakes import PARAGRAPH, Answer, FakeFetcher, RefusingGate, fetched
 from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
 from text_extraction import worker as worker_module
+from text_extraction.asr_dispatch import asr_queue
 from text_extraction.auth import Principal
-from text_extraction.compliance import ComplianceChecker
+from text_extraction.compliance import ComplianceChecker, ComplianceReport
 from text_extraction.docling_dispatch import docling_queue
 from text_extraction.documents.routing import ocr_available
-from text_extraction.envelope import Envelope, ErrorCode
+from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.fingerprint import FingerprintStore
@@ -39,6 +40,7 @@ from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
+from text_extraction.pipeline_media import ASR_UNAVAILABLE_WARNING, MediaInputMeta, asr_available
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
@@ -112,6 +114,8 @@ class Harness:
         pipeline: Any = None,
         random: Callable[[], float] = lambda: 0.5,  # no jitter
         document_pool: Any = None,
+        media_fetcher: Any = None,
+        give_back_on_cancel: bool = False,
         **overrides: Any,
     ) -> None:
         self.valkey = FakeAsyncRedis()
@@ -130,6 +134,7 @@ class Harness:
             self.settings,
             self.registry,
             document_pool=document_pool,
+            media_fetcher=media_fetcher,
         )
         self.store = JobStore(self.valkey, self.settings, clock=self.clock)
         self.queue = (make_queue or default_queue)(self.valkey, self.settings, self.clock)
@@ -137,6 +142,8 @@ class Harness:
         self.browser_queue = FairQueue(self.valkey, self.settings, "browser", clock=self.clock)
         # The Docling pool's queue, which items that need OCR move to (F13).
         self.docling_queue = docling_queue(self.valkey, self.settings)
+        # The ASR pool's queue, which items that need a transcription move to (M9).
+        self.asr_queue = asr_queue(self.valkey, self.settings)
         self.guard = Pressure()
         self.runner = ExtractRunner(
             self.pipeline,
@@ -144,6 +151,7 @@ class Harness:
             self.settings,
             self.browser_queue if self.settings.browser_enabled else None,
             docling_queue=self.docling_queue if ocr_available(self.settings) else None,
+            asr_queue=self.asr_queue if asr_available(self.settings) else None,
             guard=self.guard,
             registry=self.registry,
         )
@@ -157,6 +165,7 @@ class Harness:
             clock=self.clock,
             sleep=self.sleeps,
             random=random,
+            give_back_on_cancel=give_back_on_cancel,
         )
 
     async def submit(self, urls: list[str]) -> str:
@@ -850,6 +859,91 @@ async def test_shutdown_cancels_items_that_outlive_the_grace_period() -> None:
     assert (await harness.queue.counts()).leased == 1  # the lease expires and the item returns
 
 
+class FailingDeferQueue(FairQueue):
+    """A queue whose ``defer`` fails as a Valkey outage would."""
+
+    async def defer(self, item: QueueItem, until: float) -> bool:
+        raise RedisConnectionError("valkey is gone")
+
+
+async def serve_until_cancelled(harness: Harness, started: Started) -> None:
+    """Serve the harness's worker, send SIGTERM once an item runs, and wait for the shutdown,
+    which cancels the item after a grace period of 0.2 s."""
+    readiness = Readiness()
+    app = create_internal_app(
+        harness.settings, harness.valkey, harness.registry, readiness=readiness
+    )
+    internal = _server(app, "127.0.0.1", free_port())
+    serving = asyncio.create_task(_serve(harness.worker, internal, readiness, graceful_seconds=0.2))
+    await started.reach(1)
+    os.kill(os.getpid(), signal.SIGTERM)
+    async with asyncio.timeout(20):
+        await serving
+
+
+@scenario
+async def test_shutdown_gives_a_cancelled_item_back_at_once_when_asked() -> None:
+    urls = [page("a.example")]
+    started = Started()
+    release = asyncio.Event()  # never set
+    harness = Harness(
+        slow_answers(urls, started, release), worker_concurrency=1, give_back_on_cancel=True
+    )
+    job_id = await harness.submit(urls)
+
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await serve_until_cancelled(harness, started)
+
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (1, 0)  # no wait for the lease to expire
+    (given_back,) = [log for log in logs if log["event"] == "job_item_given_back"]
+    assert (given_back["job_id"], given_back["item"]) == (job_id, 0)
+    again = await harness.claim()  # claimable right away, at the same time
+    assert again.item is not None
+    assert (again.item.index, again.item.attempts) == (0, 1)
+
+
+@scenario
+async def test_item_given_back_at_the_attempt_limit_is_failed_when_claimed_again() -> None:
+    urls = [page("a.example")]
+    started = Started()
+    release = asyncio.Event()  # never set
+    harness = Harness(
+        slow_answers(urls, started, release),
+        worker_concurrency=1,
+        give_back_on_cancel=True,
+        job_item_max_attempts=1,
+    )
+    await harness.submit(urls)
+    await serve_until_cancelled(harness, started)
+    started = Started()
+    harness.fetcher.answers.update(slow_answers(urls, started, release))
+    await serve_until_cancelled(harness, started)
+
+    again = await harness.claim()
+    assert again.exhausted  # each give-back counts as an attempt: an endless rerun is not possible
+
+
+@scenario
+async def test_cancelled_item_stays_cancelled_when_its_give_back_fails() -> None:
+    urls = [page("a.example")]
+    started = Started()
+    release = asyncio.Event()  # never set
+    harness = Harness(
+        slow_answers(urls, started, release),
+        worker_concurrency=1,
+        give_back_on_cancel=True,
+        make_queue=lambda valkey, settings, clock: FailingDeferQueue(valkey, settings, clock=clock),
+    )
+    await harness.submit(urls)
+
+    with capture_logs() as logs:
+        await serve_until_cancelled(harness, started)
+
+    assert any(log["event"] == "job_item_give_back_failed" for log in logs)
+    assert (await harness.queue.counts()).leased == 1  # its lease expires as without the give-back
+
+
 @pytest.fixture(autouse=True)
 def _restore_sigterm() -> Iterator[None]:
     previous = signal.getsignal(signal.SIGTERM)
@@ -1529,4 +1623,296 @@ async def test_docling_worker_deletes_the_input_with_the_outcome() -> None:
     await docling.process(claim.item)
 
     assert await harness.completed(job_id)
+    assert await harness.valkey.keys("job:*:input:*") == []
+
+
+# --- media that needs a transcription (M9) ------------------------------------------------
+
+
+def asr_harness(**overrides: Any) -> Harness:
+    from tests.test_pipeline_media import FakeMediaFetcher, probe
+
+    return Harness(media_fetcher=FakeMediaFetcher(probe(track=None)), asr_enabled=True, **overrides)
+
+
+async def submit_transcription(harness: Harness, urls: list[str]) -> str:
+    options = JobOptions(compliance="enforce", transcribe=True)
+    job_id = await harness.store.create("batch", OWNER, options, urls)
+    await harness.queue.enqueue(job_id, OWNER.name, urls)
+    return job_id
+
+
+async def asr_members(
+    harness: Harness, client: str = "alice", domain: str = "www.youtube.com"
+) -> list[str]:
+    raw = await harness.valkey.lrange(f"q:{{asr}}:c:{client}:d:{domain}", 0, -1)
+    return [os.fsdecode(value) for value in raw]
+
+
+YOUTUBE = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+
+@scenario
+async def test_batch_item_moves_to_asr() -> None:
+    harness = asr_harness()
+    job_id = await submit_transcription(harness, [YOUTUBE])
+    steps: list[str] = []
+    store, queue = harness.store, harness.asr_queue
+    real_input, real_draft, real_enqueue = store.put_input, store.put_draft, queue.enqueue_items
+
+    async def put_input(*args: Any, **kwargs: Any) -> None:
+        steps.append("input")
+        await real_input(*args, **kwargs)
+
+    async def put_draft(*args: Any, **kwargs: Any) -> None:
+        steps.append("draft")
+        await real_draft(*args, **kwargs)
+
+    failures = [RedisConnectionError("valkey is down")]
+
+    async def enqueue_items(*args: Any, **kwargs: Any) -> None:
+        steps.append("queue")
+        if failures:  # the pod dies after the draft
+            raise failures.pop()
+        await real_enqueue(*args, **kwargs)
+
+    store.put_input = put_input  # type: ignore[method-assign]
+    store.put_draft = put_draft  # type: ignore[method-assign]
+    queue.enqueue_items = enqueue_items  # type: ignore[method-assign]
+    real_complete = harness.queue.complete
+
+    async def complete(item: QueueItem) -> bool:
+        steps.append("complete")
+        return await real_complete(item)
+
+    harness.queue.complete = complete  # type: ignore[method-assign]
+
+    with pytest.raises(RedisConnectionError):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    # Still leased here, and nothing reached the ASR queue.
+    assert (await harness.queue.counts()).leased == 1
+    assert (await queue.counts()).pending == 0
+    harness.clock.now += harness.lease_seconds + 1
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert steps == ["input", "draft", "queue", "input", "draft", "queue", "complete"]
+    # Moved once: completed in ``extract`` without a result, queued on ``asr`` with the same
+    # job, index and client.
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert await asr_members(harness) == [f"{job_id}:0:0"]
+    (item,) = await harness.items(job_id)
+    assert (item.state, item.result) == ("pending", None)
+    stored = await store.get_input(job_id, 0, MediaInputMeta)
+    assert stored is not None
+    body, meta = stored
+    assert body == b""
+    assert (meta.source, meta.platform, meta.url) == ("platform", "youtube", YOUTUBE)
+    ttl = await harness.valkey.ttl(f"job:{{{job_id}}}:input:0")
+    assert 0 < ttl <= harness.settings.asr_input_ttl_seconds
+    # The rerun replaced the first input's reservation: the budget holds its bytes once.
+    reserved = len(body) + len(meta.model_dump_json().encode())
+    sizes = await harness.valkey.hgetall("inputs:{budget}:size")
+    assert sizes == {f"{job_id}:0".encode(): str(reserved).encode()}
+    assert await harness.valkey.get("inputs:{budget}:total") == str(reserved).encode()
+    draft = await store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.media is not None
+    assert draft.data.media.transcript_source == "metadata_only"
+    assert outcome_count(harness, "escalated") == 1
+    # The draft is neither cached nor fingerprinted: the ASR worker stores the kept one.
+    assert await harness.valkey.keys("res:*") == []
+
+
+@scenario
+async def test_batch_item_keeps_its_draft_while_memory_is_high_instead_of_asr() -> None:
+    harness = asr_harness()
+    harness.guard.high = True
+    job_id = await submit_transcription(harness, [YOUTUBE])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    counted = harness.sample("text_extraction_asr_dispatch_total", {"outcome": "memory_guard"})
+    assert counted == 1
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    assert item.result.data is not None
+    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert item.result.data.fingerprint is None
+    assert (await harness.asr_queue.counts()).pending == 0
+    assert await harness.valkey.keys("job:*:input:*") == []
+
+
+@scenario
+async def test_batch_item_keeps_its_draft_while_the_input_budget_is_full_instead_of_asr() -> None:
+    harness = asr_harness(
+        docling_input_budget_bytes=1_000_000,
+        media_upload_max_bytes=1_000_000,
+        document_max_bytes=50_000,
+    )
+    other = await harness.store.create("batch", OWNER, OPTIONS, [YOUTUBE])
+    meta = UploadInputMeta()
+    await harness.store.put_input(
+        other, 0, b"f" * (1_000_000 - len(meta.model_dump_json()) - 10), meta, 600
+    )
+    job_id = await submit_transcription(harness, [YOUTUBE])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert (await harness.asr_queue.counts()).pending == 0
+    assert await harness.store.draft(job_id, 0) is None
+    counted = harness.sample("text_extraction_asr_dispatch_total", {"outcome": "input_budget"})
+    assert counted == 1
+
+
+@scenario
+async def test_no_move_while_asr_is_off() -> None:
+    from tests.test_pipeline_media import FakeMediaFetcher, probe
+
+    harness = Harness(media_fetcher=FakeMediaFetcher(probe(track=None)))
+    job_id = await harness.store.create("batch", OWNER, OPTIONS, [YOUTUBE])
+    await harness.queue.enqueue(job_id, OWNER.name, [YOUTUBE])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"  # metadata only, nothing asked for
+    assert (await harness.asr_queue.counts()).pending == 0
+
+
+OGG = b"OggS\x00\x02" + b"\x00" * 64
+
+
+@scenario
+async def test_file_item_of_audio_moves_to_asr_with_its_bytes() -> None:
+    harness = asr_harness()
+    job_id = await submit_upload(harness, OGG, "audio/ogg")
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert await asr_members(harness, domain="-") == [f"{job_id}:0:0"]
+    stored = await harness.store.get_input(job_id, 0, MediaInputMeta)
+    assert stored is not None
+    body, meta = stored
+    assert body == OGG
+    assert (meta.source, meta.kind, meta.file_name) == ("upload", "ogg", "notes.txt")
+
+
+class AsrAnswering:
+    """A stand-in for the ASR worker's runner: checks what it reads, answers ``answer``."""
+
+    lease_seconds = 60.0
+
+    def __init__(self, harness: Harness, answer: Envelope[ExtractResult]) -> None:
+        self._harness = harness
+        self._answer = answer
+
+    async def run(self, job: JobRecord, item: QueueItem, url: str, **kwargs: Any) -> Any:
+        assert await self._harness.store.get_input(job.id, item.index, MediaInputMeta)
+        return self._answer
+
+
+def asr_worker(harness: Harness, runner: Any) -> Worker:
+    return Worker(
+        harness.settings,
+        harness.valkey,
+        runner,
+        harness.store,
+        harness.asr_queue,
+        harness.registry,
+        clock=harness.clock,
+    )
+
+
+def metadata_draft() -> Envelope[ExtractResult]:
+    """A platform video's metadata result, as the API stores it as the item's draft."""
+    result = ExtractResult(
+        url=YOUTUBE,
+        final_url=YOUTUBE,
+        upstream_status=200,
+        content_type="text/html",
+        mode_used="fast",
+        attempts=1,
+        language="en",
+        word_count=3,
+        title="A lesson",
+        format="markdown",
+        content="# A lesson",
+        quality=None,
+        timings=Timings(total_ms=1, compliance_ms=0, fetch_ms=1, convert_ms=0),
+        compliance=ComplianceReport(mode="enforce", decision="allowed"),
+        metadata=None,
+        links=None,
+        fingerprint=None,
+        cache="miss",
+        warnings=[],
+    )
+    error = ErrorInfo(code=ErrorCode.NO_TRANSCRIPT_AVAILABLE, message="none", retryable=False)
+    return Envelope[ExtractResult](status="partial", data=result, error=error)
+
+
+async def queue_one_transcription(harness: Harness, *, key: str | None = None) -> str:
+    """A sync request's one-item job on pool ``asr``, as the API's dispatch leaves it."""
+    options = JobOptions(compliance="enforce", transcribe=True)
+    job_id = await harness.store.create("extract", OWNER, options, [YOUTUBE])
+    meta = MediaInputMeta(
+        source="platform",
+        platform="youtube",
+        url=YOUTUBE,
+        extractor="youtube",
+        kind=None,
+        file_name=None,
+        duration=None,
+        languages=[],
+        compliance=None,
+        attempts=1,
+    )
+    await harness.store.put_input(job_id, 0, b"", meta, 600)
+    if key is not None:
+        await harness.store.put_asr_key(job_id, key)
+    await harness.store.put_draft(job_id, 0, metadata_draft())
+    await harness.asr_queue.enqueue_items(job_id, "alice#live", [(0, YOUTUBE)])
+    return job_id
+
+
+@scenario
+async def test_asr_worker_deletes_input_draft_and_key_with_the_outcome() -> None:
+    harness = asr_harness()
+    job_id = await queue_one_transcription(harness, key="sk-caller")
+    worker = asr_worker(harness, AsrAnswering(harness, Envelope[ExtractResult](status="failed")))
+
+    claim = await harness.asr_queue.claim(60)
+    assert claim.item is not None
+    await worker.process(claim.item)
+
+    assert await harness.completed(job_id)
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert await harness.store.draft(job_id, 0) is None
+    assert await harness.store.asr_key(job_id) is None
+
+
+@scenario
+async def test_exhausted_asr_item_answers_its_draft_with_asr_unavailable() -> None:
+    harness = asr_harness()
+    job_id = await queue_one_transcription(harness, key="sk-caller")
+    worker = asr_worker(harness, AsrAnswering(harness, Envelope[ExtractResult](status="failed")))
+
+    claim = await harness.asr_queue.claim(60)
+    assert claim.item is not None
+    await worker.process(claim.item, exhausted=True)
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"  # the draft, not a lost item's internal_error
+    assert item.result.data is not None
+    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+    assert item.result.data.fingerprint is None  # neither cached nor deduplicated
+    assert await harness.store.asr_key(job_id) is None
     assert await harness.valkey.keys("job:*:input:*") == []

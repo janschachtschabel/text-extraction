@@ -34,7 +34,7 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     """Whether a fast result should be tried again in the browser.
 
     Only a fast result of a page that was fetched and assessed (``quality`` is set) can escalate,
-    never a document's.
+    never a document's, a platform video's or a media file's.
     It does when the quality gate recommends a browser and the answer is 2xx HTML (a browser
     cannot do better on a text file or an error status). In unblock mode it also does when the
     page was refused as bot protection, or when the body of a 403/429/503 answer is a challenge.
@@ -48,6 +48,8 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
         return False
     if result.document is not None:  # a browser renders no better PDF (ruling F9)
         return False
+    if result.media is not None and result.media.platform != "html5":
+        return False  # a platform video's or a media file's answer is final (M1)
     if result.cache in ("hit", "revalidated"):
         return False
     if result.quality.browser_recommended and _is_ok_html(result):

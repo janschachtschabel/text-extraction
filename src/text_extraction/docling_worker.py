@@ -35,7 +35,7 @@ MarkItDown (``pipeline_documents.failed_conversion``); a model missing on the vo
 count the conversions with ``converter="docling"`` (F19).
 
 **The process** serves only the internal port. Before anything else it checks the models
-(``documents/model_store``): a file of the manifest that is missing under ``DOCLING_MODELS_PATH``
+(``model_store``): a file of the manifest that is missing under ``DOCLING_MODELS_PATH``
 ends the process with exit code 1 and a log line naming that path. Then it starts the children
 (each imports Docling), and each converts the built-in one-page scan
 (``documents/scan_check.png``), which loads the models; children that do not start
@@ -68,9 +68,9 @@ import structlog
 from prometheus_client import REGISTRY, CollectorRegistry
 from redis.asyncio import Redis
 
+from text_extraction import model_store
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.docling_dispatch import docling_queue, draft_without_ocr
-from text_extraction.documents import model_store
 from text_extraction.documents.pool import ConversionError, DocumentPool
 from text_extraction.documents.types import DocumentConversion
 from text_extraction.envelope import Envelope, ErrorCode
@@ -333,7 +333,7 @@ def models_missing(settings: Settings) -> bool:
     """Whether a file of the models manifest is missing on the volume; logs the volume's path
     when one is."""
     root = settings.docling_models_path
-    missing = model_store.missing_models(root, model_store.load_manifest())
+    missing = model_store.missing_models(root, model_store.load_manifest("docling"))
     if missing:
         _log.error("docling_models_missing", models_path=str(root), missing=len(missing))
     return bool(missing)
@@ -474,7 +474,9 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 def _download(settings: Settings) -> int:
     try:
-        model_store.download_models(settings.docling_models_path)
+        model_store.download_models(
+            settings.docling_models_path, model_store.load_manifest("docling")
+        )
     except (model_store.ModelDownloadFailed, OSError) as error:
         _log.error(
             "docling_models_download_failed",
