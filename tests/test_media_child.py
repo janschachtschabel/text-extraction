@@ -1079,6 +1079,12 @@ def test_a_proxy_refusal_of_a_format_ends_the_track(httpserver: HTTPServer) -> N
             "extractor_error",
         ),
         ("DownloadError", "ERROR: [youtube] x: HTTP Error 429: Too Many Requests", "rate_limited"),
+        (
+            "DownloadError",
+            "ERROR: [vimeo] 47677979: Cannot download embed-only video without embedding URL. "
+            "Please call yt-dlp with the URL of the page that embeds this video.",
+            "unavailable",
+        ),
     ],
 )
 def test_ytdlp_failures_are_classified_before_the_generic_code(

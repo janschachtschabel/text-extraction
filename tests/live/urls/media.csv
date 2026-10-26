@@ -8,7 +8,7 @@ https://www.youtube.com/watch?v=HPjZDlQexeY,youtube,auto_subtitles,de,,"Kurzgesa
 https://www.youtube.com/watch?v=1b3SJ2z1b2I,youtube,auto_subtitles,de,,"MrWissen2go Geschichte, automatic captions only; 6 chapters"
 https://youtu.be/6g6X353YgKk,youtube,metadata_only,de,,"WLO row; subtitles disabled (TranscriptsDisabled), 23 s, licence CC BY"
 https://youtu.be/XAgqWLNlseg,youtube,auto_subtitles,de,,WLO row; licence CC BY
-https://vimeo.com/47677979,vimeo,metadata_only,de,,"WLO row; yt-dlp needs login for vimeo.com/<id> (web client), the player URL answers 403 (embed restricted to the uploader's domains)"
+https://vimeo.com/47677979,vimeo,metadata_only,de,,"WLO row; the player URL answers 403 ""This video isn't available"" and vimeo.com/<id> a bot check, so the answer is failed, not retryable, without details"
 https://vimeo.com/70845432,vimeo,metadata_only,de,,WLO row; same as above
 https://player.vimeo.com/video/76979871,vimeo,manual_subtitles,de,,public Vimeo staff video with de/en/es/fr tracks; the player URL works without login and without impersonation
 https://www.ardmediathek.de/video/extra-3/therapie-zwecklos-ehehoelle-koalition/ndr/Y3JpZDovL25kci5kZS85YWVjYjNlNy00ZTIzLTQwOTMtOWI2ZS0wZDc5NDk5NjgxNDhfZ2FuemVTZW5kdW5n,ard,manual_subtitles,de,,"NDR satire, UT (deu); 8 chapters; Mediathek items expire"
@@ -20,7 +20,7 @@ https://www.zdf.de/video/dokus/zdfzeit-106/die-tricks-der-moebelhaeuser---mit-pi
 https://www.zdf.de/video/dokus/die-akte-trump-100/zdfinfo-die-akte-trump-amerikas-krieg-im-inneren-ice-100,zdf,manual_subtitles,de,,"ZDFinfo, UT (deu)"
 https://www.zdf.de/dokumentation/terra-x/terra-x-ozeane-eine-menschheitsgeschichte-trailer-100.html,zdf,metadata_only,de,,old /dokumentation/...html URL scheme still works; trailer without UT
 https://www.arte.tv/de/videos/134660-000-A/die-muetter-von-cherson/,arte,manual_subtitles,de,,arte documentary with a full de track; most arte videos only have de-forced (foreign-language parts only)
-https://www.arte.tv/de/videos/122150-000-A/byzanz-goldenes-erbe-europas/,arte,metadata_only,de,,only de-forced (199 bytes) and en: a forced track must not count as the transcript
+https://www.arte.tv/de/videos/122150-000-A/byzanz-goldenes-erbe-europas/,arte,manual_subtitles,de,,"only de-forced (199 bytes) and en: the forced track never counts, so M2 takes the en track (transcript_language en)"
 https://www.3sat.de/kultur/starke-stuecke/theatertreffen-2026-il-gattopardo-100.html,3sat,manual_subtitles,de,,3sat with UT (deu); 3 h; UT is rare on 3sat
 https://www.3sat.de/wissen/nano-doku/261015-nano-doku-sendung-arten-retten-im-zoo-ndk-100.html,3sat,metadata_only,de,,nano doku without UT
 https://media.neuland.br.de/file/2112613/c/feed/warum-singen-gluecklich-macht-von-innerem-klang-und-gemeinsamer-freude.mp3,file,asr,de,true,"BR radioWissen podcast MP3 (ID3), 21.7 MB"

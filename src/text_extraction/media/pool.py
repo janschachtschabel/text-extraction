@@ -110,6 +110,8 @@ _YTDLP_MESSAGES: Final = (
     ("geo restrict", "unavailable"),
     ("geo-restrict", "unavailable"),
     ("not available in your country", "unavailable"),
+    # A Vimeo video restricted to its uploader's domains: the player answers 403.
+    ("embed-only video", "unavailable"),
     # A page of ZDF or 3sat without a video: ZDF's fallback document is missing (404), or it
     # has no stream; 3sat's page has no player.
     ("http error 404", "unavailable"),

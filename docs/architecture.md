@@ -990,7 +990,10 @@ OpenAI-compatible endpoint): always a job, answered 202.
   (every other automatic language is a machine translation); arte's `-forced` tracks (only the
   foreign-language passages) and `und` never count. When both libraries fail on YouTube without
   a refusal and give no metadata, the watch page's `ytInitialPlayerResponse` (fast fetcher, same
-  turn) gives the details. Of the chosen track's formats (best first: VTT, json3, TTML, SRT), the
+  turn) gives the details. When yt-dlp fails on Vimeo with an error it does not name, the player
+  page's `og:title` and `og:description` do; the player's 403, 404 or 410 (a removed, private or
+  domain-restricted video, which yt-dlp words as a TLS fingerprint block) answers
+  `no_transcript_available`, not retryable, as does yt-dlp's "embed-only video". Of the chosen track's formats (best first: VTT, json3, TTML, SRT), the
   first whose body has a cue with text is taken; a format that fails, is too large or has no
   text gives way to the next, but a refusal of the egress proxy ends the track.
 - **M3 and M4, children and network** (`media/pool.py`, `media/child.py`). youtube-transcript-api
@@ -1233,8 +1236,10 @@ the media set without gating it (D1).
 - **Tracks.** A `<track>` that redirects to another host (a CDN) is skipped. An `auto` request
   whose browser worker did not answer in time (`browser_unavailable`) gets the fast result
   without its tracks and embeds.
-- **Platforms.** Vimeo videos restricted to their uploader's domains answer their details only;
-  arte videos whose only German track is `-forced` answer their details; Mediathek items expire.
+- **Platforms.** Vimeo videos restricted to their uploader's domains, private or removed answer
+  `failed` without details (the player refuses them, `vimeo.com` shows a bot check, oEmbed 404s);
+  arte videos whose only German track is `-forced` answer another language's manual track (with
+  its `transcript_language`), or their details when there is none; Mediathek items expire.
   Tier 1 runs without a JavaScript runtime in the API image (Deno is in the ASR image only).
 - Not in this package: transcripts of players embedded in a page (D4), speaker diarisation,
   translation, timestamps in the content, HLS or DASH URLs outside the platform extractors, S3

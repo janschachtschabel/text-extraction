@@ -1130,7 +1130,8 @@ def test_a_failed_probe_is_reported_as_what_it_is(
         if with_metadata
         else MediaProbe(error=error)
     )
-    harness = Harness(media=answer)
+    # A player page that says nothing either way, so the probe's error decides.
+    harness = Harness({VIMEO: fetched(VIMEO, "busy", status=503)}, media=answer)
 
     first, second = harness.run_all({"url": VIMEO}, {"url": VIMEO})
 
@@ -1395,11 +1396,66 @@ def test_a_zdf_video_page_still_answers_its_subtitles() -> None:
 
 
 def test_vimeo_without_a_video_never_falls_back_to_the_page() -> None:
+    """The player page is read for the video's details only (its ``og:`` tags), never
+    extracted as a page."""
     harness = Harness({VIMEO: fetched(VIMEO, ARTICLE)}, media=MediaProbe(error="extractor_error"))
 
     envelope = harness.run(url=VIMEO)
 
     assert envelope.status == "failed"
+    assert envelope.data is None or envelope.data.content == ""
+
+
+PLAYER_PAGE = """<!doctype html><html><head><title>Leaves and light on Vimeo</title>
+<meta property="og:title" content="Leaves and light">
+<meta property="og:description" content="Why leaves are green. With a quiz.">
+</head><body><div id="player"></div></body></html>"""
+
+
+def test_vimeo_details_from_the_player_page_when_ytdlp_fails() -> None:
+    """M2's tier 2 for Vimeo: yt-dlp failed for a reason it did not name, so the player page's
+    ``og:`` tags give title and description (fast fetcher, in the turn)."""
+    answer = MediaProbe(error="extractor_error")
+    harness = Harness({VIMEO: fetched(VIMEO, PLAYER_PAGE)}, media=answer)
+
+    envelope = harness.run(url=VIMEO)
+
+    assert envelope.status == "partial"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert envelope.error.retryable is True
+    data = data_of(envelope)
+    assert data.title == "Leaves and light"
+    assert data.content == "# Leaves and light\n\nWhy leaves are green. With a quiz."
+    assert data.media is not None
+    assert data.media.transcript_source == "metadata_only"
+    assert "subtitles_failed" in data.warnings
+    assert data.attempts == 2  # the probe and the player page
+    assert harness.gate.held() == []
+
+
+@pytest.mark.parametrize("status", [403, 404, 410])
+def test_a_vimeo_player_that_refuses_the_video_answers_unavailable(status: int) -> None:
+    """Vimeo's player refuses a removed, private or domain-restricted video (yt-dlp then
+    guesses a TLS fingerprint block): no retry hint, since a retry gets the same answer."""
+    page = fetched(VIMEO, "Sorry. This video isn't available.", status=status)
+    harness = Harness({VIMEO: page}, media=MediaProbe(error="extractor_error"))
+
+    envelope = harness.run(url=VIMEO)
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    assert envelope.error.retryable is False
+    assert "private, removed or restricted" in envelope.error.message
+
+
+@pytest.mark.parametrize("error", ["connect_error", "platform_error", "unavailable", "crashed"])
+def test_the_vimeo_player_page_is_read_only_after_an_unnamed_extractor_error(error: str) -> None:
+    harness = Harness({VIMEO: fetched(VIMEO, PLAYER_PAGE)}, media=MediaProbe(error=error))
+
+    harness.run(url=VIMEO)
+
     assert page_files(harness.fetched_urls()) == []
 
 

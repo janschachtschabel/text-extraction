@@ -14,7 +14,10 @@ rest:
   2. When both libraries failed on YouTube without a refusal of the service and gave no
      metadata, the watch page is fetched with the fast fetcher, in the same turn (its status
      goes to the gate), and its ``ytInitialPlayerResponse`` gives title, description, author,
-     duration, date and keywords (M2's last tier 2). A redirect ends that attempt.
+     duration, date and keywords (M2's last tier 2). A redirect ends that attempt. On Vimeo,
+     after an ``extractor_error`` without metadata, the player page is fetched the same way:
+     its ``og:`` tags give title and description, and its 403, 404 or 410 (a removed, private
+     or domain-restricted video) makes the error ``unavailable``, not retryable.
   3. A target with ``page_fallback`` (a ZDF or 3sat ``.html`` page, which may be an article)
      whose probe found no video (no track, no title, no description, and the extractor said
      so: ``no_video`` or ``unavailable``) is ``NO_VIDEO``: the caller extracts the URL as a
@@ -121,7 +124,13 @@ from text_extraction.media.types import (
     Platform,
     TranscriptSource,
 )
-from text_extraction.metadata import MAX_FIELD_LENGTH, MAX_KEYWORDS, PageMetadata, detect_language
+from text_extraction.metadata import (
+    MAX_FIELD_LENGTH,
+    MAX_KEYWORDS,
+    PageMetadata,
+    detect_language,
+    page_tree,
+)
 from text_extraction.outbound import (
     CircuitOpen,
     DomainGate,
@@ -223,6 +232,10 @@ NO_VIDEO: Final = NoVideo()
 # (``media/pool.py``). A refusal, a failure that may pass, an extractor error that names no
 # missing video, or a probe that succeeded says nothing of the kind.
 _NO_VIDEO_ERRORS: Final = frozenset({"no_video", "unavailable"})
+# What Vimeo's player answers for a removed, private or domain-restricted video (yt-dlp words
+# its 403 as a TLS fingerprint block, which it is not for an honest client that gets other
+# videos).
+_GONE_STATUSES: Final = frozenset({403, 404, 410})
 
 
 @dataclass(frozen=True)
@@ -709,6 +722,11 @@ class MediaSteps:
             and probe.title is None
             and not probe.blocked
             and probe.error != "blocked_address"
+        ) or (
+            target.platform == "vimeo"
+            and probe.track is None
+            and probe.title is None
+            and probe.error == "extractor_error"
         ):
             probe = await self._watch_page(run, target, probe)
         if probe.title is None and probe.description is None and probe.rate_limited:
@@ -897,8 +915,10 @@ class MediaSteps:
     async def _watch_page(
         self, run: MediaRun, target: MediaTarget, probe: MediaProbe
     ) -> MediaProbe:
-        """The probe with what YouTube's watch page says, fetched in the held turn; the probe
-        unchanged when the page cannot be had or says nothing. A 429 marks it rate-limited."""
+        """The probe with what the video's page says (YouTube's watch page, Vimeo's player),
+        fetched in the held turn; the probe unchanged when the page cannot be had or says
+        nothing. A 429 marks it rate-limited; Vimeo's player refusing the video (403, 404, 410)
+        marks it unavailable."""
         host = urlsplit(target.canonical_url).hostname or ""
         budget = self._fetch_budget(run)
         if budget < _MIN_SECONDS:
@@ -925,11 +945,14 @@ class MediaSteps:
         await self._record(host, fetched)
         if fetched.status == 429:
             return replace(probe, rate_limited=True, retry_after=fetched.headers.get("retry-after"))
+        if target.platform == "vimeo" and fetched.status in _GONE_STATUSES:
+            return replace(probe, error="unavailable")
         if not 200 <= fetched.status < 300:
             return probe
+        parse = player_details if target.platform == "youtube" else og_details
         started = time.perf_counter()
         try:
-            details = await self._threads.run(player_details, fetched.content, fetched.charset)
+            details = await self._threads.run(parse, fetched.content, fetched.charset)
         finally:
             run.convert_ms += _ms(started)
         return replace(probe, **details) if details else probe
@@ -1302,7 +1325,7 @@ def _append(content: str, sections: list[str], fmt: OutputFormat) -> str:
     )
 
 
-# --- YouTube's watch page ----------------------------------------------------------------------
+# --- YouTube's watch page and Vimeo's player ------------------------------------------------
 
 
 def player_details(body: bytes, charset: str | None) -> dict[str, Any] | None:
@@ -1346,6 +1369,22 @@ def player_details(body: bytes, charset: str | None) -> dict[str, Any] | None:
         "is_live": details.get("isLive") is True
         or (isinstance(live, dict) and live.get("isLiveNow") is True),
     }
+
+
+def og_details(body: bytes, charset: str | None) -> dict[str, Any] | None:
+    """Title and description from the ``og:`` tags of a page (Vimeo's player), as
+    ``MediaProbe`` fields; None without an ``og:title``. CPU-bound: runs on the conversion
+    pool."""
+    declared: dict[str, str] = {}
+    for tag in page_tree(decode_html(body, charset)).iter("meta"):
+        key = (tag.get("property") or "").strip().lower()
+        content = " ".join((tag.get("content") or "").split())
+        if key in ("og:title", "og:description") and content:
+            declared.setdefault(key, content)
+    title = _text(declared.get("og:title"), MAX_FIELD_LENGTH)
+    if title is None:
+        return None
+    return {"title": title, "description": _text(declared.get("og:description"), 20_000)}
 
 
 def _text(value: object, limit: int) -> str | None:
