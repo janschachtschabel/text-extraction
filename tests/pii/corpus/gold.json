@@ -1,0 +1,1213 @@
+{
+ "de_01_school_contact.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 326,
+    "end": 333,
+    "text": "Schmidt"
+   },
+   {
+    "type": "PERSON",
+    "start": 422,
+    "end": 428,
+    "text": "Müller"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 553,
+    "end": 567,
+    "text": "0421 361-12345"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 587,
+    "end": 611,
+    "text": "schulleitung@example.org"
+   },
+   {
+    "type": "PERSON",
+    "start": 654,
+    "end": 676,
+    "text": "Anna-Lena Meyer-Schulz"
+   },
+   {
+    "type": "PERSON",
+    "start": 681,
+    "end": 693,
+    "text": "Karin Brandt"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 853,
+    "end": 872,
+    "text": "+49 (0)30 23125-100"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 889,
+    "end": 902,
+    "text": "030 23125-199"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 946,
+    "end": 969,
+    "text": "sekretariat@example.org"
+   },
+   {
+    "type": "PERSON",
+    "start": 1232,
+    "end": 1240,
+    "text": "Hoffmann"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 1495,
+    "end": 1526,
+    "text": "naturwissenschaften@example.org"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 1651,
+    "end": 1678,
+    "text": "DE89 3704 0044 0532 0130 00"
+   },
+   {
+    "type": "PERSON",
+    "start": 1786,
+    "end": 1793,
+    "text": "Neumann"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1874,
+    "end": 1887,
+    "text": "040 66969-217"
+   },
+   {
+    "type": "URL",
+    "start": 2027,
+    "end": 2082,
+    "text": "https://www.gymnasium-stadtpark.example.org/datenschutz"
+   },
+   {
+    "type": "PERSON",
+    "start": 2180,
+    "end": 2193,
+    "text": "Jens Albrecht"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 2212,
+    "end": 2235,
+    "text": "datenschutz@example.org"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 2396,
+    "end": 2406,
+    "text": "192.0.2.17"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 2498,
+    "end": 2521,
+    "text": "2001:db8::8a2e:370:7334"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 2575,
+    "end": 2591,
+    "text": "4012888888881881"
+   }
+  ],
+  "keep": [
+   "Bremen",
+   "Goethestraße",
+   "Universität Bremen",
+   "Energiewende",
+   "Bundesregierung",
+   "Niedersachsen"
+  ]
+ },
+ "de_02_worksheet_credits.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 640,
+    "end": 647,
+    "text": "Winkler"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 925,
+    "end": 950,
+    "text": "lena.hartmann@example.com"
+   },
+   {
+    "type": "PERSON",
+    "start": 992,
+    "end": 1005,
+    "text": "Lena Hartmann"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1036,
+    "end": 1049,
+    "text": "0221 4710-352"
+   },
+   {
+    "type": "PERSON",
+    "start": 1125,
+    "end": 1138,
+    "text": "Lena Hartmann"
+   },
+   {
+    "type": "PERSON",
+    "start": 1250,
+    "end": 1262,
+    "text": "Thomas Kruse"
+   },
+   {
+    "type": "PERSON",
+    "start": 1356,
+    "end": 1368,
+    "text": "Marie Dubois"
+   },
+   {
+    "type": "PERSON",
+    "start": 1385,
+    "end": 1399,
+    "text": "Jonas Pfeiffer"
+   },
+   {
+    "type": "URL",
+    "start": 1485,
+    "end": 1547,
+    "text": "https://www.beispiel-lernen.example.org/material/photosynthese"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 1856,
+    "end": 1883,
+    "text": "DE02 1203 0000 0000 2020 51"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 2117,
+    "end": 2136,
+    "text": "4111 1111 1111 1111"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 2217,
+    "end": 2230,
+    "text": "198.51.100.23"
+   },
+   {
+    "type": "PERSON",
+    "start": 2272,
+    "end": 2284,
+    "text": "Sven Lindner"
+   }
+  ],
+  "keep": [
+   "Niedersachsen",
+   "Deutschland",
+   "Bundesregierung",
+   "Bundesnetzagentur",
+   "Max-Planck-Gesellschaft",
+   "Hamburg",
+   "Humboldt-Universität",
+   "Berlin",
+   "Calvin",
+   "Bundesministerium",
+   "Europäische Union"
+  ]
+ },
+ "de_03_press_release.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 438,
+    "end": 454,
+    "text": "Katharina Reuter"
+   },
+   {
+    "type": "PERSON",
+    "start": 674,
+    "end": 688,
+    "text": "Bernd Kowalski"
+   },
+   {
+    "type": "PERSON",
+    "start": 896,
+    "end": 904,
+    "text": "Kowalski"
+   },
+   {
+    "type": "PERSON",
+    "start": 1089,
+    "end": 1101,
+    "text": "Ingrid Vogel"
+   },
+   {
+    "type": "PERSON",
+    "start": 1316,
+    "end": 1330,
+    "text": "Matthias Engel"
+   },
+   {
+    "type": "PERSON",
+    "start": 1455,
+    "end": 1463,
+    "text": "Schröder"
+   },
+   {
+    "type": "PERSON",
+    "start": 1624,
+    "end": 1639,
+    "text": "Carolin Behrens"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1649,
+    "end": 1666,
+    "text": "+49 441 99998-410"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1674,
+    "end": 1686,
+    "text": "0171 5550123"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 1695,
+    "end": 1713,
+    "text": "presse@example.org"
+   },
+   {
+    "type": "URL",
+    "start": 1755,
+    "end": 1804,
+    "text": "https://www.landkreis-beispiel.example.org/presse"
+   },
+   {
+    "type": "PERSON",
+    "start": 1885,
+    "end": 1897,
+    "text": "Julia Seidel"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 2089,
+    "end": 2111,
+    "text": "DE75512108001245126199"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 2238,
+    "end": 2255,
+    "text": "3782 822463 10005"
+   }
+  ],
+  "keep": [
+   "Oldenburg",
+   "Landesregierung",
+   "Europäische Union",
+   "Hochschule Emden",
+   "Bundesregierung"
+  ]
+ },
+ "de_04_forum_post.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 273,
+    "end": 282,
+    "text": "Brinkmann"
+   },
+   {
+    "type": "PERSON",
+    "start": 605,
+    "end": 617,
+    "text": "Fatma Yilmaz"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 1066,
+    "end": 1094,
+    "text": "familie.baumgart@example.net"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1166,
+    "end": 1179,
+    "text": "0151 55501234"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1242,
+    "end": 1256,
+    "text": "0221 4710 0815"
+   },
+   {
+    "type": "PERSON",
+    "start": 1271,
+    "end": 1286,
+    "text": "Sabine Baumgart"
+   },
+   {
+    "type": "PERSON",
+    "start": 1317,
+    "end": 1323,
+    "text": "Tobias"
+   },
+   {
+    "type": "PERSON",
+    "start": 1333,
+    "end": 1339,
+    "text": "Sabine"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 1664,
+    "end": 1683,
+    "text": "5555 5555 5555 4444"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 1758,
+    "end": 1770,
+    "text": "203.0.113.45"
+   },
+   {
+    "type": "PERSON",
+    "start": 1817,
+    "end": 1823,
+    "text": "Tobias"
+   },
+   {
+    "type": "PERSON",
+    "start": 2004,
+    "end": 2010,
+    "text": "Winter"
+   },
+   {
+    "type": "PERSON",
+    "start": 2201,
+    "end": 2213,
+    "text": "Marlene Koch"
+   }
+  ],
+  "keep": [
+   "Köln",
+   "Pythagoras"
+  ]
+ },
+ "de_05_cv_bio.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 70,
+    "end": 90,
+    "text": "Katrin Bauer-Lehmann"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 149,
+    "end": 162,
+    "text": "040 66969-880"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 174,
+    "end": 189,
+    "text": "+49 171 5550987"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 202,
+    "end": 234,
+    "text": "katrin.bauer-lehmann@example.org"
+   },
+   {
+    "type": "URL",
+    "start": 248,
+    "end": 285,
+    "text": "https://www.bauer-lehmann.example.com"
+   },
+   {
+    "type": "PERSON",
+    "start": 305,
+    "end": 325,
+    "text": "Katrin Bauer-Lehmann"
+   },
+   {
+    "type": "PERSON",
+    "start": 605,
+    "end": 618,
+    "text": "Henrik Sommer"
+   },
+   {
+    "type": "PERSON",
+    "start": 700,
+    "end": 713,
+    "text": "Bauer-Lehmann"
+   },
+   {
+    "type": "PERSON",
+    "start": 982,
+    "end": 996,
+    "text": "Elisabeth Roth"
+   },
+   {
+    "type": "PERSON",
+    "start": 1180,
+    "end": 1193,
+    "text": "Detlef Ahrens"
+   },
+   {
+    "type": "PERSON",
+    "start": 1388,
+    "end": 1394,
+    "text": "Sommer"
+   },
+   {
+    "type": "PERSON",
+    "start": 1410,
+    "end": 1423,
+    "text": "Ulrike Hansen"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1494,
+    "end": 1511,
+    "text": "+49 40 66969 4455"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 1633,
+    "end": 1655,
+    "text": "DE89370400440532013000"
+   },
+   {
+    "type": "PERSON",
+    "start": 1709,
+    "end": 1722,
+    "text": "Bauer-Lehmann"
+   }
+  ],
+  "keep": [
+   "Hamburg",
+   "Münster",
+   "Westfalen",
+   "Universität Hamburg",
+   "Körber-Stiftung",
+   "Altona",
+   "Leibniz-Institut",
+   "Deutsche Bahn"
+  ]
+ },
+ "de_06_transcript.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 125,
+    "end": 136,
+    "text": "Lukas Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 215,
+    "end": 220,
+    "text": "Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 261,
+    "end": 266,
+    "text": "Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 300,
+    "end": 306,
+    "text": "Albers"
+   },
+   {
+    "type": "PERSON",
+    "start": 478,
+    "end": 483,
+    "text": "Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 748,
+    "end": 760,
+    "text": "Beate Lorenz"
+   },
+   {
+    "type": "PERSON",
+    "start": 968,
+    "end": 973,
+    "text": "Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 1234,
+    "end": 1243,
+    "text": "Schneider"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1287,
+    "end": 1301,
+    "text": "0421 361-54321"
+   },
+   {
+    "type": "PERSON",
+    "start": 1488,
+    "end": 1493,
+    "text": "Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 1597,
+    "end": 1610,
+    "text": "Paul Hartmann"
+   },
+   {
+    "type": "PERSON",
+    "start": 1864,
+    "end": 1869,
+    "text": "Frank"
+   },
+   {
+    "type": "PERSON",
+    "start": 2003,
+    "end": 2006,
+    "text": "Mia"
+   },
+   {
+    "type": "PERSON",
+    "start": 2163,
+    "end": 2168,
+    "text": "Frank"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 2212,
+    "end": 2231,
+    "text": "podcast@example.org"
+   }
+  ],
+  "keep": [
+   "Bremen",
+   "Niedersachsen",
+   "Datenschutzkonferenz",
+   "Kultusministerkonferenz",
+   "Berlin"
+  ]
+ },
+ "de_07_parent_letter.md": {
+  "spans": [
+   {
+    "type": "IBAN_CODE",
+    "start": 429,
+    "end": 453,
+    "text": "AT61 1904 3002 3457 3201"
+   },
+   {
+    "type": "PERSON",
+    "start": 520,
+    "end": 534,
+    "text": "Kerstin Wolter"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 643,
+    "end": 660,
+    "text": "+49 (0)30 1234567"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 682,
+    "end": 708,
+    "text": "kerstin.wolter@example.com"
+   },
+   {
+    "type": "PERSON",
+    "start": 777,
+    "end": 786,
+    "text": "Osterhoff"
+   },
+   {
+    "type": "PERSON",
+    "start": 793,
+    "end": 798,
+    "text": "Nowak"
+   },
+   {
+    "type": "PERSON",
+    "start": 808,
+    "end": 821,
+    "text": "Marco Bianchi"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 934,
+    "end": 948,
+    "text": "0421 361-12345"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 966,
+    "end": 986,
+    "text": "klasse6b@example.org"
+   },
+   {
+    "type": "PERSON",
+    "start": 1376,
+    "end": 1386,
+    "text": "Helga Pohl"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1467,
+    "end": 1481,
+    "text": "0421 361-45678"
+   },
+   {
+    "type": "URL",
+    "start": 1630,
+    "end": 1675,
+    "text": "https://www.klasse6b.example.org/projektwoche"
+   },
+   {
+    "type": "PERSON",
+    "start": 1828,
+    "end": 1847,
+    "text": "Friederike Thalmann"
+   }
+  ],
+  "keep": [
+   "Weser",
+   "Bundesregierung",
+   "Universum",
+   "Bremer"
+  ]
+ },
+ "en_01_school_contact.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 356,
+    "end": 367,
+    "text": "Priya Patel"
+   },
+   {
+    "type": "PERSON",
+    "start": 436,
+    "end": 444,
+    "text": "Thompson"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 546,
+    "end": 559,
+    "text": "020 7946 0123"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 575,
+    "end": 596,
+    "text": "principal@example.org"
+   },
+   {
+    "type": "PERSON",
+    "start": 636,
+    "end": 653,
+    "text": "Margaret O'Connor"
+   },
+   {
+    "type": "PERSON",
+    "start": 658,
+    "end": 670,
+    "text": "David Clarke"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 811,
+    "end": 829,
+    "text": "office@example.org"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 881,
+    "end": 897,
+    "text": "+44 20 7946 0199"
+   },
+   {
+    "type": "PERSON",
+    "start": 1135,
+    "end": 1149,
+    "text": "Alan Whitfield"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 1321,
+    "end": 1340,
+    "text": "science@example.com"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 1483,
+    "end": 1510,
+    "text": "GB82 WEST 1234 5698 7654 32"
+   },
+   {
+    "type": "PERSON",
+    "start": 1573,
+    "end": 1583,
+    "text": "Hargreaves"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1677,
+    "end": 1691,
+    "text": "(212) 555-0147"
+   },
+   {
+    "type": "URL",
+    "start": 1808,
+    "end": 1857,
+    "text": "https://www.riverside-college.example.org/privacy"
+   },
+   {
+    "type": "PERSON",
+    "start": 1943,
+    "end": 1955,
+    "text": "Oliver Finch"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 1960,
+    "end": 1975,
+    "text": "dpo@example.org"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 2140,
+    "end": 2152,
+    "text": "203.0.113.45"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 2181,
+    "end": 2204,
+    "text": "2001:db8::8a2e:370:7334"
+   }
+  ],
+  "keep": [
+   "Manchester",
+   "Piccadilly",
+   "University of Manchester",
+   "Department for Education",
+   "Greater Manchester"
+  ]
+ },
+ "en_02_worksheet_credits.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 580,
+    "end": 587,
+    "text": "Winters"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 824,
+    "end": 847,
+    "text": "helen.marsh@example.com"
+   },
+   {
+    "type": "PERSON",
+    "start": 896,
+    "end": 907,
+    "text": "Helen Marsh"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 941,
+    "end": 953,
+    "text": "07911 123789"
+   },
+   {
+    "type": "PERSON",
+    "start": 1033,
+    "end": 1044,
+    "text": "Helen Marsh"
+   },
+   {
+    "type": "PERSON",
+    "start": 1146,
+    "end": 1157,
+    "text": "Thomas Kerr"
+   },
+   {
+    "type": "PERSON",
+    "start": 1247,
+    "end": 1259,
+    "text": "Marie Dubois"
+   },
+   {
+    "type": "PERSON",
+    "start": 1272,
+    "end": 1287,
+    "text": "Jonathan Pierce"
+   },
+   {
+    "type": "URL",
+    "start": 1378,
+    "end": 1442,
+    "text": "https://www.example-learning.example.org/material/photosynthesis"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 1729,
+    "end": 1751,
+    "text": "NL91 ABNA 0417 1643 00"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 1938,
+    "end": 1957,
+    "text": "4111-1111-1111-1111"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 2053,
+    "end": 2066,
+    "text": "198.51.100.23"
+   },
+   {
+    "type": "PERSON",
+    "start": 2098,
+    "end": 2113,
+    "text": "Simon Lindqvist"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 2165,
+    "end": 2182,
+    "text": "+1 (415) 555-0132"
+   }
+  ],
+  "keep": [
+   "Yorkshire",
+   "Britain",
+   "National Grid",
+   "Environment Agency",
+   "Royal Society",
+   "University of Edinburgh",
+   "Calvin",
+   "Department for Energy",
+   "European Union"
+  ]
+ },
+ "en_03_press_release.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 432,
+    "end": 448,
+    "text": "Katherine Rutter"
+   },
+   {
+    "type": "PERSON",
+    "start": 676,
+    "end": 692,
+    "text": "Bernard Kowalski"
+   },
+   {
+    "type": "PERSON",
+    "start": 891,
+    "end": 899,
+    "text": "Kowalski"
+   },
+   {
+    "type": "PERSON",
+    "start": 1079,
+    "end": 1090,
+    "text": "Imogen Vale"
+   },
+   {
+    "type": "PERSON",
+    "start": 1278,
+    "end": 1291,
+    "text": "Matthew Engle"
+   },
+   {
+    "type": "PERSON",
+    "start": 1407,
+    "end": 1416,
+    "text": "Schroeder"
+   },
+   {
+    "type": "PERSON",
+    "start": 1563,
+    "end": 1577,
+    "text": "Caroline Behan"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1585,
+    "end": 1601,
+    "text": "+44 117 496 0410"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1610,
+    "end": 1622,
+    "text": "07700 900555"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 1630,
+    "end": 1647,
+    "text": "press@example.org"
+   },
+   {
+    "type": "URL",
+    "start": 1694,
+    "end": 1738,
+    "text": "https://www.county-example.example.org/press"
+   },
+   {
+    "type": "PERSON",
+    "start": 1788,
+    "end": 1802,
+    "text": "Julia Sedgwick"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 2001,
+    "end": 2028,
+    "text": "FR1420041010050500013M02606"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 2129,
+    "end": 2144,
+    "text": "378282246310005"
+   }
+  ],
+  "keep": [
+   "Bristol",
+   "Department for Transport",
+   "European Union",
+   "University of Bath",
+   "Treasury"
+  ]
+ },
+ "en_04_forum_post.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 246,
+    "end": 253,
+    "text": "Brennan"
+   },
+   {
+    "type": "PERSON",
+    "start": 501,
+    "end": 516,
+    "text": "Fiona Gallagher"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 930,
+    "end": 956,
+    "text": "family.bamford@example.net"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1023,
+    "end": 1035,
+    "text": "07911 123321"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1076,
+    "end": 1089,
+    "text": "0113 496 0815"
+   },
+   {
+    "type": "PERSON",
+    "start": 1104,
+    "end": 1117,
+    "text": "Sarah Bamford"
+   },
+   {
+    "type": "PERSON",
+    "start": 1147,
+    "end": 1151,
+    "text": "Toby"
+   },
+   {
+    "type": "PERSON",
+    "start": 1158,
+    "end": 1163,
+    "text": "Sarah"
+   },
+   {
+    "type": "CREDIT_CARD",
+    "start": 1451,
+    "end": 1470,
+    "text": "5555 5555 5555 4444"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 1515,
+    "end": 1527,
+    "text": "203.0.113.45"
+   },
+   {
+    "type": "PERSON",
+    "start": 1553,
+    "end": 1557,
+    "text": "Toby"
+   },
+   {
+    "type": "PERSON",
+    "start": 1725,
+    "end": 1731,
+    "text": "Winter"
+   },
+   {
+    "type": "PERSON",
+    "start": 1904,
+    "end": 1916,
+    "text": "Marlene Cook"
+   }
+  ],
+  "keep": [
+   "Leeds",
+   "Headingley",
+   "Pythagoras"
+  ]
+ },
+ "en_05_cv_bio.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 75,
+    "end": 96,
+    "text": "Katherine Bowen-Lewis"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 155,
+    "end": 168,
+    "text": "0141 496 0880"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 181,
+    "end": 196,
+    "text": "+44 7911 123456"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 208,
+    "end": 241,
+    "text": "katherine.bowen-lewis@example.org"
+   },
+   {
+    "type": "URL",
+    "start": 255,
+    "end": 290,
+    "text": "https://www.bowen-lewis.example.com"
+   },
+   {
+    "type": "PERSON",
+    "start": 312,
+    "end": 333,
+    "text": "Katherine Bowen-Lewis"
+   },
+   {
+    "type": "PERSON",
+    "start": 574,
+    "end": 587,
+    "text": "Henry Summers"
+   },
+   {
+    "type": "PERSON",
+    "start": 650,
+    "end": 661,
+    "text": "Bowen-Lewis"
+   },
+   {
+    "type": "PERSON",
+    "start": 936,
+    "end": 954,
+    "text": "Elizabeth Rothwell"
+   },
+   {
+    "type": "PERSON",
+    "start": 1119,
+    "end": 1134,
+    "text": "Derek Ainsworth"
+   },
+   {
+    "type": "PERSON",
+    "start": 1311,
+    "end": 1318,
+    "text": "Summers"
+   },
+   {
+    "type": "PERSON",
+    "start": 1333,
+    "end": 1346,
+    "text": "Ursula Hansen"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 1397,
+    "end": 1413,
+    "text": "+44 141 496 4455"
+   },
+   {
+    "type": "IBAN_CODE",
+    "start": 1518,
+    "end": 1539,
+    "text": "CH9300762011623852957"
+   },
+   {
+    "type": "PERSON",
+    "start": 1581,
+    "end": 1602,
+    "text": "Katherine Bowen-Lewis"
+   },
+   {
+    "type": "IP_ADDRESS",
+    "start": 1658,
+    "end": 1668,
+    "text": "192.0.2.99"
+   }
+  ],
+  "keep": [
+   "Glasgow",
+   "Dundee",
+   "Fife",
+   "University of Glasgow",
+   "Wellcome Trust",
+   "Hillhead",
+   "Institute of Education",
+   "British Rail"
+  ]
+ }
+}
