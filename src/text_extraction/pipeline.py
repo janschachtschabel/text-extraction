@@ -261,14 +261,14 @@ _LANG_ATTRIBUTE = re.compile(r"""(?:^|\s)(?:xml:)?lang\s*=\s*["']?([^"'\s>]+)"""
 _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30)
 
 
-# Hands a document that needs OCR to the Docling pool and answers for it. It gets the answer
-# without OCR too (``pipeline_documents.without_ocr``), for a fallback of its own.
 def _with_pii_time(timings: Timings, handed_off: Timings) -> Timings:
     """This request's ``timings``, with the PII time of a handoff's answer kept: a Docling or
     ASR job's result that came back through the nlp pool carries its ``pii_ms`` (N3)."""
     return timings.model_copy(update={"pii_ms": handed_off.pii_ms})
 
 
+# Hands a document that needs OCR to the Docling pool and answers for it. It gets the answer
+# without OCR too (``pipeline_documents.without_ocr``), for a fallback of its own.
 type OcrHandoff = Callable[[OcrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
 # Hands media that needs speech recognition to the ASR queue and answers for it; it gets the
 # answer without a transcription too (``pipeline_media.without_asr``), as its stand-in.
