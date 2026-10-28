@@ -13,7 +13,8 @@ it is and its offsets point at the entity. Recall per type is that of ``annotate
 Markdown texts, counted as in ``docs/superpowers/plans/2026-10-26-package-7-calibration.md``: a
 gold span is found when entities of its type cover 80 % of it. The pattern types must be found
 without a miss; ``PERSON`` meets the pins below. No word of a ``keep`` list is touched by the
-default entity types (decision D2: places and institutions are not personal data).
+default entity types (decision D2: places and institutions are not personal data), except the
+known false positives listed per model size in ``KNOWN_FALSE_POSITIVES``.
 
 Run it with ``uv sync --extra nlp`` and ``uv run pytest -m nlp tests/pii/test_corpus.py`` (add
 ``PII_TEST_MODEL_SIZE=lg`` for the large models).
