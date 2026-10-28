@@ -12,6 +12,7 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode
 from text_extraction.netguard import MAX_URL_LENGTH
+from text_extraction.pii.types import PiiOptions
 
 JobKind = Literal["extract", "batch", "screenshot", "file"]
 JobState = Literal["queued", "running", "completed"]
@@ -67,6 +68,12 @@ class BatchRequest(BaseModel, extra="forbid"):
         description="As for `/v1/extract`: preferred subtitle and transcription languages, at "
         "most 5.",
     )
+    pii: PiiOptions | None = Field(
+        default=None,
+        description="As for `/v1/extract`: find personal data in every item's result and "
+        "handle it (`mask`, `redact`, `hash` or `annotate`; a bare string is the mode). 400 "
+        "while the service has no PII handling.",
+    )
 
 
 class JobOptions(BaseModel, extra="forbid"):
@@ -84,6 +91,7 @@ class JobOptions(BaseModel, extra="forbid"):
     ocr: OcrOption = "auto"
     transcribe: bool = False
     languages: list[LanguageCode] = Field(default=[], max_length=MAX_LANGUAGES)
+    pii: PiiOptions | None = None
 
     @model_validator(mode="after")
     def _screenshot_needs_browser(self) -> Self:

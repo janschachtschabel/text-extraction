@@ -118,6 +118,7 @@ Keep these out of ConfigMaps, images and logs.
 | `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
+| `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | Not set by the chart yet (the Helm key comes with the NLP worker). docker compose: `.env`. |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -439,6 +440,38 @@ The request fields `transcribe` (default `false`) and `languages` (preferred sub
 transcription languages, ISO 639 codes such as `de` or `en-GB`, at most 5; default: the video's
 original language) are part of `POST /v1/extract` and `POST /v1/batch`. `transcribe: true` answers
 400 `invalid_request` while the service has no transcription.
+
+## PII
+
+A request with `pii` finds personal data in the result (the content, the title, the metadata, the
+links, the media uploader, the document's file name) and masks, redacts, hashes or lists it. The
+analysis runs in the NLP worker (pool `nlp`, Presidio and spaCy), never in the API pod: the API
+image has neither the libraries nor the models. PII is off by default.
+
+The request field `pii` is part of `POST /v1/extract`, `POST /v1/batch` and (as a string) the form
+of `POST /v1/extract/file`: a mode (`mask`, `redact`, `hash`, `annotate`) or an object with `mode`,
+`entities` (default `PII_DEFAULT_ENTITIES`), `language` (`auto`, `de`, `en`) and `score_threshold`
+(default `PII_SCORE_THRESHOLD`). `mask` turns an entity into `[PERSON]`, `redact` into
+`[REDACTED]`, `hash` into `[PERSON:<12 hex>]` (HMAC-SHA-256 of the type and the value, case-folded
+and with its whitespace collapsed; equal values get equal hashes), `annotate` keeps the text and
+lists the entities in `data.pii.items`. The report is `data.pii`; `data.timings.pii_ms` is its
+time. A result that could not be processed answers `failed`/`pii_failed` with its content withheld.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PII_ENABLED` | `false` | Switch PII handling on: requests with `pii` are processed by the NLP worker (`text-extraction-nlp-worker`, pool `nlp`). Needs `JOBS_ENABLED=true`. Off, a request with `pii` answers 400 `invalid_request`. |
+| `PII_DEFAULT_ENTITIES` | `PERSON,EMAIL_ADDRESS,PHONE_NUMBER,IBAN_CODE,CREDIT_CARD,IP_ADDRESS` | Entity types handled when a request names none: a comma-separated list of `PERSON`, `LOCATION`, `ORGANIZATION`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, without repeats. Places, organisations and URLs are left out by default: teaching material is full of them and they are rarely personal data. An empty, unknown or repeated entry makes the service exit with code 2. |
+| `PII_SCORE_THRESHOLD` | `0.4` | Least confidence of an entity, 0 to 1, when a request names none (`score_threshold`). Lower finds more and mistakes more. |
+| `PII_FALLBACK_LANGUAGE` | `en` | The model (`de` or `en`) for names in a language that has none of its own, with the warning `pii_language_unsupported`. The patterns (e-mail, phone, IBAN, card, IP) work in any language. |
+| `PII_SYNC_WAIT_SECONDS` | `20` | How long a request with `pii` and without `wait_seconds` waits for the NLP worker, in seconds, before it answers 202 with its job. 1 to 60. |
+| `PII_TIMEOUT_SECONDS` | `300` | Time budget of one item in the NLP worker, in seconds; the analysis child is killed after it and the item fails with `pii_failed`, retryable. The worker's lease of an item is 2 × this + 10 s. 10 to 3600. |
+| `PII_MAX_CHARS` | `2000000` | Most characters of all fields of one result that are analysed. A result with more fails with `too_large`, its content withheld. Minimum 10000. |
+| `PII_MAX_ENTITIES` | `1000` | Most items `annotate` lists; more are cut with the warning `pii_entities_truncated` (the counts stay complete). 1 to 100000. |
+| `PII_CONCURRENCY` | `1` | Items one NLP worker pod analyses at once, each in a child process of its own with the models loaded. Minimum 1. |
+| `PII_MEMORY_LIMIT_MB` | `3072` | Address space limit of one analysis child, in MiB (the `lg` models need about 2.2 GB at their peak). Minimum 512. |
+| `PII_MODELS_PATH` | `/models` | Volume with the spaCy models, one folder each. The image holds no models; the NLP worker mounts the volume read-only. |
+| `PII_MODEL_SIZE` | `lg` | spaCy models: `lg` (about 1 GB, better German names) or `md` (about 115 MB, half the memory, more names missed). Any other value makes the service exit with code 2. |
+| `PII_HASH_KEY` | unset | **Secret**, see [Secrets](#secrets): the key of `mode: hash`, at least 32 bytes (`openssl rand -hex 32`). With it the same value gets the same hash in every result of the service (`pii.hash_scope: service`), so documents can be linked without the value. Without it each result gets a random key (`hash_scope: result`): equal values match only within one result. Changing it changes every hash. Empty counts as unset; a shorter key makes the service exit with code 2. |
 
 ## Headers
 

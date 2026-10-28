@@ -29,6 +29,7 @@ class ErrorCode(StrEnum):
     MEDIA_TOO_LONG = "media_too_long"
     TRANSCRIPTION_FAILED = "transcription_failed"
     LLM_FAILED = "llm_failed"
+    PII_FAILED = "pii_failed"
     RATE_LIMITED = "rate_limited"
     INTERNAL_ERROR = "internal_error"
     # The service's own 4xx answers.

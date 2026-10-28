@@ -440,13 +440,28 @@ def test_too_many_fields_refused(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     "form",
-    [{"fromat": "text"}, {"format": "pdf"}, {"ocr": "maybe"}, {"wait_seconds": "61"}],
+    [
+        {"fromat": "text"},
+        {"format": "pdf"},
+        {"ocr": "maybe"},
+        {"wait_seconds": "61"},
+        {"pii": "scramble"},
+        {"pii": "{not json"},
+        {"pii": '{"mode": "mask", "entities": []}'},
+    ],
 )
 def test_invalid_form_is_422(client: TestClient, form: dict[str, str]) -> None:
     response = upload(client, GIF, "a.gif", "image/gif", form=form)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("pii", ["mask", '{"mode": "annotate", "entities": ["PERSON"]}'])
+def test_pii_form_field_is_a_mode_or_a_json_object(client: TestClient, pii: str) -> None:
+    response = upload(client, GIF, "a.gif", "image/gif", form={"pii": pii})
+
+    assert response.status_code == 200
 
 
 def test_missing_file_is_422(client: TestClient) -> None:
@@ -557,8 +572,9 @@ def test_openapi_documents_multipart(client: TestClient) -> None:
     assert body["properties"]["file"]["format"] == "binary"
     assert body["required"] == ["file"]
     form = schemas[body["allOf"][0]["$ref"].rsplit("/", 1)[-1]]
-    assert set(form["properties"]) == {"format", "metadata", "ocr", "wait_seconds"}
+    assert set(form["properties"]) == {"format", "metadata", "ocr", "wait_seconds", "pii"}
     assert form["properties"]["wait_seconds"]["default"] == 25
+    assert form["properties"]["pii"]["type"] == "string"
     assert "202" in operation["responses"]
 
 

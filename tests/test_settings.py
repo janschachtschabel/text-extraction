@@ -95,6 +95,19 @@ SETTING_ENV_VARS = (
     "ASR_EXTERNAL_MODEL",
     "ASR_EXTERNAL_API_KEY",
     "ASR_EXTERNAL_TIMEOUT_SECONDS",
+    "PII_ENABLED",
+    "PII_DEFAULT_ENTITIES",
+    "PII_SCORE_THRESHOLD",
+    "PII_FALLBACK_LANGUAGE",
+    "PII_SYNC_WAIT_SECONDS",
+    "PII_TIMEOUT_SECONDS",
+    "PII_MAX_CHARS",
+    "PII_MAX_ENTITIES",
+    "PII_CONCURRENCY",
+    "PII_MEMORY_LIMIT_MB",
+    "PII_MODELS_PATH",
+    "PII_MODEL_SIZE",
+    "PII_HASH_KEY",
 )
 
 
@@ -1075,3 +1088,101 @@ def test_asr_external_api_key_empty_means_unset(
     monkeypatch.setenv("ASR_EXTERNAL_API_KEY", value)
 
     assert load_settings().asr_external_api_key is None
+
+
+def test_pii_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.pii_enabled is False
+    assert settings.pii_default_entities == [
+        "PERSON",
+        "EMAIL_ADDRESS",
+        "PHONE_NUMBER",
+        "IBAN_CODE",
+        "CREDIT_CARD",
+        "IP_ADDRESS",
+    ]
+    assert settings.pii_score_threshold == 0.4
+    assert settings.pii_fallback_language == "en"
+    assert settings.pii_sync_wait_seconds == 20
+    assert settings.pii_timeout_seconds == 300
+    assert settings.pii_max_chars == 2_000_000
+    assert settings.pii_max_entities == 1000
+    assert settings.pii_concurrency == 1
+    assert settings.pii_memory_limit_mb == 3072
+    assert settings.pii_models_path == Path("/models")
+    assert settings.pii_model_size == "lg"
+    assert settings.pii_hash_key is None
+
+
+def test_pii_default_entities_from_a_comma_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("PII_DEFAULT_ENTITIES", " person, URL ,email_address")
+
+    assert load_settings().pii_default_entities == ["PERSON", "URL", "EMAIL_ADDRESS"]
+
+
+@pytest.mark.parametrize("value", ["", "PERSON,PERSON", "PERSON,SSN"])
+def test_pii_default_entities_invalid(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("PII_DEFAULT_ENTITIES", value)
+
+    with pytest.raises(ConfigError, match="pii_default_entities"):
+        load_settings()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("PII_SCORE_THRESHOLD", "1.5"),
+        ("PII_SCORE_THRESHOLD", "-0.1"),
+        ("PII_SYNC_WAIT_SECONDS", "0"),
+        ("PII_SYNC_WAIT_SECONDS", "61"),
+        ("PII_TIMEOUT_SECONDS", "9"),
+        ("PII_TIMEOUT_SECONDS", "3601"),
+        ("PII_MAX_CHARS", "9999"),
+        ("PII_MAX_ENTITIES", "0"),
+        ("PII_MAX_ENTITIES", "100001"),
+        ("PII_CONCURRENCY", "0"),
+        ("PII_MEMORY_LIMIT_MB", "511"),
+        ("PII_MODEL_SIZE", "xl"),
+        ("PII_FALLBACK_LANGUAGE", "fr"),
+    ],
+)
+def test_pii_bounds(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_pii_hash_key_not_in_repr_and_min_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("PII_HASH_KEY", "0123456789abcdef0123456789abcdef-secret")
+
+    settings = load_settings()
+
+    assert settings.pii_hash_key is not None
+    assert settings.pii_hash_key.get_secret_value() == "0123456789abcdef0123456789abcdef-secret"
+    assert "0123456789abcdef" not in repr(settings)
+    assert "0123456789abcdef" not in str(settings)
+
+    monkeypatch.setenv("PII_HASH_KEY", "short-key-0123456789")
+    with pytest.raises(ConfigError) as error:
+        load_settings()
+    assert "short-key" not in str(error.value)
+
+    monkeypatch.setenv("PII_HASH_KEY", "é" * 16)  # 32 bytes in UTF-8
+    assert load_settings().pii_hash_key is not None
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_pii_hash_key_empty_means_unset(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """A chart that renders an unset secret so must not make the service refuse to start."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("PII_HASH_KEY", value)
+
+    assert load_settings().pii_hash_key is None

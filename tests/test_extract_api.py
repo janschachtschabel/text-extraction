@@ -165,6 +165,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "unblocked",
         "document",
         "media",
+        "pii",
     }
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
@@ -175,6 +176,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "fetch_ms",
         "convert_ms",
         "render_ms",
+        "pii_ms",
     }
     assert data["compliance"]["decision"] == "allowed"
     assert {"url", "text", "kind"} <= set(data["links"][0])

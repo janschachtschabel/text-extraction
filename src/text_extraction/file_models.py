@@ -1,14 +1,16 @@
 """Form model of ``POST /v1/extract/file`` (ruling F17)."""
 
-from typing import Any
+import json
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, WithJsonSchema, field_validator, model_validator
 
 from text_extraction.browser_options import WaitSeconds
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
 from text_extraction.documents.types import OcrOption
 from text_extraction.job_models import JobOptions
+from text_extraction.pii.types import PiiOptions
 
 # The form part that carries the file; the route takes it as a parameter of its own.
 FILE_PART = "file"
@@ -36,6 +38,14 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
         "`GET /v1/jobs/{id}` has the result. Ignored when jobs are disabled "
         "(`JOBS_ENABLED=false`).",
     )
+    # The part is text, so the schema says string; the validator below makes the options of it.
+    pii: Annotated[PiiOptions | None, WithJsonSchema({"type": "string"})] = Field(
+        default=None,
+        description="Find personal data in the result and handle it. Either a mode (`mask`, "
+        "`redact`, `hash` or `annotate`) or a JSON object as a string, e.g. "
+        '`{"mode": "annotate", "entities": ["PERSON"], "score_threshold": 0.6}`; see '
+        "`POST /v1/extract` for its fields.",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -44,6 +54,18 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
         if isinstance(data, dict) and FILE_PART in data:
             return {name: value for name, value in data.items() if name != FILE_PART}
         return data
+
+    @field_validator("pii", mode="before")
+    @classmethod
+    def _pii_from_its_form_string(cls, value: Any) -> Any:
+        """The part is text: a bare mode (``PiiOptions`` reads it as the mode) or a JSON
+        object."""
+        if isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+            try:
+                return json.loads(value)
+            except ValueError:
+                raise ValueError("pii is not valid JSON") from None
+        return value
 
 
 class UploadInputMeta(BaseModel):
@@ -65,10 +87,13 @@ def upload_options(form: FileForm, compliance: ComplianceMode) -> JobOptions:
         compliance=compliance,
         cache=False,
         ocr=form.ocr,
+        pii=form.pii,
     )
 
 
 def form_of(options: JobOptions) -> FileForm:
     """The form of an upload, rebuilt from its job's options (``wait_seconds`` does not
     matter any more)."""
-    return FileForm(format=options.format, metadata=options.metadata, ocr=options.ocr)
+    return FileForm(
+        format=options.format, metadata=options.metadata, ocr=options.ocr, pii=options.pii
+    )

@@ -1,0 +1,95 @@
+"""Spans: segmenting long text for the analyser and settling overlaps between its findings.
+
+Pure and free of Presidio and spaCy. The analyser's cost grows faster than linearly with the
+length of a text (its context step), so long text goes in segments of at most 20,000
+characters; in the spike 175,000 characters took 11.3 s in one piece and 3.8 s in segments.
+"""
+
+from collections.abc import Iterable
+
+from text_extraction.pii.types import Span
+
+SEGMENT_CHARS = 20_000
+
+# Where a segment is cut, best first: after a blank line, after a line break, after a space.
+_SEPARATORS = ("\n\n", "\n", " ")
+
+
+def segments(text: str, max_chars: int = SEGMENT_CHARS) -> list[tuple[int, str]]:
+    """``text`` in pieces of at most ``max_chars`` characters, as ``(offset, piece)``.
+
+    A piece ends after the last blank line inside its window, else after the last line break,
+    else after the last space, else it is cut at ``max_chars``. The separator stays with the
+    piece before it, so the pieces in order are the text again, and a span's offset in the text
+    is the piece's offset plus its own.
+    """
+    if max_chars < 1:
+        raise ValueError("max_chars must be at least 1")
+    pieces: list[tuple[int, str]] = []
+    start = 0
+    while start < len(text):
+        window_end = start + max_chars
+        if window_end >= len(text):
+            pieces.append((start, text[start:]))
+            break
+        cut = window_end
+        for separator in _SEPARATORS:
+            found = text.rfind(separator, start, window_end)
+            if found != -1:
+                cut = found + len(separator)
+                break
+        pieces.append((start, text[start:cut]))
+        start = cut
+    return pieces
+
+
+def resolve(spans: Iterable[Span], text: str) -> list[Span]:
+    """The spans without overlaps, sorted by start.
+
+    A span inside another of equal or higher score is dropped (of two equal spans one stays).
+    Where two spans overlap partly, the one of lower score is cut to its part outside the other,
+    and the part is dropped when it holds no letter or digit; a span that surrounds a better
+    one keeps both of its outer parts. On equal scores the longer span wins, then the earlier,
+    and stays whole. A cut part loses the blanks at its ends: the replacement must not eat the
+    space between words. Offsets past the text are clamped, empty spans are dropped.
+    """
+    accepted: list[Span] = []
+    for candidate in sorted(
+        (_clamped(span, len(text)) for span in spans),
+        key=lambda span: (-span.score, span.start - span.end, span.start, span.type),
+    ):
+        if candidate.end <= candidate.start:
+            continue
+        taken = [
+            other
+            for other in accepted
+            if other.start < candidate.end and candidate.start < other.end
+        ]
+        if not taken:
+            accepted.append(candidate)
+            continue
+        for start, end in _outside(candidate, taken):
+            piece = text[start:end]
+            stripped = piece.strip()
+            if not any(char.isalnum() for char in stripped):
+                continue
+            start += len(piece) - len(piece.lstrip())
+            accepted.append(Span(start, start + len(stripped), candidate.type, candidate.score))
+    return sorted(accepted, key=lambda span: (span.start, span.end))
+
+
+def _clamped(span: Span, length: int) -> Span:
+    return Span(max(span.start, 0), min(span.end, length), span.type, span.score)
+
+
+def _outside(span: Span, taken: list[Span]) -> list[tuple[int, int]]:
+    """The parts of ``span`` that none of ``taken`` covers, left to right."""
+    parts: list[tuple[int, int]] = []
+    position = span.start
+    for other in sorted(taken, key=lambda span: span.start):
+        if other.start > position:
+            parts.append((position, other.start))
+        position = max(position, other.end)
+    if position < span.end:
+        parts.append((position, span.end))
+    return parts

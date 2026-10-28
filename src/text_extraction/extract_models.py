@@ -24,6 +24,7 @@ from text_extraction.fingerprint import Fingerprint
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode, MediaInfo
 from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
+from text_extraction.pii.types import PiiOptions, PiiReport
 from text_extraction.quality import Quality
 from text_extraction.tracing import current_trace_id
 
@@ -105,6 +106,15 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="Preferred subtitle and transcription languages, ISO 639 codes, at most 5; "
         "default: the video's original language.",
     )
+    pii: PiiOptions | None = Field(
+        default=None,
+        description="Find personal data in the result and handle it: `mask`, `redact`, `hash` or "
+        "`annotate` (a bare string is the mode; see the object's fields). Applies to the "
+        "content, the title, the metadata, the links and the media uploader; the report is "
+        "`data.pii`. Always a job when the service has to wait for it: a request without "
+        "`wait_seconds` waits `PII_SYNC_WAIT_SECONDS`, then answers 202. 400 while the service "
+        "has no PII handling. Not with `screenshot`.",
+    )
 
     @model_validator(mode="after")
     def _browser_options(self) -> Self:
@@ -133,6 +143,7 @@ class Timings(BaseModel):
     fetch_ms: int
     convert_ms: int
     render_ms: int = 0  # browser: navigation, actions and settling; 0 in fast mode
+    pii_ms: int = 0  # the PII step; 0 without ``pii``
 
 
 class ExtractResult(BaseModel):
@@ -181,6 +192,8 @@ class ExtractResult(BaseModel):
     document: DocumentInfo | None = None
     # Audio and video only (and pages with players); the default keeps older results valid.
     media: MediaInfo | None = None
+    # With a ``pii`` request only; the default keeps results cached before PII valid.
+    pii: PiiReport | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

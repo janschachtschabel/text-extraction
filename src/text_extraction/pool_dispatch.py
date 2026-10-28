@@ -92,6 +92,7 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         ocr=req.ocr,
         transcribe=req.transcribe,
         languages=req.languages,
+        pii=req.pii,
     )
 
 
