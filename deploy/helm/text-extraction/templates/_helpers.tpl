@@ -246,8 +246,8 @@ the NLP worker container gets it (not its models init container, no other pod). 
 - name: PII_HASH_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ $nlp.hashKey.existingSecret }}
-      key: {{ $nlp.hashKey.existingSecretKey }}
+      name: {{ $nlp.hashKey.existingSecret | quote }}
+      key: {{ $nlp.hashKey.existingSecretKey | quote }}
 {{- end }}
 {{- end -}}
 

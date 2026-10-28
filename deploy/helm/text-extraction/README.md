@@ -242,10 +242,10 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.nlp.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
 | `workers.nlp.replicaCount` | `1` | Ignored with KEDA or HPA. |
 | `workers.nlp.concurrency` | `1` | `PII_CONCURRENCY`: results analysed per pod at once, each in a child process of its own with the models loaded. |
-| `workers.nlp.terminationGracePeriodSeconds` | `60` | Analyses in flight get 30 s after SIGTERM, then the children are killed and their items run again elsewhere once their lease expires. The render fails below 40. |
+| `workers.nlp.terminationGracePeriodSeconds` | `60` | Analyses in flight get 30 s after SIGTERM, then the children are killed and their items run again elsewhere once their lease expires: `2 × PII_TIMEOUT_SECONDS + 10`, 610 s by default, so a rollout during an analysis can delay that job by about 10 minutes. The render fails below 40. |
 | `workers.nlp.resources` | requests 1 / 2Gi, limits 2 / 3Gi | Placeholder for one analysis child with the `lg` models (about 1.6 GB resident, 2.2 GB peak on a long text; `PII_MEMORY_LIMIT_MB` 3072 of address space). `md` needs about half. |
-| `workers.nlp.nodeSelector` | `{}` | Merged over the global `nodeSelector`. |
-| `workers.nlp.autoscaling.keda.*` | as for the extract workers, `threshold` `10`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="nlp"})`. The API pods export it while `JOBS_ENABLED` and `PII_ENABLED` are true. Keep one replica: a sync request with `pii` waits only `PII_SYNC_WAIT_SECONDS` (20) for a worker. |
+| `workers.nlp.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The nlp wheels are not amd64-only, but the published NLP image is built for linux/amd64 only: pin `kubernetes.io/arch: amd64` here when the cluster has arm64 nodes. |
+| `workers.nlp.autoscaling.keda.*` | as for the extract workers, `threshold` `10` (an untuned placeholder until package 11), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="nlp"})`. The API pods export it while `JOBS_ENABLED` and `PII_ENABLED` are true. Keep one replica: a sync request with `pii` waits only `PII_SYNC_WAIT_SECONDS` (20) for a worker, and answers 202 with its job when the backlog waits longer. |
 | `workers.nlp.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
 | `workers.nlp.autoscaling.scaleDownStabilizationWindowSeconds` | `null` | As for the extract workers. |
 | `workers.nlp.hashKey.existingSecret` | `""` | Your own Secret with `PII_HASH_KEY`. Empty: no key, `hash_scope: result`. |
@@ -253,7 +253,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.nlp.models.download` | `true` | Runs `text-extraction-nlp-worker --download-models` (the models of `modelSize`, from github.com, which redirects to githubusercontent.com) with the volume mounted writable. `false` needs `persistence.existingClaim`, or the render fails. |
 | `workers.nlp.models.downloadMode` | `init` | `init` or `job`, as for the Docling workers. |
 | `workers.nlp.models.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Of the init container or the hook Job, as for the Docling workers. |
-| `workers.nlp.models.persistence.size` | `2Gi` | `lg` takes about 1.1 GB and `md` about 0.2 GB; switching `modelSize` adds the other pair beside the first. |
+| `workers.nlp.models.persistence.size` | `3Gi` | An update stages a full copy beside the models before it swaps them: the `lg` pair takes about 1 GB, so a manifest update needs about 2.4 GB at its peak (a smaller volume fails the init container or the Job with ENOSPC), and `lg` plus `md` (after a change of `modelSize`) needs more still. |
 | `workers.nlp.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
 | `workers.nlp.models.persistence.storageClass` | `""` | Cluster default when empty. |
 | `workers.nlp.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
@@ -302,10 +302,14 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
-| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000; for `docling` `alerts.doclingQueueBacklogItems`, 100; for `asr` `alerts.asrQueueBacklogItems`, 50; for `nlp` `alerts.nlpQueueBacklogItems`, 200) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
+| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above the pool's backlog threshold (below the table) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
 | `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
+
+The backlog thresholds are `alerts.queueBacklogItems` (1000) for `extract` and `browser`,
+`alerts.doclingQueueBacklogItems` (100), `alerts.asrQueueBacklogItems` (50) and
+`alerts.nlpQueueBacklogItems` (200).
 
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
 `TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the alerts of the
@@ -436,7 +440,9 @@ workers such a request answers 400. The API pods keep their grace period: a sync
   `models.download: false`.
 - `workers.nlp.hashKey.existingSecret` names a Secret with `PII_HASH_KEY` (at least 32 bytes) for
   `mode: hash`; only the NLP worker container gets it. Without it each result is hashed with a
-  random key. Changing it changes every hash.
+  random key. Changing it changes every hash. The checksum annotation of the pods does not cover
+  your own Secret: after rotating `PII_HASH_KEY` in it, restart the NLP worker pods
+  (`kubectl rollout restart`).
 - The text of a result never reaches a log, a metric label or the ConfigMap; the workers count
   found entities by type only.
 

@@ -647,7 +647,6 @@ expect_absent "nlp off renders no models PVC" "$on" "$NLP_MODELS"
 for name in "$API" "$EXTRACT" "$BROWSER"; do
   expect_values "nlp off ($name)" "$(document "$on" Deployment "$name")" PII_ENABLED "false"
 done
-expect_values "nlp off renders PII_ENABLED=false" "$(document "$on" Deployment "$API")" PII_ENABLED "false"
 expect_values "config.PII_ENABLED ignored (API)" \
   "$(document "$(render --set config.PII_ENABLED=true)" Deployment "$API")" PII_ENABLED "false"
 expect_absent "no PII_HASH_KEY without nlp workers" "$on" "PII_HASH_KEY"
@@ -690,7 +689,7 @@ expect_contains "nlp worker mounts the models" "$worker" "mountPath: /models"
 expect_contains "nlp worker models mount is read-only" "$(flat "$worker")" "mountPath: /models readOnly: true"
 expect_absent "nlp worker does not download" "$worker" "--download-models"
 nlp_pvc="$(document "$nlp_on" PersistentVolumeClaim "$NLP_MODELS")"
-expect_contains "nlp models PVC is rendered" "$nlp_pvc" "storage: 2Gi"
+expect_contains "nlp models PVC is rendered" "$nlp_pvc" "storage: 3Gi"
 expect_contains "nlp models PVC is ReadWriteMany" "$nlp_pvc" "- ReadWriteMany"
 expect_absent "nlp models PVC uses the default storage class" "$nlp_pvc" "storageClassName"
 expect_contains "nlp worker uses the models PVC" "$nlp" "claimName: $NLP_MODELS"
@@ -714,11 +713,11 @@ expect_values "nlp concurrency follows workers.nlp.concurrency" \
 nlp_key="$(render --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key)"
 nlp_keyed="$(document "$nlp_key" Deployment "$NLP")"
 expect_contains "hashKey secret renders PII_HASH_KEY from it" \
-  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$nlp_keyed")" "name: pii-key"
+  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$nlp_keyed")" 'name: "pii-key"'
 expect_contains "hashKey secret key defaults to PII_HASH_KEY" \
-  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$nlp_keyed")" "key: PII_HASH_KEY"
+  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$nlp_keyed")" 'key: "PII_HASH_KEY"'
 expect_contains "hashKey secret key can be set" \
-  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key --set workers.nlp.hashKey.existingSecretKey=hmac)" Deployment "$NLP")")" "key: hmac"
+  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key --set workers.nlp.hashKey.existingSecretKey=hmac)" Deployment "$NLP")")" 'key: "hmac"'
 expect_absent "PII_HASH_KEY stays out of the init container" \
   "$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$nlp_keyed")" "PII_HASH_KEY"
 for name in "$API" "$EXTRACT" "$BROWSER"; do

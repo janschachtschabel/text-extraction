@@ -133,17 +133,17 @@ jobs:
           done
           '
 
-      # The API image must not hold the PII stack (it belongs to the NLP image): no Presidio, spaCy
-      # or thinc, so no model could be loaded in it either.
-      - name: API image has no presidio_analyzer, spacy, thinc
-        if: matrix.variant == 'api'
+      # No image but the NLP image may hold the PII stack: no Presidio, spaCy or thinc in the API
+      # image or the browser, Docling and ASR images, so no model could be loaded in them either.
+      - name: Image has no presidio_analyzer, spacy, thinc (all but nlp)
+        if: matrix.variant != 'nlp'
         run: |
           docker run --rm "$CHECK_TAG" python -c '
           import importlib.util, sys
           names = ("presidio_analyzer", "spacy", "thinc")
           found = [name for name in names if importlib.util.find_spec(name)]
-          sys.exit(f"PII packages in the API image: {found}" if found else 0)
-          '
+          sys.exit(f"PII packages in the {sys.argv[1]} image: {found}" if found else 0)
+          ' "${{ matrix.variant }}"
 
       # Every image runs tini as PID 1 and as the non-root user 10001.
       - name: Image runs tini as a non-root user
