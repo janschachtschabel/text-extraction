@@ -24,17 +24,22 @@ each item it:
    is ``de`` or ``en``; else ``PII_FALLBACK_LANGUAGE`` with the warning
    ``pii_language_unsupported``;
 4. sends the strings that need the analyser, and only those (an author's name and the uploader
-   are one person as a whole: ruling R1), to a child in one call, by a deadline of
-   ``PII_TIMEOUT_SECONDS`` from the start of the item. A child that was replaced (killed at a
-   deadline, crashed, recycled) is not loaded: its ``NotLoaded`` is answered with a ``load`` of
-   the configured models, then the call is repeated (at most ``MAX_LOADS_PER_ITEM`` loads);
+   are one person as a whole: ruling R1), to a child in one call, with the models' path and size,
+   by a deadline of ``PII_TIMEOUT_SECONDS`` from the moment the call is made. A child loads the
+   models lazily, in the call that finds it without them (ruling R12): a child that the pool
+   replaced (killed at a deadline, crashed, recycled) is loaded by its own next call, and loads
+   once per lifetime, whichever child the pool hands out. The first call of a fresh child spends
+   a few seconds of its deadline on the load;
 5. applies the mode to the result with the spans (``pii.fields.apply_pii``: N7 resolves them,
    N2 and N10 replace them), sets the report and ``timings.pii_ms``, and counts the entities by
    type in ``text_extraction_pii_entities_total{type}``.
 
 Failures never answer the draft: the child's deadline, a crash, an error of the child and models
-that do not load are ``failed``/``pii_failed``, retryable; a child that runs out of memory is
-``too_large``, not retryable (the same text would fail again). Each of them is the draft with
+that do not load (including a child that runs out of memory while it loads them: the child
+reports that as ``LoadFailed``, never as the text's size) are ``failed``/``pii_failed``,
+retryable; a child that runs out of memory analysing is ``too_large``, not retryable (the same
+text would fail again). Spans and replacement that raise are ``pii_failed`` as well (the type is
+logged, never the message: it could quote the text). Each of them is the draft with
 its text, title, metadata, links, uploader and file name removed (``pii.fields.fail_closed``)
 and keeps what the target answered. The ``Worker`` deletes the draft once the result is written
 (also of an exhausted item, which answers ``pii_failed``, retryable, never the draft); an item
@@ -42,8 +47,8 @@ that runs again (a failed write, a Valkey error, a cancelled shutdown) finds it.
 
 **The analysis** runs in one of ``PII_CONCURRENCY`` children (``DocumentPool``, one slot loop
 each), each with ``PII_MEMORY_LIMIT_MB`` of address space, by a deadline of its own. At the
-deadline the child is killed. The models' path and size go to the children in the ``load`` call,
-never through this process's environment.
+deadline the child is killed. The models' path and size go to the children in the payload, never
+through this process's environment. The pool replaces a child after ``CHILD_MAX_TASKS`` calls.
 
 **The process** serves only the internal port. Before anything else it checks the models
 (``model_store``): a model of ``PII_MODEL_SIZE`` that is missing under ``PII_MODELS_PATH`` ends the
@@ -123,8 +128,10 @@ GRACEFUL_SECONDS: Final = 30
 _CHILD_START_SECONDS: Final = 120.0
 # Loading the two models from the volume.
 _LOAD_SECONDS: Final = 300.0
-# A replaced child comes back unloaded; the loads one item may need to reach a loaded child.
-MAX_LOADS_PER_ITEM: Final = 3
+# Calls after which the pool replaces a child. Recycling only guards against spaCy's string
+# store growing with every text, and a replacement costs a reload of the models (about 8 s of the
+# 300 s an item has): far less often than the pool's default of 50 calls.
+CHILD_MAX_TASKS: Final = 1000
 # The built-in sentences of the self-check: a person and an e-mail address each (ruling N13).
 _CHECK_TYPES: Final[list[EntityType]] = ["PERSON", "EMAIL_ADDRESS"]
 _CHECK_SENTENCES: Final[tuple[tuple[PiiLanguage, str], ...]] = (
@@ -149,17 +156,18 @@ class PiiChildrenPool(PiiChildren, Protocol):
 
 def create_nlp_pool(settings: Settings) -> DocumentPool:
     """The PII children of a worker (``PII_CONCURRENCY``, ``PII_MEMORY_LIMIT_MB``); not started
-    yet and not loaded: the models' path and size go in the ``load`` call."""
+    yet and not loaded: the models' path and size go in the payload of each call."""
     return DocumentPool(
         settings.pii_concurrency,
         settings.pii_memory_limit_mb,
         target=PII_TARGET,
         start_timeout=_CHILD_START_SECONDS,
+        max_tasks=CHILD_MAX_TASKS,
     )
 
 
 def load_payload(settings: Settings) -> dict[str, Any]:
-    """The child's ``load`` call: the volume and the size of the models."""
+    """The volume and the size of the models, in the payload of a ``load`` or ``analyze`` call."""
     return {"models_path": str(settings.pii_models_path), "size": settings.pii_model_size}
 
 
@@ -260,7 +268,7 @@ class PiiRunner:
         language, fallback = choose_language(
             options.language, data.language, self._settings.pii_fallback_language
         )
-        spans: dict[str, list[Span]] = {}
+        found: dict[str, list[tuple[int, int, EntityType, float]]] = {}
         needing = [(field.name, field.text) for field in fields if field.whole is None]
         if needing:
             threshold = (
@@ -282,21 +290,26 @@ class PiiRunner:
             except (ConversionTimeout, ConversionCrashed, ConversionError) as error:
                 self._log_child_failure(error)
                 return _withheld(draft, options)
+        try:
             spans = {
                 name: [Span(start, end, kind, score) for start, end, kind, score in field_spans]
                 for name, field_spans in found.items()
             }
-        key, scope = hash_key(self._settings)
-        processed, warnings = apply_pii(
-            data,
-            options,
-            spans,
-            language=language,
-            key=key,
-            hash_scope=scope,
-            max_entities=self._settings.pii_max_entities,
-            entities=entities,
-        )
+            key, scope = hash_key(self._settings)
+            processed, warnings = apply_pii(
+                data,
+                options,
+                spans,
+                language=language,
+                key=key,
+                hash_scope=scope,
+                max_entities=self._settings.pii_max_entities,
+                entities=entities,
+            )
+        except Exception as error:
+            # The type only: the worker's own handler would log a traceback that may quote text.
+            _log.error("pii_apply_failed", error=type(error).__name__)
+            return _withheld(draft, options)
         if fallback:
             warnings.insert(0, LANGUAGE_UNSUPPORTED_WARNING)
         pii_ms = round((time.perf_counter() - started) * 1000)
@@ -318,28 +331,20 @@ class PiiRunner:
         entities: list[EntityType],
         threshold: float,
     ) -> dict[str, list[tuple[int, int, EntityType, float]]]:
-        """The child's spans per field, within ``PII_TIMEOUT_SECONDS``. A child that is not
-        loaded (replaced since its last call) gets the models, then the call again."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._settings.pii_timeout_seconds
+        """The child's spans per field, within ``PII_TIMEOUT_SECONDS`` of this call. A child
+        that has no models yet (a fresh one) loads them first, inside the same call."""
+        deadline = asyncio.get_running_loop().time() + self._settings.pii_timeout_seconds
         payload = {
             "fields": fields,
             "language": language,
             "entities": entities,
             "threshold": threshold,
+            **load_payload(self._settings),
         }
-        loads = 0
-        while True:
-            try:
-                reply: dict[str, list[tuple[int, int, EntityType, float]]] = await self._pool.run(
-                    "analyze", payload, deadline
-                )
-                return reply
-            except ConversionError as error:
-                if error.type_name != "NotLoaded" or loads >= MAX_LOADS_PER_ITEM:
-                    raise
-            loads += 1
-            await self._pool.run("load", load_payload(self._settings), deadline)
+        reply: dict[str, list[tuple[int, int, EntityType, float]]] = await self._pool.run(
+            "analyze", payload, deadline
+        )
+        return reply
 
     def _log_child_failure(self, error: Exception) -> None:
         """The failure's type only: a child's message may quote the text."""

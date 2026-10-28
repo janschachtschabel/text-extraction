@@ -10,12 +10,19 @@ allowlist of what a parent may call by name, each with the payload dict the pool
 - ``load`` (``models_path``, ``size``): the two spaCy models of ``size`` (``lg`` or ``md``,
   ``de_core_news_<size>`` and ``en_core_web_<size>``) from the directories of the same names
   under ``models_path``. A directory without ``config.cfg`` and ``meta.json`` raises
-  ``ModelsMissing`` (``model_store.require_models``), an unknown size ``ValueError``.
-- ``analyze`` (``fields``, ``language``, ``entities``, ``threshold``): ``fields`` are
-  ``(name, text)`` pairs. The reply is ``{name: [(start, end, type, score), ...]}`` for every
-  name given: spans of the asked ``entities`` only, at or above ``threshold``, with offsets into
-  that field's text, not yet resolved against each other (``pii/spans.py``: ``resolve``).
-  Without a ``load`` first it raises ``NotLoaded``.
+  ``ModelsMissing`` (``model_store.require_models``), an unknown size ``ValueError``, a
+  ``MemoryError`` while building the engine ``LoadFailed`` (it is the models' size, never the
+  text's: the parent must not read it as a text that is too large). Loading what is loaded
+  already (same path and size) does nothing; another path or size drops the engine before it
+  builds the next, so two engines are never alive at once.
+- ``analyze`` (``fields``, ``language``, ``entities``, ``threshold``, and ``models_path`` and
+  ``size`` as for ``load``): ``fields`` are ``(name, text)`` pairs. The reply is
+  ``{name: [(start, end, type, score), ...]}`` for every name given: spans of the asked
+  ``entities`` only, at or above ``threshold``, with offsets into that field's text, not yet
+  resolved against each other (``pii/spans.py``: ``resolve``). With ``models_path`` and ``size``
+  the child loads them first when it has no engine yet or one for other models (ruling R12:
+  each child loads lazily, once per lifetime, so a child that the pool replaced needs no call of
+  its own). Without them and without an engine it raises ``NotLoaded``.
 
 A text is analysed in segments of at most 20,000 characters (``spans.segments``): Presidio's
 context step grows faster than linearly with the length, and the offsets are added back.
@@ -41,7 +48,13 @@ LANGUAGES: Final = ("de", "en")
 
 
 class NotLoaded(Exception):  # noqa: N818 - a call out of order, named as such
-    """``analyze`` before ``load``: the parent starts a child and loads it first."""
+    """``analyze`` without an engine and without the models to load: the parent sends them with
+    every call."""
+
+
+class LoadFailed(Exception):  # noqa: N818 - a failed load, named as such
+    """The engine could not be built for lack of memory: a fault of the models' size, not of
+    any text."""
 
 
 class _Found(Protocol):
@@ -60,17 +73,28 @@ class _Analyzer(Protocol):
 
 
 _ANALYZER: _Analyzer | None = None
+_LOADED_FOR: tuple[str, str] | None = None  # (models_path, size) the engine was built for
 
 
 def load(models_path: str, size: str) -> None:
-    """Build the engine from the two models of ``size`` under ``models_path`` and keep it."""
-    global _ANALYZER
+    """Build the engine from the two models of ``size`` under ``models_path`` and keep it. Does
+    nothing when the engine is built for these models already."""
+    global _ANALYZER, _LOADED_FOR
     names = model_names(size)  # type: ignore[arg-type]  # ValueError for an unknown size
+    wanted = (models_path, size)
+    if _ANALYZER is not None and wanted == _LOADED_FOR:
+        return
     root = Path(models_path)
     model_store.require_models(root, model_store.load_manifest("nlp").only(*names.values()))
     from text_extraction.pii.recognizers import build_analyzer
 
-    _ANALYZER = build_analyzer({"de": root / names["de"], "en": root / names["en"]})
+    # The old engine goes first: both at once would roughly double the memory.
+    _ANALYZER = _LOADED_FOR = None
+    try:
+        _ANALYZER = build_analyzer({"de": root / names["de"], "en": root / names["en"]})
+    except MemoryError:
+        raise LoadFailed("not enough memory to load the models") from None
+    _LOADED_FOR = wanted
 
 
 def analyze(
@@ -80,7 +104,7 @@ def analyze(
     docstring)."""
     engine = _ANALYZER
     if engine is None:
-        raise NotLoaded("the models are not loaded: call load first")
+        raise NotLoaded("the models are not loaded: send models_path and size, or call load")
     if language not in LANGUAGES:
         raise ValueError(f"the language must be one of {LANGUAGES}")
     names = [name for name, _ in fields]
@@ -116,6 +140,8 @@ def _load_call(payload: dict[str, Any]) -> None:
 
 
 def _analyze_call(payload: dict[str, Any]) -> dict[str, list[tuple[int, int, str, float]]]:
+    if "models_path" in payload:
+        load(payload["models_path"], payload["size"])  # lazily, once per child
     fields = [(name, text) for name, text in payload["fields"]]
     return analyze(fields, payload["language"], payload["entities"], payload["threshold"])
 

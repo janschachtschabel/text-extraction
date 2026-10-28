@@ -211,6 +211,95 @@ def test_a_loaded_child_keeps_its_analyzer(child: Any, monkeypatch: pytest.Monke
     assert len(engine.calls) == 2
 
 
+def fake_models(
+    monkeypatch: pytest.MonkeyPatch, before_build: Callable[[], None] | None = None
+) -> list[tuple[dict[str, Path], "FakeEngine"]]:
+    """``build_analyzer`` and the volume check replaced: the engines built, with their models;
+    ``before_build`` runs when an engine is about to be built (it may raise)."""
+    built: list[tuple[dict[str, Path], FakeEngine]] = []
+
+    def build(models: dict[str, Path]) -> FakeEngine:
+        if before_build is not None:
+            before_build()
+        engine = FakeEngine()
+        built.append((dict(models), engine))
+        return engine
+
+    monkeypatch.setattr(model_store, "require_models", lambda *_: None)
+    monkeypatch.setitem(
+        sys.modules, "text_extraction.pii.recognizers", types.SimpleNamespace(build_analyzer=build)
+    )
+    return built
+
+
+def lazy_payload(**changes: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "fields": [["a", "Anna"]],
+        "language": "en",
+        "entities": ["PERSON"],
+        "threshold": 0.4,
+        "models_path": "/models",
+        "size": "md",
+    }
+    payload.update(changes)
+    return payload
+
+
+def test_analyze_loads_the_models_of_its_payload_once(
+    child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R12: a child loads lazily, in the call that finds it without models, and not again
+    for the same path and size, however many calls follow or a ``load`` repeats."""
+    built = fake_models(monkeypatch)
+
+    first = child.FUNCTIONS["analyze"](lazy_payload())
+    child.FUNCTIONS["analyze"](lazy_payload())
+    child.FUNCTIONS["load"]({"models_path": "/models", "size": "md"})
+
+    assert first == {"a": [(0, 4, "PERSON", 0.85)]}
+    assert [models for models, _engine in built] == [
+        {"de": Path("/models") / "de_core_news_md", "en": Path("/models") / "en_core_web_md"}
+    ]
+
+
+def test_analyze_for_other_models_drops_the_old_engine_before_building_the_next(
+    child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen_during_build: list[Any] = []
+    # Two engines alive at once would roughly double the memory.
+    built = fake_models(monkeypatch, lambda: seen_during_build.append(child._ANALYZER))
+    child.FUNCTIONS["analyze"](lazy_payload())
+
+    child.FUNCTIONS["analyze"](lazy_payload(size="lg"))
+    child.FUNCTIONS["analyze"](lazy_payload(size="lg"))
+
+    assert len(built) == 2
+    assert seen_during_build == [None, None]  # nothing was alive at either build
+    assert child._LOADED_FOR == ("/models", "lg")
+
+
+def test_a_memory_error_while_loading_is_load_failed_not_a_text_problem(
+    child: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def out_of_memory() -> None:
+        raise MemoryError
+
+    fake_models(monkeypatch, out_of_memory)
+
+    with pytest.raises(child.LoadFailed):
+        child.FUNCTIONS["analyze"](lazy_payload())
+
+    assert child._ANALYZER is None  # the next call tries again
+
+
+def test_analyze_without_models_in_its_payload_needs_a_loaded_child(child: Any) -> None:
+    payload = lazy_payload()
+    del payload["models_path"], payload["size"]
+
+    with pytest.raises(child.NotLoaded):
+        child.FUNCTIONS["analyze"](payload)
+
+
 def test_importing_the_child_silences_what_libraries_log() -> None:
     """What Presidio or spaCy log or warn may quote the text: in a child it reaches neither
     stderr (the pod's log stream) nor stdout."""

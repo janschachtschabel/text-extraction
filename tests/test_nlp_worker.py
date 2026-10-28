@@ -9,6 +9,8 @@ import re
 import subprocess
 import sys
 import time
+from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,16 +56,31 @@ _PERSON = re.compile(r"Anna(?: Schmidt)?|Thomas Müller|John Smith")
 _EMAIL = re.compile(r"[\w.]+@[\w.]+\w")
 
 
-class FakePiiPool:
-    """The PII children: one fake engine that finds ``Anna``, ``Anna Schmidt`` and the persons of
-    the self-check's sentences as a person (0.85) and e-mail addresses (1.0) in every field it is
-    given, filtered by the asked types and the threshold like the real child. Like the real one it
-    must be loaded before it analyses, and a child that is killed or replaced comes back
-    unloaded."""
+WARM = ("/models", "lg")  # the models of the default settings: what ``warm`` loads
 
-    def __init__(self) -> None:
+
+@dataclass
+class FakeChild:
+    """One child of the fake pool: the models it holds and how often it loaded them."""
+
+    loaded_for: tuple[str, str] | None = None
+    loads: int = 0
+
+
+class FakePiiPool:
+    """The PII children: a pool of ``children`` fake children handed out first in, first out
+    (``DocumentPool``'s idle queue), each with the models it holds. The fake engine finds ``Anna``,
+    ``Anna Schmidt`` and the persons of the self-check's sentences as a person (0.85) and e-mail
+    addresses (1.0) in every field it is given, filtered by the asked types and the threshold like
+    the real child. Like the real child it loads the models of a call that names them (once per
+    child and models), raises ``NotLoaded`` for a call that names none to a child that has none,
+    and a child that is killed or replaced comes back as a fresh, unloaded child at the back of the
+    queue."""
+
+    def __init__(self, children: int = 1) -> None:
         self.calls: list[tuple[str, dict[str, Any], float]] = []
-        self.loaded = False
+        self.children = [FakeChild() for _ in range(children)]  # every child ever started
+        self._idle = deque(self.children)
         self.started = False
         self.finds_nothing = False
         self.failures: list[BaseException] = []  # raised by the next ``analyze`` calls, in order
@@ -75,35 +92,64 @@ class FakePiiPool:
     async def shutdown(self) -> None:
         pass
 
+    def warm(self) -> None:
+        """Every child holds the default settings' models, as after the start-up."""
+        for child in self.children:
+            child.loaded_for = WARM
+            child.loads += 1
+
+    @property
+    def loads(self) -> int:
+        return sum(child.loads for child in self.children)
+
     def calls_to(self, name: str) -> list[dict[str, Any]]:
         return [payload for function, payload, _deadline in self.calls if function == name]
 
-    async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
-        self.calls.append((function_name, payload, deadline))
-        if function_name == "load":
+    def _load(self, child: FakeChild, payload: dict[str, Any]) -> None:
+        wanted = (payload["models_path"], payload["size"])
+        if child.loaded_for != wanted:
             if self.load_failure is not None:
                 raise self.load_failure
-            self.loaded = True
-            return None
-        assert function_name == "analyze"
-        if self.failures:
-            failure = self.failures.pop(0)
-            if isinstance(failure, (ConversionTimeout, ConversionCrashed, ConversionOutOfMemory)):
-                self.loaded = False  # the pool killed the child and started a fresh one
-            raise failure
-        if not self.loaded:
-            raise ConversionError("NotLoaded", "the models are not loaded")
-        wanted = set(payload["entities"])
-        reply: dict[str, list[tuple[int, int, str, float]]] = {}
-        for name, text in payload["fields"]:
-            found: list[tuple[int, int, str, float]] = []
-            if not self.finds_nothing:
-                found += [(m.start(), m.end(), "PERSON", 0.85) for m in _PERSON.finditer(text)]
-                found += [(m.start(), m.end(), "EMAIL_ADDRESS", 1.0) for m in _EMAIL.finditer(text)]
-            reply[name] = [
-                span for span in found if span[2] in wanted and span[3] >= payload["threshold"]
-            ]
-        return reply
+            child.loaded_for = wanted
+            child.loads += 1
+
+    async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+        self.calls.append((function_name, payload, deadline))
+        child = self._idle.popleft()
+        killed = False
+        try:
+            if function_name == "load":
+                self._load(child, payload)
+                return None
+            assert function_name == "analyze"
+            if self.failures:
+                failure = self.failures.pop(0)
+                killed = isinstance(
+                    failure, (ConversionTimeout, ConversionCrashed, ConversionOutOfMemory)
+                )
+                raise failure
+            if "models_path" in payload:
+                self._load(child, payload)
+            elif child.loaded_for is None:
+                raise ConversionError("NotLoaded", "the models are not loaded")
+            wanted = set(payload["entities"])
+            reply: dict[str, list[tuple[int, int, str, float]]] = {}
+            for name, text in payload["fields"]:
+                found: list[tuple[int, int, str, float]] = []
+                if not self.finds_nothing:
+                    found += [(m.start(), m.end(), "PERSON", 0.85) for m in _PERSON.finditer(text)]
+                    found += [
+                        (m.start(), m.end(), "EMAIL_ADDRESS", 1.0) for m in _EMAIL.finditer(text)
+                    ]
+                reply[name] = [
+                    span for span in found if span[2] in wanted and span[3] >= payload["threshold"]
+                ]
+            return reply
+        finally:
+            if killed:  # the pool killed the child and started a fresh one
+                child = FakeChild()
+                self.children.append(child)
+            self._idle.append(child)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -233,13 +279,16 @@ async def test_runner_sends_the_child_what_n13_says() -> None:
 
 @scenario
 async def test_runner_loads_the_models_it_is_configured_for() -> None:
-    """A child that comes back unloaded gets ``load`` with the volume and the size."""
+    """Each call names the volume and the size; the child loads them itself, lazily."""
     nlp = Nlp(pii_models_path="/srv/models", pii_model_size="md")
     await nlp.submit(draft_of())
 
     await nlp.process_next()
 
-    assert nlp.pool.calls_to("load") == [{"models_path": "/srv/models", "size": "md"}]
+    (payload,) = nlp.pool.calls_to("analyze")
+    assert (payload["models_path"], payload["size"]) == ("/srv/models", "md")
+    assert nlp.pool.calls_to("load") == []  # no call of its own
+    assert nlp.pool.children[0].loaded_for == ("/srv/models", "md")
 
 
 @scenario
@@ -383,7 +432,7 @@ async def test_runner_draft_expired_is_pii_failed_retryable() -> None:
 @scenario
 async def test_runner_child_deadline_is_pii_failed_and_child_restarted() -> None:
     nlp = Nlp()
-    nlp.pool.loaded = True
+    nlp.pool.warm()
     nlp.pool.failures = [ConversionTimeout("killed")]
     first = await nlp.submit(draft_of(content="Anna Schmidt privat"))
     await nlp.process_next()  # the child runs into its deadline and is killed
@@ -398,14 +447,13 @@ async def test_runner_child_deadline_is_pii_failed_and_child_restarted() -> None
     assert (data.content, data.title, data.metadata, data.links) == (None, None, None, None)
     assert data.url == URL
     assert data.upstream_status == 200
-    assert not nlp.pool.loaded  # the pool started a fresh child
+    assert len(nlp.pool.children) == 2  # the pool started a fresh child, which holds no models
 
-    nlp.pool.calls.clear()
     second = await nlp.submit(draft_of(content="Anna Schmidt privat"))
-    await nlp.process_next()  # the fresh child is not loaded: load, then analyse again
+    await nlp.process_next()  # the fresh child loads in the call, and answers it
 
-    assert [name for name, _payload, _deadline in nlp.pool.calls] == ["analyze", "load", "analyze"]
     assert data_of(await nlp.result(second)).content == "[PERSON] privat"
+    assert [child.loads for child in nlp.pool.children] == [1, 1]
 
 
 @pytest.mark.parametrize(
@@ -424,7 +472,7 @@ async def test_runner_child_failures_withhold_the_content(
     failure: BaseException, code: ErrorCode, retryable: bool
 ) -> None:
     nlp = Nlp()
-    nlp.pool.loaded = True
+    nlp.pool.warm()
     nlp.pool.failures = [failure]
     job_id = await nlp.submit(draft_of(content="Anna Schmidt privat"))
 
@@ -454,6 +502,75 @@ async def test_runner_models_never_loading_is_pii_failed_retryable() -> None:
     assert result.error is not None
     assert (result.error.code, result.error.retryable) == (ErrorCode.PII_FAILED, True)
     assert data_of(result).content is None
+
+
+@scenario
+async def test_runner_a_failure_while_loading_is_pii_failed_retryable_never_too_large() -> None:
+    """The child reports a memory error while it builds the engine as ``LoadFailed``: the models'
+    size, nothing about the text."""
+    nlp = Nlp()
+    nlp.pool.load_failure = ConversionError("LoadFailed", "not enough memory to load the models")
+    job_id = await nlp.submit(draft_of(content="Anna privat"))
+
+    await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    assert result.error is not None
+    assert (result.error.code, result.error.retryable) == (ErrorCode.PII_FAILED, True)
+    assert data_of(result).content is None
+
+
+@scenario
+async def test_a_replaced_child_loads_once_and_no_item_fails_at_concurrency_two() -> None:
+    """The pool hands children out first in, first out: the fresh child of a killed one comes
+    next whatever the runner asks, and its own call loads it (ruling R12)."""
+    nlp = Nlp(FakePiiPool(children=2), pii_concurrency=2)
+    await start_children(nlp.pool, nlp.settings, children=2)  # both children load at start
+    first = await nlp.submit(draft_of(content="Anna privat"))
+    nlp.pool.failures = [ConversionTimeout("killed")]
+    await nlp.process_next()  # the first child runs into its deadline and is replaced
+    assert nlp.pool.children[0].loads == 1
+    items = [await nlp.submit(draft_of(content="Anna privat")) for _ in range(6)]
+
+    for _ in items:
+        await nlp.process_next()
+
+    assert (await nlp.result(first)).status == "failed"
+    for job_id in items:
+        assert data_of(await nlp.result(job_id)).content == "[PERSON] privat"
+    # Three children lived: the two of the start and the replacement; each loaded once.
+    assert [child.loads for child in nlp.pool.children] == [1, 1, 1]
+    assert nlp.pool.calls_to("load") == [
+        {"models_path": "/models", "size": "lg"},
+        {"models_path": "/models", "size": "lg"},
+    ]  # the start-up's warm-up only
+
+
+@scenario
+async def test_runner_a_failure_applying_the_spans_is_withheld_and_logs_the_type_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError("Anna Schmidt is quoted in this message")
+
+    monkeypatch.setattr(nlp_worker, "apply_pii", broken)
+    nlp = Nlp()
+    job_id = await nlp.submit(draft_of(content="Anna Schmidt privat"))
+
+    with capture_logs() as logs:
+        await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    assert result.error is not None
+    assert (result.status, result.error.code, result.error.retryable) == (
+        "failed",
+        ErrorCode.PII_FAILED,
+        True,
+    )
+    assert data_of(result).content is None
+    (line,) = [log for log in logs if log["event"] == "pii_apply_failed"]
+    assert line["error"] == "ValueError"
+    assert "Anna" not in json.dumps(logs, default=str)
 
 
 @scenario
@@ -567,7 +684,7 @@ async def test_runner_entity_counts_feed_the_metric_by_type_only() -> None:
 async def test_runner_logs_no_text() -> None:
     nlp = Nlp()
     nlp.pool.failures = [ConversionTimeout("Anna Schmidt")]
-    nlp.pool.loaded = True
+    nlp.pool.warm()
     await nlp.submit(draft_of(content="Anna Schmidt anna@example.org"))
     await nlp.submit(draft_of(content="Anna Schmidt anna@example.org"))
 
@@ -630,7 +747,6 @@ async def test_exhausted_item_of_another_pool_still_answers_internal_error() -> 
 async def test_nlp_worker_drops_draft_after_result() -> None:
     nlp = Nlp()
     job_id = await nlp.submit(draft_of(content="Anna Schmidt"))
-    await nlp.store.put_input(job_id, 0, b"leftover", JobOptions(compliance="enforce"), 600)
 
     await nlp.process_next()
 
@@ -673,15 +789,9 @@ async def test_an_item_of_a_job_that_is_gone_is_dropped() -> None:
 # --- the start-up and the process ---------------------------------------------------------------
 
 
-def sentences_pool(*, finds_person: bool = True, finds_email: bool = True) -> FakePiiPool:
-    pool = FakePiiPool()
-    pool.finds_nothing = not (finds_person or finds_email)
-    return pool
-
-
 def test_self_check_passes_when_both_languages_find_a_person_and_an_email() -> None:
     pool = FakePiiPool()
-    pool.loaded = True
+    pool.warm()
     settings = make_settings()
 
     asyncio.run(self_check(pool, settings))
@@ -765,13 +875,14 @@ def test_children_that_do_not_start_are_logged_with_the_models_path() -> None:
 
 
 def test_start_loads_every_child_once() -> None:
-    pool = FakePiiPool()
+    pool = FakePiiPool(children=3)
     settings = make_settings(pii_concurrency=3)
 
     asyncio.run(start_children(pool, settings, children=3))
 
     assert pool.started
     assert len(pool.calls_to("load")) == 3
+    assert [child.loads for child in pool.children] == [1, 1, 1]  # one each, none twice
     assert [call["language"] for call in pool.calls_to("analyze")] == ["de", "en"]
 
 
@@ -925,6 +1036,7 @@ def test_pool_is_the_pii_child_with_the_configured_size() -> None:
 
     assert (pool._processes, pool._memory_limit_mb) == (2, 2048)
     assert pool._target == "text_extraction.pii.child"
+    assert pool._max_tasks == 1000  # a replacement reloads the models: far less often
     assert "VALKEY_PASSWORD" not in pool._env
 
 
@@ -972,7 +1084,7 @@ def test_real_children_run_the_check_and_mask_a_draft(
 
     async def run() -> tuple[int, Envelope[ExtractResult]]:
         exit_code = await nlp_worker._check(settings)
-        # A fresh child is not loaded: the first analysis answers NotLoaded, the runner loads.
+        # A fresh child holds no models: the first analysis loads them (ruling R12).
         nlp = Nlp(nlp_worker.create_nlp_pool(settings), **settings.model_dump())
         await nlp.pool.start()
         try:
