@@ -86,11 +86,11 @@ def load(models_path: str, size: str) -> None:
         return
     root = Path(models_path)
     model_store.require_models(root, model_store.load_manifest("nlp").only(*names.values()))
-    from text_extraction.pii.recognizers import build_analyzer
-
     # The old engine goes first: both at once would roughly double the memory.
     _ANALYZER = _LOADED_FOR = None
-    try:
+    try:  # the first import of Presidio and spaCy in this child counts as loading too
+        from text_extraction.pii.recognizers import build_analyzer
+
         _ANALYZER = build_analyzer({"de": root / names["de"], "en": root / names["en"]})
     except MemoryError:
         raise LoadFailed("not enough memory to load the models") from None
