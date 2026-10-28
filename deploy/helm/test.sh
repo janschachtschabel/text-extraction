@@ -16,6 +16,8 @@ DOCLING="$RELEASE-text-extraction-worker-docling"
 MODELS="$RELEASE-text-extraction-docling-models"
 ASR="$RELEASE-text-extraction-worker-asr"
 ASR_MODELS="$RELEASE-text-extraction-asr-models"
+NLP="$RELEASE-text-extraction-worker-nlp"
+NLP_MODELS="$RELEASE-text-extraction-nlp-models"
 APP_VERSION="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CHART/Chart.yaml")"
 
 failures=0
@@ -398,8 +400,8 @@ expect_contains "docling backlog alert" "$docling_rules" "text_extraction_queue_
 expect_contains "extract backlog keeps its threshold" "$docling_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"extract\"}) > 1000"
 expect_contains "docling workers-down alert" "$docling_rules" "deployment=\"$DOCLING\""
 expect_contains "docling items are counted on the docling workers" "$docling_rules" "service=\"$DOCLING-internal\""
-expect_contains "extract items leave out the browser, docling and asr workers" "$docling_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal\""
-expect_contains "Valkey memory alert reads the docling workers" "$docling_rules" "|$DOCLING-internal|$ASR-internal\"})"
+expect_contains "extract items leave out the browser, docling, asr and nlp workers" "$docling_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal\""
+expect_contains "Valkey memory alert reads the docling workers" "$docling_rules" "|$DOCLING-internal|$ASR-internal|$NLP-internal\"})"
 expect_absent "no docling alerts without docling workers" "$rules" 'pool="docling"'
 
 # --- Model downloads as a hook Job (models.downloadMode job) -----------------------------------
@@ -627,8 +629,8 @@ asr_rules="$(render --set workers.asr.enabled=true --set metrics.prometheusRule.
 expect_contains "asr backlog alert" "$asr_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"asr\"}) > 9"
 expect_contains "asr workers-down alert" "$asr_rules" "deployment=\"$ASR\""
 expect_contains "asr items are counted on the asr workers" "$asr_rules" "service=\"$ASR-internal\""
-expect_contains "extract items leave out the asr workers" "$asr_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal\""
-expect_contains "Valkey memory alert reads the asr workers" "$asr_rules" "|$ASR-internal\"})"
+expect_contains "extract items leave out the asr workers" "$asr_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal\""
+expect_contains "Valkey memory alert reads the asr workers" "$asr_rules" "|$ASR-internal|$NLP-internal\"})"
 expect_contains "asr backlog default threshold" \
   "$(render --set workers.asr.enabled=true --set metrics.prometheusRule.enabled=true)" "pool=\"asr\"}) > 50"
 expect_absent "no asr alerts without asr workers" "$rules" 'pool="asr"'
@@ -637,6 +639,173 @@ expect_contains "notes describe the asr workers" "$(render_notes --set workers.a
 expect_contains "notes warn about the default maxmemory with asr" \
   "$(render_notes --set workers.asr.enabled=true)" "DOCLING_INPUT_BUDGET_BYTES (200000000)"
 expect_contains "notes say transcription is off" "$(render_notes)" "No ASR workers are deployed"
+
+# --- NLP workers (PII) --------------------------------------------------------------------------
+
+expect_absent "nlp off renders nothing" "$on" "nlp"
+expect_absent "nlp off renders no models PVC" "$on" "$NLP_MODELS"
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_values "nlp off ($name)" "$(document "$on" Deployment "$name")" PII_ENABLED "false"
+done
+expect_values "nlp off renders PII_ENABLED=false" "$(document "$on" Deployment "$API")" PII_ENABLED "false"
+expect_values "config.PII_ENABLED ignored (API)" \
+  "$(document "$(render --set config.PII_ENABLED=true)" Deployment "$API")" PII_ENABLED "false"
+expect_absent "no PII_HASH_KEY without nlp workers" "$on" "PII_HASH_KEY"
+
+nlp_on="$(render --set workers.nlp.enabled=true --set workers.docling.enabled=true --set workers.asr.enabled=true)"
+nlp="$(document "$nlp_on" Deployment "$NLP")"
+if [[ -n "$nlp" ]]; then pass "nlp worker Deployment is rendered when enabled"; else fail "no nlp worker Deployment"; fi
+# Every container of every pod (the init containers included).
+for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP"; do
+  expect_every_value "nlp on ($name)" "$(document "$nlp_on" Deployment "$name")" PII_ENABLED "true"
+done
+# The init container and the worker.
+expect_values "nlp on (nlp worker and init container)" "$nlp" PII_ENABLED "true true"
+expect_values "nlp worker and init container" "$nlp" PII_MODELS_PATH "/models /models"
+expect_values "nlp worker and init container" "$nlp" PII_MODEL_SIZE "lg lg"
+expect_values "nlp worker" "$nlp" PII_CONCURRENCY "1 1"
+expect_absent "nlp worker gets no WORKER_CONCURRENCY" "$nlp" "name: WORKER_CONCURRENCY"
+expect_absent "nlp worker gets no DOCUMENT_MEMORY_LIMIT_MB" "$nlp" "name: DOCUMENT_MEMORY_LIMIT_MB"
+expect_absent "the API pods get no model settings" "$(document "$nlp_on" Deployment "$API")" "PII_MODEL"
+expect_contains "nlp worker uses the nlp image" "$nlp" "image: \"ghcr.io/janschachtschabel/text-extraction-nlp:$APP_VERSION\""
+expect_contains "nlp worker runs its entry point" "$nlp" "- text-extraction-nlp-worker"
+expect_absent "nlp worker keeps the image's init process" "$nlp" "command:"
+expect_contains "nlp worker serves the internal port" "$nlp" "containerPort: 9090"
+expect_absent "nlp worker has no public port" "$nlp" "containerPort: 8080"
+expect_contains "nlp worker grace period" "$nlp" "terminationGracePeriodSeconds: 60"
+expect_contains "nlp worker CPU request" "$(flat "$nlp")" "requests: cpu: \"1\" memory: 2Gi"
+expect_contains "nlp worker memory limit" "$(flat "$nlp")" "limits: cpu: \"2\" memory: 3Gi"
+expect_contains "nlp worker internal Service" "$(document "$nlp_on" Service "$NLP-internal")" "port: 9090"
+# The init container downloads into a writable mount, the worker reads it read-only.
+init="$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$nlp")"
+worker="$(awk '/^      containers:/ { f = 1 } /^      volumes:/ { f = 0 } f' <<<"$nlp")"
+expect_contains "nlp init container downloads the models" "$init" "- --download-models"
+expect_contains "nlp init container runs the nlp entry point" "$init" "- text-extraction-nlp-worker"
+expect_contains "nlp init container mounts the models" "$init" "mountPath: /models"
+expect_absent "nlp init container mount is writable" "$init" "readOnly: true"
+expect_contains "nlp init container root filesystem is read-only" "$init" "readOnlyRootFilesystem: true"
+expect_contains "nlp init container requests little memory" "$(flat "$init")" "requests: cpu: 100m memory: 256Mi"
+expect_absent "nlp init container does not take the worker's resources" "$init" "memory: 3Gi"
+expect_contains "nlp worker mounts the models" "$worker" "mountPath: /models"
+expect_contains "nlp worker models mount is read-only" "$(flat "$worker")" "mountPath: /models readOnly: true"
+expect_absent "nlp worker does not download" "$worker" "--download-models"
+nlp_pvc="$(document "$nlp_on" PersistentVolumeClaim "$NLP_MODELS")"
+expect_contains "nlp models PVC is rendered" "$nlp_pvc" "storage: 2Gi"
+expect_contains "nlp models PVC is ReadWriteMany" "$nlp_pvc" "- ReadWriteMany"
+expect_absent "nlp models PVC uses the default storage class" "$nlp_pvc" "storageClassName"
+expect_contains "nlp worker uses the models PVC" "$nlp" "claimName: $NLP_MODELS"
+expect_contains "nlp storageClass is passed on" \
+  "$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.models.persistence.storageClass=nfs)" PersistentVolumeClaim "$NLP_MODELS")" \
+  'storageClassName: "nfs"'
+expect_contains "docling keeps its own models PVC" "$(document "$nlp_on" Deployment "$DOCLING")" "claimName: $MODELS"
+expect_contains "asr keeps its own models PVC" "$(document "$nlp_on" Deployment "$ASR")" "claimName: $ASR_MODELS"
+expect_contains "API grace period does not wait for nlp" "$(document "$nlp_on" Deployment "$API")" "terminationGracePeriodSeconds: 90"
+expect_absent "nlp worker gets no hash key without a secret" "$nlp" "PII_HASH_KEY"
+
+# modelSize reaches the init container and the worker, nothing else.
+nlp_md="$(render --set workers.nlp.enabled=true --set workers.nlp.modelSize=md)"
+expect_values "modelSize md sets PII_MODEL_SIZE" "$(document "$nlp_md" Deployment "$NLP")" PII_MODEL_SIZE "md md"
+expect_render_fails "modelSize is lg or md" "workers.nlp.modelSize must be lg or md" \
+  --set workers.nlp.enabled=true --set workers.nlp.modelSize=xl
+expect_values "nlp concurrency follows workers.nlp.concurrency" \
+  "$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.concurrency=3)" Deployment "$NLP")" PII_CONCURRENCY "3 3"
+
+# PII_HASH_KEY only from a Secret, on the worker container only.
+nlp_key="$(render --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key)"
+nlp_keyed="$(document "$nlp_key" Deployment "$NLP")"
+expect_contains "hashKey secret renders PII_HASH_KEY from it" \
+  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$nlp_keyed")" "name: pii-key"
+expect_contains "hashKey secret key defaults to PII_HASH_KEY" \
+  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$nlp_keyed")" "key: PII_HASH_KEY"
+expect_contains "hashKey secret key can be set" \
+  "$(grep -A4 -- "- name: PII_HASH_KEY" <<<"$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key --set workers.nlp.hashKey.existingSecretKey=hmac)" Deployment "$NLP")")" "key: hmac"
+expect_absent "PII_HASH_KEY stays out of the init container" \
+  "$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$nlp_keyed")" "PII_HASH_KEY"
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_absent "PII_HASH_KEY stays out of $name" "$(document "$nlp_key" Deployment "$name")" "PII_HASH_KEY"
+done
+expect_absent "PII_HASH_KEY never in the ConfigMap" "$(document "$nlp_key" ConfigMap "$API")" "PII_HASH_KEY"
+expect_absent "hashKey secret without nlp workers renders nothing" \
+  "$(render --set workers.nlp.hashKey.existingSecret=pii-key)" "PII_HASH_KEY"
+
+nlp_claimed="$(render --set workers.nlp.enabled=true --set workers.nlp.models.persistence.existingClaim=spacy)"
+expect_absent "existingClaim skips the PVC" "$nlp_claimed" "kind: PersistentVolumeClaim"
+expect_contains "nlp existingClaim is mounted" "$(document "$nlp_claimed" Deployment "$NLP")" "claimName: spacy"
+expect_contains "nlp existingClaim still downloads by default" "$(document "$nlp_claimed" Deployment "$NLP")" "- --download-models"
+expect_absent "nlp download false skips the init container" \
+  "$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.models.persistence.existingClaim=spacy --set workers.nlp.models.download=false)" Deployment "$NLP")" \
+  "initContainers:"
+expect_render_fails "nlp download false needs a pre-filled existingClaim" "workers.nlp.models.download=false needs" \
+  --set workers.nlp.enabled=true --set workers.nlp.models.download=false
+
+# downloadMode job: a hook Job fills the volume, the pods only check it.
+nlp_job_mode="$(render --set workers.nlp.enabled=true --set workers.nlp.models.downloadMode=job)"
+nlp_job="$(document "$nlp_job_mode" Job "$NLP-models")"
+if [[ -n "$nlp_job" ]]; then pass "downloadMode job renders a hook Job"; else fail "downloadMode job: no nlp models Job"; fi
+expect_contains "nlp models Job is a post-install and post-upgrade hook" "$nlp_job" '"helm.sh/hook": post-install,post-upgrade'
+expect_contains "nlp models Job downloads the models" "$nlp_job" "- --download-models"
+expect_contains "nlp models Job uses the nlp image" "$nlp_job" "image: \"ghcr.io/janschachtschabel/text-extraction-nlp:$APP_VERSION\""
+expect_contains "nlp models Job mounts the models" "$nlp_job" "mountPath: /models"
+expect_absent "nlp models Job mount is writable" "$nlp_job" "readOnly: true"
+expect_contains "nlp models Job root filesystem is read-only" "$nlp_job" "readOnlyRootFilesystem: true"
+expect_contains "nlp models Job runs as the image's user" "$nlp_job" "runAsUser: 10001"
+expect_absent "nlp models Job keeps the image's init process" "$nlp_job" "command:"
+expect_values "nlp models Job downloads the configured size" "$nlp_job" PII_MODEL_SIZE "lg"
+expect_values "nlp models Job reads PII_MODELS_PATH" "$nlp_job" PII_MODELS_PATH "/models"
+expect_contains "nlp models Job requests little memory" "$(flat "$nlp_job")" "requests: cpu: 100m memory: 256Mi"
+expect_absent "nlp models Job needs no hash key" "$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.models.downloadMode=job --set workers.nlp.hashKey.existingSecret=pii-key)" Job "$NLP-models")" "PII_HASH_KEY"
+nlp_job_worker="$(document "$nlp_job_mode" Deployment "$NLP")"
+expect_absent "downloadMode job renders no init container (nlp)" "$nlp_job_worker" "initContainers:"
+expect_absent "downloadMode job: the nlp worker does not download" "$nlp_job_worker" "--download-models"
+expect_contains "downloadMode job: the nlp worker mounts the models read-only" "$nlp_job_worker" "readOnly: true"
+expect_absent "downloadMode init (the default) renders no nlp Job" "$nlp_on" "$NLP-models"
+expect_absent "nlp download false renders no Job" \
+  "$(render --set workers.nlp.enabled=true --set workers.nlp.models.downloadMode=job --set workers.nlp.models.download=false --set workers.nlp.models.persistence.existingClaim=m)" \
+  "kind: Job"
+expect_render_fails "nlp downloadMode is init or job" "workers.nlp.models.downloadMode must be init or job" \
+  --set workers.nlp.enabled=true --set workers.nlp.models.downloadMode=sidecar
+
+expect_render_fails "nlp needs jobs" "workers.nlp.enabled needs JOBS_ENABLED=true" \
+  --set workers.nlp.enabled=true --set jobs.enabled=false
+# nlp worker: 30 s for the items in flight + 10
+expect_render_fails "nlp worker grace period too short" "workers.nlp.terminationGracePeriodSeconds" \
+  --set workers.nlp.enabled=true --set workers.nlp.terminationGracePeriodSeconds=39
+expect_render_succeeds "nlp worker grace period just long enough" \
+  --set workers.nlp.enabled=true --set workers.nlp.terminationGracePeriodSeconds=40
+
+nlp_keda="$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.autoscaling.keda.enabled=true)" ScaledObject "$NLP")"
+expect_contains "nlp KEDA query names pool nlp" "$nlp_keda" \
+  "query: \"max(text_extraction_queue_pending_items{pool=\\\"nlp\\\", namespace=\\\"$NAMESPACE\\\"})\""
+expect_contains "nlp KEDA threshold" "$nlp_keda" 'threshold: "10"'
+expect_contains "nlp KEDA keeps a replica" "$nlp_keda" "minReplicaCount: 1"
+nlp_hpa="$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$NLP")"
+expect_contains "nlp HPA scales the nlp workers" "$nlp_hpa" "name: $NLP"
+expect_absent "nlp replicas are left to the scaler" \
+  "$(document "$(render --set workers.nlp.enabled=true --set workers.nlp.autoscaling.hpa.enabled=true)" Deployment "$NLP")" "replicas:"
+expect_render_fails "nlp KEDA and HPA are exclusive" "mutually exclusive" \
+  --set workers.nlp.enabled=true --set workers.nlp.autoscaling.keda.enabled=true \
+  --set workers.nlp.autoscaling.hpa.enabled=true
+expect_render_fails "nlp autoscaling needs the workers" "workers.nlp.autoscaling needs workers.nlp.enabled=true" \
+  --set workers.nlp.autoscaling.hpa.enabled=true
+
+nlp_policies="$(render --set workers.nlp.enabled=true --set networkPolicy.enabled=true)"
+expect_contains "nlp worker NetworkPolicy" "$(document "$nlp_policies" NetworkPolicy "$NLP")" "port: 9090"
+expect_contains "Valkey accepts the nlp workers" \
+  "$(document "$nlp_policies" NetworkPolicy "$RELEASE-text-extraction-valkey")" "app.kubernetes.io/name: text-extraction-worker-nlp"
+
+nlp_rules="$(render --set workers.nlp.enabled=true --set metrics.prometheusRule.enabled=true --set alerts.nlpQueueBacklogItems=9)"
+expect_contains "nlp backlog alert" "$nlp_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"nlp\"}) > 9"
+expect_contains "nlp workers-down alert" "$nlp_rules" "deployment=\"$NLP\""
+expect_contains "nlp items are counted on the nlp workers" "$nlp_rules" "service=\"$NLP-internal\""
+expect_contains "nlp backlog default threshold" \
+  "$(render --set workers.nlp.enabled=true --set metrics.prometheusRule.enabled=true)" "pool=\"nlp\"}) > 200"
+expect_absent "no nlp alerts without nlp workers" "$rules" 'pool="nlp"'
+
+expect_contains "notes describe the nlp workers" "$(render_notes --set workers.nlp.enabled=true)" "PII handling is on (PII_ENABLED=true in every pod)"
+expect_contains "notes name the models size" "$(render_notes --set workers.nlp.enabled=true --set workers.nlp.modelSize=md)" "spaCy models md"
+expect_contains "notes warn about the random hash key" "$(render_notes --set workers.nlp.enabled=true)" "hash_scope: result"
+expect_absent "no hash key warning with a key" "$(render_notes --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key)" "hash_scope: result"
+expect_contains "notes say PII handling is off" "$(render_notes)" "No NLP workers are deployed"
 
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2

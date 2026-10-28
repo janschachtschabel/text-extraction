@@ -1,7 +1,7 @@
 {{- if .Values.networkPolicy.enabled }}
 {{- if .Values.valkey.enabled }}
-# Valkey accepts connections from the API and worker pods (extract, browser, docling, asr) of
-# this release only.
+# Valkey accepts connections from the API and worker pods (extract, browser, docling, asr, nlp)
+# of this release only.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

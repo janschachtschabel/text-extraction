@@ -1,0 +1,22 @@
+{{- $nlp := .Values.workers.nlp }}
+{{- if and $nlp.enabled (not $nlp.models.persistence.existingClaim) }}
+# The spaCy models of the NLP workers (PII_MODELS_PATH=/models, only the models of
+# PII_MODEL_SIZE are downloaded): filled by their init container or the models Job, read-only in
+# the workers. ReadWriteMany by default, so replicas on any node share it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "text-extraction.nlpModelsClaim" . }}
+  labels:
+    {{- include "text-extraction.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nlp-models
+spec:
+  accessModes:
+    {{- toYaml $nlp.models.persistence.accessModes | nindent 4 }}
+  {{- with $nlp.models.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $nlp.models.persistence.size }}
+{{- end }}

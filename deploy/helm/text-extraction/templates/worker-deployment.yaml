@@ -1,6 +1,6 @@
 {{- /* One Deployment per enabled worker pool (workers.extract, workers.browser, workers.docling,
-workers.asr). The Docling workers and the ASR workers of the local backend also mount their models
-volume read-only; with models.downloadMode init (the default) an init container first downloads
+workers.asr, workers.nlp). The Docling workers, the NLP workers and the ASR workers of the local
+backend also mount their models volume read-only; with models.downloadMode init (the default) an init container first downloads
 the models into it (writable), with job the hook Job of models-job.yaml does, and with
 models.download false nobody does. The ASR workers keep downloaded media on a bounded emptyDir at
 /scratch. */ -}}
@@ -103,6 +103,11 @@ spec:
                 name: {{ include "text-extraction.fullname" $ }}
           env:
             {{- $env | nindent 12 }}
+            {{- if eq $pool "nlp" }}
+            {{- with include "text-extraction.nlpKeyEnv" $ | trim }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /health

@@ -5,7 +5,8 @@
 {{- $browserInternal := include "text-extraction.workerInternalServiceName" (list . "browser") }}
 {{- $doclingInternal := include "text-extraction.workerInternalServiceName" (list . "docling") }}
 {{- $asrInternal := include "text-extraction.workerInternalServiceName" (list . "asr") }}
-{{- $podServices := printf "%s|%s|%s|%s|%s" $internal $workerInternal $browserInternal $doclingInternal $asrInternal }}
+{{- $nlpInternal := include "text-extraction.workerInternalServiceName" (list . "nlp") }}
+{{- $podServices := printf "%s|%s|%s|%s|%s|%s" $internal $workerInternal $browserInternal $doclingInternal $asrInternal $nlpInternal }}
 {{- $ns := .Release.Namespace }}
 {{- $jobs := eq (include "text-extraction.jobsEnabled" .) "true" }}
 apiVersion: monitoring.coreos.com/v1
@@ -60,12 +61,12 @@ spec:
             description: Valkey of {{ $fullName }} in namespace {{ $ns }} has used more than {{ mulf .Values.alerts.valkeyMemoryRatio 100 }} % of its maxmemory for 10 minutes. New batches are refused (503) and result-cache writes are skipped until it drops; a full Valkey refuses every write.
         {{- if $jobs }}
         {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
-        {{- /* The pools browser, docling and asr have a queue only while BROWSER_ENABLED,
-        DOCLING_ENABLED or ASR_ENABLED, that is with their workers. */}}
+        {{- /* The pools browser, docling, asr and nlp have a queue only while BROWSER_ENABLED,
+        DOCLING_ENABLED, ASR_ENABLED or PII_ENABLED, that is with their workers. */}}
         {{- if or (eq $pool "extract") (index $.Values.workers $pool).enabled }}
         {{- $worker := include "text-extraction.workerName" (list $ $pool) }}
         {{- /* The item counter has no pool label: the workers' Services tell the pools apart. */}}
-        {{- $items := printf `service!~"%s|%s|%s"` $browserInternal $doclingInternal $asrInternal }}
+        {{- $items := printf `service!~"%s|%s|%s|%s"` $browserInternal $doclingInternal $asrInternal $nlpInternal }}
         {{- if ne $pool "extract" }}
         {{- $items = printf `service="%s"` (include "text-extraction.workerInternalServiceName" (list $ $pool)) }}
         {{- end }}
@@ -74,11 +75,13 @@ spec:
         {{- $backlog = $.Values.alerts.doclingQueueBacklogItems }}
         {{- else if eq $pool "asr" }}
         {{- $backlog = $.Values.alerts.asrQueueBacklogItems }}
+        {{- else if eq $pool "nlp" }}
+        {{- $backlog = $.Values.alerts.nlpQueueBacklogItems }}
         {{- end }}
         # The queue gauges come from the API pods (every pod reports the same queue), hence max().
         # Counters appear with the first item a worker handles. `or vector(0)` makes "no completion
         # yet" count as 0 on a fresh cluster instead of hiding the alert. Escalated items (moved from
-        # the extract pool to the browser, the docling or the asr pool) are not completions.
+        # the extract pool to the browser, the docling, the asr or the nlp pool) are not completions.
         - alert: TextExtractionQueueBacklog
           expr: |
             max(text_extraction_queue_pending_items{namespace="{{ $ns }}", pool="{{ $pool }}"}) > {{ $backlog }}

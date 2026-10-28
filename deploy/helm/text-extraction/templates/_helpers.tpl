@@ -51,7 +51,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Worker pools, in the order their objects are rendered. Each has a `workers.<pool>` block. */}}
 {{- define "text-extraction.workerPools" -}}
-extract browser docling asr
+extract browser docling asr nlp
 {{- end -}}
 
 {{/* Names and labels of the worker objects of a pool; call with (list $ "<pool>"). The pod name
@@ -79,12 +79,12 @@ app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 {{- end -}}
 
 {{/* Image of a pool's workers; call with (list $ "<pool>"). Extract workers run the API image;
-browser, Docling and ASR workers their own, with image.tag and then the appVersion as the default
-tag. */}}
+browser, Docling, ASR and NLP workers their own, with image.tag and then the appVersion as the
+default tag. */}}
 {{- define "text-extraction.workerImage" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
-{{- if has $pool (list "browser" "docling" "asr") -}}
+{{- if has $pool (list "browser" "docling" "asr" "nlp") -}}
 {{- $image := (index $root.Values.workers $pool).image -}}
 {{- printf "%s:%s" $image.repository ($image.tag | default $root.Values.image.tag | default $root.Chart.AppVersion) -}}
 {{- else -}}
@@ -98,6 +98,7 @@ reaps orphaned children) stays PID 1. */}}
 {{- if eq . "browser" -}}text-extraction-browser-worker
 {{- else if eq . "docling" -}}text-extraction-docling-worker
 {{- else if eq . "asr" -}}text-extraction-asr-worker
+{{- else if eq . "nlp" -}}text-extraction-nlp-worker
 {{- else -}}text-extraction-worker{{- end -}}
 {{- end -}}
 
@@ -106,6 +107,7 @@ reaps orphaned children) stays PID 1. */}}
 {{- if eq . "browser" -}}BROWSER_CONCURRENCY
 {{- else if eq . "docling" -}}DOCLING_CONCURRENCY
 {{- else if eq . "asr" -}}ASR_CONCURRENCY
+{{- else if eq . "nlp" -}}PII_CONCURRENCY
 {{- else -}}WORKER_CONCURRENCY{{- end -}}
 {{- end -}}
 
@@ -129,7 +131,12 @@ worker toggles. */}}
 {{- ternary "true" "false" (.Values.workers.asr.enabled | default false) -}}
 {{- end -}}
 
-{{/* The browser, Docling and ASR switches as env entries, with the ASR settings every pod reads:
+{{/* PII_ENABLED ("true"/"false") of every pod, from the NLP worker toggle. */}}
+{{- define "text-extraction.nlpEnabled" -}}
+{{- ternary "true" "false" (.Values.workers.nlp.enabled | default false) -}}
+{{- end -}}
+
+{{/* The browser, Docling, ASR and PII switches as env entries, with the ASR settings every pod reads:
 the backend (the API answers 400 for the external one without a key) and the upload limit (the
 API's body limit). They come after envFrom, so they override config.*. */}}
 {{- define "text-extraction.switchEnv" -}}
@@ -141,6 +148,8 @@ API's body limit). They come after envFrom, so they override config.*. */}}
   value: {{ include "text-extraction.doclingEnabled" . | quote }}
 - name: ASR_ENABLED
   value: {{ include "text-extraction.asrEnabled" . | quote }}
+- name: PII_ENABLED
+  value: {{ include "text-extraction.nlpEnabled" . | quote }}
 - name: ASR_BACKEND
   value: {{ .Values.workers.asr.backend | quote }}
 - name: MEDIA_UPLOAD_MAX_BYTES
@@ -167,18 +176,30 @@ chart-managed one, mounted at /models (ASR_MODELS_PATH). */}}
 {{- end -}}
 {{- end -}}
 
+{{/* The models volume of the NLP workers: the existing claim, or the chart-managed one, mounted
+at /models (PII_MODELS_PATH). */}}
+{{- define "text-extraction.nlpModelsClaim" -}}
+{{- with .Values.workers.nlp.models.persistence.existingClaim -}}
+{{- . -}}
+{{- else -}}
+{{- printf "%s-nlp-models" (include "text-extraction.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
 {{/* "true" when a pool's workers read models from a volume; call with (list $ "<pool>"): the
-Docling workers always, the ASR workers with the local backend. */}}
+Docling and NLP workers always, the ASR workers with the local backend. */}}
 {{- define "text-extraction.workerHasModels" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
-{{- if or (eq $pool "docling") (and (eq $pool "asr") (eq (toString $root.Values.workers.asr.backend) "local")) -}}true{{- end -}}
+{{- if or (eq $pool "docling") (eq $pool "nlp") (and (eq $pool "asr") (eq (toString $root.Values.workers.asr.backend) "local")) -}}true{{- end -}}
 {{- end -}}
 
 {{/* The models claim of a pool with models; call with (list $ "<pool>"). */}}
 {{- define "text-extraction.workerModelsClaim" -}}
 {{- if eq (index . 1) "asr" -}}
 {{- include "text-extraction.asrModelsClaim" (index . 0) -}}
+{{- else if eq (index . 1) "nlp" -}}
+{{- include "text-extraction.nlpModelsClaim" (index . 0) -}}
 {{- else -}}
 {{- include "text-extraction.doclingModelsClaim" (index . 0) -}}
 {{- end -}}
@@ -217,10 +238,24 @@ is configured. The API pods and the ASR workers get it, no other pod. */}}
 {{- end }}
 {{- end -}}
 
+{{/* PII_HASH_KEY from the operator's Secret, while the NLP workers run and a Secret is named. Only
+the NLP worker container gets it (not its models init container, no other pod). */}}
+{{- define "text-extraction.nlpKeyEnv" -}}
+{{- $nlp := .Values.workers.nlp -}}
+{{- if and $nlp.enabled $nlp.hashKey.existingSecret }}
+- name: PII_HASH_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $nlp.hashKey.existingSecret }}
+      key: {{ $nlp.hashKey.existingSecretKey }}
+{{- end }}
+{{- end -}}
+
 {{/* The env entries of a pool's workers; call with (list $ "<pool>"). They come after envFrom,
 so they override config.*. The Docling workers read the models from /models; the ASR workers
-too (local backend), keep downloaded media on /scratch and get the backend's settings; the
-extract and browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
+too (local backend), keep downloaded media on /scratch and get the backend's settings; the NLP
+workers read the models from /models and get the model size; the extract and browser workers get
+DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
 {{- define "text-extraction.workerEnv" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
@@ -248,6 +283,11 @@ extract and browser workers get DOCUMENT_MEMORY_LIMIT_MB from their memory limit
 {{ . }}
 {{- end }}
 {{- end }}
+{{- else if eq $pool "nlp" }}
+- name: PII_MODELS_PATH
+  value: /models
+- name: PII_MODEL_SIZE
+  value: {{ $root.Values.workers.nlp.modelSize | quote }}
 {{- else }}
 {{- $worker := index $root.Values.workers $pool }}
 {{- with include "text-extraction.documentMemoryEnv" (list $root $worker.resources $worker.documentParentReserveMiB (printf "workers.%s.resources" $pool)) | trim }}
@@ -364,6 +404,9 @@ mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. Docling worker: a fix
 
 {{/* ASR worker: a fixed 30 s (asr_worker.GRACEFUL_SECONDS); nothing waits for a transcription. */}}
 {{- define "text-extraction.asrGracefulSeconds" -}}30{{- end -}}
+
+{{/* NLP worker: a fixed 30 s (nlp_worker.GRACEFUL_SECONDS). */}}
+{{- define "text-extraction.nlpGracefulSeconds" -}}30{{- end -}}
 
 {{- define "text-extraction.browserGracefulSeconds" -}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
@@ -502,10 +545,22 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and $docling.enabled (not $docling.models.download) (not $docling.models.persistence.existingClaim) -}}
 {{- fail "workers.docling.models.download=false needs workers.docling.models.persistence.existingClaim: a volume that already holds the models. A new volume stays empty without the download." -}}
 {{- end -}}
-{{- range $pool := list "docling" "asr" -}}
+{{- range $pool := list "docling" "asr" "nlp" -}}
 {{- $mode := toString ((index $root.Values.workers $pool).models.downloadMode | default "init") -}}
 {{- if not (has $mode (list "init" "job")) -}}
 {{- fail (printf "workers.%s.models.downloadMode must be init or job, not %s." $pool $mode) -}}
+{{- end -}}
+{{- end -}}
+{{- $nlp := .Values.workers.nlp -}}
+{{- if $nlp.enabled -}}
+{{- if not $jobs -}}
+{{- fail "workers.nlp.enabled needs JOBS_ENABLED=true on the API pods: PII handling runs as a job of the pool nlp. Do not set jobs.enabled=false with NLP workers." -}}
+{{- end -}}
+{{- if not (has (toString $nlp.modelSize) (list "lg" "md")) -}}
+{{- fail (printf "workers.nlp.modelSize must be lg or md (the models of the manifest), not %s." $nlp.modelSize) -}}
+{{- end -}}
+{{- if and (not $nlp.models.download) (not $nlp.models.persistence.existingClaim) -}}
+{{- fail "workers.nlp.models.download=false needs workers.nlp.models.persistence.existingClaim: a volume that already holds the models. A new volume stays empty without the download." -}}
 {{- end -}}
 {{- end -}}
 {{- $asr := .Values.workers.asr -}}
@@ -574,6 +629,10 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- $asrGraceful := include "text-extraction.asrGracefulSeconds" . | float64 -}}
 {{- if and $asr.enabled (gt $asrGraceful (subf (float64 $asr.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.asr.terminationGracePeriodSeconds (%v) is too short: the ASR workers give transcriptions in flight %v s + a 10 s margin must fit." $asr.terminationGracePeriodSeconds $asrGraceful) -}}
+{{- end -}}
+{{- $nlpGraceful := include "text-extraction.nlpGracefulSeconds" . | float64 -}}
+{{- if and $nlp.enabled (gt $nlpGraceful (subf (float64 $nlp.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.nlp.terminationGracePeriodSeconds (%v) is too short: the NLP workers give analyses in flight %v s + a 10 s margin must fit." $nlp.terminationGracePeriodSeconds $nlpGraceful) -}}
 {{- end -}}
 {{- end -}}
 

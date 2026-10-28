@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Four images from one file:
+# Five images from one file:
 #   default target (`runtime`, the last stage): the API and extract worker image, no browser, no
 #   Docling, no torch, no Tesseract, no Whisper;
 #   target `browser`: the browser worker (`text-extraction-browser-worker`), with Chromium,
@@ -9,7 +9,9 @@
 #   and the Tesseract CLI, but no models: they come from a volume at /models;
 #   target `asr`: the ASR worker (`text-extraction-asr-worker`), with faster-whisper, PyAV built
 #   against an LGPL FFmpeg (decision D5) and yt-dlp with Deno, but no models (a volume at /models)
-#   and no `ffmpeg` or `rtmpdump` program.
+#   and no `ffmpeg` or `rtmpdump` program;
+#   target `nlp`: the NLP worker (`text-extraction-nlp-worker`), with Presidio and spaCy but no
+#   models: they come from a volume at /models.
 # Every image runs tini as PID 1 (ENTRYPOINT): it forwards signals to the service and reaps
 # orphaned child processes, such as a tesseract whose conversion child was killed. Kubernetes and
 # compose pass the entry point as args (CMD), so tini stays.
@@ -50,6 +52,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM build AS build-docling
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable --extra docling
+
+# Build stage of the NLP worker: the same environment plus the extra `nlp` (Presidio and spaCy; the
+# spaCy models are not a Python dependency, `text-extraction-nlp-worker --download-models` puts them
+# on the volume). Only the NLP image copies it: the API and the other workers hold neither Presidio,
+# spaCy nor thinc.
+FROM build AS build-nlp
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable --extra nlp
 
 # Build stage of the ASR worker: the same environment plus the extra `asr`, with PyAV built from
 # source against a pinned LGPL FFmpeg (decision D5). The PyPI wheel of av bundles an FFmpeg that
@@ -253,6 +263,32 @@ EXPOSE 9090
 USER 10001
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["text-extraction-asr-worker"]
+
+# NLP worker image. It serves only the internal port 9090 and holds no models: the German and
+# English spaCy models of PII_MODEL_SIZE are on the volume at /models (PII_MODELS_PATH;
+# `text-extraction-nlp-worker --download-models` fills it from the manifest, SHA-256 checked). Only
+# its children import Presidio and spaCy; the worker process itself does not.
+FROM python:3.13-slim AS nlp
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
+# /models stays empty: it is the mount point. Owned by the user, so a new docker volume mounted
+# there is writable for the download (Kubernetes uses fsGroup instead).
+RUN install -d -o 10001 -g 10001 /models
+COPY --from=tini /tini /usr/bin/tini
+COPY --from=build-nlp /app/.venv /app/.venv
+# The root filesystem is read-only in compose and Kubernetes, and the user has no home: whatever
+# the libraries cache goes under HOME, which points into the writable /tmp (tldextract needs
+# nothing: it uses its bundled suffix list and never fetches or caches one).
+ENV PATH=/app/.venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PII_MODELS_PATH=/models \
+    HOME=/tmp \
+    XDG_CACHE_HOME=/tmp/.cache
+EXPOSE 9090
+USER 10001
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["text-extraction-nlp-worker"]
 
 # Runtime stage (default target): only the virtual environment, no build tools, models, data or
 # browsers.

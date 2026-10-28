@@ -1,4 +1,4 @@
-{{- /* models.downloadMode job (Docling workers, ASR workers of the local backend): a Helm hook Job
+{{- /* models.downloadMode job (Docling workers, NLP workers, ASR workers of the local backend): a Helm hook Job
 per pool fills the models volume once per install and upgrade, instead of an init container in
 every worker pod. It runs `<worker> --download-models` with the volume mounted writable: that
 downloads the files of the manifest (SHA-256 checked) and does nothing when the volume already
@@ -6,7 +6,7 @@ holds them. The worker pods only check the marker; one that starts before the Jo
 with code 1 and restarts. The volume must be mountable by the Job and the workers at once
 (ReadWriteMany, or everything on one node). A succeeded Job is deleted, a failed one stays for its
 logs until the next upgrade. */ -}}
-{{- range $pool := list "docling" "asr" }}
+{{- range $pool := list "docling" "asr" "nlp" }}
 {{- $args := list $ $pool }}
 {{- if eq (include "text-extraction.modelsDownload" $args) "job" }}
 {{- $worker := index $.Values.workers $pool }}
