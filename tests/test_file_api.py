@@ -531,6 +531,37 @@ def test_upload_with_pii_form_field_bare_and_json(pii: str, mode: str) -> None:
         assert service.wait_for_no_jobs() == []  # the nlp job of a sync answer is deleted
 
 
+def test_upload_with_pii_counts_the_hop_in_its_total_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_pii_dispatch import NAME, PiiService
+    from text_extraction.pii_dispatch import PiiHandoff
+
+    hop = PiiHandoff.__call__
+
+    async def slow(self: PiiHandoff, envelope: Any, handover: Any) -> Any:
+        await asyncio.sleep(0.3)
+        return await hop(self, envelope, handover)
+
+    monkeypatch.setattr(PiiHandoff, "__call__", slow)
+    service = PiiService()
+    with TestClient(service.app) as pii_client, service.nlp():
+        response = upload(
+            pii_client,
+            f"{PARAGRAPH * 3}\n\nBy {NAME}.\n".encode(),
+            "notes.txt",
+            "text/plain",
+            form={"pii": "mask"},
+        )
+
+        body = response.json()
+        assert body["status"] == "success", body["error"]
+        timings = body["data"]["timings"]
+        assert timings["total_ms"] >= 300
+        assert timings["pii_ms"] >= 0
+        assert body["trace_id"]
+
+
 def test_missing_file_is_422(client: TestClient) -> None:
     response = client.post("/v1/extract/file", data={"format": "text"}, headers=AUTH)
 

@@ -32,20 +32,27 @@ from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
 from text_extraction.extract_api import _store_result
-from text_extraction.extract_models import ExtractResult, Timings, failed_extract
+from text_extraction.extract_models import ExtractRequest, ExtractResult, Timings, failed_extract
 from text_extraction.fetch import Fetcher
+from text_extraction.file_models import FileForm
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.nlp_worker import PiiRunner
-from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE, TOO_LARGE_MESSAGE, fail_closed
+from text_extraction.pii.fields import (
+    ANNOTATE_HTML_MESSAGE,
+    FAIL_CLOSED_MESSAGE,
+    TOO_LARGE_MESSAGE,
+    withheld,
+    withheld_by_pii,
+)
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import (
     PII_BUSY_MESSAGE,
     PII_OUTCOMES,
     PII_POOL,
+    PiiDispatcher,
     nlp_queue,
-    withheld,
     without_findings,
 )
 from text_extraction.pipeline import create_pipeline
@@ -468,6 +475,65 @@ def test_browser_fallback_then_slow_nlp_answers_202_with_the_nlp_job() -> None:
     assert service.outcomes() == {"handed_over": 1}
 
 
+def test_valkey_error_during_the_nlp_wait_is_pii_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def down(self: Any, job_id: str, **kwargs: Any) -> Any:
+        raise RedisConnectionError("Error 111 connecting to valkey:6379. Connection refused.")
+
+    monkeypatch.setattr(PiiDispatcher, "_wait", down)
+    service = PiiService()
+    with TestClient(service.app) as client:
+        response = extract(client, pii="mask")
+
+        assert response.status_code == 200
+        assert_withheld(response.json())
+        assert service.stored() == []  # the nlp job was given up
+    assert service.outcomes() == {"backend_error": 1}
+
+
+@pytest.mark.usefixtures("high_memory")
+def test_browser_fallback_is_withheld_while_memory_is_high() -> None:
+    service = PiiService(
+        {PAGE: fetched(body=NAMED_SHELL)}, browser_enabled=True, browser_queue_wait_seconds=0.3
+    )
+    with TestClient(service.app) as client:
+        response = extract(client, pii="mask")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert_withheld(body, PII_BUSY_MESSAGE)
+        assert body["data"]["mode_used"] == "fast"
+        assert service.stored() == []
+    assert service.outcomes() == {"memory_guard": 1}
+
+
+@pytest.mark.parametrize("source", ["url", "upload"])
+def test_the_pipeline_keeps_the_pii_time_of_a_handed_off_result(source: str) -> None:
+    """A Docling job's result comes back through nlp (with ``pii_ms``); the pipeline's own
+    timings replace the job's, but keep its PII time (N3)."""
+    service = PiiService(docling_enabled=True)
+    seen: list[Envelope[ExtractResult]] = []
+
+    async def ocr(needed: Any, envelope: Envelope[ExtractResult]) -> Envelope[ExtractResult]:
+        seen.append(envelope)
+        assert envelope.data is not None
+        timings = Timings(total_ms=1, compliance_ms=0, fetch_ms=0, convert_ms=1, pii_ms=42)
+        data = envelope.data.model_copy(update={"timings": timings})
+        return envelope.model_copy(update={"data": data})
+
+    async def scenario(valkey: FakeAsyncRedis) -> Envelope[ExtractResult]:
+        if source == "url":
+            return await service.real.run(ExtractRequest(url=SCAN), ALICE, ocr_handoff=ocr)
+        return await service.real.extract_upload(
+            SCAN_BODY, "scan.pdf", FileForm(), ALICE, ocr_handoff=ocr
+        )
+
+    answer = service.run(scenario)
+    assert seen  # the document went to the handoff
+    assert answer.data is not None
+    assert answer.data.timings.pii_ms == 42
+    assert answer.data.timings.total_ms >= answer.data.timings.convert_ms
+
+
 def test_p1_job_result_is_processed() -> None:
     service = PiiService()
     gated = GatedPipeline(service.real)
@@ -600,24 +666,27 @@ def test_without_findings_leaves_a_withheld_answer_alone() -> None:
     owed = Envelope[ExtractResult](status="success", data=_result(content=NAME))
     for held in (
         withheld(owed, pii),
-        withheld(owed, pii, PII_BUSY_MESSAGE),
-        fail_closed(owed, pii).model_copy(
-            update={
-                "error": ErrorInfo(
-                    code=ErrorCode.TOO_LARGE, message=TOO_LARGE_MESSAGE, retryable=False
-                )
-            }
-        ),
+        withheld(owed, pii, message=PII_BUSY_MESSAGE),
+        withheld(owed, pii, code=ErrorCode.TOO_LARGE, message=TOO_LARGE_MESSAGE, retryable=False),
     ):
+        assert held.status == "failed"
         assert held.data is not None
         assert held.data.content is None
+        assert withheld_by_pii(held)
         assert without_findings(held, pii, settings) is held
+    # The nlp worker's refusal of annotate on HTML is withheld the same way.
+    refused = withheld(owed, pii, message=ANNOTATE_HTML_MESSAGE, retryable=False)
+    assert (refused.status, refused.error) == (
+        "failed",
+        ErrorInfo(code=ErrorCode.PII_FAILED, message=ANNOTATE_HTML_MESSAGE, retryable=False),
+    )
     # A target's own too_large without text is a failure with nothing to process.
     target = Envelope[ExtractResult](
         status="failed",
         data=_result(content=None, title=None),
         error=ErrorInfo(code=ErrorCode.TOO_LARGE, message="The document is too large."),
     )
+    assert not withheld_by_pii(target)
     reported = without_findings(target, pii, settings)
     assert reported.data is not None
     assert reported.data.pii is not None

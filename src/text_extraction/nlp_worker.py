@@ -90,23 +90,22 @@ from text_extraction.documents.pool import (
     ConversionTimeout,
     DocumentPool,
 )
-from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult, failed_extract
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, pii_lease_seconds
 from text_extraction.pii.fields import (
-    FAIL_CLOSED_MESSAGE,
+    ANNOTATE_HTML_MESSAGE,
     TOO_LARGE_MESSAGE,
     apply_pii,
-    fail_closed,
     text_fields,
+    withheld,
 )
 from text_extraction.pii.replace import hash_key
 from text_extraction.pii.types import (
     ENTITY_TYPES,
     EntityType,
     PiiLanguage,
-    PiiOptions,
     Span,
     model_names,
 )
@@ -125,7 +124,6 @@ LANGUAGE_UNSUPPORTED_WARNING: Final = "pii_language_unsupported"
 DRAFT_EXPIRED_MESSAGE: Final = (
     "The result to process expired before PII handling ran. Send the request again."
 )
-ANNOTATE_HTML_MESSAGE: Final = "annotate needs format markdown or text."
 # What the items in flight get after SIGTERM before they are cancelled (N13).
 GRACEFUL_SECONDS: Final = 30
 # Importing Presidio and spaCy takes a while on a cold volume.
@@ -196,21 +194,6 @@ def entities_counter_for(registry: CollectorRegistry) -> Counter:
     return counter
 
 
-def _withheld(
-    draft: Envelope[ExtractResult],
-    options: PiiOptions,
-    *,
-    code: ErrorCode = ErrorCode.PII_FAILED,
-    message: str = FAIL_CLOSED_MESSAGE,
-    retryable: bool = True,
-) -> Envelope[ExtractResult]:
-    """``draft`` as ``failed`` with ``code``, its text, metadata, links, uploader and file name
-    removed (N12) and the facts of the target kept."""
-    held = fail_closed(draft, options)
-    error = ErrorInfo(code=code, message=message, retryable=retryable)
-    return held.model_copy(update={"status": "failed", "error": error})
-
-
 class PiiRunner:
     """The ``nlp`` pool's ``ItemRunner``; see the module docstring. ``pool`` is the PII
     children (``DocumentPool``)."""
@@ -248,11 +231,11 @@ class PiiRunner:
             return draft  # nothing is owed: not asked for, nothing to read, or done before
         started = time.perf_counter()
         if options.mode == "annotate" and data.format == "html":
-            return _withheld(draft, options, message=ANNOTATE_HTML_MESSAGE, retryable=False)
+            return withheld(draft, options, message=ANNOTATE_HTML_MESSAGE, retryable=False)
         entities = list(options.entities or self._settings.pii_default_entities)
         fields = text_fields(data, entities)
         if sum(len(field.text) for field in fields) > self._settings.pii_max_chars:
-            return _withheld(
+            return withheld(
                 draft, options, code=ErrorCode.TOO_LARGE, message=TOO_LARGE_MESSAGE, retryable=False
             )
         language, fallback = choose_language(
@@ -270,7 +253,7 @@ class PiiRunner:
                 found = await self._analyze(needing, language, entities, threshold)
             except ConversionOutOfMemory:
                 _log.warning("pii_child_out_of_memory")
-                return _withheld(
+                return withheld(
                     draft,
                     options,
                     code=ErrorCode.TOO_LARGE,
@@ -279,7 +262,7 @@ class PiiRunner:
                 )
             except (ConversionTimeout, ConversionCrashed, ConversionError) as error:
                 self._log_child_failure(error)
-                return _withheld(draft, options)
+                return withheld(draft, options)
         try:
             spans = {
                 name: [Span(start, end, kind, score) for start, end, kind, score in field_spans]
@@ -299,7 +282,7 @@ class PiiRunner:
         except Exception as error:
             # The type only: the worker's own handler would log a traceback that may quote text.
             _log.error("pii_apply_failed", error=type(error).__name__)
-            return _withheld(draft, options)
+            return withheld(draft, options)
         if fallback:
             warnings.insert(0, LANGUAGE_UNSUPPORTED_WARNING)
         pii_ms = round((time.perf_counter() - started) * 1000)

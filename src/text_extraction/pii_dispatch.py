@@ -38,7 +38,10 @@ or an OCR or browser fallback):
 that owes the step: it stores the envelope as the item's draft and queues the item on ``nlp``
 (same job, index and client); the worker then completes the item without a result (outcome
 ``escalated``). Draft, then queue, then completion: a crash in between reruns the item, which
-moves again, and only the first result of an item counts. While the memory guard is high nothing
+moves again, and only the first result of an item counts. Once the completion holds, the item
+never runs on its pool again: the worker deletes its input bytes and, on pool ``asr`` but for a
+batch, the caller's key at once (R13); the draft is nlp's. A job that expired meanwhile
+(``JobLost``) drops the item. While the memory guard is high nothing
 is stored: the move declines and the worker writes ``pii_failed``, retryable, withheld. The
 browser worker's renders, the Docling worker's OCR results and the ASR worker's transcripts take
 this path, and so does a sync request's job of those pools: its waits are ``PII_SYNC_WAIT_SECONDS``
@@ -59,8 +62,8 @@ dispatched; moves of the workers count here too).
 - Draft: ``JobStore.draft(job, index)``: the unprocessed envelope of the item. None when it
   expired with its job: the item then answers ``pii_failed``, retryable. The ``Worker`` deletes
   the draft once the item's result is written (also of an exhausted item), with whatever the
-  pools before left for the item: its input bytes and, but for a batch, the job's caller
-  secrets. There are no input bytes of its own.
+  pools before may have left for the item (its input bytes, again, and, but for a batch, the
+  job's caller secrets). There are no input bytes of its own.
 - Result: the processed envelope, or ``pii_failed`` / ``too_large`` with the content withheld.
   An item that is lost too often (``JOB_ITEM_MAX_ATTEMPTS``) answers ``pii_failed``, retryable,
   never its draft.
@@ -79,16 +82,11 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
-from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobRecord, JobStore
-from text_extraction.pii.fields import (
-    FAIL_CLOSED_MESSAGE,
-    TOO_LARGE_MESSAGE,
-    fail_closed,
-    needs_pii,
-)
+from text_extraction.pii.fields import needs_pii, withheld, withheld_by_pii
 from text_extraction.pii.replace import hash_key
 from text_extraction.pii.types import PiiLanguage, PiiLanguageOption, PiiOptions, PiiReport
 from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatcher
@@ -140,31 +138,17 @@ def choose_language(
     return fallback, True
 
 
-def withheld(
-    envelope: Envelope[ExtractResult],
-    options: PiiOptions | None,
-    message: str = FAIL_CLOSED_MESSAGE,
-) -> Envelope[ExtractResult]:
-    """``pii.fields.fail_closed`` with ``message``: an envelope that owes the PII step as
-    ``failed``/``pii_failed``, retryable, its text withheld. Any other envelope as it is."""
-    if not needs_pii(envelope, options):
-        return envelope
-    held = fail_closed(envelope, options)
-    error = ErrorInfo(code=ErrorCode.PII_FAILED, message=message, retryable=True)
-    return held.model_copy(update={"error": error})
-
-
 def without_findings(
     envelope: Envelope[ExtractResult], options: PiiOptions | None, settings: Settings
 ) -> Envelope[ExtractResult]:
     """An envelope with data that asked for PII, is not processed and has nothing N5 processes
     (a failure without content and metadata): as it is, with a report of zero entities. Any
-    other envelope as it is, also one whose text the hop withheld (``_withheld_by_pii``): it
+    other envelope as it is, also one whose text the hop withheld (``withheld_by_pii``): it
     has nothing left to process, but it was not processed either."""
     data = envelope.data
     if options is None or data is None or data.pii is not None or needs_pii(envelope, options):
         return envelope
-    if _withheld_by_pii(envelope):
+    if withheld_by_pii(envelope):
         return envelope
     language, _fallback = choose_language(
         options.language, data.language, settings.pii_fallback_language
@@ -177,17 +161,6 @@ def without_findings(
         hash_scope=hash_key(settings)[1] if options.mode == "hash" else None,
     )
     return envelope.model_copy(update={"data": data.model_copy(update={"pii": report})})
-
-
-def _withheld_by_pii(envelope: Envelope[ExtractResult]) -> bool:
-    """Whether the PII step withheld the envelope's text: ``pii_failed``, or the nlp worker's
-    ``too_large`` (a target's own ``too_large`` has another message)."""
-    error = envelope.error
-    if error is None:
-        return False
-    if error.code == ErrorCode.PII_FAILED:
-        return True
-    return error.code == ErrorCode.TOO_LARGE and error.message == TOO_LARGE_MESSAGE
 
 
 class PiiDispatcher(PoolDispatcher):
@@ -289,7 +262,7 @@ class PiiHandoff:
         dispatcher = self._dispatcher
         if self._guard.high:
             dispatcher.count("memory_guard")
-            return withheld(envelope, pii, PII_BUSY_MESSAGE)
+            return withheld(envelope, pii, message=PII_BUSY_MESSAGE)
         claimed = handover.claim_after_release(PII_POOL)
         if not claimed:  # the route is handing it over to a P1 job
             await handover.settled()

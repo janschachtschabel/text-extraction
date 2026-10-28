@@ -1701,9 +1701,12 @@ def test_annotate_with_html_is_422() -> None:
         assert body["error"]["message"] == "annotate needs format markdown or text."
         # The replacing modes take HTML; annotate takes the other formats.
         for allowed in ({"format": "html", "pii": "mask"}, {"format": "text", "pii": "annotate"}):
-            assert client.post(
-                "/v1/extract", json={"url": PAGE, "wait_seconds": 0, **allowed}, headers=AUTH
-            ).status_code in (200, 202)
+            assert (
+                client.post(
+                    "/v1/extract", json={"url": PAGE, "wait_seconds": 0, **allowed}, headers=AUTH
+                ).status_code
+                == 202  # no nlp worker here: a job at once
+            )
         assert case.fetcher.calls  # those were taken
 
 

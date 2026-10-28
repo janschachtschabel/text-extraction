@@ -110,7 +110,7 @@ from text_extraction.extract_models import (
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
-from text_extraction.pii.fields import fail_closed
+from text_extraction.pii.fields import ANNOTATE_HTML_MESSAGE, fail_closed
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, pii_available
 from text_extraction.pipeline import Pipeline
@@ -139,7 +139,6 @@ _EVALUATE_MESSAGE = "The evaluate action (JavaScript) is for admin keys only."
 _BROWSER_TIMEOUT_MESSAGE = "No browser rendered the page in time. Try again later."
 PII_DISABLED_MESSAGE = "PII handling is not enabled on this service."
 PII_SCREENSHOT_MESSAGE = "A screenshot cannot be masked; ask for it without pii."
-PII_ANNOTATE_HTML_MESSAGE = "annotate needs format markdown or text."
 
 type _Background = set[asyncio.Task[Any]]
 type _Answer = Envelope[ExtractResult] | None
@@ -266,7 +265,7 @@ def check_pii_request(
     if screenshot:
         raise ServiceError(ErrorCode.INVALID_REQUEST, PII_SCREENSHOT_MESSAGE, 422)
     if pii.mode == "annotate" and req_format == "html":
-        raise ServiceError(ErrorCode.INVALID_REQUEST, PII_ANNOTATE_HTML_MESSAGE, 422)
+        raise ServiceError(ErrorCode.INVALID_REQUEST, ANNOTATE_HTML_MESSAGE, 422)
 
 
 def request_wait_seconds(body: ExtractRequest, settings: Settings) -> float | None:
@@ -546,7 +545,7 @@ async def _flow(
     if handoff is None:  # no PII on this pod: the route's guard withholds the text
         return answer
     processed = await handoff(answer, handover)
-    return None if processed is None else _timed(processed, started)
+    return None if processed is None else timed(processed, started)
 
 
 async def _extraction(
@@ -752,7 +751,7 @@ async def _in_browser(
     # Answered here: nobody reads the job again, unless the route answered 202 with it meanwhile.
     if handover.release():
         await asyncio.shield(dispatcher.answered(job_id, result))
-    return _timed(result, started)
+    return timed(result, started)
 
 
 def _dispatch_failed(error: Exception) -> None:
@@ -769,9 +768,9 @@ def _backend_unavailable() -> ServiceError:
     )
 
 
-def _timed(envelope: Envelope[ExtractResult], started: float) -> Envelope[ExtractResult]:
+def timed(envelope: Envelope[ExtractResult], started: float) -> Envelope[ExtractResult]:
     """The envelope with this request's trace id and its whole time in ``timings.total_ms``:
-    the fast phase, the wait for a worker and the render."""
+    the fast phase, the wait for a worker, the render and the PII hop."""
     data = envelope.data
     if data is not None:
         total = max(data.timings.total_ms, round((time.perf_counter() - started) * 1000))
@@ -796,9 +795,9 @@ def _unavailable(
                 "warnings": [*draft.data.warnings, BROWSER_UNAVAILABLE_WARNING],
             }
         )
-        return _timed(draft.model_copy(update={"data": data}), started)
+        return timed(draft.model_copy(update={"data": data}), started)
     if draft is not None:  # pragma: no cover - needs_browser only passes results with data
-        return _timed(draft, started)
+        return timed(draft, started)
     private = not body.secrets().empty() or body.screenshot
     result = ExtractResult(
         url=body.url,
@@ -822,7 +821,7 @@ def _unavailable(
         warnings=[],
     )
     error = ErrorInfo(code=ErrorCode.TIMEOUT, message=_BROWSER_TIMEOUT_MESSAGE, retryable=True)
-    return _timed(Envelope(status="failed", data=result, error=error), started)
+    return timed(Envelope(status="failed", data=result, error=error), started)
 
 
 # --- the P1 job -----------------------------------------------------------------------------------

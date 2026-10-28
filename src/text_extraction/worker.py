@@ -154,13 +154,12 @@ from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
-from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE, fail_closed, needs_pii
+from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE, fail_closed, needs_pii, withheld
 from text_extraction.pii_dispatch import (
     PII_BUSY_MESSAGE,
     PII_POOL,
     PiiMove,
     create_pii_move,
-    withheld,
     without_findings,
 )
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
@@ -636,14 +635,19 @@ class Worker:
         A result that owes the PII step (the job's ``pii``, ruling N11) moves to the ``nlp``
         pool instead and is completed here without one. Whatever is written passes the guard
         (``pii.fields.fail_closed``, N12): a result that owes the step and did not move (the
-        memory guard, a worker without the move) is ``pii_failed`` with its text withheld."""
+        memory guard, a worker without the move) is ``pii_failed`` with its text withheld. A job
+        that expired before the move (``JobLost``) drops the item, as before a write."""
         pii = job.options.pii
         if pii is not None and self._queue.pool != PII_POOL:
             if needs_pii(envelope, pii):
                 if self._pii_move is not None:
-                    if await self._pii_move(job, item, envelope):
-                        return await self._moved(item)
-                    envelope = withheld(envelope, pii, PII_BUSY_MESSAGE)
+                    try:
+                        moved = await self._pii_move(job, item, envelope)
+                    except JobLost:
+                        return await self._drop(item)
+                    if moved:
+                        return await self._moved_to_nlp(job, item)
+                    envelope = withheld(envelope, pii, message=PII_BUSY_MESSAGE)
             else:
                 envelope = without_findings(envelope, pii, self._settings)
         envelope = fail_closed(envelope, pii)
@@ -662,13 +666,30 @@ class Worker:
         await self._queue.complete(item)
         return None if write == "repeat" else _outcome(envelope)
 
+    async def _moved_to_nlp(self, job: JobRecord, item: QueueItem) -> str | None:
+        """Complete an item that moved to ``nlp`` (``_moved``). Once that completion holds, the
+        item never runs on this pool again: what this pool kept for a rerun goes at once
+        (ruling R13), as ``_drop_input`` would delete it with a result, but for the draft,
+        which is nlp's now. Otherwise an nlp pool that is down would keep the inputs of
+        ``docling`` and ``asr`` filling their budget and Valkey."""
+        outcome = await self._moved(item)
+        if outcome is None:
+            return None  # the lease was lost: the current holder may need them
+        pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)
+        if job.kind == "file" or pooled:
+            await self._store.delete_input(item.job_id, item.index)
+        if self._queue.pool == ASR_POOL and job.kind != "batch":
+            await self._store.drop_secrets(item.job_id)
+        return outcome
+
     async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
         """Delete the item's bytes once it has its result: an upload's, or those of an item
         that was queued for OCR (pool ``docling``) or a transcription (pool ``asr``), with its
         draft; on pool ``asr`` also the caller's key of a sync request's job (a batch's serves
         its other items and goes with its last result, ``_finish``). Pool ``nlp`` is the last
-        hop: an item that moved there left what its pool before kept for a rerun, so it deletes
-        the draft, any input of the item and, but for a batch, the job's caller secrets.
+        hop: it deletes the draft, any input of the item that is still there (the pool before
+        deletes it once its move is complete, ``_moved_to_nlp``) and, but for a batch, the job's
+        caller secrets.
         Only after the result is written: an item that runs again (a failed write, a lost lease)
         needs them."""
         pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)

@@ -260,8 +260,15 @@ _MAX_TAG_CHARS = 4096
 _LANG_ATTRIBUTE = re.compile(r"""(?:^|\s)(?:xml:)?lang\s*=\s*["']?([^"'\s>]+)""", re.IGNORECASE)
 _DURATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 25, 30)
 
+
 # Hands a document that needs OCR to the Docling pool and answers for it. It gets the answer
 # without OCR too (``pipeline_documents.without_ocr``), for a fallback of its own.
+def _with_pii_time(timings: Timings, handed_off: Timings) -> Timings:
+    """This request's ``timings``, with the PII time of a handoff's answer kept: a Docling or
+    ASR job's result that came back through the nlp pool carries its ``pii_ms`` (N3)."""
+    return timings.model_copy(update={"pii_ms": handed_off.pii_ms})
+
+
 type OcrHandoff = Callable[[OcrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]]
 # Hands media that needs speech recognition to the ASR queue and answers for it; it gets the
 # answer without a transcription too (``pipeline_media.without_asr``), as its stand-in.
@@ -665,7 +672,7 @@ class Pipeline:
                 # Likewise: a transcription is always a job (M9).
                 envelope = await run.asr_handoff(run.asr_needed, envelope)
             if envelope.data is not None:
-                envelope.data.timings = run.timings()
+                envelope.data.timings = _with_pii_time(run.timings(), envelope.data.timings)
             envelope.trace_id = current_trace_id()
             outcome = _outcome(envelope)
             return envelope
@@ -720,7 +727,7 @@ class Pipeline:
             if run.asr_needed is not None and run.asr_handoff is not None:
                 envelope = await run.asr_handoff(run.asr_needed, envelope)
             if envelope.data is not None:
-                envelope.data.timings = run.timings()
+                envelope.data.timings = _with_pii_time(run.timings(), envelope.data.timings)
             envelope.trace_id = current_trace_id()
             outcome = _outcome(envelope)
             return envelope

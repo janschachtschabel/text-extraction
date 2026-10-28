@@ -44,6 +44,7 @@ envelope through the nlp workers last (``pii_dispatch.PiiHandoff``, N11), as for
 answer, and what a P1 job stores, passes ``pii.fields.fail_closed`` (N12).
 """
 
+import time
 import unicodedata
 from collections.abc import Callable, Coroutine
 from functools import partial
@@ -71,6 +72,7 @@ from text_extraction.extract_api import (
     docling_handoff,
     handover_time,
     pii_handoff,
+    timed,
 )
 from text_extraction.extract_models import ExtractResult
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
@@ -287,6 +289,7 @@ async def _flow(
     """The upload's envelope, or None when the Docling, the ASR or the nlp worker writes its
     job's result. With ``pii`` the envelope goes through the nlp workers last
     (``pii_dispatch.PiiHandoff``)."""
+    started = time.perf_counter()
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
         state,
@@ -317,4 +320,5 @@ async def _flow(
     )
     if form.pii is None or pii is None:  # without PII on this pod the route's guard withholds
         return envelope
-    return await pii(envelope, handover)
+    processed = await pii(envelope, handover)
+    return None if processed is None else timed(processed, started)

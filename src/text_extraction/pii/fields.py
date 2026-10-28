@@ -33,6 +33,8 @@ from text_extraction.tracing import current_trace_id
 
 FAIL_CLOSED_MESSAGE = "PII handling did not run; the content is withheld."
 TOO_LARGE_MESSAGE = "The text is too large for PII handling; the content is withheld."
+# The request checks' 422 and the nlp worker's refusal of a draft (annotate takes no HTML).
+ANNOTATE_HTML_MESSAGE = "annotate needs format markdown or text."
 TRUNCATED_WARNING = "pii_entities_truncated"
 _CONTACT_SCHEMES = ("mailto:", "tel:")
 
@@ -174,6 +176,35 @@ def fail_closed(
         error=ErrorInfo(code=ErrorCode.PII_FAILED, message=FAIL_CLOSED_MESSAGE, retryable=True),
         trace_id=envelope.trace_id or current_trace_id(),
     )
+
+
+def withheld(
+    envelope: Envelope[ExtractResult],
+    options: PiiOptions | None,
+    *,
+    code: ErrorCode = ErrorCode.PII_FAILED,
+    message: str = FAIL_CLOSED_MESSAGE,
+    retryable: bool = True,
+) -> Envelope[ExtractResult]:
+    """``envelope`` withheld by the PII step: ``fail_closed`` (its text, metadata, links,
+    uploader and file name removed, the facts of the target kept), then ``failed`` with
+    ``code``, ``message`` and ``retryable``. For an envelope that owes the step; one that does
+    not keeps its data and fails all the same."""
+    held = fail_closed(envelope, options)
+    error = ErrorInfo(code=code, message=message, retryable=retryable)
+    return held.model_copy(update={"status": "failed", "error": error})
+
+
+def withheld_by_pii(envelope: Envelope[ExtractResult]) -> bool:
+    """Whether the PII step withheld the envelope's text (``withheld``): ``pii_failed``, or the
+    nlp worker's ``too_large``. A target's own ``too_large`` has another message; the message
+    is the one constant both ``nlp_worker`` and this check use."""
+    error = envelope.error
+    if error is None:
+        return False
+    if error.code == ErrorCode.PII_FAILED:
+        return True
+    return error.code == ErrorCode.TOO_LARGE and error.message == TOO_LARGE_MESSAGE
 
 
 def _is_contact_url(url: str) -> bool:
