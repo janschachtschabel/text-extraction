@@ -359,6 +359,9 @@ class Settings(BaseSettings):
                 "ASR_INPUT_TTL_SECONDS must be longer than the ASR lease "
                 "(2 x ASR_TIMEOUT_SECONDS + 10)"
             )
+        # The PII hop is a job of pool nlp (N15): without jobs nothing could be processed.
+        if self.pii_enabled and not self.jobs_enabled:
+            raise ValueError("PII_ENABLED needs JOBS_ENABLED=true")
         return self
 
     @model_validator(mode="after")

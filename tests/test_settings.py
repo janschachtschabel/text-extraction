@@ -1186,3 +1186,19 @@ def test_pii_hash_key_empty_means_unset(monkeypatch: pytest.MonkeyPatch, value: 
     monkeypatch.setenv("PII_HASH_KEY", value)
 
     assert load_settings().pii_hash_key is None
+
+
+def test_pii_enabled_needs_jobs_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """N15: the nlp hop is a job; start-up refuses PII_ENABLED without JOBS_ENABLED."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("PII_ENABLED", "true")
+    monkeypatch.setenv("JOBS_ENABLED", "false")
+
+    with pytest.raises(ConfigError, match="PII_ENABLED needs JOBS_ENABLED"):
+        load_settings()
+
+    monkeypatch.setenv("JOBS_ENABLED", "true")
+    assert load_settings().pii_enabled is True
+    monkeypatch.setenv("PII_ENABLED", "false")
+    monkeypatch.setenv("JOBS_ENABLED", "false")
+    assert load_settings().jobs_enabled is False

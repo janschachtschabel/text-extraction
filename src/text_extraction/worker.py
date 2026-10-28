@@ -29,7 +29,8 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 4. stores the result (only the first result of an item counts), then completes the item. An item
    whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
    it) still stores its result, but its repeat write or deferral is not counted in the metrics.
-   An item the runner moved is completed without a result (outcome ``escalated``). A claimed
+   An item the runner moved, or whose result moved to the ``nlp`` pool (PII, below), is
+   completed without a result (outcome ``escalated``). A claimed
    item that has its result already (a copy left by a lost lease or a double move) is completed
    without running again. An exhausted item's caller secrets are deleted with its failure.
 
@@ -64,6 +65,22 @@ retryable). The ``asr_dispatch`` module docstring has what the ASR worker reads.
 ``asr`` pool deletes an item's input and draft once its result is written, and the job's caller
 key unless the job is a batch; an exhausted item of that pool answers its draft with
 ``asr_unavailable`` when it has one.
+
+**PII (N11, N12).** While the service has PII (``PII_ENABLED`` and ``JOBS_ENABLED``), a result
+of a job with ``pii`` that owes the step (not processed yet, with text that N5 processes) is not
+written by ``_finish`` of any pool but ``nlp``: it moves to the ``nlp`` pool
+(``pii_dispatch.PiiMove``): the result is stored as the item's draft, the item is queued on
+``nlp`` with the same job, index and client, and it is completed here without a result (outcome
+``escalated``). Draft, then the queue, then the completion: a crash in between leaves the item
+leased here, and the rerun moves it once more; only the first result of an item counts. The
+browser, Docling and ASR workers take the same path, so a render, an OCR result or a transcript
+of such a job is processed before its job completes. While the memory guard is high nothing is
+stored: the item fails ``pii_failed``, retryable, its text withheld. A result without any such
+text gets a report of zero entities instead. Every result passes the guard
+``pii.fields.fail_closed`` before it is written: one that still owes the step (a worker without
+the move) is ``pii_failed`` without its text. The ``pii_dispatch`` module docstring has what the
+nlp worker reads; a worker of pool ``nlp`` deletes an item's draft and input, and a sync
+request's caller secrets, once its result is written.
 
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
@@ -137,8 +154,15 @@ from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
-from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE
-from text_extraction.pii_dispatch import PII_POOL
+from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE, fail_closed, needs_pii
+from text_extraction.pii_dispatch import (
+    PII_BUSY_MESSAGE,
+    PII_POOL,
+    PiiMove,
+    create_pii_move,
+    withheld,
+    without_findings,
+)
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.pipeline_media import asr_available
@@ -175,7 +199,7 @@ _INPUT_EXPIRED_MESSAGE = "The uploaded file expired before it was extracted. Upl
 _INTERNAL_MESSAGE = "Internal server error."
 
 # Outcomes of an item besides its envelope's: given back to the queue, its job is gone, or it
-# moved to another pool (the browser's or Docling's).
+# moved to another pool (the browser's, Docling's, ASR's or nlp's).
 _DEFERRED = "deferred"
 _LOST = "lost"
 _ESCALATED = "escalated"
@@ -205,7 +229,8 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
                 "text_extraction_job_items_total",
                 "Job items handled by this worker, by outcome: success, the error code of the "
                 "result, deferred (given back while the host is busy or paused), lost (the "
-                "job was gone) or escalated (moved to the browser, the docling or the asr pool).",
+                "job was gone) or escalated (moved to the browser, the docling, the asr or the nlp "
+                "pool).",
                 ["outcome"],
                 registry=registry,
             ),
@@ -397,7 +422,9 @@ class Worker:
     ``valkey`` is the client behind ``store`` and ``queue``; the caller closes it. ``clock``
     (epoch seconds), ``sleep`` and ``random`` (for the jitter) can be replaced in tests.
     ``give_back_on_cancel``: an item cancelled while it runs (the shutdown's end) goes back to
-    the queue at once, instead of when its lease expires.
+    the queue at once, instead of when its lease expires. ``pii_move`` moves a result that owes
+    the PII step to the ``nlp`` pool (every pool but ``nlp``; None while the service has no
+    PII).
     """
 
     def __init__(
@@ -414,6 +441,7 @@ class Worker:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         random: Callable[[], float] = random.random,
         give_back_on_cancel: bool = False,
+        pii_move: PiiMove | None = None,
     ) -> None:
         self._settings = settings
         self._valkey = valkey
@@ -427,6 +455,7 @@ class Worker:
         self._concurrency = concurrency if concurrency is not None else settings.worker_concurrency
         self._lease_seconds = runner.lease_seconds
         self._give_back_on_cancel = give_back_on_cancel
+        self._pii_move = pii_move
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the slot loops until ``stop`` is set and the items in flight have finished."""
@@ -602,7 +631,22 @@ class Worker:
         self, item: QueueItem, job: JobRecord, envelope: Envelope[ExtractResult]
     ) -> str | None:
         """Store the item's result, then complete it. The write that completes the job observes
-        its duration; a repeat write (the item had its result already) is not counted."""
+        its duration; a repeat write (the item had its result already) is not counted.
+
+        A result that owes the PII step (the job's ``pii``, ruling N11) moves to the ``nlp``
+        pool instead and is completed here without one. Whatever is written passes the guard
+        (``pii.fields.fail_closed``, N12): a result that owes the step and did not move (the
+        memory guard, a worker without the move) is ``pii_failed`` with its text withheld."""
+        pii = job.options.pii
+        if pii is not None and self._queue.pool != PII_POOL:
+            if needs_pii(envelope, pii):
+                if self._pii_move is not None:
+                    if await self._pii_move(job, item, envelope):
+                        return await self._moved(item)
+                    envelope = withheld(envelope, pii, PII_BUSY_MESSAGE)
+            else:
+                envelope = without_findings(envelope, pii, self._settings)
+        envelope = fail_closed(envelope, pii)
         try:
             write = await self._store.write_result(item.job_id, item.index, envelope)
         except JobLost:
@@ -621,17 +665,19 @@ class Worker:
     async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
         """Delete the item's bytes once it has its result: an upload's, or those of an item
         that was queued for OCR (pool ``docling``) or a transcription (pool ``asr``), with its
-        draft; an item of pool ``nlp`` has a draft only; on pool ``asr`` also the caller's key of
-        a sync request's job (a batch's serves its other items and goes with its last result,
-        ``_finish``).
+        draft; on pool ``asr`` also the caller's key of a sync request's job (a batch's serves
+        its other items and goes with its last result, ``_finish``). Pool ``nlp`` is the last
+        hop: an item that moved there left what its pool before kept for a rerun, so it deletes
+        the draft, any input of the item and, but for a batch, the job's caller secrets.
         Only after the result is written: an item that runs again (a failed write, a lost lease)
         needs them."""
         pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)
-        if pooled or self._queue.pool == PII_POOL:  # the nlp pool's draft is its only input
+        last_hop = self._queue.pool == PII_POOL
+        if pooled or last_hop:
             await self._store.drop_draft(item.job_id, item.index)
-        if job.kind == "file" or pooled:
+        if job.kind == "file" or pooled or last_hop:
             await self._store.delete_input(item.job_id, item.index)
-        if self._queue.pool == ASR_POOL and job.kind != "batch":
+        if (self._queue.pool == ASR_POOL or last_hop) and job.kind != "batch":
             await self._store.drop_secrets(item.job_id)
 
     async def _drop(self, item: QueueItem) -> str:
@@ -772,6 +818,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         store,
         FairQueue(valkey, settings),
         registry,
+        pii_move=create_pii_move(settings, valkey, store, guard, registry),
     )
     return WorkerParts(
         worker=worker,

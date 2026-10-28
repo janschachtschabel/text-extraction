@@ -32,6 +32,7 @@ from text_extraction.pii.types import EntityType, PiiEntity, PiiOptions, PiiRepo
 from text_extraction.tracing import current_trace_id
 
 FAIL_CLOSED_MESSAGE = "PII handling did not run; the content is withheld."
+TOO_LARGE_MESSAGE = "The text is too large for PII handling; the content is withheld."
 TRUNCATED_WARNING = "pii_entities_truncated"
 _CONTACT_SCHEMES = ("mailto:", "tel:")
 

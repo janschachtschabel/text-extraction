@@ -94,18 +94,23 @@ from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, failed_extract
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, pii_lease_seconds
-from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE, apply_pii, fail_closed, text_fields
+from text_extraction.pii.fields import (
+    FAIL_CLOSED_MESSAGE,
+    TOO_LARGE_MESSAGE,
+    apply_pii,
+    fail_closed,
+    text_fields,
+)
 from text_extraction.pii.replace import hash_key
 from text_extraction.pii.types import (
     ENTITY_TYPES,
     EntityType,
     PiiLanguage,
-    PiiLanguageOption,
     PiiOptions,
     Span,
     model_names,
 )
-from text_extraction.pii_dispatch import nlp_queue
+from text_extraction.pii_dispatch import choose_language, nlp_queue
 from text_extraction.scheduler import QueueItem
 from text_extraction.server import _Server, _server, configured_settings
 from text_extraction.settings import Settings
@@ -120,7 +125,6 @@ LANGUAGE_UNSUPPORTED_WARNING: Final = "pii_language_unsupported"
 DRAFT_EXPIRED_MESSAGE: Final = (
     "The result to process expired before PII handling ran. Send the request again."
 )
-TOO_LARGE_MESSAGE: Final = "The text is too large for PII handling; the content is withheld."
 ANNOTATE_HTML_MESSAGE: Final = "annotate needs format markdown or text."
 # What the items in flight get after SIGTERM before they are cancelled (N13).
 GRACEFUL_SECONDS: Final = 30
@@ -190,20 +194,6 @@ def entities_counter_for(registry: CollectorRegistry) -> Counter:
             counter.labels(type=entity_type)
         _ENTITIES[registry] = counter
     return counter
-
-
-def choose_language(
-    option: PiiLanguageOption, language: str | None, fallback: PiiLanguage
-) -> tuple[PiiLanguage, bool]:
-    """The model for a result (N8) and whether it is the fallback for a language that has no
-    model of its own (the caller then adds ``pii_language_unsupported``)."""
-    if option != "auto":
-        return option, False
-    if language == "de":
-        return "de", False
-    if language == "en":
-        return "en", False
-    return fallback, True
 
 
 def _withheld(

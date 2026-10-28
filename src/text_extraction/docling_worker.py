@@ -2,7 +2,9 @@
 ``docling`` pool with OCR, layout and table models and stores their results in the job.
 
 It is the extract worker's ``Worker`` (``worker.py``: slot loops, leases, exhausted items, result
-writes, metrics, ``/ready`` and the shutdown) with another runner (ruling F14). The
+writes, metrics, ``/ready`` and the shutdown) with another runner (ruling F14); an OCR result of
+a job with ``pii`` moves on to the ``nlp`` pool there (``pii_dispatch.PiiMove``), and the item's
+input and draft are then left to the nlp worker. The
 ``docling_dispatch`` module docstring has the contract of the pool's items: their job, input and
 draft. This process never imports Docling or torch: only its children do
 (``documents/docling_child.py``), so a crash, a hang or a memory blow-up of a conversion ends
@@ -80,6 +82,7 @@ from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, docling_lease_seconds
 from text_extraction.memory_guard import MemoryGuard
+from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import (
     CONVERSION_FAILURES,
@@ -384,6 +387,7 @@ def build_docling_worker(
         docling_queue(valkey, settings),
         registry,
         concurrency=settings.docling_concurrency,
+        pii_move=create_pii_move(settings, valkey, store, guard, registry),
     )
     return DoclingWorkerParts(
         worker=worker,

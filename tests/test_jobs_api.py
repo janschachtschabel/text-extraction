@@ -26,6 +26,9 @@ from text_extraction.job_models import MAX_BATCH_URLS, BatchRequest, JobOptions
 from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.jobs_api import create_batch
 from text_extraction.netguard import MAX_URL_LENGTH
+from text_extraction.nlp_worker import PiiRunner
+from text_extraction.pii.types import PiiOptions
+from text_extraction.pii_dispatch import create_pii_move, nlp_queue
 from text_extraction.pipeline import create_pipeline
 from text_extraction.scheduler import FairQueue, QueueCounts
 from text_extraction.settings import Settings
@@ -104,6 +107,7 @@ class Api:
                 store,
                 FairQueue(valkey, self.settings),
                 registry,
+                pii_move=create_pii_move(self.settings, valkey, store, None, registry),
             )
             queue = FairQueue(valkey, self.settings)
             processed = 0
@@ -111,6 +115,25 @@ class Api:
                 claim = await queue.claim(60)
                 if claim.item is None:
                     break
+                await worker.process(claim.item, exhausted=claim.exhausted)
+                processed += 1
+            return processed
+
+        return self.run(process)
+
+    def work_nlp(self) -> int:
+        """Claim and process the items queued on ``nlp`` as the nlp worker would (with the fake
+        child pool of its tests); returns how many were processed."""
+        from tests.test_nlp_worker import FakePiiPool
+
+        async def process(valkey: FakeAsyncRedis) -> int:
+            registry = CollectorRegistry()
+            store = JobStore(valkey, self.settings)
+            queue = nlp_queue(valkey, self.settings)
+            runner = PiiRunner(self.settings, store, FakePiiPool(), registry)
+            worker = Worker(self.settings, valkey, runner, store, queue, registry)
+            processed = 0
+            while (claim := await queue.claim(runner.lease_seconds)).item is not None:
                 await worker.process(claim.item, exhausted=claim.exhausted)
                 processed += 1
             return processed
@@ -887,3 +910,66 @@ def test_batch_rejects_actions_cookies_headers(make_api: Callable[..., Api], ext
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
     assert api.keys("job*") == []
+
+
+# --- PII (N4, N11) ---
+
+PII_NAME = "Anna Schmidt"
+PII_ARTICLE = ARTICLE.replace(
+    "</article>", f"<p>Written by {PII_NAME}, anna.schmidt@example.org.</p></article>"
+)
+
+
+def test_pii_disabled_is_400(api: Api) -> None:
+    response = api.batch([PAGE], pii="mask")
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "PII handling is not enabled on this service."
+    assert api.keys("job*") == []
+
+
+def test_batch_annotate_with_html_is_422(make_api: Callable[..., Api]) -> None:
+    api = make_api(pii_enabled=True)
+
+    response = api.batch([PAGE], format="html", pii="annotate")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "annotate needs format markdown or text."
+    assert api.keys("job*") == []
+
+
+def test_batch_items_processed_by_nlp(make_api: Callable[..., Api]) -> None:
+    api = make_api(pii_enabled=True)
+    response = api.batch([PAGE, OTHER_PAGE], pii={"mode": "mask", "entities": ["PERSON"]})
+    assert response.status_code == 202
+    job_id = response.json()["data"]["id"]
+
+    assert api.work({PAGE: fetched(body=PII_ARTICLE), OTHER_PAGE: fetched(OTHER_PAGE)}) == 2
+    # Both items moved on to nlp: the job is not done before the nlp worker wrote them.
+    assert api.job(job_id).json()["data"]["state"] == "running"
+    assert api.work_nlp() == 2
+
+    view = api.job(job_id).json()
+    assert view["status"] == "success"
+    assert view["data"]["state"] == "completed"
+    named, other = (item["result"]["data"] for item in view["data"]["items"])
+    assert PII_NAME not in named["content"]
+    assert "[PERSON]" in named["content"]
+    assert "anna.schmidt@example.org" in named["content"]  # only PERSON was asked for
+    assert named["pii"]["entities"] == {"PERSON": 1}
+    assert other["pii"] == {
+        "mode": "mask",
+        "language": other["pii"]["language"],
+        "entities": {},
+        "items": None,
+        "hash_scope": None,
+    }
+
+    async def options(valkey: FakeAsyncRedis) -> JobOptions:
+        record = await JobStore(valkey, api.settings).get(job_id)
+        assert record is not None
+        return record.options
+
+    assert api.run(options).pii == PiiOptions(mode="mask", entities=["PERSON"])

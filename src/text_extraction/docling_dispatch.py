@@ -242,17 +242,25 @@ class DoclingDispatcher(PoolDispatcher):
         )
 
     async def wait(
-        self, job_id: str, *, extra_seconds: float = 0.0, detached: Callable[[], bool]
+        self,
+        job_id: str,
+        *,
+        extra_seconds: float = 0.0,
+        detached: Callable[[], bool],
+        pii: bool = False,
     ) -> Envelope[ExtractResult] | None:
         """The OCR result of the job's item 0, or None when there is none within
-        ``DOCLING_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not), the job is
-        gone, or ``detached()`` turned true. Valkey errors propagate."""
+        ``DOCLING_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not; with ``pii``
+        ``PII_SYNC_WAIT_SECONDS`` more in all, since the OCR result moves on to the ``nlp`` pool
+        in the same job), the job is gone, or ``detached()`` turned true. Valkey errors
+        propagate."""
         seconds = self._settings.docling_sync_wait_seconds + extra_seconds
+        pii_seconds = self._settings.pii_sync_wait_seconds if pii else 0.0
         return await self.wait_for(
             job_id,
             answered="answered",
             claim_within=seconds,
-            total_within=seconds,
+            total_within=seconds + pii_seconds,
             detached=detached,
         )
 
@@ -318,7 +326,10 @@ class DoclingHandoff:
                 handover.settle(job_id)
         try:
             result = await dispatcher.wait(
-                job_id, extra_seconds=extra, detached=lambda: handover.detached
+                job_id,
+                extra_seconds=extra,
+                detached=lambda: handover.detached,
+                pii=self._options.pii is not None,
             )
         except asyncio.CancelledError:
             if handover.release():

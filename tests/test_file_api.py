@@ -461,7 +461,74 @@ def test_invalid_form_is_422(client: TestClient, form: dict[str, str]) -> None:
 def test_pii_form_field_is_a_mode_or_a_json_object(client: TestClient, pii: str) -> None:
     response = upload(client, GIF, "a.gif", "image/gif", form={"pii": pii})
 
-    assert response.status_code == 200
+    # The form parsed (else 422); this service has no PII handling.
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "PII handling is not enabled on this service."
+
+
+def test_pii_disabled_is_400(client: TestClient) -> None:
+    response = upload(client, PARAGRAPH.encode(), "notes.txt", "text/plain", form={"pii": "mask"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "PII handling is not enabled on this service."
+
+
+def test_upload_annotate_with_html_is_422() -> None:
+    from tests.test_pii_dispatch import PiiService
+
+    service = PiiService()
+    with TestClient(service.app) as pii_client:
+        response = upload(
+            pii_client,
+            PARAGRAPH.encode(),
+            "notes.txt",
+            "text/plain",
+            form={"format": "html", "pii": "annotate"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "annotate needs format markdown or text."
+
+
+@pytest.mark.parametrize(
+    ("pii", "mode"),
+    [
+        ("mask", "mask"),
+        ('{"mode": "annotate", "entities": ["PERSON", "EMAIL_ADDRESS"]}', "annotate"),
+    ],
+    ids=["bare", "json"],
+)
+def test_upload_with_pii_form_field_bare_and_json(pii: str, mode: str) -> None:
+    from tests.test_pii_dispatch import EMAIL, NAME, PiiService
+
+    service = PiiService()
+    text = f"{PARAGRAPH * 3}\n\nNotes by {NAME}, {EMAIL}.\n"
+    with TestClient(service.app) as pii_client, service.nlp():
+        response = upload(
+            pii_client,
+            text.encode(),
+            f"notes-{NAME}.txt",
+            "text/plain",
+            form={"pii": pii},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success", body["error"]
+        data = body["data"]
+        assert data["mode_used"] == "upload"
+        assert data["pii"]["mode"] == mode
+        if mode == "mask":
+            assert NAME not in data["content"]
+            assert "[PERSON]" in data["content"]
+        else:  # the text stays, the entities are listed
+            assert NAME in data["content"]
+            found = {(item["field"], item["type"]) for item in data["pii"]["items"]}
+            assert ("content", "PERSON") in found
+            assert ("content", "EMAIL_ADDRESS") in found
+        assert service.wait_for_no_jobs() == []  # the nlp job of a sync answer is deleted
 
 
 def test_missing_file_is_422(client: TestClient) -> None:

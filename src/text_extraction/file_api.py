@@ -36,6 +36,12 @@ running in this pod, the job keeps the upload's bytes as the input of its item
 upload that needs OCR goes to the Docling workers (``docling_dispatch.DoclingHandoff``, F12): it
 waits ``DOCLING_SYNC_WAIT_SECONDS`` without ``wait_seconds``, and with it the 202 carries its
 Docling job. The job's item has no URL (``url: null``).
+
+The form field ``pii`` (a mode, or the JSON object of ``POST /v1/extract`` as a string) sends the
+envelope through the nlp workers last (``pii_dispatch.PiiHandoff``, N11), as for
+``POST /v1/extract``: 400 while the service has no PII handling, 422 for ``annotate`` with
+``format: html``; a slow nlp worker turns the upload into a job (202) after ``wait_seconds``. The
+answer, and what a P1 job stores, passes ``pii.fields.fail_closed`` (N12).
 """
 
 import unicodedata
@@ -60,9 +66,11 @@ from text_extraction.extract_api import (
     asr_handoff,
     check_asr_key,
     check_ocr_request,
+    check_pii_request,
     create_p1_job,
     docling_handoff,
     handover_time,
+    pii_handoff,
 )
 from text_extraction.extract_models import ExtractResult
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
@@ -190,10 +198,13 @@ async def extract_file(
     waiting, or the service is busy: `failed`/`rate_limited`, retryable). 422 for a form with
     more than one file or eight fields, or unknown fields; 413 for a body over
     `DOCUMENT_MAX_BYTES` + 64 KiB (the larger `MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where audio and
-    video are transcribed); 400 for `ocr: always` while the service has no OCR, an
-    `X-ASR-Api-Key` header that is not 1 to 1024 visible ASCII characters, or an audio or
-    video file without that header where the service transcribes externally and has no key of
-    its own.
+    video are transcribed); 400 for `ocr: always` while the service has no OCR, `pii` while it
+    has no PII handling, an `X-ASR-Api-Key` header that is not 1 to 1024 visible ASCII
+    characters, or an audio or video file without that header where the service transcribes
+    externally and has no key of its own; 422 for `pii` `annotate` with `format: html`.
+
+    With `pii` the result's personal data is handled as for `POST /v1/extract` (`data.pii`); a
+    result that could not be processed answers `failed`/`pii_failed` with its content withheld.
 
     An upload still converting after `wait_seconds` (25 by default) becomes a job: 202 with the
     job's id and `status_url` (`GET /v1/jobs/{id}`, kind `file`, its item's `url` null). A
@@ -203,6 +214,7 @@ async def extract_file(
     state = request.app.state
     settings: Settings = state.settings
     check_ocr_request(form.ocr, settings)
+    check_pii_request(form.pii, form.format, False, settings)
     key = asr_key_of(asr_key)
     try:
         body = await file.read(upload_file_limit(settings) + 1)
@@ -213,6 +225,9 @@ async def extract_file(
     name = sanitize_file_name(file.filename)
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)
+    wait_seconds = form.wait_seconds
+    if wait_seconds is None and form.pii is not None:
+        wait_seconds = settings.pii_sync_wait_seconds  # D4 (a), as for ``POST /v1/extract``
     handover = Handover()
     flow = partial(
         _flow,
@@ -224,7 +239,7 @@ async def extract_file(
         file.content_type,
         handover,
         options,
-        handover_time(form.wait_seconds, settings),
+        handover_time(wait_seconds, settings),
         key,
     )
     meta = UploadInputMeta(file_name=name, content_type=file.content_type)
@@ -232,7 +247,7 @@ async def extract_file(
         state,
         flow,
         handover,
-        wait_seconds=form.wait_seconds,
+        wait_seconds=wait_seconds,
         kind="file",
         renders_first=False,
         hand_over=partial(
@@ -245,6 +260,7 @@ async def extract_file(
             kind="file",
             upload=(body, meta),
         ),
+        pii=form.pii,
     )
 
 
@@ -268,8 +284,9 @@ async def _flow(
     wait_until: float | None,
     asr_key: str | None,
 ) -> Envelope[ExtractResult] | None:
-    """The upload's envelope, or None when the Docling or the ASR worker writes its job's
-    result."""
+    """The upload's envelope, or None when the Docling, the ASR or the nlp worker writes its
+    job's result. With ``pii`` the envelope goes through the nlp workers last
+    (``pii_dispatch.PiiHandoff``)."""
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
         state,
@@ -295,4 +312,9 @@ async def _flow(
     )
     if (ocr is not None and ocr.handed_over) or (asr is not None and asr.handed_over):
         return None
-    return envelope
+    pii = pii_handoff(
+        state, kind="file", options=options, principal=principal, url=None, wait_until=wait_until
+    )
+    if form.pii is None or pii is None:  # without PII on this pod the route's guard withholds
+        return envelope
+    return await pii(envelope, handover)

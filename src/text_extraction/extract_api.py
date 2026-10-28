@@ -25,16 +25,27 @@ workers.
    (``asr_dispatch.AsrHandoff``, M9), with the video's metadata as the draft and the
    ``X-ASR-Api-Key`` header as the job's secret. Nothing waits for a transcription: the route
    answers 202 with the ASR job at once.
+7. With ``pii`` (while the service has PII, ``PII_ENABLED`` and ``JOBS_ENABLED``; else 400; with
+   a screenshot, or ``annotate`` with ``format: html``, 422), the envelope the flow ends with (a
+   fresh or cached fast result, a browser or Docling job's result, an OCR or browser fallback)
+   goes to the nlp workers (``pii_dispatch.PiiHandoff``, N11) as the last step, unless it is
+   processed already: a browser or Docling job of such a request moves its result on to pool
+   ``nlp`` in the same job, and the request waits ``PII_SYNC_WAIT_SECONDS`` longer for it. The
+   cache and the fingerprints keep the unprocessed extraction (N9). Every envelope the route
+   answers or stores passes ``pii.fields.fail_closed`` (N12): one that still owes the step is
+   ``pii_failed`` with its text withheld.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result. A request with
 ``transcribe: true`` and no ``wait_seconds`` waits 20 seconds (M9): a transcription is always a
-job, and a video with subtitles still answers at once.
+job, and a video with subtitles still answers at once. A request with ``pii`` and no
+``wait_seconds`` waits ``PII_SYNC_WAIT_SECONDS`` (D4 a): a slow nlp worker turns it into a job.
 
 1. the flow runs as a task, and the route waits ``wait_seconds`` for it (the wait does not
    cancel it);
-2. if the flow waits for a browser or a Docling job by then (or will, step 2 above), the route
-   answers 202 with that job and detaches the task: the pool's worker writes the job's result.
+2. if the flow waits for a browser, a Docling or an nlp job by then (or will, step 2 above), the
+   route answers 202 with that job and detaches the task: the pool's worker writes the job's
+   result.
    A flow that dispatched an ASR job answers None and leaves the job to the route
    (``Handover.adopt``), which answers 202 with it as soon as the flow ends, whether or not
    ``wait_seconds`` has passed;
@@ -42,8 +53,9 @@ job, and a video with subtitles still answers at once.
    ``EXTRACT_TIMEOUT_SECONDS + 10`` seconds, and the route answers 202;
 4. a done-callback of the task stores its envelope as item 0 of the job. A task that raised is
    stored as ``internal_error`` (a ``ServiceError`` keeps its own code). A flow whose fast result
-   escalates (or needs OCR) after the hand-over reuses the job for the browser (or Docling; its
-   lease is cleared) and stores nothing: that pool's worker writes item 0;
+   escalates (or needs OCR, or owes the PII step) after the hand-over reuses the job for the
+   browser (or Docling, or nlp; its lease is cleared) and stores nothing: that pool's worker
+   writes item 0;
 5. a pod that dies in between leaves the lease to expire; ``GET /v1/jobs/{id}`` then shows the
    item as failed (``jobs_api.py``).
 
@@ -82,6 +94,7 @@ from text_extraction.browser_dispatch import (
 )
 from text_extraction.browser_options import EvaluateAction
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
+from text_extraction.convert import OutputFormat
 from text_extraction.docling_dispatch import DoclingDispatcher, DoclingHandoff
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
 from text_extraction.documents.types import OcrOption
@@ -97,6 +110,9 @@ from text_extraction.extract_models import (
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
+from text_extraction.pii.fields import fail_closed
+from text_extraction.pii.types import PiiOptions
+from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, pii_available
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_media import (
     TRANSCRIBE_WAIT_SECONDS,
@@ -121,6 +137,9 @@ _CANCELLED_MESSAGE = "The extraction was cancelled."
 BROWSER_DISABLED_MESSAGE = "Browser mode is not enabled on this service."
 _EVALUATE_MESSAGE = "The evaluate action (JavaScript) is for admin keys only."
 _BROWSER_TIMEOUT_MESSAGE = "No browser rendered the page in time. Try again later."
+PII_DISABLED_MESSAGE = "PII handling is not enabled on this service."
+PII_SCREENSHOT_MESSAGE = "A screenshot cannot be masked; ask for it without pii."
+PII_ANNOTATE_HTML_MESSAGE = "annotate needs format markdown or text."
 
 type _Background = set[asyncio.Task[Any]]
 type _Answer = Envelope[ExtractResult] | None
@@ -183,6 +202,13 @@ async def extract(
     the video's metadata. While the key has `ASR_MAX_OPEN_PER_CLIENT` transcriptions waiting, or
     the service is busy, the answer is the metadata with the warning `asr_unavailable` (a media
     file: `failed`/`rate_limited`, retryable).
+
+    `pii` (where the service has PII handling, else 400; not with `screenshot`, and `annotate`
+    not with `format: html`: 422) finds personal data in the result and handles it as the mode
+    says, reported in `data.pii`. It waits `PII_SYNC_WAIT_SECONDS` (20 s) by default, then
+    answers 202 with a job. A result that could not be processed answers `failed`/`pii_failed`
+    (retryable) with its content, title, metadata and links withheld; one over
+    `JOB_ITEM_MAX_BYTES` comes back without `content`, as from a browser.
     """
     return await respond(request, body, principal, "extract", asr_key=asr_key_of(asr_key))
 
@@ -227,10 +253,29 @@ def asr_key_missing(settings: Settings) -> bool:
     return settings.asr_backend == "openai" and settings.asr_external_api_key is None
 
 
-def request_wait_seconds(body: ExtractRequest) -> float | None:
-    """The request's ``wait_seconds``; with ``transcribe: true`` and none set, 20 (M9)."""
+def check_pii_request(
+    pii: PiiOptions | None, req_format: OutputFormat, screenshot: bool, settings: Settings
+) -> None:
+    """400 for ``pii`` while the service has no PII handling (``PII_ENABLED`` and
+    ``JOBS_ENABLED``), 422 for ``pii`` with a screenshot (a picture cannot be masked) and for
+    ``annotate`` with ``format: html`` (offsets into HTML text nodes are not stable; N2, N4)."""
+    if pii is None:
+        return
+    if not pii_available(settings):
+        raise ServiceError(ErrorCode.INVALID_REQUEST, PII_DISABLED_MESSAGE, 400)
+    if screenshot:
+        raise ServiceError(ErrorCode.INVALID_REQUEST, PII_SCREENSHOT_MESSAGE, 422)
+    if pii.mode == "annotate" and req_format == "html":
+        raise ServiceError(ErrorCode.INVALID_REQUEST, PII_ANNOTATE_HTML_MESSAGE, 422)
+
+
+def request_wait_seconds(body: ExtractRequest, settings: Settings) -> float | None:
+    """The request's ``wait_seconds``; with ``transcribe: true`` and none set, 20 (M9); with
+    ``pii`` and none set, ``PII_SYNC_WAIT_SECONDS`` (D4 a)."""
     if body.wait_seconds is None and body.transcribe:
         return TRANSCRIBE_WAIT_SECONDS
+    if body.wait_seconds is None and body.pii is not None:
+        return settings.pii_sync_wait_seconds
     return body.wait_seconds
 
 
@@ -261,7 +306,8 @@ async def respond(
     check_browser_request(body, principal, settings)
     check_ocr_request(body.ocr, settings)
     check_transcribe_request(body.transcribe, settings, key=asr_key)
-    wait_seconds = request_wait_seconds(body)
+    check_pii_request(body.pii, body.format, body.screenshot, settings)
+    wait_seconds = request_wait_seconds(body, settings)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)
     flow = partial(
@@ -276,6 +322,7 @@ async def respond(
         kind=kind,
         renders_first=renders_first(body),
         hand_over=partial(create_p1_job, state.job_store, settings, principal, options, body.url),
+        pii=body.pii,
     )
 
 
@@ -301,14 +348,17 @@ async def answer_or_hand_over(
     kind: JobKind,
     renders_first: bool,
     hand_over: Callable[[], Awaitable[str | None]],
+    pii: PiiOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run ``flow``, or answer 202 with a job after ``wait_seconds`` (the module docstring):
     the pool job the flow dispatched (of ``kind``), or a P1 job that ``hand_over`` creates (of
     kind ``file`` for an upload, else ``extract``). ``renders_first`` says that the flow goes to
-    the browser at once. Shared with ``POST /v1/extract/file`` (``file_api.py``)."""
+    the browser at once. Every envelope answered or stored in the P1 job passes
+    ``pii.fields.fail_closed`` with the request's ``pii`` (N12). Shared with
+    ``POST /v1/extract/file`` (``file_api.py``)."""
     settings: Settings = state.settings
     if wait_seconds is None or not settings.jobs_enabled:
-        return await _answer(state, await flow(), handover, kind)
+        return await _answer(state, await flow(), handover, kind, pii)
 
     background: _Background = state.background
     task = asyncio.create_task(flow())
@@ -322,9 +372,9 @@ async def answer_or_hand_over(
         raise
     if task.done():
         background.discard(task)
-        return await _answer(state, task.result(), handover, kind)
+        return await _answer(state, task.result(), handover, kind, pii)
     if renders_first or handover.claimed == "pool":
-        return await _detach(state, task, handover, kind)
+        return await _detach(state, task, handover, kind, pii)
 
     store: JobStore = state.job_store
     job_id: str | None = None
@@ -350,12 +400,21 @@ async def answer_or_hand_over(
             answer = await task
         finally:
             background.discard(task)
-        return await _answer(state, answer, handover, kind)
+        return await _answer(state, answer, handover, kind, pii)
     p1_kind: JobKind = "file" if kind == "file" else "extract"
     metrics: JobMetrics = state.job_metrics
     metrics.created.labels(kind=p1_kind).inc()
     task.add_done_callback(
-        partial(_store_when_done, background, store, metrics, job_id, handed_over_at, kind=p1_kind)
+        partial(
+            _store_when_done,
+            background,
+            store,
+            metrics,
+            job_id,
+            handed_over_at,
+            kind=p1_kind,
+            pii=pii,
+        )
     )
     _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
     return _accepted(job_id, p1_kind, "running")
@@ -368,13 +427,17 @@ def _answered(answer: _Answer) -> Envelope[ExtractResult]:
 
 
 async def _answer(
-    state: Any, answer: _Answer, handover: Handover, kind: JobKind
+    state: Any,
+    answer: _Answer,
+    handover: Handover,
+    kind: JobKind,
+    pii: PiiOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
-    """The flow's envelope; for a flow that answered None after leaving a pool job to the route
-    (``Handover.adopt``: an ASR job), 202 with that job."""
+    """The flow's envelope, past the PII guard; for a flow that answered None after leaving a
+    pool job to the route (``Handover.adopt``: an ASR job), 202 with that job."""
     if answer is None and handover.detached and handover.pool_job is not None:
         return await _pool_job_accepted(state, handover, kind)
-    return _answered(answer)
+    return fail_closed(_answered(answer), pii)
 
 
 async def _pool_job_accepted(state: Any, handover: Handover, kind: JobKind) -> JSONResponse:
@@ -400,11 +463,15 @@ def _accepted(job_id: str, kind: JobKind, state: JobState) -> JSONResponse:
 
 
 async def _detach(
-    state: Any, task: asyncio.Task[_Answer], handover: Handover, kind: JobKind
+    state: Any,
+    task: asyncio.Task[_Answer],
+    handover: Handover,
+    kind: JobKind,
+    pii: PiiOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
-    """``wait_seconds`` ran out while the flow dispatches or waits for a pool job (a browser or
-    a Docling job): answer 202 with that job and let the flow stop waiting. If the dispatch
-    failed, wait for the flow's own answer."""
+    """``wait_seconds`` ran out while the flow dispatches or waits for a pool job (a browser, a
+    Docling or an nlp job): answer 202 with that job and let the flow stop waiting. If the
+    dispatch failed, wait for the flow's own answer."""
     background: _Background = state.background
     settled = asyncio.ensure_future(handover.settled())
     try:
@@ -422,7 +489,7 @@ async def _detach(
             answer = await task
         finally:
             background.discard(task)
-        return await _answer(state, answer, handover, kind)
+        return await _answer(state, answer, handover, kind, pii)
     task.add_done_callback(partial(_forget, background))
     return await _pool_job_accepted(state, handover, kind)
 
@@ -460,8 +527,42 @@ async def _flow(
     """The envelope of the request, or None when its job's result is written by a pool's
     worker (after a hand-over); see the module docstring. ``wait_until`` is when the route
     turns the request into a job (``handover_time``); ``asr_key`` the caller's key of the
-    external transcription endpoint."""
+    external transcription endpoint. With ``pii`` the envelope goes through the nlp workers
+    last (step 7)."""
     started = time.perf_counter()
+    answer = await _extraction(
+        state, body, principal, compliance, handover, kind, wait_until, started, asr_key=asr_key
+    )
+    if answer is None or body.pii is None:
+        return answer
+    handoff = pii_handoff(
+        state,
+        kind="extract",
+        options=job_options(body, compliance),
+        principal=principal,
+        url=body.url,
+        wait_until=wait_until,
+    )
+    if handoff is None:  # no PII on this pod: the route's guard withholds the text
+        return answer
+    processed = await handoff(answer, handover)
+    return None if processed is None else _timed(processed, started)
+
+
+async def _extraction(
+    state: Any,
+    body: ExtractRequest,
+    principal: Principal,
+    compliance: ComplianceMode,
+    handover: Handover,
+    kind: BrowserJobKind,
+    wait_until: float | None,
+    started: float,
+    *,
+    asr_key: str | None = None,
+) -> _Answer:
+    """Steps 2 to 6 of the flow: the request's envelope before the PII step, or None after a
+    hand-over."""
     if renders_first(body):
         return await _in_browser(state, body, principal, compliance, handover, kind, None, started)
     pipeline: Pipeline = state.pipeline
@@ -506,6 +607,31 @@ async def _flow(
     ):
         return fast
     return await _in_browser(state, body, principal, compliance, handover, kind, fast, started)
+
+
+def pii_handoff(
+    state: Any,
+    *,
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    wait_until: float | None,
+) -> PiiHandoff | None:
+    """The PII handoff of one request (N11); None while the service has no PII."""
+    dispatcher: PiiDispatcher | None = state.pii_dispatcher
+    if dispatcher is None:
+        return None
+    return PiiHandoff(
+        dispatcher,
+        state.memory_guard,
+        state.settings,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        wait_until=wait_until,
+    )
 
 
 def docling_handoff(
@@ -600,7 +726,12 @@ async def _in_browser(
             handover.settle(job_id)
     unblock = unblock_for(principal, compliance, state.settings)
     try:
-        result = await dispatcher.wait(job_id, unblock=unblock, detached=lambda: handover.detached)
+        result = await dispatcher.wait(
+            job_id,
+            unblock=unblock,
+            detached=lambda: handover.detached,
+            pii=body.pii is not None,
+        )
     except asyncio.CancelledError:
         if handover.release():
             await asyncio.shield(dispatcher.abandon(job_id))
@@ -762,6 +893,7 @@ def _store_when_done(
     task: asyncio.Task[_Answer],
     *,
     kind: JobKind = "extract",
+    pii: PiiOptions | None = None,
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
     went on to a pool's worker, which writes it. The storing task is added to ``background``
@@ -770,7 +902,7 @@ def _store_when_done(
     envelope = _envelope_of(task)
     if envelope is not None:
         storing = asyncio.create_task(
-            _store_result(store, metrics, job_id, created_at, envelope, kind=kind)
+            _store_result(store, metrics, job_id, created_at, envelope, kind=kind, pii=pii)
         )
         background.add(storing)
         storing.add_done_callback(background.discard)
@@ -785,11 +917,14 @@ async def _store_result(
     envelope: Envelope[ExtractResult],
     *,
     kind: JobKind = "extract",
+    pii: PiiOptions | None = None,
 ) -> None:
-    """Store the envelope as item 0 and observe the job's duration (``created_at`` is a
+    """Store the envelope as item 0, past the PII guard (``pii.fields.fail_closed`` with the
+    request's ``pii``, N12), and observe the job's duration (``created_at`` is a
     ``time.monotonic()`` reading from just before the job was created); an upload's input is
     deleted then. A Valkey failure is logged and not raised: the job's lease then runs out and
     ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its own)."""
+    envelope = fail_closed(envelope, pii)
     try:
         # The first and only write of a P1 job completes it ("last"); a repeat is not counted.
         if await store.write_result(job_id, 0, envelope) == "last":
