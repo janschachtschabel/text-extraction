@@ -128,7 +128,8 @@
    "Universität Bremen",
    "Energiewende",
    "Bundesregierung",
-   "Niedersachsen"
+   "Niedersachsen",
+   "Photosynthese"
   ]
  },
  "de_02_worksheet_credits.md": {
@@ -223,7 +224,14 @@
    "Berlin",
    "Calvin",
    "Bundesministerium",
-   "Europäische Union"
+   "Europäische Union",
+   "Energiewende",
+   "Photosynthese",
+   "Klimawandel",
+   "Chlorophyll",
+   "Glukose",
+   "Kohlenstoffdioxid",
+   "Landwirtschaft"
   ]
  },
  "de_03_press_release.md": {
@@ -318,7 +326,9 @@
    "Landesregierung",
    "Europäische Union",
    "Hochschule Emden",
-   "Bundesregierung"
+   "Bundesregierung",
+   "Energiewende",
+   "Mobilitätswende"
   ]
  },
  "de_04_forum_post.md": {
@@ -404,7 +414,8 @@
   ],
   "keep": [
    "Köln",
-   "Pythagoras"
+   "Pythagoras",
+   "Bruchrechnung"
   ]
  },
  "de_05_cv_bio.md": {
@@ -508,7 +519,9 @@
    "Körber-Stiftung",
    "Altona",
    "Leibniz-Institut",
-   "Deutsche Bahn"
+   "Deutsche Bahn",
+   "Energiewende",
+   "Klimabildung"
   ]
  },
  "de_06_transcript.md": {
@@ -609,7 +622,8 @@
    "Niedersachsen",
    "Datenschutzkonferenz",
    "Kultusministerkonferenz",
-   "Berlin"
+   "Berlin",
+   "Photosynthese"
   ]
  },
  "de_07_parent_letter.md": {
@@ -915,7 +929,9 @@
    "University of Edinburgh",
    "Calvin",
    "Department for Energy",
-   "European Union"
+   "European Union",
+   "Photosynthesis",
+   "Energy Transition"
   ]
  },
  "en_03_press_release.md": {
