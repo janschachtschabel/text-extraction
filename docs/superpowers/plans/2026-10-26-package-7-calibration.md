@@ -187,6 +187,23 @@ Probe: the 16 German and 12 English gold phone numbers scored at threshold 0 wit
 - Precision pins are not needed by the plan; for reference `lg` German `PERSON` precision is 0.93 and the keep words found by default are `Pythagoras` and `Calvin`.
 - Keep words (D2): the run checked the keep lists as they stood then (41 German and 30 English entries, almost all places and institutions; of the capitalised non-name nouns only `Energiewende` in `de_01`). It found no place or institution under the default types; the two hits above are NER false positives on persons' names used as concepts. The keep lists were extended afterwards, without re-measuring, with the capitalised non-name nouns that occur (`Energiewende`, `Photosynthese`, `Klimawandel`, `Chlorophyll`, `Glukose`, `Kohlenstoffdioxid`, `Landwirtschaft`, `Mobilitätswende`, `Bruchrechnung`, `Klimabildung`, English `Photosynthesis`, `Energy Transition`) in every file where they occur; Task 8's corpus test checks the extended lists.
 
+## md pins (Task 8)
+
+Measured on 2026-10-28 with `tests/pii/test_corpus.py` (marker `nlp`): every corpus text through `POST /v1/extract/file` as Markdown with `pii: annotate`, the real nlp worker loop, the real recognizers of Task 4 (the `HonorificRecognizer` now also takes a name after a title alone, so `Henrik Sommer` after `Prof. Dr.` is found), threshold 0.4, the default entity types. Matching as in Setup: a gold span is found when entities of its type cover 80 % of it. The test pins `PERSON` per model size (`PII_TEST_MODEL_SIZE`; the numbers are rounded down to two decimals) and requires every pattern type to be found without a miss with either size.
+
+| type | `md` de | `md` en | `lg` de | `lg` en |
+|---|---|---|---|---|
+| `PERSON` | 58 of 58 (1.00) | 39 of 39 (1.00) | 57 of 58 (0.98) | 39 of 39 (1.00) |
+| `EMAIL_ADDRESS` | 11 of 11 | 8 of 8 | 11 of 11 | 8 of 8 |
+| `PHONE_NUMBER` | 16 of 16 | 12 of 12 | 16 of 16 | 12 of 12 |
+| `IBAN_CODE` | 5 of 5 | 4 of 4 | 5 of 5 | 4 of 4 |
+| `CREDIT_CARD` | 4 of 4 | 3 of 3 | 4 of 4 | 3 of 3 |
+| `IP_ADDRESS` | 4 of 4 | 5 of 5 | 4 of 4 | 5 of 5 |
+
+- Pins in the test: `md` `PERSON` de 1.00 and en 1.00 (the measured values, no rounding needed); `lg` de 0.96 and en 1.00 (the calibration pins above, not raised although the German `lg` measurement is now 0.98: the real honorific recognizer finds `Henrik Sommer`, only the greeting `Hallo Sabine` stays missed). Pattern types: 1.00 for both.
+- The `md` pins are as tight as they can be (no miss). That is deliberate (ruling R17: measured now, rounded down) and a change of a recognizer, of the corpus or of a model release that costs one span fails the CI job `nlp`, which is the point of the pin; lower it only with the reason written here.
+- The same run checks the keep lists as extended after the calibration, under the default entity types: three occurrences are taken for a `PERSON`, as in the calibration's own finding 7: `Pythagoras` (`de_04_forum_post`, both sizes; `en_04_forum_post`, `md` only) and `Calvin` (`en_02_worksheet_credits`, both sizes). No place, institution or other keep word is touched.
+
 ## Findings and surprises
 
 1. **`Herrn` is missing from the plan's German honorific list.** In running German text the dative and accusative is the usual form (`mit Herrn Dr. Hartmann`, `von Herrn Prof. Hoffmann`, `Herrn Müller`). The plan lists `Herr`, `Frau`, `Hr.`, `Fr.`. In this corpus the NER found those names anyway, so adding `Herrn?` changed recall by no span (56 of 58 either way), but it adds a false positive when a title word follows (`Herrn Doktor Lukas Frank` took `Doktor` as the name). Recommendation for Task 4: accept `Herrn`, and treat `Doktor` as a title word between salutation and name. The rule gets `Herr` and `Frau` right where the NER misses the name: `Müller`, `Neumann`, `Winter`, `Sommer`.

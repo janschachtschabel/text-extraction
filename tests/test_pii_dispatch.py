@@ -107,8 +107,8 @@ class FakeNlpWorker:
     """The real ``Worker`` on pool ``nlp`` with the real ``PiiRunner`` and the fake child pool,
     on a loop of its own, sharing the fakeredis server of the app."""
 
-    def __init__(self, server: FakeServer, settings: Settings) -> None:
-        self.pool = FakePiiPool()
+    def __init__(self, server: FakeServer, settings: Settings, pool: Any = None) -> None:
+        self.pool = pool or FakePiiPool()  # the corpus test passes the real children's pool
         self._server = server
         self._settings = settings
         self._ready = threading.Event()
@@ -132,8 +132,12 @@ class FakeNlpWorker:
             concurrency=1,
             sleep=_short_sleep,
         )
-        self._ready.set()
-        await worker.run(self._stop)
+        await self.pool.start()
+        try:
+            self._ready.set()
+            await worker.run(self._stop)
+        finally:
+            await self.pool.shutdown()
 
     def __enter__(self) -> "FakeNlpWorker":
         self._thread.start()
@@ -198,8 +202,8 @@ class PiiService:
         )
         self.app.state.pipeline = self.real
 
-    def nlp(self) -> FakeNlpWorker:
-        return FakeNlpWorker(self.server, self.settings)
+    def nlp(self, pool: Any = None) -> FakeNlpWorker:
+        return FakeNlpWorker(self.server, self.settings, pool)
 
     def run(self, work: Callable[[FakeAsyncRedis], Awaitable[Any]]) -> Any:
         async def scenario() -> Any:

@@ -22,7 +22,8 @@ Per package:
 | 4 | Browser worker | merged 2026-10-25 | #8 | `wlo_200` auto 83.0 % (baseline 80 %) |
 | 5 | Documents and OCR | merged 2026-10-25 | #9, #10 | corpus converts, scans yield text (CI `documents`); `wlo_200` auto 84.0 % in an A/B run against package 4 (83.0 %) |
 | 6 | Audio and video | next | | |
-| 7-11 | | open | | |
+| 7 | PII | in review | | corpus test `tests/pii/test_corpus.py` (CI job `nlp`: `md` on every push, `lg` weekly): every mode through `POST /v1/extract/file` as Markdown and HTML with the real nlp worker loop; pattern types found 100 %, `PERSON` recall pinned per model size (`lg` German 0.96, English 1.00; `md` 1.00 and 1.00); no keep word touched |
+| 8-11 | | open | | |
 
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |
@@ -56,3 +57,17 @@ no browser fallback. The done-when check therefore runs from Jan's line (`tests/
 with the compose profile `asr`); the live workflow reports the media set from GitHub's runners
 without gating it. Transcription (`transcribe: true`, uploads) is always a job, and ASR is off by
 default (`ASR_ENABLED`). Details in [architecture.md](architecture.md), "Audio and video".
+
+Package 7 note (Jan, D1-D4): PII runs in the nlp worker, as the last hop of every result that asked
+for it (`pii: {"mode": "mask|redact|hash|annotate"}` on `POST /v1/extract`, `/v1/extract/file` and
+`/v1/batch`), with Presidio and the spaCy models `de_core_news_<size>` and `en_core_web_<size>`
+(`lg` by default, `md` switchable) from a PVC; the API image and the other workers have neither.
+By default persons and contact or payment data are found (`PERSON`, `EMAIL_ADDRESS`,
+`PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`); places, organisations and URLs only when
+a request asks. `hash` is a keyed HMAC (`PII_HASH_KEY`, else a random key per result). A sync
+request with `pii` waits `PII_SYNC_WAIT_SECONDS` (20 s) and then answers 202 with its job. A result
+that asked for PII is never answered unprocessed: it is `failed`/`pii_failed` without text. Not in
+this package: PII in screenshots, `/v1/structured` and `/v1/chunk` (package 8), other languages,
+custom lists. The done-when evidence runs in CI (`nlp` job) and locally with
+`PII_TEST_MODEL_SIZE=lg uv run pytest -m nlp tests/pii/test_corpus.py`. Details in
+[architecture.md](architecture.md), "PII".

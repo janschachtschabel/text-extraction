@@ -270,6 +270,7 @@ The grace periods in the Helm chart, each with a 10 s margin:
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
 | ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items go back to the queue at once and start again elsewhere) |
+| NLP workers | `workers.nlp.terminationGracePeriodSeconds` | 60 | 30 s for the analyses in flight (then their items run again elsewhere once their lease expires, `2 × PII_TIMEOUT_SECONDS + 10`) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -464,7 +465,7 @@ time. A result that could not be processed answers `failed`/`pii_failed` with it
 | `PII_SCORE_THRESHOLD` | `0.4` | Least confidence of an entity, 0 to 1, when a request names none (`score_threshold`). Lower finds more and mistakes more. |
 | `PII_FALLBACK_LANGUAGE` | `en` | The model (`de` or `en`) for names in a language that has none of its own, with the warning `pii_language_unsupported`. The patterns (e-mail, phone, IBAN, card, IP) work in any language. |
 | `PII_SYNC_WAIT_SECONDS` | `20` | How long a request with `pii` and without `wait_seconds` waits for the NLP worker, in seconds, before it answers 202 with its job. 1 to 60. |
-| `PII_TIMEOUT_SECONDS` | `300` | Time budget of one item in the NLP worker, in seconds; the analysis child is killed after it and the item fails with `pii_failed`, retryable. The worker's lease of an item is 2 × this + 10 s. 10 to 3600. |
+| `PII_TIMEOUT_SECONDS` | `300` | Time budget of one item in the NLP worker, in seconds; the analysis child is killed after it and the item fails with `pii_failed`, retryable. The worker's lease of an item is 2 × this + 10 s. 10 to 3600. **Do not set it small:** a child loads the spaCy models in its first item (once per child: at the worker's first item, and again after a child was killed, crashed or recycled), which takes about 8 s with `md` and more with `lg`, and that time is part of this budget. With a small value (the minimum is 10 s) an item that meets a fresh child can fail with `pii_failed` before the models are loaded. |
 | `PII_MAX_CHARS` | `2000000` | Most characters of all fields of one result that are analysed. A result with more fails with `too_large`, its content withheld. Minimum 10000. |
 | `PII_MAX_ENTITIES` | `1000` | Most items `annotate` lists; more are cut with the warning `pii_entities_truncated` (the counts stay complete). 1 to 100000. |
 | `PII_CONCURRENCY` | `1` | Items one NLP worker pod analyses at once, each in a child process of its own with the models loaded. Minimum 1. The Helm chart sets it from `workers.nlp.concurrency`. |
@@ -474,6 +475,28 @@ time. A result that could not be processed answers `failed`/`pii_failed` with it
 | `PII_HASH_KEY` | unset | **Secret**, see [Secrets](#secrets): the key of `mode: hash`, at least 32 bytes (`openssl rand -hex 32`). With it the same value gets the same hash in every result of the service (`pii.hash_scope: service`), so documents can be linked without the value. Without it each result gets a random key (`hash_scope: result`): equal values match only within one result. Changing it changes every hash. Empty counts as unset; a shorter key makes the service exit with code 2. Helm: `workers.nlp.hashKey.existingSecret`. |
 
 The other PII settings are service defaults in the chart: set them under `config` (for example `config.PII_SYNC_WAIT_SECONDS`); only `PII_ENABLED`, `PII_CONCURRENCY`, `PII_MODEL_SIZE`, `PII_MODELS_PATH` and `PII_HASH_KEY` come from the chart's own values. See the [chart README](../deploy/helm/text-extraction/README.md#nlp-workers-and-the-models-volume) for the volume and the models download.
+
+PII needs `PII_ENABLED=true` on every pod, `JOBS_ENABLED=true` on the API pods, at least one NLP
+worker (`text-extraction-nlp-worker`, image `text-extraction-nlp`) and its models volume. How it
+works is in [architecture.md](architecture.md) ("PII"). Without a worker a request with `pii` is
+not lost: after `PII_SYNC_WAIT_SECONDS` it answers 202 with its job, which waits in the queue. The
+Helm keys (the full table is in the chart README):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.nlp.enabled` | `false` | Deploys the NLP workers and the models PVC; renders `PII_ENABLED` into every pod. Needs jobs on the API pods. |
+| `workers.nlp.modelSize` | `lg` | `PII_MODEL_SIZE`: `lg` (about 1 GB on the volume, 1.6 GB resident) or `md` (about 115 MB, half the memory). Only the models of this size are downloaded. |
+| `workers.nlp.concurrency` | `1` | `PII_CONCURRENCY` on the NLP workers; raise `resources` with it. |
+| `workers.nlp.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a request with `pii` waits only `PII_SYNC_WAIT_SECONDS`. |
+| `workers.nlp.terminationGracePeriodSeconds` | `60` | See Response times. |
+| `workers.nlp.resources` | 1 / 2Gi to 2 / 3Gi | Sized for one analysis child with the `lg` models; `md` needs about half. |
+| `workers.nlp.nodeSelector` | `{}` | Merged over the global one; the published image is linux/amd64 only. |
+| `workers.nlp.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `nlp` queue or on CPU. |
+| `workers.nlp.hashKey.existingSecret`, `.existingSecretKey` | `""`, `PII_HASH_KEY` | Your own Secret with `PII_HASH_KEY` (an NLP worker's container only). Empty: a random key per result. |
+| `workers.nlp.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.nlp.models.resources` | 100m / 256Mi to 1 / 1Gi | Of the init container or the hook Job. |
+| `workers.nlp.models.persistence.*` | `3Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`PII_MODELS_PATH`), read-only in the worker. 3Gi holds the staged copy of an `lg` update. |
+| `workers.nlp.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-nlp`, chart version | The NLP image (Presidio and spaCy, no models). |
 
 ## Headers
 

@@ -24,7 +24,8 @@ Valkey ◀──▶ browser-worker  (Chromium behind an egress proxy: auto fallb
                              screenshots; Patchright + Chrome for unblock mode)
 Valkey ◀──▶ docling-worker  (Docling and Tesseract: scans, broken text layers, images,
                              OpenDocument files, PDFs with `ocr: always`)
-Valkey ◀──▶ nlp-worker      (Presidio)
+Valkey ◀──▶ nlp-worker      (Presidio and spaCy: names and contact or payment data in the
+                             results of requests with `pii`)
 Valkey ◀──▶ asr-worker      (faster-whisper on CPU, or an external OpenAI-compatible
                              endpoint; downloads media through its egress proxy)
 workers ──▶ model volumes (one PVC per worker type, read-only: Docling and Tesseract,
@@ -34,18 +35,21 @@ optional: S3-compatible store for screenshots and large results
 
 Images: `api` (slim), `browser-worker` (image `text-extraction-browser`: Chromium headless
 shell, Google Chrome stable, Xvfb), `docling-worker` (image `text-extraction-docling`: Docling,
-CPU torch, the Tesseract CLI, no models), `nlp-worker`, `asr-worker` (image
+CPU torch, the Tesseract CLI, no models), `nlp-worker` (image `text-extraction-nlp`: Presidio,
+spaCy, no models), `asr-worker` (image
 `text-extraction-asr`: faster-whisper, CTranslate2, PyAV built against an LGPL FFmpeg, Deno, no
 models). Each worker is a Helm toggle and scales on queue length (KEDA or HPA). The API image
 holds no browser and no Playwright or Patchright, no Docling, torch or Tesseract, and no
-faster-whisper, CTranslate2, PyAV or Deno; the details are in "Browser worker", "Documents and
-OCR" and "Audio and video" below. Every image runs tini as PID 1, which forwards signals
+faster-whisper, CTranslate2, PyAV or Deno; the API image and the other workers' images hold no
+Presidio, spaCy or spaCy models either. The details are in "Browser worker", "Documents and
+OCR", "Audio and video" and "PII" below. Every image runs tini as PID 1, which forwards signals
 and reaps orphaned processes (a tesseract whose conversion child was killed).
 
 MarkItDown runs where the bytes are (package 5, D1): in child processes of the API pods, the
 extract workers and the browser worker, never in their parent processes. So do
-youtube-transcript-api and yt-dlp for subtitles (package 6), behind the pod's egress proxy. The
-nlp-worker keeps Presidio (package 7).
+youtube-transcript-api and yt-dlp for subtitles (package 6), behind the pod's egress proxy.
+Presidio and spaCy (package 7) run in child processes of the nlp worker and nowhere else; the
+result of a request with `pii` makes a last hop through that worker (see "PII").
 
 ## Extraction pipeline
 
@@ -96,8 +100,14 @@ nlp-worker keeps Presidio (package 7).
    subtitles and details in the host's turn. A body that sniffs as audio or video is a media
    file (transcribed with `transcribe: true`), and an HTML page's `<track>` text is appended
    after its conversion. Speech recognition is a job of the ASR worker. See "Audio and video".
-6. **Post-process (optional):** DOM metadata, PII, links, structured output, chunking,
-   screenshot.
+6. **Post-process (optional):** DOM metadata, links, structured output, chunking, screenshot, and
+   PII as the last step of the result. A request with `pii` does not answer or store its result
+   itself: the result goes to the nlp worker as a draft (a one-item job on the pool `nlp`), which
+   masks, redacts, hashes or lists the personal data in the content and in the result's free-text
+   fields, and the processed result is what the caller gets, from a sync request, a job or a
+   batch. The cache and the fingerprint keep the extraction as it was. Nothing unprocessed leaves
+   the service: when the hop cannot run, the answer is `failed`/`pii_failed` without text. See
+   "PII".
 7. **Fingerprint and classify:** see change detection; return the result envelope.
 
 ## Result envelope and errors
@@ -108,7 +118,8 @@ Fields: `status` (`success|partial|failed`), `error.code`, `error.message`,
 time in the browser, 0 in fast mode), `compliance`, `metadata`, `fingerprint`, `warnings`, for
 browser results `unblocked` (unblock mode rendered the page) and `screenshot` (the artifact
 reference), for documents `document` (`kind`, `converter`, `pages`, `pages_converted`,
-`ocr`, `file_name`; F7), and for audio and video `media` (`platform`, `transcript_source`,
+`ocr`, `file_name`; F7), for requests with `pii` `pii` (the report: `mode`, `language`,
+`entities`, `items`, `hash_scope`; N3) with `timings.pii_ms`, and for audio and video `media` (`platform`, `transcript_source`,
 `transcript_language`, `available_languages`, `duration_seconds`, `uploader`, `asr_model`,
 `embeds`; M6). For a browser result `attempts` counts the main-frame document
 responses of the render, redirect hops included.
@@ -131,6 +142,10 @@ add a note of its own):
   `no_speech` (the speech recognition heard no speech; final, also for the cache),
   `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed` (every `<track>` of
   a page failed).
+- PII: `pii_language_unsupported` (the language is neither German nor English, so
+  `PII_FALLBACK_LANGUAGE` found the names; the patterns work in any language, N8),
+  `pii_entities_truncated` (`annotate` lists at most `PII_MAX_ENTITIES` items; the counts stay
+  complete).
 - Jobs: `content_not_stored_too_large` (an item stored without its content).
 
 A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
@@ -143,6 +158,11 @@ Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `unsupported_content_type`, `too_large`, `conversion_failed`, `no_transcript_available`,
 `media_too_long`, `transcription_failed`, `llm_failed`, `pii_failed`, `rate_limited`,
 `internal_error`.
+
+`pii_failed` (retryable, except for an `annotate` that was asked for HTML on a path that does not
+refuse it earlier) says that PII handling did not run or did not finish; the answer carries none
+of the text (N12). A result with more than `PII_MAX_CHARS` characters in the fields PII handles is
+`too_large` with its text withheld.
 
 Codes of the API's own 4xx answers (never an extraction outcome): `invalid_request`,
 `unauthorized`, `forbidden`, `not_found`. `tests/test_errors.py` keeps both lists in step
@@ -174,13 +194,13 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
-| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii`, `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9) |
-| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii` (`mask`, `redact`, `hash` or `annotate`, with `entities`, `language` and `score_threshold`: see "PII"; 400 `invalid_request` while the service has no PII, 422 with `screenshot` and for `annotate` with `format: html`, and without `wait_seconds` it waits `PII_SYNC_WAIT_SECONDS`, 20 s), `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9); a result with `pii` goes through the pool `nlp` and waits up to `PII_SYNC_WAIT_SECONDS` (D4) |
+| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `pii` (a bare mode or a JSON object as a string), `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto` | sync, job fallback |
 | `POST /v1/chunk` | Text/Markdown/URL → chunks (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`) | sync |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
-| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `transcribe`, `languages` as for `/v1/extract`; header `X-ASR-Api-Key` as for it), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
+| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; header `X-ASR-Api-Key` as for it), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `/mcp` | MCP tools (optional, `MCP_ENABLED`) | streamable HTTP |
@@ -285,8 +305,7 @@ script stores an item's result: it sets the done bit and counts the item only wh
 so a re-run after a lost lease counts once. The script answers `first`, `last` (this write
 completed the job; only then is `job_duration_seconds` observed) or `repeat` (R7).
 
-**The fair queue.** One queue per worker pool (`extract`, `browser`, `docling`, `asr`; the nlp
-pool will reuse it), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and
+**The fair queue.** One queue per worker pool (`extract`, `browser`, `docling`, `asr`, `nlp`), all keys under one hash tag `q:{<pool>}:…`; no script touches a job key and
 a queue key. Items are `<job>:<index>:<attempts>` in lists per client and domain.
 
 - Client = API key name (P3); under `AUTH_MODE=none` everyone is `anonymous` and batches share
@@ -1250,6 +1269,235 @@ the media set without gating it (D1).
   offload of inputs (package 11), PII in transcripts (package 7 applies to them like to any
   content).
 
+## PII
+
+A request with `pii` finds personal data in the result (names, e-mail addresses, phone numbers,
+IBANs, card numbers, IP addresses; places, organisations and URLs when asked for) in German and
+English text and handles it: `mask`, `redact`, `hash` or `annotate`. Presidio with spaCy models
+does the finding, in the nlp worker. The corpus of `tests/pii/corpus` (12 texts, 7 German and 5
+English, written for the purpose, with a gold file) is the evidence: `tests/pii/test_corpus.py`
+is the package's done-when test, and `docs/superpowers/plans/2026-10-26-package-7-calibration.md`
+has the calibration behind the threshold and the pinned recall.
+
+**Decisions of Jan (2026-10-28, the recommended options).**
+
+- **D1, model size.** `lg` by default: better recall on German names, which is the point of the
+  package, at 1.1 GB on the volume and 1.6 GB resident (2.2 GB peak on a 175,000-character text);
+  the worker's limit is 3 GiB. `md` needs a tenth of the volume and half the memory and misses more
+  names. `PII_MODEL_SIZE` (`lg|md`) switches it; both sizes are in the manifest. Speed is the same
+  (about 6,500 words/s). On the written-for-purpose corpus the two sizes are close on recall (the
+  corpus is small: one German `PERSON` span is 1.7 points), `lg` has fewer false positives.
+- **D2, what is found by default.** `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`,
+  `CREDIT_CARD`, `IP_ADDRESS` (`PII_DEFAULT_ENTITIES`). `LOCATION`, `ORGANIZATION` and `URL` only
+  when a request names them in `entities`: teaching material is full of places and institutions
+  (`Bremen`, `Bundesregierung`) that are not personal data, and masking them would ruin the text.
+- **D3, the key of `hash`.** HMAC-SHA-256, because a plain hash of a phone number or an e-mail
+  address can be reversed by trying all candidates. With `PII_HASH_KEY` (operator secret, at least
+  32 bytes) the same value gets the same hash in every result of the service (`hash_scope:
+  service`), so documents can be linked without the value. Without it each result gets a random
+  key (`hash_scope: result`): equal values match only within one result. `mode: hash` is never a
+  400.
+- **D4, a sync request whose PII takes longer.** As `transcribe: true` (package 6, M9): a request
+  with `pii` and without `wait_seconds` waits `PII_SYNC_WAIT_SECONDS` (20 s), then answers 202 with
+  its job, which goes on and stores the result. No work is lost. (A page of 1,000 words takes well
+  under a second, a 150,000-word PDF about 25 s.)
+
+**N1, the option.** `ExtractRequest`, `BatchRequest`, `JobOptions` and the form of
+`POST /v1/extract/file` have `pii: PiiOptions | None`, stored in a job only when set.
+
+- `mode`: `mask|redact|hash|annotate`, required. A bare string (`"pii": "mask"`) is
+  `{"mode": "mask"}`; the form field of `/v1/extract/file` is the bare mode or a JSON object as a
+  string.
+- `entities`: a non-empty list without repeats of `PERSON`, `LOCATION`, `ORGANIZATION`,
+  `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`; default
+  `PII_DEFAULT_ENTITIES` (D2).
+- `language`: `auto|de|en` (default `auto`, N8). `score_threshold`: 0.0-1.0, default
+  `PII_SCORE_THRESHOLD` (0.4).
+
+**N2, the modes.** The replacement is plain brackets in every format, so Markdown does not read
+it as HTML.
+
+| Mode | An entity becomes |
+| --- | --- |
+| `mask` | `[<TYPE>]`, e.g. `[PERSON]`, `[EMAIL_ADDRESS]` |
+| `redact` | `[REDACTED]`: neither the value nor the type is left |
+| `hash` | `[<TYPE>:<12 hex>]`: the first 12 hex digits of HMAC-SHA-256 over `<TYPE>:<value>`, with the value case-folded and its whitespace collapsed (D3 for the key); equal values give equal hashes |
+| `annotate` | nothing: the fields stay as they are and `pii.items` lists every entity (`field`, `type`, `start`, `end`, `score`, `text`; offsets are Unicode code points in that field's string), at most `PII_MAX_ENTITIES` (1,000) items, then the warning `pii_entities_truncated` (the counts stay complete) |
+
+`annotate` with `format: html` is 422 `invalid_request` ("annotate needs format markdown or
+text."), because the offsets of text nodes in HTML are not stable.
+
+**N3, the report.** `data.pii`: `mode`, `language` (the model used, `de|en`), `entities` (the count
+per type, only types found), `items` (`annotate` only, else null), `hash_scope` (`hash` only,
+else null). `data.timings.pii_ms` is the time of the step. `status`, `word_count`, `quality`,
+`language` and `fingerprint` stay those of the extraction. A result without `pii` gains
+`pii: null` and `timings.pii_ms: 0` and is otherwise unchanged by a byte.
+
+**N4, request checks** (`extract_api.check_pii_request`, also for files and batches). `pii` while
+the service has no PII handling (`PII_ENABLED` and `JOBS_ENABLED`) is 400 `invalid_request` ("PII
+handling is not enabled on this service."). `pii` with `screenshot: true` is 422
+`invalid_request` ("A screenshot cannot be masked; ask for it without pii."). `/v1/screenshot`
+has no `pii`.
+
+**N5, which fields** (`pii/fields.py`). Processed: `title`, `content`, `metadata.title`,
+`metadata.description`, `metadata.authors[i]`, `metadata.keywords[i]`, `metadata.site_name`,
+`metadata.images[i].alt`, every string leaf of `metadata.lrmi`, `links[i].text`, `links[i].url`
+when it is `mailto:` or `tel:`, `media.uploader`, `document.file_name`. Unchanged: URLs (`url`,
+`final_url`, `canonical_url`, other link and image URLs), dates, language codes, licences,
+`compliance`, `quality`, `fingerprint`. `metadata.authors[i]` and `media.uploader` are a person as
+a whole when `PERSON` is asked for: the whole string is one `PERSON` span, without the NER. The
+`content` of `format: html` is processed as its text nodes and the `alt` and `title` attributes
+(N10).
+
+**N6, recognizers** (`pii/recognizers.py`, in the children only). One Presidio `AnalyzerEngine`
+for `de` and `en`:
+
+- NER: `SpacyRecognizer` with the mapping `PER`, `PERSON` to `PERSON`, `LOC`, `GPE` to
+  `LOCATION`, `ORG` to `ORGANIZATION`; every other model label is ignored.
+- Patterns: `EmailRecognizer`, `PhoneRecognizer` (regions `DE`, `AT`, `CH`, `GB`, `US`; German
+  context words such as `telefon`, `mobil`, `fax`, `rufnummer`), `IbanRecognizer`,
+  `CreditCardRecognizer`, `IpRecognizer`, `UrlRecognizer`. The patterns do not depend on the
+  language.
+- Our `HonorificRecognizer`: a name after a salutation (`Herr`, `Herrn`, `Frau`, `Hr.`, `Fr.`;
+  `Mr`, `Mrs`, `Ms`, `Mx`, `Dr`) or after a title alone (`Prof. Dr. Henrik Sommer`), with titles
+  and academic degrees in between (a bounded chain: `Prof. Dr. med. dent.`), is a `PERSON` of score
+  0.7. The span is the name only (`Herr Müller` gives `Herr [PERSON]`). It finds the names that
+  the NER model misses after `Herr` and `Frau`.
+- tldextract never goes online: Presidio's e-mail recognizer uses the bundled suffix list, so an
+  address with a suffix that is not in it (`.test`, `.example`, `.local`) is not found.
+- Presidio's own loggers are at `WARNING`; no text is ever logged.
+
+**N7, spans** (`pii/spans.py`, pure). The child returns the spans `(start, end, type, score)` at
+or above the threshold for the asked types. Overlaps: a span inside another of equal or higher
+score is dropped; of a partial overlap the lower-score span is cut to its part outside the
+higher one, and dropped when that part has no letter or digit (so the NER span "IBAN DE89 3704"
+leaves the IBAN `DE89 3704 0044 0532 0130 00` whole). Long text is analysed in segments of at most
+20,000 characters cut at a blank line, else a line break, else a space, with the offsets added
+back: Presidio's context step grows faster than linearly, and the same 175,000 characters took
+11.3 s in one piece and 3.8 s in segments.
+
+**N8, language.** `auto` takes the result's `language`: `de` and `en` use their model, any other
+or none uses `PII_FALLBACK_LANGUAGE` (`en`) and adds the warning `pii_language_unsupported`. The
+patterns still work in any language; names are found less well. `de` or `en` in the option forces
+the model.
+
+**N9, cache and fingerprints.** PII runs after the cache and the fingerprint. A cache hit goes
+through the nlp hop like a fresh result; the cache stores the extraction, not the processed
+result, as it does for a request without `pii` (`cache: false` keeps the extraction out of the
+cache), so `pii` is not part of the cache key. A job's result is the processed envelope.
+
+**N10, HTML** (`pii/html.py`). `HtmlText.parse` collects the text nodes and the `alt` and `title`
+attribute values in document order into one string, a space between two nodes that are not
+adjacent inline text, with a map back to each node. `HtmlText.render` writes each replacement into
+the node where its span starts and deletes the span's rest from the following nodes, so a name
+across `<b>Anna</b> Schmidt` is replaced once. Markup, and attributes other than `alt`/`title`
+(and the `href` of `mailto:` and `tel:` links, masked like N5's links), stay; lxml serialises, so a
+replacement is escaped. HTML comments and processing instructions are dropped in every mode but
+`annotate`, because nothing unprocessed may leave.
+
+**N11, the hop** (`pii_dispatch.py`, built like `docling_dispatch.py`). Pool `nlp`, queue
+`nlp_queue` without the per-domain lease cap (nothing is fetched); items `<job id>:<index>:<attempts>`;
+lease `2 * PII_TIMEOUT_SECONDS + 10`. The draft is the unprocessed envelope in Valkey
+(`JobStore.put_draft`, deleted once the result is written); there are no input bytes.
+
+- *Sync* (`PiiHandoff`): once a request has its envelope (fast, from a browser or Docling job, or
+  an OCR or browser fallback), one that is not processed yet and has text that N5 processes goes to
+  `nlp` as a one-item job of kind `extract` or `file` (or the request's P1 job). D4: without
+  `wait_seconds` the request waits `PII_SYNC_WAIT_SECONDS`, then answers 202 with the job. An
+  envelope with nothing to process answers as it is, with `pii` reporting zero entities. A sync
+  request that waits for a browser or Docling job gets `PII_SYNC_WAIT_SECONDS` more, because that
+  worker's result moves on to `nlp` in the same job.
+- *Moves* (`PiiMove`, called by `Worker._finish` of every pool except `nlp`): a batch item, an ASR
+  transcript or a Docling result of a job whose options have `pii` is stored as the item's draft
+  and queued on `nlp` (same job, index and client), then the item completes in the first pool
+  without a result (outcome `escalated`). Draft, then queue, then completion: a crash in between
+  reruns the item, which moves again. After a completed move the item's input bytes (an upload, a
+  media file) are deleted at once; the draft stays for the nlp worker.
+- *Back-pressure:* while Valkey's memory guard is high nothing is stored: the item or the request
+  answers `failed`/`pii_failed`, retryable ("PII handling is busy; retry later."). Valkey failing
+  is `pii_failed`, retryable, for a request too.
+- `text_extraction_nlp_dispatch_total{outcome}`: `answered`, `not_claimed`, `no_result`,
+  `handed_over`, `backend_error`, `memory_guard`. `text_extraction_pii_entities_total{type}`
+  counts the entities found, by type only.
+
+**N12, fail closed** (`pii.fields.fail_closed`). A result that asked for PII never leaves the
+service unprocessed. When `pii` is set and the envelope is not processed but has content or N5
+fields, the answer is `failed`/`pii_failed` (retryable, "PII handling did not run; the content is
+withheld.") with `content`, `title`, `metadata`, `links`, `media.uploader` and `document.file_name`
+set to null; the rest (status of the target, compliance, timings) stays. The guard sits in
+front of every answer and every result write: `extract_api.respond`, the P1 result store,
+`file_api` and `Worker._finish` of every pool, after the move declined or failed, so a pool that
+forgot the move still withholds. An item of pool `nlp` that is exhausted or whose draft expired
+answers `pii_failed`, retryable, never its draft. An OCR fallback draft (`ocr_unavailable`), a
+browser fallback (`browser_unavailable`), a cache hit and a P1 job whose task raised take the same
+paths. A target failure with content (`likely_error_page`) answers `pii_failed` instead, with
+its `upstream_status`. Too much text (over `PII_MAX_CHARS` in all fields) is `failed`/`too_large`
+with the content withheld; the child's deadline is `pii_failed`, retryable.
+
+**N13, the nlp worker** (`nlp_worker.py`, entry `text-extraction-nlp-worker`, pool `nlp`, internal
+port only). The extract worker's `Worker` with a `PiiRunner`. The parent process never imports
+`presidio_analyzer` or `spacy`: `PII_CONCURRENCY` (1) slot loops each own a child process
+(`DocumentPool`, `PII_MEMORY_LIMIT_MB` of address space, killed at its deadline) that loads the
+models. Per item: read the draft, collect N5's fields, choose the language (N8), call the child
+with the fields, the types, the threshold and the deadline (`PII_TIMEOUT_SECONDS`, 300), resolve
+the spans (N7), apply the mode (N2, N10) and build the report (N3).
+
+- *Lazy load per child (R12).* A child loads the models inside the call that finds it without
+  them, once per lifetime. A child that the pool replaced (killed at a deadline, crashed, recycled
+  after `CHILD_MAX_TASKS`, 1,000 calls) spends its first item on the load: about 8 s with `md`,
+  more with `lg`, inside `PII_TIMEOUT_SECONDS`. Do not set that small. A load that fails is
+  `pii_failed`, retryable, never `too_large`.
+- `--download-models` fills the volume (N14); `--check` loads both models, analyses a built-in
+  German and English sentence and expects a `PERSON` and an `EMAIL_ADDRESS` in each (exit 1
+  otherwise). `/ready` is true once the models are present and the children started; missing
+  models end the process with exit code 1.
+- On SIGTERM the loops stop claiming and an analysis in flight gets 30 s; its item then runs again
+  elsewhere once its lease expires (R15: `terminationGracePeriodSeconds` 60 in the chart).
+
+**N14, models on the PVC** (`pii/models.toml`, `model_store.py`). The manifest names the four
+wheels (`de_core_news_lg`, `en_core_web_lg`, `de_core_news_md`, `en_core_web_md`, 3.8.0) by their
+GitHub release URL, size and SHA-256. A downloaded wheel is checked, then unpacked into its own
+folder on the volume (absolute paths, `..` and links refused); only the models of `PII_MODEL_SIZE`
+are downloaded, and a present model is not downloaded again. No models in an image. Helm: an init
+container (or a hook Job, `downloadMode: job`) fills a PVC that the worker mounts read-only,
+or `existingClaim` for an air-gapped volume (R16: 3Gi by default, because a manifest update stages a
+full copy of the `lg` pair, about 2.4 GB at its peak). Compose: the one-shot `nlp-models` on the
+volume `nlp-models`.
+
+**N15, switches.** `PII_ENABLED` (default false, as `DOCLING_ENABLED`): Helm renders it into
+every pod from `workers.nlp.enabled`, compose from `.env` with the profile `nlp`. Start-up refuses
+`PII_ENABLED` without `JOBS_ENABLED`. Without it a request with `pii` answers 400. The settings and
+Helm values are in [configuration.md](configuration.md#pii).
+
+**Rulings that changed plan values.** R12: the models load lazily in each child (not at start-up),
+so a replaced child needs no separate load step. R13: after a completed move the item's input is
+dropped at once. R15: nlp pods get a termination grace period of 60 s (30 s graceful plus the
+10 s margin the chart checks; the plan's 30 s could not pass that check). R16: the models PVC is
+3Gi, not 2Gi.
+
+**Known limits.**
+
+- **Names in other languages.** Only German and English have models. Any other language uses the
+  fallback model with the warning `pii_language_unsupported`: patterns (e-mail, phone, IBAN, card,
+  IP) work, names are found less well. No other language's model and no transformer model
+  (`*_trf`, they need torch) are in this package.
+- **PII in screenshots.** A picture is not read: `pii` with `screenshot: true` is refused (N4).
+  Text in images that OCR reads is handled like any content.
+- **Titles before a first name.** The honorific rule treats a bare degree word as a title, so in
+  `Dr. Phil Collins` it takes `Collins` and leaves `Phil` (a known trade-off for `Dr. Phil.`
+  as a degree); `Dr. med Weber` without the dot after `med` is not matched.
+- **Names used as concepts.** Names of historical persons used as concepts (Pythagoras, Calvin)
+  may be masked as `PERSON`: the NER labels a name such as `Pythagoras` in a maths text or `Calvin`
+  in `Calvin cycle` as a person. With `PERSON` asked for, a teaching text with historic names
+  loses a few words to `[PERSON]` (the corpus test lists the known cases per model size). The
+  NER also labels the occasional user name, URL or Markdown marker as `PERSON`.
+- **Patterns are strict.** A phone number must be valid for `libphonenumber` (fictional ranges
+  such as the UK `07700 900xxx` are not found), and a number without a context word scores only
+  0.4, which is why `PII_SCORE_THRESHOLD` must not be raised above 0.4. An e-mail address needs a
+  known public suffix.
+- **Not in this package:** `/v1/structured` and `/v1/chunk` (package 8 calls the same hop),
+  custom entity lists or deny lists per caller, S3.
+
 ## Observability
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
@@ -1259,7 +1507,9 @@ rendered, not claimed, no result, handed over, backend error), document conversi
 kind and outcome with their seconds and pages, sync Docling dispatches by outcome, media
 extractions by platform, transcript source and outcome with their seconds, ASR dispatches by
 outcome, transcriptions by backend and outcome with their seconds and audio seconds, LLM calls,
-tokens and failures, rate-limit rejections. Alert rules ship in the Helm chart
+tokens and failures, sync NLP dispatches by outcome (answered, not claimed, no result, handed
+over, backend error, memory guard), entities found by PII handling by type (never by value),
+rate-limit rejections. Alert rules ship in the Helm chart
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.
 
