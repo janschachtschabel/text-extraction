@@ -69,25 +69,23 @@ def apply_pii(
     key: bytes,
     hash_scope: Literal["service", "result"],
     max_entities: int,
-    entities: Collection[EntityType] | None = None,
+    entities: Collection[EntityType],
 ) -> tuple[ExtractResult, list[str]]:
     """``result`` with the entities in ``spans`` (the analyser's findings per field name)
     handled as ``options.mode`` says, ``pii`` set, and the warnings the caller adds.
 
     The analyser is not asked about the ``whole`` fields: they become one ``PERSON`` span here
     (score 1.0) and findings for them are ignored. The other fields' spans are resolved first
-    (``spans.resolve``). ``entities`` is what ``text_fields`` was given; it defaults to
-    ``options.entities``, and a request without them (the operator's defaults, which hold
-    ``PERSON``) is treated as asking for ``PERSON``. ``annotate`` leaves every string as it is
-    and lists the entities, at most ``max_entities`` of them; it cannot take HTML. Status,
-    word count, quality, language and fingerprint are the extraction's, and the caller sets
-    ``timings.pii_ms``.
+    (``spans.resolve``). ``entities`` is required: the effective entity types (the request's, or
+    the operator's defaults), the same the caller gave ``text_fields`` to choose what to send
+    to the analyser; with ``PERSON`` among them, authors and the uploader are whole persons.
+    A mode that replaces also drops the comments and processing instructions of HTML content
+    (R8). ``annotate`` leaves every string as it is and lists the entities, at most
+    ``max_entities`` of them; it cannot take HTML. Status, word count, quality, language and
+    fingerprint are the extraction's, and the caller sets ``timings.pii_ms``.
     """
     if options.mode == "annotate" and result.format == "html":
         raise ValueError("annotate needs format markdown or text")
-    asked: Collection[EntityType] = (
-        entities if entities is not None else options.entities or ["PERSON"]
-    )
     counts: Counter[EntityType] = Counter()
     items: list[PiiEntity] = []
 
@@ -113,7 +111,12 @@ def apply_pii(
                 )
         return found
 
-    processed = _Walk(asked, handle, Replacer(options.mode, key)).result(result)
+    processed = _Walk(
+        entities,
+        handle,
+        Replacer(options.mode, key),
+        drop_comments=options.mode != "annotate",
+    ).result(result)
     report = PiiReport(
         mode=options.mode,
         language=language,
@@ -127,11 +130,19 @@ def apply_pii(
 
 def needs_pii(envelope: Envelope[ExtractResult], options: PiiOptions | None) -> bool:
     """Whether the envelope still owes the PII step: it was asked for, the envelope has data
-    that is not processed yet, and the data has a string that N5 processes."""
+    that is not processed yet, and the data has a string that N5 processes, or HTML content
+    with a comment (which a replacing mode drops).
+
+    Which fields exist does not depend on the entity types (only whether they are ``whole``), so
+    this passes ``options.entities`` as given, and none when the request names none."""
     data = envelope.data
     if options is None or data is None or data.pii is not None:
         return False
-    return bool(text_fields(data, options.entities or ()))
+    if text_fields(data, options.entities or ()):
+        return True
+    return bool(
+        data.format == "html" and data.content and HtmlText.parse(data.content).has_comments
+    )
 
 
 def fail_closed(
@@ -184,7 +195,10 @@ class _Walk:
         entities: Collection[EntityType],
         handle: Callable[[TextField], list[Span]],
         replacer: Replacer | None,
+        *,
+        drop_comments: bool = False,
     ) -> None:
+        self._drop_comments = drop_comments
         self._person = "PERSON" in entities
         self._handle = handle
         self._replacer = replacer
@@ -202,19 +216,18 @@ class _Walk:
         return None if text is None else self.text(name, text, person=person)
 
     def html(self, name: str, html: str) -> str:
+        """The HTML with its text handled. Under a replacing mode its comments and processing
+        instructions go too (R8): they are not text, so no analyser reads them, and nothing
+        unprocessed may leave. ``annotate`` leaves the markup as it is."""
         parsed = HtmlText.parse(html)
-        if not parsed.text.strip():
-            return html
-        spans = self._handle(TextField(name, parsed.text))
-        if not spans or self._replacer is None:
-            return html
+        spans = self._handle(TextField(name, parsed.text)) if parsed.text.strip() else []
         replacer = self._replacer
-        return parsed.render(
-            [
-                (span, replacer.placeholder(span, parsed.text[span.start : span.end]))
-                for span in spans
-            ]
-        )
+        if replacer is None or not self._drop_comments:
+            return html
+        replacements = [
+            (span, replacer.placeholder(span, parsed.text[span.start : span.end])) for span in spans
+        ]
+        return parsed.render(replacements, drop_comments=True)
 
     def result(self, result: ExtractResult) -> ExtractResult:
         update: dict[str, Any] = {}

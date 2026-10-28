@@ -102,14 +102,70 @@ def test_html_script_and_style_are_not_text() -> None:
     assert parsed.text == "Anna"
 
 
-def test_html_comment_stays_and_its_tail_is_text() -> None:
+def test_html_comment_tail_is_text_and_stays_without_drop() -> None:
     html = "<p>Anna<!-- note -->Schmidt</p>"
     parsed = HtmlText.parse(html)
 
     assert parsed.text == "AnnaSchmidt"
+    assert parsed.has_comments
     assert parsed.render([(find(parsed, "AnnaSchmidt"), "[PERSON]")]) == (
         "<p>[PERSON]<!-- note --></p>"
     )
+    assert parsed.render([]) == html
+
+
+def test_html_drop_comments_with_a_replacement() -> None:
+    parsed = HtmlText.parse("<p>Anna<!-- Bob Meier -->Schmidt kam.</p><!-- end -->")
+
+    rendered = parsed.render([(find(parsed, "AnnaSchmidt"), "[PERSON]")], drop_comments=True)
+
+    assert rendered == "<p>[PERSON] kam.</p>"
+
+
+def test_html_drop_comments_without_a_replacement_keeps_the_tails() -> None:
+    parsed = HtmlText.parse("<p>Anna<!-- Bob Meier -->Schmidt</p><!-- end -->tail")
+
+    assert parsed.render([], drop_comments=True) == "<p>AnnaSchmidt</p>tail"
+
+
+def test_html_drop_comments_takes_processing_instructions_too() -> None:
+    parsed = HtmlText.parse("<p>a<?php echo 'Carl' ?>b</p>")
+
+    assert parsed.has_comments
+    assert parsed.render([], drop_comments=True) == "<p>ab</p>"
+
+
+def test_html_drop_comments_without_any_returns_the_original() -> None:
+    html = "<p>Anna <br/> kam  &nbsp; </p>"
+    parsed = HtmlText.parse(html)
+
+    assert not parsed.has_comments
+    assert parsed.render([], drop_comments=True) == html
+
+
+def test_html_drop_comments_beside_the_root_and_in_a_head() -> None:
+    html = (
+        "<!-- a --><!DOCTYPE html><html><head><!-- b --><title>T</title></head>"
+        "<body>x</body></html><!-- z -->"
+    )
+    parsed = HtmlText.parse(html)
+
+    assert parsed.has_comments
+    rendered = parsed.render([], drop_comments=True)
+
+    assert "<!--" not in rendered
+    assert rendered == "<!DOCTYPE html>\n<html><head><title>T</title></head><body>x</body></html>"
+
+
+def test_html_drop_comments_is_repeatable() -> None:
+    parsed = HtmlText.parse("<p>Anna<!-- c -->Schmidt</p>")
+    replacements = [(find(parsed, "Anna"), "[PERSON]")]
+
+    first = parsed.render(replacements, drop_comments=True)
+
+    assert first == parsed.render(replacements, drop_comments=True) == "<p>[PERSON]Schmidt</p>"
+    # The tree of a render without dropping is not touched by the one that dropped.
+    assert parsed.render(replacements) == "<p>[PERSON]<!-- c -->Schmidt</p>"
 
 
 def test_html_entities_decoded_in_text_and_reescaped() -> None:
@@ -207,3 +263,12 @@ def test_html_invalid_control_characters_do_not_break_parsing() -> None:
     parsed = HtmlText.parse("<p>An\x00na</p>")
 
     assert parsed.text == "Anna"
+
+
+def test_html_drop_comments_of_a_source_that_is_only_a_comment() -> None:
+    parsed = HtmlText.parse("<!-- Bob Meier -->")
+
+    assert parsed.text == ""
+    assert parsed.has_comments
+    assert parsed.render([], drop_comments=True) == ""
+    assert parsed.render([]) == "<!-- Bob Meier -->"

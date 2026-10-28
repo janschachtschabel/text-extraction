@@ -226,6 +226,7 @@ def apply(
         key=KEY,
         hash_scope="result",
         max_entities=max_entities,
+        entities=entities if entities is not None else ["PERSON"],
     )
 
 
@@ -357,6 +358,7 @@ def test_apply_redact_and_hash() -> None:
         key=KEY,
         hash_scope="service",
         max_entities=10,
+        entities=["PERSON"],
     )
 
     assert redacted.content == "[REDACTED] wohnt in Bremen."
@@ -454,6 +456,62 @@ def test_apply_html_content() -> None:
     )
 
 
+def test_apply_without_the_entities_is_a_type_error() -> None:
+    with pytest.raises(TypeError, match="entities"):
+        apply_pii(  # type: ignore[call-arg]
+            make_result(),
+            PiiOptions(mode="mask"),
+            {},
+            language="de",
+            key=KEY,
+            hash_scope="result",
+            max_entities=10,
+        )
+
+
+COMMENT_HTML = "<p>Anna kam.</p><!-- Bob Meier --><?php echo 'Carl' ?>"
+
+
+@pytest.mark.parametrize("mode", ["mask", "redact", "hash"])
+def test_apply_html_drops_comments_with_a_replacement_in_the_text(mode: str) -> None:
+    result = make_result(format="html", content=COMMENT_HTML, title=None, metadata=None, media=None)
+    text = text_fields(result, ["PERSON"])[0].text
+
+    processed, _ = apply(result, {"content": [where(text, "Anna")]}, mode)
+
+    assert processed.content is not None
+    assert processed.content.startswith("<p>")
+    assert processed.content.endswith(" kam.</p>")
+    for leaked in ("Anna", "Bob", "Carl", "<!--", "<?"):
+        assert leaked not in processed.content
+
+
+def test_apply_html_drops_comments_without_a_span() -> None:
+    result = make_result(format="html", content=COMMENT_HTML, title=None, metadata=None, media=None)
+
+    processed, _ = apply(result, {})
+
+    assert processed.content == "<p>Anna kam.</p>"
+
+
+def test_apply_html_with_only_a_comment_drops_it() -> None:
+    result = make_result(
+        format="html", content="<!-- Bob Meier -->", title=None, metadata=None, media=None
+    )
+
+    processed, _ = apply(result, {})
+
+    assert processed.content == ""
+
+
+def test_apply_annotate_leaves_markdown_alone_and_html_is_refused() -> None:
+    result = make_result(content="Anna <!-- Bob Meier -->")
+
+    processed, _ = apply(result, {"content": [span(0, 4)]}, "annotate")
+
+    assert processed.content == "Anna <!-- Bob Meier -->"
+
+
 def test_apply_html_without_spans_is_unchanged() -> None:
     html = "<p>Anna <br/> kam  &nbsp; </p>"
     result = make_result(format="html", content=html, title=None, metadata=None, media=None)
@@ -486,6 +544,21 @@ def envelope(result: ExtractResult | None, status: str = "success") -> Envelope[
 
 def test_needs_pii_true_for_unprocessed_result_with_text() -> None:
     assert needs_pii(envelope(make_result()), PiiOptions(mode="mask"))
+
+
+def test_needs_pii_true_for_html_that_holds_only_a_comment() -> None:
+    result = make_result(
+        format="html",
+        content="<!-- Bob Meier -->",
+        title=None,
+        metadata=None,
+        links=None,
+        document=None,
+        media=None,
+    )
+
+    assert needs_pii(envelope(result), PiiOptions(mode="mask"))
+    assert fail_closed(envelope(result), PiiOptions(mode="mask")).data.content is None  # type: ignore[union-attr]
 
 
 def test_needs_pii_false_for_processed_or_empty_failure() -> None:
