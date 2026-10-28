@@ -84,6 +84,12 @@ def test_apply_keeps_text_between_spans_and_code_point_offsets() -> None:
     assert Replacer("mask", KEY).apply(text, []) == text
 
 
+def test_apply_adjacent_spans() -> None:
+    assert Replacer("mask", KEY).apply("AnnaBert!", [span(0, 4), span(4, 8, "LOCATION")]) == (
+        "[PERSON][LOCATION]!"
+    )
+
+
 def test_apply_hashes_the_value_of_each_span() -> None:
     replacer = Replacer("hash", KEY)
     text = "Anna and ANNA"

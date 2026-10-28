@@ -1,3 +1,5 @@
+import random
+import time
 from itertools import pairwise
 
 import pytest
@@ -141,3 +143,68 @@ def test_segments_default_size_is_20000() -> None:
 def test_segments_rejects_a_size_below_one() -> None:
     with pytest.raises(ValueError, match="max_chars"):
         segments("abc", 0)
+
+
+def _reference_resolve(spans: list[Span], text: str) -> list[Span]:
+    """The same rules, written the slow obvious way: scan every accepted span."""
+    accepted: list[Span] = []
+    ordered = sorted(spans, key=lambda s: (-s.score, s.start - s.end, s.start, s.type))
+    for candidate in ordered:
+        if candidate.end <= candidate.start:
+            continue
+        taken = sorted(
+            (o for o in accepted if o.start < candidate.end and candidate.start < o.end),
+            key=lambda o: o.start,
+        )
+        if not taken:
+            accepted.append(candidate)
+            continue
+        parts, position = [], candidate.start
+        for other in taken:
+            if other.start > position:
+                parts.append((position, other.start))
+            position = max(position, other.end)
+        if position < candidate.end:
+            parts.append((position, candidate.end))
+        for start, end in parts:
+            piece = text[start:end]
+            if not any(char.isalnum() for char in piece):
+                continue
+            start += len(piece) - len(piece.lstrip())
+            accepted.append(
+                Span(start, start + len(piece.strip()), candidate.type, candidate.score)
+            )
+    return sorted(accepted, key=lambda s: (s.start, s.end))
+
+
+def _many_spans(count: int, seed: int) -> tuple[str, list[Span]]:
+    """``count`` spans over a text of words: mostly disjoint, some contained in or overlapping
+    their neighbour, with a few distinct scores."""
+    rng = random.Random(seed)  # noqa: S311 - test data, not a secret
+    text = "word " * (count * 3)
+    spans = []
+    for index in range(count):
+        start = index * 14 + rng.randrange(0, 4)
+        length = rng.choice([4, 4, 4, 9, 20])  # 20 reaches into the next span or two
+        spans.append(
+            Span(start, min(start + length, len(text)), "PERSON", rng.choice([0.4, 0.6, 0.85]))
+        )
+    return text, spans
+
+
+def test_resolve_matches_a_brute_force_reference() -> None:
+    text, spans = _many_spans(400, seed=7)
+
+    assert resolve(spans, text) == _reference_resolve(spans, text)
+
+
+def test_resolve_many_spans_is_fast() -> None:
+    text, spans = _many_spans(50_000, seed=11)
+
+    started = time.perf_counter()
+    resolved = resolve(spans, text)
+    elapsed = time.perf_counter() - started
+
+    assert len(resolved) > 40_000
+    assert all(a.end <= b.start for a, b in pairwise(resolved))
+    assert elapsed < 2.0

@@ -5,6 +5,7 @@ length of a text (its context step), so long text goes in segments of at most 20
 characters; in the spike 175,000 characters took 11.3 s in one piece and 3.8 s in segments.
 """
 
+from bisect import bisect_left, bisect_right, insort
 from collections.abc import Iterable
 
 from text_extraction.pii.types import Span
@@ -53,6 +54,8 @@ def resolve(spans: Iterable[Span], text: str) -> list[Span]:
     and stays whole. A cut part loses the blanks at its ends: the replacement must not eat the
     space between words. Offsets past the text are clamped, empty spans are dropped.
     """
+    # Disjoint and sorted by start, hence also by end: the spans that overlap a candidate are one
+    # run of neighbours, which bisection finds (many thousands of spans must stay cheap).
     accepted: list[Span] = []
     for candidate in sorted(
         (_clamped(span, len(text)) for span in spans),
@@ -60,13 +63,11 @@ def resolve(spans: Iterable[Span], text: str) -> list[Span]:
     ):
         if candidate.end <= candidate.start:
             continue
-        taken = [
-            other
-            for other in accepted
-            if other.start < candidate.end and candidate.start < other.end
-        ]
+        first = bisect_right(accepted, candidate.start, key=_end)
+        last = bisect_left(accepted, candidate.end, key=_start)
+        taken = accepted[first:last]
         if not taken:
-            accepted.append(candidate)
+            accepted.insert(first, candidate)
             continue
         for start, end in _outside(candidate, taken):
             piece = text[start:end]
@@ -74,8 +75,20 @@ def resolve(spans: Iterable[Span], text: str) -> list[Span]:
             if not any(char.isalnum() for char in stripped):
                 continue
             start += len(piece) - len(piece.lstrip())
-            accepted.append(Span(start, start + len(stripped), candidate.type, candidate.score))
-    return sorted(accepted, key=lambda span: (span.start, span.end))
+            insort(
+                accepted,
+                Span(start, start + len(stripped), candidate.type, candidate.score),
+                key=_start,
+            )
+    return accepted
+
+
+def _start(span: Span) -> int:
+    return span.start
+
+
+def _end(span: Span) -> int:
+    return span.end
 
 
 def _clamped(span: Span, length: int) -> Span:
