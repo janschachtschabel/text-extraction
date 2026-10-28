@@ -24,7 +24,9 @@ Browser jobs (package 4) may have these as well:
                           the worker once it has finished the item. No read of the job shows them.
 - ``job:{<id>}:drafts``   hash: item index -> the fast ``Envelope[ExtractResult]`` of an ``auto``
                           item that moved to the browser (B5), with the job's remaining TTL;
-                          deleted by the browser worker once the item has its outcome
+                          deleted by the browser worker once the item has its outcome. The nlp
+                          worker's items have one too: the unprocessed envelope, deleted once
+                          the item has its outcome
 - ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
@@ -359,6 +361,12 @@ def asr_lease_seconds(settings: Settings) -> float:
     """How long the ASR worker holds an item: two transcriptions (``ASR_TIMEOUT_SECONDS``) plus
     10 s (ruling M10)."""
     return 2 * settings.asr_timeout_seconds + 10
+
+
+def pii_lease_seconds(settings: Settings) -> float:
+    """How long the nlp worker holds an item: two runs of the child (``PII_TIMEOUT_SECONDS``)
+    plus 10 s (ruling N11)."""
+    return 2 * settings.pii_timeout_seconds + 10
 
 
 def owner_key(owner: str, name: str) -> str:

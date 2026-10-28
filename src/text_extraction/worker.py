@@ -13,7 +13,8 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 1. claims the next item, leased for the runner's lease (``EXTRACT_TIMEOUT_SECONDS * 2 + 10``
    seconds here). An item that lost too many leases (``exhausted``) fails with
    ``internal_error``, retryable (an item of pool ``docling`` answers its draft with
-   ``ocr_unavailable`` instead, when it has one; of pool ``asr`` with ``asr_unavailable``), and
+   ``ocr_unavailable`` instead, when it has one; of pool ``asr`` with ``asr_unavailable``; of
+   pool ``nlp`` with ``pii_failed``, retryable, never its unprocessed draft), and
    is completed once that is recorded or its job is gone. A Valkey error leaves it leased: it
    comes back after the lease, so its batch still gets a result for it;
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
@@ -136,6 +137,8 @@ from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
 from text_extraction.outbound import CircuitOpen, OutboundBusy
+from text_extraction.pii.fields import FAIL_CLOSED_MESSAGE
+from text_extraction.pii_dispatch import PII_POOL
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.pipeline_media import asr_available
@@ -569,8 +572,9 @@ class Worker:
     async def _fail_exhausted(self, item: QueueItem, job: JobRecord | None) -> str | None:
         """Record the item as lost too often, then complete it; an item of pool ``docling`` or
         ``asr`` answers its draft instead, when it has one (``draft_without_ocr``,
-        ``draft_without_asr``). A Valkey error propagates and leaves the item leased, so it is
-        offered again after the lease instead of vanishing without a result."""
+        ``draft_without_asr``), one of pool ``nlp`` ``pii_failed``, never its draft. A Valkey
+        error propagates and leaves the item leased, so it is offered again after the lease
+        instead of vanishing without a result."""
         _log.warning("job_item_exhausted", attempts=item.attempts)
         if job is None:
             return await self._drop(item)
@@ -583,6 +587,9 @@ class Worker:
             # A video whose transcription never finished keeps its metadata, unstored.
             draft = await self._store.draft(item.job_id, item.index)
             envelope = draft_without_asr(draft) or envelope
+        elif self._queue.pool == PII_POOL:
+            # The draft is the result before its personal data was handled: never answered.
+            envelope = failed_extract(ErrorCode.PII_FAILED, FAIL_CLOSED_MESSAGE, retryable=True)
         outcome = await self._finish(item, job, envelope)
         # The item never runs again: its caller secrets (a browser job's, B6; an ASR key, M11)
         # are done with. A batch's ASR key serves its other items (a batch has no browser
@@ -614,12 +621,13 @@ class Worker:
     async def _drop_input(self, job: JobRecord, item: QueueItem) -> None:
         """Delete the item's bytes once it has its result: an upload's, or those of an item
         that was queued for OCR (pool ``docling``) or a transcription (pool ``asr``), with its
-        draft; on pool ``asr`` also the caller's key of a sync request's job (a batch's serves
-        its other items and goes with its last result, ``_finish``).
+        draft; an item of pool ``nlp`` has a draft only; on pool ``asr`` also the caller's key of
+        a sync request's job (a batch's serves its other items and goes with its last result,
+        ``_finish``).
         Only after the result is written: an item that runs again (a failed write, a lost lease)
         needs them."""
         pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)
-        if pooled:
+        if pooled or self._queue.pool == PII_POOL:  # the nlp pool's draft is its only input
             await self._store.drop_draft(item.job_id, item.index)
         if job.kind == "file" or pooled:
             await self._store.delete_input(item.job_id, item.index)
