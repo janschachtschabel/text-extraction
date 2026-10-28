@@ -91,11 +91,23 @@ _RECOGNIZER_NAME: Final = "HonorificRecognizer"
 
 _UPPER = "A-ZÀÁÂÄÇÈÉÊËÌÍÎÏÑÒÓÔÕÖØÙÚÛÜÝ"
 _LOWER = "a-zßàáâäçèéêëìíîïñòóôõöøùúûüýÿ"
-_NAME_PART = rf"[{_UPPER}][{_LOWER}]+(?:-[{_UPPER}][{_LOWER}]+)*"  # Meyer-Schulz is one part
+# Words that are titles or degrees, never a name: a name part must not be one of them, or the title
+# group would give back its last word to the name ("Prof. Dr. med. Meier" must not yield "Dr").
+_NOT_A_NAME = r"(?!(?:Dr|Prof|Doktor|Ing|Phil|Med|Jur|Dent|Habil)\b)"
+_NAME_PART = (  # Meyer-Schulz is one part
+    rf"{_NOT_A_NAME}[{_UPPER}][{_LOWER}]+(?:-[{_UPPER}][{_LOWER}]+)*"
+)
 _NAME = rf"(?P<name>{_NAME_PART}(?:[ \t\xa0]+{_NAME_PART})?)"  # one or two words
 _GAP = r"[ \t\xa0]+"
-# Titles that may stand between a salutation and the name, or alone before it.
-_TITLES = rf"(?:(?:(?:Dr|Prof)\.|Doktor){_GAP}){{1,2}}"
+# Titles that may stand between a salutation and the name, or alone before it: Dr., Prof. or
+# Doktor, then any number of titles and academic degrees (med., dent., rer. nat., h. c., Ing., ...).
+_TITLE = r"(?:Dr|Prof)\.|Doktor"
+_DEGREE = (
+    r"(?:med|dent|vet|rer|nat|oec|pol|phil|jur|iur|theol|habil|mult|techn|agr)\."
+    r"|h\.[ \t\xa0]?c\."
+    r"|(?:Ing|Phil|Med|Jur|Dent|Habil)\.?"
+)
+_TITLES = rf"(?:{_TITLE}){_GAP}(?:(?:{_TITLE}|{_DEGREE}){_GAP})*"
 _SALUTATIONS: Final = {
     "de": r"(?:Herrn?|Frau|Hr\.|Fr\.)",
     "en": r"(?:Mr|Mrs|Ms|Mx|Dr)\.?",

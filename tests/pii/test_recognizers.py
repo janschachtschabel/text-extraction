@@ -44,6 +44,14 @@ def names(text: str, language: str) -> list[str]:
         ("Frau Anna-Lena Meyer-Schulz spricht.", "Anna-Lena Meyer-Schulz"),
         (f"Herr Müller{NBSP}Schmidt", f"Müller{NBSP}Schmidt"),
         ("Frau Zoë Meier", "Zoë Meier"),
+        ("Frau Dr. med. Weber", "Weber"),
+        ("Prof. Dr. med. Klaus Meier", "Klaus Meier"),
+        ("Herr Dr. med. dent. Xaver Huber", "Xaver Huber"),
+        ("Prof. Dr. rer. nat. Müller", "Müller"),
+        ("Prof. Dr. Dr. h. c. Anna Sommer", "Anna Sommer"),
+        ("Dr. Ing. Meyer", "Meyer"),
+        ("Dr. Phil. Meyer", "Meyer"),
+        ("Herrn Dr. jur. habil. Peter Lang", "Peter Lang"),
     ],
 )
 def test_german_salutations_and_titles(text: str, name: str) -> None:
@@ -61,6 +69,11 @@ def test_german_salutations_and_titles(text: str, name: str) -> None:
         "Der Doktor kommt.",
         "Mehrere Herren Müller",  # `Herren` is no salutation
         "Doktorand Meyer",
+        "Dr. med. dent.",
+        "Prof. Dr. rer. nat.",
+        "Frau Dr. med. und mehr",
+        "Dr. Ing.",
+        "Herr Dr. Phil.",
         "Dr.Anna",  # the title needs a blank before the name
         "Andr. Meyer",  # `Dr.` inside a word is no title
         "Mr Smith",  # English salutations are not German ones
