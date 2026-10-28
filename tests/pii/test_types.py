@@ -9,7 +9,13 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.file_models import FileForm, form_of, upload_options
 from text_extraction.job_models import BatchRequest, JobOptions
 from text_extraction.jobs import _options_json
-from text_extraction.pii.types import ENTITY_TYPES, PiiEntity, PiiOptions, PiiReport
+from text_extraction.pii.types import (
+    ENTITY_TYPES,
+    PiiEntity,
+    PiiOptions,
+    PiiReport,
+    model_names,
+)
 from text_extraction.pool_dispatch import job_options
 
 
@@ -144,3 +150,10 @@ def test_report_shapes() -> None:
     assert PiiReport.model_validate_json(annotated.model_dump_json()) == annotated
     with pytest.raises(ValidationError):
         PiiReport(mode="mask", language="fr", entities={})  # type: ignore[arg-type]
+
+
+def test_model_names_follow_the_size() -> None:
+    assert model_names("lg") == {"de": "de_core_news_lg", "en": "en_core_web_lg"}
+    assert model_names("md") == {"de": "de_core_news_md", "en": "en_core_web_md"}
+    with pytest.raises(ValueError, match="size"):
+        model_names("sm")  # type: ignore[arg-type]

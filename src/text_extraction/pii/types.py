@@ -32,9 +32,21 @@ PiiMode = Literal["mask", "redact", "hash", "annotate"]
 PiiLanguageOption = Literal["auto", "de", "en"]
 PiiLanguage = Literal["de", "en"]  # the model that was used
 
+# The size of the spaCy models (``PII_MODEL_SIZE``): `lg` finds names better, `md` needs a tenth of
+# the volume and half the memory.
+ModelSize = Literal["lg", "md"]
+
 # Whose key signed a hash: the operator's (the same value hashes the same in every result) or a
 # random one made for this result.
 HashScope = Literal["service", "result"]
+
+
+def model_names(size: ModelSize) -> dict[PiiLanguage, str]:
+    """The two spaCy models of a size: the directory names on the models volume, the keys of
+    ``pii/models.toml``."""
+    if size not in get_args(ModelSize):
+        raise ValueError(f"unknown spaCy model size {size!r}")
+    return {"de": f"de_core_news_{size}", "en": f"en_core_web_{size}"}
 
 
 @dataclass(frozen=True)

@@ -84,6 +84,17 @@ asr = [
     "yt-dlp-ejs==0.8.0",  # Unlicense AND MIT AND ISC
 ]
 
+# The NLP worker (text-extraction-nlp-worker): Presidio and spaCy, imported in its child processes
+# only (never in the API, the other workers or the nlp worker's parent). The spaCy models are not
+# a Python dependency: they come from the manifest `pii/models.toml` onto the volume. Presidio's
+# transitive packages are not pinned here (tldextract ships the public suffix list the e-mail
+# recognizer uses offline); thinc 8.3.14 (2026-10-25) is held back by `exclude-newer-package`.
+# Each pinned to a release at least 14 days old (ruling R16).
+nlp = [
+    "presidio-analyzer==2.2.364",  # MIT; 2.2.365 (2026-10-25) is too new
+    "spacy==3.8.16",  # MIT
+]
+
 [build-system]
 requires = ["uv_build>=0.11,<0.12"]
 build-backend = "uv_build"
@@ -92,7 +103,7 @@ build-backend = "uv_build"
 # The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
 # `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
 # does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
-exclude-newer-package = { pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days" }
+exclude-newer-package = { thinc = "14 days", blis = "14 days", confection = "14 days", cymem = "14 days", murmurhash = "14 days", phonenumbers = "14 days", preshed = "14 days", smart-open = "14 days", srsly = "14 days", weasel = "14 days", wrapt = "14 days", pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days" }
 
 # torch and torchvision only from the PyTorch CPU index: its wheels carry no CUDA libraries.
 [tool.uv.sources]
@@ -147,8 +158,14 @@ python_version = "3.13"
 files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["av.*", "defusedxml.*", "deno.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "faster_whisper.*", "jstyleson", "lxml.*", "openpyxl.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "xlwt.*", "yt_dlp.*"]
+module = ["av.*", "defusedxml.*", "deno.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "faster_whisper.*", "jstyleson", "lxml.*", "openpyxl.*", "presidio_analyzer.*", "py3langid.*", "pypdfium2.*", "reportlab.*", "spacy.*", "tldextract.*", "xlwt.*", "yt_dlp.*"]
 ignore_missing_imports = true
+
+# Presidio's classes are Any where the extra `nlp` is not installed (the default environment type-
+# checks without it); subclassing them is the point of this module.
+[[tool.mypy.overrides]]
+module = ["text_extraction.pii.recognizers"]
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -157,10 +174,13 @@ testpaths = ["tests"]
 # Browser tests need Chromium: `pytest -m browser` runs them (CI job `browser`).
 # Docling tests need the extra `docling`, Tesseract and the models: `pytest -m docling`.
 # ASR tests need the extra `asr` and a Whisper model under ASR_MODELS_PATH: `pytest -m asr`.
-addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser and not docling and not asr'"
+# NLP tests need the extra `nlp` and download the spaCy models of PII_TEST_MODEL_SIZE (default
+# md) into PII_TEST_MODELS_PATH: `pytest -m nlp`.
+addopts = "-ra --strict-markers --strict-config --ignore=tests/live --ignore=tests/e2e -m 'not browser and not docling and not asr and not nlp'"
 markers = [
     "browser: needs a real Chromium (run with `-m browser`)",
     "docling: needs Docling, Tesseract and the models (run with `-m docling`)",
     "asr: needs the extra `asr` and a Whisper model under ASR_MODELS_PATH (run with `-m asr`)",
+    "nlp: needs the extra `nlp` and the spaCy models, downloaded on first use (run with `-m nlp`)",
 ]
 xfail_strict = true

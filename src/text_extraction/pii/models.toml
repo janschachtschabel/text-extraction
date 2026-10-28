@@ -1,0 +1,39 @@
+# The spaCy models of the NLP worker, as `text-extraction-nlp-worker --download-models` puts them
+# under PII_MODELS_PATH (ruling N14). Each entry is a model wheel (a zip) from the
+# explosion/spacy-models GitHub releases: `url`, `size` and `sha256` describe the wheel, which
+# must match exactly, otherwise nothing is put in place. `unpack` is the member prefix under
+# which the model lives in the wheel; those members are extracted into `path` (one directory per
+# model, named like the model) and the wheel is discarded. Only the two models of PII_MODEL_SIZE
+# (`lg` or `md`: `de_core_news_<size>` and `en_core_web_<size>`) are downloaded; a change to
+# another model's entry makes no run download again. Sizes and SHA-256 values were measured on
+# 2026-10-28 (docs/superpowers/plans/2026-10-26-package-7-calibration.md). All four are version
+# 3.8.0, for spaCy >=3.8.0,<3.9.0 (their meta.json), licence MIT. The licences and the data the
+# models were trained on are in NOTICE.
+
+[[files]]
+path = "de_core_news_lg/"
+url = "https://github.com/explosion/spacy-models/releases/download/de_core_news_lg-3.8.0/de_core_news_lg-3.8.0-py3-none-any.whl"
+sha256 = "36fda650e476b54d5e87803635e36dadd1e8e034c4b5962088586d684f4c9fed"
+size = 567843151
+unpack = "de_core_news_lg/de_core_news_lg-3.8.0/"
+
+[[files]]
+path = "en_core_web_lg/"
+url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl"
+sha256 = "293e9547a655b25499198ab15a525b05b9407a75f10255e405e8c3854329ab63"
+size = 400658291
+unpack = "en_core_web_lg/en_core_web_lg-3.8.0/"
+
+[[files]]
+path = "de_core_news_md/"
+url = "https://github.com/explosion/spacy-models/releases/download/de_core_news_md-3.8.0/de_core_news_md-3.8.0-py3-none-any.whl"
+sha256 = "b903f59220f1e76dd672acdaa7fa454d6703fe056c5ccd6457820e70874116d0"
+size = 44398316
+unpack = "de_core_news_md/de_core_news_md-3.8.0/"
+
+[[files]]
+path = "en_core_web_md/"
+url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl"
+sha256 = "5e6329fe3fecedb1d1a02c3ea2172ee0fede6cea6e4aefb6a02d832dba78a310"
+size = 33480380
+unpack = "en_core_web_md/en_core_web_md-3.8.0/"
