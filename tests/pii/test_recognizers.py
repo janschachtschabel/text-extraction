@@ -3,6 +3,7 @@ or a title is a ``PERSON`` of score 0.7, the span is the name only. It needs Pre
 ``nlp``) but no model."""
 
 import importlib.util
+import time
 
 import pytest
 
@@ -81,6 +82,23 @@ def test_german_salutations_and_titles(text: str, name: str) -> None:
 )
 def test_german_non_names(text: str) -> None:
     assert names(text, "de") == []
+
+
+def test_a_hyphenated_part_is_no_title_either() -> None:
+    assert names("Dr. Meier-Dr. Schulz", "de") == ["Meier", "Schulz"]  # not "Meier-Dr"
+
+
+@pytest.mark.parametrize(
+    "text", ["Dr. " * 8000 + "x", "Frau " + "Dr. med. " * 4000, "Prof. Dr. med. " * 4000 + "x"]
+)
+def test_a_long_title_chain_takes_linear_time(text: str) -> None:
+    """Page text is untrusted: a chain of titles with no name must not backtrack quadratically
+    (32 KB of ``Dr. `` took 4 s with an open-ended chain)."""
+    started = time.perf_counter()
+    found = names(text, "de")
+
+    assert time.perf_counter() - started < 0.1
+    assert found == []
 
 
 def test_a_name_does_not_run_over_a_line_break() -> None:

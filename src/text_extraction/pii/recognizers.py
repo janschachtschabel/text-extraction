@@ -95,7 +95,7 @@ _LOWER = "a-zßàáâäçèéêëìíîïñòóôõöøùúûüýÿ"
 # group would give back its last word to the name ("Prof. Dr. med. Meier" must not yield "Dr").
 _NOT_A_NAME = r"(?!(?:Dr|Prof|Doktor|Ing|Phil|Med|Jur|Dent|Habil)\b)"
 _NAME_PART = (  # Meyer-Schulz is one part
-    rf"{_NOT_A_NAME}[{_UPPER}][{_LOWER}]+(?:-[{_UPPER}][{_LOWER}]+)*"
+    rf"{_NOT_A_NAME}[{_UPPER}][{_LOWER}]+(?:-{_NOT_A_NAME}[{_UPPER}][{_LOWER}]+)*"
 )
 _NAME = rf"(?P<name>{_NAME_PART}(?:[ \t\xa0]+{_NAME_PART})?)"  # one or two words
 _GAP = r"[ \t\xa0]+"
@@ -107,7 +107,10 @@ _DEGREE = (
     r"|h\.[ \t\xa0]?c\."
     r"|(?:Ing|Phil|Med|Jur|Dent|Habil)\.?"
 )
-_TITLES = rf"(?:{_TITLE}){_GAP}(?:(?:{_TITLE}|{_DEGREE}){_GAP})*"
+# The chain is bounded (the longest real one is "Prof. Dr. Dr. h. c. mult."): on page text of
+# "Dr. Dr. Dr. ..." an open-ended chain would backtrack quadratically. A bare degree word can still
+# be taken as a title before a first name ("Dr. Phil Collins" gives "Collins"): a known trade-off.
+_TITLES = rf"(?:{_TITLE}){_GAP}(?:(?:{_TITLE}|{_DEGREE}){_GAP}){{0,6}}"
 _SALUTATIONS: Final = {
     "de": r"(?:Herrn?|Frau|Hr\.|Fr\.)",
     "en": r"(?:Mr|Mrs|Ms|Mx|Dr)\.?",
