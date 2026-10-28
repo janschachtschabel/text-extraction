@@ -17,7 +17,7 @@
 - `docs/packages.md` row 7: Presidio de/en with `mask`, `redact`, `hash`, `annotate`; spaCy models from PVC. Done when German and English test texts are handled per mode.
 - `docs/architecture.md`: Overview (nlp-worker with Presidio, one model PVC per worker type, spaCy for the nlp-worker), pipeline step 6 (post-process: PII), `POST /v1/extract` option `pii`, "Jobs and the fair queue", "Documents and OCR" (F12 dispatch and inputs, F13 moves, F14 worker pattern, F15 models), "Audio and video" (PII applies to transcripts like to any content).
 - `CLAUDE.md` rules 1, 2 (stateless, settings as env vars, jobs over ~30 s, models from a PVC, Helm toggles), 4 (result envelope), 5, 7 (no GPL/AGPL).
-- Jan's decisions D1-D4 below (open until Jan answers; the plan is written on the recommended options).
+- Jan's decisions D1-D4 below (2026-10-28: Jan approved the plan and the implementation; the cards were unanswered, so the recommended options (a) apply).
 
 ## Global Constraints
 
@@ -31,20 +31,20 @@
 - Never log, count by value, or put into a metric label any text, span or entity value; entity types and counts at most.
 - Not in this package: PII in screenshots (refused, N4), PII inside `POST /v1/structured` and `/v1/chunk` (package 8 calls the same hop), custom entity lists or deny lists per caller, other languages' models, transformer models (`*_trf`, they need torch), S3.
 
-## Decisions of Jan (open; the plan follows the recommended options)
+## Decisions of Jan (2026-10-28: the recommended options)
 
 - **D1, size of the spaCy models.** Measured in the sandbox on 2026-10-26 (both languages loaded, Presidio 2.2.364, our recognizers, 4 vCPU): `md` loads in 5.6 s with 0.7 GB RSS; `lg` in 7.0-7.8 s with 1.6 GB RSS, 2.2 GB peak on a 175,000-character German text. On a German test text `md` missed "Dr. Anna Schmidt", `lg` found her; both missed "Herr Müller" (N6 adds a rule for that). Speed is the same (about 6,500 words/s in 20,000-character segments, N7). Volume: `md` 115 MB, `lg` 1.03 GB.
-  - (a, recommended) `lg`: better recall on German names, the point of the package; 1.1 GB volume, worker limit 3 GiB.
+  - (a, recommended, **chosen**) `lg`: better recall on German names, the point of the package; 1.1 GB volume, worker limit 3 GiB.
   - (b) `md`: a tenth of the volume and half the memory, more names missed.
   - Either way `PII_MODEL_SIZE` (`lg|md`) switches it; both are in the manifest.
 - **D2, what is found by default** (when a request names no `entities`).
-  - (a, recommended) Persons and contact or payment data: `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`. Places, organisations and URLs only when asked (`entities`). Teaching material is full of places and institutions ("Bremen", "Bundesregierung") that are not personal data; masking them would ruin the text.
+  - (a, recommended, **chosen**) Persons and contact or payment data: `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`. Places, organisations and URLs only when asked (`entities`). Teaching material is full of places and institutions ("Bremen", "Bundesregierung") that are not personal data; masking them would ruin the text.
   - (b) Everything we support, including `LOCATION`, `ORGANIZATION`, `URL`.
 - **D3, the key of `hash`.** A plain SHA-256 of a phone number or e-mail can be reversed by trying all candidates, so `hash` uses HMAC-SHA-256.
-  - (a, recommended) With `PII_HASH_KEY` (operator secret) set, the same value gives the same hash in every result of the service (`hash_scope: service`), so documents can be linked without the value; without it, a random key per result (`hash_scope: result`): equal values match only within one result.
+  - (a, recommended, **chosen**) With `PII_HASH_KEY` (operator secret) set, the same value gives the same hash in every result of the service (`hash_scope: service`), so documents can be linked without the value; without it, a random key per result (`hash_scope: result`): equal values match only within one result.
   - (b) `hash` needs `PII_HASH_KEY`; without it, `mode: hash` answers 400.
 - **D4, a sync request whose PII takes longer.** Our measurement: a page of 1,000 words takes well under a second, a 150,000-word PDF about 25 s.
-  - (a, recommended) As `transcribe: true` (package 6, M9): a request with `pii` and without `wait_seconds` waits 20 s (`PII_SYNC_WAIT_SECONDS`), then answers 202 with its job, which goes on and stores the result. No work is lost.
+  - (a, recommended, **chosen**) As `transcribe: true` (package 6, M9): a request with `pii` and without `wait_seconds` waits 20 s (`PII_SYNC_WAIT_SECONDS`), then answers 202 with its job, which goes on and stores the result. No work is lost.
   - (b) As OCR (package 5, D2): it waits 20 s, then answers `failed`/`pii_failed`, retryable, and the job is deleted; the caller has to send `wait_seconds` to get a job.
 
 ## Rulings in this plan
