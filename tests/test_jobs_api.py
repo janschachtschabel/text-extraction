@@ -986,3 +986,19 @@ def test_batch_items_processed_by_nlp(make_api: Callable[..., Api]) -> None:
         return record.options
 
     assert api.run(options).pii == PiiOptions(mode="mask", entities=["PERSON"])
+
+
+def test_batch_xpath_selectors_need_an_admin_key(api: Api) -> None:
+    """Ruling R4, on the batch route: no job for a user's XPath; an admin's is taken."""
+    structured = {
+        "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+        "strategy": "selectors",
+        "selectors": {"title": {"xpath": "//h1"}},
+    }
+
+    refused = api.batch([PAGE], structured=structured)
+    assert refused.status_code == 422
+    assert refused.json()["error"]["message"] == "XPath selectors need an admin key; use CSS."
+    assert api.keys("job:*:meta") == []
+
+    assert api.batch([PAGE], headers=ROOT, structured=structured).status_code == 202

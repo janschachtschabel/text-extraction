@@ -1774,3 +1774,28 @@ def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled:
 
     assert asyncio.run(keys("job*")) == []
     assert asyncio.run(keys("q:{nlp}*")) == []
+
+
+XPATH_STRUCTURED: dict[str, Any] = {
+    "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+    "strategy": "selectors",
+    "selectors": {"title": {"xpath": "//h1"}},
+}
+
+
+def test_xpath_selectors_need_an_admin_key(client: TestClient) -> None:
+    """Ruling R4: a user's XPath is 422 before anything is fetched; CSS is fine."""
+    response = client.post(
+        "/v1/extract", json={"url": PAGE, "structured": XPATH_STRUCTURED}, headers=AUTH
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "XPath selectors need an admin key; use CSS."
+    assert "//h1" not in response.text
+
+    css = {**XPATH_STRUCTURED, "selectors": {"title": {"css": "h1"}}}
+    allowed = client.post("/v1/extract", json={"url": PAGE, "structured": css}, headers=AUTH)
+    assert allowed.status_code == 200
+    assert allowed.json()["data"]["structured"]["values"] == {"title": "Photosynthesis explained"}

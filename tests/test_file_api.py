@@ -1327,3 +1327,22 @@ def test_a_large_upload_keeps_its_answer_without_hashing_the_body(
     assert answer["data"]["mode_used"] == "upload"
     if asr:
         assert pool.calls == []
+
+
+def test_xpath_selectors_need_an_admin_key(client: TestClient) -> None:
+    """Ruling R4, on the upload route."""
+    structured = {
+        "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+        "strategy": "selectors",
+        "selectors": {"title": {"xpath": "//h1"}},
+    }
+    response = upload(
+        client,
+        b"<html><body><h1>Title</h1></body></html>",
+        "page.html",
+        "text/html",
+        form={"structured": json.dumps(structured)},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "XPath selectors need an admin key; use CSS."

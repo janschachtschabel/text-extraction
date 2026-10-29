@@ -9,17 +9,30 @@ skips this stage. Pure: no I/O, and nothing here logs a selector, a value or the
   items that describe the page first, then those of its site), microdata ``itemprop``, RDFa
   ``property``, OpenGraph ``og:<name>``, ``<meta name>`` (a comma list for an array field), then
   the ``PageMetadata`` fields. A value that does not fit the field's type is no match.
-* ``selectors``: the caller's CSS (soupsieve on BeautifulSoup) and XPath (lxml) rules, and the
-  learned ones (``SelectorStore``) for the fields without a caller rule. An XPath that fails
-  when it is evaluated (an unknown function, variable or prefix) leaves its field missing.
-* ``auto``: learned selectors, then ``metadata``, then the caller's selectors, per field.
+* ``selectors``: the caller's CSS (soupsieve on BeautifulSoup) and XPath (lxml, admin keys only:
+  ``checks.check_selector_access``) rules, merged over the learned ones (``SelectorStore``, CSS
+  only): the caller's rule wins per field. An XPath that fails when it is evaluated (an unknown
+  function, variable or prefix) leaves its field missing.
+* ``auto``: the selectors (caller's or learned), then ``metadata``, per field (ruling R3).
 * ``tables``: every ``<table>`` with at least two rows.
 * ``learn_html``: the cleaned HTML that ``learn_selectors`` shows the LLM.
 
-Bounds: a value is cut to ``MAX_VALUE_CHARS`` characters, a rule takes at most ``MAX_MATCHES``
-matches, at most ``MAX_TABLES`` tables of at most ``MAX_TABLE_ROWS`` rows. The page is parsed
-once by lxml (the tree ``metadata`` made, for XPath and tables) and, only when a CSS rule runs,
-once by BeautifulSoup.
+Bounds (rule 5; rulings R4, R5), since a selector's cost and a table's size are up to the page:
+
+* Selector rules run only on pages of at most ``STRUCTURED_MAX_ELEMENTS`` elements; on a bigger
+  page they are skipped, their fields stay missing, with the warning
+  ``selectors_skipped_large_page`` (lxml cannot stop an expression once it runs, and
+  ``//*//*//*`` is quadratic in the number of elements).
+* A value is cut to ``MAX_VALUE_CHARS`` characters; a rule's field takes at most
+  ``MAX_FIELD_VALUES`` values and ``MAX_FIELD_CHARS`` characters in all, then it is cut with the
+  warning ``structured_truncated``.
+* At most ``MAX_TABLES`` tables of at most ``MAX_TABLE_ROWS`` rows of at most
+  ``MAX_TABLE_COLUMNS`` cells; ``colspan`` counts 1 to ``MAX_COLSPAN``; all tables together at
+  most ``MAX_TABLES_CHARS`` characters of cell text, then they stop with the warning
+  ``tables_truncated``.
+
+The page is parsed once by lxml (the tree ``metadata`` made, for XPath and tables) and, only
+when a CSS rule runs, once by BeautifulSoup.
 
 ``patterns`` and ``llm`` run later, in the post stage, on the final content; fields the DOM
 stage did not fill stay missing (``values[field] = None``, listed in ``missing``).
@@ -29,6 +42,7 @@ import hashlib
 import html as html_lib
 import json
 from collections.abc import Iterable, Iterator, Mapping
+from itertools import islice
 from typing import Any
 
 import structlog
@@ -50,11 +64,18 @@ from text_extraction.structured.types import (
 
 _log = structlog.get_logger(__name__)
 
-MAX_VALUE_CHARS = 10_000
-MAX_MATCHES = 1_000
+STRUCTURED_MAX_ELEMENTS = 50_000  # selector rules run on pages of at most this many elements
+MAX_VALUE_CHARS = 10_000  # one value
+MAX_FIELD_VALUES = 1_000  # values of one field from a rule
+MAX_FIELD_CHARS = 100_000  # characters of one field from a rule, all values together
 MAX_TABLES = 50
 MAX_TABLE_ROWS = 1_000
-MAX_TABLE_COLUMNS = 1_000
+MAX_TABLE_COLUMNS = 100  # cells of a row, colspan included
+MAX_COLSPAN = 20
+MAX_TABLES_CHARS = 1_000_000  # cell text of all tables together
+SELECTORS_SKIPPED_WARNING = "selectors_skipped_large_page"
+STRUCTURED_TRUNCATED_WARNING = "structured_truncated"
+TABLES_TRUNCATED_WARNING = "tables_truncated"
 _URL_ATTRIBUTES = frozenset({"href", "src"})
 _DOM_STRATEGIES = frozenset({"metadata", "selectors", "auto"})
 _PAGE_FIELDS = (
@@ -130,15 +151,15 @@ def structured_cache_part(
 def usable_learned(
     options: StructuredOptions, learned: Mapping[str, SelectorRule]
 ) -> dict[str, SelectorRule]:
-    """The learned rules the stage would use: of fields of the schema without a caller rule;
-    none when the strategy does not read them."""
+    """The learned rules the stage would use: CSS rules of fields of the schema without a
+    caller rule; none when the strategy does not read them."""
     compiled = options.compiled
     if compiled is None or not reads_learned(options):
         return {}
     return {
         name: rule
         for name, rule in learned.items()
-        if name in compiled.fields and name not in options.selectors
+        if name in compiled.fields and name not in options.selectors and rule.css is not None
     }
 
 
@@ -155,47 +176,70 @@ def dom_stage(
     learn: bool,
     learn_max_chars: int,
     learned: Mapping[str, SelectorRule] | None = None,
+    warnings: list[str] | None = None,
 ) -> StructuredResult:
     """The DOM strategies of ``options`` on the page ``html`` (final URL ``final_url``).
     ``metadata`` are the page's ``PageMetadata`` (the last source of ``metadata``; None: not
     used), ``items`` its ``StructuredItems`` (for ``metadata``: with the syntaxes read),
     ``learned`` the learned rules (by field; the caller's own rules win). With ``learn`` the
-    result carries ``learn_html`` (cut to ``learn_max_chars``). Never raises for a rule."""
+    result carries ``learn_html`` (cut to ``learn_max_chars``). The stage's warnings
+    (``selectors_skipped_large_page``, ``structured_truncated``, ``tables_truncated``) are
+    appended to ``warnings``. Never raises for a rule."""
+    noted: list[str] = warnings if warnings is not None else []
     compiled = options.compiled
     values: dict[str, Any] = {}
     sources: dict[str, Source] = {}
     if compiled is not None:
-        page = _Page(html, items)
-        rules = options.selectors if options.strategy in ("selectors", "auto") else {}
         own_learned = usable_learned(options, learned or {})
+        caller = options.selectors if options.strategy in ("selectors", "auto") else {}
+        rules = {**own_learned, **caller}
+        if rules and _too_large(items.tree):
+            rules = {}
+            noted.append(SELECTORS_SKIPPED_WARNING)
+        page = _Page(html, items)
         uses_metadata = reads_metadata(options)
+        truncated = False
         for name in compiled.fields:
             value: Any = None
             source: Source | None = None
-            if name in own_learned:
-                value, source = page.rule_value(compiled, name, own_learned[name]), "learned"
+            if name in rules:
+                value, cut = page.rule_value(compiled, name, rules[name])
+                truncated = truncated or cut
+                source = "selectors" if name in caller else "learned"
             if value is None and uses_metadata:
                 value, source = _metadata_value(compiled, name, items, metadata), "metadata"
-            if value is None and name in rules:
-                value, source = page.rule_value(compiled, name, rules[name]), "selectors"
             values[name] = value
             if value is not None and source is not None:
                 sources[name] = source
+        if truncated:
+            noted.append(STRUCTURED_TRUNCATED_WARNING)
+    tables = None
+    if options.tables:
+        tables, cut_tables = _tables(items.tree)
+        if cut_tables:
+            noted.append(TABLES_TRUNCATED_WARNING)
     return StructuredResult(
         values=values,
         sources=sources,
         missing=[name for name, value in values.items() if value is None],
-        tables=_tables(items.tree) if options.tables else None,
+        tables=tables,
         stage="dom",
         learn_html=clean_html_for_learning(html, learn_max_chars) if learn else None,
     )
+
+
+def _too_large(tree: HtmlElement) -> bool:
+    """Whether the page has more than ``STRUCTURED_MAX_ELEMENTS`` elements; stops counting
+    there."""
+    elements = tree.getroottree().iter(etree.Element)
+    return sum(1 for _ in islice(elements, STRUCTURED_MAX_ELEMENTS + 1)) > STRUCTURED_MAX_ELEMENTS
 
 
 def _cut(value: Any) -> Any:
     if isinstance(value, str):
         return value[:MAX_VALUE_CHARS]
     if isinstance(value, list):
-        return [_cut(item) for item in value[:MAX_MATCHES]]
+        return [_cut(item) for item in value[:MAX_FIELD_VALUES]]
     if isinstance(value, dict):
         return {key: _cut(item) for key, item in value.items()}
     return value
@@ -238,7 +282,7 @@ def _plain(value: Any, depth: int = 0) -> Any:
     if depth > 6:
         return None
     if isinstance(value, list):
-        return [_plain(item, depth + 1) for item in value[:MAX_MATCHES]]
+        return [_plain(item, depth + 1) for item in value[:MAX_FIELD_VALUES]]
     if isinstance(value, dict):
         if "@value" in value:
             return _plain(value["@value"], depth + 1)
@@ -256,7 +300,7 @@ def _texts(value: Any, depth: int = 0) -> Iterator[str]:
         if value.strip():
             yield value
     elif isinstance(value, list):
-        for item in value[:MAX_MATCHES]:
+        for item in value[:MAX_FIELD_VALUES]:
             yield from _texts(item, depth + 1)
     elif isinstance(value, dict):
         if isinstance(value.get("properties"), dict):
@@ -347,6 +391,36 @@ def _metadata_value(
 # --- selectors -------------------------------------------------------------------------------
 
 
+class _Found:
+    """The values of one rule, within ``MAX_FIELD_VALUES`` and ``MAX_FIELD_CHARS``."""
+
+    def __init__(self, take_all: bool) -> None:
+        self.take_all = take_all
+        self.values: list[Any] = []
+        self.chars = 0
+        self.truncated = False
+
+    def add(self, value: Any) -> bool:
+        """Keep ``value`` (blank text is skipped); False once no more are wanted."""
+        if isinstance(value, str):
+            value = value[:MAX_VALUE_CHARS]
+            if not value.strip():
+                return True
+        if len(self.values) >= MAX_FIELD_VALUES:
+            self.truncated = True
+            return False
+        if isinstance(value, str):
+            room = MAX_FIELD_CHARS - self.chars
+            if len(value) > room:
+                self.truncated = True
+                if value[:room].strip():
+                    self.values.append(value[:room])
+                return False
+            self.chars += len(value)
+        self.values.append(value)
+        return self.take_all
+
+
 class _Page:
     """The page for selector rules: lxml's tree for XPath, BeautifulSoup for CSS, parsed on
     the first CSS rule."""
@@ -356,49 +430,45 @@ class _Page:
         self._items = items
         self._soup: BeautifulSoup | None = None
 
-    def rule_value(self, compiled: CompiledSchema, name: str, rule: SelectorRule) -> Any | None:
-        take_all = rule.all if rule.all is not None else _is_array(compiled, name)
+    def rule_value(
+        self, compiled: CompiledSchema, name: str, rule: SelectorRule
+    ) -> tuple[Any | None, bool]:
+        """The field's value by ``rule`` (None: nothing found) and whether it was cut to the
+        field's limits."""
+        found = _Found(rule.all if rule.all is not None else _is_array(compiled, name))
         try:
-            found = (
-                self._css(rule, take_all) if rule.css is not None else self._xpath(rule, take_all)
-            )
+            if rule.css is not None:
+                self._css(rule, found)
+            else:
+                self._xpath(rule, found)
         except Exception as error:  # an XPath that fails at evaluation (M2.5), or worse
             _log.debug("structured_rule_failed", error_type=type(error).__name__)
-            return None
-        if not found:
-            return None
-        return _cut(coerce(compiled, name, found if take_all else found[0]))
+            return None, False
+        if not found.values:
+            return None, found.truncated
+        raw = found.values if found.take_all else found.values[0]
+        return _cut(coerce(compiled, name, raw)), found.truncated
 
     def _url(self, attr: str | None, value: str) -> str:
         if attr is not None and attr.lower() in _URL_ATTRIBUTES:
             return absolute_url(self._items.base, value.strip()) or value
         return value
 
-    def _css(self, rule: SelectorRule, take_all: bool) -> list[Any]:
+    def _css(self, rule: SelectorRule, found: _Found) -> None:
         if self._soup is None:
             self._soup = BeautifulSoup(self._html, "lxml")
-        found: list[Any] = []
-        for tag in self._soup.css.iselect(rule.css or "", limit=MAX_MATCHES):
+        for tag in self._soup.css.iselect(rule.css or "", limit=MAX_FIELD_VALUES + 1):
             value = _tag_value(tag, rule.attr)
-            if value is None or not value.strip():
-                continue
-            found.append(self._url(rule.attr, value))
-            if not take_all:
+            if value is not None and not found.add(self._url(rule.attr, value)):
                 break
-        return found
 
-    def _xpath(self, rule: SelectorRule, take_all: bool) -> list[Any]:
+    def _xpath(self, rule: SelectorRule, found: _Found) -> None:
         result = self._items.tree.getroottree().xpath(rule.xpath or "")
         matches: Iterable[Any] = result if isinstance(result, list) else [result]
-        found: list[Any] = []
         for match in matches:
             value = self._match_value(match, rule.attr)
-            if value is None or (isinstance(value, str) and not value.strip()):
-                continue
-            found.append(value)
-            if not take_all or len(found) >= MAX_MATCHES:
+            if value is not None and not found.add(value):
                 break
-        return found
 
     def _match_value(self, match: Any, attr: str | None) -> Any | None:
         if isinstance(match, etree._Element):
@@ -435,7 +505,8 @@ def _cells(row: HtmlElement) -> list[HtmlElement]:
 
 
 def _expanded(cells: list[HtmlElement]) -> list[str]:
-    """The cells' texts, a cell with ``colspan`` repeated, at most ``MAX_TABLE_COLUMNS``."""
+    """The cells' texts, a cell with ``colspan`` repeated (1 to ``MAX_COLSPAN`` times), at most
+    ``MAX_TABLE_COLUMNS``."""
     out: list[str] = []
     for cell in cells:
         try:
@@ -443,7 +514,7 @@ def _expanded(cells: list[HtmlElement]) -> list[str]:
         except ValueError:
             span = 1
         text = _bounded(cell.itertext())
-        out.extend([text] * min(max(span, 1), MAX_TABLE_COLUMNS - len(out)))
+        out.extend([text] * min(max(span, 1), MAX_COLSPAN, MAX_TABLE_COLUMNS - len(out)))
         if len(out) >= MAX_TABLE_COLUMNS:
             break
     return out
@@ -460,8 +531,11 @@ def _rows(table: HtmlElement) -> list[HtmlElement]:
     return rows
 
 
-def _tables(tree: HtmlElement) -> list[Table]:
+def _tables(tree: HtmlElement) -> tuple[list[Table], bool]:
+    """The page's tables, and whether they were cut at ``MAX_TABLES_CHARS`` (the table that
+    reached it keeps the rows before; nothing after it is read)."""
     tables: list[Table] = []
+    budget = MAX_TABLES_CHARS
     for table in tree.getroottree().iter("table"):
         rows = _rows(table)
         if len(rows) < 2:
@@ -471,19 +545,29 @@ def _tables(tree: HtmlElement) -> list[Table]:
         if first and all(cell.tag == "th" for cell in first):
             headers = _expanded(first)
             rows = rows[1:]
+        budget -= sum(map(len, headers))
+        if budget < 0:
+            return tables, True
         caption = table.find("caption")
         caption_text = _bounded(caption.itertext()) if caption is not None else ""
+        kept: list[list[str]] = []
+        cut = False
+        for row in rows[:MAX_TABLE_ROWS]:
+            cells = _expanded(_cells(row))
+            size = sum(map(len, cells))
+            if size > budget:
+                cut = True
+                break
+            budget -= size
+            kept.append(cells)
         tables.append(
-            Table(
-                index=len(tables),
-                caption=caption_text or None,
-                headers=headers,
-                rows=[_expanded(_cells(row)) for row in rows[:MAX_TABLE_ROWS]],
-            )
+            Table(index=len(tables), caption=caption_text or None, headers=headers, rows=kept)
         )
+        if cut:
+            return tables, True
         if len(tables) >= MAX_TABLES:
             break
-    return tables
+    return tables, False
 
 
 # --- learn_html ------------------------------------------------------------------------------

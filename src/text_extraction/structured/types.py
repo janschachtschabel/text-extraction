@@ -39,13 +39,15 @@ class SelectorRule(BaseModel, extra="forbid", hide_input_in_errors=True):
     css: str | None = Field(
         default=None,
         max_length=MAX_RULE_LENGTH,
-        description="A CSS selector. Exactly one of `css` and `xpath`.",
+        description="A CSS selector; without an admin key it may use `:has()` at most once. "
+        "Exactly one of `css` and `xpath`.",
     )
     xpath: str | None = Field(
         default=None,
         max_length=MAX_RULE_LENGTH,
-        description="An XPath 1.0 expression; a string result (`.../@href`, `string(...)`) is "
-        "taken as it is. Exactly one of `css` and `xpath`.",
+        description="An XPath 1.0 expression, for admin keys only (422 for others: use CSS); a "
+        "string result (`.../@href`, `string(...)`) is taken as it is. Exactly one of `css` and "
+        "`xpath`.",
     )
     attr: str | None = Field(
         default=None,
@@ -151,12 +153,16 @@ with warnings.catch_warnings():
             description="`metadata`: the page's JSON-LD, microdata, RDFa, OpenGraph and meta tags. "
             "`selectors`: your CSS or XPath rules. `patterns`: your regular expressions on the "
             "content. `llm`: the LLM reads the content. `auto`: every field is looked up in this "
-            "order and the first strategy that finds a value wins: learned selectors, `metadata`, "
-            "`selectors`, `patterns`, `llm` for what is still missing.",
+            "order and the first strategy that finds a value wins: `selectors` (your rules, else "
+            "the selectors learned for this API key and site), `metadata`, `patterns`, `llm` for "
+            "what is still missing.",
         )
         selectors: dict[str, SelectorRule] = Field(
             default={},
-            description="Selector rules by field name; the names must be properties of `schema`.",
+            description="Selector rules by field name; the names must be properties of `schema`. "
+            "They run on pages of at most 50,000 elements (else they are skipped with the warning "
+            "`selectors_skipped_large_page`); a field takes at most 1,000 values and 100,000 "
+            "characters (else `structured_truncated`).",
         )
         patterns: dict[str, PatternRule] = Field(
             default={},

@@ -81,7 +81,12 @@ A caller that can retry later itself (the job worker) may ask for the gate's ref
 Only ``success`` and ``partial`` results are cached and fingerprinted: a bot challenge or an
 error page is nothing to serve again, nor to compare the next version of the page with. Requests
 with browser secrets (actions, cookies, headers) touch neither; screenshot requests skip the
-cache, since their artifact belongs to one job.
+cache, since their artifact belongs to one job, and so do requests with
+``structured.learn_selectors``, which need the page's cleaned HTML (ruling R6).
+
+An HTML page of a request with ``structured`` gets the DOM stage in step 8
+(``structured/dom.py``): its options and the owner's learned selectors (read before the cache
+lookup) are part of the cache key.
 
 With a ``Renderer`` (the browser worker only; docs/architecture.md, "Browser worker"), ``browser``
 requests, screenshots, requests with browser options and ``auto`` items with a draft are rendered
@@ -166,6 +171,7 @@ from text_extraction.metadata import (
     PageMetadata,
     StructuredItems,
     detect_language,
+    extract_metadata,
     metadata_with_items,
     structured_items,
 )
@@ -712,7 +718,7 @@ class Pipeline:
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
         private = not req.secrets().empty()
-        cacheable = req.cache and not private and not req.screenshot
+        cacheable = _cacheable(req, private)
         run = _Run(
             req=req,
             report=ComplianceReport(mode=mode, decision="skipped"),  # until it is checked
@@ -902,7 +908,7 @@ class Pipeline:
             mode=resolve_mode(req.compliance, principal, self._settings), decision="skipped"
         )
         private = not req.secrets().empty()
-        cacheable = req.cache and not private and not req.screenshot
+        cacheable = _cacheable(req, private)
         return _Run(
             req=req,
             report=report,
@@ -1030,7 +1036,7 @@ class Pipeline:
             mode=resolve_mode(req.compliance, principal, self._settings), decision="skipped"
         )
         private = not req.secrets().empty()
-        cacheable = req.cache and not private and not req.screenshot
+        cacheable = _cacheable(req, private)
         return _Run(
             req=req,
             report=report,
@@ -1667,15 +1673,11 @@ class Pipeline:
             envelope = envelope.model_copy(update={"data": result})
         # A draft stored without its content (over JOB_ITEM_MAX_BYTES) is not served again.
         complete = CONTENT_NOT_STORED_WARNING not in result.warnings
-        # A request that learns selectors carries the cleaned HTML for it (S7): never stored,
-        # though it may be served from the cache (S4).
-        learning = run.req.structured is not None and run.req.structured.learn_selectors
         if (
             run.cacheable
             and envelope.status != "failed"
             and result.fingerprint is not None
             and complete
-            and not learning
         ):
             await self._cache.put(
                 cache_key(run.cache_url, self._cache_options_of(run)),
@@ -2206,6 +2208,7 @@ class Pipeline:
         links: list[Link] | None = None
         html_lang: str | None = None
         structured: StructuredResult | None = None
+        dom_warnings: list[str] = []
         if kind == "html":
             conversion = convert_html(text, final_url, req.format)
             host = urlsplit(final_url).hostname or ""
@@ -2213,25 +2216,28 @@ class Pipeline:
             quality = assess(text, content)
             html_lang = _html_lang(text)
             options = req.structured
-            dom = options is not None and runs_dom_stage(options)
+            dom = options if options is not None and runs_dom_stage(options) else None
             page_metadata: PageMetadata | None = None
             items: StructuredItems | None = None
-            if req.metadata or (options is not None and dom and reads_metadata(options)):
+            if dom is not None and (req.metadata or reads_metadata(dom)):
                 page_metadata, items = metadata_with_items(text, final_url, fetched.headers)
-                if req.metadata:
-                    metadata = page_metadata
-            if options is not None and dom:
+            elif req.metadata:  # no DOM stage: the metadata alone, as before (R7)
+                page_metadata = extract_metadata(text, final_url, fetched.headers)
+            if req.metadata:
+                metadata = page_metadata
+            if dom is not None:
                 if items is None:  # selectors, tables or learning only: the tree is enough
                     items = structured_items(text, final_url, syntaxes=False)
                 structured = dom_stage(
                     text,
                     final_url,
-                    options,
+                    dom,
                     page_metadata,
                     items,
-                    learn=options.learn_selectors,
+                    learn=dom.learn_selectors,
                     learn_max_chars=self._settings.llm_max_input_tokens * 4,
                     learned=learned,
+                    warnings=dom_warnings,
                 )
             if req.links:
                 links = page_links(text, final_url)
@@ -2257,7 +2263,7 @@ class Pipeline:
         return _Processed(
             content=content,
             title=conversion.title,
-            warnings=list(conversion.warnings),
+            warnings=[*conversion.warnings, *dom_warnings],
             quality=quality,
             language=language,
             metadata=metadata,
@@ -2411,6 +2417,13 @@ def _cache_options(
     if structured is not None:
         options["structured"] = dict(structured)
     return options
+
+
+def _cacheable(req: ExtractRequest, private: bool) -> bool:
+    """Whether a request may read and write the result cache: not with secrets, a screenshot,
+    or ``learn_selectors``, which needs the page itself for its ``learn_html`` (ruling R6)."""
+    learning = req.structured is not None and req.structured.learn_selectors
+    return req.cache and not private and not req.screenshot and not learning
 
 
 def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:

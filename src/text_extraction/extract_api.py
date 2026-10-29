@@ -123,6 +123,7 @@ from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import check_selector_access
 from text_extraction.tracing import current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -303,6 +304,7 @@ async def respond(
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
+    check_selector_access(body.structured, principal)
     check_ocr_request(body.ocr, settings)
     check_transcribe_request(body.transcribe, settings, key=asr_key)
     check_pii_request(body.pii, body.format, body.screenshot, settings)

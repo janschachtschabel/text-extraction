@@ -50,6 +50,7 @@ from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import check_selector_access
 from text_extraction.tracing import current_trace_id
 from text_extraction.valkey import reply_text
 
@@ -224,6 +225,8 @@ async def create_batch(
     check_transcribe_request(body.transcribe, settings, key=key)
     # 400 while there is no PII handling, 422 for annotate with HTML (N4).
     check_pii_request(body.pii, body.format, False, settings)
+    # 422 for a non-admin key's XPath selectors (R4).
+    check_selector_access(body.structured, principal)
     options = JobOptions(
         mode=body.mode,
         format=body.format,

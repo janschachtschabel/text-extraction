@@ -25,6 +25,7 @@ from tests.fakes import (
     fetched,
     rendered,
 )
+from text_extraction import metadata as metadata_module
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
@@ -42,7 +43,11 @@ from text_extraction.pipeline import Pipeline, _cache_options, create_outbound, 
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
-from text_extraction.structured.dom import structured_cache_part
+from text_extraction.structured.dom import (
+    SELECTORS_SKIPPED_WARNING,
+    STRUCTURED_MAX_ELEMENTS,
+    structured_cache_part,
+)
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import SelectorRule, StructuredOptions
 
@@ -1555,27 +1560,63 @@ def test_cache_key_changes_with_dom_options_and_learned_rules_not_with_chunking(
     assert new_keys(structured=metadata) == 0
 
 
-def test_learn_request_not_cached_but_served() -> None:
+def test_learn_request_bypasses_the_cache() -> None:
+    """Ruling R6: a request with ``learn_selectors`` neither reads nor writes the cache, so it
+    always has the page's ``learn_html``."""
     harness = Harness({PAGE: fetched()})
     learning = {"schema": STRUCTURED_SCHEMA, "learn_selectors": True}
 
-    first = data_of(harness.run_once(structured=learning))
-    assert first.cache == "miss"
-    assert first.structured is not None
-    assert first.structured.learn_html is not None
-    assert "<h1>Photosynthesis explained</h1>" in first.structured.learn_html
-    assert harness.keys("res:*") == []
-
-    # The same request without learning is stored; the learning request is served from it.
     stored = data_of(harness.run_once(structured={"schema": STRUCTURED_SCHEMA}))
     assert stored.cache == "miss"
     assert stored.structured is not None
     assert stored.structured.learn_html is None
-    assert len(harness.keys("res:*")) == 1
-    served = data_of(harness.run_once(structured=learning))
-    assert served.cache == "hit"
-    assert served.structured is not None
-    assert served.structured.values == stored.structured.values
+    keys = harness.keys("res:*")
+    assert len(keys) == 1
+
+    for _ in range(2):
+        learned = data_of(harness.run_once(structured=learning))
+        assert learned.cache == "bypass"
+        assert learned.structured is not None
+        assert learned.structured.learn_html is not None
+        assert "<h1>Photosynthesis explained</h1>" in learned.structured.learn_html
+        assert learned.structured.values == stored.structured.values
+    assert harness.keys("res:*") == keys
+    assert len(harness.fetcher.page_calls()) == 3
+
+
+def test_plain_request_builds_no_structured_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ruling R7: without a DOM stage the metadata is read as before: no ``StructuredItems``,
+    ``content_nodes`` once."""
+    calls = {"items": 0, "content_nodes": 0}
+    real_items = metadata_module._items
+    real_nodes = metadata_module._Structured.content_nodes
+
+    def counted_items(*args: Any) -> Any:
+        calls["items"] += 1
+        return real_items(*args)
+
+    def counted_nodes(self: Any) -> Any:
+        calls["content_nodes"] += 1
+        return real_nodes(self)
+
+    monkeypatch.setattr(metadata_module, "_items", counted_items)
+    monkeypatch.setattr(metadata_module._Structured, "content_nodes", counted_nodes)
+    harness = Harness({PAGE: fetched()})
+
+    plain = data_of(harness.run_once(cache=False))
+    assert plain.metadata is not None
+    assert calls == {"items": 0, "content_nodes": 1}
+
+    # Chunking and post-stage strategies have no DOM stage either.
+    data_of(
+        harness.run_once(cache=False, structured={"schema": STRUCTURED_SCHEMA, "strategy": "llm"})
+    )
+    assert calls == {"items": 0, "content_nodes": 2}
+
+    # The DOM stage shares the one parse with the metadata.
+    dom = data_of(harness.run_once(cache=False, structured={"schema": STRUCTURED_SCHEMA}))
+    assert dom.structured is not None
+    assert calls["items"] == 1
 
 
 def test_caller_selectors_win_over_learned() -> None:
@@ -1620,13 +1661,14 @@ def test_caller_selectors_win_over_learned() -> None:
 
 
 def test_heavy_xpath_within_deadline() -> None:
-    """Review Focus 2: a 5 MB page with ``//*//*//*`` answers within EXTRACT_TIMEOUT_SECONDS
-    (here as ``timeout``), never a hang. The deadline cannot stop the conversion thread (see
-    ``conversion_pool``): it finishes afterwards and gives its slot back then."""
-    row = "<p>" + "word " * 80 + "</p>\n"
-    page = "<html><body><article>" + row * (5_000_000 // len(row)) + "</article></body></html>"
-    assert len(page) >= 4_900_000
-    timeout = 2.0
+    """Review Focus 2, ruling R4: ``//*//*//*`` on a page of 60,000 elements takes about 14 s
+    in lxml, which the deadline cannot stop (it runs on a conversion thread). The page is over
+    STRUCTURED_MAX_ELEMENTS, so the rule is skipped: the answer is a success with the warning,
+    long before the 10 s deadline that the XPath alone would miss."""
+    count = 60_000
+    assert count > STRUCTURED_MAX_ELEMENTS
+    page = ARTICLE.replace("</article>", f"</article><div>{'<i></i>' * count}</div>")
+    timeout = 10.0
     pool = ConversionPool(1)
     valkey = FakeAsyncRedis()
     settings = make_settings(extract_timeout_seconds=timeout)
@@ -1642,30 +1684,29 @@ def test_heavy_xpath_within_deadline() -> None:
         pool,
     )
     options = {
-        "schema": {"type": "object", "properties": {"all": {"type": "string"}}},
-        "strategy": "selectors",
+        "schema": {
+            "type": "object",
+            "properties": {"all": {"type": "string"}, "description": {"type": "string"}},
+        },
         "selectors": {"all": {"xpath": "//*//*//*", "all": True}},
     }
 
-    async def scenario() -> tuple[Envelope[ExtractResult], float, float]:
-        started = time.perf_counter()
-        envelope = await pipeline.run(
-            ExtractRequest.model_validate({"url": PAGE, "structured": options}), USER
-        )
-        answered = time.perf_counter() - started
-        await pool.run(time.perf_counter)  # once the conversion thread is done
-        return envelope, answered, time.perf_counter() - started
+    async def scenario() -> Envelope[ExtractResult]:
+        request = ExtractRequest.model_validate({"url": PAGE, "structured": options})
+        envelope = await pipeline.run(request, USER)
+        await pool.run(time.perf_counter)  # the conversion thread is done, nothing runs on
+        return envelope
 
     try:
-        envelope, answered, drained = asyncio.run(scenario())
+        envelope = asyncio.run(scenario())
     finally:
         pool.shutdown()
 
-    assert answered < timeout + 1.5
-    if envelope.status == "failed":
-        assert envelope.error is not None
-        assert envelope.error.code == ErrorCode.TIMEOUT
-        assert envelope.error.retryable
-    else:
-        assert data_of(envelope).structured is not None
-    assert drained >= answered
+    assert envelope.status == "success"  # not `timeout`: the stage did not wait for the XPath
+    data = data_of(envelope)
+    assert SELECTORS_SKIPPED_WARNING in data.warnings
+    assert data.structured is not None
+    assert data.structured.values == {
+        "all": None,
+        "description": "How plants turn light into food.",
+    }

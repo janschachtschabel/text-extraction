@@ -83,6 +83,7 @@ from text_extraction.pipeline_media import asr_available
 from text_extraction.pool_dispatch import Handover
 from text_extraction.ratelimit import rate_limited
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import check_selector_access
 
 PATH: Final = "/v1/extract/file"
 MAX_FILES: Final = 1
@@ -218,6 +219,7 @@ async def extract_file(
     settings: Settings = state.settings
     check_ocr_request(form.ocr, settings)
     check_pii_request(form.pii, form.format, False, settings)
+    check_selector_access(form.structured, principal)
     key = asr_key_of(asr_key)
     try:
         body = await file.read(upload_file_limit(settings) + 1)

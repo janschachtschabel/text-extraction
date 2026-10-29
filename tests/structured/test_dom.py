@@ -3,15 +3,25 @@
 
 import json
 import re
+import time
 from typing import Any
 
 import pytest
 
 from text_extraction.metadata import extract_metadata, structured_items
 from text_extraction.structured.dom import (
+    MAX_COLSPAN,
+    MAX_FIELD_CHARS,
+    MAX_FIELD_VALUES,
+    MAX_TABLE_COLUMNS,
     MAX_TABLE_ROWS,
     MAX_TABLES,
+    MAX_TABLES_CHARS,
     MAX_VALUE_CHARS,
+    SELECTORS_SKIPPED_WARNING,
+    STRUCTURED_MAX_ELEMENTS,
+    STRUCTURED_TRUNCATED_WARNING,
+    TABLES_TRUNCATED_WARNING,
     clean_html_for_learning,
     dom_stage,
     runs_dom_stage,
@@ -34,7 +44,7 @@ def stage(
     return dom_stage(
         html,
         url,
-        StructuredOptions(**options),
+        StructuredOptions.model_validate(options),
         extract_metadata(html, url, {}),
         structured_items(html, url),
         learn=learn,
@@ -298,25 +308,126 @@ def test_learned_rules_fill_fields_without_a_caller_rule() -> None:
     assert result.sources == {"title": "selectors", "more": "learned"}
 
 
-def test_auto_order_learned_metadata_selectors() -> None:
-    """``auto`` on the DOM: learned selectors, then metadata, then the caller's selectors."""
+def test_auto_order_selectors_then_metadata() -> None:
+    """Ruling R3: ``auto`` on the DOM takes the selectors first (the caller's rule, else a
+    learned one), then metadata."""
     page = META_PAGE.replace("<p>Text.</p>", '<h2 class="h">Heading</h2><b>Bold</b>')
     result = stage(
         page,
         {
-            "schema": schema(headline=STRING, title=STRING, bold=STRING, other=STRING),
+            "schema": schema(
+                headline=STRING, title=STRING, bold=STRING, description=STRING, other=STRING
+            ),
             "selectors": {"title": {"css": "h2.h"}, "bold": {"css": "b"}},
         },
-        learned={"headline": SelectorRule(css="h2.h")},
+        learned={
+            "headline": SelectorRule(css="h2.h"),
+            "title": SelectorRule(css="b"),  # the caller's rule wins
+            "description": SelectorRule(xpath="//b"),  # learned rules are CSS only
+        },
     )
 
     assert result.values == {
         "headline": "Heading",  # learned, before the JSON-LD headline
-        "title": "OG title",  # metadata, before the caller's rule
-        "bold": "Bold",  # the caller's rule, where metadata has nothing
+        "title": "Heading",  # the caller's rule, before og:title
+        "bold": "Bold",
+        "description": "JSON-LD description",  # metadata
         "other": None,
     }
-    assert result.sources == {"headline": "learned", "title": "metadata", "bold": "selectors"}
+    assert result.sources == {
+        "headline": "learned",
+        "title": "selectors",
+        "bold": "selectors",
+        "description": "metadata",
+    }
+
+
+def _many_elements(count: int) -> str:
+    return META_PAGE.replace("<p>Text.</p>", f"<h1>Title</h1><div>{'<i></i>' * count}</div>")
+
+
+def test_selectors_skipped_on_a_large_page() -> None:
+    """Ruling R4: selector rules (caller's and learned) run on pages of at most
+    STRUCTURED_MAX_ELEMENTS elements; a bigger page skips them quickly, metadata still runs."""
+    options = {
+        "schema": schema(slow=STRING, heading=STRING, learned=STRING, description=STRING),
+        "selectors": {"slow": {"xpath": "//*//*//*", "all": True}, "heading": {"css": "h1"}},
+    }
+    small = stage(_many_elements(100), options, learned={"learned": SelectorRule(css="h1")})
+    assert small.values["heading"] == small.values["learned"] == "Title"
+
+    page = _many_elements(STRUCTURED_MAX_ELEMENTS + 10)
+    warnings: list[str] = []
+    started = time.perf_counter()
+    result = dom_stage(
+        page,
+        URL,
+        StructuredOptions.model_validate(options),
+        None,
+        structured_items(page, URL),
+        learn=False,
+        learn_max_chars=1000,
+        learned={"learned": SelectorRule(css="h1")},
+        warnings=warnings,
+    )
+    elapsed = time.perf_counter() - started
+
+    assert result.values == {
+        "slow": None,
+        "heading": None,
+        "learned": None,
+        "description": "JSON-LD description",
+    }
+    assert warnings == [SELECTORS_SKIPPED_WARNING]
+    assert elapsed < 2  # about 0.02 s; the XPath alone takes about 10 s on this page
+
+
+def test_selector_field_caps_values_and_characters() -> None:
+    many = "<html><body><ul>" + "<li>item</li>" * (MAX_FIELD_VALUES + 500) + "</ul>"
+    long = "".join(f"<p class='l'>{'x' * MAX_VALUE_CHARS}</p>" for _ in range(15))
+    page = many + long + "<p class='one'>one</p></body></html>"
+    warnings: list[str] = []
+    result = dom_stage(
+        page,
+        URL,
+        StructuredOptions(
+            schema=schema(items=STRINGS, texts=STRINGS, xitems=STRINGS, one=STRING),
+            strategy="selectors",
+            selectors={
+                "items": SelectorRule(css="li"),
+                "texts": SelectorRule(css="p.l"),
+                "xitems": SelectorRule(xpath="//li"),
+                "one": SelectorRule(css="p.one"),
+            },
+        ),
+        None,
+        structured_items(page, URL),
+        learn=False,
+        learn_max_chars=1000,
+        warnings=warnings,
+    )
+
+    assert len(result.values["items"]) == MAX_FIELD_VALUES
+    assert len(result.values["xitems"]) == MAX_FIELD_VALUES
+    texts = result.values["texts"]
+    assert sum(map(len, texts)) == MAX_FIELD_CHARS == 100_000
+    assert len(texts) == 10
+    assert result.values["one"] == "one"
+    assert warnings == [STRUCTURED_TRUNCATED_WARNING]
+
+    # A field within its limits gives no warning.
+    quiet: list[str] = []
+    dom_stage(
+        page,
+        URL,
+        StructuredOptions(schema=schema(one=STRING), selectors={"one": SelectorRule(css="li")}),
+        None,
+        structured_items(page, URL),
+        learn=False,
+        learn_max_chars=1000,
+        warnings=quiet,
+    )
+    assert quiet == []
 
 
 # --- tables ----------------------------------------------------------------------------------
@@ -351,6 +462,56 @@ def test_tables_headers_colspan_and_limits() -> None:
 
     # Without `tables`, no tables.
     assert stage(page, {"schema": schema(a=STRING), "strategy": "metadata"}).tables is None
+
+
+def _tables_of(page: str) -> tuple[StructuredResult, list[str]]:
+    warnings: list[str] = []
+    result = dom_stage(
+        page,
+        URL,
+        StructuredOptions(tables=True),
+        None,
+        structured_items(page, URL, syntaxes=False),
+        learn=False,
+        learn_max_chars=1000,
+        warnings=warnings,
+    )
+    return result, warnings
+
+
+def test_tables_colspan_clamped_and_row_width_capped() -> None:
+    page = (
+        "<table><tr><td colspan='1000'>a</td><td colspan='0'>b</td><td colspan='x'>c</td></tr>"
+        f"<tr>{'<td>w</td>' * 150}</tr></table>"
+    )
+    result, warnings = _tables_of(page)
+
+    assert result.tables is not None
+    first, wide = result.tables[0].rows
+    assert first == ["a"] * MAX_COLSPAN + ["b", "c"]
+    assert len(wide) == MAX_TABLE_COLUMNS == 100
+    assert warnings == []
+
+
+def test_tables_colspan_page_from_the_review_stays_small() -> None:
+    """Review I1: an 83 KB page of 1,000 rows of ``<td colspan="1000">`` and 50 characters
+    dumped 53 MB of JSON before the clamp."""
+    table = "<table>" + f"<tr><td colspan='1000'>{'x' * 50}</td></tr>" * 1000 + "</table>"
+    page = f"<html><body>{table}</body></html>"
+    assert len(page) < 90_000
+
+    result, _ = _tables_of(page)
+    assert result.tables is not None
+    assert len(result.model_dump_json()) < 1_200_000
+
+    # Fifty of them meet the budget of all tables together.
+    many, warnings = _tables_of(f"<html><body>{table * 50}</body></html>")
+    assert many.tables is not None
+    cells = sum(len(cell) for t in many.tables for row in t.rows for cell in row)
+    assert cells <= MAX_TABLES_CHARS
+    assert len(many.tables) <= 2
+    assert warnings == [TABLES_TRUNCATED_WARNING]
+    assert len(many.model_dump_json()) < 1_200_000
 
 
 # --- learn_html ------------------------------------------------------------------------------
