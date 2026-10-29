@@ -68,7 +68,13 @@ PERSON_PINS: Final[dict[str, dict[str, float]]] = {
 # fails the test, and so does a listed word that is no longer touched (the list must not go stale).
 KNOWN_FALSE_POSITIVES: Final[dict[str, frozenset[tuple[str, str]]]] = {
     "lg": frozenset(
-        {("de_04_forum_post.md", "Pythagoras"), ("en_02_worksheet_credits.md", "Calvin")}
+        {
+            ("de_04_forum_post.md", "Pythagoras"),
+            ("en_02_worksheet_credits.md", "Calvin"),
+            # A sentence in another language of the Latin script (Turkish): the script filter of
+            # issue #14 cannot tell it apart, and the German model takes its first words for a name.
+            ("de_08_multilingual.md", "Okulumuzdaki"),
+        }
     ),
     "md": frozenset(
         {
@@ -227,7 +233,7 @@ def test_annotate_leaves_the_text_and_its_offsets_point_at_the_entities(
     assert report["mode"] == "annotate"
     assert report["language"] == language_of(name)
     assert report["hash_scope"] is None
-    assert "pii_language_unsupported" not in [w["code"] for w in data["warnings"]]
+    assert "pii_language_unsupported" not in data["warnings"]
     for item in items:
         assert content[item["start"] : item["end"]] == item["text"]
         assert 0.4 <= item["score"] <= 1.0

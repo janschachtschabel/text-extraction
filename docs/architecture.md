@@ -90,7 +90,8 @@ result of a request with `pii` makes a last hop through that worker (see "PII").
    key.
 5. **Convert:** the body's bytes decide what it is (`documents/sniff.py`, F1). HTML →
    Trafilatura (keep link-only lists of linked files, domain boilerplate rules, MathML →
-   LaTeX); `text/plain` → plain text. PDFs with a text layer, DOCX, PPTX, XLSX, XLS, EPUB and
+   LaTeX); `text/plain` → plain text; `text/markdown` and `text/x-markdown` → Markdown, rendered
+   to each output format as a document's Markdown is (issue #15). PDFs with a text layer, DOCX, PPTX, XLSX, XLS, EPUB and
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
    Tesseract OCR, in the Docling worker. A document never escalates to the browser. See
@@ -648,8 +649,8 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   | `png`, `jpeg`, `tiff`, `webp`, `bmp` | image signatures | Docling (OCR) |
   | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |
 
-  A body declared HTML or XHTML keeps its package-2 path. A body declared `text/plain` is a
-  document only when a signature starts it (offset 0 after an optional byte order mark and at
+  A body declared HTML or XHTML keeps its package-2 path. A body declared `text/plain` (or
+  `text/markdown`, `text/x-markdown`, which take the same path as Markdown) is a document only when a signature starts it (offset 0 after an optional byte order mark and at
   most 1 KiB of whitespace); otherwise it stays plain text, also when its URL ends in `.csv` (the extension
   tie-break does not apply to a declared `text/plain`). Untyped bodies, `application/octet-stream`
   and other declared types keep the 1024-byte window for `%PDF-`. Where no document signature
@@ -1277,7 +1278,7 @@ the media set without gating it (D1).
 A request with `pii` finds personal data in the result (names, e-mail addresses, phone numbers,
 IBANs, card numbers, IP addresses; places, organisations and URLs when asked for) in German and
 English text and handles it: `mask`, `redact`, `hash` or `annotate`. Presidio with spaCy models
-does the finding, in the nlp worker. The corpus of `tests/pii/corpus` (12 texts, 7 German and 5
+does the finding, in the nlp worker. The corpus of `tests/pii/corpus` (14 texts, 8 German and 6
 English, written for the purpose, with a gold file) is the evidence: `tests/pii/test_corpus.py`
 is the package's done-when test, and `docs/superpowers/plans/2026-10-26-package-7-calibration.md`
 has the calibration behind the threshold and the pinned recall.
@@ -1335,7 +1336,9 @@ per type, only types found), `items` (`annotate` only, else null), `hash_scope` 
 `result`: `hash` only, and only when an entity was hashed; else null, also for a `hash` result
 without any entity). `data.timings.pii_ms` is the time of the step. `status`, `word_count`, `quality`,
 `language` and `fingerprint` stay those of the extraction. A result without `pii` gains
-`pii: null` and `timings.pii_ms: 0` and is otherwise unchanged by a byte.
+`pii: null` and `timings.pii_ms: 0` and is otherwise unchanged by a byte. A result with `pii` that
+had nothing to process (a failure without content and metadata) or whose text was withheld
+(`pii_failed`) has `pii: null` too: nothing was processed.
 
 **N4, request checks** (`extract_api.check_pii_request`, also for files and batches). `pii` while
 the service has no PII handling (`PII_ENABLED` and `JOBS_ENABLED`) is 400 `invalid_request` ("PII
@@ -1357,7 +1360,14 @@ a whole when `PERSON` is asked for: the whole string is one `PERSON` span, witho
 for `de` and `en`:
 
 - NER: `SpacyRecognizer` with the mapping `PER`, `PERSON` to `PERSON`, `LOC`, `GPE` to
-  `LOCATION`, `ORG` to `ORGANIZATION`; every other model label is ignored.
+  `LOCATION`, `ORG` to `ORGANIZATION`; every other model label is ignored. A span with letters
+  but none of the Latin script is dropped (`LatinScriptSpacyRecognizer`, issue #14): the German
+  and English models only guess on Arabic, Cyrillic, Greek or CJK words. This holds for
+  `LOCATION` and `ORGANIZATION` too (asked for only), for the same reason. The cost is recall: a
+  name in such a script without a salutation is not found (`Петрова` alone stays), nor a place
+  (`Київ`); a name after a salutation still is, by the honorific rule (`Frau Петрова`). Another language in
+  Latin letters is not caught: `lg` takes the start of a Turkish sentence for a `PERSON` (a known
+  false positive of the corpus).
 - Patterns: `EmailRecognizer`, `PhoneRecognizer` (regions `DE`, `AT`, `CH`, `GB`, `US`; German
   context words such as `telefon`, `mobil`, `fax`, `rufnummer`), `IbanRecognizer`,
   `CreditCardRecognizer`, `IpRecognizer`, `UrlRecognizer`. The patterns do not depend on the
@@ -1427,7 +1437,8 @@ lease `2 * PII_TIMEOUT_SECONDS + 10`. The draft is the unprocessed envelope in V
   an OCR or browser fallback), one that is not processed yet and has text that N5 processes goes to
   `nlp` as a one-item job of kind `extract` or `file` (or the request's P1 job). D4: without
   `wait_seconds` the request waits `PII_SYNC_WAIT_SECONDS`, then answers 202 with the job. An
-  envelope with nothing to process answers as it is, with `pii` reporting zero entities. A sync
+  envelope with nothing to process (a failure without content and metadata) answers as it is,
+  with `pii` null: nothing was processed (issue #15). A sync
   request that waits for a browser or Docling job gets `PII_SYNC_WAIT_SECONDS` more, because that
   worker's result moves on to `nlp` in the same job.
 - *Moves* (`PiiMove`, called by `Worker._finish` of every pool except `nlp`): a batch item, an ASR

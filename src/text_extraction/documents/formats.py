@@ -24,7 +24,7 @@ from text_extraction.convert import OutputFormat
 _CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 _TRAILING_BLANKS = re.compile(r"[ \t]+$", re.MULTILINE)
 _BLANK_RUNS = re.compile(r"\n{3,}")
-_HEADING = re.compile(r"^#{1,2} +(.+?) *#* *$", re.MULTILINE)
+_HEADING = re.compile(r"^#{1,2} +(.+?) *#* *\r?$", re.MULTILINE)  # CRLF: no "\r" in it
 
 
 @cache

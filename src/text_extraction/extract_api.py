@@ -624,7 +624,6 @@ def pii_handoff(
     return PiiHandoff(
         dispatcher,
         state.memory_guard,
-        state.settings,
         kind=kind,
         options=options,
         principal=principal,

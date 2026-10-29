@@ -496,6 +496,43 @@ def test_capitalised_nouns_not_persons(children: Children) -> None:
     assert children.spans(text, "de") == []
 
 
+# A notice in several scripts, as on example.org (issue #14), with one name in Latin letters.
+OTHER_SCRIPTS = (
+    "هذا النطاق مُخصص للاستخدام في أمثلة التوثيق دون الحاجة إلى إذن. "
+    "Этот домен предназначен для использования в примерах документации без разрешения. "
+    "Αυτός ο τομέας προορίζεται για χρήση σε παραδείγματα τεκμηρίωσης. "  # noqa: RUF001 - other scripts on purpose
+    "此域名用于文档示例，无需许可。"  # noqa: RUF001 - other scripts on purpose
+)
+MULTILINGUAL = {
+    "en": (
+        "This domain is for use in documentation examples without needing permission. "
+        f"{OTHER_SCRIPTS} For questions, write to Elizabeth Rothwell or to Mr Петров."
+    ),
+    "de": (
+        "Diese Domain ist für Beispiele in Dokumentationen gedacht, ohne Erlaubnis. "
+        f"{OTHER_SCRIPTS} Bei Fragen schreiben Sie an Katharina Brandt oder an Frau Петрова."
+    ),
+}
+
+
+@nlp_test
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_words_of_other_scripts_are_no_entities(children: Children, language: str) -> None:
+    """Issue #14: the German and English models only guess on Arabic, Cyrillic, Greek or CJK
+    words; their spans are dropped. A name of any script after a salutation is still found."""
+    text = MULTILINGUAL[language]
+    entities = ["PERSON", "LOCATION", "ORGANIZATION"]
+
+    found = children.spans(text, language, entities)
+
+    assert not [hit for hit in found if hit[0] in OTHER_SCRIPTS], found
+    names = persons(found)
+    assert any(name.endswith(("Rothwell", "Brandt")) for name in names), found
+    assert any(name.endswith(("Петров", "Петрова")) for name in names), found
+    # The cost (recall): without a salutation a name in another script is not found.
+    assert persons(children.spans("Анна Петрова пишет письмо.", language, entities)) == []
+
+
 @nlp_test
 def test_segment_border_entity_found(children: Children) -> None:
     """An address that straddles character 20,000 stays whole: the text is cut at a space before

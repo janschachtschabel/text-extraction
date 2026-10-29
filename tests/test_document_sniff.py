@@ -126,6 +126,20 @@ def test_html_bytes_keep_the_path_of_other_declared_types(body: bytes) -> None:
     assert sniff(body, "image/gif", None) is None
 
 
+@pytest.mark.parametrize(
+    "declared", ["text/markdown", "text/x-markdown", "Text/Markdown; charset=utf-8"]
+)
+def test_markdown_is_text_like_plain_text(declared: str) -> None:
+    """Issue #15: a declared Markdown type takes the plain-text path, with its rules: a document
+    signature counts at the start only, and the name breaks the CSV tie."""
+    assert sniff(b"# Notes\n\nSome *text*.", declared, "notes.md") == "text"
+    assert sniff(b"", declared, None) == "text"
+    assert sniff(b"Quoting %PDF- in prose.", declared, None) == "text"
+    assert sniff(PDF, declared, None) == "pdf"
+    assert sniff(b"<html><body>x</body></html>", declared, None) == "text"
+    assert sniff(b"a,b\n1,2\n", declared, "data.csv") == "csv"
+
+
 def test_html_bytes_need_the_tag_at_the_start() -> None:
     assert sniff(b"Notes: <html> is a tag", None, None) is None
     assert sniff(b"<htmlish>", None, None) is None

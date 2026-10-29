@@ -714,6 +714,63 @@
    "Bremer"
   ]
  },
+ "de_08_multilingual.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 473,
+    "end": 486,
+    "text": "Sabine Lorenz"
+   },
+   {
+    "type": "PERSON",
+    "start": 625,
+    "end": 640,
+    "text": "Olena Kovalenko"
+   },
+   {
+    "type": "PERSON",
+    "start": 650,
+    "end": 657,
+    "text": "Петрова"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 795,
+    "end": 817,
+    "text": "willkommen@example.org"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 841,
+    "end": 854,
+    "text": "040 66969-412"
+   }
+  ],
+  "keep": [
+   "النطاق",
+   "مُخصص",
+   "لأمسية",
+   "الترحيب",
+   "Этот",
+   "вечер",
+   "предназначен",
+   "использования",
+   "знакомства",
+   "школой",
+   "Ласкаво",
+   "просимо",
+   "вечір",
+   "знайомства",
+   "родин",
+   "Καλώς",
+   "ήρθατε",
+   "βραδιά",
+   "γνωριμίας",
+   "οικογένειες",
+   "Okulumuzdaki"
+  ]
+ },
  "en_01_school_contact.md": {
   "spans": [
    {
@@ -1224,6 +1281,63 @@
    "Hillhead",
    "Institute of Education",
    "British Rail"
+  ]
+ },
+ "en_06_multilingual.md": {
+  "spans": [
+   {
+    "type": "PERSON",
+    "start": 389,
+    "end": 404,
+    "text": "Daniel Ashworth"
+   },
+   {
+    "type": "PERSON",
+    "start": 566,
+    "end": 581,
+    "text": "Olena Kovalenko"
+   },
+   {
+    "type": "PERSON",
+    "start": 589,
+    "end": 595,
+    "text": "Петров"
+   },
+   {
+    "type": "EMAIL_ADDRESS",
+    "start": 746,
+    "end": 765,
+    "text": "welcome@example.org"
+   },
+   {
+    "type": "PHONE_NUMBER",
+    "start": 769,
+    "end": 782,
+    "text": "0113 496 0412"
+   }
+  ],
+  "keep": [
+   "النطاق",
+   "مُخصص",
+   "لأمسية",
+   "الترحيب",
+   "Этот",
+   "вечер",
+   "предназначен",
+   "использования",
+   "знакомства",
+   "школой",
+   "Ласкаво",
+   "просимо",
+   "вечір",
+   "знайомства",
+   "родин",
+   "Καλώς",
+   "ήρθατε",
+   "βραδιά",
+   "γνωριμίας",
+   "οικογένειες",
+   "欢迎参加新家庭的欢迎晚会"
   ]
  }
 }

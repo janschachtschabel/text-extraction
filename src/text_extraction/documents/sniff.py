@@ -13,7 +13,7 @@ from typing import Final, Literal
 
 from text_extraction.documents.types import DocumentKind
 
-__all__ = ["DocumentTooLarge", "check_container", "media_type", "sniff"]
+__all__ = ["TEXT_TYPES", "DocumentTooLarge", "check_container", "media_type", "sniff"]
 
 MAX_ZIP_ENTRIES: Final = 10_000
 MAX_RATIO: Final = 100
@@ -26,6 +26,8 @@ _HTML_TYPES: Final = frozenset({"text/html", "application/xhtml+xml"})
 _HTML_START: Final = re.compile(rb"<(?:!doctype\s+html|html)(?:[\s>/]|$)", re.IGNORECASE)
 _HTML_PREFIX_LIMIT: Final = 1024  # whitespace before the tag is skipped up to this
 _TEXT_PREFIX_LIMIT: Final = 1024  # whitespace before a text/plain body's signature, likewise
+# Plain text and Markdown (issue #15): read as text, the Markdown by the pipeline as Markdown.
+TEXT_TYPES: Final = frozenset({"text/plain", "text/markdown", "text/x-markdown"})
 _CSV_SAMPLE: Final = 8192
 _CONTENT_TYPES_LIMIT: Final = 256 * 1024
 _MIMETYPE_LIMIT: Final = 128
@@ -99,15 +101,15 @@ def sniff(
     bytes decide first; then an HTML page declared as a document type, as
     ``application/octet-stream`` or not at all ("html": an upload named report.pdf that is
     HTML); then CSV (declared, or a ``.csv`` name, with decodable text); then a declared
-    ``text/plain`` is "text". A ``text/plain`` body is a document only when its signature
-    stands at the start (after a byte order mark and whitespace), so prose that quotes
-    ``%PDF-`` stays text. Any parser error means None.
+    ``text/plain``, ``text/markdown`` or ``text/x-markdown`` is "text". Such a body is a
+    document only when its signature stands at the start (after a byte order mark and
+    whitespace), so prose that quotes ``%PDF-`` stays text. Any parser error means None.
     """
     media = (declared or "").split(";", 1)[0].strip().lower()
     if media in _HTML_TYPES:
         return "html"
     try:
-        by_bytes = _sniff_bytes(body, at_start=media == "text/plain")
+        by_bytes = _sniff_bytes(body, at_start=media in TEXT_TYPES)
     except Exception:  # a parser boundary on hostile input: no kind is always safe
         by_bytes = None
     if by_bytes is not None:
@@ -116,7 +118,7 @@ def sniff(
         return "html"
     if (media == "text/csv" or (name or "").lower().endswith(".csv")) and _looks_like_text(body):
         return "csv"
-    if media == "text/plain":
+    if media in TEXT_TYPES:
         return "text"
     return None
 

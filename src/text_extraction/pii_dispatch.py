@@ -9,9 +9,9 @@ sync requests of the API pods, on the generic ``pool_dispatch.PoolDispatcher`` a
 and every job a pool worker finishes). The last section is the contract of the nlp worker.
 
 **Which envelopes go.** One that is not processed yet (``data.pii`` is None) and has something
-N5 processes (``pii.fields.needs_pii``). An envelope without data (a failure of ours) goes as it
-is; one with data but nothing to process (a failure without content and metadata) answers as it
-is with a report of zero entities (``without_findings``), without the hop.
+N5 processes (``pii.fields.needs_pii``). Any other envelope answers as it is, without the hop:
+one without data (a failure of ours), and one with nothing to process (a failure without content
+and metadata), whose ``pii`` stays null because nothing was processed (issue #15).
 
 **Sync requests (``PiiHandoff``).** The ``pii_handoff`` of ``extract_api._flow`` and
 ``file_api._flow``, called once the flow has its envelope (fast, from a browser or Docling job,
@@ -86,8 +86,8 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobRecord, JobStore
-from text_extraction.pii.fields import needs_pii, withheld, withheld_by_pii
-from text_extraction.pii.types import PiiLanguage, PiiLanguageOption, PiiOptions, PiiReport
+from text_extraction.pii.fields import needs_pii, withheld
+from text_extraction.pii.types import PiiLanguage, PiiLanguageOption
 from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatcher
 from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.result_cache import MemoryPressure
@@ -135,32 +135,6 @@ def choose_language(
     if language == "en":
         return "en", False
     return fallback, True
-
-
-def without_findings(
-    envelope: Envelope[ExtractResult], options: PiiOptions | None, settings: Settings
-) -> Envelope[ExtractResult]:
-    """An envelope with data that asked for PII, is not processed and has nothing N5 processes
-    (a failure without content and metadata): as it is, with a report of zero entities (and
-    ``hash_scope`` null: nothing was hashed, and no key is needed on this pod). Any
-    other envelope as it is, also one whose text the hop withheld (``withheld_by_pii``): it
-    has nothing left to process, but it was not processed either."""
-    data = envelope.data
-    if options is None or data is None or data.pii is not None or needs_pii(envelope, options):
-        return envelope
-    if withheld_by_pii(envelope):
-        return envelope
-    language, _fallback = choose_language(
-        options.language, data.language, settings.pii_fallback_language
-    )
-    report = PiiReport(
-        mode=options.mode,
-        language=language,
-        entities={},
-        items=[] if options.mode == "annotate" else None,
-        hash_scope=None,  # nothing was hashed: no key signed anything
-    )
-    return envelope.model_copy(update={"data": data.model_copy(update={"pii": report})})
 
 
 class PiiDispatcher(PoolDispatcher):
@@ -232,7 +206,6 @@ class PiiHandoff:
         self,
         dispatcher: PiiDispatcher,
         guard: MemoryPressure,
-        settings: Settings,
         *,
         kind: Literal["extract", "file"],
         options: JobOptions,
@@ -243,7 +216,6 @@ class PiiHandoff:
     ) -> None:
         self._dispatcher = dispatcher
         self._guard = guard
-        self._settings = settings
         self._kind = kind
         self._options = options
         self._principal = principal
@@ -255,10 +227,8 @@ class PiiHandoff:
         self, envelope: Envelope[ExtractResult], handover: Handover
     ) -> Envelope[ExtractResult] | None:
         pii = self._options.pii
-        if pii is None:
+        if pii is None or not needs_pii(envelope, pii):
             return envelope
-        if not needs_pii(envelope, pii):
-            return without_findings(envelope, pii, self._settings)
         dispatcher = self._dispatcher
         if self._guard.high:
             dispatcher.count("memory_guard")

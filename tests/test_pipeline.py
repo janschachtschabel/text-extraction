@@ -272,6 +272,20 @@ def test_plain_text_is_converted() -> None:
     assert data.metadata is None
 
 
+def test_markdown_is_converted_as_markdown() -> None:
+    """Issue #15: a page served as ``text/markdown`` is read as Markdown."""
+    markdown = f"# Notes\n\n{(PARAGRAPH * 3).strip()}"
+    harness = Harness({PAGE: fetched(body=markdown, content_type="text/markdown")})
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "success"
+    data = data_of(envelope)
+    assert data.content_type == "text/markdown"
+    assert data.title == "Notes"
+    assert data.content == markdown.strip()
+
+
 def test_too_short_is_partial_with_content() -> None:
     harness = Harness({PAGE: fetched(body=SHORT_PAGE)})
 

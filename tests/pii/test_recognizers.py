@@ -251,3 +251,24 @@ def test_other_languages_have_no_honorifics() -> None:
 
     with pytest.raises(ValueError, match="de and en"):
         HonorificRecognizer("fr")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("Müller", True),
+        ("Zoë", True),
+        ("Ørsted", True),
+        ("Herr Иванов", True),  # one Latin letter keeps the span
+        ("2024", True),  # no letter at all: not ours to judge
+        ("النطاق مُخصص", False),  # Arabic letters and a mark
+        ("использования в", False),
+        ("Σωκράτης", False),
+        ("文档示例", False),
+        ("«Петров»", False),
+    ],
+)
+def test_a_span_without_latin_letters_is_dropped(text: str, kept: bool) -> None:
+    from text_extraction.pii.recognizers import has_latin_letter_or_none
+
+    assert has_latin_letter_or_none(text) is kept
