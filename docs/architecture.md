@@ -1516,6 +1516,9 @@ dropped at once. R15: nlp pods get a termination grace period of 60 s (30 s grac
   in `Calvin cycle` as a person. With `PERSON` asked for, a teaching text with historic names
   loses a few words to `[PERSON]` (the corpus test lists the known cases per model size). The
   NER also labels the occasional user name, URL or Markdown marker as `PERSON`.
+- **Other scripts on a German or English page.** The `de`/`en` NER guesses on words in a script
+  it was not trained on: on a multilingual page, Arabic or Cyrillic phrases may come back as
+  `[PERSON]` (issue #14).
 - **Patterns are strict.** A phone number must be valid for `libphonenumber` (fictional ranges
   such as the UK `07700 900xxx` are not found), and a number without a context word scores only
   0.4, which is why `PII_SCORE_THRESHOLD` must not be raised above 0.4. An e-mail address needs a

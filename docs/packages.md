@@ -21,8 +21,8 @@ Per package:
 | 3 | Jobs and batch | merged 2026-10-24 | #7 | 1,000-URL batch across 2 workers (`batch` job in CI) |
 | 4 | Browser worker | merged 2026-10-25 | #8 | `wlo_200` auto 83.0 % (baseline 80 %) |
 | 5 | Documents and OCR | merged 2026-10-25 | #9, #10 | corpus converts, scans yield text (CI `documents`); `wlo_200` auto 84.0 % in an A/B run against package 4 (83.0 %) |
-| 6 | Audio and video | next | | |
-| 7 | PII | in review | | corpus test `tests/pii/test_corpus.py` (CI job `nlp`: `md` on every push, `lg` weekly): every mode through `POST /v1/extract/file` as Markdown and HTML with the real nlp worker loop; pattern types found 100 %, `PERSON` recall pinned per model size (`lg` German 0.96, English 1.00; `md` 1.00 and 1.00); no keep word touched except the listed known false positives (`Pythagoras`, `Calvin`: historical names used as concepts); live `wlo_200` auto 83.0 % unchanged (2026-10-29) |
+| 6 | Audio and video | merged 2026-10-26 | #12 | subtitles from YouTube and Mediathek samples, an upload transcribed (CI `asr`, live run on Jan's PC) |
+| 7 | PII | merged 2026-10-29 | #13 | corpus test `tests/pii/test_corpus.py` (CI job `nlp`: `md` on every push, `lg` weekly): every mode through `POST /v1/extract/file` as Markdown and HTML with the real nlp worker loop; pattern types found 100 %, `PERSON` recall pinned per model size (`lg` German 0.96, English 1.00; `md` 1.00 and 1.00); no keep word touched except the listed known false positives (`Pythagoras`, `Calvin`: historical names used as concepts); live `wlo_200` auto 83.0 % unchanged; Docker check with `lg` on Jan's PC (2026-10-29) |
 | 8-11 | | open | | |
 
 | # | Package | Contents | Done when |
