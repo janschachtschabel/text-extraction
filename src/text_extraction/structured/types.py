@@ -174,9 +174,11 @@ with warnings.catch_warnings():
         )
         learn_selectors: bool = Field(
             default=False,
-            description="After the LLM found values, ask it for one CSS selector per field, check "
-            "that each reproduces the value and keep it for this API key and this page layout, so "
-            "that later pages of the site need no LLM.",
+            description="After the LLM found values, ask it for one CSS selector per field it "
+            "filled, check that each reproduces the value on the page and keep the ones that do "
+            "for this API key, the site (the request URL's host) and the schema, so that later "
+            "pages of the site need no LLM for those fields (`auto` and `selectors` use them). "
+            "Strategy `llm` or `auto` only.",
         )
         instructions: str | None = Field(
             default=None,

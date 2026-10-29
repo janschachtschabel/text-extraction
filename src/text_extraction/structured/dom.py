@@ -15,7 +15,8 @@ skips this stage. Pure: no I/O, and nothing here logs a selector, a value or the
   function, variable or prefix) leaves its field missing.
 * ``auto``: the selectors (caller's or learned), then ``metadata``, per field (ruling R3).
 * ``tables``: every ``<table>`` with at least two rows.
-* ``learn_html``: the cleaned HTML that ``learn_selectors`` shows the LLM.
+* ``learn_html``: the cleaned HTML that ``learn_selectors`` shows the LLM; ``RulePage`` runs a
+  proposed selector on it exactly as this stage runs rules, so that a kept rule reproduces.
 
 Bounds (rule 5; rulings R4, R5), since a selector's cost and a table's size are up to the page:
 
@@ -52,7 +53,7 @@ from lxml.html import HtmlElement
 
 from text_extraction.convert.links import absolute_url
 from text_extraction.licenses import License
-from text_extraction.metadata import PageMetadata, StructuredItems, page_tree
+from text_extraction.metadata import PageMetadata, StructuredItems, page_tree, structured_items
 from text_extraction.structured.schema import CompiledSchema, coerce
 from text_extraction.structured.types import (
     SelectorRule,
@@ -486,6 +487,19 @@ class _Page:
         if isinstance(match, bool | float | int):
             return match
         return None
+
+
+class RulePage:
+    """A page to run single selector rules on as the DOM stage does (``learn_selectors`` checks
+    the LLM's proposals with it); ``base_url`` makes ``href`` and ``src`` values absolute."""
+
+    def __init__(self, html: str, base_url: str) -> None:
+        self._page = _Page(html, structured_items(html, base_url, syntaxes=False))
+
+    def value(self, compiled: CompiledSchema, name: str, rule: SelectorRule) -> Any | None:
+        """The value ``rule`` finds for the field ``name``; None when it finds none (or
+        fails)."""
+        return self._page.rule_value(compiled, name, rule)[0]
 
 
 def _tag_value(tag: Tag, attr: str | None) -> str | None:

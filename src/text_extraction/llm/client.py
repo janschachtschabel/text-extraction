@@ -1,6 +1,6 @@
 """The client of the operator's OpenAI-compatible LLM endpoint (ruling S9): JSON answers that
 fit a schema (``chat_json``) and embeddings (``embed``). It is generic: the extraction prompt is
-built on top of it (``structured/llm.py``).
+built on top of it (``structured/post.py``, ``structured/learn.py``).
 
 **The endpoint** is operator configuration (``LLM_BASE_URL``, https unless ``LLM_ALLOW_HTTP``),
 not a caller's target, so the SSRF guard does not apply. As for the external ASR endpoint it is
