@@ -281,7 +281,7 @@ async def create_batch(
             if caller_llm_key is not None and wants_llm(body.structured, body.chunking, settings):
                 # The caller's key of the LLM endpoint, for any item that moves to the llm
                 # workers, while the job lives (ruling S9); the job's deletion takes it along.
-                await store.put_llm_key(job_id, caller_llm_key, whole_job=True)
+                await store.put_llm_key(job_id, caller_llm_key)
             # Enqueued exactly once and never retried: a retry could queue some items twice.
             await queue.enqueue(job_id, principal.name, body.urls)
         except BaseException:

@@ -700,7 +700,7 @@ async def test_llm_key_never_outlives_the_job() -> None:
     job_id = await create_job(store, kind="extract")
     await valkey.expire(f"job:{{{job_id}}}:meta", 100)
 
-    await store.put_llm_key(job_id, "sk-caller", whole_job=True)
+    await store.put_llm_key(job_id, "sk-caller")
 
     assert await valkey.ttl(f"job:{{{job_id}}}:llm_key") <= 100
 

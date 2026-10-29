@@ -588,12 +588,15 @@ class JobStore:
         raw = await self._valkey.get(_key(job_id, "asr_key"))
         return reply_text(raw) if raw is not None else None
 
-    async def put_llm_key(self, job_id: str, key: str, *, whole_job: bool = False) -> None:
-        """Keep the caller's key of the LLM endpoint for the job (ruling S9) as long as the job
-        lives: the draft the llm worker reads lives that long, and the item may wait for the
-        worker until then. ``whole_job`` marks a batch's key (its items move to pool ``llm`` at
-        any time and its last result drops it); the lifetime is the same. Raises ``JobLost`` when
-        the job is gone; nothing is stored then."""
+    async def put_llm_key(self, job_id: str, key: str) -> None:
+        """Keep the caller's key of the LLM endpoint for the job (ruling S9, R11) for the job's
+        TTL, whatever the job is (a sync request's, a pool job's, a batch's). Unlike the ASR key
+        there is no shorter bound: the draft the llm worker reads lives as long as the job, a
+        202 job may wait for the worker until then, and a batch's items move to pool ``llm`` at
+        any time. The key is not left to expire: the item's writer drops it (``drop_llm_key``:
+        the llm worker once a sync job's item has its outcome, a batch's last result, and
+        ``_store_result`` when the API pod ran the whole request); ``delete`` and ``shorten``
+        remove it too. Raises ``JobLost`` when the job is gone; nothing is stored then."""
         outcome = await self._put_with_job(
             keys=[_key(job_id, "meta"), _key(job_id, "llm_key")],
             args=[key, self._ttl_seconds * 1000],

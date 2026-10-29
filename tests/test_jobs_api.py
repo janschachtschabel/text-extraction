@@ -1101,7 +1101,7 @@ def test_batch_400_without_any_llm_key_and_422_for_the_combinations(
     assert api.keys("job:*") == []
 
 
-def test_llm_key_stored_with_batch_for_whole_job(make_api: Callable[..., Api]) -> None:
+def test_llm_key_stored_with_batch_for_the_job_ttl(make_api: Callable[..., Api]) -> None:
     api = make_api(**llm_overrides(job_ttl_seconds=7200))
 
     with capture_logs() as logs:
