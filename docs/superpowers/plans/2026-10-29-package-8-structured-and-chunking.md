@@ -28,7 +28,7 @@
 - The LLM only ever sees the page as data: no tool calls, no URL from LLM output is fetched, LLM output is validated against the caller's schema before it is used.
 - Not in this package: vision-LLM image descriptions (D4), MCP tools (package 9), per-request model choice, tokenisers (sizes are characters; token budgets are estimated as 4 characters per token), S3.
 
-## Decisions of Jan (cards of 2026-10-29; the recommended options apply until he answers)
+## Decisions of Jan (2026-10-29: Jan approved the plan; the cards were unanswered, so the recommended options (a) apply)
 
 - **D1, embeddings for `semantic`.** (a, recommended) The `/embeddings` route of the same OpenAI-compatible endpoint with `LLM_EMBEDDING_MODEL`; without it `semantic` answers 400. (b) No `semantic` in this package. (c) A local embedding model in a worker of its own (torch, PVC).
 - **D2, scope of learned selectors.** (a, recommended) Per API key: no key can change another's results. (b) Global, only admins learn. (c) Global, everybody learns.
