@@ -167,7 +167,12 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "document",
         "media",
         "pii",
+        "structured",
+        "chunks",
     }
+    assert data["structured"] is None
+    assert data["chunks"] is None
+    assert data["timings"]["llm_ms"] == 0
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
     assert data["upstream_status"] == 200
@@ -178,6 +183,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "convert_ms",
         "render_ms",
         "pii_ms",
+        "llm_ms",
     }
     assert data["compliance"]["decision"] == "allowed"
     assert {"url", "text", "kind"} <= set(data["links"][0])
@@ -1740,8 +1746,9 @@ def test_annotate_with_html_is_422() -> None:
 @pytest.mark.parametrize("pii_enabled", [False, True], ids=["pii-off", "pii-on"])
 def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled: bool) -> None:
     """The answer of a request without ``pii`` is the package-6 one (the golden recording),
-    whether the service has PII or not: the result only gained ``pii: null`` and
-    ``timings.pii_ms: 0``, and no job or nlp item is made."""
+    whether the service has PII or not: the result only gained ``pii: null``, ``structured: null``,
+    ``chunks: null``, ``timings.pii_ms: 0`` and ``timings.llm_ms: 0``, and no job or nlp item is
+    made."""
     golden = json.loads(GOLDEN.read_text())["article"]
     settings = make_settings(pii_enabled=pii_enabled)
     valkey = FakeAsyncRedis()
@@ -1755,8 +1762,11 @@ def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled:
     answer = response.json()
     timings = answer["data"].pop("timings")
     assert timings["pii_ms"] == 0
+    assert timings["llm_ms"] == 0
     assert answer.pop("trace_id")
     assert answer["data"]["pii"] is None
+    assert answer["data"]["structured"] is None
+    assert answer["data"]["chunks"] is None
     assert json.dumps(answer, sort_keys=True) == json.dumps(golden, sort_keys=True)
 
     async def keys(pattern: str) -> list[Any]:

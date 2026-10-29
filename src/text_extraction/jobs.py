@@ -395,13 +395,13 @@ def _artifact_key(job_id: str, name: str) -> str:
 
 def _options_json(options: JobOptions) -> str:
     """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false),
-    ``languages`` (none) and ``pii`` (none) are left out while they are the default: pods of a
-    release before them parse the options strictly, and during a rolling upgrade they read the
-    jobs that new pods create."""
+    ``languages`` (none), ``pii`` (none), ``structured`` (none) and ``chunking`` (none) are left
+    out while they are the default: pods of a release before them parse the options strictly, and
+    during a rolling upgrade they read the jobs that new pods create."""
     defaults = JobOptions.model_fields
     omit = {
         name
-        for name in ("ocr", "transcribe", "languages", "pii")
+        for name in ("ocr", "transcribe", "languages", "pii", "structured", "chunking")
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }
     return options.model_dump_json(exclude=omit or None)

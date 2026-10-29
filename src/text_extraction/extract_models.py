@@ -16,6 +16,7 @@ from text_extraction.browser_options import (
     WaitSeconds,
     check_cookie_domains,
 )
+from text_extraction.chunking.types import Chunk, ChunkingOptions
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
 from text_extraction.documents.types import DocumentInfo, OcrOption
@@ -26,6 +27,7 @@ from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pii.types import BareModeOrObject, PiiOptions, PiiReport
 from text_extraction.quality import Quality
+from text_extraction.structured.types import StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
 
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
@@ -117,6 +119,16 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         "`wait_seconds` waits `PII_SYNC_WAIT_SECONDS`, then answers 202. 400 while the service "
         "has no PII handling. Not with `screenshot`.",
     )
+    structured: StructuredOptions | None = Field(
+        default=None,
+        description="Extract the fields of a JSON schema (and the page's tables) from the "
+        "result: `data.structured` has the values, where each came from and what is missing.",
+    )
+    chunking: ChunkingOptions | None = Field(
+        default=None,
+        description="Split the content into chunks for retrieval: `data.chunks`. Needs "
+        "`format: markdown` or `text`.",
+    )
 
     @model_validator(mode="after")
     def _browser_options(self) -> Self:
@@ -146,6 +158,7 @@ class Timings(BaseModel):
     convert_ms: int
     render_ms: int = 0  # browser: navigation, actions and settling; 0 in fast mode
     pii_ms: int = 0  # the PII step; 0 without ``pii``
+    llm_ms: int = 0  # the LLM calls of ``structured``; 0 without them
 
 
 class ExtractResult(BaseModel):
@@ -184,8 +197,17 @@ class ExtractResult(BaseModel):
         "had or read this time: the metadata answers), `asr_unavailable` (no transcription in "
         "time, or it failed: the metadata answers), `tracks_truncated` (more tracks than the "
         "limit: the first ones), `tracks_failed` (no track of the page could be read) (media); "
-        "`content_not_stored_too_large` (a job item stored without its content). Converter "
-        "notes may follow."
+        "`content_not_stored_too_large` (a job item stored without its content); "
+        "`structured_value_invalid` (a value from the LLM or a rule did not fit its field's "
+        "type: the field is missing), `pattern_timeout` (a pattern ran into its time limit: its "
+        "field is looked up by the next strategy), `llm_unavailable` (the LLM was needed but the "
+        "service has none, or the request ran out of time for it), `llm_input_truncated` (the "
+        "content was cut to the model's input limit for the LLM), "
+        "`learned_selectors_unavailable` (learned selectors could not be read or stored this "
+        "time), `chunks_truncated` (more chunks than `CHUNK_MAX_CHUNKS`: the first ones), "
+        "`chunking_fallback_recursive` (the chunking strategy needed Markdown or too many "
+        "sentences for embeddings: `recursive` was used) (structured output and chunking). "
+        "Converter notes may follow."
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
@@ -196,6 +218,9 @@ class ExtractResult(BaseModel):
     media: MediaInfo | None = None
     # With a ``pii`` request only; the default keeps results cached before PII valid.
     pii: PiiReport | None = None
+    # With a ``structured`` or ``chunking`` request only; the defaults keep older results valid.
+    structured: StructuredResult | None = None
+    chunks: list[Chunk] | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

@@ -702,9 +702,18 @@ def test_openapi_documents_multipart(client: TestClient) -> None:
     assert body["properties"]["file"]["format"] == "binary"
     assert body["required"] == ["file"]
     form = schemas[body["allOf"][0]["$ref"].rsplit("/", 1)[-1]]
-    assert set(form["properties"]) == {"format", "metadata", "ocr", "wait_seconds", "pii"}
+    assert set(form["properties"]) == {
+        "format",
+        "metadata",
+        "ocr",
+        "wait_seconds",
+        "pii",
+        "structured",
+        "chunking",
+    }
     assert form["properties"]["wait_seconds"]["default"] == 25
-    assert form["properties"]["pii"]["type"] == "string"
+    for name in ("pii", "structured", "chunking"):
+        assert form["properties"][name]["type"] == "string"
     assert "202" in operation["responses"]
 
 

@@ -95,6 +95,8 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         transcribe=req.transcribe,
         languages=req.languages,
         pii=req.pii,
+        structured=req.structured,
+        chunking=req.chunking,
     )
 
 

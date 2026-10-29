@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
 from text_extraction.documents.types import OcrOption
@@ -13,6 +14,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pii.types import BareModeOrObject, PiiOptions
+from text_extraction.structured.types import StructuredOptions
 
 JobKind = Literal["extract", "batch", "screenshot", "file"]
 JobState = Literal["queued", "running", "completed"]
@@ -74,6 +76,15 @@ class BatchRequest(BaseModel, extra="forbid"):
         "handle it (`mask`, `redact`, `hash` or `annotate`; a bare string is the mode). 400 "
         "while the service has no PII handling.",
     )
+    structured: StructuredOptions | None = Field(
+        default=None,
+        description="As for `/v1/extract`: extract the fields of a JSON schema from every "
+        "item's result.",
+    )
+    chunking: ChunkingOptions | None = Field(
+        default=None,
+        description="As for `/v1/extract`: split every item's content into chunks.",
+    )
 
 
 class JobOptions(BaseModel, extra="forbid"):
@@ -92,6 +103,8 @@ class JobOptions(BaseModel, extra="forbid"):
     transcribe: bool = False
     languages: list[LanguageCode] = Field(default=[], max_length=MAX_LANGUAGES)
     pii: PiiOptions | None = None
+    structured: StructuredOptions | None = None
+    chunking: ChunkingOptions | None = None
 
     @model_validator(mode="after")
     def _screenshot_needs_browser(self) -> Self:

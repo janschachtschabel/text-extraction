@@ -235,6 +235,8 @@ async def create_batch(
         transcribe=body.transcribe,
         languages=body.languages,
         pii=body.pii,
+        structured=body.structured,
+        chunking=body.chunking,
     )
     if guard.high:
         raise _memory_high()

@@ -43,9 +43,10 @@ from openai.types import CreateEmbeddingResponse
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 from openai.types.shared_params import ResponseFormatJSONSchema
 from prometheus_client import REGISTRY, CollectorRegistry, Counter
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from text_extraction.envelope import ErrorCode
+from text_extraction.llm.usage import LlmUsage
 from text_extraction.settings import Settings
 
 __all__ = [
@@ -78,16 +79,6 @@ class LlmError(Exception):
         self.code = code
         self.retryable = retryable
         self.message = message
-
-
-class LlmUsage(BaseModel):
-    """What the LLM calls of one step used: the model, the calls made (a repair call counts)
-    and the tokens the endpoint reported."""
-
-    model: str
-    calls: int
-    prompt_tokens: int
-    completion_tokens: int
 
 
 @dataclass(frozen=True)
