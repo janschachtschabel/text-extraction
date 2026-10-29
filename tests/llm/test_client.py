@@ -185,10 +185,11 @@ def test_invalid_json_gets_one_repair_call_then_fails(httpserver: HTTPServer) ->
     first, second = sent(httpserver)
     assert len(first.get_json()["messages"]) == 2
     repair = second.get_json()["messages"]
+    # system, user, the invalid answer as the model's own turn, the error as a user message
+    assert [message["role"] for message in repair] == ["system", "user", "assistant", "user"]
     assert repair[:2] == first.get_json()["messages"]
-    assert len(repair) == 3
-    assert repair[2]["role"] == "user"
-    assert "Expecting value" in repair[2]["content"]  # the parser's error text
+    assert repair[2]["content"] == "this is not json"
+    assert "Expecting value" in repair[3]["content"]  # the parser's error text
 
 
 def test_validation_error_is_repaired_by_the_second_call(httpserver: HTTPServer) -> None:
@@ -200,8 +201,11 @@ def test_validation_error_is_repaired_by_the_second_call(httpserver: HTTPServer)
     assert usage.calls == 2
     assert usage.prompt_tokens == 22
     assert usage.completion_tokens == 10
-    repair = sent(httpserver)[1].get_json()["messages"][2]["content"]
-    assert "title" in repair  # the failing field, not the invalid input echoed back
+    repair = sent(httpserver)[1].get_json()["messages"]
+    assert [message["role"] for message in repair] == ["system", "user", "assistant", "user"]
+    assert repair[2]["content"] == '{"title": 5}'
+    assert "title" in repair[3]["content"]  # the failing field
+    assert "5" not in repair[3]["content"]  # not the invalid input echoed in the error
 
 
 def test_validate_may_raise_pydantic_validation_error_or_value_error(
@@ -221,7 +225,7 @@ def test_validate_may_raise_pydantic_validation_error_or_value_error(
 
     with pytest.raises(LlmError):
         asyncio.run(run())
-    assert "title is not allowed" in sent(httpserver)[1].get_json()["messages"][2]["content"]
+    assert "title is not allowed" in sent(httpserver)[1].get_json()["messages"][3]["content"]
     with pytest.raises(ValidationError):
         validate({"title": 5})
 
@@ -260,6 +264,24 @@ def test_refusal_without_content_is_invalid(httpserver: HTTPServer) -> None:
     value, _usage = chat(settings_for(httpserver))
 
     assert value == Answer(title="Ok")
+    # Nothing to show the model: no assistant turn, only the error as a user message.
+    repair = sent(httpserver)[1].get_json()["messages"]
+    assert [message["role"] for message in repair] == ["system", "user", "user"]
+
+
+def test_cut_off_answer_is_shown_to_the_model_in_the_repair_call(httpserver: HTTPServer) -> None:
+    serve_chat(
+        httpserver,
+        completion('{"title": "Cu', finish_reason="length"),
+        completion('{"title": "Whole"}'),
+    )
+
+    chat(settings_for(httpserver))
+
+    repair = sent(httpserver)[1].get_json()["messages"]
+    assert [message["role"] for message in repair] == ["system", "user", "assistant", "user"]
+    assert repair[2]["content"] == '{"title": "Cu'
+    assert "cut off" in repair[3]["content"]
 
 
 def test_429_then_200_succeeds(httpserver: HTTPServer) -> None:

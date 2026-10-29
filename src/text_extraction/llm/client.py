@@ -16,7 +16,8 @@ call of ours. ``LLM_TIMEOUT_SECONDS`` is the SDK's timeout of one request.
 **Answers that do not fit:** ``chat_json`` parses the answer and hands it to ``validate``
 (which raises ``ValueError``, a pydantic ``ValidationError`` included). An answer that is no
 JSON, does not validate, has no choice, no content or ``finish_reason: length`` (cut off) is
-invalid; it gets exactly one more call, with the error text appended as a user message, then
+invalid; it gets exactly one more call, with the model's invalid answer appended as an assistant
+turn (when it gave one) and the error text as a user message, then
 ``LlmError(llm_failed, retryable=False)``.
 
 **Failures** are ``LlmError`` with a fixed message that names the HTTP status at most, never the
@@ -211,6 +212,8 @@ class LlmClient:
             except _Invalid as invalid:
                 self._metrics.calls.labels("chat", "invalid").inc()
                 if attempt == 1:
+                    if invalid.answer is not None:  # the model sees what it got wrong
+                        messages.append({"role": "assistant", "content": invalid.answer})
                     messages.append({"role": "user", "content": _repair_request(invalid.problem)})
                 continue
             self._metrics.calls.labels("chat", "ok").inc()
@@ -295,11 +298,14 @@ def _tokens(usage: object, *names: str) -> tuple[int, ...]:
 
 
 class _Invalid(Exception):  # noqa: N818 - internal control flow
-    """An answer that does not fit; ``problem`` is what the repair call tells the model."""
+    """An answer that does not fit. ``problem`` is what the repair call tells the model;
+    ``answer`` is the model's invalid text (None when it gave none), which the repair call shows
+    it as its own previous turn."""
 
-    def __init__(self, problem: str) -> None:
+    def __init__(self, problem: str, answer: str | None = None) -> None:
         super().__init__(problem)
         self.problem = problem
+        self.answer = answer
 
 
 def _checked[T](reply: ChatCompletion, validate: Callable[[Any], T]) -> T:
@@ -307,11 +313,11 @@ def _checked[T](reply: ChatCompletion, validate: Callable[[Any], T]) -> T:
     if not reply.choices:
         raise _Invalid(_NO_ANSWER)
     choice = reply.choices[0]
-    if getattr(choice, "finish_reason", None) == "length":
-        raise _Invalid(_CUT_OFF)
     content = getattr(getattr(choice, "message", None), "content", None)
     if not content or not content.strip():
         raise _Invalid(_NO_ANSWER)
+    if getattr(choice, "finish_reason", None) == "length":
+        raise _Invalid(_CUT_OFF, content)
     try:
         return validate(json.loads(content))
     except ValidationError as error:
@@ -319,9 +325,9 @@ def _checked[T](reply: ChatCompletion, validate: Callable[[Any], T]) -> T:
             f"{'.'.join(str(part) for part in item['loc']) or 'answer'}: {item['msg']}"
             for item in error.errors(include_input=False, include_url=False, include_context=False)
         )
-        raise _Invalid(details[:_REPAIR_ERROR_CHARS]) from None
+        raise _Invalid(details[:_REPAIR_ERROR_CHARS], content) from None
     except ValueError as error:  # includes json.JSONDecodeError
-        raise _Invalid((str(error) or _INVALID)[:_REPAIR_ERROR_CHARS]) from None
+        raise _Invalid((str(error) or _INVALID)[:_REPAIR_ERROR_CHARS], content) from None
 
 
 def _repair_request(problem: str) -> str:
