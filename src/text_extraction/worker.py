@@ -76,7 +76,7 @@ leased here, and the rerun moves it once more; only the first result of an item 
 browser, Docling and ASR workers take the same path, so a render, an OCR result or a transcript
 of such a job is processed before its job completes. While the memory guard is high nothing is
 stored: the item fails ``pii_failed``, retryable, its text withheld. A result without any such
-text gets a report of zero entities instead. Every result passes the guard
+text is written as it is, with ``pii`` null. Every result passes the guard
 ``pii.fields.fail_closed`` before it is written: one that still owes the step (a worker without
 the move) is ``pii_failed`` without its text. The ``pii_dispatch`` module docstring has what the
 nlp worker reads; a worker of pool ``nlp`` deletes an item's draft and input, and a sync
@@ -160,7 +160,6 @@ from text_extraction.pii_dispatch import (
     PII_POOL,
     PiiMove,
     create_pii_move,
-    without_findings,
 )
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
@@ -638,18 +637,19 @@ class Worker:
         memory guard, a worker without the move) is ``pii_failed`` with its text withheld. A job
         that expired before the move (``JobLost``) drops the item, as before a write."""
         pii = job.options.pii
-        if pii is not None and self._queue.pool != PII_POOL:
-            if needs_pii(envelope, pii):
-                if self._pii_move is not None:
-                    try:
-                        moved = await self._pii_move(job, item, envelope)
-                    except JobLost:
-                        return await self._drop(item)
-                    if moved:
-                        return await self._moved_to_nlp(job, item)
-                    envelope = withheld(envelope, pii, message=PII_BUSY_MESSAGE)
-            else:
-                envelope = without_findings(envelope, pii, self._settings)
+        if (
+            pii is not None
+            and self._queue.pool != PII_POOL
+            and self._pii_move is not None
+            and needs_pii(envelope, pii)
+        ):
+            try:
+                moved = await self._pii_move(job, item, envelope)
+            except JobLost:
+                return await self._drop(item)
+            if moved:
+                return await self._moved_to_nlp(job, item)
+            envelope = withheld(envelope, pii, message=PII_BUSY_MESSAGE)
         envelope = fail_closed(envelope, pii)
         try:
             write = await self._store.write_result(item.job_id, item.index, envelope)

@@ -31,7 +31,9 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
 7. ``documents.sniff`` names the body's kind: the declared type for HTML and XHTML, the bytes
    first otherwise (ruling F1). HTML and XHTML: decode, compliance after the fetch (headers,
    meta tags, ``noai``; may block), convert, strip domain boilerplate. ``text/plain``: decode,
-   header checks, ``convert_plain``. A document (PDF, Office, EPUB, CSV, an image ...): up to
+   header checks, ``convert_plain``. ``text/markdown`` and ``text/x-markdown`` take that path
+   too, but are read as Markdown (``documents.formats``: each output format, the first heading
+   as the title). A document (PDF, Office, EPUB, CSV, an image ...): up to
    ``DOCUMENT_MAX_BYTES``, header checks, then ``pipeline_documents`` converts it (F10). One that
    needs OCR is handed to ``ocr_handoff``; without one, or while the service has no OCR, it
    answers its text layer with the warning ``ocr_unavailable`` (an image fails
@@ -134,6 +136,7 @@ from text_extraction.compliance import (
 )
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import (
+    Conversion,
     Link,
     OutputFormat,
     convert_html,
@@ -141,6 +144,7 @@ from text_extraction.convert import (
     decode_html,
     page_links,
 )
+from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
 from text_extraction.documents.sniff import media_type, sniff
@@ -231,7 +235,11 @@ _KINDS: dict[str, Literal["html", "text"]] = {
     "text/html": "html",
     "application/xhtml+xml": "html",
     "text/plain": "text",
+    "text/markdown": "text",
+    "text/x-markdown": "text",
 }
+# Text types read as Markdown (issue #15).
+_MARKDOWN_TYPES = frozenset({"text/markdown", "text/x-markdown"})
 # A render that ends on one of these (or on a download) fetches the file directly (F18).
 _DOCUMENT_TYPES = frozenset(
     {media_type(kind) for kind in get_args(DocumentKind)} | {"application/octet-stream"}
@@ -2107,10 +2115,18 @@ class Pipeline:
             if req.links:
                 links = page_links(text, final_url)
         else:
-            conversion = convert_plain(text)
-            content = conversion.content
-            if req.format == "html":
-                content = f"<pre>{html_lib.escape(content)}</pre>" if content else ""
+            if fetched.content_type in _MARKDOWN_TYPES:
+                conversion = Conversion(
+                    content=from_markdown(text, req.format),
+                    converter="markdown",
+                    title=first_heading(text),
+                )
+                content = conversion.content
+            else:
+                conversion = convert_plain(text)
+                content = conversion.content
+                if req.format == "html":
+                    content = f"<pre>{html_lib.escape(content)}</pre>" if content else ""
             quality = assess(None, content)
             if req.links:
                 links = []
@@ -2313,10 +2329,10 @@ def _path_hash(url: str) -> str:
 
 
 def _page_type(kind: Literal["html", "text"], declared: str | None) -> str:
-    """The media type a page's result reports: a declared HTML type as it is, else the type
-    the bytes were read as."""
+    """The media type a page's result reports: a declared HTML or Markdown type as it is, else
+    the type the bytes were read as."""
     if kind == "text":
-        return "text/plain"
+        return declared if declared in _MARKDOWN_TYPES else "text/plain"
     if declared is not None and _KINDS.get(declared) == "html":
         return declared
     return "text/html"

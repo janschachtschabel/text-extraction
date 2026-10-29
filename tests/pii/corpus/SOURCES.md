@@ -1,6 +1,6 @@
 # PII corpus: sources and conventions
 
-All twelve texts were written for this purpose in October 2026 (7 German, 5 English). They are
+All fourteen texts were written for this purpose in October 2026 (8 German, 6 English). They are
 original text released with the repository (Apache-2.0). Nothing is copied from a web page, a
 book or a model's training corpus. No real person's data is in them.
 
@@ -12,7 +12,8 @@ book or a model's training corpus. No real person's data is in them.
   Bremen`, `University of Manchester`, ...) because teaching material mentions them. They are not
   personal data and are listed under `keep` in `gold.json` (decision D2: not found by default).
   `keep` also holds words that look like names but are not: `Pythagoras`, `Calvin`,
-  `Goethestraße`, `Max-Planck-Gesellschaft`, `Humboldt-Universität`, `Energiewende`.
+  `Goethestraße`, `Max-Planck-Gesellschaft`, `Humboldt-Universität`, `Energiewende`, and the
+  Arabic, Cyrillic, Greek and Chinese words of the two multilingual texts (issue #14).
 - **Addresses:** invented street numbers (`Beispielweg 12`, `14 Mill Lane`); the postcodes are
   plausible but not checked against a real address.
 - **IBANs:** published test IBANs with valid checksums (`DE89 3704 0044 0532 0130 00`,
@@ -43,11 +44,13 @@ book or a model's training corpus. No real person's data is in them.
 | `de_05_cv_bio.md` | CV and short biography | German |
 | `de_06_transcript.md` | podcast transcript snippet | German |
 | `de_07_parent_letter.md` | letter to parents | German |
+| `de_08_multilingual.md` | invitation with notes in other scripts (issue #14) | German |
 | `en_01_school_contact.md` | school contact page | English |
 | `en_02_worksheet_credits.md` | teacher's worksheet with credits | English |
 | `en_03_press_release.md` | press release | English |
 | `en_04_forum_post.md` | forum post with replies | English |
 | `en_05_cv_bio.md` | CV and short biography | English |
+| `en_06_multilingual.md` | invitation with notes in other scripts (issue #14) | English |
 
 ## `gold.json`
 

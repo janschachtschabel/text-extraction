@@ -93,7 +93,7 @@ class Conversion:
     """The converted content, the converter that produced it and what went wrong on the way."""
 
     content: str
-    converter: Literal["trafilatura", "bs4", "plain"]
+    converter: Literal["trafilatura", "bs4", "plain", "markdown"]
     title: str | None = None
     warnings: list[str] = field(default_factory=list)
 

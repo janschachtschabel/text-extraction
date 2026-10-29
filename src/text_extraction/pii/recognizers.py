@@ -6,7 +6,11 @@ One ``AnalyzerEngine`` serves ``de`` and ``en``:
 - **Names, places, organisations** come from the spaCy models through Presidio's
   ``SpacyRecognizer``: ``PER`` and ``PERSON`` are ``PERSON``, ``LOC`` and ``GPE`` are
   ``LOCATION``, ``ORG`` is ``ORGANIZATION``. Every other label is ignored (the German models
-  have ``MISC``, the English ones dates, money and more).
+  have ``MISC``, the English ones dates, money and more). ``LatinScriptSpacyRecognizer`` drops
+  a span that has letters but none of the Latin script (issue #14): the German and English
+  models were not trained on Arabic, Cyrillic, Greek or CJK text and tag its words at random
+  (``использования в`` became ``[PERSON]``). A span with one Latin letter stays (``Herr Иванов``),
+  and the honorific rule below still finds a name of any script after a salutation.
 - **Patterns** per language: e-mail address, phone number (regions ``DE``, ``AT``, ``CH``,
   ``GB``, ``US``; German context words that lift a number's score from 0.4 to 0.75), IBAN,
   credit card, IP address and URL.
@@ -31,6 +35,7 @@ set to ``WARNING``; the decision log is off.
 import logging
 import re
 import sys
+import unicodedata
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal
@@ -200,6 +205,35 @@ class HonorificRecognizer(LocalRecognizer):
         ]
 
 
+def has_latin_letter_or_none(text: str) -> bool:
+    """Whether ``text`` has a letter of the Latin script, or no letter at all. Marks and
+    punctuation are no letters: ``مُخصص`` has Arabic letters only."""
+    letters = False
+    for char in text:
+        if char.isalpha():
+            if unicodedata.name(char, "").startswith("LATIN "):
+                return True
+            letters = True
+    return not letters
+
+
+class LatinScriptSpacyRecognizer(SpacyRecognizer):
+    """Presidio's spaCy recognizer without the spans of letters outside the Latin script: the
+    German and English models only guess on them."""
+
+    def analyze(
+        self,
+        text: str,
+        entities: list[str],
+        nlp_artifacts: NlpArtifacts | None = None,
+    ) -> list[RecognizerResult]:
+        return [
+            result
+            for result in super().analyze(text, entities, nlp_artifacts)
+            if has_latin_letter_or_none(text[result.start : result.end])
+        ]
+
+
 _TLD_EXTRACTOR: Final = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None)
 
 
@@ -236,7 +270,7 @@ def build_analyzer(models: Mapping[Language, Path]) -> AnalyzerEngine:
     registry = RecognizerRegistry(supported_languages=codes)
     for language in languages:
         registry.add_recognizer(
-            SpacyRecognizer(
+            LatinScriptSpacyRecognizer(
                 supported_language=language,
                 supported_entities=["PERSON", "LOCATION", "ORGANIZATION"],
             )

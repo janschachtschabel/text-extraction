@@ -29,10 +29,10 @@ from text_extraction.compliance import ComplianceReport
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.docling_dispatch import DoclingDispatcher
 from text_extraction.documents.pool import DocumentPool
-from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
+from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
 from text_extraction.extract_api import _store_result
-from text_extraction.extract_models import ExtractRequest, ExtractResult, Timings, failed_extract
+from text_extraction.extract_models import ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher
 from text_extraction.file_models import FileForm
 from text_extraction.job_models import JobOptions
@@ -40,11 +40,7 @@ from text_extraction.jobs import JobStore
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.nlp_worker import PiiRunner
 from text_extraction.pii.fields import (
-    ANNOTATE_HTML_MESSAGE,
     FAIL_CLOSED_MESSAGE,
-    TOO_LARGE_MESSAGE,
-    withheld,
-    withheld_by_pii,
 )
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import (
@@ -53,7 +49,6 @@ from text_extraction.pii_dispatch import (
     PII_POOL,
     PiiDispatcher,
     nlp_queue,
-    without_findings,
 )
 from text_extraction.pipeline import create_pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING
@@ -385,21 +380,18 @@ def test_sync_valkey_down_is_pii_failed_not_draft(monkeypatch: pytest.MonkeyPatc
     assert service.outcomes() == {"backend_error": 1}
 
 
-def test_a_result_with_nothing_to_process_answers_with_zero_entities() -> None:
+def test_a_result_with_nothing_to_process_answers_without_a_report() -> None:
+    """Issue #15: a failure without content and metadata was not processed: ``pii`` is null."""
     service = PiiService({PAGE: fetched(status=404, body="")})
     with TestClient(service.app) as client:
-        response = extract(client, pii="hash")
+        for mode in ("mask", "hash", "annotate"):
+            response = extract(client, pii=mode)
 
-        body = response.json()
-        assert body["status"] == "failed"
-        assert body["error"]["code"] == "target_http_error"  # the target's own answer
-        assert body["data"]["pii"] == {
-            "mode": "hash",
-            "language": "en",
-            "entities": {},
-            "items": None,
-            "hash_scope": None,  # nothing was hashed (final review M6)
-        }
+            body = response.json()
+            assert body["status"] == "failed"
+            assert body["error"]["code"] == "target_http_error"  # the target's own answer
+            assert body["data"]["content"] is None
+            assert body["data"]["pii"] is None
         assert service.stored() == []  # no hop for nothing
     assert service.outcomes() == {}
 
@@ -632,70 +624,6 @@ def test_handover_is_claimed_again_after_a_released_pool_job() -> None:
         assert not detached.claim_after_release(PII_POOL)  # the route answered with that job
 
     asyncio.run(scenario())
-
-
-def test_without_findings_reports_zero_entities_only_when_nothing_is_owed() -> None:
-    settings = make_settings(pii_hash_key="k" * 40)
-    empty = Envelope[ExtractResult](
-        status="failed", data=_result(content=None, title=None, language="fr")
-    )
-
-    annotated = without_findings(empty, PiiOptions(mode="annotate"), settings)
-    assert annotated.data is not None
-    assert annotated.data.pii is not None
-    assert annotated.data.pii.model_dump() == {
-        "mode": "annotate",
-        "language": "en",  # the fallback
-        "entities": {},
-        "items": [],
-        "hash_scope": None,
-    }
-    hashed = without_findings(empty, PiiOptions(mode="hash", language="de"), settings)
-    assert hashed.data is not None
-    assert hashed.data.pii is not None
-    # Nothing was hashed: no scope, also with PII_HASH_KEY (final review M6).
-    assert (hashed.data.pii.language, hashed.data.pii.hash_scope) == ("de", None)
-    # Owed, not asked for, or without data: as it is.
-    owed = Envelope[ExtractResult](status="success", data=_result(content=NAME))
-    assert without_findings(owed, PiiOptions(mode="mask"), settings) is owed
-    assert without_findings(empty, None, settings) is empty
-    bare = failed_extract(ErrorCode.INTERNAL_ERROR, "Internal server error.", retryable=False)
-    assert without_findings(bare, PiiOptions(mode="mask"), settings) is bare
-
-
-def test_without_findings_leaves_a_withheld_answer_alone() -> None:
-    """An answer the hop withheld (``pii_failed``, or the nlp worker's ``too_large``) has no
-    text left, but it was not processed: it gets no report of zero entities."""
-    settings = make_settings()
-    pii = PiiOptions(mode="mask")
-    owed = Envelope[ExtractResult](status="success", data=_result(content=NAME))
-    for held in (
-        withheld(owed, pii),
-        withheld(owed, pii, message=PII_BUSY_MESSAGE),
-        withheld(owed, pii, code=ErrorCode.TOO_LARGE, message=TOO_LARGE_MESSAGE, retryable=False),
-    ):
-        assert held.status == "failed"
-        assert held.data is not None
-        assert held.data.content is None
-        assert withheld_by_pii(held)
-        assert without_findings(held, pii, settings) is held
-    # The nlp worker's refusal of annotate on HTML is withheld the same way.
-    refused = withheld(owed, pii, message=ANNOTATE_HTML_MESSAGE, retryable=False)
-    assert (refused.status, refused.error) == (
-        "failed",
-        ErrorInfo(code=ErrorCode.PII_FAILED, message=ANNOTATE_HTML_MESSAGE, retryable=False),
-    )
-    # A target's own too_large without text is a failure with nothing to process.
-    target = Envelope[ExtractResult](
-        status="failed",
-        data=_result(content=None, title=None),
-        error=ErrorInfo(code=ErrorCode.TOO_LARGE, message="The document is too large."),
-    )
-    assert not withheld_by_pii(target)
-    reported = without_findings(target, pii, settings)
-    assert reported.data is not None
-    assert reported.data.pii is not None
-    assert reported.data.pii.entities == {}
 
 
 def test_pool_waits_are_longer_with_pii(monkeypatch: pytest.MonkeyPatch) -> None:

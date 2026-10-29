@@ -632,6 +632,35 @@ def test_plain_text_upload(client: TestClient) -> None:
     assert data["content"].startswith("Photosynthesis is the process")
 
 
+MARKDOWN = (
+    f"# Photosynthesis notes\n\n{(PARAGRAPH * 3).strip()}\n\n"
+    "- **Light** reactions\n- Calvin cycle\n"
+)
+
+
+@pytest.mark.parametrize("declared", ["text/markdown", "text/x-markdown; charset=utf-8"])
+def test_markdown_upload_is_converted_as_markdown(client: TestClient, declared: str) -> None:
+    """Issue #15: a Markdown upload is read as Markdown, for every output format."""
+    answers = {
+        fmt: upload(client, MARKDOWN.encode(), "notes.md", declared, form={"format": fmt}).json()
+        for fmt in ("markdown", "html", "text")
+    }
+
+    for body in answers.values():
+        assert body["status"] == "success", body["error"]
+        assert body["data"]["content_type"] == declared.split(";", 1)[0]
+        assert body["data"]["title"] == "Photosynthesis notes"
+        assert body["data"]["document"] is None
+    assert answers["markdown"]["data"]["content"] == MARKDOWN.strip()
+    html = answers["html"]["data"]["content"]
+    assert "<h1>Photosynthesis notes</h1>" in html
+    assert "<strong>Light</strong>" in html
+    text = answers["text"]["data"]["content"]
+    assert text.startswith("Photosynthesis notes\nPhotosynthesis is the process")
+    assert "#" not in text
+    assert "**" not in text
+
+
 def test_unsupported_upload(client: TestClient) -> None:
     response = upload(client, GIF, "a.gif", "image/gif")
 

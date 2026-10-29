@@ -2102,7 +2102,8 @@ async def test_worker_without_the_move_withholds() -> None:
 
 
 @scenario
-async def test_a_failed_item_without_text_gets_zero_entities_without_a_hop() -> None:
+async def test_a_failed_item_without_text_gets_no_report_and_no_hop() -> None:
+    """Issue #15: nothing was processed, so ``pii`` is null."""
     url = page("example.org")
     harness = Harness({url: fetched(url, "", status=404)}, pii_enabled=True)
     job_id = await submit_with_pii(harness, [url])
@@ -2114,8 +2115,7 @@ async def test_a_failed_item_without_text_gets_zero_entities_without_a_hop() -> 
     assert item.result.data is not None
     assert item.result.error is not None
     assert item.result.error.code == ErrorCode.TARGET_HTTP_ERROR
-    assert item.result.data.pii is not None
-    assert item.result.data.pii.entities == {}
+    assert item.result.data.pii is None
     assert (await nlp_queue(harness.valkey, harness.settings).counts()).pending == 0
 
 
