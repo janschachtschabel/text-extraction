@@ -18,6 +18,8 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.llm import client as client_module
 from text_extraction.llm.client import LlmClient
 from text_extraction.settings import Settings
+from text_extraction.structured import patterns as patterns_module
+from text_extraction.structured import post as post_module
 from text_extraction.structured.post import (
     BUSY_MESSAGE,
     NOT_RUN_MESSAGE,
@@ -25,8 +27,9 @@ from text_extraction.structured.post import (
     finish_post,
     needs_llm,
     post_done,
+    run_post_patterns,
 )
-from text_extraction.structured.types import StructuredOptions, Table
+from text_extraction.structured.types import LearnReport, StructuredOptions, Table
 
 from .post_helpers import (
     CHAT,
@@ -356,12 +359,14 @@ def test_learn_html_cleared_after_post(httpserver: HTTPServer) -> None:
             "learn_html"
             not in done.model_dump(mode="json", exclude_none=True)["data"]["structured"]
         )
-    # Only DOM values: nothing came from the LLM, so there is nothing to learn and no call.
+    # Only DOM values: nothing goes to the LLM, so there is nothing to learn and no call (R8).
     assert chat_requests(httpserver) == []
-    applied_result = data_of(applied)
-    assert applied_result.structured is not None
-    assert applied_result.structured.learned is not None
-    assert applied_result.structured.learned.stored == []
+    for done in (finished, applied):
+        result = data_of(done)
+        assert done.status == "success"
+        assert result.warnings == ["nothing_to_learn"]
+        assert result.structured is not None
+        assert result.structured.learned == LearnReport(stored=[], rejected=[])
 
 
 DOCUMENT = """# Report
@@ -590,11 +595,23 @@ def test_needs_llm_cases(httpserver: HTTPServer) -> None:
     assert needs(structured(schema=SHOP, strategy="llm"), dom=None)
     assert needs(structured(schema=SHOP), dom=missing)  # auto, fields missing after the DOM
     assert not needs(structured(schema=SHOP), dom=found)
-    # auto: patterns that fill the missing field leave nothing for the LLM
-    assert not needs(structured(schema=SHOP, patterns=sku_pattern), dom=one_missing)
+    # auto: patterns that have not run yet may still leave the field missing (needs_llm runs
+    # no regex); once run_post_patterns filled it, nothing is left for the LLM (R10)
+    with_pattern = structured(schema=SHOP, patterns=sku_pattern)
+    assert needs(with_pattern, dom=one_missing)
+    patterned = run_post_patterns(
+        envelope(SHOP_TEXT, structured=one_missing), with_pattern, settings=on
+    )
+    assert not needs_llm(patterned, with_pattern, None, on)
     no_match = {"sku": {"regex": r"never (\d+)", "group": 1}}
-    assert needs(structured(schema=SHOP, patterns=no_match), dom=one_missing)
-    assert needs(structured(schema=SHOP, learn_selectors=True), dom=found)
+    unmatched = structured(schema=SHOP, patterns=no_match)
+    patterned = run_post_patterns(
+        envelope(SHOP_TEXT, structured=one_missing), unmatched, settings=on
+    )
+    assert needs_llm(patterned, unmatched, None, on)
+    # learn_selectors needs the LLM only when a field goes to it (R8)
+    assert not needs(structured(schema=SHOP, learn_selectors=True), dom=found)
+    assert needs(structured(schema=SHOP, learn_selectors=True), dom=missing)
     assert needs(None, semantic)
     assert not needs(None, ChunkingOptions(strategy="recursive"))
     assert not needs(structured(schema=SHOP, strategy="metadata"), dom=missing)
@@ -617,3 +634,62 @@ def test_needs_llm_cases(httpserver: HTTPServer) -> None:
     # chunks still missing while chunking was asked: not done
     half = finish_post(draft, options, None, settings=on)
     assert not post_done(half, options, semantic)
+
+
+def test_patterns_run_once_per_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R10: the patterns' outcome is kept on the result; needs_llm, finish_post and apply_post
+    reuse it and run no regex again."""
+    calls: list[list[str]] = []
+    real = patterns_module.run_patterns
+
+    def counted(content: str, options: Any, fields: Any, **kwargs: Any) -> Any:
+        calls.append(list(fields))
+        return real(content, options, fields, **kwargs)
+
+    monkeypatch.setattr(post_module, "run_patterns", counted)
+    options = structured(
+        schema=SHOP,
+        patterns={
+            "sku": {"regex": r"Article no\. ([A-Z]+-\d+)", "group": 1},
+            "price": {"regex": r"never (\d+)", "group": 1},
+        },
+    )
+    settings = llm_settings()
+    draft = envelope(
+        SHOP_TEXT,
+        structured=dom_result({"title": "T", "sku": None, "price": None, "summary": None}),
+    )
+
+    patterned = run_post_patterns(draft, options, settings=settings)
+    assert calls == [["sku", "price"]]
+    assert run_post_patterns(patterned, options, settings=settings) == patterned
+    needs_llm(patterned, options, None, llm_settings(None))
+    done = finish_post(patterned, options, None, settings=settings)
+    asyncio.run(
+        apply_post(patterned, options, None, settings=settings, llm=None, store=None, owner="a")
+    )
+
+    assert calls == [["sku", "price"]]  # once
+    result = data_of(done)
+    assert result.structured is not None
+    assert result.structured.values["sku"] == "KT-77"
+    assert result.structured.sources["sku"] == "patterns"
+    assert "patterns_done" not in done.model_dump(mode="json")["data"]["structured"]
+    # the draft keeps the mark through Valkey (JSON)
+    reread = Envelope[ExtractResult].model_validate_json(patterned.model_dump_json())
+    assert post_module.patterns_ran(reread)
+
+
+def test_needs_llm_runs_no_regex(monkeypatch: pytest.MonkeyPatch, httpserver: HTTPServer) -> None:
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("needs_llm ran a pattern")
+
+    monkeypatch.setattr(post_module, "run_patterns", refuse)
+    options = structured(
+        schema=SHOP, patterns={"sku": {"regex": r"Article no\. ([A-Z]+-\d+)", "group": 1}}
+    )
+    draft = envelope(
+        SHOP_TEXT, structured=dom_result({"title": "T", "sku": None, "price": 1.0, "summary": "S"})
+    )
+
+    assert needs_llm(draft, options, None, llm_settings(httpserver))

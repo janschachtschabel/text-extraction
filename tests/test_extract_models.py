@@ -52,6 +52,8 @@ def test_result_documents_the_new_warnings() -> None:
         "learned_selectors_unavailable",
         "chunks_truncated",
         "chunking_fallback_recursive",
+        "nothing_to_learn",
+        "selector_learning_failed",
     ):
         assert f"`{warning}`" in description
 

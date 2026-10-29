@@ -494,7 +494,14 @@ class RulePage:
     the LLM's proposals with it); ``base_url`` makes ``href`` and ``src`` values absolute."""
 
     def __init__(self, html: str, base_url: str) -> None:
-        self._page = _Page(html, structured_items(html, base_url, syntaxes=False))
+        self._items = structured_items(html, base_url, syntaxes=False)
+        self._page = _Page(html, self._items)
+
+    @property
+    def too_large(self) -> bool:
+        """Whether the page has more than ``STRUCTURED_MAX_ELEMENTS`` elements: then no rule
+        runs on it, as in the DOM stage."""
+        return _too_large(self._items.tree)
 
     def value(self, compiled: CompiledSchema, name: str, rule: SelectorRule) -> Any | None:
         """The value ``rule`` finds for the field ``name``; None when it finds none (or

@@ -256,3 +256,9 @@ class StructuredResult(BaseModel):
     # What the LLM selector learning reads; the post stage clears it, so that no answer carries
     # it. A draft in Valkey keeps it, and the schema of the API does not show it.
     learn_html: SkipJsonSchema[str | None] = None
+    # Whether the post stage's patterns have run on this result (ruling R10): they run once, and
+    # the routing check and the later steps reuse their outcome. A draft keeps it; an answer
+    # never shows it (the post stage clears it, and None is not dumped).
+    patterns_done: SkipJsonSchema[bool | None] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )

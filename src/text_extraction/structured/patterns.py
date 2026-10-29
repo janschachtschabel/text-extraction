@@ -4,8 +4,12 @@ Patterns run in the post stage on the final content (after PII: masked content, 
 ``regex`` module, so that each pattern has a time limit: ``STRUCTURED_REGEX_TIMEOUT_SECONDS``
 for all of its matches together. A pattern that runs into it leaves its field missing with the
 warning ``pattern_timeout`` (no field name in it); a catastrophic caller pattern such as
-``(a+)+$`` therefore costs at most that time (Review Focus 2). The search releases the GIL
-(``concurrent``), so that the post stage can run it in a thread.
+``(a+)+$`` therefore costs at most that time (Review Focus 2). On top of that, all patterns of
+one result share ``PATTERNS_TOTAL_BUDGET_SECONDS`` (2 s, ruling R10): each pattern gets what is
+left of it, and the patterns after it is spent leave their fields missing with
+``pattern_timeout``, so 50 such patterns cost 2 s, not 25. The post stage runs the patterns of
+a result once and keeps their outcome on it (``post.run_post_patterns``). The search releases
+the GIL (``concurrent``), so that it can run in a thread.
 
 A rule's ``group`` (number or name) of each match is its value; ``all`` takes every match (the
 default for an array field), else the first. Blank values are skipped. As for selector rules
@@ -20,6 +24,7 @@ bounds of the DOM stage's tables. Nothing here logs a pattern, a value or the co
 """
 
 import re
+import time
 from collections.abc import Iterator, Sequence
 from typing import Any, Final
 
@@ -39,6 +44,7 @@ from text_extraction.structured.schema import CompiledSchema, coerce
 from text_extraction.structured.types import PatternRule, StructuredOptions, Table
 
 __all__ = [
+    "PATTERNS_TOTAL_BUDGET_SECONDS",
     "PATTERN_TIMEOUT_WARNING",
     "VALUE_INVALID_WARNING",
     "markdown_tables",
@@ -47,6 +53,7 @@ __all__ = [
 ]
 
 PATTERN_TIMEOUT_WARNING: Final = "pattern_timeout"
+PATTERNS_TOTAL_BUDGET_SECONDS: Final = 2.0  # all patterns of one result together
 VALUE_INVALID_WARNING: Final = "structured_value_invalid"
 _FLAGS: Final = {"i": regex.IGNORECASE, "m": regex.MULTILINE, "s": regex.DOTALL}
 
@@ -91,24 +98,35 @@ def _matches(
 
 
 def run_patterns(
-    content: str, options: StructuredOptions, fields: Sequence[str], *, timeout: float
+    content: str,
+    options: StructuredOptions,
+    fields: Sequence[str],
+    *,
+    timeout: float,
+    budget: float = PATTERNS_TOTAL_BUDGET_SECONDS,
 ) -> tuple[dict[str, Any], list[str]]:
     """The values the pattern rules of ``fields`` find in ``content`` (fields without a rule,
     or without a value, are left out) and the warnings (``pattern_timeout``,
     ``structured_truncated``, ``structured_value_invalid``). ``timeout`` is each pattern's
-    limit in seconds. Never raises for a pattern."""
+    limit in seconds, ``budget`` the limit of all of them together. Never raises for a
+    pattern."""
     compiled = options.compiled
     values: dict[str, Any] = {}
     warnings: list[str] = []
     if compiled is None:
         return values, warnings
+    deadline = time.monotonic() + budget
     for name in fields:
         rule = options.patterns.get(name)
         if rule is None or name not in compiled.fields:
             continue
         take_all = rule.all if rule.all is not None else _is_array(compiled, name)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            _note(warnings, PATTERN_TIMEOUT_WARNING)
+            continue
         try:
-            found, truncated = _matches(content, rule, take_all, timeout)
+            found, truncated = _matches(content, rule, take_all, min(timeout, left))
         except TimeoutError:
             _note(warnings, PATTERN_TIMEOUT_WARNING)
             continue

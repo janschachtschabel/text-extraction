@@ -4,15 +4,22 @@ caller's own key (Review Focus 1)."""
 
 import asyncio
 import json
+import threading
 from typing import Any
 
+import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from redis.exceptions import RedisError
 
 from text_extraction.llm.client import LlmClient
-from text_extraction.structured.dom import clean_html_for_learning
+from text_extraction.structured.dom import (
+    SELECTORS_SKIPPED_WARNING,
+    STRUCTURED_MAX_ELEMENTS,
+    RulePage,
+    clean_html_for_learning,
+)
 from text_extraction.structured.learn import learn
 from text_extraction.structured.post import apply_post
 from text_extraction.structured.store import SelectorStore, selector_host
@@ -237,7 +244,13 @@ class BrokenStore(SelectorStore):
         raise RedisError("down")
 
 
-def learning_post(server: HTTPServer, store: SelectorStore, *, url: str | None = URL) -> Any:
+def learning_post(
+    server: HTTPServer,
+    store: SelectorStore,
+    *,
+    url: str | None = URL,
+    learn_html: str | None = None,
+) -> Any:
     options = StructuredOptions.model_validate(
         {"schema": schema(name=STRING), "strategy": "llm", "learn_selectors": True}
     )
@@ -245,7 +258,9 @@ def learning_post(server: HTTPServer, store: SelectorStore, *, url: str | None =
         "# Blue Kettle",
         url=url,
         structured=dom_result(
-            {"name": None}, sources={}, learn_html=clean_html_for_learning(PAGE, 128_000)
+            {"name": None},
+            sources={},
+            learn_html=learn_html or clean_html_for_learning(PAGE, 128_000),
         ),
     )
 
@@ -292,12 +307,55 @@ def test_upload_learns_nothing_without_a_host(httpserver: HTTPServer) -> None:
     assert len(chat_requests(httpserver)) == 1  # the extraction only
 
 
-def test_failed_learning_call_is_partial_llm_failed(httpserver: HTTPServer) -> None:
+def test_failed_learning_call_keeps_the_status(httpserver: HTTPServer) -> None:
+    """R9: learning is a side effect; the values asked for are complete."""
     serve_chat(httpserver, answer({"name": "Blue Kettle"}), completion("no json"))
 
     done = learning_post(httpserver, SelectorStore(FakeAsyncRedis(), ttl_seconds=60))
 
-    assert done.status == "partial"
-    assert done.error.code == "llm_failed"
+    assert done.status == "success"
+    assert done.error is None
     assert done.data.structured.values == {"name": "Blue Kettle"}  # the values stay
-    assert done.data.structured.learned == LearnReport(stored=[], rejected=[])
+    assert done.data.structured.learned == LearnReport(stored=[], rejected=["name"])
+    assert done.data.warnings == ["selector_learning_failed"]
+    assert done.data.structured.llm.calls == 1  # the extraction's; the failed calls' time counts
+
+
+def test_learning_skipped_on_a_page_over_the_element_cap(httpserver: HTTPServer) -> None:
+    """I2: proposals run on learn_html only within STRUCTURED_MAX_ELEMENTS, like every other
+    selector run; over it nothing is learned and no learning call is made."""
+    serve_chat(httpserver, answer({"name": "Blue Kettle"}))
+    huge = "<html><body>" + "<i>x</i>" * (STRUCTURED_MAX_ELEMENTS + 1) + "</body></html>"
+
+    done = learning_post(
+        httpserver, SelectorStore(FakeAsyncRedis(), ttl_seconds=60), learn_html=huge
+    )
+
+    assert done.status == "success"
+    assert done.data.structured.learned == LearnReport(stored=[], rejected=["name"])
+    assert done.data.warnings == [SELECTORS_SKIPPED_WARNING]
+    assert len(chat_requests(httpserver)) == 1  # the extraction only
+
+
+def test_proposals_are_checked_off_the_event_loop(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I2: parsing learn_html and running the proposed selectors happens in a thread."""
+    threads: list[bool] = []
+    real = RulePage.value
+
+    def spy(self: RulePage, *args: Any) -> Any:
+        threads.append(threading.current_thread() is threading.main_thread())
+        return real(self, *args)
+
+    monkeypatch.setattr(RulePage, "value", spy)
+    serve_chat(
+        httpserver,
+        answer({"name": "Blue Kettle"}),
+        answer({"name": {"css": "h1.title", "attr": None}}),
+    )
+
+    done = learning_post(httpserver, SelectorStore(FakeAsyncRedis(), ttl_seconds=60))
+
+    assert done.data.structured.learned == LearnReport(stored=["name"], rejected=[])
+    assert threads == [False]

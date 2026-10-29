@@ -11,6 +11,7 @@ from text_extraction.structured.dom import (
 )
 from text_extraction.structured.patterns import (
     PATTERN_TIMEOUT_WARNING,
+    PATTERNS_TOTAL_BUDGET_SECONDS,
     markdown_tables,
     run_patterns,
     tables_from_markdown,
@@ -108,6 +109,25 @@ def test_catastrophic_pattern_times_out() -> None:
     assert elapsed < 1.0
     assert values == {"fine": "b"}
     assert warnings == [PATTERN_TIMEOUT_WARNING]  # the field's name is not in it
+
+
+def test_patterns_share_a_total_budget() -> None:
+    """R10: on top of each pattern's limit, all patterns of a result share a total budget;
+    the patterns after it leave their fields missing with ``pattern_timeout``."""
+    assert PATTERNS_TOTAL_BUDGET_SECONDS == 2.0
+    evil = {f"evil{number}": {"regex": r"(a+)+$"} for number in range(5)}
+    opts = options(
+        {**{name: STRING for name in evil}, "fine": STRING}, {**evil, "fine": {"regex": "b"}}
+    )
+    content = "a" * 50_000 + "b"
+
+    started = time.monotonic()
+    values, warnings = run_patterns(content, opts, [*evil, "fine"], timeout=0.5, budget=0.6)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0  # not 5 x 0.5 s
+    assert values == {}  # "fine" came after the budget was spent
+    assert warnings == [PATTERN_TIMEOUT_WARNING]
 
 
 def test_pattern_matches_capped_per_field() -> None:

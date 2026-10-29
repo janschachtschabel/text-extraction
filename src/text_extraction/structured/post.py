@@ -5,14 +5,20 @@ post stage reads ``data.content`` as it is now (masked content gives masked valu
 D3 a) and runs, in this order:
 
 1. ``patterns`` (``patterns.py``): strategy ``patterns`` for every field with a rule, ``auto``
-   for the fields still missing.
+   for the fields still missing. They run once per result, within a total budget of 2 s, and
+   their outcome stays on the result (``patterns_done``, ruling R10): ``run_post_patterns``
+   runs this step alone before routing, ``needs_llm`` runs no regex, and the later steps reuse
+   it.
 2. The LLM (``llm_extract``): strategy ``llm`` for every field, ``auto`` for the fields still
    missing (so the order of ``auto`` is selectors, metadata, patterns, LLM: ruling R3). The
    request carries only those fields' strict schema; values are only ever taken from the answer
    as the compiled schema validates it, for the fields asked (Review Focus 1).
 3. ``learn_selectors`` (``learn.py``) for the values the LLM found; the kept rules are stored
    for the caller's own key (``owner``), the request URL's host and the schema (S8), as the
-   pipeline reads them.
+   pipeline reads them. With no field for the LLM there is nothing to learn: no LLM call, the
+   warning ``nothing_to_learn`` (R8). Learning is a side effect: a failed learning call keeps
+   the status, with the warning ``selector_learning_failed`` (R9); a page over
+   ``STRUCTURED_MAX_ELEMENTS`` learns nothing (``selectors_skipped_large_page``).
 4. Tables from Markdown pipe tables for results without a DOM stage (documents, text), when
    ``tables`` is asked.
 5. Chunking (S10) of the content; ``semantic`` embeds with the LLM client.
@@ -23,20 +29,22 @@ D3 a) and runs, in this order:
 **Two entry points.** ``apply_post`` (async) runs it with an LLM client (the llm worker,
 ruling S14). ``finish_post`` (sync, no LLM) is the guard at every finish point: an envelope
 whose post stage has not run gets it without the LLM. LLM work that was asked and not done
-(the extraction, and with it learning, which only learns the LLM's values; ``semantic``)
+(the extraction, and with it learning, which only learns the LLM's values, or ``semantic``)
 turns a ``success`` into ``partial`` with ``llm_failed``, retryable (``BUSY_MESSAGE`` for
 ``reason="busy"``, else ``NOT_RUN_MESSAGE``); its fields stay in ``missing`` and
 ``semantic`` falls back to ``recursive`` with the warning ``chunking_fallback_recursive``.
 ``auto`` on a service without an LLM is no failure: the fields stay missing, with the warning
 ``llm_unavailable``. A failing LLM call in ``apply_post`` does the same with the call's
-``LlmError``. A result that already is ``partial`` or ``failed`` keeps its status and error.
-The content always stays.
+``LlmError`` (a learning call excepted, R9). A result that already is ``partial`` or
+``failed`` keeps its status and error. The content always stays.
 
 An envelope without data, or ``failed`` without content, gets no post stage (``structured`` and
 ``chunks`` stay null). Empty content gives ``chunks: []`` and every field missing, without an
-LLM call. Patterns, chunking and the fallback run in a thread in ``apply_post`` (CPU-bound);
-``finish_post`` runs them where it is called. The LLM's time is added to ``timings.llm_ms``.
-Nothing here logs the content, a value, a pattern, a selector or a key.
+LLM call. Patterns, chunking, the fallback and the check of learned selectors run in a thread
+in ``apply_post`` (CPU-bound); the sync ``run_post_patterns``, ``needs_llm`` (cheap) and
+``finish_post`` run where they are called, so callers on an event loop call
+``run_post_patterns`` and ``finish_post`` via ``asyncio.to_thread``. The LLM's time is added
+to ``timings.llm_ms``. Nothing here logs the content, a value, a pattern, a selector or a key.
 """
 
 import asyncio
@@ -57,8 +65,8 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.llm.client import LlmClient, LlmError, truncate_input
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.settings import Settings, llm_available
-from text_extraction.structured.dom import TABLES_TRUNCATED_WARNING
-from text_extraction.structured.learn import learn
+from text_extraction.structured.dom import SELECTORS_SKIPPED_WARNING, TABLES_TRUNCATED_WARNING
+from text_extraction.structured.learn import LearnPageTooLargeError, learn
 from text_extraction.structured.patterns import VALUE_INVALID_WARNING, markdown_tables, run_patterns
 from text_extraction.structured.prompts import document_message, extraction_system
 from text_extraction.structured.schema import CompiledSchema
@@ -78,12 +86,16 @@ __all__ = [
     "BUSY_MESSAGE",
     "LLM_INPUT_TRUNCATED_WARNING",
     "LLM_UNAVAILABLE_WARNING",
+    "NOTHING_TO_LEARN_WARNING",
     "NOT_RUN_MESSAGE",
+    "SELECTOR_LEARNING_FAILED_WARNING",
     "apply_post",
     "finish_post",
     "llm_extract",
     "needs_llm",
+    "patterns_ran",
     "post_done",
+    "run_post_patterns",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -92,6 +104,8 @@ BUSY_MESSAGE: Final = "The LLM step is busy; retry later."
 NOT_RUN_MESSAGE: Final = "The LLM step did not run; retry later."
 LLM_UNAVAILABLE_WARNING: Final = "llm_unavailable"
 LLM_INPUT_TRUNCATED_WARNING: Final = "llm_input_truncated"
+NOTHING_TO_LEARN_WARNING: Final = "nothing_to_learn"
+SELECTOR_LEARNING_FAILED_WARNING: Final = "selector_learning_failed"
 _EMBEDDINGS_MISMATCH: Final = "The LLM embeddings did not match the request."
 
 
@@ -175,10 +189,14 @@ def needs_llm(
     chunking: ChunkingOptions | None,
     settings: Settings,
 ) -> bool:
-    """Whether the post stage of this envelope needs the LLM (S5): the service has one, the
-    stage has not run, there is content, and strategy ``llm``; or ``auto`` with fields missing
-    after the DOM stage and ``patterns`` (which this runs to find out); or ``learn_selectors``;
-    or chunking ``semantic``."""
+    """Whether the post stage of this envelope needs the LLM (S5, rulings R8, R10): the service
+    has one, the stage has not run, there is content, and strategy ``llm``; or ``auto`` with
+    fields missing after the DOM stage and the patterns; or chunking ``semantic``.
+    ``learn_selectors`` needs the LLM only through those (it learns from the LLM's values).
+
+    It runs no regex: the patterns' outcome is the one ``run_post_patterns`` kept on the result.
+    Before they ran, a field a pattern might fill counts as missing; so call
+    ``run_post_patterns`` (off the event loop) first, to send fewer results to the LLM."""
     data = envelope.data
     if data is None or not llm_available(settings) or post_done(envelope, structured, chunking):
         return False
@@ -190,19 +208,45 @@ def needs_llm(
     compiled = structured.compiled if structured is not None else None
     if structured is None or compiled is None or _structured_done(data, structured):
         return False
-    if structured.strategy == "llm" or structured.learn_selectors:
+    if structured.strategy == "llm":
         return True
-    if structured.strategy != "auto":
-        return False
-    missing = _missing(data, compiled)
-    if not missing:
-        return False
-    if any(name not in structured.patterns for name in missing):
-        return True
-    found, _ = run_patterns(
-        content, structured, missing, timeout=settings.structured_regex_timeout_seconds
-    )
-    return any(name not in found for name in missing)
+    return structured.strategy == "auto" and bool(_missing(data, compiled))
+
+
+def patterns_ran(envelope: Envelope[ExtractResult]) -> bool:
+    """Whether the post stage's patterns have run on this envelope's result (R10)."""
+    data = envelope.data
+    return data is not None and data.structured is not None and bool(data.structured.patterns_done)
+
+
+def run_post_patterns(
+    envelope: Envelope[ExtractResult],
+    structured: StructuredOptions | None,
+    *,
+    settings: Settings,
+) -> Envelope[ExtractResult]:
+    """Step 1 of the post stage alone: the patterns, run once and kept on the result (still
+    ``stage: "dom"``, ``patterns_done`` set), so that ``needs_llm`` can route on their outcome
+    and the later steps reuse it (R10). Sync and CPU-bound (up to
+    ``PATTERNS_TOTAL_BUDGET_SECONDS``): call it off the event loop. An envelope whose patterns
+    ran, whose post stage ran, or that gets none comes back as it is."""
+    data = envelope.data
+    if (
+        data is None
+        or structured is None
+        or structured.compiled is None
+        or patterns_ran(envelope)
+        or post_done(envelope, structured, None)
+    ):
+        return envelope
+    work = _Post.start(envelope, data, structured, None, settings)
+    if work.result is None:
+        return envelope
+    work.run_patterns()
+    warnings = list(data.warnings)
+    warnings.extend(warning for warning in work.warnings if warning not in warnings)
+    update = {"structured": work.result, "warnings": warnings}
+    return envelope.model_copy(update={"data": data.model_copy(update=update)})
 
 
 # --- the work ----------------------------------------------------------------------------------
@@ -285,17 +329,20 @@ class _Post:
         return [name for name in names if name in self.options.patterns]
 
     def run_patterns(self) -> None:
-        fields = self.pattern_fields()
-        if not fields or self.options is None:
+        """Step 1, once per result: a result whose patterns ran keeps their outcome."""
+        if self.result is None or self.result.patterns_done:
             return
-        values, warnings = run_patterns(
-            self.content,
-            self.options,
-            fields,
-            timeout=self.settings.structured_regex_timeout_seconds,
-        )
-        self.note(*warnings)
-        self.found(values, "patterns")
+        fields = self.pattern_fields()
+        if fields and self.options is not None:
+            values, warnings = run_patterns(
+                self.content,
+                self.options,
+                fields,
+                timeout=self.settings.structured_regex_timeout_seconds,
+            )
+            self.note(*warnings)
+            self.found(values, "patterns")
+        self.result.patterns_done = True
 
     # 2. the LLM
     def llm_fields(self) -> list[str]:
@@ -416,6 +463,7 @@ class _Post:
                 "llm": llm,
                 "stage": "done",
                 "learn_html": None,
+                "patterns_done": None,
             }
         )
 
@@ -477,11 +525,14 @@ def finish_post(
     message = BUSY_MESSAGE if reason == "busy" else NOT_RUN_MESSAGE
     if work.result is not None:
         work.run_patterns()
-        if work.llm_fields():
+        asked = work.llm_fields()
+        if asked:
             optional = structured is not None and structured.strategy == "auto"
             work.llm_not_done(message, optional=optional)
         if structured is not None and structured.learn_selectors:
             work.result.learned = LearnReport(stored=[], rejected=[])
+            if not asked:
+                work.note(NOTHING_TO_LEARN_WARNING)
         work.tables()
     if work.wants_chunks():
         semantic = work.chunking is not None and work.chunking.strategy == "semantic"
@@ -562,16 +613,25 @@ async def _learn(work: _Post, llm: LlmClient, store: SelectorStore | None, owner
     compiled = work.compiled
     html = result.learn_html
     host = selector_host(work.data.url) if work.data.url else None
-    if not values or compiled is None or not html or store is None or not owner or host is None:
+    if not values:
+        if work.failure is None:  # no field went to the LLM, or it found none of them (R8)
+            work.note(NOTHING_TO_LEARN_WARNING)
+        return
+    if compiled is None or not html or store is None or not owner or host is None:
         return
     started = time.perf_counter()
     try:
         rules, report, usage = await learn(
             llm, html, compiled, values, base_url=work.data.final_url or work.data.url
         )
-    except LlmError as error:
+    except LearnPageTooLargeError:
+        work.note(SELECTORS_SKIPPED_WARNING)
+        result.learned = LearnReport(stored=[], rejected=list(values))
+        return
+    except LlmError:  # learning is a side effect: the values stand (R9)
         work.llm_ms += round((time.perf_counter() - started) * 1000)
-        work.fail(error)
+        work.note(SELECTOR_LEARNING_FAILED_WARNING)
+        result.learned = LearnReport(stored=[], rejected=list(values))
         return
     work.used(usage, started)
     if rules:

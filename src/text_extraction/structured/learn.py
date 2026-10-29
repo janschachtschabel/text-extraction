@@ -12,8 +12,15 @@ whole page, which is not the value: it is rejected. Nothing from the answer is f
 executed; a proposal that fails a check is rejected without a repair call. Storing the kept
 rules (for the caller's own key, S8) is the post stage's part. Selectors and values are never
 logged.
+
+Parsing ``learn_html`` and running the proposals is CPU work on HTML a page shaped and with
+selectors the LLM chose: it runs in a thread, never on the event loop, and only on a page of at
+most ``STRUCTURED_MAX_ELEMENTS`` elements, like every other selector run. A bigger page raises
+``LearnPageTooLargeError`` before the LLM call (the post stage reports
+``selectors_skipped_large_page``).
 """
 
+import asyncio
 from collections.abc import Mapping
 from functools import partial
 from typing import Any, Final
@@ -28,7 +35,11 @@ from text_extraction.structured.prompts import LEARN_SYSTEM, learn_message
 from text_extraction.structured.schema import CompiledSchema
 from text_extraction.structured.types import LearnReport, SelectorRule
 
-__all__ = ["learn"]
+__all__ = ["LearnPageTooLargeError", "learn"]
+
+
+class LearnPageTooLargeError(Exception):
+    """``learn_html`` has more than ``STRUCTURED_MAX_ELEMENTS`` elements: nothing is learned."""
 
 
 class _Proposal(BaseModel, extra="ignore"):
@@ -81,6 +92,31 @@ def _rule(proposal: _Proposal | None) -> SelectorRule | None:
         return None
 
 
+def _open(html: str, base_url: str) -> RulePage | None:
+    """``html`` parsed for the checks; None when it is over ``STRUCTURED_MAX_ELEMENTS``."""
+    page = RulePage(html, base_url)
+    return None if page.too_large else page
+
+
+def _kept(
+    page: RulePage,
+    compiled: CompiledSchema,
+    asked: Mapping[str, Any],
+    proposals: Mapping[str, _Proposal | None],
+) -> tuple[dict[str, SelectorRule], list[str]]:
+    """The proposals that reproduce their value on ``page``, and the fields rejected."""
+    kept: dict[str, SelectorRule] = {}
+    rejected: list[str] = []
+    for name, value in asked.items():
+        rule = _rule(proposals.get(name))
+        found = page.value(compiled, name, rule) if rule is not None else None
+        if rule is not None and found is not None and _normal(found) == _normal(value):
+            kept[name] = rule
+        else:
+            rejected.append(name)
+    return kept, rejected
+
+
 async def learn(
     client: LlmClient,
     html: str,
@@ -93,26 +129,21 @@ async def learn(
     (``learn_html``), the report (``stored`` names the kept fields, which the post stage still
     has to store; ``rejected`` the others) and the LLM's usage. ``base_url`` is the page's
     final URL, against which ``href`` and ``src`` values are made absolute. No call without a
-    value. Raises ``LlmError`` when the call fails."""
+    value. Raises ``LearnPageTooLargeError`` (before any call) for a page over
+    ``STRUCTURED_MAX_ELEMENTS`` elements, ``LlmError`` when the call fails."""
     fields = [name for name in compiled.fields if values.get(name) is not None]
     if not fields:
         empty = LlmUsage(model="", calls=0, prompt_tokens=0, completion_tokens=0)
         return {}, LearnReport(stored=[], rejected=[]), empty
     asked = {name: values[name] for name in fields}
+    page = await asyncio.to_thread(_open, html, base_url or "")
+    if page is None:
+        raise LearnPageTooLargeError
     proposals, usage = await client.chat_json(
         LEARN_SYSTEM,
         learn_message(html, asked),
         _schema(fields),
         validate=partial(_proposals, fields),
     )
-    page = RulePage(html, base_url or "")
-    kept: dict[str, SelectorRule] = {}
-    rejected: list[str] = []
-    for name in fields:
-        rule = _rule(proposals.get(name))
-        found = page.value(compiled, name, rule) if rule is not None else None
-        if rule is not None and found is not None and _normal(found) == _normal(asked[name]):
-            kept[name] = rule
-        else:
-            rejected.append(name)
+    kept, rejected = await asyncio.to_thread(_kept, page, compiled, asked, proposals)
     return kept, LearnReport(stored=list(kept), rejected=rejected), usage
