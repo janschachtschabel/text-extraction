@@ -306,6 +306,9 @@ _NUMBER = re.compile(
 )
 
 
+_MAX_NUMBER_DIGITS = 60  # longer is no number a page states (and int() refuses 4,300 digits)
+
+
 def _grouped(text: str, separator: str) -> bool:
     return re.fullmatch(rf"\d{{1,3}}(?:{re.escape(separator)}\d{{3}})+", text) is not None
 
@@ -318,7 +321,7 @@ def _parse_number(text: str, *, integer: bool) -> int | float | None:
     if match is None:
         return None
     token = re.sub(f"[{_GROUPING}]", "", match["digits"])
-    if token[-1] in ".,":
+    if token[-1] in ".," or len(token) > _MAX_NUMBER_DIGITS:
         return None
     dots, commas = token.count("."), token.count(",")
     if dots and commas:
@@ -347,10 +350,13 @@ def _parse_number(text: str, *, integer: bool) -> int | float | None:
             digits = head + tail
         else:
             digits = f"{head}.{tail}"
-    number = float(digits)
-    if match["sign"] in tuple(_MINUS):
-        number = -number
-    return int(number) if number.is_integer() and "." not in digits else number
+    negative = match["sign"] in tuple(_MINUS)
+    whole, point, fraction = digits.partition(".")
+    # Exact for an integer: no detour through float, which loses digits above 2**53. A fraction
+    # of zeros is still an integer (``1.234,0``).
+    if not point or (integer and not fraction.strip("0")):
+        return -int(whole) if negative else int(whole)
+    return -float(digits) if negative else float(digits)
 
 
 def _number(value: Any, *, integer: bool) -> int | float | None:
@@ -364,8 +370,8 @@ def _number(value: Any, *, integer: bool) -> int | float | None:
         isinstance(value, float) and not math.isfinite(value)
     ):
         return None
-    if integer:
-        return int(value) if float(value).is_integer() else None
+    if integer and not isinstance(value, int):
+        return int(value) if value.is_integer() else None
     return value
 
 

@@ -221,6 +221,15 @@ def test_coerce_string_number_boolean_list_and_misfit() -> None:
     assert coerce(compiled, "stock", 12.0) == 12
     assert coerce(compiled, "stock", "1.234,0") == 1234
     assert coerce(compiled, "stock", "12.5") is None
+    # Exact, not through float (which would give 12345678901234567168).
+    assert coerce(compiled, "stock", "12345678901234567890") == 12345678901234567890
+    assert coerce(compiled, "stock", "-12345678901234567891") == -12345678901234567891
+    assert coerce(compiled, "stock", 12345678901234567891) == 12345678901234567891
+    assert coerce(compiled, "stock", "1.234.567") == 1234567
+    assert coerce(compiled, "stock", "1.234.567 Stück") == 1234567
+    assert coerce(compiled, "stock", "12,0") == 12
+    assert coerce(compiled, "stock", "9" * 61) is None
+    assert coerce(compiled, "price", "12345678901234567890") == 12345678901234567890
     assert coerce(compiled, "stock", True) is None
     # boolean
     for yes in ("true", "Yes", "JA", True):
