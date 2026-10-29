@@ -5,7 +5,7 @@ fakeredis with the real job store and queues. The browser pool's behaviour is co
 import asyncio
 from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
@@ -18,10 +18,12 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
+from text_extraction.pii_dispatch import PiiDispatcher
 from text_extraction.pipeline_documents import DocumentInput, DocumentInputMeta, OcrNeeded
 from text_extraction.pool_dispatch import PoolDispatcher
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
+from text_extraction.structured.types import StructuredOptions
 
 ALICE = Principal(name="alice", role="user", rate_limit_per_minute=None)
 SETTINGS = Settings(auth_mode="none", docling_enabled=True)
@@ -206,3 +208,124 @@ async def test_dispatch_counters_of_two_pools_share_a_registry() -> None:
         == 0
     )
     assert parts.count("answered") == 0
+
+
+# --- the caller's LLM key and the longer waits (rulings S9, S13) --------------------------------
+
+LLM_OPTIONS = JobOptions(
+    compliance="enforce",
+    structured=StructuredOptions.model_validate(
+        {"schema": {"type": "object", "properties": {"a": {"type": "string"}}}, "strategy": "llm"}
+    ),
+)
+
+
+@scenario
+async def test_a_new_job_keeps_the_callers_llm_key() -> None:
+    parts = Parts()
+    dispatcher = PoolDispatcher(
+        "docling", parts.store, parts.queue, SETTINGS, CollectorRegistry(), outcomes=()
+    )
+
+    job_id = await dispatcher.submit_job("extract", OPTIONS, ALICE, URL, llm_key="sk-caller")
+    without = await dispatcher.submit_job("extract", OPTIONS, ALICE, URL)
+
+    assert await parts.store.llm_key(job_id) == "sk-caller"
+    assert await parts.store.llm_key(without) is None
+
+
+@scenario
+async def test_a_reused_job_keeps_the_key_it_has() -> None:
+    parts = Parts()
+    p1 = await parts.store.create("extract", ALICE, OPTIONS, [URL])
+    await parts.store.put_llm_key(p1, "sk-p1")
+    await parts.store.mark_running(p1, lease_seconds=60)
+    dispatcher = PoolDispatcher(
+        "docling", parts.store, parts.queue, SETTINGS, CollectorRegistry(), outcomes=()
+    )
+
+    await dispatcher.submit_job("extract", OPTIONS, ALICE, URL, job_id=p1, llm_key="sk-other")
+
+    assert await parts.store.llm_key(p1) == "sk-p1"
+
+
+@scenario
+async def test_a_new_job_with_a_key_is_deleted_when_the_dispatch_fails() -> None:
+    parts = Parts()
+    dispatcher = PoolDispatcher(
+        "docling", parts.store, parts.queue, SETTINGS, CollectorRegistry(), outcomes=()
+    )
+
+    async def refuse(job_id: str) -> None:
+        raise OpenLimitReached
+
+    with pytest.raises(OpenLimitReached):
+        await dispatcher.submit_job(
+            "extract", OPTIONS, ALICE, URL, prepare=refuse, llm_key="sk-caller"
+        )
+
+    assert await parts.valkey.keys("job:*") == []  # the key went with the job
+
+
+@scenario
+async def test_the_docling_dispatcher_passes_the_key_on() -> None:
+    parts = Parts()
+
+    job_id = await parts.docling.submit(
+        "extract", LLM_OPTIONS, ALICE, URL, needed(), llm_key="sk-caller"
+    )
+
+    assert await parts.store.llm_key(job_id) == "sk-caller"
+
+
+def test_pool_waits_are_longer_with_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A browser, Docling or nlp job of a request that may need the LLM completes only once the
+    llm worker wrote its result: the request waits ``LLM_SYNC_WAIT_SECONDS`` longer for it."""
+    calls: list[dict[str, Any]] = []
+
+    async def wait_for(self: Any, job_id: str, **limits: Any) -> None:
+        calls.append(limits)
+
+    for dispatcher_class in (BrowserDispatcher, DoclingDispatcher, PiiDispatcher):
+        monkeypatch.setattr(dispatcher_class, "wait_for", wait_for)
+    settings = Settings(
+        auth_mode="none",
+        browser_timeout_seconds=40,
+        docling_sync_wait_seconds=10,
+        pii_sync_wait_seconds=20,
+        llm_sync_wait_seconds=30,
+    )
+    store = cast(JobStore, None)
+    browser = BrowserDispatcher(store, cast(Any, None), settings)
+    docling = DoclingDispatcher(store, cast(Any, None), settings)
+    nlp = PiiDispatcher(store, cast(Any, None), settings)
+
+    async def scenario_() -> None:
+        for llm in (False, True):
+            await browser.wait("j", unblock=False, detached=lambda: False, pii=True, llm=llm)
+            await docling.wait("j", detached=lambda: False, pii=True, llm=llm)
+            await nlp.wait("j", extra_seconds=5, detached=lambda: False, llm=llm)
+
+    asyncio.run(scenario_())
+    plain_browser, plain_docling, plain_nlp, llm_browser, llm_docling, llm_nlp = calls
+    assert llm_browser["result_within"] == plain_browser["result_within"] + 30
+    assert llm_browser["claim_within"] == plain_browser["claim_within"]
+    assert llm_docling["total_within"] == plain_docling["total_within"] + 30
+    assert llm_docling["claim_within"] == plain_docling["claim_within"]
+    assert plain_nlp["total_within"] == 25
+    assert llm_nlp["total_within"] == 55
+    assert llm_nlp["claim_within"] == 55
+
+
+def test_wants_llm_of_the_stored_options() -> None:
+    settings = Settings(auth_mode="none", llm_enabled=True)
+    on = PoolDispatcher(
+        "docling", cast(JobStore, None), cast(Any, None), settings, None, outcomes=()
+    )
+    off = PoolDispatcher(
+        "docling", cast(JobStore, None), cast(Any, None), SETTINGS, None, outcomes=()
+    )
+
+    assert on.wants_llm(LLM_OPTIONS)
+    assert not on.wants_llm(OPTIONS)
+    assert not off.wants_llm(LLM_OPTIONS)  # the service has no LLM

@@ -60,6 +60,7 @@ from text_extraction.jobs import JobLost, JobStore
 from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import wants_llm
 from text_extraction.tracing import current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -229,6 +230,11 @@ class PoolDispatcher:
     def count(self, outcome: str) -> None:
         self._outcomes.labels(outcome=outcome).inc()
 
+    def wants_llm(self, options: JobOptions) -> bool:
+        """Whether a job with these options may end at the llm worker, so that a request waiting
+        for this pool waits ``LLM_SYNC_WAIT_SECONDS`` longer (ruling S13)."""
+        return wants_llm(options.structured, options.chunking, self._settings)
+
     async def submit_job(
         self,
         kind: JobKind,
@@ -240,11 +246,14 @@ class PoolDispatcher:
         draft: Envelope[ExtractResult] | None = None,
         secrets: BrowserSecrets | None = None,
         prepare: Callable[[str], Awaitable[None]] | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue item 0 of a new job (or of ``job_id``, the request's P1 job) on the pool and
         return the job's id. ``prepare`` runs before the draft is stored (a Docling job's input);
-        ``draft`` is the result the worker compares its own with. Valkey errors propagate, and so
-        does whatever ``prepare`` raises; a new job is deleted again first."""
+        ``draft`` is the result the worker compares its own with. ``llm_key`` is the caller's
+        ``X-LLM-Api-Key`` of a request that may need the LLM: a new job keeps it for the llm
+        worker (the request's P1 job has it already). Valkey errors propagate, and so does
+        whatever ``prepare`` raises; a new job is deleted again first."""
         created = job_id is None
         if job_id is None:
             try:
@@ -262,6 +271,8 @@ class PoolDispatcher:
         elif secrets is not None and not secrets.empty():
             raise ValueError("a reused job cannot take secrets")
         try:
+            if created and llm_key is not None:
+                await self._store.put_llm_key(job_id, llm_key)
             if prepare is not None:
                 await prepare(job_id)
             # Draft first: a worker may claim the item as soon as it is queued.

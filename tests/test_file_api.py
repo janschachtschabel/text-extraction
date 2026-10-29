@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from fakeredis import FakeAsyncRedis
+from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
@@ -34,6 +34,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.fetch import Fetcher
 from text_extraction.file_api import sanitize_file_name
 from text_extraction.file_models import FileForm
+from text_extraction.jobs import JobStore
 from text_extraction.pipeline import create_pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
 from text_extraction.pipeline_media import (
@@ -1346,3 +1347,92 @@ def test_xpath_selectors_need_an_admin_key(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["message"] == "XPath selectors need an admin key; use CSS."
+
+
+# --- the caller's LLM key and the LLM wait (rulings S9, S12, S13) ------------------------------
+
+LLM_KEY = "sk-llm-caller-key-9c2b"
+LLM_STRUCTURED = {
+    "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+    "strategy": "llm",
+}
+
+
+def llm_app(**overrides: Any) -> tuple[FastAPI, FakeServer]:
+    server = FakeServer()
+    settings = make_settings(llm_enabled=True, **overrides)
+    return create_public_app(settings, FakeAsyncRedis(server=server), CollectorRegistry()), server
+
+
+def stored_keys(server: FakeServer, pattern: str) -> list[str]:
+    async def scan() -> list[str]:
+        valkey = FakeAsyncRedis(server=server)
+        return sorted(
+            key.decode() if isinstance(key, bytes) else key for key in await valkey.keys(pattern)
+        )
+
+    return asyncio.run(scan())
+
+
+def test_the_llm_key_is_stored_with_the_uploads_job_and_never_shown() -> None:
+    """``wait_seconds=0`` turns the upload into a P1 job at once: it carries the caller's key
+    for the llm worker."""
+    app, server = llm_app()
+    with TestClient(app) as test_client, capture_logs() as logs:
+        response = upload(
+            test_client,
+            b"<html><body><h1>Title</h1></body></html>",
+            "page.html",
+            "text/html",
+            headers={**AUTH, "X-LLM-Api-Key": LLM_KEY},
+            form={"structured": json.dumps(LLM_STRUCTURED), "wait_seconds": "0"},
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["data"]["id"]
+        view = test_client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+
+        async def stored() -> str | None:
+            return await JobStore(FakeAsyncRedis(server=server), make_settings()).llm_key(job_id)
+
+        assert asyncio.run(stored()) == LLM_KEY
+        assert LLM_KEY not in view.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+def test_an_upload_without_llm_work_stores_no_llm_key() -> None:
+    app, server = llm_app()
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            b"<html><body><h1>Title</h1></body></html>",
+            "page.html",
+            "text/html",
+            headers={**AUTH, "X-LLM-Api-Key": LLM_KEY},
+            form={"wait_seconds": "0"},
+        )
+        assert response.status_code == 202, response.text
+
+    assert stored_keys(server, "job:*:llm_key") == []
+
+
+def test_llm_key_checks_on_the_upload_route() -> None:
+    app, server = llm_app()  # no LLM_API_KEY
+    with TestClient(app) as test_client:
+        body = b"<html><body><h1>Title</h1></body></html>"
+        form = {"structured": json.dumps(LLM_STRUCTURED)}
+        missing = upload(test_client, body, "page.html", "text/html", form=form)
+        bad = upload(
+            test_client,
+            body,
+            "page.html",
+            "text/html",
+            headers={**AUTH, "X-LLM-Api-Key": "has space"},
+            form=form,
+        )
+
+    assert missing.status_code == 400
+    assert missing.json()["error"]["message"] == "No LLM key: send X-LLM-Api-Key."
+    assert bad.status_code == 400
+    assert "X-LLM-Api-Key" in bad.json()["error"]["message"]
+    assert "has space" not in bad.text
+    assert stored_keys(server, "job:*") == []

@@ -170,19 +170,31 @@ class PiiDispatcher(PoolDispatcher):
         principal: Principal,
         url: str | None,
         job_id: str | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue item 0 on the ``nlp`` pool with ``envelope`` as its draft and return its job's
-        id: a new job of ``kind``, or ``job_id`` (the request's P1 job), whose lease is cleared.
-        Valkey errors propagate; a new job is deleted again first."""
-        return await self.submit_job(kind, options, principal, url, job_id=job_id, draft=envelope)
+        id: a new job of ``kind`` (with the caller's ``llm_key``, if any: the result moves on to
+        the llm worker), or ``job_id`` (the request's P1 job), whose lease is cleared. Valkey
+        errors propagate; a new job is deleted again first."""
+        return await self.submit_job(
+            kind, options, principal, url, job_id=job_id, draft=envelope, llm_key=llm_key
+        )
 
     async def wait(
-        self, job_id: str, *, extra_seconds: float = 0.0, detached: Callable[[], bool]
+        self,
+        job_id: str,
+        *,
+        extra_seconds: float = 0.0,
+        detached: Callable[[], bool],
+        llm: bool = False,
     ) -> Envelope[ExtractResult] | None:
         """The processed result of the job's item 0, or None when there is none within
-        ``PII_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not), the job is gone,
-        or ``detached()`` turned true. Valkey errors propagate."""
+        ``PII_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not; with ``llm``
+        ``LLM_SYNC_WAIT_SECONDS`` more, since the result moves on to the ``llm`` pool in the same
+        job), the job is gone, or ``detached()`` turned true. Valkey errors propagate."""
         seconds = self._settings.pii_sync_wait_seconds + extra_seconds
+        if llm:
+            seconds += self._settings.llm_sync_wait_seconds
         return await self.wait_for(
             job_id,
             answered="answered",
@@ -196,9 +208,10 @@ class PiiHandoff:
     """The ``pii_handoff`` of one sync request (``extract_api._flow``, ``file_api._flow``; N11).
 
     ``kind`` is the job kind of the request (``extract`` for a URL, ``file`` for an upload),
-    ``options`` its stored options (with ``pii``) and ``url`` its URL (None for an upload).
-    ``wait_until`` is the ``time.monotonic()`` reading at which the route answers 202: the
-    request waits that much longer, so that the route finds the job to answer with. A call
+    ``options`` its stored options (with ``pii``) and ``url`` its URL (None for an upload);
+    ``llm_key`` is the caller's ``X-LLM-Api-Key`` of a request that may need the LLM, stored with
+    the nlp job. ``wait_until`` is the ``time.monotonic()`` reading at which the route answers
+    202: the request waits that much longer, so that the route finds the job to answer with. A call
     answers the processed envelope, a withheld one, or None once the job belongs to the nlp
     worker (the route answered 202 with it, or it is the request's P1 job)."""
 
@@ -212,6 +225,7 @@ class PiiHandoff:
         principal: Principal,
         url: str | None,
         wait_until: float | None = None,
+        llm_key: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._dispatcher = dispatcher
@@ -221,6 +235,7 @@ class PiiHandoff:
         self._principal = principal
         self._url = url
         self._wait_until = wait_until
+        self._llm_key = llm_key
         self._clock = clock
 
     async def __call__(
@@ -251,7 +266,10 @@ class PiiHandoff:
                 handover.settle(job_id)
         try:
             result = await dispatcher.wait(
-                job_id, extra_seconds=extra, detached=lambda: handover.detached
+                job_id,
+                extra_seconds=extra,
+                detached=lambda: handover.detached,
+                llm=dispatcher.wants_llm(self._options),
             )
         except asyncio.CancelledError:
             if handover.release():
@@ -275,7 +293,13 @@ class PiiHandoff:
 
     async def _submit(self, envelope: Envelope[ExtractResult], job_id: str | None = None) -> str:
         return await self._dispatcher.submit(
-            envelope, self._kind, self._options, self._principal, self._url, job_id=job_id
+            envelope,
+            self._kind,
+            self._options,
+            self._principal,
+            self._url,
+            job_id=job_id,
+            llm_key=self._llm_key,
         )
 
     async def _on_p1_job(

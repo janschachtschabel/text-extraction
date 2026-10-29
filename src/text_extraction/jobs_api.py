@@ -31,6 +31,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.extract_api import (
     ASR_KEY_DESCRIPTION,
     BROWSER_DISABLED_MESSAGE,
+    LLM_KEY_DESCRIPTION,
     check_ocr_request,
     check_pii_request,
     check_transcribe_request,
@@ -50,7 +51,13 @@ from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
-from text_extraction.structured.checks import check_selector_access
+from text_extraction.structured.checks import (
+    LLM_KEY_HEADER,
+    check_selector_access,
+    check_structured_request,
+    llm_key_of,
+    wants_llm,
+)
 from text_extraction.tracing import current_trace_id
 from text_extraction.valkey import reply_text
 
@@ -184,6 +191,9 @@ async def create_batch(
     asr_key: Annotated[
         str | None, Header(alias=ASR_KEY_HEADER, description=ASR_KEY_DESCRIPTION)
     ] = None,
+    llm_key: Annotated[
+        str | None, Header(alias=LLM_KEY_HEADER, description=LLM_KEY_DESCRIPTION)
+    ] = None,
 ) -> Envelope[JobAccepted]:
     """Queue many URLs as one job and answer 202 with its id and `status_url`.
 
@@ -207,6 +217,10 @@ async def create_batch(
     handling, 422 for `annotate` with `format: html`) sends every item's result through the nlp
     workers before it is stored: the processed result, or `pii_failed` with its content
     withheld.
+
+    `structured` and `chunking` and the header `X-LLM-Api-Key` are checked as for
+    `POST /v1/extract` (400 without LLM, embedding model or key; 422 for the refused
+    combinations); the key serves all items of the batch, as long as the job.
     """
     settings: Settings = request.app.state.settings
     valkey: Redis = request.app.state.valkey
@@ -227,6 +241,11 @@ async def create_batch(
     check_pii_request(body.pii, body.format, False, settings)
     # 422 for a non-admin key's XPath selectors (R4).
     check_selector_access(body.structured, principal)
+    caller_llm_key = llm_key_of(llm_key)
+    # 400 without LLM, embedding model or key; 422 for the combinations of S12.
+    check_structured_request(
+        body.structured, body.chunking, body.pii, body.format, settings, llm_key=caller_llm_key
+    )
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -259,6 +278,10 @@ async def create_batch(
                 # The caller's key of the external endpoint, for any item that moves to the ASR
                 # workers, while the job lives (M11); the job's deletion takes it along.
                 await store.put_asr_key(job_id, key, whole_job=True)
+            if caller_llm_key is not None and wants_llm(body.structured, body.chunking, settings):
+                # The caller's key of the LLM endpoint, for any item that moves to the llm
+                # workers, while the job lives (ruling S9); the job's deletion takes it along.
+                await store.put_llm_key(job_id, caller_llm_key, whole_job=True)
             # Enqueued exactly once and never retried: a retry could queue some items twice.
             await queue.enqueue(job_id, principal.name, body.urls)
         except BaseException:

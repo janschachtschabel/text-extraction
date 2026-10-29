@@ -41,6 +41,17 @@ Jobs that wait for a transcription (package 6, M11) may have:
                           and with a batch's last result. No read of the job shows it, and it is
                           never logged.
 
+Jobs that need LLM work (package 8, ruling S9) may have:
+
+- ``job:{<id>}:llm_key``  string: the caller's key of the LLM endpoint (the request header
+                          ``X-LLM-Api-Key``). Kept as long as the job, since the draft the llm
+                          worker reads lives that long and the item may wait for the worker
+                          until then. Deleted with the job, by ``shorten``, by the llm worker
+                          once a sync request's item has its outcome and with a batch's last
+                          result (``drop_llm_key``); ``drop_secrets`` leaves it, because the
+                          browser, Docling and nlp workers that call it run before the llm
+                          worker. No read of the job shows it, and it is never logged.
+
 Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR; M9: media queued
 for transcription, with an empty body for a URL) have:
 
@@ -123,8 +134,9 @@ CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
 
-# The keys of a job: the four of every job, those of browser jobs and the caller's ASR key.
-_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts", "asr_key")
+# The keys of a job: the four of every job, those of browser jobs and the caller's ASR and LLM
+# keys.
+_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts", "asr_key", "llm_key")
 
 # The input of item 0 (the only item of a sync job), which ``delete`` and ``shorten`` remove.
 _FIRST_INPUT = "input:0"
@@ -522,9 +534,9 @@ class JobStore:
 
     async def shorten(self, job_id: str, seconds: int) -> None:
         """Let the job and its files expire within ``seconds`` (never later than they would)
-        and delete its secrets (the ASR key too), drafts and the input of item 0: a sync answer's
-        screenshot job, which only the artifact route still reads. A job that is gone already is
-        not an error."""
+        and delete its secrets (the ASR and LLM keys too), drafts and the input of item 0: a sync
+        answer's screenshot job, which only the artifact route still reads. A job that is gone
+        already is not an error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
             for kind in ("meta", "urls", "results", "done"):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
@@ -533,6 +545,7 @@ class JobStore:
             pipe.delete(
                 _key(job_id, "secrets"),
                 _key(job_id, "asr_key"),
+                _key(job_id, "llm_key"),
                 _key(job_id, "drafts"),
                 _key(job_id, _FIRST_INPUT),
             )
@@ -573,6 +586,29 @@ class JobStore:
         """The caller's key of the external transcription endpoint, or None when the job had
         none or it is gone."""
         raw = await self._valkey.get(_key(job_id, "asr_key"))
+        return reply_text(raw) if raw is not None else None
+
+    async def put_llm_key(self, job_id: str, key: str, *, whole_job: bool = False) -> None:
+        """Keep the caller's key of the LLM endpoint for the job (ruling S9) as long as the job
+        lives: the draft the llm worker reads lives that long, and the item may wait for the
+        worker until then. ``whole_job`` marks a batch's key (its items move to pool ``llm`` at
+        any time and its last result drops it); the lifetime is the same. Raises ``JobLost`` when
+        the job is gone; nothing is stored then."""
+        outcome = await self._put_with_job(
+            keys=[_key(job_id, "meta"), _key(job_id, "llm_key")],
+            args=[key, self._ttl_seconds * 1000],
+        )
+        if outcome == _NOT_FOUND:
+            raise JobLost(job_id)
+
+    async def drop_llm_key(self, job_id: str) -> None:
+        """Delete the caller's key of the LLM endpoint only (the llm worker has finished the
+        item, or a hand-over failed after storing it)."""
+        await self._valkey.delete(_key(job_id, "llm_key"))
+
+    async def llm_key(self, job_id: str) -> str | None:
+        """The caller's key of the LLM endpoint, or None when the job had none or it is gone."""
+        raw = await self._valkey.get(_key(job_id, "llm_key"))
         return reply_text(raw) if raw is not None else None
 
     async def put_draft(self, job_id: str, index: int, envelope: Envelope[ExtractResult]) -> None:

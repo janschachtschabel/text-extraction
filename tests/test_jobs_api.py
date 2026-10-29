@@ -15,10 +15,12 @@ from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi import Request
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from structlog.testing import capture_logs
 
 from tests.fakes import ARTICLE, ORIGIN, PAGE, Answer, FakeFetcher, fetched
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.envelope import ErrorCode
 from text_extraction.extract_models import ExtractRequest
 from text_extraction.fetch import Fetcher, FetchError
@@ -32,6 +34,7 @@ from text_extraction.pii_dispatch import create_pii_move, nlp_queue
 from text_extraction.pipeline import create_pipeline
 from text_extraction.scheduler import FairQueue, QueueCounts
 from text_extraction.settings import Settings
+from text_extraction.structured.types import StructuredOptions
 from text_extraction.worker import ExtractRunner, Worker
 
 KEYS = {"alice": "alice-key-raw-secret", "bob": "bob-key-raw-secret", "root": "root-key-raw-secret"}
@@ -1002,3 +1005,148 @@ def test_batch_xpath_selectors_need_an_admin_key(api: Api) -> None:
     assert api.keys("job:*:meta") == []
 
     assert api.batch([PAGE], headers=ROOT, structured=structured).status_code == 202
+
+
+# --- structured and chunking on the batch route (rulings S1, S9, S12) --------------------------
+
+LLM_KEY = "sk-llm-caller-key-9c2b"
+LLM_HEADERS = {**ALICE, "X-LLM-Api-Key": LLM_KEY}
+LLM_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"title": {"type": "string"}}}
+LLM_STRUCTURED: dict[str, Any] = {"schema": LLM_SCHEMA, "strategy": "llm"}
+
+
+def llm_overrides(**more: Any) -> dict[str, Any]:
+    return {"llm_enabled": True, "llm_embedding_model": "embed-1", **more}
+
+
+def test_batch_stores_structured_and_chunking_in_the_job_options(
+    make_api: Callable[..., Api],
+) -> None:
+    """The options of a batch reach its job (review item M2.6)."""
+    api = make_api(**llm_overrides(llm_api_key="sk-operator-key"))
+    structured = {
+        "schema": LLM_SCHEMA,
+        "strategy": "patterns",
+        "patterns": {"title": {"regex": r"\w+"}},
+        "tables": True,
+    }
+    chunking = {"strategy": "fixed", "size": 400, "overlap": 40}
+
+    response = api.batch([PAGE], structured=structured, chunking=chunking)
+    plain = api.batch([PAGE])
+
+    assert response.status_code == 202, response.text
+    assert plain.status_code == 202
+
+    async def options(valkey: FakeAsyncRedis, job_id: str) -> JobOptions:
+        record = await JobStore(valkey, api.settings).get(job_id)
+        assert record is not None
+        return record.options
+
+    stored = api.run(lambda valkey: options(valkey, response.json()["data"]["id"]))
+    assert stored.structured == StructuredOptions.model_validate(structured)
+    assert stored.chunking == ChunkingOptions(strategy="fixed", size=400, overlap=40)
+    unset = api.run(lambda valkey: options(valkey, plain.json()["data"]["id"]))
+    assert (unset.structured, unset.chunking) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({"structured": LLM_STRUCTURED}, "LLM features are not enabled on this service."),
+        (
+            {"structured": {"schema": LLM_SCHEMA, "learn_selectors": True}},
+            "LLM features are not enabled on this service.",
+        ),
+        (
+            {"chunking": {"strategy": "semantic"}},
+            "LLM features are not enabled on this service.",
+        ),
+    ],
+    ids=["llm", "learn", "semantic"],
+)
+def test_batch_400_for_llm_features_without_llm(
+    api: Api, body: dict[str, Any], message: str
+) -> None:
+    response = api.batch([PAGE], headers=LLM_HEADERS, **body)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["message"] == message
+    assert api.keys("job:*") == []
+
+
+def test_batch_400_without_any_llm_key_and_422_for_the_combinations(
+    make_api: Callable[..., Api],
+) -> None:
+    api = make_api(**llm_overrides(pii_enabled=True))
+
+    missing = api.batch([PAGE], structured=LLM_STRUCTURED)
+    html = api.batch([PAGE], format="html", chunking={"strategy": "fixed"})
+    pii = api.batch([PAGE], pii="mask", structured={**LLM_STRUCTURED, "strategy": "metadata"})
+    learn = api.batch(
+        [PAGE],
+        headers=LLM_HEADERS,
+        structured={"schema": LLM_SCHEMA, "strategy": "patterns", "learn_selectors": True},
+    )
+
+    assert missing.status_code == 400
+    assert missing.json()["error"]["message"] == "No LLM key: send X-LLM-Api-Key."
+    assert [r.status_code for r in (html, pii, learn)] == [422, 422, 422]
+    assert html.json()["error"]["message"] == "Chunking needs format markdown or text."
+    assert pii.json()["error"]["message"] == (
+        "Strategy metadata reads the raw page and cannot be combined with pii."
+    )
+    assert learn.json()["error"]["message"] == "learn_selectors needs strategy llm or auto."
+    assert api.keys("job:*") == []
+
+
+def test_llm_key_stored_with_batch_for_whole_job(make_api: Callable[..., Api]) -> None:
+    api = make_api(**llm_overrides(job_ttl_seconds=7200))
+
+    with capture_logs() as logs:
+        accepted = api.batch([PAGE, OTHER_PAGE], headers=LLM_HEADERS, structured=LLM_STRUCTURED)
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["data"]["id"]
+    view = api.job(job_id)
+
+    async def stored(valkey: FakeAsyncRedis) -> tuple[str | None, int]:
+        key = await JobStore(valkey, api.settings).llm_key(job_id)
+        return key, await valkey.ttl(f"job:{{{job_id}}}:llm_key")
+
+    key, ttl = api.run(stored)
+    assert key == LLM_KEY
+    assert 7200 - 5 < ttl <= 7200  # as long as the job: its items move to pool llm at any time
+    assert LLM_KEY not in view.text
+    assert LLM_KEY not in accepted.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+def test_batch_stores_no_llm_key_without_llm_work(make_api: Callable[..., Api]) -> None:
+    api = make_api(**llm_overrides())
+
+    plain = api.batch([PAGE], headers=LLM_HEADERS)
+    patterns = api.batch(
+        [PAGE],
+        headers=LLM_HEADERS,
+        structured={
+            "schema": LLM_SCHEMA,
+            "strategy": "patterns",
+            "patterns": {"title": {"regex": r"\w+"}},
+        },
+    )
+
+    assert plain.status_code == patterns.status_code == 202
+    assert api.keys("job:*:llm_key") == []
+
+
+def test_batch_refuses_an_invalid_llm_key_header(make_api: Callable[..., Api]) -> None:
+    api = make_api(**llm_overrides(llm_api_key="sk-operator-key"))
+
+    response = api.batch(
+        [PAGE], headers={**ALICE, "X-LLM-Api-Key": "has space"}, structured=LLM_STRUCTURED
+    )
+
+    assert response.status_code == 400
+    assert "has space" not in response.text
+    assert api.keys("job:*") == []

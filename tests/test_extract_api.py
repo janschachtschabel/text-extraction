@@ -27,7 +27,13 @@ from text_extraction.browser_options import ArtifactRef, BrowserSecrets, Evaluat
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
-from text_extraction.extract_api import _in_browser, _store_result, extract
+from text_extraction.extract_api import (
+    _in_browser,
+    _store_result,
+    default_wait_seconds,
+    extract,
+    request_wait_seconds,
+)
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
@@ -975,6 +981,7 @@ class Seen:
     client: str
     secrets: BrowserSecrets
     draft: Envelope[ExtractResult] | None
+    llm_key: str | None = None
 
 
 class FakeBrowserWorker:
@@ -1025,7 +1032,13 @@ class FakeBrowserWorker:
                 continue
             if job.state == "queued":
                 await store.mark_running(item.job_id)
-            seen = Seen(job, item.client, await store.secrets(job.id), await store.draft(job.id, 0))
+            seen = Seen(
+                job,
+                item.client,
+                await store.secrets(job.id),
+                await store.draft(job.id, 0),
+                await store.llm_key(job.id),
+            )
             self.seen.append(seen)
             self.claimed.set()
             while not self.hold.is_set():  # noqa: ASYNC110 - set by another thread
@@ -1799,3 +1812,380 @@ def test_xpath_selectors_need_an_admin_key(client: TestClient) -> None:
     allowed = client.post("/v1/extract", json={"url": PAGE, "structured": css}, headers=AUTH)
     assert allowed.status_code == 200
     assert allowed.json()["data"]["structured"]["values"] == {"title": "Photosynthesis explained"}
+
+
+# --- structured and chunking: the request checks and the caller's LLM key (rulings S12, S9) -----
+
+LLM_KEY = "sk-llm-caller-key-9c2b"
+LLM_KEY_HEADERS = {**AUTH, "X-LLM-Api-Key": LLM_KEY}
+SCHEMA_ONE: dict[str, Any] = {"type": "object", "properties": {"title": {"type": "string"}}}
+LLM_STRUCTURED: dict[str, Any] = {"schema": SCHEMA_ONE, "strategy": "llm"}
+ROUTES = ["extract", "file", "batch"]
+LLM_DISABLED = "LLM features are not enabled on this service."
+LLM_KEY_MISSING = "No LLM key: send X-LLM-Api-Key."
+
+
+def llm_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
+        "llm_enabled": True,
+        "llm_api_key": "sk-operator-key",
+        "llm_embedding_model": "embed-1",
+    }
+    values.update(overrides)
+    return make_settings(**values)
+
+
+class Service:
+    """The public app on a fakeredis server with a fake fetcher, for the three routes that take
+    ``structured`` and ``chunking``."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or make_settings()
+        self.server = FakeServer()
+        valkey = FakeAsyncRedis(server=self.server)
+        registry = CollectorRegistry()
+        self.app = create_public_app(self.settings, valkey, registry)
+        self.fetcher = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+        self.app.state.pipeline = create_pipeline(
+            self.settings, valkey, cast(Fetcher, self.fetcher), registry
+        )
+
+    def keys(self, pattern: str = "job*") -> list[str]:
+        async def scan() -> list[str]:
+            valkey = FakeAsyncRedis(server=self.server)
+            return sorted(
+                key.decode() if isinstance(key, bytes) else key
+                for key in await valkey.keys(pattern)
+            )
+
+        return asyncio.run(scan())
+
+
+def post_route(
+    client: TestClient,
+    route: str,
+    *,
+    structured: dict[str, Any] | None = None,
+    chunking: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    **options: Any,
+) -> Any:
+    """The same request on ``POST /v1/extract``, ``/v1/extract/file`` or ``/v1/batch``."""
+    given = {
+        name: value
+        for name, value in (("structured", structured), ("chunking", chunking))
+        if value is not None
+    }
+    headers = AUTH if headers is None else headers
+    if route == "extract":
+        return client.post("/v1/extract", json={"url": PAGE, **given, **options}, headers=headers)
+    if route == "batch":  # a batch is a job anyway: it takes no wait_seconds
+        options.pop("wait_seconds", None)
+        return client.post("/v1/batch", json={"urls": [PAGE], **given, **options}, headers=headers)
+    return client.post(
+        "/v1/extract/file",
+        files={"file": ("page.html", ARTICLE, "text/html")},
+        data={
+            name: value if isinstance(value, str) else json.dumps(value)
+            for name, value in {**given, **options}.items()
+        },
+        headers=headers,
+    )
+
+
+def refusal(response: Any, status: int, message: str) -> None:
+    assert response.status_code == status, response.text
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert error["message"] == message
+
+
+OPTION_CASES = {
+    "llm": {"structured": LLM_STRUCTURED},
+    "learn": {"structured": {"schema": SCHEMA_ONE, "learn_selectors": True}},
+    "semantic": {"chunking": {"strategy": "semantic"}},
+}
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("case", list(OPTION_CASES))
+def test_llm_features_400_without_llm(route: str, case: str) -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, **OPTION_CASES[case])
+
+    refusal(response, 400, LLM_DISABLED)
+    assert service.fetcher.calls == []  # refused before anything was fetched
+    assert service.keys() == []  # and never a job
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_semantic_400_without_embedding_model(route: str) -> None:
+    service = Service(llm_settings(llm_embedding_model=None))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, chunking={"strategy": "semantic"})
+
+    refusal(response, 400, "Semantic chunking needs LLM_EMBEDDING_MODEL.")
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("strategy", ["llm", "auto"])
+def test_llm_work_400_without_any_key(route: str, strategy: str) -> None:
+    service = Service(llm_settings(llm_api_key=None))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, structured={**LLM_STRUCTURED, "strategy": strategy})
+
+    refusal(response, 400, LLM_KEY_MISSING)
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize(("route", "status"), [("extract", 200), ("file", 200), ("batch", 202)])
+def test_header_key_accepted_without_env_key(route: str, status: int) -> None:
+    service = Service(llm_settings(llm_api_key=None))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, structured=LLM_STRUCTURED)
+
+    assert response.status_code == status, response.text
+    assert LLM_KEY not in response.text
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("value", ["has space", "x" * 1025, "tab\there"])
+def test_bad_llm_key_header_400(route: str, value: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(
+            client, route, headers={**AUTH, "X-LLM-Api-Key": value}, structured=LLM_STRUCTURED
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert "X-LLM-Api-Key" in response.json()["error"]["message"]
+    assert value not in response.text
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_chunking_html_422(route: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(client, route, chunking={"strategy": "fixed"}, format="html")
+
+    refusal(response, 422, "Chunking needs format markdown or text.")
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize(
+    ("structured", "what"),
+    [
+        ({"schema": SCHEMA_ONE, "strategy": "metadata"}, "Strategy metadata"),
+        ({"schema": SCHEMA_ONE, "strategy": "selectors"}, "Strategy selectors"),
+        ({"tables": True}, "tables"),
+        ({"schema": SCHEMA_ONE, "strategy": "llm", "learn_selectors": True}, "learn_selectors"),
+        (
+            {"schema": SCHEMA_ONE, "strategy": "auto", "selectors": {"title": {"css": "h1"}}},
+            "selectors",
+        ),
+    ],
+    ids=["metadata", "selectors", "tables", "learn", "caller-selectors"],
+)
+def test_pii_with_dom_strategies_422(route: str, structured: dict[str, Any], what: str) -> None:
+    service = Service(llm_settings(pii_enabled=True))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, structured=structured, pii="mask")
+
+    refusal(response, 422, f"{what} reads the raw page and cannot be combined with pii.")
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_pii_with_patterns_llm_and_chunking_accepted(route: str) -> None:
+    service = Service(llm_settings(pii_enabled=True))
+    patterns = {
+        "schema": SCHEMA_ONE,
+        "strategy": "patterns",
+        "patterns": {"title": {"regex": r"\w+"}},
+    }
+    with TestClient(service.app) as client:
+        for options in (
+            {"structured": patterns},
+            {"structured": LLM_STRUCTURED},
+            {"structured": {"schema": SCHEMA_ONE}},  # auto
+            {"chunking": {"strategy": "markdown"}},
+        ):
+            # No nlp worker here: a request that goes there is a job at once.
+            response = post_route(client, route, pii="mask", wait_seconds=0, **options)
+            assert response.status_code in (200, 202), (options, response.text)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("strategy", ["metadata", "selectors", "patterns"])
+def test_learn_needs_llm_or_auto_422(route: str, strategy: str) -> None:
+    service = Service(llm_settings())
+    structured = {"schema": SCHEMA_ONE, "strategy": strategy, "learn_selectors": True}
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, structured=structured)
+
+    refusal(response, 422, "learn_selectors needs strategy llm or auto.")
+    assert service.keys() == []
+
+
+def test_requests_without_structured_and_chunking_need_no_llm() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        for route in ROUTES:
+            assert post_route(client, route).status_code in (200, 202)
+
+
+@pytest.mark.parametrize("path", ["/v1/extract", "/v1/extract/file", "/v1/batch"])
+def test_the_llm_key_header_is_documented(path: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        spec = client.get("/openapi.json").json()
+
+    parameters = {p["name"]: p for p in spec["paths"][path]["post"]["parameters"]}
+    assert "X-LLM-Api-Key" in parameters
+    assert parameters["X-LLM-Api-Key"]["in"] == "header"
+
+
+def wait_body(**changes: Any) -> ExtractRequest:
+    return ExtractRequest.model_validate({"url": PAGE, **changes})
+
+
+def test_default_wait_is_largest_of_transcribe_pii_llm() -> None:
+    settings = llm_settings(pii_enabled=True, pii_sync_wait_seconds=40, llm_sync_wait_seconds=50)
+    llm = {"structured": LLM_STRUCTURED}
+
+    assert request_wait_seconds(wait_body(), settings) is None
+    assert request_wait_seconds(wait_body(transcribe=True), settings) == 20
+    assert request_wait_seconds(wait_body(pii="mask"), settings) == 40
+    assert request_wait_seconds(wait_body(**llm), settings) == 50
+    assert request_wait_seconds(wait_body(pii="mask", **llm), settings) == 50
+    assert request_wait_seconds(wait_body(transcribe=True, pii="mask"), settings) == 40
+    assert request_wait_seconds(wait_body(transcribe=True, pii="mask", **llm), settings) == 50
+    assert request_wait_seconds(wait_body(transcribe=True, **llm), settings) == 50
+    assert request_wait_seconds(wait_body(chunking={"strategy": "semantic"}), settings) == 50
+    # What does not call the LLM does not wait for it.
+    assert request_wait_seconds(wait_body(structured={"tables": True}), settings) is None
+    assert request_wait_seconds(wait_body(chunking={"strategy": "fixed"}), settings) is None
+    selectors = {"schema": SCHEMA_ONE, "strategy": "selectors"}
+    assert request_wait_seconds(wait_body(structured=selectors), settings) is None
+    # An explicit wait_seconds always wins, 0 too.
+    assert request_wait_seconds(wait_body(wait_seconds=5, pii="mask", **llm), settings) == 5
+    assert request_wait_seconds(wait_body(wait_seconds=0, **llm), settings) == 0
+    # The default of the LLM is LLM_SYNC_WAIT_SECONDS (30), and the transcription's is 20.
+    plain = llm_settings(pii_enabled=True)
+    assert request_wait_seconds(wait_body(transcribe=True, **llm), plain) == 30
+    assert request_wait_seconds(wait_body(pii="mask"), plain) == 20
+    # No LLM on the service: auto has no LLM step to wait for.
+    assert (
+        request_wait_seconds(wait_body(structured={"schema": SCHEMA_ONE}), make_settings()) is None
+    )
+
+
+def test_default_wait_of_an_upload_is_the_largest_of_pii_and_llm() -> None:
+    settings = llm_settings(pii_enabled=True, pii_sync_wait_seconds=40, llm_sync_wait_seconds=50)
+    assert default_wait_seconds(settings, pii=False, llm=False) is None
+    assert default_wait_seconds(settings, pii=True, llm=False) == 40
+    assert default_wait_seconds(settings, pii=False, llm=True) == 50
+    assert default_wait_seconds(settings, pii=True, llm=True) == 50
+    assert default_wait_seconds(settings, transcribe=True, pii=False, llm=False) == 20
+
+
+def test_an_llm_request_without_wait_seconds_waits_then_becomes_a_job() -> None:
+    """The default wait applies: a request that may need the LLM and whose extraction is slower
+    than LLM_SYNC_WAIT_SECONDS answers 202 with its job."""
+    case = Handover(llm_enabled=True, llm_api_key="sk-operator-key", llm_sync_wait_seconds=1)
+    case.release_later(4)  # a failing test must not hang
+    with TestClient(case.app) as client:
+        started = time.monotonic()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "structured": LLM_STRUCTURED}, headers=AUTH
+        )
+        waited = time.monotonic() - started
+
+        assert response.status_code == 202, response.text
+        assert 0.9 <= waited < 5
+        case.pipeline.release.set()
+        case.wait_for_job(client, response.json()["data"]["id"])
+
+
+def test_the_llm_key_is_stored_with_the_p1_job() -> None:
+    case = Handover(llm_enabled=True, llm_api_key="sk-operator-key")
+    with TestClient(case.app) as client, capture_logs() as logs:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "structured": LLM_STRUCTURED, "wait_seconds": 0},
+            headers=LLM_KEY_HEADERS,
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["data"]["id"]
+        view = client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+        stored = asyncio.run(
+            JobStore(FakeAsyncRedis(server=case.server), case.settings).llm_key(job_id)
+        )
+        case.pipeline.release.set()
+        case.wait_for_job(client, job_id)
+        case.wait_for_idle()
+        # The pod wrote the job's result itself: no llm worker will read the key any more.
+        left = case.keys("job*llm_key")
+
+    assert stored == LLM_KEY
+    assert left == []
+    assert LLM_KEY not in view.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+def test_no_llm_key_is_stored_for_a_request_without_llm_work() -> None:
+    case = Handover(llm_enabled=True, llm_api_key="sk-operator-key")
+    with TestClient(case.app) as client:
+        plain = client.post(
+            "/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=LLM_KEY_HEADERS
+        )
+        patterns = client.post(
+            "/v1/extract",
+            json={
+                "url": PAGE,
+                "wait_seconds": 0,
+                "structured": {
+                    "schema": SCHEMA_ONE,
+                    "strategy": "patterns",
+                    "patterns": {"title": {"regex": r"\w+"}},
+                },
+            },
+            headers=LLM_KEY_HEADERS,
+        )
+        assert plain.status_code == patterns.status_code == 202
+        keys = case.keys("job*llm_key")
+        case.pipeline.release.set()
+        case.wait_for_idle()
+
+    assert keys == []
+
+
+@pytest.mark.parametrize(
+    "options", [{"mode": "browser"}, {"mode": "auto"}], ids=["browser", "auto"]
+)
+def test_a_browser_job_keeps_the_callers_llm_key(options: dict[str, Any]) -> None:
+    """The browser job of a request that may need the LLM carries the caller's key, so that
+    the llm worker it moves on to can read it; a request without LLM work stores none."""
+    case = BrowserCase(
+        {PAGE: fetched(body=SHELL_WITH_WORDS)}, llm_enabled=True, llm_api_key="sk-operator-key"
+    )
+    with TestClient(case.app) as client, case.worker() as worker, capture_logs() as logs:
+        llm = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "structured": LLM_STRUCTURED, **options},
+            headers=LLM_KEY_HEADERS,
+        )
+        plain = client.post("/v1/extract", json={"url": PAGE, **options}, headers=LLM_KEY_HEADERS)
+
+        assert llm.status_code == plain.status_code == 200
+        assert [seen.llm_key for seen in worker.seen] == [LLM_KEY, None]
+        assert LLM_KEY not in llm.text
+    assert not any(LLM_KEY in repr(event) for event in logs)

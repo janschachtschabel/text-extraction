@@ -63,12 +63,14 @@ from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import (
     ASR_KEY_DESCRIPTION,
+    LLM_KEY_DESCRIPTION,
     answer_or_hand_over,
     asr_handoff,
     check_asr_key,
     check_ocr_request,
     check_pii_request,
     create_p1_job,
+    default_wait_seconds,
     docling_handoff,
     handover_time,
     pii_handoff,
@@ -83,7 +85,13 @@ from text_extraction.pipeline_media import asr_available
 from text_extraction.pool_dispatch import Handover
 from text_extraction.ratelimit import rate_limited
 from text_extraction.settings import Settings
-from text_extraction.structured.checks import check_selector_access
+from text_extraction.structured.checks import (
+    LLM_KEY_HEADER,
+    check_selector_access,
+    check_structured_request,
+    llm_key_of,
+    wants_llm,
+)
 
 PATH: Final = "/v1/extract/file"
 MAX_FILES: Final = 1
@@ -185,6 +193,9 @@ async def extract_file(
     asr_key: Annotated[
         str | None, Header(alias=ASR_KEY_HEADER, description=ASR_KEY_DESCRIPTION)
     ] = None,
+    llm_key: Annotated[
+        str | None, Header(alias=LLM_KEY_HEADER, description=LLM_KEY_DESCRIPTION)
+    ] = None,
 ) -> Envelope[ExtractResult] | Response:
     """Extract an uploaded file as Markdown, text or HTML.
 
@@ -210,6 +221,10 @@ async def extract_file(
     With `pii` the result's personal data is handled as for `POST /v1/extract` (`data.pii`); a
     result that could not be processed answers `failed`/`pii_failed` with its content withheld.
 
+    `structured` and `chunking` (JSON strings) and the `X-LLM-Api-Key` header are checked as for
+    `POST /v1/extract`: 400 without LLM, embedding model or key, 422 for the combinations that
+    are refused there.
+
     An upload still converting after `wait_seconds` (25 by default) becomes a job: 202 with the
     job's id and `status_url` (`GET /v1/jobs/{id}`, kind `file`, its item's `url` null). A
     document that needs OCR waits up to `DOCLING_SYNC_WAIT_SECONDS` for it without
@@ -221,6 +236,12 @@ async def extract_file(
     check_pii_request(form.pii, form.format, False, settings)
     check_selector_access(form.structured, principal)
     key = asr_key_of(asr_key)
+    caller_llm_key = llm_key_of(llm_key)
+    check_structured_request(
+        form.structured, form.chunking, form.pii, form.format, settings, llm_key=caller_llm_key
+    )
+    # Only a request that may need the LLM keeps the caller's key with its jobs.
+    job_llm_key = caller_llm_key if wants_llm(form.structured, form.chunking, settings) else None
     try:
         body = await file.read(upload_file_limit(settings) + 1)
     finally:
@@ -231,8 +252,12 @@ async def extract_file(
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)
     wait_seconds = form.wait_seconds
-    if wait_seconds is None and form.pii is not None:
-        wait_seconds = settings.pii_sync_wait_seconds  # D4 (a), as for ``POST /v1/extract``
+    if wait_seconds is None:  # D4 (a) and S13, as for ``POST /v1/extract``
+        wait_seconds = default_wait_seconds(
+            settings,
+            pii=form.pii is not None,
+            llm=wants_llm(form.structured, form.chunking, settings),
+        )
     handover = Handover()
     flow = partial(
         _flow,
@@ -246,6 +271,7 @@ async def extract_file(
         options,
         handover_time(wait_seconds, settings),
         key,
+        job_llm_key,
     )
     meta = UploadInputMeta(file_name=name, content_type=file.content_type)
     return await answer_or_hand_over(
@@ -264,6 +290,7 @@ async def extract_file(
             None,
             kind="file",
             upload=(body, meta),
+            llm_key=job_llm_key,
         ),
         pii=form.pii,
     )
@@ -288,10 +315,12 @@ async def _flow(
     options: JobOptions,
     wait_until: float | None,
     asr_key: str | None,
+    llm_key: str | None = None,
 ) -> Envelope[ExtractResult] | None:
     """The upload's envelope, or None when the Docling, the ASR or the nlp worker writes its
-    job's result. With ``pii`` the envelope goes through the nlp workers last
-    (``pii_dispatch.PiiHandoff``)."""
+    job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the LLM),
+    kept with every job the flow creates. With ``pii`` the envelope goes through the nlp workers
+    last (``pii_dispatch.PiiHandoff``)."""
     started = time.perf_counter()
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
@@ -302,6 +331,7 @@ async def _flow(
         principal=principal,
         url=None,
         wait_until=wait_until,
+        llm_key=llm_key,
     )
     asr = asr_handoff(
         state,
@@ -312,6 +342,7 @@ async def _flow(
         url=None,
         body=body,
         key=asr_key,
+        llm_key=llm_key,
     )
     envelope = await pipeline.extract_upload(
         body, name, form, principal, content_type=content_type, ocr_handoff=ocr, asr_handoff=asr
@@ -319,7 +350,13 @@ async def _flow(
     if (ocr is not None and ocr.handed_over) or (asr is not None and asr.handed_over):
         return None
     pii = pii_handoff(
-        state, kind="file", options=options, principal=principal, url=None, wait_until=wait_until
+        state,
+        kind="file",
+        options=options,
+        principal=principal,
+        url=None,
+        wait_until=wait_until,
+        llm_key=llm_key,
     )
     if form.pii is None or pii is None:  # without PII on this pod the route's guard withholds
         return envelope

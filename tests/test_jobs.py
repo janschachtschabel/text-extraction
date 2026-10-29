@@ -670,6 +670,84 @@ def test_has_secrets_is_recorded_and_outlives_the_secrets() -> None:
     asyncio.run(_secrets_flag())
 
 
+# --- the caller's LLM key (ruling S9) ----------------------------------------------------------
+
+
+@scenario
+async def test_llm_key_round_trip_and_ttl() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400)
+    job_id = await create_job(store, kind="extract")
+
+    assert await store.llm_key(job_id) is None
+    await store.put_llm_key(job_id, "sk-caller")
+    assert await store.llm_key(job_id) == "sk-caller"
+    ttl = await valkey.ttl(f"job:{{{job_id}}}:llm_key")
+    assert 86400 - 5 <= ttl <= 86400  # the draft it belongs to lives as long as the job
+
+    await store.drop_llm_key(job_id)
+
+    assert await store.llm_key(job_id) is None
+    assert await valkey.exists(f"job:{{{job_id}}}:llm_key") == 0
+    await store.drop_llm_key(job_id)  # nothing to drop is not an error
+    assert await store.llm_key("f" * 32) is None  # an unknown job has none
+
+
+@scenario
+async def test_llm_key_never_outlives_the_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=600)
+    job_id = await create_job(store, kind="extract")
+    await valkey.expire(f"job:{{{job_id}}}:meta", 100)
+
+    await store.put_llm_key(job_id, "sk-caller", whole_job=True)
+
+    assert await valkey.ttl(f"job:{{{job_id}}}:llm_key") <= 100
+
+
+@scenario
+async def test_llm_key_of_a_gone_job_is_not_stored() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+
+    with pytest.raises(JobLost):
+        await store.put_llm_key("f" * 32, "sk-caller")
+
+    assert await valkey.keys("job:*") == []
+
+
+@scenario
+async def test_drop_secrets_keeps_llm_key() -> None:
+    """The browser worker drops its secrets and the ASR key when it has finished its item; the
+    LLM key is for the llm worker, which comes later (ruling S13)."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+    await store.put_asr_key(job_id, "sk-asr")
+    await store.put_llm_key(job_id, "sk-llm")
+
+    await store.drop_secrets(job_id)
+
+    assert await store.secrets(job_id) == BrowserSecrets()
+    assert await store.asr_key(job_id) is None
+    assert await store.llm_key(job_id) == "sk-llm"
+
+
+@scenario
+async def test_delete_and_shorten_remove_the_llm_key() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    deleted = await create_job(store, kind="extract")
+    shortened = await create_job(store, kind="extract")
+    for job_id in (deleted, shortened):
+        await store.put_llm_key(job_id, "sk-llm")
+
+    await store.delete(deleted)
+    await store.shorten(shortened, 30)
+
+    assert await valkey.keys("job:*:llm_key") == []
+
+
 # --- inputs and URL-less items (ruling F12) ---------------------------------------------------
 
 

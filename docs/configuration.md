@@ -649,6 +649,14 @@ it; it is deleted with the job and once its item is done. `jobs:{owner:<name>}:a
 owner's unfinished ASR jobs for `ASR_MAX_OPEN_PER_CLIENT`, as `jobs:{owner:<name>}:docling` does
 for `DOCLING_MAX_OPEN_PER_CLIENT`.
 
+A job whose request may need the LLM (`structured` with strategy `llm` or `auto`, or `chunking`
+`semantic`, while the service has the LLM) may keep the caller's `X-LLM-Api-Key` header in
+`job:{<id>}:llm_key` (a string), as long as the job: the draft the llm worker reads lives that long,
+and the item may wait for the worker until then. Every job such a request creates has it (the
+request's own job, a browser, Docling, ASR or nlp job, a batch's job). No read of the job shows it;
+it is deleted with the job, when the pod that ran the whole request stores its result, and by the
+llm worker once the item is done. The browser, Docling and nlp workers leave it alone.
+
 ## Queue keys
 
 Batch items wait in a fair queue per worker pool (`extract` for the fast workers). The pool name is
