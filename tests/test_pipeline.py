@@ -18,24 +18,33 @@ from tests.fakes import (
     ROBOTS,
     Answer,
     FakeFetcher,
+    FakeRenderer,
     RecordingGate,
     Redirect,
     RefusingGate,
     fetched,
+    rendered,
 )
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import convert_html
+from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
+from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
-from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
-from text_extraction.result_cache import ResultCache
+from text_extraction.pipeline import Pipeline, _cache_options, create_outbound, create_pipeline
+from text_extraction.render import Renderer
+from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
+from text_extraction.structured.dom import structured_cache_part
+from text_extraction.structured.store import SelectorStore
+from text_extraction.structured.types import SelectorRule, StructuredOptions
 
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 
@@ -64,6 +73,7 @@ class Harness:
         self.valkey = FakeAsyncRedis()
         self.registry = CollectorRegistry()
         self.settings = make_settings(**overrides)
+        self.selectors = SelectorStore(self.valkey, self.settings.selector_learn_ttl_seconds)
         fetcher = cast(Fetcher, self.fetcher)
         the_gate = gate if gate is not None else DomainGate(self.valkey, self.settings)
         # As create_outbound wires the real fetcher: every request is checked and reported.
@@ -77,6 +87,7 @@ class Harness:
             FingerprintStore(self.valkey, self.settings),
             self.settings,
             self.registry,
+            selector_store=self.selectors,
         )
 
     async def run(self, **request: Any) -> Envelope[ExtractResult]:
@@ -1337,3 +1348,324 @@ def test_a_timeout_is_judged_by_the_time_the_host_had_after_the_gate(
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.TIMEOUT
     assert (failures == [b"out:fail:{127.0.0.1}"]) is counted
+
+
+# --- structured output: the DOM stage and the cache key (package 8, S3, S4) -----------------
+
+STRUCTURED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"headline": {"type": "string"}, "description": {"type": "string"}},
+}
+DOM_OPTIONS: dict[str, Any] = {
+    "schema": STRUCTURED_SCHEMA,
+    "selectors": {"headline": {"css": "h1"}},
+    "tables": True,
+}
+TABLE_PAGE = ARTICLE.replace(
+    "</article>",
+    "<table><tr><th>Gas</th><th>Role</th></tr><tr><td>CO2</td><td>input</td></tr></table>"
+    "</article>",
+)
+
+
+def _expected_dom(headline: str) -> dict[str, Any]:
+    return {"headline": headline, "description": "How plants turn light into food."}
+
+
+def test_dom_stage_runs_in_fast_browser_and_upload_html() -> None:
+    # Fast: the fetched page.
+    fast = data_of(Harness({PAGE: fetched(body=TABLE_PAGE)}).run_once(structured=DOM_OPTIONS))
+    assert fast.structured is not None
+    assert fast.structured.stage == "dom"
+    assert fast.structured.values == _expected_dom("Photosynthesis explained")
+    assert fast.structured.sources == {"headline": "selectors", "description": "metadata"}
+    assert fast.structured.tables is not None
+    assert fast.structured.tables[0].rows == [["CO2", "input"]]
+    assert fast.metadata is not None  # the parse for the DOM stage serves the metadata too
+
+    # Browser: the rendered HTML, not the fetched one.
+    rendered_page = TABLE_PAGE.replace("<h1>Photosynthesis explained</h1>", "<h1>Rendered</h1>")
+    valkey = FakeAsyncRedis()
+    settings = make_settings(browser_enabled=True)
+    fetcher = cast(Fetcher, FakeFetcher({}))
+    browser = Pipeline(
+        fetcher,
+        DomainGate(valkey, settings),
+        ComplianceChecker(fetcher, valkey, settings),
+        ResultCache(valkey, settings),
+        FingerprintStore(valkey, settings),
+        settings,
+        CollectorRegistry(),
+        renderer=cast(Renderer, FakeRenderer(rendered(rendered_page))),
+    )
+    request = ExtractRequest.model_validate(
+        {"url": PAGE, "mode": "browser", "structured": DOM_OPTIONS}
+    )
+    shown = data_of(asyncio.run(browser.run(request, USER)))
+    assert shown.mode_used == "browser"
+    assert shown.structured is not None
+    assert shown.structured.values == _expected_dom("Rendered")
+
+    # Upload: without a URL, so relative links stay relative.
+    form = FileForm(
+        structured=StructuredOptions(
+            schema={"type": "object", "properties": {"link": {"type": "string"}}},
+            strategy="selectors",
+            selectors={"link": SelectorRule(css="article a", attr="href")},
+        ),
+        metadata=False,
+    )
+    harness = Harness({})
+    uploaded = data_of(
+        asyncio.run(
+            harness.pipeline.extract_upload(
+                ARTICLE.encode(), "page.html", form, USER, content_type="text/html"
+            )
+        )
+    )
+    assert uploaded.mode_used == "upload"
+    assert uploaded.metadata is None
+    assert uploaded.structured is not None
+    assert uploaded.structured.values == {"link": "/learn/respiration.html"}
+
+
+class _AnsweringDocumentPool:
+    """A document pool whose children answer every document with a text layer."""
+
+    async def start(self) -> None:
+        pass
+
+    async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+        return {
+            "content": "# Lesson\n\n" + PARAGRAPH * 3,
+            "title": "Lesson",
+            "warnings": [],
+            "pages": 1,
+            "pages_converted": 1,
+            "needs_ocr": False,
+            "metadata": None,
+        }
+
+    async def shutdown(self) -> None:
+        pass
+
+
+def test_document_and_text_skip_dom_stage() -> None:
+    text = Harness({PAGE: fetched(body=PARAGRAPH * 3, content_type="text/plain")})
+    plain = data_of(text.run_once(structured=DOM_OPTIONS))
+    assert plain.content
+    assert plain.structured is None
+
+    valkey = FakeAsyncRedis()
+    settings = make_settings()
+    pdf = b"%PDF-1.7\n" + b"0" * 64
+    fetcher = cast(Fetcher, FakeFetcher({PAGE: fetched(body=pdf, content_type="application/pdf")}))
+    documents = Pipeline(
+        fetcher,
+        DomainGate(valkey, settings),
+        ComplianceChecker(fetcher, valkey, settings),
+        ResultCache(valkey, settings),
+        FingerprintStore(valkey, settings),
+        settings,
+        CollectorRegistry(),
+        document_pool=cast(DocumentPool, _AnsweringDocumentPool()),
+    )
+    document = data_of(
+        asyncio.run(
+            documents.run(
+                ExtractRequest.model_validate({"url": PAGE, "structured": DOM_OPTIONS}), USER
+            )
+        )
+    )
+    assert document.document is not None
+    assert document.structured is None
+
+
+PACKAGE_4_OPTIONS: dict[str, Any] = {
+    "mode": "auto",
+    "format": "markdown",
+    "metadata": True,
+    "links": False,
+    "compliance": "enforce",
+}
+
+
+def test_cache_key_unchanged_without_structured() -> None:
+    """Requests without ``structured``, or whose options do not touch the DOM, keep the key of
+    the release before: a deploy keeps the cache."""
+    assert _cache_options(ExtractRequest(url=PAGE), "enforce") == PACKAGE_4_OPTIONS
+    expected = cache_key(PAGE, PACKAGE_4_OPTIONS)
+    patterns = {
+        "schema": STRUCTURED_SCHEMA,
+        "strategy": "patterns",
+        "patterns": {"headline": {"regex": "Photo\\w+"}},
+    }
+    llm = {"schema": STRUCTURED_SCHEMA, "strategy": "llm"}
+    for request in (
+        {},
+        {"chunking": {"strategy": "fixed", "size": 500}},
+        {"structured": patterns},
+        {"structured": llm},
+    ):
+        harness = Harness({PAGE: fetched()})
+        envelope = harness.run_once(**request)
+        assert envelope.status == "success"
+        assert data_of(envelope).structured is None
+        assert harness.keys("res:*") == [expected.encode()], request
+
+
+def test_cache_key_changes_with_dom_options_and_learned_rules_not_with_chunking() -> None:
+    harness = Harness({PAGE: fetched()})
+    seen: set[bytes] = set()
+
+    def new_keys(**request: Any) -> int:
+        assert harness.run_once(**request).status == "success"
+        keys = set(harness.keys("res:*"))
+        added = len(keys - seen)
+        seen.update(keys)
+        return added
+
+    metadata = {"schema": STRUCTURED_SCHEMA, "strategy": "metadata"}
+    assert new_keys() == 1
+    assert new_keys(structured=metadata) == 1
+    assert new_keys(structured=metadata, chunking={"strategy": "sentence"}) == 0
+    assert new_keys(structured={**metadata, "tables": True}) == 1
+    assert new_keys(structured={**metadata, "strategy": "auto"}) == 1
+    selectors = {"schema": STRUCTURED_SCHEMA, "selectors": {"headline": {"css": "h1"}}}
+    assert new_keys(structured=selectors) == 1
+    assert new_keys(structured={**selectors, "selectors": {"headline": {"css": "h2"}}}) == 1
+    other_schema = {"type": "object", "properties": {"title": {"type": "string"}}}
+    assert new_keys(structured={"schema": other_schema, "strategy": "metadata"}) == 1
+
+    # Learned rules of the owner join the key; another owner's do not.
+    compiled = StructuredOptions(schema=STRUCTURED_SCHEMA).compiled
+    assert compiled is not None
+    rules = {"description": SelectorRule(css="nav a")}
+    asyncio.run(harness.selectors.put("bob", "example.org", compiled.schema_id, rules))
+    assert new_keys(structured=selectors) == 0
+    asyncio.run(harness.selectors.put("alice", "example.org", compiled.schema_id, rules))
+    assert new_keys(structured=selectors) == 1
+    # The served result was extracted with them.
+    hit = data_of(harness.run_once(structured=selectors))
+    assert hit.cache == "hit"
+    assert hit.structured is not None
+    assert hit.structured.values == {"headline": "Photosynthesis explained", "description": "Home"}
+    assert hit.structured.sources == {"headline": "selectors", "description": "learned"}
+    # Strategy metadata reads no learned rules: its key stays.
+    assert new_keys(structured=metadata) == 0
+
+
+def test_learn_request_not_cached_but_served() -> None:
+    harness = Harness({PAGE: fetched()})
+    learning = {"schema": STRUCTURED_SCHEMA, "learn_selectors": True}
+
+    first = data_of(harness.run_once(structured=learning))
+    assert first.cache == "miss"
+    assert first.structured is not None
+    assert first.structured.learn_html is not None
+    assert "<h1>Photosynthesis explained</h1>" in first.structured.learn_html
+    assert harness.keys("res:*") == []
+
+    # The same request without learning is stored; the learning request is served from it.
+    stored = data_of(harness.run_once(structured={"schema": STRUCTURED_SCHEMA}))
+    assert stored.cache == "miss"
+    assert stored.structured is not None
+    assert stored.structured.learn_html is None
+    assert len(harness.keys("res:*")) == 1
+    served = data_of(harness.run_once(structured=learning))
+    assert served.cache == "hit"
+    assert served.structured is not None
+    assert served.structured.values == stored.structured.values
+
+
+def test_caller_selectors_win_over_learned() -> None:
+    harness = Harness({PAGE: fetched()})
+    compiled = StructuredOptions(schema=STRUCTURED_SCHEMA).compiled
+    assert compiled is not None
+    learned = {"headline": SelectorRule(css="nav a"), "description": SelectorRule(css="nav a")}
+    asyncio.run(harness.selectors.put("alice", "example.org", compiled.schema_id, learned))
+
+    result = data_of(
+        harness.run_once(
+            structured={
+                "schema": STRUCTURED_SCHEMA,
+                "strategy": "selectors",
+                "selectors": {"headline": {"css": "h1"}},
+            }
+        )
+    )
+
+    assert result.structured is not None
+    assert result.structured.values == {
+        "headline": "Photosynthesis explained",
+        "description": "Home",
+    }
+    assert result.structured.sources == {"headline": "selectors", "description": "learned"}
+    # Only the learned rule the stage used joins the key.
+    request = ExtractRequest.model_validate(
+        {
+            "url": PAGE,
+            "structured": {
+                "schema": STRUCTURED_SCHEMA,
+                "strategy": "selectors",
+                "selectors": {"headline": {"css": "h1"}},
+            },
+        }
+    )
+    assert request.structured is not None
+    part = structured_cache_part(request.structured, {"description": learned["description"]})
+    assert harness.keys("res:*") == [
+        cache_key(PAGE, _cache_options(request, "enforce", structured=part)).encode()
+    ]
+
+
+def test_heavy_xpath_within_deadline() -> None:
+    """Review Focus 2: a 5 MB page with ``//*//*//*`` answers within EXTRACT_TIMEOUT_SECONDS
+    (here as ``timeout``), never a hang. The deadline cannot stop the conversion thread (see
+    ``conversion_pool``): it finishes afterwards and gives its slot back then."""
+    row = "<p>" + "word " * 80 + "</p>\n"
+    page = "<html><body><article>" + row * (5_000_000 // len(row)) + "</article></body></html>"
+    assert len(page) >= 4_900_000
+    timeout = 2.0
+    pool = ConversionPool(1)
+    valkey = FakeAsyncRedis()
+    settings = make_settings(extract_timeout_seconds=timeout)
+    fetcher = cast(Fetcher, FakeFetcher({PAGE: fetched(body=page)}))
+    pipeline = Pipeline(
+        fetcher,
+        DomainGate(valkey, settings),
+        ComplianceChecker(fetcher, valkey, settings),
+        ResultCache(valkey, settings),
+        FingerprintStore(valkey, settings),
+        settings,
+        CollectorRegistry(),
+        pool,
+    )
+    options = {
+        "schema": {"type": "object", "properties": {"all": {"type": "string"}}},
+        "strategy": "selectors",
+        "selectors": {"all": {"xpath": "//*//*//*", "all": True}},
+    }
+
+    async def scenario() -> tuple[Envelope[ExtractResult], float, float]:
+        started = time.perf_counter()
+        envelope = await pipeline.run(
+            ExtractRequest.model_validate({"url": PAGE, "structured": options}), USER
+        )
+        answered = time.perf_counter() - started
+        await pool.run(time.perf_counter)  # once the conversion thread is done
+        return envelope, answered, time.perf_counter() - started
+
+    try:
+        envelope, answered, drained = asyncio.run(scenario())
+    finally:
+        pool.shutdown()
+
+    assert answered < timeout + 1.5
+    if envelope.status == "failed":
+        assert envelope.error is not None
+        assert envelope.error.code == ErrorCode.TIMEOUT
+        assert envelope.error.retryable
+    else:
+        assert data_of(envelope).structured is not None
+    assert drained >= answered

@@ -76,6 +76,7 @@ from text_extraction.fingerprint import Fingerprint, compute_fingerprint
 from text_extraction.metadata import PageMetadata
 from text_extraction.quality import Quality, assess, quality_error
 from text_extraction.settings import Settings
+from text_extraction.structured.types import StructuredOptions
 
 _log = structlog.get_logger(__name__)
 
@@ -169,6 +170,9 @@ class DocumentRequest(Protocol):
 
     @property
     def ocr(self) -> OcrOption: ...
+
+    @property
+    def structured(self) -> StructuredOptions | None: ...
 
 
 class DocumentRun(Protocol):

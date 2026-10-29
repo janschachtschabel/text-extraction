@@ -110,7 +110,7 @@ import html as html_lib
 import math
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 from urllib.parse import urlsplit
@@ -162,7 +162,13 @@ from text_extraction.media.sites import MediaTarget, media_target
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, media_type_of, sniff_media
 from text_extraction.media.transcript import Transcription
 from text_extraction.media.types import MediaInfo, MediaKind
-from text_extraction.metadata import PageMetadata, detect_language, extract_metadata
+from text_extraction.metadata import (
+    PageMetadata,
+    StructuredItems,
+    detect_language,
+    metadata_with_items,
+    structured_items,
+)
 from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.outbound import (
     CircuitOpen,
@@ -226,6 +232,21 @@ from text_extraction.render import (
 )
 from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
 from text_extraction.settings import Settings
+from text_extraction.structured.dom import (
+    dom_stage,
+    reads_learned,
+    reads_metadata,
+    runs_dom_stage,
+    structured_cache_part,
+    usable_learned,
+)
+from text_extraction.structured.store import (
+    LEARNED_SELECTORS_UNAVAILABLE_WARNING,
+    LearnedSelectorsUnavailableError,
+    SelectorStore,
+    selector_host,
+)
+from text_extraction.structured.types import SelectorRule, StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -386,6 +407,11 @@ class _Run:
     media: MediaTarget | None = None  # the platform video the request URL is (step 2b)
     asr_handoff: TranscriptionHandoff | None = None
     asr_needed: AsrNeeded | None = None  # for the handoff, once the deadline's steps are done
+    # The owner of learned selectors (the principal's name, D2 a), the ones read for this
+    # request (by field, only those the DOM stage uses: S4) and whether reading them failed.
+    owner: str | None = None
+    learned: dict[str, SelectorRule] = field(default_factory=dict)
+    learned_unavailable: bool = False
 
     @property
     def cache_url(self) -> str:
@@ -442,6 +468,7 @@ class _UploadOptions:
     metadata: bool
     ocr: OcrOption
     links: bool = False  # the form has no `links`: without a URL, links stay relative
+    structured: StructuredOptions | None = None
 
 
 @dataclass
@@ -556,6 +583,7 @@ class _Processed:
     metadata: PageMetadata | None
     links: list[Link] | None
     fingerprint: Fingerprint | None  # not yet compared with the previous one
+    structured: StructuredResult | None = None  # the DOM stage's (S3), for HTML only
 
 
 class Pipeline:
@@ -578,6 +606,7 @@ class Pipeline:
         timeout_seconds: float | None = None,
         document_pool: DocumentPool | None = None,
         media_fetcher: MediaFetcher | None = None,
+        selector_store: SelectorStore | None = None,
     ) -> None:
         """``pool`` runs the CPU-bound steps; without one the pipeline makes its own. So does
         ``document_pool``, the MarkItDown children; the pipeline starts it with the first
@@ -588,7 +617,10 @@ class Pipeline:
         Only the browser worker passes a ``renderer`` (and, with unblock mode enabled, the
         ``unblock_renderer`` and the ``clearance`` store). ``timeout_seconds`` replaces
         ``EXTRACT_TIMEOUT_SECONDS`` as the deadline; an unblock render has
-        ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``."""
+        ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``.
+
+        ``selector_store`` holds the learned selectors of ``structured`` (S8); without it no
+        request reads any."""
         self._fetcher = fetcher
         self._gate = gate
         self._checker = checker
@@ -602,6 +634,7 @@ class Pipeline:
         self._unblock_renderer = unblock_renderer
         self._clearance = clearance
         self._timeout_seconds = timeout_seconds
+        self._selector_store = selector_store
         self._blocked_resources = blocked_resources(settings)
         self._documents = DocumentSteps(
             document_pool if document_pool is not None else create_document_pool(settings),
@@ -617,6 +650,33 @@ class Pipeline:
             if media_fetcher is not None and settings.media_enabled
             else None
         )
+
+    @property
+    def selector_store(self) -> SelectorStore | None:
+        """The store of learned selectors (S8), for the post stage's ``learn_selectors``."""
+        return self._selector_store
+
+    async def _load_learned(self, run: _Run) -> None:
+        """Read the learned selectors of the request's owner, host and schema (S4), before the
+        cache lookup: they join the key. A Valkey failure means none, with the warning
+        ``learned_selectors_unavailable``."""
+        options = run.req.structured
+        host = selector_host(run.req.url)
+        if (
+            options is None
+            or options.compiled is None
+            or not reads_learned(options)
+            or self._selector_store is None
+            or run.owner is None
+            or host is None
+        ):
+            return
+        try:
+            stored = await self._selector_store.get(run.owner, host, options.compiled.schema_id)
+        except LearnedSelectorsUnavailableError:
+            run.learned_unavailable = True
+            return
+        run.learned = usable_learned(options, stored)
 
     async def run(
         self,
@@ -668,6 +728,7 @@ class Pipeline:
             ocr_handoff=ocr_handoff,
             target=req.url,
             asr_handoff=asr_handoff,
+            owner=principal.name,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -681,6 +742,9 @@ class Pipeline:
                 envelope = await run.asr_handoff(run.asr_needed, envelope)
             if envelope.data is not None:
                 envelope.data.timings = _with_pii_time(run.timings(), envelope.data.timings)
+                if run.learned_unavailable:
+                    # Not part of the stored result: the next request may read them again.
+                    envelope.data.warnings.append(LEARNED_SELECTORS_UNAVAILABLE_WARNING)
             envelope.trace_id = current_trace_id()
             outcome = _outcome(envelope)
             return envelope
@@ -720,7 +784,9 @@ class Pipeline:
         """
         mode = resolve_mode(None, principal, self._settings)
         run = _UploadRun(
-            req=_UploadOptions(format=form.format, metadata=form.metadata, ocr=form.ocr),
+            req=_UploadOptions(
+                format=form.format, metadata=form.metadata, ocr=form.ocr, structured=form.structured
+            ),
             report=ComplianceReport(mode=mode, decision="skipped"),
             file_name=name,
             ocr_handoff=ocr_handoff,
@@ -772,7 +838,12 @@ class Pipeline:
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
-                req=_UploadOptions(format=req.format, metadata=req.metadata, ocr=req.ocr),
+                req=_UploadOptions(
+                    format=req.format,
+                    metadata=req.metadata,
+                    ocr=req.ocr,
+                    structured=req.structured,
+                ),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
                 ),
@@ -782,6 +853,7 @@ class Pipeline:
             )
         else:
             run = self._queued_run(req, principal, meta)
+            await self._load_learned(run)  # the key of the URL's sync requests (S4)
         converted = await convert(run, document)
         if isinstance(converted, Envelope):
             ocr = converted
@@ -846,6 +918,7 @@ class Pipeline:
             warnings=list(meta.warnings),
             target=meta.target or req.url,
             direct=meta.target is not None,
+            owner=principal.name,
         )
 
     async def transcribed_result(
@@ -879,7 +952,12 @@ class Pipeline:
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
-                req=_UploadOptions(format=req.format, metadata=req.metadata, ocr=req.ocr),
+                req=_UploadOptions(
+                    format=req.format,
+                    metadata=req.metadata,
+                    ocr=req.ocr,
+                    structured=req.structured,
+                ),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
                 ),
@@ -889,6 +967,7 @@ class Pipeline:
             )
         else:
             run = self._media_run(req, principal, meta)
+            await self._load_learned(run)  # the key of the URL's sync requests (S4)
         envelope: Envelope[ExtractResult]
         if isinstance(transcription, Envelope):
             error = transcription.error or ErrorInfo(
@@ -964,6 +1043,7 @@ class Pipeline:
             attempts=meta.attempts,
             target=req.url,
             media=media_target(req.url) if meta.source == "platform" else None,
+            owner=principal.name,
         )
 
     # --- steps ---------------------------------------------------------------------------------
@@ -996,6 +1076,7 @@ class Pipeline:
         if target is not None and target.video_id is None:
             return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, PLAYLIST_MESSAGE)
         run.media = target
+        await self._load_learned(run)
 
         stored = await self._cached(run) if run.cacheable else None
         if stored is not None and req.transcribe and _metadata_only(stored.result):
@@ -1134,9 +1215,17 @@ class Pipeline:
         )
         return without_asr(needed, run, message=message)
 
+    def _cache_options_of(self, run: _Run) -> dict[str, Any]:
+        options = run.req.structured
+        return _cache_options(
+            run.req,
+            run.report.mode,
+            media=run.media is not None,
+            structured=structured_cache_part(options, run.learned) if options is not None else None,
+        )
+
     async def _cached(self, run: _Run) -> _Stored | None:
-        options = _cache_options(run.req, run.report.mode, media=run.media is not None)
-        key = cache_key(run.cache_url, options)
+        key = cache_key(run.cache_url, self._cache_options_of(run))
         found = await self._cache.get(key)
         if found is None:
             return None
@@ -1523,6 +1612,7 @@ class Pipeline:
             links=processed.links,
             fingerprint=processed.fingerprint,
             warnings=processed.warnings,
+            structured=processed.structured,
         )
         envelope = self._envelope(result)
         if self._escalates(run, envelope):
@@ -1539,8 +1629,9 @@ class Pipeline:
     ) -> _Processed | Envelope[ExtractResult]:
         """``_process`` on the conversion pool, or the failed envelope of a page that broke it."""
         started = time.perf_counter()
+        learned = run.learned if isinstance(run, _Run) else {}
         try:
-            return await self._pool.run(self._process, run.req, fetched, kind, text)
+            return await self._pool.run(self._process, run.req, fetched, kind, text, learned)
         except Exception as error:  # a page that breaks a converter fails alone
             # Traceback without locals (see logging.py); the host only, never the URL.
             _log.error(
@@ -1576,17 +1667,18 @@ class Pipeline:
             envelope = envelope.model_copy(update={"data": result})
         # A draft stored without its content (over JOB_ITEM_MAX_BYTES) is not served again.
         complete = CONTENT_NOT_STORED_WARNING not in result.warnings
+        # A request that learns selectors carries the cleaned HTML for it (S7): never stored,
+        # though it may be served from the cache (S4).
+        learning = run.req.structured is not None and run.req.structured.learn_selectors
         if (
             run.cacheable
             and envelope.status != "failed"
             and result.fingerprint is not None
             and complete
+            and not learning
         ):
             await self._cache.put(
-                cache_key(
-                    run.cache_url,
-                    _cache_options(run.req, run.report.mode, media=run.media is not None),
-                ),
+                cache_key(run.cache_url, self._cache_options_of(run)),
                 CachedEntry(
                     stored_at=time.time(),
                     validators=validators,
@@ -1762,6 +1854,7 @@ class Pipeline:
                 links=processed.links,
                 fingerprint=processed.fingerprint,
                 warnings=processed.warnings,
+                structured=processed.structured,
             )
         )
 
@@ -2008,6 +2101,7 @@ class Pipeline:
             fingerprint=fingerprint,
             warnings=[*processed.warnings, *rendered.warnings],
             screenshot=screenshot,
+            structured=processed.structured,
         )
         if self._media is not None and screenshot is None:
             result = await self._media.tracks(
@@ -2097,21 +2191,48 @@ class Pipeline:
             )
 
     def _process(
-        self, req: DocumentRequest, fetched: FetchResult, kind: Literal["html", "text"], text: str
+        self,
+        req: DocumentRequest,
+        fetched: FetchResult,
+        kind: Literal["html", "text"],
+        text: str,
+        learned: Mapping[str, SelectorRule] | None = None,
     ) -> _Processed:
-        """Convert and judge the decoded page. CPU-bound: runs on the conversion pool."""
+        """Convert and judge the decoded page, and run the DOM stage of ``structured`` on an
+        HTML page (S3) with the ``learned`` selectors. CPU-bound: runs on the conversion pool.
+        The page is parsed once for the metadata and the DOM stage."""
         final_url = fetched.final_url
         metadata: PageMetadata | None = None
         links: list[Link] | None = None
         html_lang: str | None = None
+        structured: StructuredResult | None = None
         if kind == "html":
             conversion = convert_html(text, final_url, req.format)
             host = urlsplit(final_url).hostname or ""
             content = strip_boilerplate(host, conversion.content, self._rules)
             quality = assess(text, content)
             html_lang = _html_lang(text)
-            if req.metadata:
-                metadata = extract_metadata(text, final_url, fetched.headers)
+            options = req.structured
+            dom = options is not None and runs_dom_stage(options)
+            page_metadata: PageMetadata | None = None
+            items: StructuredItems | None = None
+            if req.metadata or (options is not None and dom and reads_metadata(options)):
+                page_metadata, items = metadata_with_items(text, final_url, fetched.headers)
+                if req.metadata:
+                    metadata = page_metadata
+            if options is not None and dom:
+                if items is None:  # selectors, tables or learning only: the tree is enough
+                    items = structured_items(text, final_url, syntaxes=False)
+                structured = dom_stage(
+                    text,
+                    final_url,
+                    options,
+                    page_metadata,
+                    items,
+                    learn=options.learn_selectors,
+                    learn_max_chars=self._settings.llm_max_input_tokens * 4,
+                    learned=learned,
+                )
             if req.links:
                 links = page_links(text, final_url)
         else:
@@ -2142,6 +2263,7 @@ class Pipeline:
             metadata=metadata,
             links=links,
             fingerprint=None if failed else compute_fingerprint(fetched.raw_sha256, content),
+            structured=structured,
         )
 
     def _envelope(self, result: ExtractResult) -> Envelope[ExtractResult]:
@@ -2210,15 +2332,20 @@ def create_pipeline(
     timeout_seconds: float | None = None,
     document_pool: DocumentPool | None = None,
     media_fetcher: MediaFetcher | None = None,
+    selector_store: SelectorStore | None = None,
 ) -> Pipeline:
-    """A pipeline whose gate, compliance checks, cache and fingerprints all live in ``valkey``.
+    """A pipeline whose gate, compliance checks, cache, fingerprints and learned selectors all
+    live in ``valkey``.
 
     ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
     without it a new gate is made, which then counts its spacing from the turn starts only.
     With ``memory_guard`` the result cache skips its writes while Valkey's memory is high.
-    The browser options, ``document_pool`` and ``media_fetcher`` go to ``Pipeline`` unchanged."""
+    The browser options, ``document_pool`` and ``media_fetcher`` go to ``Pipeline`` unchanged.
+    Without ``selector_store`` one is made on ``valkey`` (``SELECTOR_LEARN_TTL_SECONDS``)."""
     if gate is None:
         gate = DomainGate(valkey, settings)
+    if selector_store is None:
+        selector_store = SelectorStore(valkey, settings.selector_learn_ttl_seconds)
     return Pipeline(
         fetcher,
         gate,
@@ -2234,6 +2361,7 @@ def create_pipeline(
         timeout_seconds=timeout_seconds,
         document_pool=document_pool,
         media_fetcher=media_fetcher,
+        selector_store=selector_store,
     )
 
 
@@ -2241,7 +2369,11 @@ def create_pipeline(
 
 
 def _cache_options(
-    req: ExtractRequest, mode: ComplianceMode, *, media: bool = False
+    req: ExtractRequest,
+    mode: ComplianceMode,
+    *,
+    media: bool = False,
+    structured: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Every request option that changes the result; the cache key covers them.
 
@@ -2256,6 +2388,12 @@ def _cache_options(
     apart from a page result of the same URL. The requested ``languages`` choose a video's
     subtitle track and the tracks of a page's players, so they are part of every key, but only
     when set: the keys of requests without them stay as they were.
+
+    ``structured`` is the DOM stage's part (``structured.dom.structured_cache_part``: its
+    strategy, schema, selectors, tables and learned selectors, S4), again only when there is
+    one: a request without ``structured``, or whose options do not touch the DOM (``patterns``,
+    ``llm``), keeps the key of a request without it. ``chunking`` and the post stage's options
+    never change the cached result, so they are never part of the key.
     """
     options: dict[str, Any] = {
         "mode": req.mode,
@@ -2270,6 +2408,8 @@ def _cache_options(
         options["media"] = True
     if req.languages:
         options["languages"] = list(req.languages)
+    if structured is not None:
+        options["structured"] = dict(structured)
     return options
 
 
