@@ -12,7 +12,9 @@ every job a pool worker finishes). ``nlp`` is a last hop: what the generic class
 when the hop does not serve them: withheld). The last section is the contract of the nlp
 worker.
 
-**Which envelopes go.** One that is not processed yet (``data.pii`` is None) and has something
+**Which envelopes go.** Without a DOM stage's ``structured`` (R12 b: it read the raw page,
+which this step does not mask; a request with ``pii`` has no DOM stage anyway). One that is not
+processed yet (``data.pii`` is None) and has something
 N5 processes (``pii.fields.needs_pii``). Any other envelope answers as it is, without the hop:
 one without data (a failure of ours), and one with nothing to process (a failure without content
 and metadata), whose ``pii`` stays null because nothing was processed (issue #15).
@@ -87,10 +89,11 @@ from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobStore
+from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.pii.fields import needs_pii, withheld
 from text_extraction.pii.types import PiiLanguage, PiiLanguageOption
 from text_extraction.pool_dispatch import (
+    Handover,
     LastHopHandoff,
     LastHopMove,
     PoolDispatcher,
@@ -98,9 +101,10 @@ from text_extraction.pool_dispatch import (
 )
 from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.result_cache import MemoryPressure
-from text_extraction.scheduler import FairQueue
+from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
 from text_extraction.structured.checks import wants_llm
+from text_extraction.structured.post import without_dom_stage
 
 PII_POOL: Final = "nlp"
 _PII_DOMAIN_CAP: Final = 1_000_000
@@ -251,6 +255,12 @@ class PiiHandoff(LastHopHandoff):
         # A result that moves on to the llm worker completes later (ruling S13).
         self._llm = wants_llm(options.structured, options.chunking, dispatcher.settings)
 
+    async def __call__(
+        self, envelope: Envelope[ExtractResult], handover: Handover
+    ) -> Envelope[ExtractResult] | None:
+        # Defence in depth (R12 b): no DOM-stage value of the raw page passes the PII step.
+        return await super().__call__(without_dom_stage(envelope), handover)
+
     def needs(self, envelope: Envelope[ExtractResult]) -> bool:
         pii = self._options.pii
         return pii is not None and needs_pii(envelope, pii)
@@ -275,7 +285,12 @@ class PiiMove(LastHopMove):
     """The move of a finished item to the ``nlp`` pool (``Worker._finish`` of every other pool;
     N11), the generic ``pool_dispatch.LastHopMove`` with the ``nlp`` queue. ``guard`` tells
     whether Valkey is nearly full; ``outcomes`` (``text_extraction_nlp_dispatch_total``) counts
-    the refused moves."""
+    the refused moves. The draft has no DOM-stage ``structured`` (R12 b)."""
+
+    async def __call__(
+        self, job: JobRecord, item: QueueItem, envelope: Envelope[ExtractResult]
+    ) -> bool:
+        return await super().__call__(job, item, without_dom_stage(envelope))
 
 
 def create_pii_move(

@@ -25,7 +25,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
 from text_extraction.pii.types import PiiOptions
-from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, nlp_queue
+from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, PiiMove, nlp_queue
 from text_extraction.pipeline_documents import DocumentInput, DocumentInputMeta, OcrNeeded
 from text_extraction.pool_dispatch import Handover, LastHopHandoff, LastHopMove, PoolDispatcher
 from text_extraction.queue_metrics import dispatch_counter_for
@@ -546,3 +546,74 @@ async def test_last_hop_move_stores_the_draft_and_queues_the_item() -> None:
     refused = LastHopMove(toy.store, toy.queue, HighGuard(), outcomes=counter)
     assert not await refused(job, item, OWING)
     assert toy.count("memory_guard") == 1
+
+
+def dom_draft() -> Envelope[ExtractResult]:
+    """A result with a page's text and a DOM-stage value read from its raw HTML."""
+    return Envelope[ExtractResult].model_validate(
+        {
+            "status": "success",
+            "data": {
+                "url": URL,
+                "final_url": URL,
+                "upstream_status": 200,
+                "content_type": "text/html",
+                "mode_used": "fast",
+                "attempts": 1,
+                "language": "en",
+                "word_count": 3,
+                "title": "Page",
+                "format": "markdown",
+                "content": "Written by Anna Schmidt.",
+                "quality": None,
+                "timings": {"total_ms": 1, "compliance_ms": 0, "fetch_ms": 0, "convert_ms": 1},
+                "compliance": {"mode": "enforce"},
+                "metadata": None,
+                "links": None,
+                "fingerprint": None,
+                "cache": "miss",
+                "warnings": [],
+                "structured": {"values": {"author": "Anna Schmidt"}, "stage": "dom"},
+            },
+        }
+    )
+
+
+def test_the_pii_hop_drops_dom_values_from_its_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defence in depth (R12 b): what the nlp worker gets, from a sync request or a move, has
+    no DOM-stage ``structured``: only patterns and the LLM fill fields after the masking."""
+    pii = JobOptions(compliance="enforce", pii=PiiOptions(mode="mask"))
+
+    async def no_result(self: Any, job_id: str, **limits: Any) -> None:
+        return None
+
+    monkeypatch.setattr(PiiDispatcher, "wait", no_result)
+
+    async def scenario_() -> tuple[Any, Any]:
+        settings = Settings(auth_mode="none", pii_enabled=True)
+        parts = Parts(settings)
+        queue = nlp_queue(parts.valkey, settings)
+        drafts: list[Any] = []
+        put_draft = parts.store.put_draft
+
+        async def kept(job_id: str, index: int, envelope: Envelope[ExtractResult]) -> None:
+            drafts.append(envelope)
+            await put_draft(job_id, index, envelope)
+
+        monkeypatch.setattr(parts.store, "put_draft", kept)
+        nlp = PiiDispatcher(parts.store, queue, settings)
+        handoff = PiiHandoff(nlp, LowGuard(), kind="extract", options=pii, principal=ALICE, url=URL)
+        await handoff(dom_draft(), Handover())
+
+        job_id = await parts.store.create("batch", ALICE, pii, [URL])
+        job = await parts.store.get(job_id)
+        assert job is not None
+        item = QueueItem(job_id=job_id, index=0, client="alice", attempts=1, domain="d")
+        await PiiMove(parts.store, queue, LowGuard())(job, item, dom_draft())
+        return drafts[0], drafts[1]
+
+    sync, moved = asyncio.run(scenario_())
+
+    for draft in (sync, moved):
+        assert draft.data.structured is None
+        assert draft.data.content == "Written by Anna Schmidt."  # for the nlp worker to mask

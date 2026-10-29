@@ -109,6 +109,7 @@ __all__ = [
     "post_done",
     "post_pending",
     "run_post_patterns",
+    "without_dom_stage",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -198,11 +199,24 @@ def post_pending(
     """Whether a finish point still owes this envelope its post stage (ruling S13): the stage
     has not run (``post_done``), and the envelope does not owe the PII step any more. The post
     stage only ever reads the final content (D3 a): an envelope that still owes PII (no nlp
-    worker took it) is withheld by ``pii.fields.fail_closed`` right after, and its raw content
-    must not end up in values or chunks."""
+    worker took it) is withheld by ``pii.fields.fail_closed`` right after (which drops
+    ``structured`` and ``chunks`` too, R13), so it gets none."""
     if post_done(envelope, structured, chunking):
         return False
     return pii is None or not needs_pii(envelope, pii)
+
+
+def without_dom_stage(envelope: Envelope[ExtractResult]) -> Envelope[ExtractResult]:
+    """The envelope without a DOM stage's ``structured`` (``stage: "dom"``), for a request with
+    ``pii`` (ruling R12 b, D3 a): the DOM stage read the raw page, which the nlp step does not
+    mask, so only ``patterns`` and the LLM may fill fields, on the masked content. Called where
+    the PII hop takes an envelope (``PiiHandoff``, ``PiiMove``) and on a cache hit of a ``pii``
+    request; the pipeline runs no DOM stage for such a request in the first place
+    (``dom.dom_options``). Any other envelope comes back as it is."""
+    data = envelope.data
+    if data is None or data.structured is None or data.structured.stage != "dom":
+        return envelope
+    return envelope.model_copy(update={"data": data.model_copy(update={"structured": None})})
 
 
 def _missing(data: ExtractResult, compiled: CompiledSchema) -> list[str]:

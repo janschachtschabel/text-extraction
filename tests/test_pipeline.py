@@ -39,6 +39,7 @@ from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
+from text_extraction.pii.types import PiiOptions
 from text_extraction.pipeline import Pipeline, _cache_options, create_outbound, create_pipeline
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
@@ -1710,3 +1711,32 @@ def test_heavy_xpath_within_deadline() -> None:
         "all": None,
         "description": "How plants turn light into food.",
     }
+
+
+def test_a_pii_request_runs_no_dom_stage_and_keeps_the_plain_key() -> None:
+    """Ruling R12 (D3 a): with ``pii`` no DOM-stage value may reach a result. The DOM stage
+    (metadata, learned selectors) does not run, and the cache key is the one of a request
+    without DOM work; an upload with ``pii`` gets no DOM stage either."""
+    harness = Harness({PAGE: fetched()})
+    compiled = StructuredOptions(schema=STRUCTURED_SCHEMA).compiled
+    assert compiled is not None
+    learned = {"headline": SelectorRule(css="h1")}
+    asyncio.run(harness.selectors.put("alice", "example.org", compiled.schema_id, learned))
+
+    result = data_of(harness.run_once(structured={"schema": STRUCTURED_SCHEMA}, pii="mask"))
+
+    assert result.structured is None
+    plain = ExtractRequest.model_validate({"url": PAGE})
+    assert harness.keys("res:*") == [cache_key(PAGE, _cache_options(plain, "enforce")).encode()]
+
+    form = FileForm(
+        structured=StructuredOptions(schema=STRUCTURED_SCHEMA), pii=PiiOptions(mode="mask")
+    )
+    uploaded = data_of(
+        asyncio.run(
+            harness.pipeline.extract_upload(
+                ARTICLE.encode(), "page.html", form, USER, content_type="text/html"
+            )
+        )
+    )
+    assert uploaded.structured is None

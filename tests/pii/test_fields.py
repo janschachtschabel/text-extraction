@@ -2,6 +2,7 @@ from typing import Any
 
 import pytest
 
+from text_extraction.chunking.types import Chunk
 from text_extraction.compliance import ComplianceReport
 from text_extraction.convert import Link
 from text_extraction.documents.types import DocumentInfo
@@ -17,9 +18,11 @@ from text_extraction.pii.fields import (
     fail_closed,
     needs_pii,
     text_fields,
+    withheld,
 )
 from text_extraction.pii.types import PiiOptions, PiiReport, Span
 from text_extraction.quality import Quality
+from text_extraction.structured.types import StructuredResult
 
 KEY = b"k" * 32
 ALL: list[Any] = ["PERSON", "EMAIL_ADDRESS"]
@@ -738,3 +741,32 @@ def test_apply_hash_without_an_entity_reports_no_scope() -> None:
     assert found.pii.hash_scope == "result"
     assert nothing.pii is not None
     assert (nothing.pii.entities, nothing.pii.hash_scope) == ({}, None)
+
+
+def test_fail_closed_and_withheld_clear_structured_and_chunks() -> None:
+    """Ruling R13: ``structured`` and ``chunks`` are derived from the page; a withheld answer
+    carries neither (here a DOM-stage value read from the raw page)."""
+    dom = StructuredResult(values={"author": "Anna Schmidt"}, stage="dom")
+    chunks = [Chunk(index=0, text="Anna Schmidt", start=0, end=12, headings=[])]
+    owing = envelope(make_result(structured=dom, chunks=chunks))
+    processed = envelope(
+        make_result(
+            structured=dom,
+            chunks=chunks,
+            pii=PiiReport(mode="mask", language="de", entities={}),
+        )
+    )
+
+    for held in (
+        fail_closed(owing, PiiOptions(mode="mask")),
+        withheld(owing, PiiOptions(mode="mask")),
+    ):
+        assert held.status == "failed"
+        assert held.data is not None
+        assert held.data.structured is None
+        assert held.data.chunks is None
+        assert "Anna" not in held.model_dump_json()
+    # ``withheld`` of an envelope that does not owe the step drops them as well.
+    failed = withheld(processed, PiiOptions(mode="mask"))
+    assert failed.data is not None
+    assert (failed.data.structured, failed.data.chunks) == (None, None)

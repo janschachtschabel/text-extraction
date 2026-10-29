@@ -37,6 +37,9 @@ when a CSS rule runs, once by BeautifulSoup.
 
 ``patterns`` and ``llm`` run later, in the post stage, on the final content; fields the DOM
 stage did not fill stay missing (``values[field] = None``, listed in ``missing``).
+
+A request with ``pii`` has no DOM stage (``dom_options``, ruling R12): the stage reads the raw
+page, which the nlp step never masks.
 """
 
 import hashlib
@@ -54,6 +57,7 @@ from lxml.html import HtmlElement
 from text_extraction.convert.links import absolute_url
 from text_extraction.licenses import License
 from text_extraction.metadata import PageMetadata, StructuredItems, page_tree, structured_items
+from text_extraction.pii.types import PiiOptions
 from text_extraction.structured.schema import CompiledSchema, coerce
 from text_extraction.structured.types import (
     SelectorRule,
@@ -94,6 +98,18 @@ _TEXT_KEYS = ("@value", "name", "text", "headline")
 
 
 # --- when the stage runs, and the cache key --------------------------------------------------
+
+
+def dom_options(
+    structured: StructuredOptions | None, pii: PiiOptions | None
+) -> StructuredOptions | None:
+    """The ``structured`` options the DOM stage works with: none for a request with ``pii``
+    (ruling R12, D3 a). The DOM stage reads the raw page (its metadata, the caller's and the
+    learned selectors, its tables), which the nlp step never masks: with ``pii`` only
+    ``patterns`` and the LLM fill fields, on the masked content. The request then has no DOM
+    stage, no learned selectors are read, and its cache key is the one of a request without
+    DOM work."""
+    return None if pii is not None else structured
 
 
 def touches_dom(options: StructuredOptions) -> bool:

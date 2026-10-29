@@ -2465,9 +2465,7 @@ def test_withheld_result_gets_no_post_stage(move: bool) -> None:
         assert item.result.error.code == ErrorCode.PII_FAILED
         assert item.result.data is not None
         assert item.result.data.chunks is None
-        assert item.result.data.structured is None or not item.result.data.structured.values.get(
-            "author"
-        )
+        assert item.result.data.structured is None
         assert PII_NAME not in item.result.model_dump_json()
 
     asyncio.run(scenario_())

@@ -144,7 +144,9 @@ def check_structured_request(
 
 def _check_pii(structured: StructuredOptions) -> None:
     """422 for ``pii`` with a strategy or an option that reads the raw page (ruling D3 a): the
-    masking runs on the extracted content, not on the HTML."""
+    masking runs on the extracted content, not on the HTML. ``auto`` passes: with ``pii`` it runs
+    ``patterns`` and the LLM only, because the pipeline runs no DOM stage for such a request
+    (``dom.dom_options``, ruling R12)."""
     if structured.strategy in ("metadata", "selectors"):
         what = f"Strategy {structured.strategy}"
     elif structured.tables:

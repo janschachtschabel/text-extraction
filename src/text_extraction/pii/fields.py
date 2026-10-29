@@ -163,8 +163,9 @@ def fail_closed(
 ) -> Envelope[ExtractResult]:
     """N12: an envelope that owes the PII step is answered as ``failed``/``pii_failed``
     (retryable), with the content, title, metadata, links, media uploader and file name
-    withheld and the rest kept (what the target answered, compliance, timings). Any other
-    envelope is returned as it is."""
+    withheld, and ``structured`` and ``chunks`` (derived from the page; R13) dropped, and the
+    rest kept (what the target answered, compliance, timings). Any other envelope is returned
+    as it is."""
     data = envelope.data
     if data is None or not needs_pii(envelope, options):
         return envelope
@@ -178,6 +179,8 @@ def fail_closed(
             "document": data.document.model_copy(update={"file_name": None})
             if data.document
             else None,
+            "structured": None,
+            "chunks": None,
         }
     )
     return Envelope[ExtractResult](
@@ -199,10 +202,14 @@ def withheld(
     """``envelope`` withheld by the PII step: ``fail_closed`` (its text, metadata, links,
     uploader and file name removed, the facts of the target kept), then ``failed`` with
     ``code``, ``message`` and ``retryable``. For an envelope that owes the step; one that does
-    not keeps its data and fails all the same."""
+    not keeps its data and fails all the same, but for ``structured`` and ``chunks``, which a
+    withheld answer never carries (R13)."""
     held = fail_closed(envelope, options)
     error = ErrorInfo(code=code, message=message, retryable=retryable)
-    return held.model_copy(update={"status": "failed", "error": error})
+    update: dict[str, Any] = {"status": "failed", "error": error}
+    if held.data is not None and (held.data.structured is not None or held.data.chunks is not None):
+        update["data"] = held.data.model_copy(update={"structured": None, "chunks": None})
+    return held.model_copy(update=update)
 
 
 def withheld_by_pii(envelope: Envelope[ExtractResult]) -> bool:

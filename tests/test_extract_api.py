@@ -2419,3 +2419,111 @@ def test_sync_patterns_after_pii_on_masked_content() -> None:
     texts = [chunk["text"] for chunk in assert_chunked(data, 300)]
     assert "[PERSON]" in "".join(texts)
     assert not any(NAME in text or EMAIL in text for text in texts)
+
+
+# --- pii with structured: no DOM-stage value (rulings R12, R13; D3 a) ----------------------------
+
+AUTHOR_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"author": {"type": "string"}}}
+
+
+def author_page() -> str:
+    """The PII test page with a JSON-LD author: the ``metadata`` strategy reads it raw."""
+    from tests.test_pii_dispatch import NAME, NAMED_ARTICLE
+
+    ld = f'<script type="application/ld+json">{{"@type": "Article", "author": "{NAME}"}}</script>'
+    return NAMED_ARTICLE.replace("</head>", f"{ld}</head>")
+
+
+def pii_author_service() -> Any:
+    from tests.test_pii_dispatch import PiiService
+
+    return PiiService({PAGE: fetched(body=author_page())})
+
+
+def assert_no_author(body: dict[str, Any]) -> None:
+    from tests.test_pii_dispatch import NAME
+
+    assert body["status"] == "success", body["error"]
+    assert NAME not in json.dumps(body)
+    assert "Schmidt" not in json.dumps(body)
+    structured = body["data"]["structured"]
+    assert structured["stage"] == "done"
+    assert structured["values"] == {"author": None}  # neither metadata nor the masked text
+    assert structured["sources"] == {}
+
+
+def test_auto_with_pii_answers_no_dom_value() -> None:
+    """``auto`` with ``pii`` runs ``patterns`` and ``llm`` only: the JSON-LD author never
+    reaches the answer, though the page states it."""
+    service = pii_author_service()
+    with TestClient(service.app) as client, service.nlp():
+        plain = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "structured": {"schema": AUTHOR_SCHEMA}, "cache": False},
+            headers=AUTH,
+        )
+        masked = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "pii": "mask", "structured": {"schema": AUTHOR_SCHEMA}},
+            headers=AUTH,
+        )
+
+    from tests.test_pii_dispatch import NAME
+
+    assert plain.json()["data"]["structured"]["values"] == {"author": NAME}  # the page has it
+    assert masked.json()["data"]["cache"] == "miss"
+    assert_no_author(masked.json())
+
+
+def test_auto_with_pii_after_a_cached_auto_request_answers_no_dom_value() -> None:
+    """A non-``pii`` ``auto`` request caches its DOM-stage result; a ``pii`` request for the
+    same page does not get it (another key) and answers no DOM value."""
+    service = pii_author_service()
+    with TestClient(service.app) as client, service.nlp():
+        first = client.post(
+            "/v1/extract", json={"url": PAGE, "structured": {"schema": AUTHOR_SCHEMA}}, headers=AUTH
+        )
+        masked = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "pii": "mask", "structured": {"schema": AUTHOR_SCHEMA}},
+            headers=AUTH,
+        )
+
+    assert first.json()["data"]["structured"]["sources"] == {"author": "metadata"}
+    assert_no_author(masked.json())
+
+
+def test_a_cache_hit_of_a_pii_request_drops_dom_values() -> None:
+    """Defence in depth (R12 b): a cache entry that holds a DOM-stage result under the key of
+    a ``pii`` request (planted here) is served without its ``structured``."""
+    from text_extraction.result_cache import ResultCache
+
+    service = pii_author_service()
+    with TestClient(service.app) as client, service.nlp():
+        client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
+
+        async def plant() -> None:
+            valkey = FakeAsyncRedis(server=service.server)
+            cache = ResultCache(valkey, service.settings)
+            keys = [key async for key in valkey.scan_iter("res:*")]
+            assert len(keys) == 1
+            key = keys[0].decode()
+            found = await cache.get(key)
+            assert found is not None
+            entry, _fresh = found
+            entry.result["structured"] = {
+                "values": {"author": "Anna Schmidt"},
+                "sources": {"author": "metadata"},
+                "stage": "dom",
+            }
+            await cache.put(key, entry)
+
+        asyncio.run(plant())
+        masked = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "pii": "mask", "structured": {"schema": AUTHOR_SCHEMA}},
+            headers=AUTH,
+        )
+
+    assert masked.json()["data"]["cache"] == "hit"
+    assert_no_author(masked.json())

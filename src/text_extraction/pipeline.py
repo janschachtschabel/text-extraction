@@ -183,6 +183,7 @@ from text_extraction.outbound import (
     normalize_host,
     parse_retry_after,
 )
+from text_extraction.pii.types import PiiOptions
 from text_extraction.pipeline_documents import (
     OCR_NOT_HANDED_MESSAGE,
     OCR_NOT_HANDED_REASON,
@@ -239,6 +240,7 @@ from text_extraction.render import (
 from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
 from text_extraction.settings import Settings
 from text_extraction.structured.dom import (
+    dom_options,
     dom_stage,
     reads_learned,
     reads_metadata,
@@ -246,6 +248,7 @@ from text_extraction.structured.dom import (
     structured_cache_part,
     usable_learned,
 )
+from text_extraction.structured.post import without_dom_stage
 from text_extraction.structured.store import (
     LEARNED_SELECTORS_UNAVAILABLE_WARNING,
     LearnedSelectorsUnavailableError,
@@ -475,6 +478,7 @@ class _UploadOptions:
     ocr: OcrOption
     links: bool = False  # the form has no `links`: without a URL, links stay relative
     structured: StructuredOptions | None = None
+    pii: PiiOptions | None = None
 
 
 @dataclass
@@ -665,8 +669,8 @@ class Pipeline:
     async def _load_learned(self, run: _Run) -> None:
         """Read the learned selectors of the request's owner, host and schema (S4), before the
         cache lookup: they join the key. A Valkey failure means none, with the warning
-        ``learned_selectors_unavailable``."""
-        options = run.req.structured
+        ``learned_selectors_unavailable``. A request with ``pii`` reads none (R12)."""
+        options = dom_options(run.req.structured, run.req.pii)
         host = selector_host(run.req.url)
         if (
             options is None
@@ -791,7 +795,11 @@ class Pipeline:
         mode = resolve_mode(None, principal, self._settings)
         run = _UploadRun(
             req=_UploadOptions(
-                format=form.format, metadata=form.metadata, ocr=form.ocr, structured=form.structured
+                format=form.format,
+                metadata=form.metadata,
+                ocr=form.ocr,
+                structured=form.structured,
+                pii=form.pii,
             ),
             report=ComplianceReport(mode=mode, decision="skipped"),
             file_name=name,
@@ -849,6 +857,7 @@ class Pipeline:
                     metadata=req.metadata,
                     ocr=req.ocr,
                     structured=req.structured,
+                    pii=req.pii,
                 ),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
@@ -963,6 +972,7 @@ class Pipeline:
                     metadata=req.metadata,
                     ocr=req.ocr,
                     structured=req.structured,
+                    pii=req.pii,
                 ),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
@@ -1222,7 +1232,7 @@ class Pipeline:
         return without_asr(needed, run, message=message)
 
     def _cache_options_of(self, run: _Run) -> dict[str, Any]:
-        options = run.req.structured
+        options = dom_options(run.req.structured, run.req.pii)
         return _cache_options(
             run.req,
             run.report.mode,
@@ -1249,7 +1259,10 @@ class Pipeline:
             update={"url": run.req.url, "attempts": 0, "cache": "hit"}
         )
         # A video's details only keep their media error (M6), as in the fresh answer.
-        return cached_details_only(result, self._settings) or self._envelope(result)
+        envelope = cached_details_only(result, self._settings) or self._envelope(result)
+        if run.req.pii is not None:  # defence in depth (R12): no DOM-stage value with pii
+            envelope = without_dom_stage(envelope)
+        return envelope
 
     async def _fetch_and_extract(
         self, run: _Run, stored: _Stored | None
@@ -2215,7 +2228,7 @@ class Pipeline:
             content = strip_boilerplate(host, conversion.content, self._rules)
             quality = assess(text, content)
             html_lang = _html_lang(text)
-            options = req.structured
+            options = dom_options(req.structured, req.pii)  # none with pii (R12)
             dom = options if options is not None and runs_dom_stage(options) else None
             page_metadata: PageMetadata | None = None
             items: StructuredItems | None = None
@@ -2398,8 +2411,9 @@ def _cache_options(
     ``structured`` is the DOM stage's part (``structured.dom.structured_cache_part``: its
     strategy, schema, selectors, tables and learned selectors, S4), again only when there is
     one: a request without ``structured``, or whose options do not touch the DOM (``patterns``,
-    ``llm``), keeps the key of a request without it. ``chunking`` and the post stage's options
-    never change the cached result, so they are never part of the key.
+    ``llm``), keeps the key of a request without it; so does a request with ``pii``, which has no
+    DOM stage (``dom.dom_options``, R12). ``chunking`` and the post stage's options never change
+    the cached result, so they are never part of the key.
     """
     options: dict[str, Any] = {
         "mode": req.mode,
