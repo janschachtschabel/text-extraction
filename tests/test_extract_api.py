@@ -213,6 +213,33 @@ def test_extract_is_in_openapi(client: TestClient) -> None:
     assert "wait_seconds" in client.get("/openapi.json").text
 
 
+def test_openapi_pii_takes_a_bare_mode_or_the_object(client: TestClient) -> None:
+    """The final review's I2: ``"pii": "mask"`` (the README's form) is valid by the published
+    schema, not only by the validator: generated clients and validating gateways read it."""
+    spec = client.get("/openapi.json").json()
+    body = spec["paths"]["/v1/extract"]["post"]["requestBody"]["content"]["application/json"]
+    name = body["schema"]["$ref"].rsplit("/", 1)[1]
+    pii = spec["components"]["schemas"][name]["properties"]["pii"]
+
+    assert pii["anyOf"] == [
+        {"type": "string", "enum": ["mask", "redact", "hash", "annotate"]},
+        {"$ref": "#/components/schemas/PiiOptions"},
+        {"type": "null"},
+    ]
+    assert "PiiOptions" in spec["components"]["schemas"]
+
+
+def test_openapi_pii_description_names_every_field_it_applies_to(client: TestClient) -> None:
+    """The final review's M11: N5 handles the uploaded file's name too."""
+    spec = client.get("/openapi.json").json()
+    body = spec["paths"]["/v1/extract"]["post"]["requestBody"]["content"]["application/json"]
+    name = body["schema"]["$ref"].rsplit("/", 1)[1]
+    description = spec["components"]["schemas"][name]["properties"]["pii"]["description"]
+
+    for field in ("content", "title", "metadata", "links", "media uploader", "document.file_name"):
+        assert field in description, field
+
+
 def test_extract_200_schema_is_the_plain_envelope(client: TestClient) -> None:
     """Package 2's contract: the 200 answer is `Envelope[ExtractResult]`; the 202 is declared
     beside it."""

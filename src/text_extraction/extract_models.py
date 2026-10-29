@@ -1,6 +1,6 @@
 """Request and result models of ``POST /v1/extract``."""
 
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -24,7 +24,7 @@ from text_extraction.fingerprint import Fingerprint
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode, MediaInfo
 from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
-from text_extraction.pii.types import PiiOptions, PiiReport
+from text_extraction.pii.types import BareModeOrObject, PiiOptions, PiiReport
 from text_extraction.quality import Quality
 from text_extraction.tracing import current_trace_id
 
@@ -106,11 +106,12 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="Preferred subtitle and transcription languages, ISO 639 codes, at most 5; "
         "default: the video's original language.",
     )
-    pii: PiiOptions | None = Field(
+    pii: Annotated[PiiOptions | None, BareModeOrObject()] = Field(
         default=None,
         description="Find personal data in the result and handle it: `mask`, `redact`, `hash` or "
         "`annotate` (a bare string is the mode; see the object's fields). Applies to the "
-        "content, the title, the metadata, the links and the media uploader; the report is "
+        "content, the title, the metadata, the links, the media uploader and the uploaded "
+        "file's name (`document.file_name`); the report is "
         "`data.pii`. Always a job when the service has to wait for it: a request without "
         "`wait_seconds` waits `PII_SYNC_WAIT_SECONDS`, then answers 202. 400 while the service "
         "has no PII handling. Not with `screenshot`.",

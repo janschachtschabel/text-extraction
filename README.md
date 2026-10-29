@@ -189,7 +189,8 @@ The service answers a request with `pii` when the NLP worker is done; after `PII
 (20 s) a slower one answers 202 with a job to poll. A result is never answered unprocessed: when
 PII handling cannot run, the answer is `failed` with `error.code: pii_failed` (retryable) and none
 of the text. `hash` is keyed with `PII_HASH_KEY`: set, the same value has the same hash in every
-result (`hash_scope: service`), unset, only within one result (`result`). A language other than
+result (`hash_scope: service`), unset, only within one result (`result`); with nothing hashed
+`hash_scope` is null. A language other than
 German and English uses the English model for names, with the warning `pii_language_unsupported`.
 `pii` cannot be combined with `screenshot`. Names are found by a statistical model, so a few are
 missed and a few words are taken for names; see "PII" in the [architecture](docs/architecture.md)

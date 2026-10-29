@@ -3,29 +3,46 @@
 Pure and free of Presidio and spaCy. The analyser's cost grows faster than linearly with the
 length of a text (its context step), so long text goes in segments of at most 20,000
 characters; in the spike 175,000 characters took 11.3 s in one piece and 3.8 s in segments.
+
+Segments overlap by 500 characters: a cut at a space may fall inside an entity that holds
+spaces (an IBAN or a card number in groups, a phone number, a name of two words), which neither
+piece would hold whole. 500 characters hold the longest of them (an IBAN in groups is at most
+42 characters, a name or a phone number far less) with a few sentences of context for the NER
+and the phone recognizer's context words, and cost 2.5 % more text to analyse. The same entity
+found in both pieces has the same offsets in the text, or overlaps, which ``resolve`` settles.
 """
 
+import re
 from bisect import bisect_left, bisect_right, insort
 from collections.abc import Iterable
 
 from text_extraction.pii.types import Span
 
 SEGMENT_CHARS = 20_000
+SEGMENT_OVERLAP = 500  # see the module docstring
 
 # Where a segment is cut, best first: after a blank line, after a line break, after a space.
 _SEPARATORS = ("\n\n", "\n", " ")
+_BLANK = re.compile(r"\s")
 
 
-def segments(text: str, max_chars: int = SEGMENT_CHARS) -> list[tuple[int, str]]:
-    """``text`` in pieces of at most ``max_chars`` characters, as ``(offset, piece)``.
+def segments(
+    text: str, max_chars: int = SEGMENT_CHARS, overlap: int = SEGMENT_OVERLAP
+) -> list[tuple[int, str]]:
+    """``text`` in pieces of at most ``max_chars`` characters, as ``(offset, piece)``; a span's
+    offset in the text is the piece's offset plus its own.
 
     A piece ends after the last blank line inside its window, else after the last line break,
-    else after the last space, else it is cut at ``max_chars``. The separator stays with the
-    piece before it, so the pieces in order are the text again, and a span's offset in the text
-    is the piece's offset plus its own.
+    else after the last space, else it is cut at ``max_chars``; a separator counts only past the
+    first ``overlap`` characters of the window, so every piece moves on. The next piece starts
+    up to ``overlap`` characters before that end, at the first word start there (right after a
+    blank), else exactly ``overlap`` characters before it: an entity across the cut is whole in
+    the next piece. With ``overlap`` 0 the pieces in order are the text again.
     """
     if max_chars < 1:
         raise ValueError("max_chars must be at least 1")
+    if not 0 <= overlap < max_chars:
+        raise ValueError("overlap must be at least 0 and below max_chars")
     pieces: list[tuple[int, str]] = []
     start = 0
     while start < len(text):
@@ -35,13 +52,22 @@ def segments(text: str, max_chars: int = SEGMENT_CHARS) -> list[tuple[int, str]]
             break
         cut = window_end
         for separator in _SEPARATORS:
-            found = text.rfind(separator, start, window_end)
+            found = text.rfind(separator, start + overlap, window_end)
             if found != -1:
                 cut = found + len(separator)
                 break
         pieces.append((start, text[start:cut]))
-        start = cut
+        start = _next_start(text, cut, overlap)
     return pieces
+
+
+def _next_start(text: str, cut: int, overlap: int) -> int:
+    """The first word start in the ``overlap`` characters before ``cut``, else their start."""
+    if overlap == 0:
+        return cut
+    earliest = cut - overlap  # past the previous piece's start: ``segments`` cuts after it
+    blank = _BLANK.search(text, earliest - 1, cut)
+    return earliest if blank is None else blank.end()
 
 
 def resolve(spans: Iterable[Span], text: str) -> list[Span]:

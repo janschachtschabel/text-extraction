@@ -25,7 +25,10 @@ allowlist of what a parent may call by name, each with the payload dict the pool
   its own). Without them and without an engine it raises ``NotLoaded``.
 
 A text is analysed in segments of at most 20,000 characters (``spans.segments``): Presidio's
-context step grows faster than linearly with the length, and the offsets are added back.
+context step grows faster than linearly with the length, and the offsets are added back. The
+segments overlap by 500 characters, so an entity with spaces across a cut (an IBAN in groups, a
+name of two words) is whole in one of them; a span that two segments found alike is in the
+reply once, other overlaps are left to ``resolve``.
 
 Before anything else is imported, logging is silenced (``child_logging``): what Presidio, spaCy
 and tldextract log or warn may quote the text. The child never logs text itself.
@@ -116,7 +119,7 @@ def analyze(
         return reply
     asked = list(entities)
     for name, text in fields:
-        spans = reply[name]
+        spans: dict[tuple[int, int, str, float], None] = {}  # ordered, without repeats
         for offset, piece in segments(text):
             if not piece.strip():
                 continue
@@ -124,14 +127,14 @@ def analyze(
                 text=piece, language=language, entities=asked, score_threshold=threshold
             ):
                 if found.entity_type in wanted and found.score >= threshold:
-                    spans.append(
-                        (
-                            offset + found.start,
-                            offset + found.end,
-                            found.entity_type,
-                            float(found.score),
-                        )
+                    span = (
+                        offset + found.start,
+                        offset + found.end,
+                        found.entity_type,
+                        float(found.score),
                     )
+                    spans[span] = None
+        reply[name] = list(spans)
     return reply
 
 

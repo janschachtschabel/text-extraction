@@ -398,7 +398,7 @@ def test_a_result_with_nothing_to_process_answers_with_zero_entities() -> None:
             "language": "en",
             "entities": {},
             "items": None,
-            "hash_scope": "result",
+            "hash_scope": None,  # nothing was hashed (final review M6)
         }
         assert service.stored() == []  # no hop for nothing
     assert service.outcomes() == {}
@@ -653,7 +653,8 @@ def test_without_findings_reports_zero_entities_only_when_nothing_is_owed() -> N
     hashed = without_findings(empty, PiiOptions(mode="hash", language="de"), settings)
     assert hashed.data is not None
     assert hashed.data.pii is not None
-    assert (hashed.data.pii.language, hashed.data.pii.hash_scope) == ("de", "service")
+    # Nothing was hashed: no scope, also with PII_HASH_KEY (final review M6).
+    assert (hashed.data.pii.language, hashed.data.pii.hash_scope) == ("de", None)
     # Owed, not asked for, or without data: as it is.
     owed = Envelope[ExtractResult](status="success", data=_result(content=NAME))
     assert without_findings(owed, PiiOptions(mode="mask"), settings) is owed

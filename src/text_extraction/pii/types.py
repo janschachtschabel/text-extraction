@@ -7,7 +7,9 @@ them.
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, GetJsonSchemaHandler, field_validator, model_validator
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
 
 # What the service looks for: the entity types of Presidio that its recognizers and the spaCy
 # models cover.
@@ -124,3 +126,21 @@ class PiiReport(BaseModel):
     entities: dict[EntityType, int]  # count per type, only the types found
     items: list[PiiEntity] | None = None  # annotate only
     hash_scope: HashScope | None = None  # hash only
+
+
+class BareModeOrObject:
+    """The JSON schema of a request's ``pii`` field: a bare mode (``"pii": "mask"``) or the
+    ``PiiOptions`` object, and null where the field is optional. The validator of
+    ``PiiOptions`` reads the bare string; this tells generated clients and validating gateways
+    that the string is allowed. Use it as ``Annotated[PiiOptions | None, BareModeOrObject()]``.
+    """
+
+    def __get_pydantic_json_schema__(
+        self, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        schema = handler(core_schema)
+        bare_mode: JsonSchemaValue = {"type": "string", "enum": list(get_args(PiiMode))}
+        if "anyOf" in schema:  # optional: the object or null
+            rest = {key: value for key, value in schema.items() if key != "anyOf"}
+            return {**rest, "anyOf": [bare_mode, *schema["anyOf"]]}
+        return {"anyOf": [bare_mode, schema]}

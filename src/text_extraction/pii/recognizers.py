@@ -10,11 +10,16 @@ One ``AnalyzerEngine`` serves ``de`` and ``en``:
 - **Patterns** per language: e-mail address, phone number (regions ``DE``, ``AT``, ``CH``,
   ``GB``, ``US``; German context words that lift a number's score from 0.4 to 0.75), IBAN,
   credit card, IP address and URL.
-- **Honorifics** (``HonorificRecognizer``): the NER models miss many German surnames after a
-  salutation (``Herr Müller``), so a name after ``Herr``, ``Herrn``, ``Frau``, ``Hr.``, ``Fr.``
-  (German) or ``Mr``, ``Mrs``, ``Ms``, ``Mx``, ``Dr`` (English), after a title alone (``Prof.``,
-  ``Dr.``, ``Prof. Dr.``, ``Doktor``), or after a salutation and a title, is a ``PERSON`` of
-  score 0.7. The span is the name only: ``Herr Müller`` becomes ``Herr [PERSON]``.
+- **Honorifics** (``HonorificRecognizer``): a name after ``Herr``, ``Herrn``, ``Frau``, ``Hr.``,
+  ``Fr.`` (German) or ``Mr``, ``Mrs``, ``Ms``, ``Mx``, ``Dr`` (English), after a title alone
+  (``Prof.``, ``Dr.``, ``Prof. Dr.``, ``Doktor``), or after a salutation and a title, is a
+  ``PERSON`` of score 0.7, and the span is the name only. The NER usually takes a salutation and
+  its name as one ``PERSON`` (``Herr Müller`` becomes ``[PERSON]``, which wins on its higher
+  score); this rule covers the names the NER misses after a salutation, which then become
+  ``Herr [PERSON]``. A name word is an upper-case letter and letters of any script, with internal
+  capitals and an apostrophe (``McDonald``, ``O'Brien``, ``Nowak-Šimić``), and the name ends
+  where its word does. ``Fr.`` that closes a range of weekdays (``Mo.-Fr.``, ``Mo. bis Fr.``) is
+  Friday, not ``Frau``.
 
 tldextract never goes online: Presidio's e-mail recognizer validates the domain with it, and
 tldextract's default would fetch the public suffix list from publicsuffix.org (and cache it
@@ -25,6 +30,7 @@ set to ``WARNING``; the decision log is off.
 
 import logging
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Literal
@@ -89,15 +95,40 @@ IGNORED_LABELS: Final = [
 HONORIFIC_SCORE: Final = 0.7
 _RECOGNIZER_NAME: Final = "HonorificRecognizer"
 
-_UPPER = "A-ZÀÁÂÄÇÈÉÊËÌÍÎÏÑÒÓÔÕÖØÙÚÛÜÝ"
-_LOWER = "a-zßàáâäçèéêëìíîïñòóôõöøùúûüýÿ"
+
+def _upper_case_letters() -> str:
+    """Every upper-case character of Unicode, as the ranges of a character class: ``re`` has no
+    ``\\p{Lu}``, and a name part starts with one (``Šimić``, ``Łukasiewicz``, ``Ørsted``)."""
+    ranges: list[tuple[int, int]] = []
+    for code in range(sys.maxunicode + 1):
+        if chr(code).isupper():
+            if ranges and ranges[-1][1] == code - 1:
+                ranges[-1] = (ranges[-1][0], code)
+            else:
+                ranges.append((code, code))
+    return "".join(
+        f"\\U{first:08x}" if first == last else f"\\U{first:08x}-\\U{last:08x}"
+        for first, last in ranges
+    )
+
+
+_UPPER = _upper_case_letters()
+_REST = rf"[^\W\d_{_UPPER}]"  # a letter that is not upper case (lower case, or caseless)
+_APOSTROPHE = "['\u2019]"
 # Words that are titles or degrees, never a name: a name part must not be one of them, or the title
 # group would give back its last word to the name ("Prof. Dr. med. Meier" must not yield "Dr").
 _NOT_A_NAME = r"(?!(?:Dr|Prof|Doktor|Ing|Phil|Med|Jur|Dent|Habil)\b)"
-_NAME_PART = (  # Meyer-Schulz is one part
-    rf"{_NOT_A_NAME}[{_UPPER}][{_LOWER}]+(?:-{_NOT_A_NAME}[{_UPPER}][{_LOWER}]+)*"
+# One word of a name: an upper-case letter, then letters that are not, with internal capitals and
+# apostrophes before one (McDonald, O'Brien, Dell'Orto). Each repetition starts with an apostrophe
+# or a capital, which the letters before it are not: one way to match, so linear time.
+_WORD = rf"[{_UPPER}](?:{_REST}+|{_APOSTROPHE}(?=[{_UPPER}]))(?:{_APOSTROPHE}?[{_UPPER}]{_REST}+)*"
+_NAME_PART = rf"{_NOT_A_NAME}{_WORD}(?:-{_NOT_A_NAME}{_WORD})*"  # Meyer-Schulz is one part
+# One or two words; the name ends where the word does (never "Mc" of "McDonald", never "Dell" of
+# "Dell'orto"), but a possessive "'s" or a trailing apostrophe is no part of it ("Smith's").
+_NAME = (
+    rf"(?P<name>{_NAME_PART}(?:[ \t\xa0]+{_NAME_PART})?)"
+    rf"(?!\w|{_APOSTROPHE}(?!s\b)[^\W\d_])"
 )
-_NAME = rf"(?P<name>{_NAME_PART}(?:[ \t\xa0]+{_NAME_PART})?)"  # one or two words
 _GAP = r"[ \t\xa0]+"
 # Titles that may stand between a salutation and the name, or alone before it: Dr., Prof. or
 # Doktor, then any number of titles and academic degrees (med., dent., rer. nat., h. c., Ing., ...).
@@ -111,8 +142,16 @@ _DEGREE = (
 # "Dr. Dr. Dr. ..." an open-ended chain would backtrack quadratically. A bare degree word can still
 # be taken as a title before a first name ("Dr. Phil Collins" gives "Collins"): a known trade-off.
 _TITLES = rf"(?:{_TITLE}){_GAP}(?:(?:{_TITLE}|{_DEGREE}){_GAP}){{0,6}}"
+# "Fr." that closes a range of weekdays ("Mo.-Fr.", "Mo. bis Fr.") is Friday, not Frau.
+_NOT_FRIDAY = (
+    r"(?<!(?:Mo|Di|Mi|Do)[-\u2013])"
+    r"(?<!(?:Mo|Di|Mi|Do)\.[-\u2013])"
+    r"(?<!(?:Mo|Di|Mi|Do)\.[ \xa0][-\u2013][ \xa0])"
+    r"(?<!(?:Mo|Di|Mi|Do)[ \xa0]bis[ \xa0])"
+    r"(?<!(?:Mo|Di|Mi|Do)\.[ \xa0]bis[ \xa0])"
+)
 _SALUTATIONS: Final = {
-    "de": r"(?:Herrn?|Frau|Hr\.|Fr\.)",
+    "de": rf"(?:Herrn?|Frau|Hr\.|{_NOT_FRIDAY}Fr\.)",
     "en": r"(?:Mr|Mrs|Ms|Mx|Dr)\.?",
 }
 _HONORIFICS: Final = {

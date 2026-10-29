@@ -87,7 +87,6 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.pii.fields import needs_pii, withheld, withheld_by_pii
-from text_extraction.pii.replace import hash_key
 from text_extraction.pii.types import PiiLanguage, PiiLanguageOption, PiiOptions, PiiReport
 from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatcher
 from text_extraction.queue_metrics import dispatch_counter_for
@@ -142,7 +141,8 @@ def without_findings(
     envelope: Envelope[ExtractResult], options: PiiOptions | None, settings: Settings
 ) -> Envelope[ExtractResult]:
     """An envelope with data that asked for PII, is not processed and has nothing N5 processes
-    (a failure without content and metadata): as it is, with a report of zero entities. Any
+    (a failure without content and metadata): as it is, with a report of zero entities (and
+    ``hash_scope`` null: nothing was hashed, and no key is needed on this pod). Any
     other envelope as it is, also one whose text the hop withheld (``withheld_by_pii``): it
     has nothing left to process, but it was not processed either."""
     data = envelope.data
@@ -158,7 +158,7 @@ def without_findings(
         language=language,
         entities={},
         items=[] if options.mode == "annotate" else None,
-        hash_scope=hash_key(settings)[1] if options.mode == "hash" else None,
+        hash_scope=None,  # nothing was hashed: no key signed anything
     )
     return envelope.model_copy(update={"data": data.model_copy(update={"pii": report})})
 

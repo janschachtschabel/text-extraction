@@ -107,63 +107,63 @@ def test_html_comment_tail_is_text_and_stays_without_drop() -> None:
     parsed = HtmlText.parse(html)
 
     assert parsed.text == "AnnaSchmidt"
-    assert parsed.has_comments
+    assert parsed.has_unread
     assert parsed.render([(find(parsed, "AnnaSchmidt"), "[PERSON]")]) == (
         "<p>[PERSON]<!-- note --></p>"
     )
     assert parsed.render([]) == html
 
 
-def test_html_drop_comments_with_a_replacement() -> None:
+def test_html_drop_unread_with_a_replacement() -> None:
     parsed = HtmlText.parse("<p>Anna<!-- Bob Meier -->Schmidt kam.</p><!-- end -->")
 
-    rendered = parsed.render([(find(parsed, "AnnaSchmidt"), "[PERSON]")], drop_comments=True)
+    rendered = parsed.render([(find(parsed, "AnnaSchmidt"), "[PERSON]")], drop_unread=True)
 
     assert rendered == "<p>[PERSON] kam.</p>"
 
 
-def test_html_drop_comments_without_a_replacement_keeps_the_tails() -> None:
+def test_html_drop_unread_without_a_replacement_keeps_the_tails() -> None:
     parsed = HtmlText.parse("<p>Anna<!-- Bob Meier -->Schmidt</p><!-- end -->tail")
 
-    assert parsed.render([], drop_comments=True) == "<p>AnnaSchmidt</p>tail"
+    assert parsed.render([], drop_unread=True) == "<p>AnnaSchmidt</p>tail"
 
 
-def test_html_drop_comments_takes_processing_instructions_too() -> None:
+def test_html_drop_unread_takes_processing_instructions_too() -> None:
     parsed = HtmlText.parse("<p>a<?php echo 'Carl' ?>b</p>")
 
-    assert parsed.has_comments
-    assert parsed.render([], drop_comments=True) == "<p>ab</p>"
+    assert parsed.has_unread
+    assert parsed.render([], drop_unread=True) == "<p>ab</p>"
 
 
-def test_html_drop_comments_without_any_returns_the_original() -> None:
+def test_html_drop_unread_without_any_returns_the_original() -> None:
     html = "<p>Anna <br/> kam  &nbsp; </p>"
     parsed = HtmlText.parse(html)
 
-    assert not parsed.has_comments
-    assert parsed.render([], drop_comments=True) == html
+    assert not parsed.has_unread
+    assert parsed.render([], drop_unread=True) == html
 
 
-def test_html_drop_comments_beside_the_root_and_in_a_head() -> None:
+def test_html_drop_unread_beside_the_root_and_in_a_head() -> None:
     html = (
         "<!-- a --><!DOCTYPE html><html><head><!-- b --><title>T</title></head>"
         "<body>x</body></html><!-- z -->"
     )
     parsed = HtmlText.parse(html)
 
-    assert parsed.has_comments
-    rendered = parsed.render([], drop_comments=True)
+    assert parsed.has_unread
+    rendered = parsed.render([], drop_unread=True)
 
     assert "<!--" not in rendered
     assert rendered == "<!DOCTYPE html>\n<html><head><title>T</title></head><body>x</body></html>"
 
 
-def test_html_drop_comments_is_repeatable() -> None:
+def test_html_drop_unread_is_repeatable() -> None:
     parsed = HtmlText.parse("<p>Anna<!-- c -->Schmidt</p>")
     replacements = [(find(parsed, "Anna"), "[PERSON]")]
 
-    first = parsed.render(replacements, drop_comments=True)
+    first = parsed.render(replacements, drop_unread=True)
 
-    assert first == parsed.render(replacements, drop_comments=True) == "<p>[PERSON]Schmidt</p>"
+    assert first == parsed.render(replacements, drop_unread=True) == "<p>[PERSON]Schmidt</p>"
     # The tree of a render without dropping is not touched by the one that dropped.
     assert parsed.render(replacements) == "<p>[PERSON]<!-- c -->Schmidt</p>"
 
@@ -265,10 +265,116 @@ def test_html_invalid_control_characters_do_not_break_parsing() -> None:
     assert parsed.text == "Anna"
 
 
-def test_html_drop_comments_of_a_source_that_is_only_a_comment() -> None:
+def test_html_drop_unread_of_a_source_that_is_only_a_comment() -> None:
     parsed = HtmlText.parse("<!-- Bob Meier -->")
 
     assert parsed.text == ""
-    assert parsed.has_comments
-    assert parsed.render([], drop_comments=True) == ""
+    assert parsed.has_unread
+    assert parsed.render([], drop_unread=True) == ""
     assert parsed.render([]) == "<!-- Bob Meier -->"
+
+
+# --- the final review's M3: a parse that fails never empties the content ------------------------
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        "<?xml version='1.0' encoding='utf-8'?>\n",
+        '﻿<?xml version="1.0" encoding="UTF-8"?>',
+    ],
+)
+def test_html_leading_xml_declaration_is_stripped_before_parsing(declaration: str) -> None:
+    parsed = HtmlText.parse(f"{declaration}<p>Anna Schmidt kam.</p>")
+
+    assert parsed.text.strip() == "Anna Schmidt kam."
+    assert parsed.has_unread  # the declaration is not text: a replacing mode drops it
+    rendered = parsed.render([(find(parsed, "Anna Schmidt"), "[PERSON]")], drop_unread=True)
+    assert rendered.strip("﻿") == "<p>[PERSON] kam.</p>"
+    assert parsed.render([], drop_unread=True).strip("﻿") == "<p>Anna Schmidt kam.</p>"
+
+
+def test_html_a_parse_failure_with_text_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lxml.html
+
+    from text_extraction.pii.html import HtmlParseFailed
+
+    def failing(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("cannot parse <p>Anna</p>")
+
+    monkeypatch.setattr(lxml.html, "document_fromstring", failing)
+
+    with pytest.raises(HtmlParseFailed) as raised:
+        HtmlText.parse("<p>Anna Schmidt</p>")
+    assert "Anna" not in str(raised.value)  # the message never quotes the source
+    # Without text (blank, or only comments and markup) a failed parse is no text, as before.
+    assert HtmlText.parse("  ").text == ""
+    only_comment = HtmlText.parse("<!-- Bob Meier --><br/>")
+    assert only_comment.text == ""
+    assert only_comment.has_unread
+
+
+# --- the final review's M4: what the analyser does not read is dropped by a replacing mode ------
+
+
+def test_html_script_and_style_are_dropped_when_unread_is_dropped() -> None:
+    html = (
+        "<p>Anna kam.</p><script>var a = 'Bob Meier';</script>x"
+        "<style>b::after{content:'Carl'}</style>"
+    )
+    parsed = HtmlText.parse(html)
+
+    assert parsed.has_unread
+    assert parsed.render([], drop_unread=True) == "<p>Anna kam.</p>x"
+    rendered = parsed.render([(find(parsed, "Anna"), "[PERSON]")], drop_unread=True)
+    assert rendered == "<p>[PERSON] kam.</p>x"
+    assert parsed.render([]) == html  # without dropping nothing changes
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        'aria-label="Anna Schmidt"',
+        'aria-description="Anna Schmidt"',
+        'data-author="Anna Schmidt"',
+        'value="Anna Schmidt"',
+        'placeholder="Anna Schmidt"',
+        'srcdoc="&lt;p&gt;Anna Schmidt&lt;/p&gt;"',
+        'content="Anna Schmidt"',
+        'name="Anna Schmidt"',
+        'label="Anna Schmidt"',
+        'style="background: url(anna-schmidt.png)"',
+        "onclick=\"alert('Anna Schmidt')\"",
+        'alttext="Anna Schmidt"',
+    ],
+)
+def test_html_text_bearing_attributes_are_dropped_when_unread_is_dropped(attribute: str) -> None:
+    html = f'<p><span {attribute} class="c" id="i">kam</span></p>'
+    parsed = HtmlText.parse(html)
+
+    assert parsed.text == "kam"
+    assert parsed.has_unread
+    rendered = parsed.render([], drop_unread=True)
+    assert rendered == '<p><span class="c" id="i">kam</span></p>'
+    assert "Anna" not in rendered
+    assert "anna" not in rendered
+    assert parsed.render([]) == html
+
+
+def test_html_structural_attributes_stay_when_unread_is_dropped() -> None:
+    html = (
+        '<p lang="de" dir="ltr" class="c" id="i"><a href="https://example.org/x" rel="nofollow" '
+        'target="_blank" title="Anna">x</a><img src="a.png" srcset="a.png 1x" width="10" '
+        'height="10" alt="Bild"></p><table><tr><td colspan="2" rowspan="1" headers="h" '
+        'scope="row">y</td></tr></table><ol start="3" reversed type="a"><li>z</li></ol>'
+        '<time datetime="2026-10-28">heute</time><blockquote cite="https://example.org/q">q'
+        '</blockquote><math display="block"><mi mathvariant="bold">x</mi>'
+        '<mo stretchy="false" fence="true">(</mo></math>'
+    )
+    parsed = HtmlText.parse(html)
+
+    assert not parsed.has_unread
+    assert parsed.render([], drop_unread=True) == html
+    rendered = parsed.render([(find(parsed, "Anna"), "[PERSON]")], drop_unread=True)
+    assert rendered == html.replace('title="Anna"', 'title="[PERSON]"')

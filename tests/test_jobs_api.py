@@ -601,6 +601,19 @@ def test_job_routes_in_openapi_internal_routes_not(api: Api) -> None:
     assert not {"/health", "/ready", "/metrics"} & set(paths)
 
 
+def test_openapi_batch_pii_takes_a_bare_mode_or_the_object(api: Api) -> None:
+    spec = api.client.get("/openapi.json").json()
+    body = spec["paths"]["/v1/batch"]["post"]["requestBody"]["content"]["application/json"]
+    name = body["schema"]["$ref"].rsplit("/", 1)[1]
+    pii = spec["components"]["schemas"][name]["properties"]["pii"]
+
+    assert pii["anyOf"] == [
+        {"type": "string", "enum": ["mask", "redact", "hash", "annotate"]},
+        {"$ref": "#/components/schemas/PiiOptions"},
+        {"type": "null"},
+    ]
+
+
 def test_discard_survives_a_second_cancellation(api: Api) -> None:
     """A request cancelled while it enqueues, and cancelled again while its job is discarded,
     still gives the job back."""

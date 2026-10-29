@@ -144,6 +144,25 @@ def test_long_text_goes_in_segments_with_offsets_added_back(child: Any) -> None:
     ]
 
 
+def test_segments_overlap_and_an_entity_in_both_is_reported_once(child: Any) -> None:
+    """Pieces overlap by 500 characters: an entity across a cut is whole in the next piece, and
+    one inside the overlap, found by both pieces, is in the reply once."""
+    engine = FakeEngine()
+    child._ANALYZER = engine
+    head = "wort " * 3960  # 19,800 characters: "Anna" lies in the overlap of the two pieces
+    text = f"{head}Anna und needle@example.org " + "wort " * 100
+
+    spans = child.analyze([("body", text)], "de", ["PERSON", "EMAIL_ADDRESS"], 0.4)["body"]
+
+    assert len(engine.calls) == 2
+    assert engine.calls[1]["text"].startswith("wort ")  # a piece starts at a word
+    assert sum(call["text"].count("Anna") for call in engine.calls) == 2  # seen twice
+    assert sorted(spans) == [
+        (text.index("Anna"), text.index("Anna") + 4, "PERSON", 0.85),
+        (text.index("needle"), text.index("needle") + 18, "EMAIL_ADDRESS", 1.0),
+    ]
+
+
 def test_field_names_must_be_unique(child: Any) -> None:
     child._ANALYZER = FakeEngine()
 
@@ -499,6 +518,63 @@ def test_segment_border_entity_found(children: Children) -> None:
         (email, "EMAIL_ADDRESS")
     ]
     assert reply["body"][0][:2] == (text.index(email), text.index(email) + len(email))
+
+
+def _across_the_cut(entity: str, cut_after: str, filler: str = "wort ") -> tuple[str, int]:
+    """A long single-line text with ``entity`` placed so that the first segment ends right after
+    ``cut_after`` (a prefix of ``entity`` that ends in a space): the cut falls inside it."""
+    from text_extraction.pii.spans import segments
+
+    head_length = 20_000 - len(cut_after)
+    head = (filler * (head_length // len(filler) + 1))[: head_length - 1] + " "
+    text = f"{head}{entity} und noch ein Satz danach. " + filler * 100
+    start = text.index(entity)
+    first = segments(text)[0]
+    assert first == (0, text[: start + len(cut_after)])  # the cut is inside the entity
+    return text, start
+
+
+@nlp_test
+@pytest.mark.parametrize(
+    ("entity", "cut_after", "kind"),
+    [
+        ("DE89 3704 0044 0532 0130 00", "DE89 3704 0044 ", "IBAN_CODE"),
+        ("4111 1111 1111 1111", "4111 1111 ", "CREDIT_CARD"),
+        ("+49 30 1234567", "+49 30 ", "PHONE_NUMBER"),
+    ],
+    ids=["iban", "card", "phone"],
+)
+def test_an_entity_with_spaces_across_a_segment_cut_is_found_once(
+    children: Children, entity: str, cut_after: str, kind: str
+) -> None:
+    """The final review's I1: the cut of a single-line text falls at the last space of the
+    window, inside the entity; the overlapping next segment holds it whole."""
+    text, start = _across_the_cut(entity, cut_after)
+    reply = children.call(
+        "analyze",
+        {"fields": [("body", text)], "language": "de", "entities": [kind], "threshold": 0.4},
+    )
+
+    assert [tuple(span[:3]) for span in reply["body"]] == [(start, start + len(entity), kind)]
+
+
+@nlp_test
+def test_a_name_across_a_segment_cut_is_found_whole(children: Children) -> None:
+    text, start = _across_the_cut(
+        "Frau Anna Schmidt", "Frau Anna ", filler="Das ist ein ruhiger Satz ohne Namen. "
+    )
+    name = start + len("Frau ")
+
+    found = children.spans(text, "de", ["PERSON"])
+
+    assert ("Anna Schmidt", "PERSON") in found
+    assert ("Anna", "PERSON") not in found
+    assert ("Schmidt", "PERSON") not in found
+    reply = children.call(
+        "analyze",
+        {"fields": [("body", text)], "language": "de", "entities": ["PERSON"], "threshold": 0.4},
+    )
+    assert (name, name + len("Anna Schmidt"), "PERSON") in [tuple(s[:3]) for s in reply["body"]]
 
 
 @nlp_test

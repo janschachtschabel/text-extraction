@@ -656,3 +656,85 @@ def test_fail_closed_passes_processed_and_no_pii() -> None:
     assert fail_closed(unprocessed, None) is unprocessed
     assert fail_closed(failure, PiiOptions(mode="mask")) is failure
     assert fail_closed(empty, PiiOptions(mode="mask")) is empty
+
+
+# --- the final review's M3 and M4 at the level of a result ---------------------------------------
+
+
+def test_apply_html_with_an_xml_declaration_masks_the_text() -> None:
+    html = '<?xml version="1.0" encoding="UTF-8"?><p>Anna Schmidt kam.</p>'
+    result = make_result(format="html", content=html, title=None, metadata=None, media=None)
+    text = text_fields(result, ["PERSON"])[0].text
+
+    processed, _ = apply(result, {"content": [where(text, "Anna Schmidt")]})
+
+    assert processed.content == "<p>[PERSON] kam.</p>"
+
+
+def test_html_that_does_not_parse_owes_the_step_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lxml.html
+
+    from text_extraction.pii.html import HtmlParseFailed
+
+    def failing(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("no")
+
+    monkeypatch.setattr(lxml.html, "document_fromstring", failing)
+    result = make_result(format="html", content="<p>Anna Schmidt</p>", title=None, metadata=None)
+    options = PiiOptions(mode="mask")
+
+    assert needs_pii(envelope(result), options)
+    with pytest.raises(HtmlParseFailed):
+        text_fields(result, ["PERSON"])
+    held = fail_closed(envelope(result), options)
+    assert held.status == "failed"
+    assert held.data is not None
+    assert held.data.content is None
+
+
+def test_needs_pii_true_for_html_with_only_a_script_or_an_attribute() -> None:
+    for html in ("<script>var a = 'Bob Meier';</script>", '<span aria-label="Bob Meier"></span>'):
+        result = make_result(
+            format="html",
+            content=html,
+            title=None,
+            metadata=None,
+            links=None,
+            document=None,
+            media=None,
+        )
+        assert needs_pii(envelope(result), PiiOptions(mode="mask")), html
+        processed, _ = apply(result, {})
+        assert processed.content is not None
+        assert "Bob" not in processed.content
+
+
+@pytest.mark.parametrize("mode", ["mask", "redact", "hash"])
+def test_apply_html_drops_script_style_and_text_bearing_attributes(mode: str) -> None:
+    html = (
+        '<p data-x="Bob Meier" class="c">Anna kam.</p><script>var b = "Bob Meier";</script>'
+        '<input value="Bob Meier" placeholder="Carl"><iframe srcdoc="Carl"></iframe>'
+    )
+    result = make_result(format="html", content=html, title=None, metadata=None, media=None)
+    text = text_fields(result, ["PERSON"])[0].text
+
+    processed, _ = apply(result, {"content": [where(text, "Anna")]}, mode)
+
+    assert processed.content is not None
+    assert processed.content.startswith('<p class="c">')
+    for leaked in ("Anna", "Bob", "Carl", "<script"):
+        assert leaked not in processed.content
+
+
+def test_apply_hash_without_an_entity_reports_no_scope() -> None:
+    """The final review's M6: no key signed anything when nothing was hashed."""
+    result = make_result(media=None)
+    found, _ = apply(result, {"content": [where(result.content or "", "Anna Schmidt")]}, "hash")
+    nothing, _ = apply(result, {}, "hash", entities=["EMAIL_ADDRESS"])
+
+    assert found.pii is not None
+    assert found.pii.hash_scope == "result"
+    assert nothing.pii is not None
+    assert (nothing.pii.entities, nothing.pii.hash_scope) == ({}, None)

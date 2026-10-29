@@ -25,7 +25,7 @@ from text_extraction.convert import Link
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.metadata import PageMetadata
-from text_extraction.pii.html import HtmlText
+from text_extraction.pii.html import HtmlParseFailed, HtmlText
 from text_extraction.pii.replace import Replacer
 from text_extraction.pii.spans import resolve
 from text_extraction.pii.types import EntityType, PiiEntity, PiiOptions, PiiReport, Span
@@ -52,7 +52,8 @@ class TextField:
 def text_fields(result: ExtractResult, entities: Collection[EntityType]) -> list[TextField]:
     """The strings of ``result`` that N5 processes, in a stable order (the content, the title,
     the metadata, the links, the media, the document); blank strings are left out. ``entities``
-    decides which fields are ``whole``."""
+    decides which fields are ``whole``. HTML content that does not parse but holds text raises
+    ``pii.html.HtmlParseFailed``."""
     fields: list[TextField] = []
 
     def collect(field: TextField) -> list[Span]:
@@ -82,10 +83,13 @@ def apply_pii(
     (``spans.resolve``). ``entities`` is required: the effective entity types (the request's, or
     the operator's defaults), the same the caller gave ``text_fields`` to choose what to send
     to the analyser; with ``PERSON`` among them, authors and the uploader are whole persons.
-    A mode that replaces also drops the comments and processing instructions of HTML content
-    (R8). ``annotate`` leaves every string as it is and lists the entities, at most
-    ``max_entities`` of them; it cannot take HTML. Status, word count, quality, language and
-    fingerprint are the extraction's, and the caller sets ``timings.pii_ms``.
+    A mode that replaces also drops what the analyser does not read of HTML content: comments
+    and processing instructions (R8), script and style elements and the text-bearing attributes
+    (``pii.html``). HTML content that does not parse but holds text raises
+    ``pii.html.HtmlParseFailed``. ``annotate`` leaves every string as it is and lists the
+    entities, at most ``max_entities`` of them; it cannot take HTML. Status, word count,
+    quality, language and fingerprint are the extraction's, and the caller sets
+    ``timings.pii_ms``.
     """
     if options.mode == "annotate" and result.format == "html":
         raise ValueError("annotate needs format markdown or text")
@@ -118,14 +122,15 @@ def apply_pii(
         entities,
         handle,
         Replacer(options.mode, key),
-        drop_comments=options.mode != "annotate",
+        drop_unread=options.mode != "annotate",
     ).result(result)
     report = PiiReport(
         mode=options.mode,
         language=language,
         entities=dict(counts),
         items=items if options.mode == "annotate" else None,
-        hash_scope=hash_scope if options.mode == "hash" else None,
+        # Whose key signed the hashes: none when nothing was hashed (no entity found).
+        hash_scope=hash_scope if options.mode == "hash" and counts else None,
     )
     truncated = options.mode == "annotate" and sum(counts.values()) > len(items)
     return processed.model_copy(update={"pii": report}), [TRUNCATED_WARNING] if truncated else []
@@ -134,18 +139,23 @@ def apply_pii(
 def needs_pii(envelope: Envelope[ExtractResult], options: PiiOptions | None) -> bool:
     """Whether the envelope still owes the PII step: it was asked for, the envelope has data
     that is not processed yet, and the data has a string that N5 processes, or HTML content
-    with a comment (which a replacing mode drops).
+    with something a replacing mode drops (a comment, a script, a text-bearing attribute;
+    ``pii.html``), or HTML content that does not parse but holds text (the step then fails
+    closed: ``HtmlParseFailed``).
 
     Which fields exist does not depend on the entity types (only whether they are ``whole``), so
     this passes ``options.entities`` as given, and none when the request names none."""
     data = envelope.data
     if options is None or data is None or data.pii is not None:
         return False
-    if text_fields(data, options.entities or ()):
+    try:
+        if text_fields(data, options.entities or ()):
+            return True
+        return bool(
+            data.format == "html" and data.content and HtmlText.parse(data.content).has_unread
+        )
+    except HtmlParseFailed:
         return True
-    return bool(
-        data.format == "html" and data.content and HtmlText.parse(data.content).has_comments
-    )
 
 
 def fail_closed(
@@ -228,9 +238,9 @@ class _Walk:
         handle: Callable[[TextField], list[Span]],
         replacer: Replacer | None,
         *,
-        drop_comments: bool = False,
+        drop_unread: bool = False,
     ) -> None:
-        self._drop_comments = drop_comments
+        self._drop_unread = drop_unread
         self._person = "PERSON" in entities
         self._handle = handle
         self._replacer = replacer
@@ -248,18 +258,19 @@ class _Walk:
         return None if text is None else self.text(name, text, person=person)
 
     def html(self, name: str, html: str) -> str:
-        """The HTML with its text handled. Under a replacing mode its comments and processing
-        instructions go too (R8): they are not text, so no analyser reads them, and nothing
-        unprocessed may leave. ``annotate`` leaves the markup as it is."""
+        """The HTML with its text handled. Under a replacing mode what the analyser does not
+        read goes too (comments and processing instructions, R8; script and style elements and
+        the text-bearing attributes, M4): nothing unprocessed may leave. ``annotate`` leaves the
+        markup as it is."""
         parsed = HtmlText.parse(html)
         spans = self._handle(TextField(name, parsed.text)) if parsed.text.strip() else []
         replacer = self._replacer
-        if replacer is None or not self._drop_comments:
+        if replacer is None or not self._drop_unread:
             return html
         replacements = [
             (span, replacer.placeholder(span, parsed.text[span.start : span.end])) for span in spans
         ]
-        return parsed.render(replacements, drop_comments=True)
+        return parsed.render(replacements, drop_unread=True)
 
     def result(self, result: ExtractResult) -> ExtractResult:
         update: dict[str, Any] = {}

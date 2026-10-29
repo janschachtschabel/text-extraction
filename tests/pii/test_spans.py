@@ -95,23 +95,79 @@ def test_empty_and_out_of_range_spans_are_dropped_or_clamped() -> None:
 
 def test_segments_cut_at_blank_line_then_line_then_space() -> None:
     blank = "aaaa bbbb\nccc\n\ndddd eeee\nffff"
-    assert segments(blank, 20) == [(0, "aaaa bbbb\nccc\n\n"), (15, "dddd eeee\nffff")]
+    assert segments(blank, 20, overlap=0) == [(0, "aaaa bbbb\nccc\n\n"), (15, "dddd eeee\nffff")]
 
     line = "aaaa bbbb\nccccccccc dddd eeee"
-    assert segments(line, 20) == [(0, "aaaa bbbb\n"), (10, "ccccccccc dddd eeee")]
+    assert segments(line, 20, overlap=0) == [(0, "aaaa bbbb\n"), (10, "ccccccccc dddd eeee")]
 
     space = "aaaa bbbb cccc dddd eeee"
-    assert segments(space, 12) == [(0, "aaaa bbbb "), (10, "cccc dddd "), (20, "eeee")]
+    assert segments(space, 12, overlap=0) == [(0, "aaaa bbbb "), (10, "cccc dddd "), (20, "eeee")]
 
 
 def test_segments_hard_cut_without_a_separator() -> None:
-    assert segments("x" * 25, 10) == [(0, "x" * 10), (10, "x" * 10), (20, "x" * 5)]
+    assert segments("x" * 25, 10, overlap=0) == [(0, "x" * 10), (10, "x" * 10), (20, "x" * 5)]
 
 
 def test_segments_short_text_is_one_piece() -> None:
-    assert segments("short", 20) == [(0, "short")]
-    assert segments("", 20) == []
-    assert segments("a" * 20, 20) == [(0, "a" * 20)]
+    assert segments("short", 20, overlap=5) == [(0, "short")]
+    assert segments("", 20, overlap=5) == []
+    assert segments("a" * 20, 20, overlap=5) == [(0, "a" * 20)]
+
+
+def test_segments_overlap_starts_the_next_piece_before_the_cut_at_a_word() -> None:
+    """A piece after the first starts up to ``overlap`` characters before the cut, after the first
+    blank there: an entity with spaces across the cut (``DE89 3704 0044 ...``) is whole in the
+    next piece. The cut itself still prefers a blank line, a line break, a space."""
+    text = "aaaa bbbb cccc dddd eeee ffff"
+
+    assert segments(text, 12, overlap=6) == [
+        (0, "aaaa bbbb "),  # cut after the last space of the window
+        (5, "bbbb cccc "),  # from the first word start of the 6 characters before the cut
+        (10, "cccc dddd "),
+        (15, "dddd eeee "),
+        (20, "eeee ffff"),
+    ]
+    line = "aaaa bbbb\ncccc dddd eeee"
+    assert segments(line, 14, overlap=5)[:2] == [(0, "aaaa bbbb\n"), (5, "bbbb\ncccc ")]
+
+
+def test_segments_overlap_without_a_blank_starts_exactly_overlap_before_the_cut() -> None:
+    assert segments("x" * 25, 10, overlap=3) == [
+        (0, "x" * 10),
+        (7, "x" * 10),
+        (14, "x" * 10),
+        (21, "x" * 4),
+    ]
+
+
+def test_segments_overlap_an_entity_with_spaces_across_a_cut_is_whole_in_one_piece() -> None:
+    iban = "DE89 3704 0044 0532 0130 00"
+    head = "wort " * 3998  # 19,990 characters: the IBAN starts 10 before the window's end
+    text = f"{head}{iban} und mehr " + "wort " * 100
+
+    pieces = segments(text)
+
+    assert len(pieces) == 2
+    first, second = pieces
+    assert iban not in first[1]  # cut inside the IBAN, at its last space in the window
+    assert iban in second[1]
+    assert second[0] + second[1].index(iban) == text.index(iban)
+    assert len(first[1]) <= 20_000
+    assert len(second[1]) <= 20_000
+
+
+@pytest.mark.parametrize("overlap", [-1, 20, 25])
+def test_segments_overlap_must_be_below_the_piece_size(overlap: int) -> None:
+    with pytest.raises(ValueError, match="overlap"):
+        segments("abc def", 20, overlap=overlap)
+
+
+def test_segments_default_overlap_is_500() -> None:
+    from text_extraction.pii.spans import SEGMENT_OVERLAP
+
+    assert SEGMENT_OVERLAP == 500
+    pieces = segments("x" * 45_000)
+    assert [offset for offset, _ in pieces] == [0, 19_500, 39_000]
 
 
 @pytest.mark.parametrize(
@@ -126,7 +182,7 @@ def test_segments_short_text_is_one_piece() -> None:
     ids=["words", "no space", "mixed", "separators only", "non-ascii"],
 )
 def test_segments_offsets_reassemble_text(text: str) -> None:
-    pieces = segments(text, 1000)
+    pieces = segments(text, 1000, overlap=0)
 
     assert all(0 < len(piece) <= 1000 for _, piece in pieces)
     assert "".join(piece for _, piece in pieces) == text
@@ -134,10 +190,38 @@ def test_segments_offsets_reassemble_text(text: str) -> None:
     assert [offset for offset, _ in pieces] == sorted({offset for offset, _ in pieces})
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "word " * 5000,
+        "x" * 12345,
+        "line one\n\nline two\nline three " * 700,
+        "\n" * 300 + "a" + " " * 300,
+        "😀 emoji and ümlauts " * 900,
+        "a" + " " * 3000 + "b",
+    ],
+    ids=["words", "no space", "mixed", "separators only", "non-ascii", "one long blank"],
+)
+def test_segments_with_overlap_cover_the_text_and_overlap_each_cut(text: str) -> None:
+    """With an overlap the pieces still cover every character, in order, each at its offset, and
+    each piece after the first starts at most ``overlap`` characters before the previous end."""
+    pieces = segments(text, 1000, overlap=100)
+
+    assert all(0 < len(piece) <= 1000 for _, piece in pieces)
+    assert all(text[offset : offset + len(piece)] == piece for offset, piece in pieces)
+    assert pieces[0][0] == 0
+    assert pieces[-1][0] + len(pieces[-1][1]) == len(text)
+    for (offset, piece), (next_offset, _) in pairwise(pieces):
+        end = offset + len(piece)
+        assert offset < next_offset <= end
+        assert end - next_offset <= 100
+    assert len(pieces) <= 2 * len(text) // 900 + 1  # the overlap costs a tenth, never quadratic
+
+
 def test_segments_default_size_is_20000() -> None:
     pieces = segments("x" * 45_000)
 
-    assert [len(piece) for _, piece in pieces] == [20_000, 20_000, 5_000]
+    assert [len(piece) for _, piece in pieces] == [20_000, 20_000, 6_000]
 
 
 def test_segments_rejects_a_size_below_one() -> None:

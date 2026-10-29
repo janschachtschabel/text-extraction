@@ -84,12 +84,113 @@ def test_german_non_names(text: str) -> None:
     assert names(text, "de") == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Mo.-Fr. Sprechstunde",
+        "Mo.\u2013Fr. Unterricht",
+        "Mo. bis Fr. Nachmittag",
+        "Di.-Fr. Beratung",
+        "Mi. - Fr. Sprechstunde",
+        "Do.\u2013Fr. Unterricht",
+        "Mo-Fr. Sprechstunde",
+        # A line as the corpus has them: opening hours of a school office.
+        "Sekretariat: Mo.-Fr. Sprechstunde 8-12 Uhr, Mo. bis Fr. Nachmittag nach Vereinbarung.",
+    ],
+)
+def test_fr_closing_a_weekday_range_is_friday_not_frau(text: str) -> None:
+    """The final review's M1: ``Fr.`` after ``Mo.``/``Di.``/``Mi.``/``Do.`` and a dash or ``bis``
+    is Friday: the word after it is no name."""
+    assert names(text, "de") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("Fr. Unterberger ist da.", "Unterberger"),  # Frau, not Friday
+        ("Sprechstunde Fr. Nowak", "Nowak"),
+        ("Mo.: Herr Lang, Fr. Kurz", "Kurz"),
+    ],
+)
+def test_fr_outside_a_weekday_range_is_still_frau(text: str, name: str) -> None:
+    assert names(text, "de")[-1] == name
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "language"),
+    [
+        ("Mr. McDonald called.", "McDonald", "en"),
+        ("Mrs O'Brien wrote.", "O'Brien", "en"),
+        ("Mrs O\u2019Brien wrote.", "O\u2019Brien", "en"),
+        ("Frau Nowak-Šimić unterrichtet.", "Nowak-Šimić", "de"),
+        ("Herr Šimić unterrichtet.", "Šimić", "de"),
+        ("Frau Łukasiewicz kommt.", "Łukasiewicz", "de"),
+        ("Herr Dell'Orto kommt.", "Dell'Orto", "de"),
+        ("Herr MacArthur Smith", "MacArthur Smith", "de"),
+        ("Frau Ørsted", "Ørsted", "de"),
+    ],
+)
+def test_a_name_takes_any_letter_internal_capitals_and_apostrophes(
+    text: str, name: str, language: str
+) -> None:
+    """The final review's M2: a name part is any letter after an upper-case one, with internal
+    capitals and an apostrophe; the match never ends inside a word."""
+    assert names(text, language) == [name]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Herr MÜLLER",  # all capitals: no name part
+        "Frau Müller2",  # a name never ends inside a word
+        "Herr Mü_ller",
+        "Herr ABC-Schulz",
+        "Frau 'Anna",
+    ],
+)
+def test_a_name_never_ends_inside_a_word(text: str) -> None:
+    assert names(text, "de") == []
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        ("Mr. Smith's car", "Smith"),
+        ("Dr. Watson\u2019s notes", "Watson"),
+        ("Mrs Jones' house", "Jones"),
+    ],
+)
+def test_a_possessive_ends_the_name(text: str, name: str) -> None:
+    """A possessive ``'s`` or a trailing apostrophe is no part of the word: the name before it is
+    found, as before the end assertion."""
+    assert names(text, "en") == [name]
+
+
+def test_an_apostrophe_inside_a_word_is_no_name_end() -> None:
+    assert names("Herr Dell'orto", "de") == []  # not "Dell"
+
+
+def test_a_second_word_that_is_no_name_is_left_out() -> None:
+    assert names("Herr Müller sagt", "de") == ["Müller"]
+    assert names("Herr Müller Schmidt2 sagt", "de") == ["Müller"]
+
+
 def test_a_hyphenated_part_is_no_title_either() -> None:
     assert names("Dr. Meier-Dr. Schulz", "de") == ["Meier", "Schulz"]  # not "Meier-Dr"
 
 
 @pytest.mark.parametrize(
-    "text", ["Dr. " * 8000 + "x", "Frau " + "Dr. med. " * 4000, "Prof. Dr. med. " * 4000 + "x"]
+    "text",
+    [
+        "Dr. " * 8000 + "x",
+        "Dr. " * 16000,
+        "Frau " + "Dr. med. " * 4000,
+        "Prof. Dr. med. " * 4000 + "x",
+        "Herr A" + "a" * 32000 + "1",  # a long word that is no name at its end
+        "Herr " + "AbC" * 10000 + "1",
+        "Frau " + "O'" * 10000 + "x",
+        "Mo.-Fr. " * 8000,
+    ],
 )
 def test_a_long_title_chain_takes_linear_time(text: str) -> None:
     """Page text is untrusted: a chain of titles with no name must not backtrack quadratically
@@ -99,6 +200,17 @@ def test_a_long_title_chain_takes_linear_time(text: str) -> None:
 
     assert time.perf_counter() - started < 0.1
     assert found == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Frau Ab-" * 8000 + "1", "Frau " + "Ab-" * 10000 + "1", "Herr " + "McD" * 10000 + "1"],
+)
+def test_long_name_like_text_takes_linear_time(text: str) -> None:
+    started = time.perf_counter()
+    names(text, "de")
+
+    assert time.perf_counter() - started < 0.1
 
 
 def test_a_name_does_not_run_over_a_line_break() -> None:

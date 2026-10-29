@@ -12,14 +12,17 @@ each item it:
 
 1. reads the item's draft, the unprocessed envelope (``JobStore.draft``). A draft that expired
    with its job answers ``pii_failed``, retryable, without data: the caller sends the request
-   again. An envelope without data, one without ``options.pii`` and one that has a ``pii``
-   report already (an item that ran twice) are returned as they are;
+   again. So does a draft that does not validate (logged by its error's type only: pydantic's
+   message quotes the input); the worker drops it with the answer. An envelope without data,
+   one without ``options.pii`` and one that has a ``pii`` report already (an item that ran
+   twice) are returned as they are;
 2. takes the effective entity types once (the request's, else ``PII_DEFAULT_ENTITIES``: ruling
    R7) and the threshold (the request's, else ``PII_SCORE_THRESHOLD``), and lists the strings
    N5 processes (``pii.fields.text_fields``). Over ``PII_MAX_CHARS`` characters in all of them
    the item fails ``too_large``, not retryable, with the content withheld (the child never sees
    it). ``annotate`` with HTML content fails ``pii_failed``, not retryable, withheld: the
-   requests' side refuses it earlier;
+   requests' side refuses it earlier. HTML content that does not parse but holds text
+   (``pii.html.HtmlParseFailed``) fails ``pii_failed``, retryable, withheld;
 3. chooses the model (N8): ``de`` or ``en`` in the option; else the language of the result when it
    is ``de`` or ``en``; else ``PII_FALLBACK_LANGUAGE`` with the warning
    ``pii_language_unsupported``;
@@ -29,7 +32,8 @@ each item it:
    models lazily, in the call that finds it without them (ruling R12): a child that the pool
    replaced (killed at a deadline, crashed, recycled) is loaded by its own next call, and loads
    once per lifetime, whichever child the pool hands out. The first call of a fresh child spends
-   a few seconds of its deadline on the load;
+   a few seconds of its deadline on the load. A reply whose field names are not exactly those
+   sent fails ``pii_failed``, retryable, withheld: a missing field is not "no entities";
 5. applies the mode to the result with the spans (``pii.fields.apply_pii``: N7 resolves them,
    N2 and N10 replace them), sets the report and ``timings.pii_ms``, and counts the entities by
    type in ``text_extraction_pii_entities_total{type}``.
@@ -80,6 +84,7 @@ from weakref import WeakKeyDictionary
 
 import structlog
 from prometheus_client import REGISTRY, CollectorRegistry, Counter
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from text_extraction import model_store
@@ -101,6 +106,7 @@ from text_extraction.pii.fields import (
     text_fields,
     withheld,
 )
+from text_extraction.pii.html import HtmlParseFailed
 from text_extraction.pii.replace import hash_key
 from text_extraction.pii.types import (
     ENTITY_TYPES,
@@ -123,6 +129,9 @@ PII_TARGET: Final = "text_extraction.pii.child"
 LANGUAGE_UNSUPPORTED_WARNING: Final = "pii_language_unsupported"
 DRAFT_EXPIRED_MESSAGE: Final = (
     "The result to process expired before PII handling ran. Send the request again."
+)
+DRAFT_INVALID_MESSAGE: Final = (
+    "The result to process could not be read for PII handling. Send the request again."
 )
 # What the items in flight get after SIGTERM before they are cancelled (N13).
 GRACEFUL_SECONDS: Final = 30
@@ -221,7 +230,13 @@ class PiiRunner:
     ) -> Envelope[ExtractResult]:
         # The worker deletes the draft once the result is written (``Worker._drop_input``): an
         # item that runs again finds it.
-        draft = await self._store.draft(job.id, item.index)
+        try:
+            draft = await self._store.draft(job.id, item.index)
+        except ValidationError as error:
+            # The type only: pydantic's message quotes the stored text. The worker drops the
+            # draft once this answer is written, so the next run does not meet it again.
+            _log.error("pii_draft_invalid", error=type(error).__name__)
+            return failed_extract(ErrorCode.PII_FAILED, DRAFT_INVALID_MESSAGE, retryable=True)
         if draft is None:
             _log.warning("pii_draft_expired")
             return failed_extract(ErrorCode.PII_FAILED, DRAFT_EXPIRED_MESSAGE, retryable=True)
@@ -233,7 +248,11 @@ class PiiRunner:
         if options.mode == "annotate" and data.format == "html":
             return withheld(draft, options, message=ANNOTATE_HTML_MESSAGE, retryable=False)
         entities = list(options.entities or self._settings.pii_default_entities)
-        fields = text_fields(data, entities)
+        try:
+            fields = text_fields(data, entities)
+        except HtmlParseFailed as error:
+            _log.error("pii_html_parse_failed", error=type(error).__name__)
+            return withheld(draft, options)
         if sum(len(field.text) for field in fields) > self._settings.pii_max_chars:
             return withheld(
                 draft, options, code=ErrorCode.TOO_LARGE, message=TOO_LARGE_MESSAGE, retryable=False
@@ -262,6 +281,10 @@ class PiiRunner:
                 )
             except (ConversionTimeout, ConversionCrashed, ConversionError) as error:
                 self._log_child_failure(error)
+                return withheld(draft, options)
+            if not isinstance(found, dict) or set(found) != {name for name, _ in needing}:
+                # A field missing from the reply is not "no entities": nothing unread may leave.
+                _log.error("pii_child_reply_mismatch")
                 return withheld(draft, options)
         try:
             spans = {

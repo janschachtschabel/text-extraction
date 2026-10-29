@@ -12,7 +12,7 @@ from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode
 from text_extraction.netguard import MAX_URL_LENGTH
-from text_extraction.pii.types import PiiOptions
+from text_extraction.pii.types import BareModeOrObject, PiiOptions
 
 JobKind = Literal["extract", "batch", "screenshot", "file"]
 JobState = Literal["queued", "running", "completed"]
@@ -68,7 +68,7 @@ class BatchRequest(BaseModel, extra="forbid"):
         description="As for `/v1/extract`: preferred subtitle and transcription languages, at "
         "most 5.",
     )
-    pii: PiiOptions | None = Field(
+    pii: Annotated[PiiOptions | None, BareModeOrObject()] = Field(
         default=None,
         description="As for `/v1/extract`: find personal data in every item's result and "
         "handle it (`mask`, `redact`, `hash` or `annotate`; a bare string is the mode). 400 "

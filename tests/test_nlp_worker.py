@@ -573,6 +573,136 @@ async def test_runner_a_failure_applying_the_spans_is_withheld_and_logs_the_type
     assert "Anna" not in json.dumps(logs, default=str)
 
 
+# --- the final review's findings in the runner ---------------------------------------------------
+
+
+@scenario
+async def test_runner_html_that_does_not_parse_is_withheld_and_logs_the_type_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M3: content that lxml cannot parse but that holds text is never answered as empty content
+    with status success."""
+    import lxml.html
+
+    def failing(*_args: Any, **_kwargs: Any) -> Any:
+        raise ValueError("Anna Schmidt")
+
+    monkeypatch.setattr(lxml.html, "document_fromstring", failing)
+    nlp = Nlp()
+    job_id = await nlp.submit(draft_of(format="html", content="<p>Anna Schmidt privat</p>"))
+
+    with capture_logs() as logs:
+        await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    assert result.error is not None
+    assert (result.status, result.error.code, result.error.retryable) == (
+        "failed",
+        ErrorCode.PII_FAILED,
+        True,
+    )
+    assert data_of(result).content is None
+    assert nlp.pool.calls == []
+    (line,) = [log for log in logs if log["event"] == "pii_html_parse_failed"]
+    assert line["error"] == "HtmlParseFailed"
+    assert "Anna" not in json.dumps(logs, default=str)
+
+
+@scenario
+async def test_runner_html_with_an_xml_declaration_is_masked() -> None:
+    nlp = Nlp()
+    html = '<?xml version="1.0" encoding="UTF-8"?><p>Hallo Anna</p>'
+    job_id = await nlp.submit(draft_of(format="html", content=html), "mask")
+
+    await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    assert result.status == "success"
+    assert data_of(result).content == "<p>Hallo [PERSON]</p>"
+
+
+@scenario
+async def test_runner_hash_without_findings_reports_no_scope() -> None:
+    """M6: nothing was hashed, so no key signed anything: ``hash_scope`` is null."""
+    nlp = Nlp()
+    nlp.pool.finds_nothing = True
+    nothing = await nlp.submit(
+        draft_of(content="Nichts Persönliches.", title=None, metadata=None, media=None), "hash"
+    )
+    bare = draft_of(title=None, content=None, metadata=None, links=None, media=None, document=None)
+    no_fields = await nlp.submit(bare, "hash")
+
+    await nlp.process_next()
+    await nlp.process_next()
+
+    for job_id in (nothing, no_fields):
+        report = data_of(await nlp.result(job_id)).pii
+        assert report is not None
+        assert (report.entities, report.hash_scope) == ({}, None)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [{}, {"content": []}, {"content": [], "title": [], "other": []}],
+    ids=["empty", "a field missing", "a field too many"],
+)
+@scenario
+async def test_runner_a_reply_without_the_fields_sent_is_withheld(
+    reply: dict[str, Any],
+) -> None:
+    """M8: a field missing from the child's reply is not "no entities": the item fails closed."""
+
+    class OddPool(FakePiiPool):
+        async def run(self, function_name: str, payload: dict[str, Any], deadline: float) -> Any:
+            await super().run(function_name, payload, deadline)
+            return reply
+
+    nlp = Nlp(pool=OddPool())
+    job_id = await nlp.submit(draft_of(content="Anna Schmidt privat", title="Anna", metadata=None))
+
+    with capture_logs() as logs:
+        await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    assert result.error is not None
+    assert (result.status, result.error.code, result.error.retryable) == (
+        "failed",
+        ErrorCode.PII_FAILED,
+        True,
+    )
+    assert (data_of(result).content, data_of(result).title) == (None, None)
+    (line,) = [log for log in logs if log["event"] == "pii_child_reply_mismatch"]
+    assert set(line) <= {"event", "log_level", "error"}
+    assert "Anna" not in json.dumps(logs, default=str)
+    assert "content" not in json.dumps(logs, default=str)  # never a field name either
+
+
+@scenario
+async def test_runner_a_malformed_draft_is_withheld_dropped_and_logs_the_type_only() -> None:
+    """M9: a corrupt draft raises a ValidationError whose message quotes the input; the runner
+    logs the type only, answers ``pii_failed``, retryable, and the draft is dropped."""
+    nlp = Nlp()
+    job_id = await nlp.submit(draft_of(content="Anna"))
+    await nlp.valkey.hset(f"job:{{{job_id}}}:drafts", "0", '{"status": "Anna Schmidt privat"')
+
+    with capture_logs() as logs:
+        await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    assert result.error is not None
+    assert (result.status, result.error.code, result.error.retryable) == (
+        "failed",
+        ErrorCode.PII_FAILED,
+        True,
+    )
+    assert result.data is None
+    (line,) = [log for log in logs if log["event"] == "pii_draft_invalid"]
+    assert line["error"] == "ValidationError"
+    assert "Anna" not in json.dumps(logs, default=str)
+    assert all("exc_info" not in log for log in logs)
+    assert await nlp.valkey.hlen(f"job:{{{job_id}}}:drafts") == 0
+
+
 @scenario
 async def test_runner_too_much_text_is_too_large_withheld() -> None:
     nlp = Nlp(pii_max_chars=10_000)

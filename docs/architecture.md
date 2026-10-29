@@ -162,7 +162,10 @@ Error codes: `invalid_url`, `blocked_url`, `blocked_by_robots`, `tdm_reserved`,
 `pii_failed` (retryable, except for an `annotate` that was asked for HTML on a path that does not
 refuse it earlier) says that PII handling did not run or did not finish; the answer carries none
 of the text (N12). A result with more than `PII_MAX_CHARS` characters in the fields PII handles is
-`too_large` with its text withheld.
+`too_large` with its text withheld. `JOB_ITEM_MAX_BYTES` comes first: the result reaches the nlp
+worker as a draft in a job item, and a draft whose JSON is over `JOB_ITEM_MAX_BYTES` (2 MB) is
+stored without its content, so it answers `success` with `data.content` null and the warning
+`content_not_stored_too_large` (its other fields processed), not `too_large`.
 
 Codes of the API's own 4xx answers (never an extraction outcome): `invalid_request`,
 `unauthorized`, `forbidden`, `not_found`. `tests/test_errors.py` keeps both lists in step
@@ -1328,8 +1331,9 @@ it as HTML.
 text."), because the offsets of text nodes in HTML are not stable.
 
 **N3, the report.** `data.pii`: `mode`, `language` (the model used, `de|en`), `entities` (the count
-per type, only types found), `items` (`annotate` only, else null), `hash_scope` (`hash` only,
-else null). `data.timings.pii_ms` is the time of the step. `status`, `word_count`, `quality`,
+per type, only types found), `items` (`annotate` only, else null), `hash_scope` (`service` or
+`result`: `hash` only, and only when an entity was hashed; else null, also for a `hash` result
+without any entity). `data.timings.pii_ms` is the time of the step. `status`, `word_count`, `quality`,
 `language` and `fingerprint` stay those of the extraction. A result without `pii` gains
 `pii: null` and `timings.pii_ms: 0` and is otherwise unchanged by a byte.
 
@@ -1361,8 +1365,12 @@ for `de` and `en`:
 - Our `HonorificRecognizer`: a name after a salutation (`Herr`, `Herrn`, `Frau`, `Hr.`, `Fr.`;
   `Mr`, `Mrs`, `Ms`, `Mx`, `Dr`) or after a title alone (`Prof. Dr. Henrik Sommer`), with titles
   and academic degrees in between (a bounded chain: `Prof. Dr. med. dent.`), is a `PERSON` of score
-  0.7. The span is the name only (`Herr Müller` gives `Herr [PERSON]`). It finds the names that
-  the NER model misses after `Herr` and `Frau`.
+  0.7. The span is the name only. The NER usually takes a salutation and its name as one
+  `PERSON`, which wins on its higher score (`Herr Müller` gives `[PERSON]`); the rule covers the
+  names the NER misses after `Herr` and `Frau`, which give `Herr [PERSON]`. A name word is an
+  upper-case letter and letters of any script, with internal capitals and an apostrophe
+  (`McDonald`, `O'Brien`, `Nowak-Šimić`); the name ends where its word does. `Fr.` that closes a
+  range of weekdays (`Mo.-Fr.`, `Mo. bis Fr.`) is Friday, not `Frau`.
 - tldextract never goes online: Presidio's e-mail recognizer uses the bundled suffix list, so an
   address with a suffix that is not in it (`.test`, `.example`, `.local`) is not found.
 - Presidio's own loggers are at `WARNING`; no text is ever logged.
@@ -1374,7 +1382,12 @@ higher one, and dropped when that part has no letter or digit (so the NER span "
 leaves the IBAN `DE89 3704 0044 0532 0130 00` whole). Long text is analysed in segments of at most
 20,000 characters cut at a blank line, else a line break, else a space, with the offsets added
 back: Presidio's context step grows faster than linearly, and the same 175,000 characters took
-11.3 s in one piece and 3.8 s in segments.
+11.3 s in one piece and 3.8 s in segments. The segments overlap by 500 characters (each starts at
+the first word start in the 500 characters before the previous cut): a cut at a space may fall
+inside an entity with spaces (an IBAN or a card number in groups, a phone number, a two-word
+name), which the next segment then holds whole. 500 characters hold the longest of them (an IBAN
+in groups has at most 42) with some context for the NER and the phone context words, for 2.5 %
+more text; a span found by both segments is reported once, other overlaps are settled as above.
 
 **N8, language.** `auto` takes the result's `language`: `de` and `en` use their model, any other
 or none uses `PII_FALLBACK_LANGUAGE` (`en`) and adds the warning `pii_language_unsupported`. The
@@ -1390,10 +1403,20 @@ cache), so `pii` is not part of the cache key. A job's result is the processed e
 attribute values in document order into one string, a space between two nodes that are not
 adjacent inline text, with a map back to each node. `HtmlText.render` writes each replacement into
 the node where its span starts and deletes the span's rest from the following nodes, so a name
-across `<b>Anna</b> Schmidt` is replaced once. Markup, and attributes other than `alt`/`title`
-(and the `href` of `mailto:` and `tel:` links, masked like N5's links), stay; lxml serialises, so a
-replacement is escaped. HTML comments and processing instructions are dropped in every mode but
-`annotate`, because nothing unprocessed may leave.
+across `<b>Anna</b> Schmidt` is replaced once. Markup stays, and the `href` of `mailto:` and
+`tel:` links is masked like N5's links; lxml serialises, so a replacement is escaped. In every mode
+but `annotate` (which HTML refuses) what the analyser does not read is dropped, because nothing
+unprocessed may leave: comments and processing instructions, `script` and `style` elements (their
+tails stay), and every attribute but `alt`/`title`, a contact link's `href` and the structural
+ones of `pii.html.KEPT_ATTRIBUTES` (URLs: `href`, `src`, `srcset`, `sizes`, `poster`, `cite`;
+`class`, `id`, `lang`, `xml:lang`, `dir`, `role`, `hidden`, `xmlns`; `rel`, `target`, `type`,
+`width`, `height`, `align`, `valign`; table and list structure: `colspan`, `rowspan`, `span`,
+`scope`, `headers`, `start`, `reversed`; `datetime`; MathML presentation attributes). So
+`aria-*`, `data-*`, `value`, `placeholder`, `srcdoc`, `content`, `name`, `label`, `style`, `on*`
+and any attribute not listed go (inline SVG loses its drawing attributes). A leading XML
+declaration is stripped before parsing (lxml refuses a declared encoding in a string); content
+that still does not parse but holds text is `pii_failed`, retryable, withheld, never empty
+content with `success`.
 
 **N11, the hop** (`pii_dispatch.py`, built like `docling_dispatch.py`). Pool `nlp`, queue
 `nlp_queue` without the per-domain lease cap (nothing is fetched); items `<job id>:<index>:<attempts>`;
@@ -1432,7 +1455,9 @@ answers `pii_failed`, retryable, never its draft. An OCR fallback draft (`ocr_un
 browser fallback (`browser_unavailable`), a cache hit and a P1 job whose task raised take the same
 paths. A target failure with content (`likely_error_page`) answers `pii_failed` instead, with
 its `upstream_status`. Too much text (over `PII_MAX_CHARS` in all fields) is `failed`/`too_large`
-with the content withheld; the child's deadline is `pii_failed`, retryable.
+with the content withheld; a draft over `JOB_ITEM_MAX_BYTES` has lost its content before (see
+"Result envelope and errors": `success`, content null, `content_not_stored_too_large`). The
+child's deadline is `pii_failed`, retryable.
 
 **N13, the nlp worker** (`nlp_worker.py`, entry `text-extraction-nlp-worker`, pool `nlp`, internal
 port only). The extract worker's `Worker` with a `PiiRunner`. The parent process never imports
