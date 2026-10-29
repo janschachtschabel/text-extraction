@@ -9,7 +9,8 @@ import socket
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from functools import wraps
-from typing import Any, cast
+from pathlib import Path
+from typing import Any, Literal, cast
 
 import httpx
 import pytest
@@ -37,7 +38,10 @@ from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import JobLost, JobRecord, JobStore, ResultWrite
 from text_extraction.memory_guard import MemoryGuard
+from text_extraction.nlp_worker import PiiRunner
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
+from text_extraction.pii.types import PiiOptions
+from text_extraction.pii_dispatch import create_pii_move, nlp_queue
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
 from text_extraction.pipeline_media import ASR_UNAVAILABLE_WARNING, MediaInputMeta, asr_available
@@ -166,6 +170,9 @@ class Harness:
             sleep=self.sleeps,
             random=random,
             give_back_on_cancel=give_back_on_cancel,
+            pii_move=create_pii_move(
+                self.settings, self.valkey, self.store, self.guard, self.registry
+            ),
         )
 
     async def submit(self, urls: list[str]) -> str:
@@ -1819,7 +1826,7 @@ class AsrAnswering:
         return self._answer
 
 
-def asr_worker(harness: Harness, runner: Any) -> Worker:
+def asr_worker(harness: Harness, runner: Any, *, pii_move: Any = None) -> Worker:
     return Worker(
         harness.settings,
         harness.valkey,
@@ -1828,6 +1835,7 @@ def asr_worker(harness: Harness, runner: Any) -> Worker:
         harness.asr_queue,
         harness.registry,
         clock=harness.clock,
+        pii_move=pii_move,
     )
 
 
@@ -1858,10 +1866,17 @@ def metadata_draft() -> Envelope[ExtractResult]:
     return Envelope[ExtractResult](status="partial", data=result, error=error)
 
 
-async def queue_one_transcription(harness: Harness, *, key: str | None = None) -> str:
-    """A sync request's one-item job on pool ``asr``, as the API's dispatch leaves it."""
-    options = JobOptions(compliance="enforce", transcribe=True)
-    job_id = await harness.store.create("extract", OWNER, options, [YOUTUBE])
+async def queue_one_transcription(
+    harness: Harness,
+    *,
+    key: str | None = None,
+    pii: PiiOptions | None = None,
+    kind: Literal["extract", "batch"] = "extract",
+) -> str:
+    """A sync request's one-item job on pool ``asr``, as the API's dispatch leaves it (or a
+    batch's item, with ``kind``)."""
+    options = JobOptions(compliance="enforce", transcribe=True, pii=pii)
+    job_id = await harness.store.create(kind, OWNER, options, [YOUTUBE])
     meta = MediaInputMeta(
         source="platform",
         platform="youtube",
@@ -1916,3 +1931,402 @@ async def test_exhausted_asr_item_answers_its_draft_with_asr_unavailable() -> No
     assert item.result.data.fingerprint is None  # neither cached nor deduplicated
     assert await harness.store.asr_key(job_id) is None
     assert await harness.valkey.keys("job:*:input:*") == []
+
+
+# --- PII: the move to the nlp pool and the guard (N11, N12) -------------------------------------
+
+PII_NAME = "Anna Schmidt"
+PII_PAGE = (
+    "<!doctype html><html lang='en'><head><title>Contact</title></head><body><article>"
+    f"<h1>Contact</h1><p>{PARAGRAPH * 4}</p><p>Written by {PII_NAME}, "
+    "anna.schmidt@example.org.</p></article></body></html>"
+)
+PII_MASK = JobOptions(compliance="enforce", pii=PiiOptions(mode="mask"))
+
+
+def pii_harness(url: str, body: str = PII_PAGE, **overrides: Any) -> Harness:
+    values: dict[str, Any] = {"pii_enabled": True}
+    values.update(overrides)
+    return Harness({url: fetched(url, body)}, **values)
+
+
+async def submit_with_pii(harness: Harness, urls: list[str]) -> str:
+    job_id = await harness.store.create("batch", OWNER, PII_MASK, urls)
+    await harness.queue.enqueue(job_id, OWNER.name, urls)
+    return job_id
+
+
+class NlpPool:
+    """The nlp worker of a harness: the real ``Worker`` and ``PiiRunner`` on its store and queue
+    ``nlp``, with the fake child pool of the nlp worker tests."""
+
+    def __init__(self, harness: Harness) -> None:
+        from tests.test_nlp_worker import FakePiiPool  # that module imports this one
+
+        self.children = FakePiiPool()
+        self.queue = nlp_queue(harness.valkey, harness.settings)
+        self.registry = CollectorRegistry()
+        self.runner = PiiRunner(harness.settings, harness.store, self.children, self.registry)
+        self.worker = Worker(
+            harness.settings,
+            harness.valkey,
+            self.runner,
+            harness.store,
+            self.queue,
+            self.registry,
+        )
+
+    async def drain(self) -> int:
+        """Process every item queued on ``nlp``; how many were claimed."""
+        claimed = 0
+        while (claim := await self.queue.claim(self.runner.lease_seconds)).item is not None:
+            await self.worker.process(claim.item, exhausted=claim.exhausted)
+            claimed += 1
+        return claimed
+
+    def analysed(self) -> int:
+        return len(self.children.calls_to("analyze"))
+
+
+def processed(item: JobItem) -> ExtractResult:
+    assert item.result is not None
+    assert item.result.status == "success", item.result.error
+    data = item.result.data
+    assert data is not None
+    assert data.pii is not None
+    assert PII_NAME not in (data.content or "")
+    assert "[PERSON]" in (data.content or "")
+    return data
+
+
+@scenario
+async def test_worker_finish_moves_to_nlp_once() -> None:
+    url = page("example.org")
+    harness = pii_harness(url)
+    job_id = await submit_with_pii(harness, [url])
+    first = await harness.claim()
+    assert first.item is not None
+
+    # The first run moves the item, then dies before its completion: its lease runs out.
+    complete = harness.queue.complete
+
+    async def crash(item: QueueItem) -> bool:
+        raise RedisConnectionError("Error 111 connecting to valkey:6379. Connection refused.")
+
+    harness.queue.complete = crash  # type: ignore[method-assign]
+    with pytest.raises(RedisConnectionError):
+        await harness.worker.process(first.item)
+    harness.queue.complete = complete  # type: ignore[method-assign]
+    assert await harness.items(job_id) == [JobItem(index=0, url=url, state="pending", result=None)]
+
+    # It runs again and moves again: draft, then the queue, then the completion.
+    harness.clock.now += harness.lease_seconds + 1
+    again = await harness.claim()
+    assert again.item is not None
+    assert again.item.index == first.item.index
+    await harness.worker.process(again.item)
+    assert not await harness.completed(job_id)
+    assert outcome_count(harness, "escalated") == 1
+    assert (await harness.queue.counts()).leased == 0
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.pii is None
+
+    nlp = NlpPool(harness)
+    assert await nlp.drain() == 2  # two moves, two items on nlp
+    assert nlp.analysed() == 1  # only the first ran: the copy found the result and stopped
+    [item] = await harness.items(job_id)
+    data = processed(item)
+    assert data.mode_used == "fast"
+    record = await harness.store.get(job_id)
+    assert record is not None
+    assert (record.state, record.progress.done, record.progress.success) == ("completed", 1, 1)
+    assert await harness.store.draft(job_id, 0) is None
+
+
+@scenario
+async def test_moved_item_keeps_its_client_and_index() -> None:
+    urls = [page("example.org", 0), page("example.org", 1)]
+    harness = Harness({url: fetched(url, PII_PAGE) for url in urls}, pii_enabled=True)
+    job_id = await submit_with_pii(harness, urls)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    nlp = nlp_queue(harness.valkey, harness.settings)
+    claim = await nlp.claim(60)
+    assert claim.item is not None
+    assert (claim.item.job_id, claim.item.index, claim.item.client) == (job_id, 0, "alice")
+
+
+@scenario
+async def test_batch_item_with_pii_under_memory_guard_is_pii_failed() -> None:
+    url = page("example.org")
+    harness = pii_harness(url)
+    harness.guard.high = True
+    job_id = await submit_with_pii(harness, [url])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert error_of(item) == (ErrorCode.PII_FAILED, True, "PII handling is busy; retry later.")
+    assert item.result is not None
+    assert item.result.data is not None
+    assert (item.result.data.content, item.result.data.title) == (None, None)
+    assert item.result.data.upstream_status == 200
+    assert (await nlp_queue(harness.valkey, harness.settings).counts()).pending == 0
+    assert await harness.store.draft(job_id, 0) is None
+    dispatch = harness.sample("text_extraction_nlp_dispatch_total", {"outcome": "memory_guard"})
+    assert dispatch == 1
+
+
+@scenario
+async def test_worker_without_the_move_withholds() -> None:
+    """A pool whose worker has no move (PII off on that pod) still never writes the text."""
+    url = page("example.org")
+    harness = Harness({url: fetched(url, PII_PAGE)})  # PII_ENABLED is false here
+    job_id = await submit_with_pii(harness, [url])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert error_of(item) == (
+        ErrorCode.PII_FAILED,
+        True,
+        "PII handling did not run; the content is withheld.",
+    )
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.content is None
+    assert PII_NAME not in item.result.model_dump_json()
+
+
+@scenario
+async def test_a_failed_item_without_text_gets_zero_entities_without_a_hop() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url, "", status=404)}, pii_enabled=True)
+    job_id = await submit_with_pii(harness, [url])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.error is not None
+    assert item.result.error.code == ErrorCode.TARGET_HTTP_ERROR
+    assert item.result.data.pii is not None
+    assert item.result.data.pii.entities == {}
+    assert (await nlp_queue(harness.valkey, harness.settings).counts()).pending == 0
+
+
+@scenario
+async def test_a_docling_result_moves_and_drops_its_input_at_once() -> None:
+    """The Docling worker's OCR result moves on: once the move is complete the item never runs
+    on ``docling`` again, so its input goes at once (R13); the draft belongs to nlp, which drops
+    it with the job's caller secrets."""
+    harness = Harness(pii_enabled=True, docling_enabled=True)
+    job_id = await harness.store.create("extract", OWNER, PII_MASK, [page("example.org")])
+    meta = UploadInputMeta(file_name="scan.pdf")
+    await harness.store.put_input(job_id, 0, b"%PDF-1.7", meta, 600)
+    await harness.store.put_asr_key(job_id, "sk-caller")
+    await harness.docling_queue.enqueue_items(job_id, "alice#live", [(0, page("example.org"))])
+    ocr = Envelope[ExtractResult](
+        status="success",
+        data=ExtractResult(
+            url=page("example.org"),
+            final_url=page("example.org"),
+            upstream_status=200,
+            content_type="application/pdf",
+            mode_used="fast",
+            attempts=1,
+            language="en",
+            word_count=4,
+            title="Scan",
+            format="markdown",
+            content=f"Read with OCR: {PII_NAME}.",
+            quality=None,
+            timings=Timings(total_ms=1, compliance_ms=0, fetch_ms=0, convert_ms=1),
+            compliance=ComplianceReport(mode="enforce"),
+            metadata=None,
+            links=None,
+            fingerprint=None,
+            cache="miss",
+            warnings=[],
+        ),
+    )
+
+    class Ocr:
+        lease_seconds = 60.0
+
+        async def run(self, *args: Any, **kwargs: Any) -> Envelope[ExtractResult]:
+            return ocr
+
+    docling = Worker(
+        harness.settings,
+        harness.valkey,
+        Ocr(),
+        harness.store,
+        harness.docling_queue,
+        harness.registry,
+        pii_move=create_pii_move(
+            harness.settings, harness.valkey, harness.store, harness.guard, harness.registry
+        ),
+    )
+    claim = await harness.docling_queue.claim(60)
+    assert claim.item is not None
+    await docling.process(claim.item)
+
+    assert not await harness.completed(job_id)
+    assert await harness.store.get_input(job_id, 0, UploadInputMeta) is None
+    assert await harness.store.draft(job_id, 0) is not None
+    assert await harness.store.asr_key(job_id) == "sk-caller"  # a Docling item holds no key
+
+    nlp = NlpPool(harness)
+    assert await nlp.drain() == 1
+    [item] = await harness.items(job_id)
+    assert processed(item).content == "Read with OCR: [PERSON]."
+    assert await harness.store.get_input(job_id, 0, UploadInputMeta) is None
+    assert await harness.store.asr_key(job_id) is None
+    assert await harness.store.draft(job_id, 0) is None
+
+
+def test_every_pool_but_nlp_moves_results_to_nlp(tmp_path: Path) -> None:
+    from tests.test_asr_worker import settings_for
+    from text_extraction import asr_worker, browser_worker, docling_worker, nlp_worker
+
+    settings = make_settings(
+        pii_enabled=True,
+        docling_enabled=True,
+        asr_enabled=True,
+        browser_enabled=True,
+        media_enabled=False,
+        **settings_for(tmp_path),
+    )
+    extract = build_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    browser = browser_worker.build_browser_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    docling = docling_worker.build_docling_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    asr = asr_worker.build_asr_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    nlp = nlp_worker.build_nlp_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    plain = build_worker(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    try:
+        for parts in (extract, browser, docling, asr):
+            assert parts.worker._pii_move is not None
+        assert nlp.worker._pii_move is None  # the last hop
+        assert plain.worker._pii_move is None  # PII is off
+    finally:
+        for pool in (extract.pool, browser.conversion_pool, docling.conversion_pool):
+            pool.shutdown()
+        asr.conversion_pool.shutdown()
+        plain.pool.shutdown()
+
+
+def transcript() -> Envelope[ExtractResult]:
+    """The ASR worker's answer: a transcript that names a person."""
+    draft = metadata_draft()
+    assert draft.data is not None
+    data = draft.data.model_copy(update={"content": f"# A lesson\n\nHello, I am {PII_NAME}."})
+    return Envelope[ExtractResult](status="success", data=data)
+
+
+def pii_move_of(harness: Harness) -> Any:
+    return create_pii_move(
+        harness.settings, harness.valkey, harness.store, harness.guard, harness.registry
+    )
+
+
+@scenario
+async def test_an_asr_result_moves_and_drops_its_input_and_key_at_once() -> None:
+    harness = asr_harness(pii_enabled=True)
+    job_id = await queue_one_transcription(harness, key="sk-caller", pii=PiiOptions(mode="mask"))
+    worker = asr_worker(harness, AsrAnswering(harness, transcript()), pii_move=pii_move_of(harness))
+
+    claim = await harness.asr_queue.claim(60)
+    assert claim.item is not None
+    await worker.process(claim.item)
+    assert outcome_count(harness, "escalated") == 1
+
+    assert not await harness.completed(job_id)
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert await harness.store.asr_key(job_id) is None
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None  # the transcript, for nlp
+    assert draft.data is not None
+    assert PII_NAME in (draft.data.content or "")
+
+    nlp = NlpPool(harness)
+    assert await nlp.drain() == 1
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.pii is not None
+    assert PII_NAME not in item.result.model_dump_json()
+    assert await harness.store.draft(job_id, 0) is None
+
+
+@scenario
+async def test_a_batch_asr_item_keeps_the_key_for_its_other_items_after_the_move() -> None:
+    harness = asr_harness(pii_enabled=True)
+    job_id = await queue_one_transcription(
+        harness, key="sk-caller", pii=PiiOptions(mode="mask"), kind="batch"
+    )
+    worker = asr_worker(harness, AsrAnswering(harness, transcript()), pii_move=pii_move_of(harness))
+
+    claim = await harness.asr_queue.claim(60)
+    assert claim.item is not None
+    await worker.process(claim.item)
+
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert await harness.store.asr_key(job_id) == "sk-caller"
+
+
+@scenario
+async def test_an_exhausted_asr_item_moves_its_draft_to_nlp() -> None:
+    harness = asr_harness(pii_enabled=True)
+    job_id = await queue_one_transcription(harness, key="sk-caller", pii=PiiOptions(mode="mask"))
+    worker = asr_worker(
+        harness,
+        AsrAnswering(harness, Envelope[ExtractResult](status="failed")),
+        pii_move=pii_move_of(harness),
+    )
+
+    claim = await harness.asr_queue.claim(60)
+    assert claim.item is not None
+    await worker.process(claim.item, exhausted=True)
+
+    assert not await harness.completed(job_id)
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert await harness.store.asr_key(job_id) is None
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert ASR_UNAVAILABLE_WARNING in draft.data.warnings
+
+    nlp = NlpPool(harness)
+    assert await nlp.drain() == 1
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"  # the metadata, processed
+    assert item.result.data is not None
+    assert item.result.data.pii is not None
+    assert ASR_UNAVAILABLE_WARNING in item.result.data.warnings
+
+
+@scenario
+async def test_pii_move_of_an_expired_job_drops_the_item() -> None:
+    url = page("example.org")
+    harness = pii_harness(url)
+    job_id = await submit_with_pii(harness, [url])
+    real = harness.runner.run
+
+    async def expiring(*args: Any, **kwargs: Any) -> Any:
+        envelope = await real(*args, **kwargs)
+        await harness.store.delete(job_id)
+        return envelope
+
+    harness.runner.run = expiring  # type: ignore[method-assign]
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert (await harness.queue.counts()).leased == 0
+    assert (await nlp_queue(harness.valkey, harness.settings).counts()).pending == 0
+    assert outcome_count(harness, "lost") == 1

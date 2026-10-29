@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Weekly: the job `media` also transcribes with the configured default model (large-v3-turbo).
+  # Weekly: the job `media` also transcribes with the configured default model (large-v3-turbo),
+  # and the job `nlp` also runs with the configured default spaCy models (lg).
   schedule:
     - cron: "23 4 * * 1"
   workflow_dispatch:
@@ -154,6 +155,77 @@ jobs:
           ASR_MODEL: large-v3-turbo
           ASR_MODELS_PATH: ${{ runner.temp }}/asr-models-large-v3-turbo
 
+  # Presidio and spaCy with the real models (tests/pii, marker `nlp`). The models `md` (115 MB) are
+  # downloaded on every run; the configured default `lg` (about 1 GB) only on the weekly schedule
+  # and on manual runs. Each is cached by the manifest's hash in a folder of its own. `--check`
+  # loads both models and finds a person and an e-mail address in a German and an English
+  # sentence, as the worker does before it is ready.
+  nlp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AUTH_MODE: none
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked --extra nlp
+
+      # The gate on the environment with the extra `nlp` (Presidio, spaCy, thinc and their
+      # dependencies).
+      - name: licence gate (nlp)
+        run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser --extra nlp
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nlp-models-md
+          key: nlp-models-md-${{ hashFiles('src/text_extraction/pii/models.toml') }}
+      # Does nothing when the cache restored the models (their config.cfg and meta.json are there).
+      - name: download the models md
+        run: uv run text-extraction-nlp-worker --download-models
+        env:
+          PII_MODEL_SIZE: md
+          PII_MODELS_PATH: ${{ runner.temp }}/nlp-models-md
+      - name: nlp worker self-check (md)
+        run: uv run text-extraction-nlp-worker --check
+        env:
+          PII_MODEL_SIZE: md
+          PII_MODELS_PATH: ${{ runner.temp }}/nlp-models-md
+      - name: pytest -m nlp (md)
+        run: uv run pytest -m nlp -q
+        env:
+          PII_TEST_MODEL_SIZE: md
+          PII_TEST_MODELS_PATH: ${{ runner.temp }}/nlp-models-md
+
+      - if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nlp-models-lg
+          key: nlp-models-lg-${{ hashFiles('src/text_extraction/pii/models.toml') }}
+      - name: download the models lg
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: uv run text-extraction-nlp-worker --download-models
+        env:
+          PII_MODEL_SIZE: lg
+          PII_MODELS_PATH: ${{ runner.temp }}/nlp-models-lg
+      - name: nlp worker self-check (lg)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: uv run text-extraction-nlp-worker --check
+        env:
+          PII_MODEL_SIZE: lg
+          PII_MODELS_PATH: ${{ runner.temp }}/nlp-models-lg
+      - name: pytest -m nlp (lg)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: uv run pytest -m nlp -q
+        env:
+          PII_TEST_MODEL_SIZE: lg
+          PII_TEST_MODELS_PATH: ${{ runner.temp }}/nlp-models-lg
+
   helm:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -193,6 +265,25 @@ jobs:
           --set workers.asr.backend=openai --set workers.asr.external.baseUrl=https://asr.example.org/v1
           --set workers.asr.external.existingSecret=asr-key --set networkPolicy.enabled=true
           --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true
+      - name: helm lint (NLP workers on)
+        run: helm lint --strict deploy/helm/text-extraction --set workers.nlp.enabled=true
+      - name: helm lint (NLP workers on a pre-filled volume, md models, hash key, KEDA)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.nlp.enabled=true
+          --set workers.nlp.modelSize=md --set workers.nlp.models.download=false
+          --set workers.nlp.models.persistence.existingClaim=spacy-models
+          --set workers.nlp.hashKey.existingSecret=pii-hash-key
+          --set workers.nlp.autoscaling.keda.enabled=true
+      - name: helm lint (NLP workers, models by hook Job, policies and alerts)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.nlp.enabled=true
+          --set workers.nlp.models.downloadMode=job --set networkPolicy.enabled=true
+          --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true
+      - name: helm lint (all optional workers on)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
+          --set workers.asr.enabled=true --set workers.nlp.enabled=true
+          --set workers.nlp.autoscaling.hpa.enabled=true
       # Render checks: toggles, env, grace periods, KEDA queries, network policies, alerts.
       - run: deploy/helm/test.sh
 
@@ -281,6 +372,34 @@ jobs:
           # Without the profile there is no ASR service.
           if docker compose config --services | grep -q asr; then
             echo "an ASR service runs without the profile" >&2; exit 1
+          fi
+          rm compose.json
+
+      # The profile `nlp`: the one-shot models service writes the volume, the worker reads it
+      # read-only after it; the mount path wins over .env; PII handling is off unless the
+      # environment switches it on, then on everywhere.
+      - name: docker compose config (profile nlp)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose --profile nlp config --format json > compose.json
+          jq -e '.services["nlp-models"]
+            | .build.target == "nlp" and .command == ["text-extraction-nlp-worker", "--download-models"]
+              and .volumes == [{"type": "volume", "source": "nlp-models", "target": "/models", "volume": {}}]
+              and .environment.PII_MODELS_PATH == "/models"' compose.json
+          jq -e '.services["nlp-worker"]
+            | .build.target == "nlp" and .read_only == true and .tmpfs == ["/tmp"]
+              and (.volumes | length == 1 and .[0].source == "nlp-models" and .[0].target == "/models" and .[0].read_only == true)
+              and .environment.PII_MODELS_PATH == "/models"
+              and .depends_on["nlp-models"].condition == "service_completed_successfully"
+              and .stop_grace_period == "45s"
+              and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "false")' compose.json
+          PII_ENABLED=true docker compose --profile nlp config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.PII_ENABLED == "true")'
+          # Without the profile there is no NLP service.
+          if docker compose config --services | grep -q nlp; then
+            echo "an NLP service runs without the profile" >&2; exit 1
           fi
           rm compose.json
 

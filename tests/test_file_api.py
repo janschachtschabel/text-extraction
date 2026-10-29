@@ -440,13 +440,126 @@ def test_too_many_fields_refused(client: TestClient) -> None:
 
 @pytest.mark.parametrize(
     "form",
-    [{"fromat": "text"}, {"format": "pdf"}, {"ocr": "maybe"}, {"wait_seconds": "61"}],
+    [
+        {"fromat": "text"},
+        {"format": "pdf"},
+        {"ocr": "maybe"},
+        {"wait_seconds": "61"},
+        {"pii": "scramble"},
+        {"pii": "{not json"},
+        {"pii": '{"mode": "mask", "entities": []}'},
+    ],
 )
 def test_invalid_form_is_422(client: TestClient, form: dict[str, str]) -> None:
     response = upload(client, GIF, "a.gif", "image/gif", form=form)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("pii", ["mask", '{"mode": "annotate", "entities": ["PERSON"]}'])
+def test_pii_form_field_is_a_mode_or_a_json_object(client: TestClient, pii: str) -> None:
+    response = upload(client, GIF, "a.gif", "image/gif", form={"pii": pii})
+
+    # The form parsed (else 422); this service has no PII handling.
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "PII handling is not enabled on this service."
+
+
+def test_pii_disabled_is_400(client: TestClient) -> None:
+    response = upload(client, PARAGRAPH.encode(), "notes.txt", "text/plain", form={"pii": "mask"})
+
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "PII handling is not enabled on this service."
+
+
+def test_upload_annotate_with_html_is_422() -> None:
+    from tests.test_pii_dispatch import PiiService
+
+    service = PiiService()
+    with TestClient(service.app) as pii_client:
+        response = upload(
+            pii_client,
+            PARAGRAPH.encode(),
+            "notes.txt",
+            "text/plain",
+            form={"format": "html", "pii": "annotate"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "annotate needs format markdown or text."
+
+
+@pytest.mark.parametrize(
+    ("pii", "mode"),
+    [
+        ("mask", "mask"),
+        ('{"mode": "annotate", "entities": ["PERSON", "EMAIL_ADDRESS"]}', "annotate"),
+    ],
+    ids=["bare", "json"],
+)
+def test_upload_with_pii_form_field_bare_and_json(pii: str, mode: str) -> None:
+    from tests.test_pii_dispatch import EMAIL, NAME, PiiService
+
+    service = PiiService()
+    text = f"{PARAGRAPH * 3}\n\nNotes by {NAME}, {EMAIL}.\n"
+    with TestClient(service.app) as pii_client, service.nlp():
+        response = upload(
+            pii_client,
+            text.encode(),
+            f"notes-{NAME}.txt",
+            "text/plain",
+            form={"pii": pii},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success", body["error"]
+        data = body["data"]
+        assert data["mode_used"] == "upload"
+        assert data["pii"]["mode"] == mode
+        if mode == "mask":
+            assert NAME not in data["content"]
+            assert "[PERSON]" in data["content"]
+        else:  # the text stays, the entities are listed
+            assert NAME in data["content"]
+            found = {(item["field"], item["type"]) for item in data["pii"]["items"]}
+            assert ("content", "PERSON") in found
+            assert ("content", "EMAIL_ADDRESS") in found
+        assert service.wait_for_no_jobs() == []  # the nlp job of a sync answer is deleted
+
+
+def test_upload_with_pii_counts_the_hop_in_its_total_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_pii_dispatch import NAME, PiiService
+    from text_extraction.pii_dispatch import PiiHandoff
+
+    hop = PiiHandoff.__call__
+
+    async def slow(self: PiiHandoff, envelope: Any, handover: Any) -> Any:
+        await asyncio.sleep(0.3)
+        return await hop(self, envelope, handover)
+
+    monkeypatch.setattr(PiiHandoff, "__call__", slow)
+    service = PiiService()
+    with TestClient(service.app) as pii_client, service.nlp():
+        response = upload(
+            pii_client,
+            f"{PARAGRAPH * 3}\n\nBy {NAME}.\n".encode(),
+            "notes.txt",
+            "text/plain",
+            form={"pii": "mask"},
+        )
+
+        body = response.json()
+        assert body["status"] == "success", body["error"]
+        timings = body["data"]["timings"]
+        assert timings["total_ms"] >= 300
+        assert timings["pii_ms"] >= 0
+        assert body["trace_id"]
 
 
 def test_missing_file_is_422(client: TestClient) -> None:
@@ -557,8 +670,9 @@ def test_openapi_documents_multipart(client: TestClient) -> None:
     assert body["properties"]["file"]["format"] == "binary"
     assert body["required"] == ["file"]
     form = schemas[body["allOf"][0]["$ref"].rsplit("/", 1)[-1]]
-    assert set(form["properties"]) == {"format", "metadata", "ocr", "wait_seconds"}
+    assert set(form["properties"]) == {"format", "metadata", "ocr", "wait_seconds", "pii"}
     assert form["properties"]["wait_seconds"]["default"] == 25
+    assert form["properties"]["pii"]["type"] == "string"
     assert "202" in operation["responses"]
 
 

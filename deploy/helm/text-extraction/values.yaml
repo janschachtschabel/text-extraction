@@ -436,6 +436,112 @@ workers:
       # Key inside the existing Secret (the chart-managed one uses it as well).
       existingSecretKey: ASR_EXTERNAL_API_KEY
 
+  # NLP workers (PII, package 7: off by default): they claim the items of the pool `nlp` (results of
+  # requests with `pii`) and find and replace personal data with Presidio and spaCy. Image
+  # `workers.nlp.image` (Presidio and spaCy, no models), internal port 9090 only, no ingress, same
+  # ConfigMap and Secrets as the API pods. The chart renders PII_ENABLED from `enabled` into every
+  # pod (API, extract, browser, Docling, ASR and NLP workers): a config.PII_ENABLED entry is
+  # ignored. Needs JOBS_ENABLED=true on the API pods (see `jobs.enabled`). Without a worker a
+  # request with `pii` answers 400 (PII off). PII_SYNC_WAIT_SECONDS (20), PII_TIMEOUT_SECONDS
+  # (300) and the other PII settings of docs/configuration.md are service defaults: set them in
+  # `config` to change them.
+  nlp:
+    enabled: false
+    # The spaCy models (PII_MODEL_SIZE): `lg` (about 1 GB on the volume, 1.6 GB resident, better
+    # German names) or `md` (about 115 MB, half the memory, more names missed). Only the German
+    # and English models of this size are downloaded.
+    modelSize: lg
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-nlp
+      # Defaults to image.tag, then the chart appVersion. The pull policy is image.pullPolicy.
+      tag: ""
+    replicaCount: 1
+    # Results one pod analyses at once, each in a child process of its own with the models loaded
+    # (PII_CONCURRENCY). Rendered into the pod env: a config.PII_CONCURRENCY entry is ignored. The
+    # resources below are sized for one.
+    concurrency: 1
+    # No drain wait. On SIGTERM the worker stops claiming and gives analyses in flight 30 s, then
+    # kills its children; their items run again elsewhere once their lease expires
+    # (2 x PII_TIMEOUT_SECONDS + 10 = 610 s by default, so a rollout during an analysis can delay
+    # that job by about 10 minutes). The render fails below 30 + a 10 s margin.
+    terminationGracePeriodSeconds: 60
+    # Placeholder values until package 11 measures real consumption: one child with the `lg`
+    # models (about 1.6 GB resident, 2.2 GB peak on a long text; PII_MEMORY_LIMIT_MB 3072 of
+    # address space). `md` needs about half. Raise both with `concurrency`.
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 3Gi
+    # Merged over the global `nodeSelector` for these pods; a key set here wins. The nlp wheels
+    # (Presidio, spaCy) are not amd64-only, but the published NLP image is built for linux/amd64
+    # only: pin `kubernetes.io/arch: amd64` here when the cluster has arm64 nodes.
+    nodeSelector: {}
+    # As for the extract workers. KEDA reads the pool `nlp` gauges that API pods export with
+    # JOBS_ENABLED=true and PII_ENABLED=true. Keep at least one replica: a sync request with
+    # `pii` waits only PII_SYNC_WAIT_SECONDS (20) for a worker before it becomes a job.
+    autoscaling:
+      keda:
+        enabled: false
+        serverAddress: http://prometheus-operated.monitoring.svc:9090
+        # Pending queue items per worker replica (an analysis takes seconds). An untuned
+        # placeholder until package 11 measures real load. A sync request with `pii` waits only
+        # PII_SYNC_WAIT_SECONDS (20): when the backlog waits longer it answers 202 with its job.
+        threshold: 10
+        countLeased: false
+        minReplicaCount: 1
+        maxReplicaCount: 4
+      hpa:
+        enabled: false
+        minReplicas: 1
+        maxReplicas: 4
+        targetCPUUtilizationPercentage: 70
+      scaleDownStabilizationWindowSeconds: null
+    # PII_HASH_KEY, the key of `mode: hash` (at least 32 bytes, `openssl rand -hex 32`), from a
+    # Secret of your own. Only the NLP workers read it. Without it each result is hashed with a
+    # random key (`hash_scope: result`); with it the same value gets the same hash in every result
+    # (`hash_scope: service`). Changing it changes every hash.
+    hashKey:
+      existingSecret: ""
+      # Key inside the existing Secret.
+      existingSecretKey: PII_HASH_KEY
+    # The spaCy models (PII_MODELS_PATH=/models, set by the chart) live on a volume mounted
+    # read-only in the workers. The image holds none.
+    models:
+      # An init container runs `text-extraction-nlp-worker --download-models` with the volume
+      # mounted writable: it downloads the German and English models of `modelSize` from the
+      # explosion/spacy-models GitHub releases, checks their SHA-256 and does nothing when they
+      # are in place. Needs egress to github.com and githubusercontent.com (the releases redirect
+      # there). false: for an air-gapped, pre-filled volume (`persistence.existingClaim`, required
+      # then).
+      download: true
+      # `init` or `job`, as for the Docling workers.
+      downloadMode: init
+      # Of the init container or the hook Job, as for the Docling workers.
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: "1"
+          memory: 1Gi
+      persistence:
+        # An update stages a full copy beside the models before it swaps them: the `lg` pair
+        # takes about 1 GB, so a manifest update needs about 2.4 GB at its peak (a smaller volume
+        # fails the init container or the Job with ENOSPC); `lg` plus `md` (after a change of
+        # `modelSize`) needs more still. 3Gi covers an update of either size on its own.
+        size: 3Gi
+        # ReadWriteMany lets replicas on any node share one volume. With ReadWriteOnce keep the
+        # replicas on one node (or at 1). The volume must be writable by uid/gid 10001 (fsGroup).
+        accessModes:
+          - ReadWriteMany
+        # The cluster default when empty.
+        storageClass: ""
+        # Use this PVC instead of creating one.
+        existingClaim: ""
+
 service:
   type: ClusterIP
   # Public API port. The ingress targets this port only.
@@ -522,7 +628,7 @@ externalValkey:
 
 metrics:
   # Needs the Prometheus Operator CRDs. Scrapes the internal Services of the API pods and of the
-  # workers (extract, browser, docling, asr), port `internal`, path /metrics.
+  # workers (extract, browser, docling, asr, nlp), port `internal`, path /metrics.
   serviceMonitor:
     enabled: false
     interval: 30s
@@ -544,6 +650,8 @@ alerts:
   doclingQueueBacklogItems: 100
   # The same for the pool asr, whose items take up to hours.
   asrQueueBacklogItems: 50
+  # The same for the pool nlp, whose items take seconds.
+  nlpQueueBacklogItems: 200
   # TextExtractionValkeyMemoryHigh fires while Valkey's used memory stays above this share of
   # its maxmemory for 10 minutes. Keep it at or below config.VALKEY_MEMORY_GUARD_RATIO (0.8),
   # from which the API refuses new batches.
@@ -551,11 +659,11 @@ alerts:
 
 # Restricts who may reach the pods (needs a CNI that enforces NetworkPolicy). Only ingress is
 # limited: the API must reach arbitrary sites, so egress stays open (it also covers the model
-# downloads from huggingface.co and the external ASR endpoint).
-#   Valkey   accepts 6379 from the API and worker pods (extract, browser, docling, asr) of this
-#            release only.
+# downloads from huggingface.co, github.com (and githubusercontent.com) and the external ASR endpoint).
+#   Valkey   accepts 6379 from the API and worker pods (extract, browser, docling, asr, nlp) of
+#            this release only.
 #   API      accepts 8080 from anywhere and 9090 from `metricsFrom`.
-#   Workers  (extract, browser, docling, asr) accept 9090 from `metricsFrom` only.
+#   Workers  (extract, browser, docling, asr, nlp) accept 9090 from `metricsFrom` only.
 # Probes of the kubelet run from the node and are normally allowed by the CNI.
 networkPolicy:
   enabled: false

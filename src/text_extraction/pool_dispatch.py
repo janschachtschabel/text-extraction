@@ -29,7 +29,9 @@ gives up releases the job first; detaching and releasing exclude each other (bot
 synchronous), so a job answered with 202 is never deleted, and a job being deleted is never
 answered with 202. A task that dispatched a job it does not wait for (a transcription) ``adopt``s
 it to the route and answers None: the route answers 202 with that job, also when it had claimed
-the hand-over for a P1 job that it could not create.
+the hand-over for a P1 job that it could not create. A task that released its pool job (a
+fallback) and then dispatches another one (its result goes on to the ``nlp`` pool) claims the
+hand-over again (``claim_after_release``): the route may then answer 202 with the new job.
 
 The ``docling`` pool's policy (OCR) and the contract of its worker are in ``docling_dispatch.py``,
 the ``asr`` pool's in ``asr_dispatch.py``.
@@ -92,6 +94,7 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         ocr=req.ocr,
         transcribe=req.transcribe,
         languages=req.languages,
+        pii=req.pii,
     )
 
 
@@ -127,6 +130,22 @@ class Handover:
         if not self._claim("pool"):
             return False
         self.pool = pool
+        return True
+
+    def claim_after_release(self, pool: str) -> bool:
+        """The task dispatches a job to ``pool`` after its earlier pool job, if any, was released
+        (it gave that job up and answered without it: a browser or OCR fallback that now goes to
+        the ``nlp`` pool). The hand-over then starts over for the new job: the route waits for
+        it to be settled and may answer 202 with it. False when the route is creating or has a
+        P1 job, or answered 202 with the earlier job; with nothing claimed yet, ``claim_pool``."""
+        if self._claimed is None:
+            return self.claim_pool(pool)
+        if self._claimed != "pool" or not self._released or self._detached:
+            return False
+        self.pool = pool
+        self.pool_job = None
+        self._released = False
+        self._settled = asyncio.Event()
         return True
 
     def _claim(self, side: Literal["p1", "pool"]) -> bool:

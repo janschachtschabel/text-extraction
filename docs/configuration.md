@@ -53,7 +53,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `CONVERT_CONCURRENCY` | `2` | Conversions (decoding, HTML conversion, metadata and licences, fingerprint) running at once in one pod, on a thread pool of their own; DNS lookups keep the default pool. A request waits for a free slot within its `EXTRACT_TIMEOUT_SECONDS`, else it fails with `timeout`. Python cannot stop a running thread: a conversion that outlives its request runs to its end and holds its slot until then, so this bound is what limits CPU and memory. Such a conversion also holds the shutdown up, because Python joins its worker threads when the process exits. That is usually seconds, but the worst case can run to the end of the grace period, where the pod is killed (Trafilatura is quadratic on repeated paragraphs: one 5.7 MB page took 125 s). That is harmless, because pods are stateless: the request it served has already been answered `timeout`. Peak memory is roughly `CONVERT_CONCURRENCY` times the peak of one page (about 450 MB for a 5 MB page), see the Helm memory limit. Minimum 1. |
 | `EXTRACT_TIMEOUT_SECONDS` | `25` | Time budget of one `POST /v1/extract`, from the compliance checks to the finished result, in seconds. Minimum 2, so that the fetch can always get its 1 s minimum. The fetch gets at most the time that is left minus 0.25 s (and never more than `FETCH_TIMEOUT_SECONDS`); with less than 1 s left when the host's turn comes, the target is not fetched. Running out answers `status: failed` with `timeout` (retryable). A fetch timeout counts against the host's circuit breaker only when the fetch had at least half of `FETCH_TIMEOUT_SECONDS` once the outbound gate let its request go (after a redirect: what was left of the chain's `FETCH_TIMEOUT_SECONDS` when the hop's request passed the gate); a long wait at the gate followed by a slow host does not count. The graceful shutdown lasts `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds (30 by default) with `BROWSER_ENABLED=false`; with it on, at least `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds, because a sync request may wait for a browser after its fast phase (75 s by default, 105 s with unblock mode; see `BROWSER_ENABLED` and Response times); the Helm chart derives the API pods' `terminationGracePeriodSeconds` from it when that value is unset, and a value you set must cover it (see Response times). After it, the lifespan shutdown waits for extractions that became a job (`wait_seconds`) for up to `EXTRACT_TIMEOUT_SECONDS` + 7 s (5 s of grace after the deadline, then it cancels them and allows 2 s for their writes); see Response times. |
 | `JOB_TTL_SECONDS` | `86400` | How long a job (its status, URL list and results) stays in Valkey, in seconds. The time starts at creation and starts again when the job completes, so a caller has this long to fetch the results of a finished job. Minimum 60. |
-| `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). This also bounds synchronous answers that a browser worker rendered (`mode: browser`, screenshots, browser options, an escalated `auto` request): their result travels through a job item, so a page whose result is larger answers without its content, where fast mode would return it whole. Such a result is never put in the result cache. Minimum 10000. |
+| `JOB_ITEM_MAX_BYTES` | `2000000` | Largest stored result of one job item, as UTF-8 JSON. A larger result is stored without its `content` (`data.content` is null and `data.warnings` has `content_not_stored_too_large`). This also bounds synchronous answers that a browser worker rendered (`mode: browser`, screenshots, browser options, an escalated `auto` request): their result travels through a job item, so a page whose result is larger answers without its content, where fast mode would return it whole. Such a result is never put in the result cache. It bounds the result a request or job with `pii` hands to the NLP worker too (its draft): a larger one loses its content before the NLP worker sees it, and answers `success` with `data.content` null and the warning `content_not_stored_too_large` (its other fields processed), not `too_large`; see `PII_MAX_CHARS`. Minimum 10000. |
 | `JOB_ITEM_MAX_ATTEMPTS` | `5` | How often one job item may lose its worker lease (the worker died or hung past the lease) or be deferred (its host was paused or busy) before it fails. The counter covers both; a lost lease beyond it fails the item with `internal_error` (retryable). Minimum 1. |
 | `SCHEDULER_CLAIM_SCAN_BUDGET` | `200` | Client-domain pairs one claim of the job queue looks at, at most. A claim that finds nothing within the budget answers "try again in 0.05 s", and the next claim goes on where it stopped (a client whose domains the budget ran out in moves to the end of the rotation), so fairness holds across claims. Workers back off from 0.05 s up to 1 s while such answers repeat. It bounds the time one claim blocks Valkey when many domains are deferred or at their limit. Minimum 1, maximum 5000. |
 | `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. Helm: `workers.extract.concurrency`. |
@@ -118,6 +118,7 @@ Keep these out of ConfigMaps, images and logs.
 | `VALKEY_PASSWORD` | Password of the Valkey that docker compose and the Helm chart start. Not read by the service itself: API and worker pods use it to build `VALKEY_URL`. | `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`, or a Secret the chart generates (default). docker compose: required in `.env` (no default). |
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
+| `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none); rendered into the NLP worker container only, and only with `workers.nlp.enabled`. docker compose: `.env` (every service). |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -269,6 +270,7 @@ The grace periods in the Helm chart, each with a 10 s margin:
 | Browser workers | `workers.browser.terminationGracePeriodSeconds` | 150 | `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` (40 s, 70 s with unblock mode) |
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
 | ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items go back to the queue at once and start again elsewhere) |
+| NLP workers | `workers.nlp.terminationGracePeriodSeconds` | 60 | 30 s for the analyses in flight (then their items run again elsewhere once their lease expires, `2 × PII_TIMEOUT_SECONDS + 10`) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -439,6 +441,62 @@ The request fields `transcribe` (default `false`) and `languages` (preferred sub
 transcription languages, ISO 639 codes such as `de` or `en-GB`, at most 5; default: the video's
 original language) are part of `POST /v1/extract` and `POST /v1/batch`. `transcribe: true` answers
 400 `invalid_request` while the service has no transcription.
+
+## PII
+
+A request with `pii` finds personal data in the result (the content, the title, the metadata, the
+links, the media uploader, the document's file name) and masks, redacts, hashes or lists it. The
+analysis runs in the NLP worker (pool `nlp`, Presidio and spaCy), never in the API pod: the API
+image has neither the libraries nor the models. PII is off by default.
+
+The request field `pii` is part of `POST /v1/extract`, `POST /v1/batch` and (as a string) the form
+of `POST /v1/extract/file`: a mode (`mask`, `redact`, `hash`, `annotate`) or an object with `mode`,
+`entities` (default `PII_DEFAULT_ENTITIES`), `language` (`auto`, `de`, `en`) and `score_threshold`
+(default `PII_SCORE_THRESHOLD`). `mask` turns an entity into `[PERSON]`, `redact` into
+`[REDACTED]`, `hash` into `[PERSON:<12 hex>]` (HMAC-SHA-256 of the type and the value, case-folded
+and with its whitespace collapsed; equal values get equal hashes), `annotate` keeps the text and
+lists the entities in `data.pii.items`. The report is `data.pii`; `data.timings.pii_ms` is its
+time. A result that could not be processed answers `failed`/`pii_failed` with its content withheld.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PII_ENABLED` | `false` | Switch PII handling on: requests with `pii` are processed by the NLP worker (`text-extraction-nlp-worker`, pool `nlp`). Needs `JOBS_ENABLED=true`; start-up refuses `PII_ENABLED=true` without it. Off, a request with `pii` answers 400 `invalid_request`. The Helm chart sets it from `workers.nlp.enabled` on every pod. docker compose: `.env` together with the profile `nlp`. |
+| `PII_DEFAULT_ENTITIES` | `PERSON,EMAIL_ADDRESS,PHONE_NUMBER,IBAN_CODE,CREDIT_CARD,IP_ADDRESS` | Entity types handled when a request names none: a comma-separated list of `PERSON`, `LOCATION`, `ORGANIZATION`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, without repeats. Places, organisations and URLs are left out by default: teaching material is full of them and they are rarely personal data. An empty, unknown or repeated entry makes the service exit with code 2. |
+| `PII_SCORE_THRESHOLD` | `0.4` | Least confidence of an entity, 0 to 1, when a request names none (`score_threshold`). Lower finds more and mistakes more. |
+| `PII_FALLBACK_LANGUAGE` | `en` | The model (`de` or `en`) for names in a language that has none of its own, with the warning `pii_language_unsupported`. The patterns (e-mail, phone, IBAN, card, IP) work in any language. |
+| `PII_SYNC_WAIT_SECONDS` | `20` | How long a request with `pii` and without `wait_seconds` waits for the NLP worker, in seconds, before it answers 202 with its job. 1 to 60. |
+| `PII_TIMEOUT_SECONDS` | `300` | Time budget of one item in the NLP worker, in seconds; the analysis child is killed after it and the item fails with `pii_failed`, retryable. The worker's lease of an item is 2 × this + 10 s. 10 to 3600. **Do not set it small:** a child loads the spaCy models in its first item (once per child: at the worker's first item, and again after a child was killed, crashed or recycled), which takes about 8 s with `md` and more with `lg`, and that time is part of this budget. With a small value (the minimum is 10 s) an item that meets a fresh child can fail with `pii_failed` before the models are loaded. |
+| `PII_MAX_CHARS` | `2000000` | Most characters of all fields of one result that are analysed. A result with more fails with `too_large`, its content withheld. Minimum 10000. **`JOB_ITEM_MAX_BYTES` comes first:** the result travels to the NLP worker as a draft in a job item, and a draft whose JSON is over `JOB_ITEM_MAX_BYTES` (2,000,000 bytes) is stored without its `content`. Such a result is not `too_large`: it answers `success` with `data.content` null and the warning `content_not_stored_too_large`, its other fields processed. With the defaults that is any result whose JSON is over 2 MB (about 2,000,000 characters of ASCII text, fewer of other text), so `too_large` is reached only when `JOB_ITEM_MAX_BYTES` is raised above it, or by the other fields. |
+| `PII_MAX_ENTITIES` | `1000` | Most items `annotate` lists; more are cut with the warning `pii_entities_truncated` (the counts stay complete). 1 to 100000. |
+| `PII_CONCURRENCY` | `1` | Items one NLP worker pod analyses at once, each in a child process of its own with the models loaded. Minimum 1. The Helm chart sets it from `workers.nlp.concurrency`. |
+| `PII_MEMORY_LIMIT_MB` | `3072` | Address space limit of one analysis child, in MiB (the `lg` models need about 2.2 GB at their peak). Minimum 512. |
+| `PII_MODELS_PATH` | `/models` | Volume with the spaCy models, one folder each. The image holds no models; the NLP worker mounts the volume read-only. The Helm chart mounts the PVC `<release>-text-extraction-nlp-models` there (`workers.nlp.models.*`), docker compose the volume `nlp-models`. |
+| `PII_MODEL_SIZE` | `lg` | spaCy models: `lg` (about 1 GB, better German names) or `md` (about 115 MB, half the memory, more names missed). Any other value makes the service exit with code 2. The Helm chart sets it from `workers.nlp.modelSize` on the NLP workers; only the German and English models of this size are downloaded. |
+| `PII_HASH_KEY` | unset | **Secret**, see [Secrets](#secrets): the key of `mode: hash`, at least 32 bytes (`openssl rand -hex 32`). With it the same value gets the same hash in every result of the service (`pii.hash_scope: service`), so documents can be linked without the value. Without it each result gets a random key (`hash_scope: result`): equal values match only within one result. A result in which nothing was hashed has `hash_scope: null`. Changing it changes every hash. Empty counts as unset; a shorter key makes the service exit with code 2. Helm: `workers.nlp.hashKey.existingSecret`. |
+
+The other PII settings are service defaults in the chart: set them under `config` (for example `config.PII_SYNC_WAIT_SECONDS`); only `PII_ENABLED`, `PII_CONCURRENCY`, `PII_MODEL_SIZE`, `PII_MODELS_PATH` and `PII_HASH_KEY` come from the chart's own values. See the [chart README](../deploy/helm/text-extraction/README.md#nlp-workers-and-the-models-volume) for the volume and the models download.
+
+PII needs `PII_ENABLED=true` on every pod, `JOBS_ENABLED=true` on the API pods, at least one NLP
+worker (`text-extraction-nlp-worker`, image `text-extraction-nlp`) and its models volume. How it
+works is in [architecture.md](architecture.md) ("PII"). Without a worker a request with `pii` is
+not lost: after `PII_SYNC_WAIT_SECONDS` it answers 202 with its job, which waits in the queue. The
+Helm keys (the full table is in the chart README):
+
+| Key | Default | Variable or effect |
+| --- | --- | --- |
+| `workers.nlp.enabled` | `false` | Deploys the NLP workers and the models PVC; renders `PII_ENABLED` into every pod. Needs jobs on the API pods. |
+| `workers.nlp.modelSize` | `lg` | `PII_MODEL_SIZE`: `lg` (about 1 GB on the volume, 1.6 GB resident) or `md` (about 115 MB, half the memory). Only the models of this size are downloaded. |
+| `workers.nlp.concurrency` | `1` | `PII_CONCURRENCY` on the NLP workers; raise `resources` with it. |
+| `workers.nlp.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a request with `pii` waits only `PII_SYNC_WAIT_SECONDS`. |
+| `workers.nlp.terminationGracePeriodSeconds` | `60` | See Response times. |
+| `workers.nlp.resources` | 1 / 2Gi to 2 / 3Gi | Sized for one analysis child with the `lg` models; `md` needs about half. |
+| `workers.nlp.nodeSelector` | `{}` | Merged over the global one; the published image is linux/amd64 only. |
+| `workers.nlp.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `nlp` queue or on CPU. |
+| `workers.nlp.hashKey.existingSecret`, `.existingSecretKey` | `""`, `PII_HASH_KEY` | Your own Secret with `PII_HASH_KEY` (an NLP worker's container only). Empty: a random key per result. |
+| `workers.nlp.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
+| `workers.nlp.models.resources` | 100m / 256Mi to 1 / 1Gi | Of the init container or the hook Job. |
+| `workers.nlp.models.persistence.*` | `3Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`PII_MODELS_PATH`), read-only in the worker. 3Gi holds the staged copy of an `lg` update. |
+| `workers.nlp.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-nlp`, chart version | The NLP image (Presidio and spaCy, no models). |
 
 ## Headers
 

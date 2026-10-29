@@ -124,22 +124,24 @@ class BrowserDispatcher(PoolDispatcher):
         )
 
     async def wait(
-        self, job_id: str, *, unblock: bool, detached: Callable[[], bool]
+        self, job_id: str, *, unblock: bool, detached: Callable[[], bool], pii: bool = False
     ) -> Envelope[ExtractResult] | None:
         """The result of the job's item 0, or None when no worker claimed it within
         ``BROWSER_QUEUE_WAIT_SECONDS``, it had no result within the render deadline + 5 s after
-        the claim, the job is gone, or ``detached()`` turned true. Valkey errors propagate.
-        Each call counts its outcome once."""
+        the claim (+ ``PII_SYNC_WAIT_SECONDS`` with ``pii``: the render moves on to the ``nlp``
+        pool in the same job), the job is gone, or ``detached()`` turned true. Valkey errors
+        propagate. Each call counts its outcome once."""
         settings = self._settings
         render_seconds = (
             settings.browser_unblock_timeout_seconds
             if unblock
             else settings.browser_timeout_seconds
         )
+        pii_seconds = settings.pii_sync_wait_seconds if pii else 0.0
         return await self.wait_for(
             job_id,
             answered="rendered",
             claim_within=settings.browser_queue_wait_seconds,
-            result_within=render_seconds + _RESULT_MARGIN_SECONDS,
+            result_within=render_seconds + _RESULT_MARGIN_SECONDS + pii_seconds,
             detached=detached,
         )

@@ -1,12 +1,13 @@
 name: image
 
-# Four images from one Dockerfile, with the same tags:
+# Five images from one Dockerfile, with the same tags:
 #   api      ghcr.io/<repo>          default target: API and extract worker, no browser, no Docling,
 #                                    no Whisper;
 #   browser  ghcr.io/<repo>-browser  target `browser`: the browser worker;
 #   docling  ghcr.io/<repo>-docling  target `docling`: the Docling worker (no models inside);
 #   asr      ghcr.io/<repo>-asr      target `asr`: the ASR worker (PyAV on an LGPL FFmpeg, no models,
-#                                    no ffmpeg program).
+#                                    no ffmpeg program);
+#   nlp      ghcr.io/<repo>-nlp      target `nlp`: the NLP worker (Presidio and spaCy, no models).
 # Each image is built and checked first; pull requests stop there and push nothing.
 # Pushes to main publish `latest` (staging) and `sha-<short>`.
 # Tags vX.Y.Z publish `X.Y.Z` and `X.Y` (production uses SemVer tags only).
@@ -48,6 +49,9 @@ jobs:
           - variant: asr
             target: asr
             suffix: "-asr"
+          - variant: nlp
+            target: nlp
+            suffix: "-nlp"
     env:
       IMAGE: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
       CHECK_TAG: text-extraction-${{ matrix.variant }}:check
@@ -128,6 +132,18 @@ jobs:
             if command -v "$tool"; then echo "$tool in the API image" >&2; exit 1; fi
           done
           '
+
+      # No image but the NLP image may hold the PII stack: no Presidio, spaCy or thinc in the API
+      # image or the browser, Docling and ASR images, so no model could be loaded in them either.
+      - name: Image has no presidio_analyzer, spacy, thinc (all but nlp)
+        if: matrix.variant != 'nlp'
+        run: |
+          docker run --rm "$CHECK_TAG" python -c '
+          import importlib.util, sys
+          names = ("presidio_analyzer", "spacy", "thinc")
+          found = [name for name in names if importlib.util.find_spec(name)]
+          sys.exit(f"PII packages in the {sys.argv[1]} image: {found}" if found else 0)
+          ' "${{ matrix.variant }}"
 
       # Every image runs tini as PID 1 and as the non-root user 10001.
       - name: Image runs tini as a non-root user
@@ -253,6 +269,44 @@ jobs:
           docker run --rm --read-only --tmpfs /tmp:size=1g --security-opt no-new-privileges:true \
             -v "$RUNNER_TEMP/asr-models:/models:ro" -e AUTH_MODE=none -e ASR_MODEL=small \
             "$CHECK_TAG" text-extraction-asr-worker --check
+
+      # No models in the NLP image: /models is an empty mount point.
+      - name: NLP image holds no models
+        if: matrix.variant == 'nlp'
+        run: |
+          docker run --rm "$CHECK_TAG" sh -c '
+          test -d /models && test -z "$(ls -A /models)"
+          '
+
+      # The models `md` (the weekly CI job `nlp` also runs `lg`), cached by the manifest's hash as
+      # in that job. On a miss the image itself downloads them, as the Helm init container does
+      # (writable mount).
+      - name: NLP models cache
+        if: matrix.variant == 'nlp'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nlp-models
+          key: nlp-models-md-image-${{ hashFiles('src/text_extraction/pii/models.toml') }}
+      - name: NLP image downloads the models
+        if: matrix.variant == 'nlp'
+        run: |
+          mkdir -p "$RUNNER_TEMP/nlp-models"
+          sudo chown -R 10001:10001 "$RUNNER_TEMP/nlp-models"
+          docker run --rm --read-only --tmpfs /tmp --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/nlp-models:/models" -e AUTH_MODE=none -e PII_MODEL_SIZE=md \
+            "$CHECK_TAG" text-extraction-nlp-worker --download-models
+          # The cache step saves the directory after the job as the runner user.
+          sudo chmod -R a+rX "$RUNNER_TEMP/nlp-models"
+
+      # The worker's self-check: both models loaded from the volume mounted read-only, a person
+      # and an e-mail address found in a German and an English sentence, as the pods run it:
+      # non-root, read-only root filesystem, /tmp as the only writable place. No Valkey needed.
+      - name: NLP image passes its self-check
+        if: matrix.variant == 'nlp'
+        run: |
+          docker run --rm --read-only --tmpfs /tmp --security-opt no-new-privileges:true \
+            -v "$RUNNER_TEMP/nlp-models:/models:ro" -e AUTH_MODE=none -e PII_MODEL_SIZE=md \
+            "$CHECK_TAG" text-extraction-nlp-worker --check
 
       - name: Image size
         run: |

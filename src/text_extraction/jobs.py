@@ -24,7 +24,9 @@ Browser jobs (package 4) may have these as well:
                           the worker once it has finished the item. No read of the job shows them.
 - ``job:{<id>}:drafts``   hash: item index -> the fast ``Envelope[ExtractResult]`` of an ``auto``
                           item that moved to the browser (B5), with the job's remaining TTL;
-                          deleted by the browser worker once the item has its outcome
+                          deleted by the browser worker once the item has its outcome. The nlp
+                          worker's items have one too: the unprocessed envelope, deleted once
+                          the item has its outcome
 - ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
@@ -361,6 +363,12 @@ def asr_lease_seconds(settings: Settings) -> float:
     return 2 * settings.asr_timeout_seconds + 10
 
 
+def pii_lease_seconds(settings: Settings) -> float:
+    """How long the nlp worker holds an item: two runs of the child (``PII_TIMEOUT_SECONDS``)
+    plus 10 s (ruling N11)."""
+    return 2 * settings.pii_timeout_seconds + 10
+
+
 def owner_key(owner: str, name: str) -> str:
     """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
     escaped, so a name cannot break the hash tag."""
@@ -386,14 +394,14 @@ def _artifact_key(job_id: str, name: str) -> str:
 
 
 def _options_json(options: JobOptions) -> str:
-    """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false) and
-    ``languages`` (none) are left out while they are the default: pods of a release before them
-    parse the options strictly, and during a rolling upgrade they read the jobs that new pods
-    create."""
+    """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false),
+    ``languages`` (none) and ``pii`` (none) are left out while they are the default: pods of a
+    release before them parse the options strictly, and during a rolling upgrade they read the
+    jobs that new pods create."""
     defaults = JobOptions.model_fields
     omit = {
         name
-        for name in ("ocr", "transcribe", "languages")
+        for name in ("ocr", "transcribe", "languages", "pii")
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }
     return options.model_dump_json(exclude=omit or None)

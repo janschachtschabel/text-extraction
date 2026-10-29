@@ -3,7 +3,9 @@
 results in the job (rulings M10, M11).
 
 It is the extract worker's ``Worker`` (``worker.py``: slot loops, leases, exhausted items, result
-writes, metrics, ``/ready`` and the shutdown) with another runner. The ``asr_dispatch`` module
+writes, metrics, ``/ready`` and the shutdown) with another runner; a transcript of a job with
+``pii`` moves on to the ``nlp`` pool there (``pii_dispatch.PiiMove``), and the item's input,
+draft and key are then left to the nlp worker. The ``asr_dispatch`` module
 docstring has the contract of the pool's items: their job, input, draft and key. This process
 never imports faster-whisper, CTranslate2, PyAV or yt-dlp: only its children do
 (``media/asr_child.py``), so a crash, a hang or a memory blow-up of a download or a
@@ -179,6 +181,7 @@ from text_extraction.media.transcript import Transcription
 from text_extraction.media.types import MediaKind
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
+from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_media import MediaInputMeta, media_too_long_message
 from text_extraction.scheduler import QueueItem
@@ -1196,6 +1199,7 @@ def build_asr_worker(
         registry,
         concurrency=settings.asr_concurrency,
         give_back_on_cancel=True,  # the lease lasts hours: a cancelled item must not wait for it
+        pii_move=create_pii_move(settings, valkey, store, guard, registry),
     )
     return AsrWorkerParts(
         worker=worker,

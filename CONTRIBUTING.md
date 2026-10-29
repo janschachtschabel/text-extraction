@@ -29,6 +29,12 @@ The workflow (packages, plans, reviews) is in [CLAUDE.md](CLAUDE.md); the comman
   its sdist against a pinned LGPL FFmpeg (decision D5), and the worker refuses to start on any
   other build. Moving that FFmpeg pin means changing the release, version, series and both
   SHA-256 sums in the `Dockerfile` together.
+- **The extra `nlp`.** Presidio and spaCy (and their transitive packages: thinc, blis, tldextract,
+  ...) are in this extra only and are imported in the NLP worker's child processes only; the API
+  image and the other workers carry none of them. The spaCy models are not Python dependencies:
+  `src/text_extraction/pii/models.toml` pins their wheels, which the worker unpacks onto its
+  volume. `presidio-analyzer` 2.2.364 asks for `numpy<2.5`, so the one lock holds numpy 2.4.x for
+  every environment until a Presidio release lifts that cap.
 - **Licences.** No GPL or AGPL dependency (CLAUDE.md rule 7). `scripts/check_licenses.py` checks
   the metadata of every installed distribution; CI runs it on the default environment, in the
   job `documents` on the environment with the extra `docling`, and in the job `media` on the one

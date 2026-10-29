@@ -12,6 +12,12 @@
 # `small` about 0.5 GB) into the volume `asr-models`, then `asr-worker` reads it read-only. With
 # ASR_BACKEND=openai (and ASR_EXTERNAL_BASE_URL, optionally ASR_EXTERNAL_API_KEY, in .env) no model
 # is downloaded. Both profiles can run together: --profile docling --profile asr.
+# PII handling (the NLP worker, image target `nlp`) is off by default too: set PII_ENABLED=true in
+# .env and start with `docker compose --profile nlp up -d --wait`. The one-shot service
+# `nlp-models` first downloads the German and English spaCy models of PII_MODEL_SIZE (default lg,
+# about 1 GB; `md` about 115 MB) into the volume `nlp-models`, then `nlp-worker` reads them
+# read-only. A PII_HASH_KEY in .env (at least 32 bytes) makes `mode: hash` consistent across
+# results. All three profiles can run together.
 
 # Shared by the API and the workers: same settings, same hardening. The API and the extract worker
 # use the default image (no browser); the browser worker builds the target `browser`.
@@ -37,6 +43,10 @@ x-app: &app
     # ASR_EXTERNAL_API_KEY and the other ASR settings come from .env (env_file) to every service:
     # the API needs the backend and the key too.
     ASR_ENABLED: ${ASR_ENABLED:-false}
+    # PII handling: on for every service only with PII_ENABLED=true in .env or the shell, together
+    # with the profile `nlp` (which starts the NLP worker). Default off. The other PII settings
+    # (PII_MODEL_SIZE, PII_HASH_KEY, ...) come from .env (env_file).
+    PII_ENABLED: ${PII_ENABLED:-false}
   read_only: true
   tmpfs:
     - /tmp
@@ -223,6 +233,61 @@ services:
     # items run again once their lease expires.
     stop_grace_period: 45s
 
+  # Downloads the German and English spaCy models of PII_MODEL_SIZE (explosion/spacy-models
+  # releases, SHA-256 checked) into the volume, then exits; with the files in place it does
+  # nothing. Needs the internet on its first run (github.com, which redirects to githubusercontent.com).
+  nlp-models:
+    <<: *app
+    profiles: ["nlp"]
+    build:
+      context: .
+      target: nlp
+    image: text-extraction-nlp:dev
+    command: ["text-extraction-nlp-worker", "--download-models"]
+    restart: "no"
+    environment:
+      <<: *app-env
+      # The image's mount point wins over an .env copied from .env.example.
+      PII_MODELS_PATH: /models
+    volumes:
+      - nlp-models:/models
+
+  # NLP worker: analyses the items of the pool `nlp` (results of requests with `pii`) with
+  # Presidio and spaCy. Only the internal port 9090, not published. The models volume is
+  # read-only here.
+  nlp-worker:
+    <<: *app
+    profiles: ["nlp"]
+    build:
+      context: .
+      target: nlp
+    image: text-extraction-nlp:dev
+    command: ["text-extraction-nlp-worker"]
+    environment:
+      <<: *app-env
+      PII_MODELS_PATH: /models
+    volumes:
+      - nlp-models:/models:ro
+    depends_on:
+      valkey:
+        condition: service_healthy
+      nlp-models:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/ready', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      # The children load both models and analyse a built-in sentence of each before /ready.
+      start_period: 120s
+    # SIGTERM stops claiming and gives analyses in flight 30 s, then kills the children; their
+    # items run again once their lease expires.
+    stop_grace_period: 45s
+
   valkey:
     image: valkey/valkey:8.1-alpine
     # Jobs, the queue and counters are state: refuse writes when full, never evict.
@@ -250,3 +315,4 @@ volumes:
   docling-models:
   asr-models:
   asr-scratch:
+  nlp-models:

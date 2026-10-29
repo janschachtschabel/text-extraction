@@ -42,6 +42,12 @@ OCR for scans and images runs in the Docling worker, which is off by default (an
 `docling`: `docker compose --profile docling up --build`. The first start downloads the models
 into a volume.
 
+Personal-data handling (`pii`, below) runs in the NLP worker, which is off by default too (Presidio
+and spaCy; models of about 1 GB for `lg`, 115 MB for `md`, downloaded into a volume on the first
+start). Set `PII_ENABLED=true` in `.env` (optionally `PII_MODEL_SIZE=md` and `PII_HASH_KEY`, from
+`openssl rand -hex 32`) and start the profile `nlp`:
+`docker compose --profile nlp up --build`. Without it a request with `pii` answers 400.
+
 ### Documents and uploads
 
 PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
@@ -139,6 +145,56 @@ envelope in `items`, also a failed one, and `progress` counts them. A job is kep
 `JOB_TTL_SECONDS` (24 h), and only its owner (or an admin) can read it. `POST /v1/extract` with
 `wait_seconds` answers 202 with a job when the extraction takes longer; that extraction keeps
 running in the API pod that took the request (not on a worker), and the job stores its result.
+
+### Personal data (PII)
+
+`pii` finds personal data in the result and handles it, in German and English text: the content
+and the free-text fields (title, authors, description, link texts, ...). `pii` is a mode, or an
+object with `entities`, `language` and `score_threshold`. By default persons and contact or payment
+data are found (`PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`,
+`IP_ADDRESS`); `LOCATION`, `ORGANIZATION` and `URL` only when you name them.
+
+| Mode | An entity becomes |
+| --- | --- |
+| `mask` | `[PERSON]`, `[EMAIL_ADDRESS]`, ... |
+| `redact` | `[REDACTED]` |
+| `hash` | `[PERSON:3f9a1c7d02be]`: a keyed hash, equal for equal values |
+| `annotate` | the text stays; `data.pii.items` lists type, field, offsets, score and text (Markdown and text only, not `format: html`) |
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/team", "pii": "mask"}' http://localhost:8080/v1/extract
+# {"status": "success", "data": {"content": "Contact [PERSON], [EMAIL_ADDRESS] ...",
+#  "pii": {"mode": "mask", "language": "en", "entities": {"PERSON": 3, "EMAIL_ADDRESS": 1},
+#  "items": null, "hash_scope": null}, ...}, ...}
+
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/team", "pii": {"mode": "annotate", "entities": ["PERSON", "ORGANIZATION"]}}' \
+  http://localhost:8080/v1/extract
+# "pii": {"mode": "annotate", "entities": {"PERSON": 3}, "items": [{"field": "content",
+#  "type": "PERSON", "start": 8, "end": 20, "score": 0.85, "text": "Anna Schmidt"}, ...], ...}
+```
+
+A batch and an upload take it the same way; the results of a batch carry the processed text:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"urls": ["https://example.org/a", "https://example.org/b"], "pii": {"mode": "hash"}}' \
+  http://localhost:8080/v1/batch
+curl -H "Authorization: Bearer $KEY" -F file=@letter.docx -F pii=redact \
+  http://localhost:8080/v1/extract/file
+```
+
+The service answers a request with `pii` when the NLP worker is done; after `PII_SYNC_WAIT_SECONDS`
+(20 s) a slower one answers 202 with a job to poll. A result is never answered unprocessed: when
+PII handling cannot run, the answer is `failed` with `error.code: pii_failed` (retryable) and none
+of the text. `hash` is keyed with `PII_HASH_KEY`: set, the same value has the same hash in every
+result (`hash_scope: service`), unset, only within one result (`result`); with nothing hashed
+`hash_scope` is null. A language other than
+German and English uses the English model for names, with the warning `pii_language_unsupported`.
+`pii` cannot be combined with `screenshot`. Names are found by a statistical model, so a few are
+missed and a few words are taken for names; see "PII" in the [architecture](docs/architecture.md)
+for the limits.
 
 ### Browser mode
 

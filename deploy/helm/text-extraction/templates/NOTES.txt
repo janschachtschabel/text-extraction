@@ -73,6 +73,23 @@ No ASR workers are deployed: transcription is off (ASR_ENABLED=false), so transc
 400, and videos without subtitles answer their details only.
 {{- end }}
 
+{{- $nlp := .Values.workers.nlp }}
+{{- if $nlp.enabled }}
+
+NLP workers (PII): {{ include "text-extraction.workerName" (list . "nlp") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" $nlp.autoscaling.hpa.enabled) $nlp.autoscaling.keda.enabled }}), image {{ include "text-extraction.workerImage" (list . "nlp") }}; internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "nlp") }}.
+{{- $download := include "text-extraction.modelsDownload" (list . "nlp") }}
+PII handling is on (PII_ENABLED=true in every pod): requests with `pii` are processed by the pool nlp. spaCy models {{ $nlp.modelSize }} from PVC {{ include "text-extraction.nlpModelsClaim" . }}, {{ if eq $download "init" }}filled by the init container on the first start{{ else if eq $download "job" }}filled by the models Job after each install and upgrade{{ else }}pre-filled (no download){{ end }}{{ if $download }} (needs egress to github.com and githubusercontent.com){{ end }}. A worker without the models exits with code 1 and logs nlp_models_missing.
+{{- if $nlp.hashKey.existingSecret }}
+PII_HASH_KEY comes from Secret {{ $nlp.hashKey.existingSecret }}: mode hash gives the same value the same hash in every result (hash_scope: service).
+{{- else }}
+No PII_HASH_KEY is set (workers.nlp.hashKey.existingSecret): mode hash uses a random key per result (hash_scope: result), so equal values match only within one result.
+{{- end }}
+{{- else }}
+
+No NLP workers are deployed: PII handling is off (PII_ENABLED=false), so a request with `pii` answers
+400 invalid_request.
+{{- end }}
+
 {{- if and .Values.valkey.enabled (eq (toString .Values.valkey.maxmemory) "768mb") (or .Values.workers.docling.enabled $asr.enabled) }}
 
 NOTE: Valkey keeps its default maxmemory (768mb). With Docling or ASR workers it also holds the bytes

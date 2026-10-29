@@ -7,7 +7,7 @@
 # Scales the {{ $pool }} workers on the length of their pool's queue{{ if $keda.countLeased }} plus the items in flight{{ end }}. The
 # gauges come from the API pods (they stay up while the workers are scaled down) and need
 # JOBS_ENABLED=true there (for the pool browser also BROWSER_ENABLED=true, for docling
-# DOCLING_ENABLED=true, for asr ASR_ENABLED=true); max() because every API pod reports the same
+# DOCLING_ENABLED=true, for asr ASR_ENABLED=true, for nlp PII_ENABLED=true); max() because every API pod reports the same
 # queue.
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject

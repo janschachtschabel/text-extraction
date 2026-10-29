@@ -34,6 +34,7 @@ from text_extraction.jobs_api import router as jobs_router
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
+from text_extraction.pii_dispatch import PiiDispatcher, nlp_queue, pii_available
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.pipeline_media import asr_available
@@ -160,7 +161,9 @@ def create_public_app(
     service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), ``app.state.docling_queue`` and
     ``app.state.docling_dispatcher`` do the same for documents that need OCR; while it has ASR
     (``ASR_ENABLED`` and ``JOBS_ENABLED``), ``app.state.asr_queue`` and
-    ``app.state.asr_dispatcher`` for media that needs a transcription;
+    ``app.state.asr_dispatcher`` for media that needs a transcription; while it has PII
+    (``PII_ENABLED`` and ``JOBS_ENABLED``), ``app.state.pii_queue`` and
+    ``app.state.pii_dispatcher`` for results that owe the PII step;
     ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
@@ -222,6 +225,14 @@ def create_public_app(
             app.state.job_store, app.state.asr_queue, settings, registry=registry
         )
         queues.append(app.state.asr_queue)
+    app.state.pii_queue = None
+    app.state.pii_dispatcher = None
+    if pii_available(settings):
+        app.state.pii_queue = nlp_queue(valkey, settings)
+        app.state.pii_dispatcher = PiiDispatcher(
+            app.state.job_store, app.state.pii_queue, settings, registry=registry
+        )
+        queues.append(app.state.pii_queue)
     app.state.job_metrics = job_metrics_for(registry)
     app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()

@@ -31,6 +31,21 @@ Whisper models (openai/whisper, MIT License, Copyright (c) 2022 OpenAI):
 - faster-whisper "large-v3-turbo" (mobiuslabsgmbh/faster-whisper-large-v3-turbo, revision main
   at commit 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf), MIT License.
 
+The NLP worker downloads two spaCy models (German and English, one size: `lg` or `md`) onto its
+models volume (never part of an image; see src/text_extraction/pii/models.toml), as the model
+wheels of explosion/spacy-models, version 3.8.0, MIT License, Copyright Explosion. The training
+data, as the models' meta.json states it:
+- de_core_news_lg and de_core_news_md: the TIGER Corpus (Brants et al., University of
+  Stuttgart; commercial licence held by Explosion), Tiger2Dep (Wolfgang Seeker; cited for
+  reference, no code in the model), WikiNER (Nothman et al., CC BY 4.0) and Explosion fastText
+  vectors (cbow, OSCAR Common Crawl and Wikipedia; CC0).
+- en_core_web_lg and en_core_web_md: OntoNotes 5 (LDC2013T19; commercial licence held by
+  Explosion), the ClearNLP constituent-to-dependency conversion (Emory University; cited for
+  reference, no code in the model), WordNet 3.0 (Princeton University, WordNet 3.0 License)
+  and Explosion vectors (OSCAR 2109, Wikipedia, OpenSubtitles and WMT News Crawl; CC0).
+Presidio (presidio-analyzer, Microsoft, MIT License) and spaCy (Explosion, MIT License) are
+installed with the extra `nlp` of the NLP worker only.
+
 The ASR worker image (Dockerfile target `asr`) contains the shared libraries of FFmpeg n9.0.2
 (ffmpeg.org, tag n9.0.2-17-g2a571b6068), licensed under the GNU Lesser General Public License,
 version 3 or later, as built by BtbN/FFmpeg-Builds (release autobuild-2026-09-30-13-08, variant

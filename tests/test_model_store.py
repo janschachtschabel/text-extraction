@@ -3,7 +3,10 @@ check of a volume, and the downloads against a local HTTP server or a mock trans
 package 5 run unchanged in behaviour against the moved, manifest-generic module."""
 
 import hashlib
+import io
 import re
+import stat
+import zipfile
 from importlib import resources
 from pathlib import Path
 from typing import get_args
@@ -366,3 +369,214 @@ def test_download_fetches_only_the_chosen_model(httpserver: HTTPServer, tmp_path
     assert sorted(entry.name for entry in tmp_path.iterdir()) == [chosen.marker, "large-v3-turbo"]
     assert model_store.missing_models(tmp_path, chosen) == []
     assert model_store.missing_models(tmp_path, manifest) == ["small/model.bin"]
+
+
+# --- unpacked archives (the spaCy model wheels of the NLP worker) -------------------------------
+
+WHEEL_PREFIX = "m_core/m_core-3.8.0/"
+
+
+def wheel(
+    members: dict[str, bytes] | None = None, *, extra: list[zipfile.ZipInfo] | None = None
+) -> bytes:
+    """A model wheel: the model under ``m_core/m_core-3.8.0/`` next to a package module and the
+    dist-info, which are not part of the model."""
+    files = members or {
+        f"{WHEEL_PREFIX}config.cfg": b"[nlp]\n",
+        f"{WHEEL_PREFIX}meta.json": b"{}",
+        f"{WHEEL_PREFIX}ner/model": b"weights" * 100,
+        "m_core/__init__.py": b"# loader",
+        "m_core-3.8.0.dist-info/METADATA": b"Name: m_core",
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, content in files.items():
+            archive.writestr(name, content)
+        for info in extra or []:
+            archive.writestr(info, b"x")
+    return buffer.getvalue()
+
+
+def unpack_manifest(
+    server: HTTPServer, archive: bytes, *, path: str = "m_core/", unpack: str = WHEEL_PREFIX
+) -> model_store.Manifest:
+    server.expect_request("/m_core.whl").respond_with_data(archive)
+    data = (
+        f'[[files]]\npath = "{path}"\nurl = "{server.url_for("/m_core.whl")}"\n'
+        f'sha256 = "{hashlib.sha256(archive).hexdigest()}"\nsize = {len(archive)}\n'
+        f'unpack = "{unpack}"\n'
+    )
+    return model_store.load_manifest("nlp", data.encode(), allow_http=True)
+
+
+def test_unpack_extracts_member_prefix_only(httpserver: HTTPServer, tmp_path: Path) -> None:
+    manifest = unpack_manifest(httpserver, wheel())
+
+    assert model_store.download_models(tmp_path, manifest) is True
+
+    assert (tmp_path / "m_core/config.cfg").read_bytes() == b"[nlp]\n"
+    assert (tmp_path / "m_core/ner/model").read_bytes() == b"weights" * 100
+    assert sorted(entry.name for entry in (tmp_path / "m_core").iterdir()) == [
+        "config.cfg",
+        "meta.json",
+        "ner",
+    ]  # no package module, no dist-info, no wheel
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == sorted(["m_core", manifest.marker])
+    assert model_store.missing_models(tmp_path, manifest) == []
+    assert model_store.download_models(tmp_path, manifest) is False  # the marker says done
+
+
+def link(name: str) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name)
+    info.create_system = 3  # Unix: external_attr carries the file mode
+    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+    return info
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        zipfile.ZipInfo(f"{WHEEL_PREFIX}../../escape"),
+        zipfile.ZipInfo(f"{WHEEL_PREFIX}ner/../../../escape"),
+        zipfile.ZipInfo("/etc/escape"),
+        zipfile.ZipInfo(f"{WHEEL_PREFIX}/etc/escape"),
+        zipfile.ZipInfo(f"{WHEEL_PREFIX}ner\\..\\escape"),
+        link(f"{WHEEL_PREFIX}ner/link"),
+    ],
+    ids=["dotdot", "nested-dotdot", "absolute", "double-slash", "backslash", "symlink"],
+)
+def test_unpack_refuses_traversal_absolute_and_links(
+    httpserver: HTTPServer, tmp_path: Path, extra: zipfile.ZipInfo
+) -> None:
+    manifest = unpack_manifest(httpserver, wheel(extra=[extra]))
+
+    with pytest.raises(model_store.ModelDownloadFailed, match="m_core"):
+        model_store.download_models(tmp_path, manifest)
+
+    assert list(tmp_path.iterdir()) == []  # nothing in place, no marker, no staging
+    assert not (tmp_path.parent / "escape").exists()
+
+
+def test_unpack_without_a_model_in_the_wheel_fails(httpserver: HTTPServer, tmp_path: Path) -> None:
+    archive = wheel({"m_core/__init__.py": b"# only the loader"})
+
+    with pytest.raises(model_store.ModelDownloadFailed, match="nothing under"):
+        model_store.download_models(tmp_path, unpack_manifest(httpserver, archive))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unpack_without_config_or_meta_fails(httpserver: HTTPServer, tmp_path: Path) -> None:
+    archive = wheel({f"{WHEEL_PREFIX}ner/model": b"weights"})
+
+    with pytest.raises(model_store.ModelDownloadFailed, match=r"config\.cfg"):
+        model_store.download_models(tmp_path, unpack_manifest(httpserver, archive))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unpack_checks_the_wheel_before_it_opens_it(httpserver: HTTPServer, tmp_path: Path) -> None:
+    manifest = unpack_manifest(httpserver, wheel())
+    httpserver.clear()
+    httpserver.expect_request("/m_core.whl").respond_with_data(wheel() + b"tampered")
+
+    with pytest.raises(model_store.ModelDownloadFailed, match="more than"):
+        model_store.download_models(tmp_path, manifest)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_missing_models_checks_unpacked_config(tmp_path: Path) -> None:
+    manifest = load_unpack_manifest()
+    model = tmp_path / "m_core"
+
+    assert model_store.missing_models(tmp_path, manifest) == ["m_core/"]
+    model.mkdir()
+    (model / "meta.json").write_text("{}")
+    assert model_store.missing_models(tmp_path, manifest) == ["m_core/"]  # config.cfg is absent
+    (model / "config.cfg").write_text("[nlp]")  # the size of the wheel does not apply
+    assert model_store.missing_models(tmp_path, manifest) == []
+    with pytest.raises(model_store.ModelsMissing, match="1 of 1"):
+        model_store.require_models(tmp_path / "other", manifest)
+    model_store.require_models(tmp_path, manifest)  # no error
+
+
+def load_unpack_manifest() -> model_store.Manifest:
+    data = (
+        f'[[files]]\npath = "m_core/"\nurl = "https://models.example.org/m.whl"\n'
+        f'sha256 = "{"0" * 64}"\nsize = 5\nunpack = "{WHEEL_PREFIX}"\n'
+    )
+    return model_store.load_manifest("nlp", data.encode())
+
+
+@pytest.mark.parametrize(
+    "unpack",
+    ["../m_core/", "/m_core/", "m_core/./x/", "m_core", "", "a\\b/"],
+    ids=["dotdot", "absolute", "dot", "no-slash", "empty", "backslash"],
+)
+def test_manifest_refuses_a_bad_unpack_prefix(unpack: str) -> None:
+    data = (
+        f'[[files]]\npath = "m_core/"\nurl = "https://models.example.org/m.whl"\n'
+        f'sha256 = "{"0" * 64}"\nsize = 5\nunpack = "{unpack.replace(chr(92), chr(92) * 2)}"\n'
+    )
+    with pytest.raises(ValueError, match="unpack"):
+        model_store.load_manifest("nlp", data.encode())
+
+
+def test_an_unpacked_entry_is_a_top_level_directory_and_a_plain_file_is_not() -> None:
+    plain = '[[files]]\npath = "m_core"\nurl = "https://models.example.org/m"\n'
+    plain += f'sha256 = "{"0" * 64}"\nsize = 5\n'
+    with pytest.raises(ValueError, match="manifest"):
+        model_store.load_manifest("nlp", plain.encode())  # a file needs a directory above it
+    nested = plain.replace('"m_core"', '"a/b/"') + f'unpack = "{WHEEL_PREFIX}"\n'
+    with pytest.raises(ValueError, match="top-level"):
+        model_store.load_manifest("nlp", nested.encode())  # the model is the directory itself
+
+
+def test_nlp_manifest_names_four_model_wheels() -> None:
+    manifest = model_store.load_manifest("nlp")
+
+    assert {file.path for file in manifest.files} == {
+        "de_core_news_lg/",
+        "en_core_web_lg/",
+        "de_core_news_md/",
+        "en_core_web_md/",
+    }
+    for file in manifest.files:
+        name = file.path.rstrip("/")
+        assert file.unpack == f"{name}/{name}-3.8.0/"
+        assert file.url == (
+            f"https://github.com/explosion/spacy-models/releases/download/{name}-3.8.0/"
+            f"{name}-3.8.0-py3-none-any.whl"
+        )
+    sizes = {file.path: file.size for file in manifest.files}
+    assert sizes["de_core_news_lg/"] == 567_843_151
+    assert sizes["en_core_web_md/"] == 33_480_380
+    assert manifest.only("de_core_news_md").files[0].path == "de_core_news_md/"
+    assert len({manifest.only(name).marker for name in ("de_core_news_lg", "en_core_web_lg")}) == 2
+
+
+def test_an_unpack_prefix_changes_the_marker_of_a_part() -> None:
+    data = (
+        '[[files]]\npath = "m_core/"\nurl = "https://models.example.org/m.whl"\n'
+        f'sha256 = "{"0" * 64}"\nsize = 5\nunpack = "%s"\n'
+    )
+    first = model_store.load_manifest("nlp", (data % "m_core/a/").encode())
+    second = model_store.load_manifest("nlp", (data % "m_core/b/").encode())
+
+    assert first.only("m_core").marker != second.only("m_core").marker
+
+
+def test_only_takes_several_directories_under_one_marker() -> None:
+    manifest = model_store.load_manifest("nlp")
+    de, en = "de_core_news_md", "en_core_web_md"
+
+    both = manifest.only(de, en)
+
+    assert [file.path for file in both.files] == [f"{de}/", f"{en}/"]
+    assert len({both.marker, manifest.only(de).marker, manifest.only(en).marker}) == 3
+    assert manifest.only(en, de) == both  # the manifest's order, not the caller's
+    with pytest.raises(ValueError, match="no files under"):
+        manifest.only(de, "fr_core_news_md")
+    with pytest.raises(ValueError, match="at least one"):
+        manifest.only()

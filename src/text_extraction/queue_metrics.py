@@ -19,6 +19,9 @@
 - ``text_extraction_asr_dispatch_total{outcome}``: how the dispatch of this pod's media that
   needs a transcription ended (``asr_dispatch.ASR_OUTCOMES``). The queue gauges have pool ``asr``
   while the service has ASR.
+- ``text_extraction_nlp_dispatch_total{outcome}``: how the dispatch of this pod's results that
+  need PII handling ended (``pii_dispatch.PII_OUTCOMES``). The queue gauges have pool ``nlp``
+  while the service has PII handling (``PII_ENABLED``).
 
 A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``
 seconds, not once per scrape, since collectors are synchronous; the collector only reports the
@@ -123,6 +126,9 @@ _DISPATCH_HELP: Final = {
     "asr": "Media of this pod that needed a transcription, by how its dispatch to the ASR "
     "workers ended: handed_over, backend_error, memory_guard, open_limit or input_budget "
     "(nothing dispatched; batch items count memory_guard and input_budget).",
+    "nlp": "Results of this pod that needed PII handling, by how their dispatch to the nlp "
+    "workers ended: answered, not_claimed, no_result, handed_over, backend_error (sync "
+    "requests) or memory_guard (nothing dispatched).",
 }
 
 

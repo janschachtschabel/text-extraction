@@ -3,20 +3,23 @@
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SecretStr,
     TypeAdapter,
     ValidationError,
     field_validator,
     model_validator,
 )
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
+
+from text_extraction.pii.types import ENTITY_TYPES, EntityType
 
 # Playwright's resource types (``Request.resource_type``). A blocked type is not loaded.
 _RESOURCE_TYPES = (
@@ -82,7 +85,7 @@ def _read_api_keys_file(path: Path) -> list[ApiKey]:
 
 class Settings(BaseSettings):
     """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content and
-    ``ASR_EXTERNAL_API_KEY``."""
+    ``ASR_EXTERNAL_API_KEY`` and ``PII_HASH_KEY``."""
 
     model_config = SettingsConfigDict(
         case_sensitive=False, extra="ignore", hide_input_in_errors=True
@@ -247,6 +250,32 @@ class Settings(BaseSettings):
     asr_external_model: str = Field(default="whisper-1", min_length=1)
     asr_external_api_key: str | None = Field(default=None, repr=False)  # secret
     asr_external_timeout_seconds: float = Field(default=300, ge=1)  # per audio chunk
+    # PII worker (personal data in results). Off by default: the API image has neither Presidio
+    # nor spaCy nor models.
+    pii_enabled: bool = False
+    # Entity types handled when a request names none, comma-separated in the env var.
+    pii_default_entities: Annotated[list[EntityType], NoDecode] = [
+        "PERSON",
+        "EMAIL_ADDRESS",
+        "PHONE_NUMBER",
+        "IBAN_CODE",
+        "CREDIT_CARD",
+        "IP_ADDRESS",
+    ]
+    pii_score_threshold: float = Field(default=0.4, ge=0, le=1)  # least confidence of an entity
+    # The model for names in a language without one of its own (patterns work in any language).
+    pii_fallback_language: Literal["de", "en"] = "en"
+    # How long a sync request that needs PII waits for the NLP worker before it becomes a job.
+    pii_sync_wait_seconds: float = Field(default=20, ge=1, le=60)
+    pii_timeout_seconds: int = Field(default=300, ge=10, le=3600)  # one item
+    pii_max_chars: int = Field(default=2_000_000, ge=10_000)  # text of all fields of one result
+    pii_max_entities: int = Field(default=1000, ge=1, le=100_000)  # items of ``annotate``
+    pii_concurrency: int = Field(default=1, ge=1)  # items at once per NLP worker
+    pii_memory_limit_mb: int = Field(default=3072, ge=512)  # address space of one child
+    pii_models_path: Path = Path("/models")  # volume with the spaCy models, one folder each
+    pii_model_size: Literal["lg", "md"] = "lg"  # size of the spaCy models
+    # Key of ``hash``: the same value gets the same hash in every result. At least 32 bytes.
+    pii_hash_key: SecretStr | None = None  # secret
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -285,6 +314,35 @@ class Settings(BaseSettings):
         caller's key is refused (``extract_api.check_asr_key``)."""
         return value if value is not None and value.strip() else None
 
+    @field_validator("pii_default_entities", mode="before")
+    @classmethod
+    def _entity_list(cls, value: object) -> object:
+        """A comma-separated list (``PERSON,EMAIL_ADDRESS``), in any case, as the env var has
+        it; a list from code passes."""
+        if isinstance(value, str):
+            return [item.strip().upper() for item in value.split(",")]
+        return value
+
+    @field_validator("pii_default_entities")
+    @classmethod
+    def _entities_not_empty_or_repeated(cls, value: list[EntityType]) -> list[EntityType]:
+        if not value or len(set(value)) != len(value):
+            raise ValueError(f"expected one or more of {', '.join(ENTITY_TYPES)}, each once")
+        return value
+
+    @field_validator("pii_hash_key", mode="before")
+    @classmethod
+    def _empty_hash_key_is_unset(cls, value: object) -> object:
+        """Empty means unset (the Helm chart renders an unset secret so)."""
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("pii_hash_key")
+    @classmethod
+    def _hash_key_is_long_enough(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value().encode()) < 32:
+            raise ValueError("the hash key must be at least 32 bytes")
+        return value
+
     @model_validator(mode="after")
     def _document_limit_within_fetch_limit(self) -> Self:
         if self.document_max_bytes > self.fetch_max_bytes:
@@ -301,6 +359,9 @@ class Settings(BaseSettings):
                 "ASR_INPUT_TTL_SECONDS must be longer than the ASR lease "
                 "(2 x ASR_TIMEOUT_SECONDS + 10)"
             )
+        # The PII hop is a job of pool nlp (N15): without jobs nothing could be processed.
+        if self.pii_enabled and not self.jobs_enabled:
+            raise ValueError("PII_ENABLED needs JOBS_ENABLED=true")
         return self
 
     @model_validator(mode="after")

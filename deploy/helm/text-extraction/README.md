@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR and optional ASR workers for transcription (both off by default), and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription and optional NLP workers for PII handling (all off by default), and an optional single-replica Valkey (with a password).
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -21,7 +21,9 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | PersistentVolumeClaim `<release>-text-extraction-docling-models` | `workers.docling.enabled` and no `workers.docling.models.persistence.existingClaim` | The models volume of the Docling workers, `ReadWriteMany` by default. |
 | Worker Deployment `<release>-text-extraction-worker-asr` | `workers.asr.enabled` | Runs `text-extraction-asr-worker` from the ASR image (`workers.asr.image`): claims the items of the pool `asr` (`transcribe: true` without subtitles, audio and video uploads) and transcribes them with faster-whisper, or on an external endpoint (`workers.asr.backend: openai`). An init container downloads the model first (local backend). Downloaded media live on a bounded emptyDir at `/scratch`. Serves only port 9090. Same ConfigMap and Secrets as the API. See [ASR workers](#asr-workers-and-the-models-volume). |
 | PersistentVolumeClaim `<release>-text-extraction-asr-models` | `workers.asr.enabled`, `workers.asr.backend: local` and no `workers.asr.models.persistence.existingClaim` | The Whisper model volume of the ASR workers, `ReadWriteMany` by default. |
-| Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
+| Worker Deployment `<release>-text-extraction-worker-nlp` | `workers.nlp.enabled` | Runs `text-extraction-nlp-worker` from the NLP image (`workers.nlp.image`): claims the items of the pool `nlp` (results of requests with `pii`) and finds and replaces personal data with Presidio and spaCy. An init container downloads the spaCy models first. Serves only port 9090. Same ConfigMap and Secrets as the API; `PII_HASH_KEY` from `workers.nlp.hashKey.existingSecret`. See [NLP workers](#nlp-workers-and-the-models-volume). |
+| PersistentVolumeClaim `<release>-text-extraction-nlp-models` | `workers.nlp.enabled` and no `workers.nlp.models.persistence.existingClaim` | The spaCy models volume of the NLP workers, `ReadWriteMany` by default. |
+| Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`, `nlp`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
 | Secret `<release>-text-extraction-asr` | `workers.asr.backend: openai`, `workers.asr.external.apiKey` set and no `workers.asr.external.existingSecret` | Holds `ASR_EXTERNAL_API_KEY`. |
 | Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
 | ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`). |
@@ -60,13 +62,16 @@ Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`) on the API po
 `DOCLING_CONCURRENCY` (from `workers.docling.concurrency`) and `DOCLING_MODELS_PATH` (`/models`,
 the mount of the models volume) on the Docling workers, `ASR_CONCURRENCY`, `ASR_MODEL`,
 `ASR_MODELS_PATH` (`/models`), `ASR_SCRATCH_PATH` (`/scratch`) and, with the external backend,
-`ASR_EXTERNAL_BASE_URL` and `ASR_EXTERNAL_MODEL` on the ASR workers, and `BROWSER_ENABLED` (from
+`ASR_EXTERNAL_BASE_URL` and `ASR_EXTERNAL_MODEL` on the ASR workers, `PII_CONCURRENCY`,
+`PII_MODEL_SIZE` (from `workers.nlp.modelSize`) and `PII_MODELS_PATH` (`/models`) on the NLP
+workers, and `BROWSER_ENABLED` (from
 `workers.browser.enabled`), `BROWSER_UNBLOCK_ENABLED` (from `workers.browser.unblock`),
 `DOCLING_ENABLED` (from `workers.docling.enabled`), `ASR_ENABLED` (from `workers.asr.enabled`),
 `ASR_BACKEND` (from `workers.asr.backend`) and `MEDIA_UPLOAD_MAX_BYTES` (from
-`workers.asr.uploadMaxBytes`) on every pod (API, extract, browser, Docling and ASR workers):
-entries for them under `config` are ignored. So browser mode, OCR and transcription are on exactly
-when the chart deploys their workers.
+`workers.asr.uploadMaxBytes`) and `PII_ENABLED` (from `workers.nlp.enabled`) on every pod (API,
+extract, browser, Docling, ASR and NLP workers): entries for them under `config` are ignored. So
+browser mode, OCR, transcription and PII handling are on exactly when the chart deploys their
+workers.
 
 `config.FETCH_MAX_BYTES` (the download limit) and `config.DOCUMENT_MAX_BYTES` (the largest
 document and upload) are both 20000000 by default: lower them together. A `DOCUMENT_MAX_BYTES`
@@ -93,6 +98,7 @@ Secrets, listed separately:
 | `API_KEYS` | `secrets.apiKeys` (chart-managed Secret) or `secrets.existingSecret` + `secrets.existingSecretKey`. Only SHA-256 hashes of keys are stored. |
 | `VALKEY_PASSWORD` | Only with the in-chart Valkey: the generated Secret, or `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`. API and worker pods get it as an env var and build `VALKEY_URL=redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` with it. |
 | `VALKEY_URL` | Plain `externalValkey.url`, or for a URL with a password `externalValkey.existingSecret.name` + `.key`. The in-chart Valkey sets it from `VALKEY_PASSWORD`. |
+| `PII_HASH_KEY` | Optional, with `workers.nlp.enabled`: your own Secret, `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (at least 32 bytes, `openssl rand -hex 32`). Rendered into the NLP worker container only (not its models init container or Job, not the API or other workers). Without it each result is hashed with a random key (`hash_scope: result`). |
 | `ASR_EXTERNAL_API_KEY` | Only with `workers.asr.backend: openai`, optional: `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`. Rendered into the API pods (which answer 400 when neither it nor the caller's `X-ASR-Api-Key` is there) and the ASR workers, no other pod. |
 
 ### Valkey password
@@ -230,6 +236,27 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.asr.external.apiKey` | `""` | `ASR_EXTERNAL_API_KEY` for a chart-managed Secret. Optional: without a key callers must send `X-ASR-Api-Key`. |
 | `workers.asr.external.existingSecret` | `""` | Your own Secret with the key; takes precedence over `apiKey`. |
 | `workers.asr.external.existingSecretKey` | `ASR_EXTERNAL_API_KEY` | Key inside that Secret (also used for the chart-managed one). |
+| `workers.nlp.enabled` | `false` | Deploy the NLP workers (PII handling). Also renders `PII_ENABLED` into every pod: false makes a request with `pii` answer 400 `invalid_request`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
+| `workers.nlp.modelSize` | `lg` | `PII_MODEL_SIZE` on the NLP workers: `lg` (about 1 GB on the volume, 1.6 GB resident, better German names) or `md` (about 115 MB, half the memory, more names missed). Only the German and English models of this size are downloaded. Anything else fails the render. |
+| `workers.nlp.image.repository` | `ghcr.io/janschachtschabel/text-extraction-nlp` | NLP worker image (Presidio and spaCy, no models). |
+| `workers.nlp.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
+| `workers.nlp.replicaCount` | `1` | Ignored with KEDA or HPA. |
+| `workers.nlp.concurrency` | `1` | `PII_CONCURRENCY`: results analysed per pod at once, each in a child process of its own with the models loaded. |
+| `workers.nlp.terminationGracePeriodSeconds` | `60` | Analyses in flight get 30 s after SIGTERM, then the children are killed and their items run again elsewhere once their lease expires: `2 × PII_TIMEOUT_SECONDS + 10`, 610 s by default, so a rollout during an analysis can delay that job by about 10 minutes. The render fails below 40. |
+| `workers.nlp.resources` | requests 1 / 2Gi, limits 2 / 3Gi | Placeholder for one analysis child with the `lg` models (about 1.6 GB resident, 2.2 GB peak on a long text; `PII_MEMORY_LIMIT_MB` 3072 of address space). `md` needs about half. |
+| `workers.nlp.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The nlp wheels are not amd64-only, but the published NLP image is built for linux/amd64 only: pin `kubernetes.io/arch: amd64` here when the cluster has arm64 nodes. |
+| `workers.nlp.autoscaling.keda.*` | as for the extract workers, `threshold` `10` (an untuned placeholder until package 11), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="nlp"})`. The API pods export it while `JOBS_ENABLED` and `PII_ENABLED` are true. Keep one replica: a sync request with `pii` waits only `PII_SYNC_WAIT_SECONDS` (20) for a worker, and answers 202 with its job when the backlog waits longer. |
+| `workers.nlp.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
+| `workers.nlp.autoscaling.scaleDownStabilizationWindowSeconds` | `null` | As for the extract workers. |
+| `workers.nlp.hashKey.existingSecret` | `""` | Your own Secret with `PII_HASH_KEY`. Empty: no key, `hash_scope: result`. |
+| `workers.nlp.hashKey.existingSecretKey` | `PII_HASH_KEY` | Key inside that Secret. |
+| `workers.nlp.models.download` | `true` | Runs `text-extraction-nlp-worker --download-models` (the models of `modelSize`, from github.com, which redirects to githubusercontent.com) with the volume mounted writable. `false` needs `persistence.existingClaim`, or the render fails. |
+| `workers.nlp.models.downloadMode` | `init` | `init` or `job`, as for the Docling workers. |
+| `workers.nlp.models.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Of the init container or the hook Job, as for the Docling workers. |
+| `workers.nlp.models.persistence.size` | `3Gi` | An update stages a full copy beside the models before it swaps them: the `lg` pair takes about 1 GB, so a manifest update needs about 2.4 GB at its peak (a smaller volume fails the init container or the Job with ENOSPC), and `lg` plus `md` (after a change of `modelSize`) needs more still. |
+| `workers.nlp.models.persistence.accessModes` | `[ReadWriteMany]` | Replicas on any node share the volume. With `ReadWriteOnce` keep the replicas on one node. |
+| `workers.nlp.models.persistence.storageClass` | `""` | Cluster default when empty. |
+| `workers.nlp.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
 | `networkPolicy.enabled` | `false` | Needs a CNI that enforces NetworkPolicy. |
 | `networkPolicy.metricsFrom` | `[{podSelector: {}}]` | Peers (`from` entries) allowed to scrape port 9090: by default every pod of the release namespace. |
 | `service.type` | `ClusterIP` | Type of the public Service. |
@@ -261,8 +288,9 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `alerts.queueBacklogItems` | `1000` | Threshold of `TextExtractionQueueBacklog` for the pools `extract` and `browser`. |
 | `alerts.doclingQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `docling` (an item takes minutes). |
 | `alerts.asrQueueBacklogItems` | `50` | Threshold of `TextExtractionQueueBacklog` for the pool `asr` (an item takes up to hours). |
+| `alerts.nlpQueueBacklogItems` | `200` | Threshold of `TextExtractionQueueBacklog` for the pool `nlp` (an item takes seconds). |
 | `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling, asr) and the models Jobs get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling, asr, nlp) and the models Jobs get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.
@@ -274,18 +302,22 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
-| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above `alerts.queueBacklogItems` (1000; for `docling` `alerts.doclingQueueBacklogItems`, 100; for `asr` `alerts.asrQueueBacklogItems`, 50) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
+| `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above the pool's backlog threshold (below the table) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
 | `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
+The backlog thresholds are `alerts.queueBacklogItems` (1000) for `extract` and `browser`,
+`alerts.doclingQueueBacklogItems` (100), `alerts.asrQueueBacklogItems` (50) and
+`alerts.nlpQueueBacklogItems` (200).
+
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
 `TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the alerts of the
-pools `browser`, `docling` and `asr` need `workers.browser.enabled`, `workers.docling.enabled` or
-`workers.asr.enabled` (without it there is no such queue). For the pools `docling` and `asr` the two
+pools `browser`, `docling`, `asr` and `nlp` need `workers.browser.enabled`, `workers.docling.enabled`,
+`workers.asr.enabled` or `workers.nlp.enabled` (without it there is no such queue). For the pools `docling`, `asr` and `nlp` the two
 alerts are the backlog and "workers down" (for example models missing on the volume: the workers
 exit before `/ready`). The item counter has no `pool` label, so the pools are told apart by the
-scrape target: the browser, docling and asr pools count the series of their workers' internal
+scrape target: the browser, docling, asr and nlp pools count the series of their workers' internal
 Service, the extract pool all others. The queue gauges come from the API
 pods and every pod reports the same queue, so the rules use `max()`, never `sum()`. The counter
 `text_extraction_job_items_total` appears with the first item a worker handles and the kube-state
@@ -311,10 +343,10 @@ pool, all for ingress only (the API and the workers must reach arbitrary sites, 
 open; that also covers the model downloads and the external ASR endpoint, which the ASR workers
 call directly):
 
-- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling, asr) of this
+- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling, asr, nlp) of this
   release only.
 - The API accepts port 8080 from anywhere and port 9090 from `networkPolicy.metricsFrom`.
-- The extract, browser, Docling and ASR workers accept port 9090 from `networkPolicy.metricsFrom`
+- The extract, browser, Docling, ASR and NLP workers accept port 9090 from `networkPolicy.metricsFrom`
   only.
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
@@ -387,12 +419,40 @@ waits for them, so the API pods keep their grace period.
   transcriptions running, and both scalers wait `scaleDownStabilizationWindowSeconds` (3600, the
   Kubernetes maximum) of lower load before they remove a replica.
 
+## NLP workers and the models volume
+
+PII handling is off by default (`workers.nlp.enabled: false`). With it on, a request with `pii`
+has its result analysed by the pool `nlp` (personal data found with Presidio and spaCy, then
+masked, redacted, hashed or annotated), and every pod gets `PII_ENABLED=true`; without the
+workers such a request answers 400. The API pods keep their grace period: a sync request waits
+`PII_SYNC_WAIT_SECONDS` (20) for a worker, then it becomes a job.
+
+- The PVC `<release>-text-extraction-nlp-models` (or `models.persistence.existingClaim`) is
+  mounted at `/models` (`PII_MODELS_PATH`), one folder per spaCy model. Only the German and
+  English models of `workers.nlp.modelSize` (`lg` or `md`) are downloaded, from the
+  explosion/spacy-models releases on `github.com` (which redirects to `githubusercontent.com`;
+  pinned URLs, size and SHA-256 checked, manifest `src/text_extraction/pii/models.toml`). The init container `models` (or, with
+  `models.downloadMode: job`, the hook Job) runs `text-extraction-nlp-worker --download-models`
+  with the volume writable; the worker mounts it read-only. The image holds no models.
+- Before `/ready` each child loads both models and analyses a built-in German and English
+  sentence; a worker without the models exits with code 1 and logs `nlp_models_missing` with the
+  path. Air-gapped: fill a volume elsewhere, then set `models.persistence.existingClaim` and
+  `models.download: false`.
+- `workers.nlp.hashKey.existingSecret` names a Secret with `PII_HASH_KEY` (at least 32 bytes) for
+  `mode: hash`; only the NLP worker container gets it. Without it each result is hashed with a
+  random key. Changing it changes every hash. The checksum annotation of the pods does not cover
+  your own Secret: after rotating `PII_HASH_KEY` in it, restart the NLP worker pods
+  (`kubectl rollout restart`).
+- The text of a result never reaches a log, a metric label or the ConfigMap; the workers count
+  found entities by type only.
+
 ## Local checks
 
 ```bash
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.docling.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.asr.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.nlp.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

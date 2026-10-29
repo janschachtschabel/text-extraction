@@ -19,6 +19,7 @@
       "content_type": "text/html",
       "document": null,
       "media": null,
+      "pii": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": {
         "changed": null,
@@ -123,6 +124,7 @@
       "content_type": "text/plain",
       "document": null,
       "media": null,
+      "pii": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": {
         "changed": null,
@@ -178,6 +180,7 @@
       "content_type": "image/gif",
       "document": null,
       "media": null,
+      "pii": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": null,
       "format": "markdown",

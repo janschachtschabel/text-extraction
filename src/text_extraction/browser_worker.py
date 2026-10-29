@@ -3,7 +3,8 @@
 
 It is the extract worker's ``Worker`` (``worker.py``: slot loops, leases, deferrals, retries,
 exhausted items, result writes, metrics, ``/ready`` and the shutdown) with another runner and
-another pipeline. This is the only module outside ``browser*.py`` that imports the browser
+another pipeline; a render of a job with ``pii`` moves on to the ``nlp`` pool there
+(``pii_dispatch.PiiMove``). This is the only module outside ``browser*.py`` that imports the browser
 modules, so the API and the extract worker never load Playwright or Patchright.
 
 **The runner** (``BrowserRunner``) leases an item for ``2 * max(BROWSER_TIMEOUT_SECONDS,
@@ -82,6 +83,7 @@ from text_extraction.jobs import (
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, OutboundBusy
+from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.render import ArtifactUnavailable
@@ -375,6 +377,7 @@ def build_browser_worker(
         FairQueue(valkey, settings, POOL),
         registry,
         concurrency=settings.browser_concurrency,
+        pii_move=create_pii_move(settings, valkey, store, guard, registry),
     )
     return BrowserWorkerParts(
         worker=worker,

@@ -32,6 +32,7 @@ from text_extraction.extract_api import (
     ASR_KEY_DESCRIPTION,
     BROWSER_DISABLED_MESSAGE,
     check_ocr_request,
+    check_pii_request,
     check_transcribe_request,
 )
 from text_extraction.extract_models import ExtractResult
@@ -201,7 +202,10 @@ async def create_batch(
     `X-ASR-Api-Key` header (that key, 1 to 1024 visible ASCII characters, else 400, serves all
     items of the batch: stored with the job while it lives, never shown or logged);
     `auto` items that need a browser move there on their own. A batch takes no `actions`,
-    `cookies`, `headers` or `screenshot` (422).
+    `cookies`, `headers` or `screenshot` (422). `pii` (400 while the service has no PII
+    handling, 422 for `annotate` with `format: html`) sends every item's result through the nlp
+    workers before it is stored: the processed result, or `pii_failed` with its content
+    withheld.
     """
     settings: Settings = request.app.state.settings
     valkey: Redis = request.app.state.valkey
@@ -218,6 +222,8 @@ async def create_batch(
     key = asr_key_of(asr_key)
     # 400 while there is no ASR (M9), or no key for an external endpoint (M11).
     check_transcribe_request(body.transcribe, settings, key=key)
+    # 400 while there is no PII handling, 422 for annotate with HTML (N4).
+    check_pii_request(body.pii, body.format, False, settings)
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -228,6 +234,7 @@ async def create_batch(
         ocr=body.ocr,
         transcribe=body.transcribe,
         languages=body.languages,
+        pii=body.pii,
     )
     if guard.high:
         raise _memory_high()

@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -165,6 +166,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "unblocked",
         "document",
         "media",
+        "pii",
     }
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
@@ -175,6 +177,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "fetch_ms",
         "convert_ms",
         "render_ms",
+        "pii_ms",
     }
     assert data["compliance"]["decision"] == "allowed"
     assert {"url", "text", "kind"} <= set(data["links"][0])
@@ -208,6 +211,33 @@ def test_extract_is_in_openapi(client: TestClient) -> None:
 
     assert "post" in paths["/v1/extract"]
     assert "wait_seconds" in client.get("/openapi.json").text
+
+
+def test_openapi_pii_takes_a_bare_mode_or_the_object(client: TestClient) -> None:
+    """The final review's I2: ``"pii": "mask"`` (the README's form) is valid by the published
+    schema, not only by the validator: generated clients and validating gateways read it."""
+    spec = client.get("/openapi.json").json()
+    body = spec["paths"]["/v1/extract"]["post"]["requestBody"]["content"]["application/json"]
+    name = body["schema"]["$ref"].rsplit("/", 1)[1]
+    pii = spec["components"]["schemas"][name]["properties"]["pii"]
+
+    assert pii["anyOf"] == [
+        {"type": "string", "enum": ["mask", "redact", "hash", "annotate"]},
+        {"$ref": "#/components/schemas/PiiOptions"},
+        {"type": "null"},
+    ]
+    assert "PiiOptions" in spec["components"]["schemas"]
+
+
+def test_openapi_pii_description_names_every_field_it_applies_to(client: TestClient) -> None:
+    """The final review's M11: N5 handles the uploaded file's name too."""
+    spec = client.get("/openapi.json").json()
+    body = spec["paths"]["/v1/extract"]["post"]["requestBody"]["content"]["application/json"]
+    name = body["schema"]["$ref"].rsplit("/", 1)[1]
+    description = spec["components"]["schemas"][name]["properties"]["pii"]["description"]
+
+    for field in ("content", "title", "metadata", "links", "media uploader", "document.file_name"):
+        assert field in description, field
 
 
 def test_extract_200_schema_is_the_plain_envelope(client: TestClient) -> None:
@@ -1639,3 +1669,98 @@ def test_the_api_exports_its_sync_dispatch_outcomes() -> None:
         assert outcome("not_claimed") == 1
         assert outcome("rendered") == 1
         assert outcome("no_result") == 0  # exported from the start
+
+
+# --- PII: the request checks and answers without pii (N4, N11) ----------------------------------
+
+GOLDEN = Path(__file__).parent / "documents" / "golden" / "package4_answers.json"
+PII_DISABLED_MESSAGE = "PII handling is not enabled on this service."
+
+
+@pytest.mark.parametrize(
+    ("pii_enabled", "jobs_enabled"), [(False, True), (False, False)], ids=["pii-off", "jobs-off"]
+)
+def test_pii_disabled_is_400(
+    registry: CollectorRegistry, pii_enabled: bool, jobs_enabled: bool
+) -> None:
+    settings = make_settings(pii_enabled=pii_enabled, jobs_enabled=jobs_enabled)
+    app = create_public_app(settings, FakeAsyncRedis(), registry)
+    fake = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+    app.state.pipeline = create_pipeline(settings, app.state.valkey, cast(Fetcher, fake), registry)
+    with TestClient(app) as test_client:
+        for pii in ("mask", {"mode": "annotate", "entities": ["PERSON"]}):
+            response = test_client.post("/v1/extract", json={"url": PAGE, "pii": pii}, headers=AUTH)
+
+            assert response.status_code == 400
+            body = response.json()
+            assert body["error"]["code"] == "invalid_request"
+            assert body["error"]["message"] == PII_DISABLED_MESSAGE
+    assert fake.calls == []  # refused before anything was fetched
+
+
+def test_pii_with_screenshot_is_422() -> None:
+    case = BrowserCase(pii_enabled=True)
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "screenshot": True, "pii": "mask"}, headers=AUTH
+        )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert body["error"]["code"] == "invalid_request"
+        assert body["error"]["message"] == "A screenshot cannot be masked; ask for it without pii."
+        assert case.keys("job*") == []
+        assert case.fetcher.calls == []
+
+
+def test_annotate_with_html_is_422() -> None:
+    case = BrowserCase(pii_enabled=True)
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "format": "html", "pii": {"mode": "annotate"}},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert body["error"]["code"] == "invalid_request"
+        assert body["error"]["message"] == "annotate needs format markdown or text."
+        # The replacing modes take HTML; annotate takes the other formats.
+        for allowed in ({"format": "html", "pii": "mask"}, {"format": "text", "pii": "annotate"}):
+            assert (
+                client.post(
+                    "/v1/extract", json={"url": PAGE, "wait_seconds": 0, **allowed}, headers=AUTH
+                ).status_code
+                == 202  # no nlp worker here: a job at once
+            )
+        assert case.fetcher.calls  # those were taken
+
+
+@pytest.mark.parametrize("pii_enabled", [False, True], ids=["pii-off", "pii-on"])
+def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled: bool) -> None:
+    """The answer of a request without ``pii`` is the package-6 one (the golden recording),
+    whether the service has PII or not: the result only gained ``pii: null`` and
+    ``timings.pii_ms: 0``, and no job or nlp item is made."""
+    golden = json.loads(GOLDEN.read_text())["article"]
+    settings = make_settings(pii_enabled=pii_enabled)
+    valkey = FakeAsyncRedis()
+    app = create_public_app(settings, valkey, registry)
+    fake = FakeFetcher({PAGE: fetched()})
+    app.state.pipeline = create_pipeline(settings, valkey, cast(Fetcher, fake), registry)
+    with TestClient(app) as test_client:
+        response = test_client.post("/v1/extract", json={"url": PAGE, "links": True}, headers=AUTH)
+
+    assert response.status_code == 200
+    answer = response.json()
+    timings = answer["data"].pop("timings")
+    assert timings["pii_ms"] == 0
+    assert answer.pop("trace_id")
+    assert answer["data"]["pii"] is None
+    assert json.dumps(answer, sort_keys=True) == json.dumps(golden, sort_keys=True)
+
+    async def keys(pattern: str) -> list[Any]:
+        return list(await valkey.keys(pattern))
+
+    assert asyncio.run(keys("job*")) == []
+    assert asyncio.run(keys("q:{nlp}*")) == []
