@@ -1436,3 +1436,65 @@ def test_llm_key_checks_on_the_upload_route() -> None:
     assert "X-LLM-Api-Key" in bad.json()["error"]["message"]
     assert "has space" not in bad.text
     assert stored_keys(server, "job:*") == []
+
+
+# --- the post stage (rulings S5, S13) ------------------------------------------------------------
+
+NOTES = (
+    "# Notes\n\n## Plants\n\n" + PARAGRAPH * 2 + "\n\n## Tables\n\n"
+    "| Plant | Height |\n| --- | --- |\n| Oak | 30 m |\n"
+)
+
+
+def test_upload_post_stage_runs_inline() -> None:
+    """An upload gets the post stage in the API pod: Markdown chunks with their headings, and
+    the tables of a result without a DOM stage from its Markdown."""
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            NOTES.encode(),
+            "notes.md",
+            "text/markdown",
+            form={
+                "structured": json.dumps({"tables": True}),
+                "chunking": json.dumps({"strategy": "markdown", "size": 400, "overlap": 0}),
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert data["structured"]["stage"] == "done"
+    assert data["structured"]["tables"]
+    chunks = data["chunks"]
+    assert chunks
+    assert ["Notes", "Plants"] in [chunk["headings"] for chunk in chunks]
+    for chunk in chunks:
+        assert data["content"][chunk["start"] : chunk["end"]] == chunk["text"]
+
+
+def test_upload_p1_job_result_has_post_stage() -> None:
+    """An upload that became a P1 job stores its result after the post stage."""
+    app, _server = llm_app()
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            NOTES.encode(),
+            "notes.md",
+            "text/markdown",
+            form={"chunking": json.dumps({"strategy": "fixed", "size": 200}), "wait_seconds": "0"},
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["data"]["id"]
+        deadline = time.monotonic() + 10
+        while True:
+            view = test_client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+            if view["data"]["state"] == "completed" or time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+
+    result = view["data"]["items"][0]["result"]
+    assert result["status"] == "success"
+    assert result["data"]["chunks"]

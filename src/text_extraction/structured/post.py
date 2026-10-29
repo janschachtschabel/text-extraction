@@ -38,6 +38,13 @@ turns a ``success`` into ``partial`` with ``llm_failed``, retryable (``BUSY_MESS
 ``LlmError`` (a learning call excepted, R9). A result that already is ``partial`` or
 ``failed`` keeps its status and error. The content always stays.
 
+**Where it runs** (ruling S13). Every finish point runs it last, after the PII step and before
+``pii.fields.fail_closed`` and the answer or write: the sync flows (``extract_api._flow``,
+``file_api._flow``), the P1 job's write (``extract_api._store_result``) and ``Worker._finish``
+of every pool; ``post_pending`` says whether it is still owed there. A result that moves to the
+``nlp`` pool gets it on that pool. The result cache keeps the DOM stage's result, never the post
+stage's: a cache hit gets a post stage of its own (other ``chunking``, other chunks).
+
 An envelope without data, or ``failed`` without content, gets no post stage (``structured`` and
 ``chunks`` stay null). Empty content gives ``chunks: []`` and every field missing, without an
 LLM call. Patterns, chunking, the fallback and the check of learned selectors run in a thread
@@ -51,7 +58,7 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import structlog
 from pydantic import ValidationError
@@ -62,8 +69,10 @@ from text_extraction.chunking.split import WARNING_FALLBACK_RECURSIVE, chunk
 from text_extraction.chunking.types import Chunk, ChunkingOptions
 from text_extraction.envelope import Envelope, ErrorInfo
 from text_extraction.extract_models import ExtractResult
-from text_extraction.llm.client import LlmClient, LlmError, truncate_input
+from text_extraction.llm.basics import LlmError, truncate_input
 from text_extraction.llm.usage import LlmUsage
+from text_extraction.pii.fields import needs_pii
+from text_extraction.pii.types import PiiOptions
 from text_extraction.settings import Settings, llm_available
 from text_extraction.structured.dom import SELECTORS_SKIPPED_WARNING, TABLES_TRUNCATED_WARNING
 from text_extraction.structured.learn import LearnPageTooLargeError, learn
@@ -82,6 +91,9 @@ from text_extraction.structured.types import (
     StructuredResult,
 )
 
+if TYPE_CHECKING:  # the OpenAI SDK only where a client is made (``llm/basics.py``)
+    from text_extraction.llm.client import LlmClient
+
 __all__ = [
     "BUSY_MESSAGE",
     "LLM_INPUT_TRUNCATED_WARNING",
@@ -95,6 +107,7 @@ __all__ = [
     "needs_llm",
     "patterns_ran",
     "post_done",
+    "post_pending",
     "run_post_patterns",
 ]
 
@@ -113,7 +126,7 @@ _EMBEDDINGS_MISMATCH: Final = "The LLM embeddings did not match the request."
 
 
 async def llm_extract(
-    client: LlmClient,
+    client: "LlmClient",
     content: str,
     compiled: CompiledSchema,
     fields: Sequence[str],
@@ -174,6 +187,22 @@ def post_done(
     if data is None or not _eligible(envelope):
         return True
     return _structured_done(data, structured) and _chunks_done(data, chunking)
+
+
+def post_pending(
+    envelope: Envelope[ExtractResult],
+    structured: StructuredOptions | None,
+    chunking: ChunkingOptions | None,
+    pii: PiiOptions | None,
+) -> bool:
+    """Whether a finish point still owes this envelope its post stage (ruling S13): the stage
+    has not run (``post_done``), and the envelope does not owe the PII step any more. The post
+    stage only ever reads the final content (D3 a): an envelope that still owes PII (no nlp
+    worker took it) is withheld by ``pii.fields.fail_closed`` right after, and its raw content
+    must not end up in values or chunks."""
+    if post_done(envelope, structured, chunking):
+        return False
+    return pii is None or not needs_pii(envelope, pii)
 
 
 def _missing(data: ExtractResult, compiled: CompiledSchema) -> list[str]:
@@ -551,7 +580,7 @@ async def apply_post(
     chunking: ChunkingOptions | None,
     *,
     settings: Settings,
-    llm: LlmClient | None,
+    llm: "LlmClient | None",
     store: SelectorStore | None,
     owner: str,
 ) -> Envelope[ExtractResult]:
@@ -579,7 +608,7 @@ async def apply_post(
     return work.finished()
 
 
-async def _extract(work: _Post, llm: LlmClient, structured: StructuredOptions) -> None:
+async def _extract(work: _Post, llm: "LlmClient", structured: StructuredOptions) -> None:
     fields = work.llm_fields()
     compiled = work.compiled
     if not fields or compiled is None:
@@ -603,7 +632,7 @@ async def _extract(work: _Post, llm: LlmClient, structured: StructuredOptions) -
     work.found(values, "llm")
 
 
-async def _learn(work: _Post, llm: LlmClient, store: SelectorStore | None, owner: str) -> None:
+async def _learn(work: _Post, llm: "LlmClient", store: SelectorStore | None, owner: str) -> None:
     result = work.result
     if result is None:
         return
@@ -644,7 +673,7 @@ async def _learn(work: _Post, llm: LlmClient, store: SelectorStore | None, owner
     result.learned = report
 
 
-async def _chunk(work: _Post, llm: LlmClient) -> None:
+async def _chunk(work: _Post, llm: "LlmClient") -> None:
     options = work.chunking
     if options is None:
         return

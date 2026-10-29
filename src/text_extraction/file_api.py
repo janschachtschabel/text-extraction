@@ -42,6 +42,10 @@ envelope through the nlp workers last (``pii_dispatch.PiiHandoff``, N11), as for
 ``POST /v1/extract``: 400 while the service has no PII handling, 422 for ``annotate`` with
 ``format: html``; a slow nlp worker turns the upload into a job (202) after ``wait_seconds``. The
 answer, and what a P1 job stores, passes ``pii.fields.fail_closed`` (N12).
+
+The form fields ``structured`` and ``chunking`` (JSON strings) get the post stage after that
+(``extract_api.post_stage``, ruling S13): on the final, possibly masked content, in the API pod
+unless a Docling or nlp worker ran it, before the PII guard. A P1 job's write runs it too.
 """
 
 import time
@@ -74,6 +78,7 @@ from text_extraction.extract_api import (
     docling_handoff,
     handover_time,
     pii_handoff,
+    post_stage,
     timed,
 )
 from text_extraction.extract_models import ExtractResult
@@ -293,6 +298,8 @@ async def extract_file(
             llm_key=job_llm_key,
         ),
         pii=form.pii,
+        structured=form.structured,
+        chunking=form.chunking,
     )
 
 
@@ -320,7 +327,7 @@ async def _flow(
     """The upload's envelope, or None when the Docling, the ASR or the nlp worker writes its
     job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the LLM),
     kept with every job the flow creates. With ``pii`` the envelope goes through the nlp workers
-    last (``pii_dispatch.PiiHandoff``)."""
+    (``pii_dispatch.PiiHandoff``), then it gets the post stage (``extract_api.post_stage``)."""
     started = time.perf_counter()
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
@@ -358,7 +365,17 @@ async def _flow(
         wait_until=wait_until,
         llm_key=llm_key,
     )
-    if form.pii is None or pii is None:  # without PII on this pod the route's guard withholds
-        return envelope
-    processed = await pii(envelope, handover)
-    return None if processed is None else timed(processed, started)
+    # Without PII on this pod the route's guard withholds the text.
+    if form.pii is not None and pii is not None:
+        processed = await pii(envelope, handover)
+        if processed is None:
+            return None
+        envelope = timed(processed, started)
+    return await post_stage(
+        state.settings,
+        envelope,
+        started,
+        pii=form.pii,
+        structured=form.structured,
+        chunking=form.chunking,
+    )

@@ -82,6 +82,14 @@ the move) is ``pii_failed`` without its text. The ``pii_dispatch`` module docstr
 nlp worker reads; a worker of pool ``nlp`` deletes an item's draft and input, and a sync
 request's caller secrets, once its result is written.
 
+**The post stage (S5, S13).** A result of a job with ``structured`` or ``chunking`` that
+``_finish`` writes gets the post stage first (``structured.post``: ``run_post_patterns``, then
+``finish_post``, off the event loop), on its final content: after the PII step, before the guard
+``fail_closed``. A result that moves to the ``nlp`` pool gets it there, on the masked content;
+one that still owes the PII step and did not move gets none (it is withheld). LLM work the job
+asks for is not done here: the result is ``partial``/``llm_failed``, retryable, with its
+content.
+
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
 expired fails ``timeout``, retryable. Once such an item's result is written, the worker deletes
@@ -175,6 +183,7 @@ from text_extraction.server import (
     extraction_graceful_seconds,
 )
 from text_extraction.settings import Settings
+from text_extraction.structured.post import finish_post, post_pending, run_post_patterns
 from text_extraction.valkey import create_valkey
 
 _log = structlog.get_logger(__name__)
@@ -635,7 +644,9 @@ class Worker:
         pool instead and is completed here without one. Whatever is written passes the guard
         (``pii.fields.fail_closed``, N12): a result that owes the step and did not move (the
         memory guard, a worker without the move) is ``pii_failed`` with its text withheld. A job
-        that expired before the move (``JobLost``) drops the item, as before a write."""
+        that expired before the move (``JobLost``) drops the item, as before a write. Before the
+        guard, a result that is not done gets the post stage of the job's ``structured`` and
+        ``chunking`` (S13)."""
         pii = job.options.pii
         if (
             pii is not None
@@ -650,6 +661,15 @@ class Worker:
             if moved:
                 return await self._moved_to_nlp(job, item)
             envelope = withheld(envelope, pii, message=PII_BUSY_MESSAGE)
+        structured, chunking = job.options.structured, job.options.chunking
+        if post_pending(envelope, structured, chunking, pii):
+            envelope = await asyncio.to_thread(
+                run_post_patterns, envelope, structured, settings=self._settings
+            )
+            # LLM work (``needs_llm``) is not done here: ``finish_post`` makes it ``llm_failed``.
+            envelope = await asyncio.to_thread(
+                finish_post, envelope, structured, chunking, settings=self._settings
+            )
         envelope = fail_closed(envelope, pii)
         try:
             write = await self._store.write_result(item.job_id, item.index, envelope)

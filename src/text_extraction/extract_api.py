@@ -34,6 +34,15 @@ workers.
    cache and the fingerprints keep the unprocessed extraction (N9). Every envelope the route
    answers or stores passes ``pii.fields.fail_closed`` (N12): one that still owes the step is
    ``pii_failed`` with its text withheld.
+8. With ``structured`` or ``chunking``, the envelope the flow ends with (after the PII step, on
+   its final, possibly masked content) gets the post stage (``structured.post``, ruling S13)
+   unless it had it already (a browser, Docling or nlp job's result is done by its worker):
+   ``run_post_patterns`` and ``finish_post``, off the event loop. LLM work it asks for is not
+   done here: the answer is ``partial``/``llm_failed``, retryable, with its content. An envelope
+   that still owes the PII step gets none: the guard withholds it. The cache keeps the DOM
+   stage's result: a cache hit gets a post stage of its own. A P1 job's write
+   (``_store_result``) runs the post stage too, for an envelope that lacks it, before the PII
+   guard.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result. A request with
@@ -93,6 +102,7 @@ from text_extraction.browser_dispatch import (
     job_options,
 )
 from text_extraction.browser_options import EvaluateAction
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
 from text_extraction.convert import OutputFormat
 from text_extraction.docling_dispatch import DoclingDispatcher, DoclingHandoff
@@ -130,6 +140,8 @@ from text_extraction.structured.checks import (
     llm_key_of,
     wants_llm,
 )
+from text_extraction.structured.post import finish_post, post_pending, run_post_patterns
+from text_extraction.structured.types import StructuredOptions
 from text_extraction.tracing import current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -404,6 +416,8 @@ async def respond(
             llm_key=job_llm_key,
         ),
         pii=body.pii,
+        structured=body.structured,
+        chunking=body.chunking,
     )
 
 
@@ -430,13 +444,16 @@ async def answer_or_hand_over(
     renders_first: bool,
     hand_over: Callable[[], Awaitable[str | None]],
     pii: PiiOptions | None = None,
+    structured: StructuredOptions | None = None,
+    chunking: ChunkingOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run ``flow``, or answer 202 with a job after ``wait_seconds`` (the module docstring):
     the pool job the flow dispatched (of ``kind``), or a P1 job that ``hand_over`` creates (of
     kind ``file`` for an upload, else ``extract``). ``renders_first`` says that the flow goes to
     the browser at once. Every envelope answered or stored in the P1 job passes
-    ``pii.fields.fail_closed`` with the request's ``pii`` (N12). Shared with
-    ``POST /v1/extract/file`` (``file_api.py``)."""
+    ``pii.fields.fail_closed`` with the request's ``pii`` (N12); one stored in the P1 job gets
+    the post stage of the request's ``structured`` and ``chunking`` first, if it lacks it (S13).
+    Shared with ``POST /v1/extract/file`` (``file_api.py``)."""
     settings: Settings = state.settings
     if wait_seconds is None or not settings.jobs_enabled:
         return await _answer(state, await flow(), handover, kind, pii)
@@ -495,6 +512,9 @@ async def answer_or_hand_over(
             handed_over_at,
             kind=p1_kind,
             pii=pii,
+            structured=structured,
+            chunking=chunking,
+            settings=settings,
         )
     )
     _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
@@ -611,7 +631,7 @@ async def _flow(
     turns the request into a job (``handover_time``); ``asr_key`` the caller's key of the
     external transcription endpoint, ``llm_key`` its LLM key (None unless the request may need
     the LLM), kept with every job the flow creates. With ``pii`` the envelope goes through the
-    nlp workers last (step 7)."""
+    nlp workers (step 7), then it gets the post stage (step 8)."""
     started = time.perf_counter()
     answer = await _extraction(
         state,
@@ -625,21 +645,55 @@ async def _flow(
         asr_key=asr_key,
         llm_key=llm_key,
     )
-    if answer is None or body.pii is None:
-        return answer
-    handoff = pii_handoff(
-        state,
-        kind="extract",
-        options=job_options(body, compliance),
-        principal=principal,
-        url=body.url,
-        wait_until=wait_until,
-        llm_key=llm_key,
+    if answer is None:
+        return None
+    if body.pii is not None:
+        handoff = pii_handoff(
+            state,
+            kind="extract",
+            options=job_options(body, compliance),
+            principal=principal,
+            url=body.url,
+            wait_until=wait_until,
+            llm_key=llm_key,
+        )
+        # Without PII on this pod the route's guard withholds the text.
+        if handoff is not None:
+            processed = await handoff(answer, handover)
+            if processed is None:
+                return None
+            answer = timed(processed, started)
+    return await post_stage(
+        state.settings,
+        answer,
+        started,
+        pii=body.pii,
+        structured=body.structured,
+        chunking=body.chunking,
     )
-    if handoff is None:  # no PII on this pod: the route's guard withholds the text
-        return answer
-    processed = await handoff(answer, handover)
-    return None if processed is None else timed(processed, started)
+
+
+async def post_stage(
+    settings: Settings,
+    envelope: Envelope[ExtractResult],
+    started: float,
+    *,
+    pii: PiiOptions | None,
+    structured: StructuredOptions | None,
+    chunking: ChunkingOptions | None,
+) -> Envelope[ExtractResult]:
+    """Step 8 of a sync flow (``_flow``, ``file_api._flow``): the post stage of the request's
+    ``structured`` and ``chunking`` for an envelope that still owes it (``post_pending``), off
+    the event loop (ruling R10), timed into ``total_ms``. Any other envelope comes back as it
+    is."""
+    if not post_pending(envelope, structured, chunking, pii):
+        return envelope
+    envelope = await asyncio.to_thread(run_post_patterns, envelope, structured, settings=settings)
+    # LLM work (``needs_llm``) is not done here: ``finish_post`` makes it ``llm_failed``.
+    envelope = await asyncio.to_thread(
+        finish_post, envelope, structured, chunking, settings=settings
+    )
+    return timed(envelope, started)
 
 
 async def _extraction(
@@ -1009,6 +1063,9 @@ def _store_when_done(
     *,
     kind: JobKind = "extract",
     pii: PiiOptions | None = None,
+    structured: StructuredOptions | None = None,
+    chunking: ChunkingOptions | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
     went on to a pool's worker, which writes it. The storing task is added to ``background``
@@ -1017,7 +1074,18 @@ def _store_when_done(
     envelope = _envelope_of(task)
     if envelope is not None:
         storing = asyncio.create_task(
-            _store_result(store, metrics, job_id, created_at, envelope, kind=kind, pii=pii)
+            _store_result(
+                store,
+                metrics,
+                job_id,
+                created_at,
+                envelope,
+                kind=kind,
+                pii=pii,
+                structured=structured,
+                chunking=chunking,
+                settings=settings,
+            )
         )
         background.add(storing)
         storing.add_done_callback(background.discard)
@@ -1033,13 +1101,22 @@ async def _store_result(
     *,
     kind: JobKind = "extract",
     pii: PiiOptions | None = None,
+    structured: StructuredOptions | None = None,
+    chunking: ChunkingOptions | None = None,
+    settings: Settings | None = None,
 ) -> None:
-    """Store the envelope as item 0, past the PII guard (``pii.fields.fail_closed`` with the
-    request's ``pii``, N12), and observe the job's duration (``created_at`` is a
-    ``time.monotonic()`` reading from just before the job was created); an upload's input is
-    deleted then, and so is the caller's LLM key. A Valkey failure is logged and not raised: the
-    job's lease then runs out and ``GET /v1/jobs/{id}`` reports the item as lost (an input
-    expires on its own)."""
+    """Store the envelope as item 0, after the post stage of the request's ``structured`` and
+    ``chunking`` (with ``settings``; for an envelope that lacks it: the flow's own answer has
+    it, S13) and past the PII guard (``pii.fields.fail_closed`` with the request's ``pii``,
+    N12), and observe the job's duration (``created_at`` is a ``time.monotonic()`` reading from
+    just before the job was created); an upload's input is deleted then, and so is the caller's
+    LLM key. A Valkey failure is logged and not raised: the job's lease then runs out and
+    ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its own)."""
+    if settings is not None and post_pending(envelope, structured, chunking, pii):
+        # LLM work (``needs_llm``) is not done here: ``finish_post`` makes it ``llm_failed``.
+        envelope = await asyncio.to_thread(
+            finish_post, envelope, structured, chunking, settings=settings
+        )
     envelope = fail_closed(envelope, pii)
     try:
         # The first and only write of a P1 job completes it ("last"); a repeat is not counted.

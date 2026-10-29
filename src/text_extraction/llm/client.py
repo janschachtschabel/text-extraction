@@ -45,7 +45,7 @@ from openai.types.shared_params import ResponseFormatJSONSchema
 from prometheus_client import REGISTRY, CollectorRegistry, Counter
 from pydantic import ValidationError
 
-from text_extraction.envelope import ErrorCode
+from text_extraction.llm.basics import LlmError, truncate_input
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.settings import Settings
 
@@ -68,17 +68,6 @@ _REPAIR_ERROR_CHARS: Final = 1000  # of the error text that goes back to the mod
 _NO_ANSWER: Final = "Your previous answer was empty."
 _CUT_OFF: Final = "Your previous answer was cut off because it was too long."
 _INVALID: Final = "Your previous answer was invalid."
-
-
-class LlmError(Exception):
-    """An LLM call failed. ``message`` is safe to put into an answer: a fixed text that names
-    the HTTP status at most. ``code`` is ``ErrorCode.LLM_FAILED``."""
-
-    def __init__(self, message: str, *, retryable: bool, code: ErrorCode = ErrorCode.LLM_FAILED):
-        super().__init__(message)
-        self.code = code
-        self.retryable = retryable
-        self.message = message
 
 
 @dataclass(frozen=True)
@@ -112,20 +101,6 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
         )
         _METRICS[registry] = metrics
     return metrics
-
-
-def truncate_input(text: str, max_chars: int) -> tuple[str, bool]:
-    """``text`` cut to at most ``max_chars`` characters, and whether it was cut. The cut is at
-    the last blank line before ``max_chars``, else the last line break, else the last space, else
-    at ``max_chars``; the kept text has no trailing white space."""
-    if len(text) <= max_chars:
-        return text, False
-    window = text[: max(max_chars, 0)]
-    for separator in ("\n\n", "\n", " "):
-        position = window.rfind(separator)
-        if position > 0:
-            return window[:position].rstrip(), True
-    return window, True
 
 
 class LlmClient:

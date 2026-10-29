@@ -25,6 +25,7 @@ from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
 from text_extraction import worker as worker_module
 from text_extraction.asr_dispatch import asr_queue
 from text_extraction.auth import Principal
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceChecker, ComplianceReport
 from text_extraction.docling_dispatch import docling_queue
 from text_extraction.documents.routing import ocr_available
@@ -49,6 +50,7 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
 from text_extraction.settings import Settings
+from text_extraction.structured.types import StructuredOptions
 from text_extraction.worker import ExtractRunner, Worker, _serve, build_worker, main
 
 START = 1_000_000.0
@@ -2330,3 +2332,142 @@ async def test_pii_move_of_an_expired_job_drops_the_item() -> None:
     assert (await harness.queue.counts()).leased == 0
     assert (await nlp_queue(harness.valkey, harness.settings).counts()).pending == 0
     assert outcome_count(harness, "lost") == 1
+
+
+# --- the post stage at every finish point (rulings S5, S13) ---------------------------------------
+
+POST_STRUCTURED = StructuredOptions.model_validate(
+    {
+        "schema": {"type": "object", "properties": {"author": {"type": "string"}}},
+        "strategy": "patterns",
+        "patterns": {"author": {"regex": r"Written by (\[?\w+\]?(?: \w+)?)", "group": 1}},
+    }
+)
+POST_CHUNKING = ChunkingOptions(strategy="fixed", size=200, overlap=0)
+
+
+async def submit_with(harness: Harness, urls: list[str], options: JobOptions) -> str:
+    job_id = await harness.store.create("batch", OWNER, options, urls)
+    await harness.queue.enqueue(job_id, OWNER.name, urls)
+    return job_id
+
+
+def chunk_texts(data: ExtractResult) -> list[str]:
+    assert data.chunks is not None
+    assert data.chunks
+    for chunk in data.chunks:
+        assert len(chunk.text) <= 200
+        assert (data.content or "")[chunk.start : chunk.end] == chunk.text
+    return [chunk.text for chunk in data.chunks]
+
+
+@scenario
+async def test_batch_item_gets_post_stage_inline() -> None:
+    """The extract worker runs the post stage of an item it writes (no LLM needed): patterns on
+    the content and the chunks, ``stage: "done"``."""
+    url = page("example.org")
+    harness = Harness({url: fetched(url, PII_PAGE)})
+    options = JobOptions(compliance="enforce", structured=POST_STRUCTURED, chunking=POST_CHUNKING)
+    job_id = await submit_with(harness, [url], options)
+
+    await harness.run_until(lambda: harness.completed(job_id))
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "success"
+    data = item.result.data
+    assert data is not None
+    assert data.structured is not None
+    assert data.structured.stage == "done"
+    assert data.structured.values == {"author": PII_NAME}
+    assert data.structured.learn_html is None
+    assert len(chunk_texts(data)) > 1
+
+
+@scenario
+async def test_batch_item_needing_the_llm_is_partial_without_the_llm_hop() -> None:
+    """Until the llm worker takes LLM work, an item that needs it gets the post stage without
+    it: ``partial``/``llm_failed``, retryable, its content kept."""
+    url = page("example.org")
+    harness = Harness({url: fetched(url, PII_PAGE)}, llm_enabled=True, llm_api_key="sk-op")
+    llm = StructuredOptions.model_validate(
+        {
+            "schema": {"type": "object", "properties": {"author": {"type": "string"}}},
+            "strategy": "llm",
+        }
+    )
+    job_id = await submit_with(harness, [url], JobOptions(compliance="enforce", structured=llm))
+
+    await harness.run_until(lambda: harness.completed(job_id))
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    assert item.result.error is not None
+    assert (item.result.error.code, item.result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert item.result.data is not None
+    assert item.result.data.content
+    assert item.result.data.structured is not None
+    assert item.result.data.structured.missing == ["author"]
+
+
+@scenario
+async def test_post_stage_runs_on_the_nlp_pool_on_masked_content() -> None:
+    """A result that moves to ``nlp`` gets no post stage on its pool; the nlp worker's
+    ``_finish`` runs it on the masked content (D3 a)."""
+    url = page("example.org")
+    harness = pii_harness(url)
+    options = PII_MASK.model_copy(update={"structured": POST_STRUCTURED, "chunking": POST_CHUNKING})
+    job_id = await submit_with(harness, [url], options)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.chunks is None  # not chunked on the raw content
+    assert draft.data.structured is None or draft.data.structured.stage == "dom"
+
+    assert await NlpPool(harness).drain() == 1
+    [item] = await harness.items(job_id)
+    data = processed(item)
+    assert data.structured is not None
+    assert data.structured.stage == "done"
+    assert data.structured.values == {"author": "[PERSON]"}
+    texts = chunk_texts(data)
+    assert not any(PII_NAME in text for text in texts)
+    assert "[PERSON]" in "".join(texts)
+
+
+@pytest.mark.parametrize("move", [True, False], ids=["memory-guard", "no-move"])
+def test_withheld_result_gets_no_post_stage(move: bool) -> None:
+    """A result that owes the PII step and is not masked (the move refused while the memory
+    guard is high, or a worker without the move) is withheld; the post stage never reads its
+    raw content: no chunks, no values."""
+
+    async def scenario_() -> None:
+        url = page("example.org")
+        harness = pii_harness(url)
+        harness.guard.high = move
+        if not move:
+            harness.worker._pii_move = None
+        options = PII_MASK.model_copy(
+            update={"structured": POST_STRUCTURED, "chunking": POST_CHUNKING}
+        )
+        job_id = await submit_with(harness, [url], options)
+
+        await harness.run_until(lambda: harness.completed(job_id))
+
+        [item] = await harness.items(job_id)
+        assert item.result is not None
+        assert item.result.status == "failed"
+        assert item.result.error is not None
+        assert item.result.error.code == ErrorCode.PII_FAILED
+        assert item.result.data is not None
+        assert item.result.data.chunks is None
+        assert item.result.data.structured is None or not item.result.data.structured.values.get(
+            "author"
+        )
+        assert PII_NAME not in item.result.model_dump_json()
+
+    asyncio.run(scenario_())

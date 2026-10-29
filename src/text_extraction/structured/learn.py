@@ -23,17 +23,19 @@ most ``STRUCTURED_MAX_ELEMENTS`` elements, like every other selector run. A bigg
 import asyncio
 from collections.abc import Mapping
 from functools import partial
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from text_extraction.llm.client import LlmClient
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.structured.checks import css_within_limits
 from text_extraction.structured.dom import RulePage
 from text_extraction.structured.prompts import LEARN_SYSTEM, learn_message
 from text_extraction.structured.schema import CompiledSchema
 from text_extraction.structured.types import LearnReport, SelectorRule
+
+if TYPE_CHECKING:  # the OpenAI SDK only where a client is made (``llm/basics.py``)
+    from text_extraction.llm.client import LlmClient
 
 __all__ = ["LearnPageTooLargeError", "learn"]
 
@@ -118,7 +120,7 @@ def _kept(
 
 
 async def learn(
-    client: LlmClient,
+    client: "LlmClient",
     html: str,
     compiled: CompiledSchema,
     values: Mapping[str, Any],

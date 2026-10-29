@@ -2189,3 +2189,233 @@ def test_a_browser_job_keeps_the_callers_llm_key(options: dict[str, Any]) -> Non
         assert [seen.llm_key for seen in worker.seen] == [LLM_KEY, None]
         assert LLM_KEY not in llm.text
     assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+# --- the post stage at every finish point (rulings S5, S13) ---------------------------------------
+
+PATTERNS_STRUCTURED: dict[str, Any] = {
+    "schema": {"type": "object", "properties": {"plant": {"type": "string"}}},
+    "strategy": "patterns",
+    "patterns": {"plant": {"regex": r"green (\w+)", "group": 1}},
+}
+
+
+def assert_chunked(data: dict[str, Any], size: int) -> list[dict[str, Any]]:
+    """The chunks of ``data`` cover its content in windows of at most ``size`` characters."""
+    chunks = data["chunks"]
+    assert isinstance(chunks, list)
+    assert chunks
+    for chunk in chunks:
+        assert len(chunk["text"]) <= size
+        assert data["content"][chunk["start"] : chunk["end"]] == chunk["text"]
+    return cast(list[dict[str, Any]], chunks)
+
+
+@pytest.mark.parametrize("route", ["extract", "file"])
+def test_sync_chunking_without_llm_runs_inline(route: str) -> None:
+    """Chunking and patterns need no LLM: the API pod runs the post stage itself, after the
+    DOM stage, and the answer is done (``stage: "done"``, the chunks there)."""
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(
+            client,
+            route,
+            structured=PATTERNS_STRUCTURED,
+            chunking={"strategy": "fixed", "size": 300, "overlap": 0},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert_chunked(data, 300)
+    structured = data["structured"]
+    assert structured["stage"] == "done"
+    assert structured["values"] == {"plant": "plants"}
+    assert structured["sources"] == {"plant": "patterns"}
+    assert structured["missing"] == []
+    assert "learn_html" not in structured or structured["learn_html"] is None
+    assert data["timings"]["llm_ms"] == 0
+    assert service.keys() == []  # no job: nothing went to another pool
+
+
+def test_sync_llm_work_without_the_llm_hop_is_partial_with_content() -> None:
+    """Until the llm worker takes LLM work (the next task), a result that needs the LLM gets the
+    post stage without it: ``partial``/``llm_failed``, retryable, the content kept."""
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(
+            client, "extract", structured={"schema": SCHEMA_ONE, "strategy": "llm"}
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "partial"
+    assert body["error"]["code"] == "llm_failed"
+    assert body["error"]["retryable"] is True
+    assert body["error"]["message"] == "The LLM step did not run; retry later."
+    assert body["data"]["content"]
+    assert body["data"]["structured"]["stage"] == "done"
+    assert body["data"]["structured"]["missing"] == ["title"]
+
+
+def test_cache_hit_gets_fresh_post_stage() -> None:
+    """The cache keeps the DOM stage's result, never the post stage's: a second request with
+    other ``chunking`` hits the same entry and gets its own chunks."""
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        first = post_route(client, "extract", chunking={"strategy": "fixed", "size": 1000})
+        second = post_route(
+            client, "extract", chunking={"strategy": "fixed", "size": 200, "overlap": 0}
+        )
+        plain = post_route(client, "extract")
+
+    one, two = first.json()["data"], second.json()["data"]
+    assert (one["cache"], two["cache"], plain.json()["data"]["cache"]) == ("miss", "hit", "hit")
+    assert len(service.fetcher.page_calls()) == 1  # one fetch of the page behind all three
+    big, small = assert_chunked(one, 1000), assert_chunked(two, 200)
+    assert len(small) > len(big)
+    assert plain.json()["data"]["chunks"] is None  # the entry has no chunks of its own
+
+
+def test_p1_job_result_has_post_stage() -> None:
+    """A request that became a P1 job stores its result after the post stage."""
+    case = Handover(**llm_settings().model_dump(include={"llm_enabled", "llm_api_key"}))
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={
+                "url": PAGE,
+                "wait_seconds": 0,
+                "structured": PATTERNS_STRUCTURED,
+                "chunking": {"strategy": "sentence", "size": 400, "overlap": 0},
+            },
+            headers=AUTH,
+        )
+        assert response.status_code == 202, response.text
+        case.pipeline.release.set()
+        final = case.wait_for_job(client, response.json()["data"]["id"])
+        case.wait_for_idle()
+
+    result = final["data"]["items"][0]["result"]
+    assert result["status"] == "success"
+    assert_chunked(result["data"], 400)
+    assert result["data"]["structured"]["stage"] == "done"
+    assert result["data"]["structured"]["values"] == {"plant": "plants"}
+
+
+def test_stored_p1_result_gets_the_post_stage_it_lacks() -> None:
+    """``_store_result`` is a finish point: an envelope whose post stage has not run gets it
+    there, before the PII guard, and is stored done."""
+    settings = llm_settings()
+    store = JobStore(FakeAsyncRedis(), settings)
+    req = ExtractRequest.model_validate(
+        {"url": PAGE, "structured": PATTERNS_STRUCTURED, "chunking": {"strategy": "fixed"}}
+    )
+    envelope = rendered_envelope()
+    assert envelope.data is not None
+    envelope.data.content = "The green plants grow."
+    metrics = cast(Any, SimpleNamespace(duration=_NoMetric()))
+
+    async def scenario_() -> Envelope[ExtractResult] | None:
+        job_id = await store.create("extract", USER, JobOptions(compliance="enforce"), [PAGE])
+        await store.mark_running(job_id, lease_seconds=60)
+        await _store_result(
+            store,
+            metrics,
+            job_id,
+            time.monotonic(),
+            envelope,
+            structured=req.structured,
+            chunking=req.chunking,
+            settings=settings,
+        )
+        return (await store.items(job_id, 0, 1))[0].result
+
+    stored = asyncio.run(scenario_())
+
+    assert stored is not None
+    assert stored.data is not None
+    assert stored.data.structured is not None
+    assert stored.data.structured.stage == "done"
+    assert stored.data.structured.values == {"plant": "plants"}
+    assert stored.data.chunks is not None
+    assert [chunk.text for chunk in stored.data.chunks] == ["The green plants grow."]
+
+
+class _NoMetric:
+    def labels(self, **labels: str) -> "_NoMetric":
+        return self
+
+    def observe(self, value: float) -> None:
+        pass
+
+
+@pytest.mark.parametrize("pii_enabled", [False, True], ids=["pii-off", "pii-on"])
+def test_request_without_structured_unchanged(
+    registry: CollectorRegistry, pii_enabled: bool
+) -> None:
+    """On a service with an LLM, the answer of a request without ``structured`` and
+    ``chunking`` is the package-7 one (the golden recording) apart from ``structured: null``,
+    ``chunks: null`` and ``timings.llm_ms: 0``: the post stage leaves it alone, and no job or
+    llm item is made."""
+    golden = json.loads(GOLDEN.read_text())["article"]
+    settings = llm_settings(pii_enabled=pii_enabled)
+    valkey = FakeAsyncRedis()
+    app = create_public_app(settings, valkey, registry)
+    fake = FakeFetcher({PAGE: fetched()})
+    app.state.pipeline = create_pipeline(settings, valkey, cast(Fetcher, fake), registry)
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/extract", json={"url": PAGE, "links": True}, headers=LLM_KEY_HEADERS
+        )
+
+    assert response.status_code == 200
+    answer = response.json()
+    timings = answer["data"].pop("timings")
+    assert timings["llm_ms"] == 0
+    assert answer.pop("trace_id")
+    assert answer["data"]["structured"] is None
+    assert answer["data"]["chunks"] is None
+    assert json.dumps(answer, sort_keys=True) == json.dumps(golden, sort_keys=True)
+
+    async def keys(pattern: str) -> list[Any]:
+        return list(await valkey.keys(pattern))
+
+    assert asyncio.run(keys("job*")) == []
+    assert asyncio.run(keys("q:*")) == []
+
+
+def test_sync_patterns_after_pii_on_masked_content() -> None:
+    """With ``pii`` the post stage reads the masked content (D3 a): the nlp worker's result
+    comes back with values and chunks of the masked text, never the raw one."""
+    from tests.test_pii_dispatch import EMAIL, NAME, PiiService, assert_processed
+
+    service = PiiService()
+    structured = {
+        "schema": {"type": "object", "properties": {"contact": {"type": "string"}}},
+        "strategy": "patterns",
+        "patterns": {"contact": {"regex": r"write to (\S+)", "group": 1}},
+    }
+    with TestClient(service.app) as client, service.nlp():
+        response = client.post(
+            "/v1/extract",
+            json={
+                "url": PAGE,
+                "pii": "mask",
+                "structured": structured,
+                "chunking": {"strategy": "recursive", "size": 300, "overlap": 0},
+            },
+            headers=AUTH,
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert_processed(data)
+    assert data["structured"]["stage"] == "done"
+    assert data["structured"]["values"] == {"contact": "[EMAIL_ADDRESS]"}
+    texts = [chunk["text"] for chunk in assert_chunked(data, 300)]
+    assert "[PERSON]" in "".join(texts)
+    assert not any(NAME in text or EMAIL in text for text in texts)
