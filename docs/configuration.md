@@ -119,6 +119,7 @@ Keep these out of ConfigMaps, images and logs.
 | `VALKEY_URL` | Only when the URL carries a password. | The in-chart Valkey builds `redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` itself. For an external Valkey with a password: `externalValkey.existingSecret.name` + `.key`; without a password use `externalValkey.url`. |
 | `ASR_EXTERNAL_API_KEY` | API key of the external transcription endpoint (`ASR_BACKEND=openai`). A request header `X-ASR-Api-Key` wins over it. The ASR workers send it; the API pods need it too, only to know whether there is one (without it, a request that needs a transcription and has no header is 400). Empty counts as unset. Never logged, never stored in a job. | `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`; rendered into the API pods and the ASR workers only, and only with `workers.asr.backend=openai`. docker compose: `.env` (every service). |
 | `PII_HASH_KEY` | Key of `mode: hash` (at least 32 bytes), so that the same value gets the same hash in every result of the service. Optional: without it each result is hashed with a random key. Needed on the NLP workers only. Never logged. | `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (your own Secret; the chart creates none); rendered into the NLP worker container only, and only with `workers.nlp.enabled`. docker compose: `.env` (every service). |
+| `LLM_API_KEY` | API key of the LLM endpoint (`LLM_BASE_URL`). A request header `X-LLM-Api-Key` wins over it. The llm workers send it; the API pods need it too, only to know whether there is one. Empty counts as unset. Never logged, never in a repr, never in an answer. | `workers.llm.apiKey.existingSecret` (your own Secret; arrives with the llm worker of package 8). docker compose: `.env` (every service). |
 
 **The Valkey password must be URL-safe** (letters, digits and `-` `.` `_` `~`; for example
 `openssl rand -hex 24`). The compose file and the Helm chart put the same value into
@@ -498,6 +499,42 @@ Helm keys (the full table is in the chart README):
 | `workers.nlp.models.persistence.*` | `3Gi`, `ReadWriteMany`, cluster default class | The models PVC, or `existingClaim`. Mounted at `/models` (`PII_MODELS_PATH`), read-only in the worker. 3Gi holds the staged copy of an `lg` update. |
 | `workers.nlp.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-nlp`, chart version | The NLP image (Presidio and spaCy, no models). |
 
+## LLM
+
+Structured output with an LLM and semantic chunking call an OpenAI-compatible endpoint that the
+operator runs or rents (`LLM_BASE_URL`). It is configuration, not a caller's target: the SSRF guard
+does not apply to it, it is called directly (no proxy from the environment, no redirects) and `http`
+is refused unless `LLM_ALLOW_HTTP` is set. The LLM only ever sees page content as data: no tool
+calls, no URL in its answer is fetched, and its answer is checked against the caller's schema
+before it is used. The LLM is off by default; the calls run in the llm workers (pool `llm`), so it
+needs jobs.
+
+The key is the caller's `X-LLM-Api-Key` (1 to 1,024 visible ASCII characters; stored with the job
+like the ASR key, never shown or logged), else `LLM_API_KEY`. The environment's `OPENAI_API_KEY` is
+never read. Failures of the endpoint answer `llm_failed`; the message names the HTTP status only,
+never the endpoint's text. 400, 401, 403, 404 and 422 are not retryable; 429, 5xx, timeouts and
+connection errors are (after the SDK's two retries). An answer that is no valid JSON for the
+schema, or is cut off (`finish_reason: length`), gets one repair call with the error appended, then
+fails with `llm_failed`, not retryable.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LLM_ENABLED` | `false` | Switch the LLM on. Needs `JOBS_ENABLED=true`; start-up refuses `LLM_ENABLED=true` without it (exit code 2). |
+| `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible endpoint (`<base>/chat/completions`, `<base>/embeddings`). https only unless `LLM_ALLOW_HTTP=true`; anything else makes the service exit with code 2 (the URL is not echoed, it may carry credentials). |
+| `LLM_ALLOW_HTTP` | `false` | Also accept an `http` URL: a local model server in development, tests. Never in production. |
+| `LLM_MODEL` | `gpt-6-luna` | Model name sent with every chat request. Chosen by the operator, never per request. |
+| `LLM_API_KEY` | unset | **Secret**, see [Secrets](#secrets): the endpoint's API key; the caller's `X-LLM-Api-Key` wins over it. Empty counts as unset. |
+| `LLM_EMBEDDING_MODEL` | unset | Model of the endpoint's `/embeddings` route, for `semantic` chunking. Without it `semantic` answers 400. Empty counts as unset. |
+| `LLM_TEMPERATURE` | `0` | Sampling temperature, 0 to 2. 0 keeps extractions repeatable. |
+| `LLM_MAX_TOKENS` | `4096` | Most tokens of one answer (`max_tokens`). A longer answer is cut off and counts as invalid. Minimum 1. |
+| `LLM_TIMEOUT_SECONDS` | `120` | Timeout of one request to the endpoint, in seconds (the SDK's, per phase of the request). Timeouts are retried twice by the SDK, so a call may take about three times this before it fails, retryable. 5 to 600. |
+| `LLM_MAX_INPUT_TOKENS` | `32000` | Most input the LLM gets of one document, in tokens estimated as 4 characters each. Longer content is cut at a paragraph border with the warning `llm_input_truncated`. 1000 to 1000000. |
+| `LLM_CONCURRENCY` | `4` | LLM items one llm worker runs at once. Minimum 1. |
+| `LLM_SYNC_WAIT_SECONDS` | `30` | How long a sync request that needs the LLM waits for the llm worker before it answers 202 with its job. 1 to 60. |
+| `SELECTOR_LEARN_TTL_SECONDS` | `2592000` | How long learned selectors stay in Valkey (30 days), per API key. Minimum 60. |
+| `STRUCTURED_REGEX_TIMEOUT_SECONDS` | `0.5` | Time one caller-supplied pattern may take on a text, in seconds; then it is skipped with the warning `pattern_timeout`. 0.05 to 5. |
+| `CHUNK_MAX_CHUNKS` | `2000` | Most chunks of one result; more are cut with the warning `chunks_truncated`. Minimum 1. |
+
 ## Headers
 
 Read from the request:
@@ -671,6 +708,8 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_asr_transcriptions_total` | counter | `backend` (`ASR_BACKEND`: `local` or `openai`), `outcome` (`success` or the error code) | ASR workers | Media the ASR worker handled: `success` (a transcript), or why there is none (`media_too_long`, `transcription_failed`, `timeout`, `too_large`, `target_http_error`, `no_transcript_available` for media without speech, ...). A copy of an item whose result was already written is not counted. |
 | `text_extraction_asr_audio_seconds_total` | counter | `backend` | ASR workers | Seconds of audio transcribed (as the speech recognition measured them; with `openai` the decoded audio sent, the cost basis). |
 | `text_extraction_asr_seconds` | histogram | `backend` | ASR workers | Seconds of one transcription call (decoding and speech recognition; not the download), the wait for the child included. Buckets 5 s to 4 h. |
+| `text_extraction_llm_calls_total` | counter | `kind` (`chat`, `embeddings`), `outcome` (`ok`, `invalid`, `error`) | llm workers, API pods (with `LLM_ENABLED`) | Calls to the LLM endpoint, one per request that got an answer or a failure (the SDK's own retries are not counted). `invalid`: an answer that is no JSON, does not fit the schema or was cut off (it gets one repair call); `error`: the endpoint failed (status, timeout, connection). |
+| `text_extraction_llm_tokens_total` | counter | `kind` (`prompt`, `completion`) | llm workers, API pods (with `LLM_ENABLED`) | Tokens the endpoint reported, over all models. Never a label of a prompt, text, value or key. |
 | `text_extraction_document_conversions_total` | counter | `converter` (`markitdown`, `docling`), `kind` (`pdf`, `docx`, ...), `outcome` (`success` or the error code) | API pods, workers (extract, browser, docling) | Document conversions, where they run: MarkItDown in API pods (URLs and uploads) and in the extract and browser workers, Docling in the Docling workers. |
 | `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
 | `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |

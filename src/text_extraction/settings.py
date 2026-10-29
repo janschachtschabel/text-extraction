@@ -276,6 +276,24 @@ class Settings(BaseSettings):
     pii_model_size: Literal["lg", "md"] = "lg"  # size of the spaCy models
     # Key of ``hash``: the same value gets the same hash in every result. At least 32 bytes.
     pii_hash_key: SecretStr | None = None  # secret
+    # LLM (structured output with an LLM, semantic chunking): an OpenAI-compatible endpoint that
+    # is the operator's, not a caller's target (no SSRF guard). Off by default.
+    llm_enabled: bool = False
+    llm_base_url: str = "https://api.openai.com/v1"  # https unless llm_allow_http
+    llm_allow_http: bool = False  # local development and tests
+    llm_model: str = Field(default="gpt-6-luna", min_length=1)
+    llm_api_key: SecretStr | None = None  # secret; a request's X-LLM-Api-Key wins over it
+    llm_embedding_model: str | None = None  # without it `semantic` chunking answers 400
+    llm_temperature: float = Field(default=0, ge=0, le=2)
+    llm_max_tokens: int = Field(default=4096, ge=1)  # most tokens of one answer
+    llm_timeout_seconds: float = Field(default=120, ge=5, le=600)  # one request to the endpoint
+    llm_max_input_tokens: int = Field(default=32_000, ge=1000, le=1_000_000)  # 4 characters each
+    llm_concurrency: int = Field(default=4, ge=1)  # LLM items at once per llm worker
+    # How long a sync request that needs the LLM waits for the llm worker before it becomes a job.
+    llm_sync_wait_seconds: float = Field(default=30, ge=1, le=60)
+    selector_learn_ttl_seconds: int = Field(default=2_592_000, ge=60)  # learned selectors, 30 days
+    structured_regex_timeout_seconds: float = Field(default=0.5, ge=0.05, le=5)  # one pattern
+    chunk_max_chunks: int = Field(default=2000, ge=1)  # most chunks of one result
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -313,6 +331,13 @@ class Settings(BaseSettings):
         """Empty means unset, as for the endpoint: no key is sent, and a request without the
         caller's key is refused (``extract_api.check_asr_key``)."""
         return value if value is not None and value.strip() else None
+
+    @field_validator("llm_api_key", "llm_embedding_model", mode="before")
+    @classmethod
+    def _empty_llm_value_is_unset(cls, value: object) -> object:
+        """Empty means unset (the Helm chart renders an unset value so): no key is sent by us,
+        and `semantic` chunking is refused without an embedding model."""
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("pii_default_entities", mode="before")
     @classmethod
@@ -362,6 +387,22 @@ class Settings(BaseSettings):
         # The PII hop is a job of pool nlp (N15): without jobs nothing could be processed.
         if self.pii_enabled and not self.jobs_enabled:
             raise ValueError("PII_ENABLED needs JOBS_ENABLED=true")
+        # The LLM hop is a job of pool llm (D5): without jobs nothing could be processed.
+        if self.llm_enabled and not self.jobs_enabled:
+            raise ValueError("LLM_ENABLED needs JOBS_ENABLED=true")
+        return self
+
+    @model_validator(mode="after")
+    def _llm_base_url_is_https(self) -> Self:
+        """https only, unless LLM_ALLOW_HTTP (a local model server, tests). The URL is not
+        echoed: it may carry credentials."""
+        parts = urlsplit(self.llm_base_url.strip())
+        schemes = {"https", "http"} if self.llm_allow_http else {"https"}
+        if parts.scheme.lower() not in schemes or not parts.hostname:
+            raise ValueError(
+                "LLM_BASE_URL must be an https URL (LLM_ALLOW_HTTP=true also allows http)"
+            )
+        self.llm_base_url = self.llm_base_url.strip()
         return self
 
     @model_validator(mode="after")
@@ -388,6 +429,11 @@ class Settings(BaseSettings):
 
         self.api_keys = keys
         return self
+
+
+def llm_available(settings: Settings) -> bool:
+    """Whether the service can do LLM work: it is switched on and has the jobs it runs as."""
+    return settings.llm_enabled and settings.jobs_enabled
 
 
 def load_settings() -> Settings:

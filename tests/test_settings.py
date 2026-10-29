@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from text_extraction.settings import ApiKey, ConfigError, Settings, get_settings, load_settings
+from text_extraction.settings import (
+    ApiKey,
+    ConfigError,
+    Settings,
+    get_settings,
+    llm_available,
+    load_settings,
+)
 
 SETTING_ENV_VARS = (
     "PUBLIC_HOST",
@@ -108,6 +115,21 @@ SETTING_ENV_VARS = (
     "PII_MODELS_PATH",
     "PII_MODEL_SIZE",
     "PII_HASH_KEY",
+    "LLM_ENABLED",
+    "LLM_BASE_URL",
+    "LLM_ALLOW_HTTP",
+    "LLM_MODEL",
+    "LLM_API_KEY",
+    "LLM_EMBEDDING_MODEL",
+    "LLM_TEMPERATURE",
+    "LLM_MAX_TOKENS",
+    "LLM_TIMEOUT_SECONDS",
+    "LLM_MAX_INPUT_TOKENS",
+    "LLM_CONCURRENCY",
+    "LLM_SYNC_WAIT_SECONDS",
+    "SELECTOR_LEARN_TTL_SECONDS",
+    "STRUCTURED_REGEX_TIMEOUT_SECONDS",
+    "CHUNK_MAX_CHUNKS",
 )
 
 
@@ -1202,3 +1224,149 @@ def test_pii_enabled_needs_jobs_enabled(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("PII_ENABLED", "false")
     monkeypatch.setenv("JOBS_ENABLED", "false")
     assert load_settings().jobs_enabled is False
+
+
+def test_llm_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S16: the LLM is off; every other value is the documented default."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.llm_enabled is False
+    assert settings.llm_base_url == "https://api.openai.com/v1"
+    assert settings.llm_allow_http is False
+    assert settings.llm_model == "gpt-6-luna"
+    assert settings.llm_api_key is None
+    assert settings.llm_embedding_model is None
+    assert settings.llm_temperature == 0
+    assert settings.llm_max_tokens == 4096
+    assert settings.llm_timeout_seconds == 120
+    assert settings.llm_max_input_tokens == 32_000
+    assert settings.llm_concurrency == 4
+    assert settings.llm_sync_wait_seconds == 30
+    assert settings.selector_learn_ttl_seconds == 2_592_000
+    assert settings.structured_regex_timeout_seconds == 0.5
+    assert settings.chunk_max_chunks == 2000
+
+
+@pytest.mark.parametrize(
+    "value", ["https://llm.example.org/v1", "HTTPS://llm.example.org:8443/v1", "https://a/v1"]
+)
+def test_llm_base_url_accepts_https(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_BASE_URL", value)
+
+    assert load_settings().llm_base_url == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "http://llm.example.org/v1",
+        "llm.example.org",
+        "ftp://llm.example.org/",
+        "https://",
+        "https:///v1",
+        "",
+        "   ",
+    ],
+)
+def test_llm_base_url_must_be_https_unless_allowed(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_BASE_URL", value)
+
+    with pytest.raises(ConfigError, match="LLM_BASE_URL") as error:
+        load_settings()
+
+    assert "LLM_ALLOW_HTTP" in str(error.value)  # says what to do, not what was given
+    if value.strip():
+        assert value.strip() not in str(error.value)  # the URL may carry credentials
+
+
+def test_llm_allow_http_lets_a_local_endpoint_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:11434/v1")
+    monkeypatch.setenv("LLM_ALLOW_HTTP", "true")
+
+    assert load_settings().llm_base_url == "http://127.0.0.1:11434/v1"
+
+    monkeypatch.setenv("LLM_BASE_URL", "ftp://127.0.0.1/v1")  # still only http(s)
+    with pytest.raises(ConfigError, match="LLM_BASE_URL"):
+        load_settings()
+
+
+def test_llm_api_key_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_API_KEY", "sk-very-secret")
+
+    settings = load_settings()
+
+    assert settings.llm_api_key is not None
+    assert settings.llm_api_key.get_secret_value() == "sk-very-secret"
+    assert "sk-very-secret" not in repr(settings)
+    assert "sk-very-secret" not in str(settings)
+    assert "sk-very-secret" not in settings.model_dump_json()
+
+
+@pytest.mark.parametrize("name", ["LLM_API_KEY", "LLM_EMBEDDING_MODEL"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_llm_empty_key_and_embedding_model_mean_unset(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    """The Helm chart renders an unset value as an empty string."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv(name, value)
+
+    settings = load_settings()
+
+    assert settings.llm_api_key is None
+    assert settings.llm_embedding_model is None
+
+
+def test_llm_enabled_needs_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D5: the LLM hop is a job of pool llm; start-up refuses LLM_ENABLED without jobs."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("JOBS_ENABLED", "false")
+
+    with pytest.raises(ConfigError, match="LLM_ENABLED needs JOBS_ENABLED"):
+        load_settings()
+
+    monkeypatch.setenv("JOBS_ENABLED", "true")
+    assert load_settings().llm_enabled is True
+
+
+def test_llm_available_is_enabled_and_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert llm_available(load_settings()) is False
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    assert llm_available(load_settings()) is True
+
+
+@pytest.mark.parametrize(
+    ("name", "good", "bad"),
+    [
+        ("LLM_TEMPERATURE", ["0", "2", "0.7"], ["-0.1", "2.1"]),
+        ("LLM_MAX_TOKENS", ["1", "4096"], ["0"]),
+        ("LLM_TIMEOUT_SECONDS", ["5", "600"], ["4.9", "601"]),
+        ("LLM_MAX_INPUT_TOKENS", ["1000", "1000000"], ["999", "1000001"]),
+        ("LLM_CONCURRENCY", ["1", "16"], ["0"]),
+        ("LLM_SYNC_WAIT_SECONDS", ["1", "60"], ["0.5", "61"]),
+        ("SELECTOR_LEARN_TTL_SECONDS", ["60", "2592000"], ["59"]),
+        ("STRUCTURED_REGEX_TIMEOUT_SECONDS", ["0.05", "5"], ["0.04", "5.1"]),
+        ("CHUNK_MAX_CHUNKS", ["1", "2000"], ["0"]),
+    ],
+)
+def test_llm_numeric_settings_are_bounded(
+    monkeypatch: pytest.MonkeyPatch, name: str, good: list[str], bad: list[str]
+) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    for value in good:
+        monkeypatch.setenv(name, value)
+        load_settings()
+    for value in bad:
+        monkeypatch.setenv(name, value)
+        with pytest.raises(ConfigError, match=name.lower()):
+            load_settings()

@@ -19,6 +19,9 @@ dependencies = [
     "markdown-it-py==4.2.0",
     "markitdown[docx,pdf,pptx,xls,xlsx]==0.1.8",
     "numpy>=2.0",
+    # The OpenAI-compatible LLM client (structured output, semantic chunking) and, since
+    # package 8, the external ASR backend. Both pins are older than 14 days (ruling R16).
+    "openai==3.29.0",  # Apache-2.0
     "prometheus-client>=0.26.0",
     "prometheus-fastapi-instrumentator>=8.1.0",
     "protego>=0.7.0",
@@ -28,6 +31,8 @@ dependencies = [
     "pypdfium2==5.14.0",
     "python-multipart==0.0.32",  # Apache-2.0; 14-day rule as above
     "redis>=8.1.0",
+    # Patterns of structured output run with a timeout, which the standard `re` cannot give.
+    "regex==2026.9.29",  # Apache-2.0; 14-day rule as above
     "structlog>=26.1.0",
     "trafilatura>=1.8",
     "uvicorn[standard]>=0.54.0",
@@ -73,14 +78,13 @@ docling = [
 # yt-dlp's extra `default` (mutagen is GPL-2.0-or-later). The ASR image builds PyAV from source
 # against an LGPL FFmpeg (decision D5): the PyPI wheel of av bundles libx264 and libx265 (GPL),
 # so the worker's --check refuses it; it serves local development and tests only. The OpenAI SDK
-# serves the external backend (ASR_BACKEND=openai, imported in the children only). Each pinned to
-# a release at least 14 days old (ruling R16).
+# (ASR_BACKEND=openai, imported in the children only) is a base dependency since package 8. Each
+# pinned to a release at least 14 days old (ruling R16).
 asr = [
     "av==19.0.1",  # BSD-3-Clause
     "ctranslate2==4.8.2",  # MIT
     "deno==2.9.7",  # MIT
     "faster-whisper==1.2.1",  # MIT
-    "openai==3.29.0",  # Apache-2.0; the external backend (ASR_BACKEND=openai)
     "yt-dlp[deno]==2026.8.19",  # Unlicense
     "yt-dlp-ejs==0.8.0",  # Unlicense AND MIT AND ISC
 ]
@@ -131,7 +135,6 @@ dev = [
     "playwright>=1.64",
     "patchright==1.63.0",  # as in the extra `browser`
     "duckduckgo-autoconsent-py>=16",
-    "openai==3.29.0",  # as in the extra `asr`: the external backend's tests run in the default suite
     # Build the document corpus in tests/documents (dev only), 14-day rule as above.
     "reportlab==5.0.1",
     "python-docx==1.2.0",
