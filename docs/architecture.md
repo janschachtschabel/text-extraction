@@ -1336,7 +1336,9 @@ per type, only types found), `items` (`annotate` only, else null), `hash_scope` 
 `result`: `hash` only, and only when an entity was hashed; else null, also for a `hash` result
 without any entity). `data.timings.pii_ms` is the time of the step. `status`, `word_count`, `quality`,
 `language` and `fingerprint` stay those of the extraction. A result without `pii` gains
-`pii: null` and `timings.pii_ms: 0` and is otherwise unchanged by a byte.
+`pii: null` and `timings.pii_ms: 0` and is otherwise unchanged by a byte. A result with `pii` that
+had nothing to process (a failure without content and metadata) or whose text was withheld
+(`pii_failed`) has `pii: null` too: nothing was processed.
 
 **N4, request checks** (`extract_api.check_pii_request`, also for files and batches). `pii` while
 the service has no PII handling (`PII_ENABLED` and `JOBS_ENABLED`) is 400 `invalid_request` ("PII
@@ -1360,8 +1362,12 @@ for `de` and `en`:
 - NER: `SpacyRecognizer` with the mapping `PER`, `PERSON` to `PERSON`, `LOC`, `GPE` to
   `LOCATION`, `ORG` to `ORGANIZATION`; every other model label is ignored. A span with letters
   but none of the Latin script is dropped (`LatinScriptSpacyRecognizer`, issue #14): the German
-  and English models only guess on Arabic, Cyrillic, Greek or CJK words. A name in such a script
-  after a salutation is still found by the honorific rule (`Frau Петрова`).
+  and English models only guess on Arabic, Cyrillic, Greek or CJK words. This holds for
+  `LOCATION` and `ORGANIZATION` too (asked for only), for the same reason. The cost is recall: a
+  name in such a script without a salutation is not found (`Петрова` alone stays), nor a place
+  (`Київ`); a name after a salutation still is, by the honorific rule (`Frau Петрова`). Another language in
+  Latin letters is not caught: `lg` takes the start of a Turkish sentence for a `PERSON` (a known
+  false positive of the corpus).
 - Patterns: `EmailRecognizer`, `PhoneRecognizer` (regions `DE`, `AT`, `CH`, `GB`, `US`; German
   context words such as `telefon`, `mobil`, `fax`, `rufnummer`), `IbanRecognizer`,
   `CreditCardRecognizer`, `IpRecognizer`, `UrlRecognizer`. The patterns do not depend on the

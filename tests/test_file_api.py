@@ -652,6 +652,9 @@ def test_markdown_upload_is_converted_as_markdown(client: TestClient, declared: 
         assert body["data"]["title"] == "Photosynthesis notes"
         assert body["data"]["document"] is None
     assert answers["markdown"]["data"]["content"] == MARKDOWN.strip()
+    crlf = upload(client, MARKDOWN.replace("\n", "\r\n").encode(), "notes.md", declared).json()
+    assert crlf["data"]["title"] == "Photosynthesis notes"  # Windows line ends
+    assert crlf["data"]["content"] == MARKDOWN.strip()
     html = answers["html"]["data"]["content"]
     assert "<h1>Photosynthesis notes</h1>" in html
     assert "<strong>Light</strong>" in html

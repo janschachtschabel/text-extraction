@@ -137,6 +137,7 @@ def test_markdown_is_text_like_plain_text(declared: str) -> None:
     assert sniff(b"Quoting %PDF- in prose.", declared, None) == "text"
     assert sniff(PDF, declared, None) == "pdf"
     assert sniff(b"<html><body>x</body></html>", declared, None) == "text"
+    assert sniff(b"a,b\n1,2\n", declared, "data.csv") == "csv"
 
 
 def test_html_bytes_need_the_tag_at_the_start() -> None:

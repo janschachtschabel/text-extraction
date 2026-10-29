@@ -68,7 +68,13 @@ PERSON_PINS: Final[dict[str, dict[str, float]]] = {
 # fails the test, and so does a listed word that is no longer touched (the list must not go stale).
 KNOWN_FALSE_POSITIVES: Final[dict[str, frozenset[tuple[str, str]]]] = {
     "lg": frozenset(
-        {("de_04_forum_post.md", "Pythagoras"), ("en_02_worksheet_credits.md", "Calvin")}
+        {
+            ("de_04_forum_post.md", "Pythagoras"),
+            ("en_02_worksheet_credits.md", "Calvin"),
+            # A sentence in another language of the Latin script (Turkish): the script filter of
+            # issue #14 cannot tell it apart, and the German model takes its first words for a name.
+            ("de_08_multilingual.md", "Okulumuzdaki"),
+        }
     ),
     "md": frozenset(
         {

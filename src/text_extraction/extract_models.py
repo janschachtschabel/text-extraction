@@ -112,7 +112,8 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         "`annotate` (a bare string is the mode; see the object's fields). Applies to the "
         "content, the title, the metadata, the links, the media uploader and the uploaded "
         "file's name (`document.file_name`); the report is "
-        "`data.pii`. Always a job when the service has to wait for it: a request without "
+        "`data.pii` (null when nothing was processed: a failure without content). Always a "
+        "job when the service has to wait for it: a request without "
         "`wait_seconds` waits `PII_SYNC_WAIT_SECONDS`, then answers 202. 400 while the service "
         "has no PII handling. Not with `screenshot`.",
     )

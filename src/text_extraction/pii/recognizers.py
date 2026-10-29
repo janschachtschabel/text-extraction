@@ -10,7 +10,8 @@ One ``AnalyzerEngine`` serves ``de`` and ``en``:
   a span that has letters but none of the Latin script (issue #14): the German and English
   models were not trained on Arabic, Cyrillic, Greek or CJK text and tag its words at random
   (``использования в`` became ``[PERSON]``). A span with one Latin letter stays (``Herr Иванов``),
-  and the honorific rule below still finds a name of any script after a salutation.
+  and the honorific rule below still finds a name of any script after a salutation. The cost is
+  recall: a name in such a script without a salutation is not found.
 - **Patterns** per language: e-mail address, phone number (regions ``DE``, ``AT``, ``CH``,
   ``GB``, ``US``; German context words that lift a number's score from 0.4 to 0.75), IBAN,
   credit card, IP address and URL.

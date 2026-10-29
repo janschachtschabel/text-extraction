@@ -529,6 +529,8 @@ def test_words_of_other_scripts_are_no_entities(children: Children, language: st
     names = persons(found)
     assert any(name.endswith(("Rothwell", "Brandt")) for name in names), found
     assert any(name.endswith(("Петров", "Петрова")) for name in names), found
+    # The cost (recall): without a salutation a name in another script is not found.
+    assert persons(children.spans("Анна Петрова пишет письмо.", language, entities)) == []
 
 
 @nlp_test
