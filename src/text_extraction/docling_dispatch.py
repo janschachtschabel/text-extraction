@@ -93,6 +93,7 @@ from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatch
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import wants_llm
 
 _log = structlog.get_logger(__name__)
 
@@ -343,7 +344,9 @@ class DoclingHandoff:
                 extra_seconds=extra,
                 detached=lambda: handover.detached,
                 pii=self._options.pii is not None,
-                llm=dispatcher.wants_llm(self._options),
+                llm=wants_llm(
+                    self._options.structured, self._options.chunking, dispatcher.settings
+                ),
             )
         except asyncio.CancelledError:
             if handover.release():

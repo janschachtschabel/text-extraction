@@ -10,18 +10,26 @@ from typing import Any, cast
 import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import BrowserDispatcher
-from text_extraction.docling_dispatch import DoclingDispatcher, OpenLimitReached, docling_queue
+from text_extraction.docling_dispatch import (
+    DoclingDispatcher,
+    DoclingHandoff,
+    OpenLimitReached,
+    docling_queue,
+)
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobStore
-from text_extraction.pii_dispatch import PiiDispatcher
+from text_extraction.pii.types import PiiOptions
+from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, nlp_queue
 from text_extraction.pipeline_documents import DocumentInput, DocumentInputMeta, OcrNeeded
-from text_extraction.pool_dispatch import PoolDispatcher
-from text_extraction.scheduler import FairQueue
+from text_extraction.pool_dispatch import Handover, LastHopHandoff, LastHopMove, PoolDispatcher
+from text_extraction.queue_metrics import dispatch_counter_for
+from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
 from text_extraction.structured.types import StructuredOptions
 
@@ -317,15 +325,224 @@ def test_pool_waits_are_longer_with_llm(monkeypatch: pytest.MonkeyPatch) -> None
     assert llm_nlp["claim_within"] == 55
 
 
-def test_wants_llm_of_the_stored_options() -> None:
-    settings = Settings(auth_mode="none", llm_enabled=True)
-    on = PoolDispatcher(
-        "docling", cast(JobStore, None), cast(Any, None), settings, None, outcomes=()
-    )
-    off = PoolDispatcher(
-        "docling", cast(JobStore, None), cast(Any, None), SETTINGS, None, outcomes=()
-    )
+class LowGuard:
+    high = False
 
-    assert on.wants_llm(LLM_OPTIONS)
-    assert not on.wants_llm(OPTIONS)
-    assert not off.wants_llm(LLM_OPTIONS)  # the service has no LLM
+
+@pytest.mark.parametrize(
+    ("options", "llm_enabled", "llm"),
+    [(LLM_OPTIONS, True, True), (OPTIONS, True, False), (LLM_OPTIONS, False, False)],
+    ids=["llm-work", "no-llm-work", "service-without-llm"],
+)
+def test_handoffs_wait_longer_for_stored_options_with_llm_work(
+    monkeypatch: pytest.MonkeyPatch, options: JobOptions, llm_enabled: bool, llm: bool
+) -> None:
+    """The Docling and the nlp handoff of a request that may need the LLM (its stored options,
+    on a service with an LLM) wait ``LLM_SYNC_WAIT_SECONDS`` longer (ruling S13): they pass
+    ``llm`` to their pool's wait."""
+    seen: list[bool] = []
+
+    async def wait(self: Any, job_id: str, **limits: Any) -> None:
+        seen.append(limits["llm"])
+
+    monkeypatch.setattr(DoclingDispatcher, "wait", wait)
+    monkeypatch.setattr(PiiDispatcher, "wait", wait)
+    settings = Settings(auth_mode="none", docling_enabled=True, llm_enabled=llm_enabled)
+    parts = Parts(settings)
+    nlp = PiiDispatcher(parts.store, nlp_queue(parts.valkey, settings), settings)
+    named = Envelope[ExtractResult].model_validate(
+        {
+            "status": "success",
+            "data": {
+                "url": URL,
+                "final_url": URL,
+                "upstream_status": 200,
+                "content_type": "text/html",
+                "mode_used": "fast",
+                "attempts": 1,
+                "language": "en",
+                "word_count": 3,
+                "title": "Page",
+                "format": "markdown",
+                "content": "Written by Anna Schmidt.",
+                "quality": None,
+                "timings": {"total_ms": 1, "compliance_ms": 0, "fetch_ms": 0, "convert_ms": 1},
+                "compliance": {"mode": "enforce"},
+                "metadata": None,
+                "links": None,
+                "fingerprint": None,
+                "cache": "miss",
+                "warnings": [],
+            },
+        }
+    )
+    with_pii = options.model_copy(update={"pii": PiiOptions(mode="mask")})
+
+    async def scenario_() -> None:
+        docling = DoclingHandoff(
+            parts.docling,
+            LowGuard(),
+            Handover(),
+            kind="extract",
+            options=options,
+            principal=ALICE,
+            url=URL,
+        )
+        await docling(needed(), named)
+        pii = PiiHandoff(
+            nlp, LowGuard(), kind="extract", options=with_pii, principal=ALICE, url=URL
+        )
+        await pii(named, Handover())
+
+    asyncio.run(scenario_())
+
+    assert seen == [llm, llm]
+
+
+# --- the last hop: LastHopHandoff and LastHopMove (ruling S13) ------------------------------------
+
+TOY_OUTCOMES = (
+    "answered",
+    "not_claimed",
+    "no_result",
+    "handed_over",
+    "backend_error",
+    "memory_guard",
+)
+
+
+class HighGuard:
+    high = True
+
+
+class ToyHandoff(LastHopHandoff):
+    """A last hop on pool ``toy``: an envelope owes it while its status is ``partial``; the
+    unserved answer is ``failed`` with the reason as the message."""
+
+    def __init__(self, dispatcher: PoolDispatcher, guard: Any, *, result: Any = None) -> None:
+        super().__init__(
+            dispatcher, guard, pool="toy", kind="extract", options=OPTIONS, principal=ALICE, url=URL
+        )
+        self.result = result
+        self.waited: list[str] = []
+
+    def needs(self, envelope: Envelope[ExtractResult]) -> bool:
+        return envelope.status == "partial"
+
+    def unserved(self, envelope: Envelope[ExtractResult], reason: Any) -> Envelope[ExtractResult]:
+        return envelope.model_copy(update={"status": "failed", "trace_id": reason})
+
+    async def _wait(
+        self, job_id: str, *, extra_seconds: float, detached: Callable[[], bool]
+    ) -> Envelope[ExtractResult] | None:
+        self.waited.append(job_id)
+        if isinstance(self.result, Exception):
+            raise self.result
+        return cast(Envelope[ExtractResult] | None, self.result)
+
+
+class Toy:
+    def __init__(self) -> None:
+        self.valkey = FakeAsyncRedis()
+        self.store = JobStore(self.valkey, SETTINGS)
+        self.queue = FairQueue(self.valkey, SETTINGS, "toy")
+        self.registry = CollectorRegistry()
+        self.dispatcher = PoolDispatcher(
+            "toy", self.store, self.queue, SETTINGS, self.registry, outcomes=TOY_OUTCOMES
+        )
+
+    def count(self, outcome: str) -> float | None:
+        return self.registry.get_sample_value(
+            "text_extraction_toy_dispatch_total", {"outcome": outcome}
+        )
+
+
+OWING = Envelope[ExtractResult](status="partial")
+
+
+@scenario
+async def test_last_hop_handoff_passes_an_envelope_that_owes_nothing() -> None:
+    toy = Toy()
+    handoff = ToyHandoff(toy.dispatcher, LowGuard())
+    done = Envelope[ExtractResult](status="success")
+
+    assert await handoff(done, Handover()) is done
+    assert handoff.waited == []
+    assert await toy.valkey.keys("job:*") == []
+
+
+@scenario
+async def test_last_hop_handoff_busy_while_the_guard_is_high() -> None:
+    toy = Toy()
+    handoff = ToyHandoff(toy.dispatcher, HighGuard())
+
+    answer = await handoff(OWING, Handover())
+
+    assert answer is not None
+    assert (answer.status, answer.trace_id) == ("failed", "busy")
+    assert toy.count("memory_guard") == 1
+    assert await toy.valkey.keys("job:*") == []
+
+
+@scenario
+async def test_last_hop_handoff_answers_the_pools_result_and_deletes_its_job() -> None:
+    toy = Toy()
+    result = Envelope[ExtractResult](status="success")
+    handoff = ToyHandoff(toy.dispatcher, LowGuard(), result=result)
+    handover = Handover()
+
+    answer = await handoff(OWING, handover)
+
+    assert answer is result
+    assert handover.pool == "toy"  # claimed for this pool's job
+    assert handoff.waited == [handover.pool_job]
+    assert await toy.valkey.keys("job:*") == []  # answered: the job is gone
+
+
+@pytest.mark.parametrize("outcome", [None, RedisConnectionError("down")], ids=["none", "valkey"])
+def test_last_hop_handoff_failed_without_a_result(outcome: Exception | None) -> None:
+    async def scenario_() -> None:
+        toy = Toy()
+        handoff = ToyHandoff(toy.dispatcher, LowGuard(), result=outcome)
+
+        answer = await handoff(OWING, Handover())
+
+        assert answer is not None
+        assert (answer.status, answer.trace_id) == ("failed", "failed")
+        assert await toy.valkey.keys("job:*") == []  # abandoned
+
+    asyncio.run(scenario_())
+
+
+@scenario
+async def test_last_hop_handoff_puts_the_envelope_on_the_p1_job() -> None:
+    toy = Toy()
+    handoff = ToyHandoff(toy.dispatcher, LowGuard())
+    handover = Handover()
+    p1 = await toy.store.create("extract", ALICE, OPTIONS, [URL])
+    assert handover.claim_p1()
+    handover.settle(p1)
+
+    assert await handoff(OWING, handover) is None  # the pool's worker writes item 0
+
+    assert handoff.waited == []
+    assert await toy.store.draft(p1, 0) is not None
+    assert (await toy.queue.counts()).pending == 1
+
+
+@scenario
+async def test_last_hop_move_stores_the_draft_and_queues_the_item() -> None:
+    toy = Toy()
+    job_id = await toy.store.create("batch", ALICE, OPTIONS, [URL])
+    job = await toy.store.get(job_id)
+    assert job is not None
+    item = QueueItem(job_id=job_id, index=0, client="alice", attempts=1, domain="docs.example.org")
+    counter = dispatch_counter_for(toy.registry, TOY_OUTCOMES, pool="toy")
+
+    assert await LastHopMove(toy.store, toy.queue, LowGuard(), outcomes=counter)(job, item, OWING)
+    assert await toy.store.draft(job_id, 0) is not None
+    assert (await toy.queue.counts()).pending == 1
+
+    refused = LastHopMove(toy.store, toy.queue, HighGuard(), outcomes=counter)
+    assert not await refused(job, item, OWING)
+    assert toy.count("memory_guard") == 1
