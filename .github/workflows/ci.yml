@@ -279,11 +279,20 @@ jobs:
           helm lint --strict deploy/helm/text-extraction --set workers.nlp.enabled=true
           --set workers.nlp.models.downloadMode=job --set networkPolicy.enabled=true
           --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true
+      - name: helm lint (llm workers on)
+        run: helm lint --strict deploy/helm/text-extraction --set workers.llm.enabled=true
+      - name: helm lint (llm workers with an API key Secret, embeddings, KEDA, policies and alerts)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set workers.llm.enabled=true
+          --set workers.llm.baseUrl=https://llm.example.org/v1 --set workers.llm.model=my-model
+          --set workers.llm.embeddingModel=my-embeddings --set workers.llm.apiKey.existingSecret=llm-key
+          --set workers.llm.autoscaling.keda.enabled=true --set networkPolicy.enabled=true
+          --set metrics.prometheusRule.enabled=true --set metrics.serviceMonitor.enabled=true
       - name: helm lint (all optional workers on)
         run: >-
           helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
-          --set workers.asr.enabled=true --set workers.nlp.enabled=true
-          --set workers.nlp.autoscaling.hpa.enabled=true
+          --set workers.asr.enabled=true --set workers.nlp.enabled=true --set workers.llm.enabled=true
+          --set workers.nlp.autoscaling.hpa.enabled=true --set workers.llm.autoscaling.hpa.enabled=true
       # Render checks: toggles, env, grace periods, KEDA queries, network policies, alerts.
       - run: deploy/helm/test.sh
 
@@ -400,6 +409,28 @@ jobs:
           # Without the profile there is no NLP service.
           if docker compose config --services | grep -q nlp; then
             echo "an NLP service runs without the profile" >&2; exit 1
+          fi
+          rm compose.json
+
+      # The profile `llm`: the worker runs the API image (no model, no volume); the LLM is off
+      # unless the environment switches it on, then on everywhere.
+      - name: docker compose config (profile llm)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose --profile llm config --format json > compose.json
+          jq -e '.services["llm-worker"]
+            | .build.target == null and .image == "text-extraction:dev" and .read_only == true
+              and .tmpfs == ["/tmp"] and .command == ["text-extraction-llm-worker"]
+              and (.volumes // [] | length == 0)
+              and .stop_grace_period == "45s"
+              and (.healthcheck.test | join(" ") | contains("9090/ready"))' compose.json
+          jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "false")' compose.json
+          LLM_ENABLED=true docker compose --profile llm config --format json \
+            | jq -e '.services | to_entries | map(select(.key != "valkey")) | all(.value.environment.LLM_ENABLED == "true")'
+          # Without the profile there is no llm service.
+          if docker compose config --services | grep -q llm; then
+            echo "an llm service runs without the profile" >&2; exit 1
           fi
           rm compose.json
 

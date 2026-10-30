@@ -18,6 +18,7 @@ ASR="$RELEASE-text-extraction-worker-asr"
 ASR_MODELS="$RELEASE-text-extraction-asr-models"
 NLP="$RELEASE-text-extraction-worker-nlp"
 NLP_MODELS="$RELEASE-text-extraction-nlp-models"
+LLM="$RELEASE-text-extraction-worker-llm"
 APP_VERSION="$(sed -n 's/^appVersion: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CHART/Chart.yaml")"
 
 failures=0
@@ -400,8 +401,8 @@ expect_contains "docling backlog alert" "$docling_rules" "text_extraction_queue_
 expect_contains "extract backlog keeps its threshold" "$docling_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"extract\"}) > 1000"
 expect_contains "docling workers-down alert" "$docling_rules" "deployment=\"$DOCLING\""
 expect_contains "docling items are counted on the docling workers" "$docling_rules" "service=\"$DOCLING-internal\""
-expect_contains "extract items leave out the browser, docling, asr and nlp workers" "$docling_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal\""
-expect_contains "Valkey memory alert reads the docling workers" "$docling_rules" "|$DOCLING-internal|$ASR-internal|$NLP-internal\"})"
+expect_contains "extract items leave out the browser, docling, asr and nlp workers" "$docling_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal|$LLM-internal\""
+expect_contains "Valkey memory alert reads the docling workers" "$docling_rules" "|$DOCLING-internal|$ASR-internal|$NLP-internal|$LLM-internal\"})"
 expect_absent "no docling alerts without docling workers" "$rules" 'pool="docling"'
 
 # --- Model downloads as a hook Job (models.downloadMode job) -----------------------------------
@@ -629,8 +630,8 @@ asr_rules="$(render --set workers.asr.enabled=true --set metrics.prometheusRule.
 expect_contains "asr backlog alert" "$asr_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"asr\"}) > 9"
 expect_contains "asr workers-down alert" "$asr_rules" "deployment=\"$ASR\""
 expect_contains "asr items are counted on the asr workers" "$asr_rules" "service=\"$ASR-internal\""
-expect_contains "extract items leave out the asr workers" "$asr_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal\""
-expect_contains "Valkey memory alert reads the asr workers" "$asr_rules" "|$ASR-internal|$NLP-internal\"})"
+expect_contains "extract items leave out the asr workers" "$asr_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal|$LLM-internal\""
+expect_contains "Valkey memory alert reads the asr workers" "$asr_rules" "|$ASR-internal|$NLP-internal|$LLM-internal\"})"
 expect_contains "asr backlog default threshold" \
   "$(render --set workers.asr.enabled=true --set metrics.prometheusRule.enabled=true)" "pool=\"asr\"}) > 50"
 expect_absent "no asr alerts without asr workers" "$rules" 'pool="asr"'
@@ -805,6 +806,128 @@ expect_contains "notes name the models size" "$(render_notes --set workers.nlp.e
 expect_contains "notes warn about the random hash key" "$(render_notes --set workers.nlp.enabled=true)" "hash_scope: result"
 expect_absent "no hash key warning with a key" "$(render_notes --set workers.nlp.enabled=true --set workers.nlp.hashKey.existingSecret=pii-key)" "hash_scope: result"
 expect_contains "notes say PII handling is off" "$(render_notes)" "No NLP workers are deployed"
+
+# --- LLM workers (structured output, semantic chunking) ------------------------------------------
+
+expect_absent "llm off renders nothing" "$on" "worker-llm"
+expect_absent "llm off renders no LLM_BASE_URL" "$on" "LLM_BASE_URL"
+expect_absent "llm off renders no LLM_API_KEY" "$on" "LLM_API_KEY"
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_values "llm off ($name)" "$(document "$on" Deployment "$name")" LLM_ENABLED "false"
+done
+expect_values "config.LLM_ENABLED ignored (API)" \
+  "$(document "$(render --set config.LLM_ENABLED=true)" Deployment "$API")" LLM_ENABLED "false"
+expect_absent "llm apiKey secret without llm workers renders nothing" \
+  "$(render --set workers.llm.apiKey.existingSecret=llm-key)" "LLM_API_KEY"
+
+llm_on="$(render --set workers.llm.enabled=true --set workers.docling.enabled=true --set workers.asr.enabled=true --set workers.nlp.enabled=true)"
+llm="$(document "$llm_on" Deployment "$LLM")"
+if [[ -n "$llm" ]]; then pass "llm worker Deployment is rendered when enabled"; else fail "no llm worker Deployment"; fi
+for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
+  expect_every_value "llm on ($name)" "$(document "$llm_on" Deployment "$name")" LLM_ENABLED "true"
+  expect_every_value "llm on ($name)" "$(document "$llm_on" Deployment "$name")" LLM_BASE_URL "https://api.openai.com/v1"
+  expect_every_value "llm on ($name)" "$(document "$llm_on" Deployment "$name")" LLM_MODEL "gpt-6-luna"
+  expect_absent "llm on without embeddingModel ($name)" "$(document "$llm_on" Deployment "$name")" "LLM_EMBEDDING_MODEL"
+done
+expect_contains "llm worker uses the API image" "$llm" "image: \"ghcr.io/janschachtschabel/text-extraction:$APP_VERSION\""
+expect_contains "llm worker runs its entry point" "$llm" "- text-extraction-llm-worker"
+expect_absent "llm worker keeps the image's init process" "$llm" "command:"
+expect_values "llm worker concurrency" "$llm" LLM_CONCURRENCY "4"
+expect_absent "llm worker gets no WORKER_CONCURRENCY" "$llm" "name: WORKER_CONCURRENCY"
+expect_absent "llm worker gets no DOCUMENT_MEMORY_LIMIT_MB" "$llm" "name: DOCUMENT_MEMORY_LIMIT_MB"
+expect_absent "llm worker needs no models volume" "$llm" "claimName"
+expect_absent "llm worker needs no init container" "$llm" "initContainers:"
+expect_absent "llm worker needs no models mount" "$llm" "mountPath: /models"
+expect_absent "llm worker is not an nlp worker" "$llm" "PII_MODEL"
+expect_contains "llm worker serves the internal port" "$llm" "containerPort: 9090"
+expect_absent "llm worker has no public port" "$llm" "containerPort: 8080"
+expect_contains "llm worker grace period" "$llm" "terminationGracePeriodSeconds: 30"
+expect_contains "llm worker CPU request" "$(flat "$llm")" "requests: cpu: 100m memory: 256Mi"
+expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: \"1\" memory: 512Mi"
+expect_contains "llm worker internal Service" "$(document "$llm_on" Service "$LLM-internal")" "port: 9090"
+expect_contains "llm worker replicas" "$llm" "replicas: 1"
+expect_absent "llm workers create no volume claim" "$(render --set workers.llm.enabled=true)" "kind: PersistentVolumeClaim"
+expect_contains "API grace period does not wait for llm" "$(document "$llm_on" Deployment "$API")" "terminationGracePeriodSeconds: 90"
+expect_values "llm concurrency follows workers.llm.concurrency" \
+  "$(document "$(render --set workers.llm.enabled=true --set workers.llm.concurrency=7)" Deployment "$LLM")" LLM_CONCURRENCY "7"
+
+# baseUrl, model and embeddingModel reach every pod.
+llm_set="$(render --set workers.llm.enabled=true --set workers.llm.baseUrl=https://llm.example.org/v1 \
+  --set workers.llm.model=my-model --set workers.llm.embeddingModel=my-embeddings)"
+for name in "$API" "$EXTRACT" "$BROWSER" "$LLM"; do
+  expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_BASE_URL "https://llm.example.org/v1"
+  expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_MODEL "my-model"
+  expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_EMBEDDING_MODEL "my-embeddings"
+done
+expect_render_fails "llm baseUrl must be https" "workers.llm.baseUrl must start with https://" \
+  --set workers.llm.enabled=true --set workers.llm.baseUrl=http://llm.local/v1
+expect_render_succeeds "llm baseUrl may be http with LLM_ALLOW_HTTP" \
+  --set workers.llm.enabled=true --set workers.llm.baseUrl=http://llm.local/v1 --set-string config.LLM_ALLOW_HTTP=true
+expect_render_fails "llm baseUrl is required" "workers.llm.baseUrl is required" \
+  --set workers.llm.enabled=true --set workers.llm.baseUrl=
+expect_render_fails "llm model is required" "workers.llm.model is required" \
+  --set workers.llm.enabled=true --set workers.llm.model=
+
+# LLM_API_KEY only from a Secret, on the API pods and the llm worker container only.
+llm_key="$(render --set workers.llm.enabled=true --set workers.llm.apiKey.existingSecret=llm-key)"
+llm_keyed="$(document "$llm_key" Deployment "$LLM")"
+expect_contains "apiKey secret renders LLM_API_KEY from it" \
+  "$(grep -A4 -- "- name: LLM_API_KEY" <<<"$llm_keyed")" 'name: "llm-key"'
+expect_contains "apiKey secret key defaults to LLM_API_KEY" \
+  "$(grep -A4 -- "- name: LLM_API_KEY" <<<"$llm_keyed")" 'key: "LLM_API_KEY"'
+expect_contains "apiKey secret key is configurable" \
+  "$(grep -A4 -- "- name: LLM_API_KEY" <<<"$(document "$(render --set workers.llm.enabled=true --set workers.llm.apiKey.existingSecret=llm-key --set workers.llm.apiKey.existingSecretKey=token)" Deployment "$LLM")")" 'key: "token"'
+expect_contains "apiKey secret reaches the API pods (they only need to know there is a key)" \
+  "$(grep -A4 -- "- name: LLM_API_KEY" <<<"$(document "$llm_key" Deployment "$API")")" 'name: "llm-key"'
+expect_absent "LLM_API_KEY is never a literal value" "$(grep -A1 -- "- name: LLM_API_KEY" <<<"$llm_key")" "value:"
+for name in "$EXTRACT" "$BROWSER"; do
+  expect_absent "LLM_API_KEY stays out of $name" "$(document "$llm_key" Deployment "$name")" "LLM_API_KEY"
+done
+expect_absent "LLM_API_KEY never in the ConfigMap" "$(document "$llm_key" ConfigMap "$API")" "LLM_API_KEY"
+expect_absent "llm worker gets no key without a secret" "$llm" "LLM_API_KEY"
+
+llm_keda="$(document "$(render --set workers.llm.enabled=true --set workers.llm.autoscaling.keda.enabled=true)" ScaledObject "$LLM")"
+expect_contains "llm KEDA query names pool llm" "$llm_keda" \
+  "query: \"max(text_extraction_queue_pending_items{pool=\\\"llm\\\", namespace=\\\"$NAMESPACE\\\"})\""
+expect_contains "llm KEDA threshold follows the concurrency" "$llm_keda" 'threshold: "4"'
+expect_contains "llm KEDA keeps a replica" "$llm_keda" "minReplicaCount: 1"
+llm_hpa_on="$(render --set workers.llm.enabled=true --set workers.llm.autoscaling.hpa.enabled=true)"
+expect_contains "llm HPA scales the llm workers" "$(document "$llm_hpa_on" HorizontalPodAutoscaler "$LLM")" "name: $LLM"
+expect_absent "llm replicas are left to the scaler" "$(document "$llm_hpa_on" Deployment "$LLM")" "replicas:"
+expect_render_fails "llm KEDA and HPA are exclusive" "mutually exclusive" \
+  --set workers.llm.enabled=true --set workers.llm.autoscaling.keda.enabled=true \
+  --set workers.llm.autoscaling.hpa.enabled=true
+expect_render_fails "llm autoscaling needs the workers" "workers.llm.autoscaling needs workers.llm.enabled=true" \
+  --set workers.llm.autoscaling.hpa.enabled=true
+
+expect_render_fails "llm needs jobs" "workers.llm.enabled needs JOBS_ENABLED=true" \
+  --set workers.llm.enabled=true --set jobs.enabled=false
+# llm worker: 30 s for the items in flight (then they are given back).
+expect_render_fails "llm worker grace period too short" "workers.llm.terminationGracePeriodSeconds" \
+  --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=29
+expect_render_succeeds "llm worker grace period just long enough" \
+  --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=30
+
+llm_policies="$(render --set workers.llm.enabled=true --set networkPolicy.enabled=true)"
+expect_contains "llm worker NetworkPolicy" "$(document "$llm_policies" NetworkPolicy "$LLM")" "port: 9090"
+expect_contains "Valkey accepts the llm workers" \
+  "$(document "$llm_policies" NetworkPolicy "$RELEASE-text-extraction-valkey")" "app.kubernetes.io/name: text-extraction-worker-llm"
+
+llm_rules="$(render --set workers.llm.enabled=true --set metrics.prometheusRule.enabled=true --set alerts.llmQueueBacklogItems=9)"
+expect_contains "backlog alert for queue llm" "$llm_rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"llm\"}) > 9"
+expect_contains "llm workers-down alert" "$llm_rules" "deployment=\"$LLM\""
+expect_contains "llm items are counted on the llm workers" "$llm_rules" "service=\"$LLM-internal\""
+expect_contains "extract items leave out the llm workers" "$llm_rules" "service!~\"$BROWSER-internal|$DOCLING-internal|$ASR-internal|$NLP-internal|$LLM-internal\""
+expect_contains "Valkey memory alert reads the llm workers" "$llm_rules" "|$NLP-internal|$LLM-internal\"})"
+expect_contains "llm backlog default threshold" \
+  "$(render --set workers.llm.enabled=true --set metrics.prometheusRule.enabled=true)" "pool=\"llm\"}) > 100"
+expect_absent "no llm alerts without llm workers" "$rules" 'pool="llm"'
+
+expect_contains "notes describe the llm workers" "$(render_notes --set workers.llm.enabled=true)" "LLM is on (LLM_ENABLED=true in every pod)"
+expect_contains "notes name the endpoint" "$(render_notes --set workers.llm.enabled=true --set workers.llm.baseUrl=https://llm.example.org/v1)" "https://llm.example.org/v1"
+expect_contains "notes warn about a missing key" "$(render_notes --set workers.llm.enabled=true)" "No LLM_API_KEY is set"
+expect_absent "no key warning with a secret" "$(render_notes --set workers.llm.enabled=true --set workers.llm.apiKey.existingSecret=llm-key)" "No LLM_API_KEY is set"
+expect_contains "notes say the LLM is off" "$(render_notes)" "No llm workers are deployed"
 
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2
