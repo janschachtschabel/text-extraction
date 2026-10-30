@@ -75,6 +75,18 @@ class InfoData(BaseModel):
     role: Role
 
 
+def service_info(principal: Principal) -> Envelope[InfoData]:
+    """The core of ``GET /v1/info`` (ruling P10-S1): name and version of the service, and who
+    the caller is."""
+    data = InfoData(
+        name=SERVICE_NAME,
+        version=__version__,
+        principal=principal.name,
+        role=principal.role,
+    )
+    return Envelope(status="success", data=data, trace_id=current_trace_id())
+
+
 async def _wait_for(background: set[asyncio.Task[Any]], seconds: float) -> None:
     """Wait until no task of ``background`` is running, or ``seconds`` have passed. Only tasks
     that are not done are waited on, so a finished member that was not removed cannot make this
@@ -283,13 +295,7 @@ def create_public_app(
         principal: Annotated[Principal, Depends(require_role("user"))],
     ) -> Envelope[InfoData]:
         """Name and version of the service, and who the caller is."""
-        data = InfoData(
-            name=SERVICE_NAME,
-            version=__version__,
-            principal=principal.name,
-            role=principal.role,
-        )
-        return Envelope(status="success", data=data, trace_id=current_trace_id())
+        return service_info(principal)
 
     # Inside the metrics middleware, so refused bodies are counted like any other answer.
     app.add_middleware(

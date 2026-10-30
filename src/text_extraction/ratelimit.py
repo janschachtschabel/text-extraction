@@ -10,6 +10,7 @@ import structlog
 from fastapi import Depends, Request
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from starlette.datastructures import State
 
 from text_extraction.auth import Principal, authenticate
 from text_extraction.envelope import ErrorCode
@@ -77,10 +78,17 @@ async def rate_limited(
     It depends on `authenticate`, so it always runs after it, and FastAPI runs that once per
     request even when the route also uses `require_role`.
     """
-    settings: Settings = request.app.state.settings
+    await check_rate(request.app.state, principal)
+
+
+async def check_rate(state: State, principal: Principal) -> None:
+    """Count one call of ``principal`` against its bucket (the one every door shares: REST, MCP
+    and the UI), or raise 429 with ``Retry-After``, or 503 while Valkey is unavailable.
+    ``state`` is the public app's state."""
+    settings: Settings = state.settings
     if not settings.rate_limit_enabled:
         return
-    limiter: RateLimiter = request.app.state.rate_limiter
+    limiter: RateLimiter = state.rate_limiter
     limit = (
         principal.rate_limit_per_minute
         if principal.rate_limit_per_minute is not None

@@ -13,6 +13,7 @@ import structlog
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.exceptions import RequestValidationError
 from redis.exceptions import RedisError
+from starlette.datastructures import State
 
 from text_extraction.auth import Principal, require_role
 from text_extraction.compliance import resolve_mode
@@ -33,7 +34,7 @@ from text_extraction.site.store import SiteStore
 from text_extraction.site.types import SiteStructureRequest
 from text_extraction.tracing import current_trace_id
 
-__all__ = ["PATH", "create_site_structure", "router"]
+__all__ = ["PATH", "create_site_structure", "router", "start_site"]
 
 _log = structlog.get_logger(__name__)
 
@@ -117,9 +118,16 @@ async def create_site_structure(
     503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
     """
-    settings: Settings = request.app.state.settings
-    sites: SiteStore = request.app.state.site_store
-    queue: FairQueue = request.app.state.job_queue
+    return await start_site(request.app.state, principal, body)
+
+
+async def start_site(
+    state: State, principal: Principal, body: SiteStructureRequest
+) -> Envelope[JobAccepted]:
+    """The core of ``POST /v1/site-structure`` (ruling P10-S1)."""
+    settings: Settings = state.settings
+    sites: SiteStore = state.site_store
+    queue: FairQueue = state.job_queue
 
     _check(body, settings)
     site = body.options()
@@ -133,18 +141,18 @@ async def create_site_structure(
         site=site,
     )
     try:
-        job_id = await open_job(request, principal, "site", options, [body.url])
+        job_id = await open_job(state, principal, "site", options, [body.url])
         try:
             await sites.init(job_id, body.url)
             # Enqueued exactly once and never retried, as a batch.
             await queue.enqueue_items(job_id, principal.name, [(0, body.url)])
         except BaseException:
-            await discard_job(request, principal, job_id)
+            await discard_job(state, principal, job_id)
             raise
     except (RedisError, OSError, JobLost) as error:
         raise backend_unavailable(error) from None
     # Counted only here: a job that was discarded above never reaches a worker.
-    request.app.state.job_metrics.created.labels(kind="site").inc()
+    state.job_metrics.created.labels(kind="site").inc()
     _log.info(
         "site_accepted",
         job_id=job_id,
