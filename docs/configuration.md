@@ -753,8 +753,10 @@ queue stay there until a worker claims them; the worker drops them as items of a
 (`job_item_dropped`, reason `job_gone`, counted as `lost`). An item that is running, and a
 handed-over request still running in an API pod, finish without storing anything: every write
 checks for `meta` first, so nothing of the job comes back. The input of an item past index 0
-that a batch queued for OCR or transcription is not deleted; it expires by its own TTL and then
-leaves the budget. The owner's Docling and ASR sets count a deleted job out on their next check.
+that a batch queued for OCR or transcription (`job:{<id>}:input:<index>`) is deleted, and leaves
+the budget, when a Docling or ASR worker drops the item, queued or in flight; while no such
+worker runs, it expires by its own TTL. The owner's Docling and ASR sets count a deleted job out
+on their next check.
 
 The bytes of an item (an upload, a document queued for OCR, media queued for transcription) are
 kept in `job:{<id>}:input:<index>` (a hash of `body` and `meta`) for `DOCLING_INPUT_TTL_SECONDS`

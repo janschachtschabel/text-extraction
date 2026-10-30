@@ -844,7 +844,13 @@ class Worker:
             await self._store.drop_llm_key(item.job_id)
 
     async def _drop(self, item: QueueItem) -> str:
-        """Complete an item whose job is gone (expired): there is nowhere to store its result."""
+        """Complete an item whose job is gone (expired or deleted): there is nowhere to store its
+        result. An item of pool ``docling`` or ``asr`` deletes its input first: the job's
+        deletion knows only item 0's (``JobStore.delete``), and a batch item's bytes would
+        otherwise outlive the job until their TTL, holding their share of the input budget. A
+        Valkey error leaves the item leased, to be dropped again."""
+        if self._queue.pool in (DOCLING_POOL, ASR_POOL):
+            await self._store.delete_input(item.job_id, item.index)
         await self._queue.complete(item)
         _log.warning("job_item_dropped", reason="job_gone")
         return _LOST

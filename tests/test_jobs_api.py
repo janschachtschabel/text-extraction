@@ -1288,23 +1288,37 @@ def test_delete_jobs_disabled_503(make_api: Callable[..., Api]) -> None:
     assert api.client.delete(f"/v1/jobs/{'a' * 32}").status_code == 401
 
 
-def test_delete_valkey_down_is_503(api: Api, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("target", "method", "job_left"),
+    [("job_store", "get", True), ("job_store", "delete", True), ("valkey", "srem", False)],
+)
+def test_delete_valkey_down_is_503(
+    make_api: Callable[..., Api],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    method: str,
+    job_left: bool,
+) -> None:
     from redis.exceptions import ConnectionError as RedisConnectionError
 
+    api = make_api(batch_max_open_per_client=1)
     job_id = api.batch([PAGE]).json()["data"]["id"]
-    store = api.client.app.state.job_store  # type: ignore[attr-defined]
 
     async def down(*_: object) -> None:
         raise RedisConnectionError("valkey is down")
 
-    monkeypatch.setattr(store, "delete", down)
+    # The visibility check, the job's deletion and the open set's update: any of them failing
+    # is a retryable 503, never a 200 that claims the job is gone.
+    monkeypatch.setattr(getattr(api.client.app.state, target), method, down)  # type: ignore[attr-defined]
     response = api.delete(job_id)
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "internal_error"
     assert response.json()["error"]["retryable"] is True
     monkeypatch.undo()
-    assert api.job(job_id).status_code == 200  # nothing was answered as deleted
+    assert api.job(job_id).status_code == (200 if job_left else 404)
+    # A job deleted without its open-set update holds no slot: the next count drops its id.
+    assert api.batch([PAGE]).status_code == (429 if job_left else 202)
 
 
 def test_openapi_lists_delete_jobs(api: Api) -> None:
@@ -1312,6 +1326,7 @@ def test_openapi_lists_delete_jobs(api: Api) -> None:
 
     operation = spec["paths"]["/v1/jobs/{job_id}"]["delete"]
     schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
-    envelope = spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
-    data = envelope["properties"]["data"]["anyOf"][0]["$ref"].rsplit("/", 1)[-1]
-    assert set(spec["components"]["schemas"][data]["properties"]) == {"id", "kind"}
+    assert "JobDeleted" in json.dumps(schema) or "JobDeleted" in json.dumps(
+        spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
+    )
+    assert set(spec["components"]["schemas"]["JobDeleted"]["properties"]) == {"id", "kind"}

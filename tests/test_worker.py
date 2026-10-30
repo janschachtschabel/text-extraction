@@ -400,6 +400,74 @@ async def test_item_in_flight_of_deleted_job_stores_nothing() -> None:
     assert await job_keys(harness, job_id) == []
 
 
+class DeletingRunner:
+    """A docling or asr runner that sees the item's input; with ``delete``, the caller deletes
+    the job while the item runs."""
+
+    lease_seconds = 60.0
+
+    def __init__(self, harness: Harness, *, delete: bool) -> None:
+        self.harness = harness
+        self.delete = delete
+        self.runs = 0
+
+    async def run(self, job: JobRecord, item: QueueItem, url: str, **kwargs: Any) -> Any:
+        self.runs += 1
+        assert await self.harness.store.get_input(job.id, item.index, DocumentInputMeta)
+        if self.delete:
+            await delete_job(api_state(self.harness), OWNER, job.id)
+        return Envelope[ExtractResult](status="failed")
+
+
+async def budget_members(harness: Harness, job_id: str) -> list[Any]:
+    """The input budget's entries of the job (``inputs:{budget}:size`` and ``:expiry``)."""
+    size = await harness.valkey.hkeys("inputs:{budget}:size")
+    expiry = await harness.valkey.zrange("inputs:{budget}:expiry", 0, -1)
+    return [m for m in [*size, *expiry] if os.fsdecode(m).startswith(f"{job_id}:")]
+
+
+@pytest.mark.parametrize("pool", ["docling", "asr"])
+@pytest.mark.parametrize("in_flight", [False, True])
+@scenario
+async def test_dropped_item_of_deleted_job_deletes_its_queued_input(
+    pool: str, in_flight: bool
+) -> None:
+    """A batch item queued for OCR or transcription (index past 0, which ``JobStore.delete``
+    does not know) loses its bytes and its budget share when its job is deleted: queued (the
+    worker drops it) or in flight (its result write finds the job gone)."""
+    harness = Harness(docling_enabled=True)
+    urls = [page("example.org"), SCAN_URL]
+    job_id = await harness.store.create("batch", OWNER, OPTIONS, urls)
+    meta = DocumentInputMeta(kind="pdf", content_type="application/pdf", raw_sha256="0" * 64)
+    await harness.store.put_input(job_id, 1, SCAN_BODY, meta, 600)
+    queue = harness.docling_queue if pool == "docling" else harness.asr_queue
+    await queue.enqueue_items(job_id, OWNER.name, [(1, SCAN_URL)])
+    runner = DeletingRunner(harness, delete=in_flight)
+    worker = Worker(
+        harness.settings,
+        harness.valkey,
+        runner,
+        harness.store,
+        queue,
+        harness.registry,
+        clock=harness.clock,
+    )
+    assert await budget_members(harness, job_id)
+
+    if not in_flight:
+        await delete_job(api_state(harness), OWNER, job_id)
+    claim = await queue.claim(60)
+    assert claim.item is not None
+    await worker.process(claim.item)
+
+    assert runner.runs == (1 if in_flight else 0)
+    assert outcome_count(harness, "lost") == 1
+    counts = await queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert await job_keys(harness, job_id) == []
+    assert await budget_members(harness, job_id) == []
+
+
 # --- deferrals ---------------------------------------------------------------------------------
 
 
@@ -782,6 +850,8 @@ async def test_valkey_outage_backs_off_and_recovers(failures: int, backoff: list
 class ScriptedQueue:
     """Answers claims from a script (a Claim, or an exception to raise); sets ``stop`` at its
     end. Items in it belong to no job, so the worker drops them."""
+
+    pool = "extract"  # as every FairQueue has: a dropped item reads it
 
     def __init__(self, script: list[Claim | Exception], stop: asyncio.Event) -> None:
         self.script = list(script)
