@@ -260,10 +260,9 @@ SINGLE_OPERATIONS: Final = ("info", "extract", "file", "screenshot", "structured
 
 def build_body(op: str, form: Mapping[str, str]) -> dict[str, Any]:
     """The REST body of the form of ``op`` (one of ``SINGLE_OPERATIONS``, ``batch`` with empty
-    ``urls`` or ``site-structure``): its fields, with
-    the "Options (JSON)" textarea (``options``) merged under them. Raises `OptionsError` for
-    invalid JSON, an Options value that is not an object, a key given twice or a malformed
-    number."""
+    ``urls``, or ``site-structure``): its fields, with the "Options (JSON)" textarea
+    (``options``) merged under them. Raises `OptionsError` for invalid JSON, an Options value
+    that is not an object, a key given twice or a malformed number."""
     fields = _FORMS[op](form)
     options = _json_object(form, "options", "Options") or {}
     body: dict[str, Any] = {}

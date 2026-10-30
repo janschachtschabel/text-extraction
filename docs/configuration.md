@@ -764,6 +764,51 @@ the viewer and the CSP stays `img-src 'self' data:`; a skipped one shows why (`b
 `refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`, or `time` when the view's
 25 s ran out). An unexpected failure of one image skips that image as `error`; the others go on.
 
+The tabs Batch, Batch file and Site structure start jobs, and every job is shown with its
+progress:
+
+- **Batch**: URLs, one per line, with the format, mode, metadata and Options of `POST /v1/batch`.
+  The lines are checked on the server: each must be a plain http(s) URL of at most 2048
+  characters without blanks (else nothing is sent and the rows are listed); exact duplicates are
+  dropped. The URLs are split into batches of `BATCH_MAX_URLS`; more batches than
+  `BATCH_MAX_OPEN_PER_CLIENT` is refused ("Select at most <n> URLs at once.") and nothing is
+  sent. Otherwise the batches are sent one after another; a refused part (such as the 429 while
+  other jobs are open) stops the rest and is shown beside the jobs already started, which keep
+  running. Log line `ui_batch_split` (`parts`, `urls`).
+- **Batch file**: a CSV or JSON file of at most `UI_BATCH_FILE_MAX_BYTES` and
+  `UI_BATCH_FILE_MAX_ROWS` rows, parsed on the server (one rate-limit hit, nothing sent yet). It
+  must be UTF-8 (a BOM is dropped). A JSON file is an array of URLs or of objects with `url`
+  (nested too deep or broken: "The file is not valid JSON."). A CSV is delimited by commas,
+  semicolons or tabs; a `url` column (any case) is used, else the first column, and a first row
+  that is not an http(s) URL is a header. A field over 2049 characters refuses the file. The
+  preview shows the counts (rows, URLs, rows that are not URLs, duplicates, batches), the first
+  50 URLs, the first 20 problems by row, and the URLs in a read-only box with the batch options
+  and "Start batch". Values such as `=HYPERLINK(...)` or `@cmd` are no URLs and are only
+  reported; the UI writes no CSV. Log line `ui_batch_file` (`rows`, `urls`, `invalid`,
+  `duplicates`).
+- **Site structure**: `POST /v1/site-structure` with the start URL, depth, most pages, scope and
+  sitemaps.
+- **Progress** (`/ui/run/progress`): each job's kind and state, a progress bar with done/total
+  and the success, partial and failed counts (a site job's total grows while it crawls), the
+  elapsed time and a page of 20 items with previous and next buttons. An item shows "queued",
+  "running in <pool>, claim <n>" (its last claim, from `items[].run`) or its status and error
+  code, and "Show" opens its result with the timeline. "Cancel" deletes the job
+  (`DELETE /v1/jobs/{id}`). While any job shown runs, the view refreshes itself every 3 s; each
+  refresh reads all its jobs through the job core with one rate-limit hit, and refreshing stops
+  once all are completed (after a 429 it tries again after `Retry-After`). A single operation
+  that continues as a job (202) has a "Show progress" button for it.
+- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree
+  now" while it runs): the job is read in pages of 20 items, so at most 20 items are held at a
+  time, and only the tree's fields are kept. The tree is built by URL path: a root per host (a
+  leading `www.` dropped), a section per directory, and every URL a leaf (a directory's own page
+  is the leaf `/`, a query string a leaf of its own), in name order. It merges the crawled pages
+  (title, link depth, status), the sitemaps' entries (`lastmod`) and links not followed for depth
+  or the page limit ("linked only"), by the crawl's seen key; pages come first. It shows at most
+  `UI_TREE_MAX_URLS` URLs and counts the rest ("<n> more URLs not shown (UI_TREE_MAX_URLS)").
+  Checking a section checks its subtree, a section shows a mixed state while part of it is
+  checked, and a counter shows the selection; "Extract selected" starts batches of the checked
+  URLs as the Batch tab does.
+
 Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/file`,
 `/ui/run/chunk` that of `POST /v1/chunk`, `/ui/run/batch-file` `UI_BATCH_FILE_MAX_BYTES` + 64 KiB,
 `/ui/run/batch-urls` `BATCH_MAX_OPEN_PER_CLIENT` times that of `POST /v1/batch`, every other route
