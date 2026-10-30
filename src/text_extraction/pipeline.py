@@ -287,11 +287,11 @@ _DOCUMENT_TYPES = frozenset(
 DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
 # Kinds Docling converts without OCR: OpenDocument files have their text.
 _NO_OCR_KINDS: frozenset[DocumentKind] = frozenset({"odt", "ods", "odp"})
-# Fetch errors that say the host itself is in trouble; they count towards its circuit breaker.
 # A result with one of these is not written to the result cache (see ``_finish``).
 _UNCACHED_WARNINGS = frozenset(
     {CONTENT_NOT_STORED_WARNING, SELECTORS_TIMED_OUT_WARNING, SELECTORS_FAILED_WARNING}
 )
+# Fetch errors that say the host itself is in trouble; they count towards its circuit breaker.
 _HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429})
