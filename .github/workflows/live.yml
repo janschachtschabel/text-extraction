@@ -51,8 +51,9 @@ jobs:
       || (contains(github.event.pull_request.labels.*.name, 'live')
           && (github.event.action != 'labeled' || github.event.label.name == 'live'))
     runs-on: ubuntu-latest
-    # Four runs: the gate, the smoke report, wlo_200 forced through the browser and the media set.
-    timeout-minutes: 90
+    # Five runs: the gate, the smoke report, wlo_200 forced through the browser, the media set
+    # and the site structure crawl (at most 20 minutes).
+    timeout-minutes: 110
     env:
       # The gate: wlo_200 in auto mode at the 80 % browser baseline (measured on 4,000 URLs,
       # 2026-09-28). Only a manual run can pick others; the smoke set is never a gate.
@@ -189,6 +190,38 @@ jobs:
             --out results/live_media_auto.jsonl \
             --summary-out results/summary_media_auto.md
 
+      # Report only, never fails the job (package 9): the site structure crawl of five WLO-type
+      # sites, one click deep, at most 25 pages each, under `compliance: report`. A crawl is a
+      # `site` job, so an extract worker starts here, after the runs above (they measure the
+      # rig without one), with its internal port on 9092. The summary goes to the job log and,
+      # with the others, to the job summary.
+      - name: Run the site structure crawl (report only)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          AUTH_MODE: none
+          VALKEY_URL: redis://127.0.0.1:6379/0
+          BROWSER_ENABLED: "true" # as on the API and the browser worker; crawls stay in fast mode
+          INTERNAL_PORT: "9092"
+        run: |
+          mkdir -p results
+          nohup uv run text-extraction-worker > results/extract-worker.log 2>&1 &
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:9092/ready > /dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:9092/ready > /dev/null 2>&1 \
+            || { echo "the extract worker is not ready" >&2; tail -n 50 results/extract-worker.log >&2; }
+          uv run python -m tests.live.run_site \
+            --urls tests/live/urls/sites.csv \
+            --depth 1 \
+            --max-pages 25 \
+            --compliance report \
+            --job-timeout 900 \
+            --out results/site_structure.jsonl \
+            --summary-out results/summary_site_structure.md || true
+
       - name: Add the summaries to the job summary
         if: always()
         run: |
@@ -205,4 +238,5 @@ jobs:
             results/*.jsonl
             results/server.log
             results/browser-worker.log
+            results/extract-worker.log
           if-no-files-found: warn

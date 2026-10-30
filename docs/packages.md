@@ -24,7 +24,8 @@ Per package:
 | 6 | Audio and video | merged 2026-10-26 | #12 | subtitles from YouTube and Mediathek samples, an upload transcribed (CI `asr`, live run on Jan's PC) |
 | 7 | PII | merged 2026-10-29 | #13 | corpus test `tests/pii/test_corpus.py` (CI job `nlp`: `md` on every push, `lg` weekly): every mode through `POST /v1/extract/file` as Markdown and HTML with the real nlp worker loop; pattern types found 100 %, `PERSON` recall pinned per model size (`lg` German 0.96, English 1.00; `md` 1.00 and 1.00); no keep word touched except the listed known false positives (`Pythagoras`, `Calvin`: historical names used as concepts); live `wlo_200` auto 83.0 % unchanged; Docker check with `lg` on Jan's PC (2026-10-29) |
 | 8 | Structured output and chunking | merged 2026-10-30 | #18 | done-when test `tests/structured/test_done_when.py` (default suite, no real LLM): on a German teaching page, `metadata`, `selectors` (CSS for a user key, XPath for an admin key), `patterns`, `llm`, `auto` (the LLM asked only for the missing field), `tables`, `learn_selectors` and its reuse without an LLM call (`sources: learned`, per key), every chunker, `POST /v1/structured`, `POST /v1/chunk` (URL and text) and a batch, through the real llm worker loop against a mock OpenAI-compatible endpoint (pytest-httpserver: `/chat/completions`, `/embeddings`); live `wlo_200` auto 82.5 % |
-| 9-11 | | open | | |
+| 9 | Site structure | in review | #23 | done-when test `tests/site/test_done_when.py` (default suite, no network): two sample sites (`tests/site/sites/`) on pytest-httpserver, crawled through `POST /v1/site-structure` by the real extract worker loop and read back through `GET /v1/jobs/{id}` in pages of 50: every entry of robots.txt's sitemaps (an index with a plain and a gzipped urlset, a text sitemap) and of a guessed `/sitemap.xml` of 300 entries across parts, every page to depth 2 as one item, typed links (`region`, `source`, `crawl`) with targets at the right items, a robots.txt-disallowed page never requested, the 404 the only failure; live site run on five WLO-type sites reported by the live workflow |
+| 10-11 | | open | | |
 
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |
@@ -89,3 +90,17 @@ done-when evidence is `uv run pytest tests/structured/test_done_when.py`; the co
 a local mock endpoint and a real `gpt-6-luna` call (`text-extraction-llm-worker --check`) were not
 run in the build sandbox (no Docker daemon, no endpoint key). Details in
 [architecture.md](architecture.md), "Structured output and chunking".
+
+Package 9 note (Jan, D1-D6): `POST /v1/site-structure` maps a site as a growing job of kind
+`site` on the extract pool: every page, robots.txt and sitemap file is an item, and the items an
+item finds are appended to the running job (`total` grows; results paged by `GET /v1/jobs/{id}`).
+Pages are fetched in fast mode only (no browser), with the compliance checks of an extraction for
+every fetch, sitemaps included, within the start page's host (a leading `www.` ignored; `scope:
+path` for one directory). Page items carry their typed links (`kind`, `source`, `rel`, `hreflang`,
+`region`, `crawl`, `target`) and no content; sitemap items their entries, split into
+`sitemap_part` items when large. A crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` with the
+batches. Upgrade the extract workers before the API pods: older workers cannot read a site job.
+The done-when evidence is `uv run pytest tests/site/test_done_when.py`; the live site run
+(`tests/live/run_site.py`) could not run in the build sandbox (no egress to the sites) and is a
+report-only step of the live workflow. Details in [architecture.md](architecture.md), "Site
+structure".

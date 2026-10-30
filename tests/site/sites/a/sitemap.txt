@@ -1,0 +1,3 @@
+{{ORIGIN}}/kontakt.html
+{{ORIGIN}}/impressum.html
+{{ORIGIN}}/mathe/level3.html

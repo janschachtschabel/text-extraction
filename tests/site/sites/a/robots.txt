@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /intern/
+
+Sitemap: {{ORIGIN}}/sitemaps/index.xml
+Sitemap: {{ORIGIN}}/sitemap.txt

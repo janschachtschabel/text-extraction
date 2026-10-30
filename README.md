@@ -318,6 +318,62 @@ is close to `JOB_ITEM_MAX_BYTES` (2 MB) can come back without its `content`, wit
 `content_not_stored_too_large`, once `describe_images` sends it through the LLM workers, as with
 `structured`: the descriptions do not need it.
 
+### Site structure
+
+`POST /v1/site-structure` maps a site: its sitemaps (robots.txt's `Sitemap:` lines, else
+`/sitemap.xml`; indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the
+start page, `depth` clicks deep (default 2), for at most `max_pages` pages (default 100). It
+answers 202 with a job of kind `site`; the extract workers crawl, and every page, robots.txt and
+sitemap file they find becomes an item of the job, so its `total` grows while it runs:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/", "depth": 2, "max_pages": 100}' \
+  http://localhost:8080/v1/site-structure
+# 202 {"status": "success", "data": {"id": "<job id>", "kind": "site", "state": "queued",
+#  "total": 1, "status_url": "/v1/jobs/<job id>"}, ...}
+curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?offset=0&limit=500"
+# {"status": "success", "data": {"kind": "site", "state": "completed", "progress": {"total": 17,
+#  ...}, "items": [
+#  {"index": 0, "url": "https://example.org/", "result": {"status": "success", "data": {
+#   "title": "Start", "content": null, "site": {"role": "page", "depth": 0, "parent": null,
+#   "links": [
+#    {"url": "https://example.org/mathe/", "text": "Mathe", "kind": "internal", "source": "a",
+#     "rel": [], "hreflang": null, "region": "nav", "crawl": "queued", "target": 2},
+#    {"url": "https://example.org/intern/", "text": "Intern", "kind": "internal", "source": "a",
+#     "rel": [], "hreflang": null, "region": "main", "crawl": "blocked", "target": null}, ...]}}}},
+#  {"index": 1, "url": "https://example.org/robots.txt", "result": {"data": {"site": {
+#   "role": "robots", "depth": 0, "parent": 0,
+#   "sitemaps": ["https://example.org/sitemap.xml"]}, ...}, ...}},
+#  {"index": 2, "url": "https://example.org/mathe/", "result": {"data": {"site": {
+#   "role": "page", "depth": 1, "parent": 0, "links": [...]}, ...}, ...}},
+#  {"index": 3, "url": "https://example.org/sitemap.xml", "result": {"data": {"site": {
+#   "role": "sitemap", "depth": 0, "parent": 1, "sitemap": {"format": "urlset", "guessed": false,
+#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01"}, ...],
+#   "children": [], "entry_count": 2400, "part": 1, "parts": 3}}, ...}, ...}}, ...]}, ...}
+```
+
+Read the graph from the items: each item's `data.site.role` is `page`, `robots`, `sitemap` or
+`sitemap_part`, and `parent` is the index of the item that found it. A page's `links` are its
+outgoing links in document order: `kind` (`internal`, `external`, `file`), `source` (`a`, `area`,
+a head `link` such as `canonical` or `alternate`, `iframe`), `rel`, `hreflang`, `region` (`nav`,
+`header`, `footer`, `aside`, `main`, `breadcrumb`, `pagination`, or null) and `crawl`, what the
+crawl did with it. `queued` and `seen` lead to a page item, whose index is `target`: an edge of
+the graph (a link deeper than `depth` to a page that is an item anyway says `seen` too). The
+others are not followed: `depth` (deeper than asked), `listed` (head links and iframes), `file`,
+`out_of_scope` (another host, or outside the start directory with `scope: "path"`), `nofollow`,
+`blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages` and
+`memory_guard`. A sitemap's entries are in
+`sitemap.entries`; a large one continues in `sitemap_part` items with the same URL (`part` of
+`parts`), and an index lists its sitemaps in `children`, each with the item it became.
+
+Pages are fetched in fast mode only, with the service's user agent, the per-host limits and the
+checks of `compliance`; the items keep title, status, metadata and quality but no text
+(`content: null`): send the URLs you want as text to `POST /v1/batch`. The crawl stays on the start
+page's host (a leading `www.` ignored); `scope: "path"` keeps it under the start URL's directory,
+`sitemaps: false` skips the sitemaps, and `depth: 0` reads the start page and the sitemaps only. A
+crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` with your batches.
+
 ### Browser mode
 
 Pages that need JavaScript are rendered in Chromium by the browser worker. `mode` is `fast` (HTTP
