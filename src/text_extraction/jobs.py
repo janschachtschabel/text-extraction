@@ -386,9 +386,11 @@ def pii_lease_seconds(settings: Settings) -> float:
 
 
 def llm_lease_seconds(settings: Settings) -> float:
-    """How long the llm worker holds an item: its overall deadline (three times
-    ``LLM_TIMEOUT_SECONDS``, ruling S14) plus one more timeout and 10 s (ruling S13)."""
-    return 4 * settings.llm_timeout_seconds + 10
+    """How long the llm worker holds an item: its longest overall deadline (three times
+    ``LLM_TIMEOUT_SECONDS``, ruling S14, plus half that for the image descriptions of an item
+    that owes them, R-V2) plus one more timeout and 10 s (ruling S13). The lease is fixed at
+    the claim, so it covers the longest case."""
+    return 5.5 * settings.llm_timeout_seconds + 10
 
 
 def escape_owner(owner: str) -> str:
@@ -423,13 +425,22 @@ def _artifact_key(job_id: str, name: str) -> str:
 
 def _options_json(options: JobOptions) -> str:
     """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false),
-    ``languages`` (none), ``pii`` (none), ``structured`` (none) and ``chunking`` (none) are left
-    out while they are the default: pods of a release before them parse the options strictly, and
-    during a rolling upgrade they read the jobs that new pods create."""
+    ``languages`` (none), ``pii`` (none), ``structured`` (none), ``chunking`` (none) and
+    ``describe_images`` (none) are left out while they are the default: pods of a release before
+    them parse the options strictly, and during a rolling upgrade they read the jobs that new pods
+    create."""
     defaults = JobOptions.model_fields
     omit = {
         name
-        for name in ("ocr", "transcribe", "languages", "pii", "structured", "chunking")
+        for name in (
+            "ocr",
+            "transcribe",
+            "languages",
+            "pii",
+            "structured",
+            "chunking",
+            "describe_images",
+        )
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }
     return options.model_dump_json(exclude=omit or None)

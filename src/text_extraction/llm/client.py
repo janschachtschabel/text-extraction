@@ -1,6 +1,7 @@
 """The client of the operator's OpenAI-compatible LLM endpoint (ruling S9): JSON answers that
-fit a schema (``chat_json``) and embeddings (``embed_batches``, float32 batches). It is generic:
-the extraction prompt is built on top of it (``structured/post.py``, ``structured/learn.py``).
+fit a schema (``chat_json``, and ``describe_image``: the same with one image, ruling V-S9) and
+embeddings (``embed_batches``, float32 batches). It is generic: the extraction prompt is built on
+top of it (``structured/post.py``, ``structured/learn.py``, ``vision/prompts.py``).
 
 **The endpoint** is operator configuration (``LLM_BASE_URL``, https unless ``LLM_ALLOW_HTTP``),
 not a caller's target, so the SSRF guard does not apply. As for the external ASR endpoint it is
@@ -25,14 +26,14 @@ refuses them while ``LLM_ENABLED`` is true (``settings.OPENAI_ENV_REFUSED``).
 JSON, does not validate, has no choice, no content or ``finish_reason: length`` (cut off) is
 invalid; it gets exactly one more call, with the model's invalid answer appended as an assistant
 turn (when it gave one) and the error text as a user message, then
-``LlmError(llm_failed, retryable=False)``.
+``LlmError(llm_failed, retryable=False, invalid_answer=True)``.
 
 **Failures** are ``LlmError`` with a fixed message that names the HTTP status at most, never the
 endpoint's text (which may echo the key or the prompt). The SDK's exception is not kept as the
 error's cause or context, for the same reason. 400, 401, 403, 404, 422 and other 4xx answers
 are not retryable; 408, 409, 425, 429, 5xx, timeouts and connection errors are.
 
-Prompts, documents, answers and keys are never logged and never a metric label: the metrics
+Prompts, documents, images, answers and keys are never logged and never a metric label: the metrics
 count calls (``text_extraction_llm_calls_total{kind, outcome}``) and tokens
 (``text_extraction_llm_tokens_total{kind}``) only.
 """
@@ -49,7 +50,11 @@ import numpy as np
 import numpy.typing as npt
 import openai
 from openai.types import CreateEmbeddingResponse
-from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
+from openai.types.chat import (
+    ChatCompletion,
+    ChatCompletionMessageParam,
+    ChatCompletionUserMessageParam,
+)
 from openai.types.shared_params import ResponseFormatJSONSchema
 from prometheus_client import REGISTRY, CollectorRegistry, Counter
 from pydantic import ValidationError
@@ -57,6 +62,7 @@ from pydantic import ValidationError
 from text_extraction.llm.basics import LlmError, truncate_input
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.settings import Settings
+from text_extraction.vision.images import data_url
 
 __all__ = [
     "EMBED_BATCH",
@@ -96,7 +102,7 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
         metrics = _Metrics(
             calls=Counter(
                 "text_extraction_llm_calls_total",
-                "Calls to the LLM endpoint by kind (chat, embeddings) and outcome "
+                "Calls to the LLM endpoint by kind (chat, vision, embeddings) and outcome "
                 "(ok, invalid answer, error).",
                 ["kind", "outcome"],
                 registry=registry,
@@ -124,6 +130,7 @@ class LlmClient:
         if not api_key:
             raise LlmError("No LLM API key is available.", retryable=False)
         self._model = settings.llm_model
+        self._vision_model = settings.llm_vision_model or settings.llm_model
         self._embedding_model = settings.llm_embedding_model
         self._temperature = settings.llm_temperature
         self._max_tokens = settings.llm_max_tokens
@@ -166,22 +173,70 @@ class LlmClient:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+        return await self._chat_json(
+            messages, schema, name="extraction", model=self._model, kind="chat", validate=validate
+        )
+
+    async def describe_image[T](
+        self,
+        system: str,
+        text: str,
+        image: bytes,
+        media_type: str,
+        schema: dict[str, Any],
+        *,
+        validate: Callable[[Any], T],
+    ) -> tuple[T, LlmUsage]:
+        """The model's answer to ``system``, ``text`` and one ``image`` (an ``image_url`` part
+        with a base64 data URL; no ``detail``, so the endpoint's default applies), as for
+        ``chat_json`` but with ``LLM_VISION_MODEL`` (else ``LLM_MODEL``), the schema named
+        ``image_description`` and calls counted as kind ``vision``. The repair call sends the
+        image again. ``media_type`` is one of ``vision.types.VisionMediaType``."""
+        user: ChatCompletionUserMessageParam = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": data_url(image, media_type)}},
+            ],
+        }
+        messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": system}, user]
+        return await self._chat_json(
+            messages,
+            schema,
+            name="image_description",
+            model=self._vision_model,
+            kind="vision",
+            validate=validate,
+        )
+
+    async def _chat_json[T](
+        self,
+        messages: list[ChatCompletionMessageParam],
+        schema: dict[str, Any],
+        *,
+        name: str,
+        model: str,
+        kind: str,
+        validate: Callable[[Any], T],
+    ) -> tuple[T, LlmUsage]:
+        """The loop of ``chat_json`` and ``describe_image``: a call, and one repair call for an
+        answer that does not fit. ``messages`` grows by the repair turns."""
         response_format: ResponseFormatJSONSchema = {
             "type": "json_schema",
-            "json_schema": {"name": "extraction", "strict": True, "schema": schema},
+            "json_schema": {"name": name, "strict": True, "schema": schema},
         }
         calls = prompt_tokens = completion_tokens = 0
         for attempt in (1, 2):
             reply = await self._call(
                 lambda: self._client.chat.completions.create(
-                    model=self._model,
+                    model=model,
                     messages=messages,
                     response_format=response_format,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
                 ),
                 ChatCompletion,
-                kind="chat",
+                kind=kind,
             )
             calls += 1
             used_prompt, used_completion = _tokens(
@@ -194,21 +249,23 @@ class LlmClient:
             try:
                 value = _checked(reply, validate)
             except _Invalid as invalid:
-                self._metrics.calls.labels("chat", "invalid").inc()
+                self._metrics.calls.labels(kind, "invalid").inc()
                 if attempt == 1:
                     if invalid.answer is not None:  # the model sees what it got wrong
                         messages.append({"role": "assistant", "content": invalid.answer})
                     messages.append({"role": "user", "content": _repair_request(invalid.problem)})
                 continue
-            self._metrics.calls.labels("chat", "ok").inc()
+            self._metrics.calls.labels(kind, "ok").inc()
             usage = LlmUsage(
-                model=self._model,
+                model=model,
                 calls=calls,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
             return value, usage
-        raise LlmError("The LLM answer did not match the schema.", retryable=False)
+        raise LlmError(
+            "The LLM answer did not match the schema.", retryable=False, invalid_answer=True
+        )
 
     async def embed_batches(self, texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
         """The embeddings of the texts (each cut to ``EMBED_TEXT_CHARS`` characters), in order,
@@ -273,6 +330,7 @@ def _failure_of(error: openai.OpenAIError) -> LlmError:
         return LlmError(
             f"The LLM endpoint answered HTTP {status}.",
             retryable=status in _RETRYABLE or status >= 500,
+            status=status,
         )
     return LlmError("The LLM endpoint answered something unreadable.", retryable=False)
 

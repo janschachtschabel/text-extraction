@@ -23,6 +23,13 @@
    (``DocumentInput``). The caller hands it on, or answers ``without_ocr``: the draft with the
    warning ``ocr_unavailable``. A scan that needs OCR the service does not have answers its text
    layer with that warning straight away.
+5. An image upload of ``describe_images`` (``DocumentRequest.describe_upload``; PNG, JPEG or
+   WebP, the types the vision model takes) is never failed for lacking text (ruling V-S8): an
+   image the service cannot OCR (``ocr: never``, no OCR, ``without_ocr`` without a draft)
+   answers ``image_stand_in`` (``success``, no content, the warning ``ocr_unavailable`` unless
+   the request said ``ocr: never``), and an OCR result without enough words keeps ``success``.
+   Its description is added by the llm worker. A URL whose body is an image keeps the path
+   above (``describe_upload`` is false for an ``ExtractRequest``).
 
 Our own faults (an exception the child should never raise, a dead child, a malformed reply) are
 logged by their type, never with a message: a converter's message may quote the document. The
@@ -78,6 +85,7 @@ from text_extraction.pii.types import PiiOptions
 from text_extraction.quality import Quality, assess, quality_error
 from text_extraction.settings import Settings
 from text_extraction.structured.types import StructuredOptions
+from text_extraction.vision.types import VISION_UPLOAD_TYPES
 
 _log = structlog.get_logger(__name__)
 
@@ -94,6 +102,9 @@ OCR_NOT_HANDED_REASON: Final = (
 OCR_NOT_HANDED_MESSAGE: Final = (
     f"{OCR_NOT_HANDED_REASON} Extract the document's own URL with mode fast."
 )
+# The quality verdicts of too few words: an image upload of ``describe_images`` keeps
+# ``success`` with them (V-S8).
+_FEW_WORDS: Final = frozenset({ErrorCode.EMPTY_CONTENT, ErrorCode.CONTENT_TOO_SHORT})
 # The child's deadline is this much before the extraction's, so its timeout is ours to answer.
 _POOL_MARGIN_SECONDS: Final = 0.25
 
@@ -177,6 +188,11 @@ class DocumentRequest(Protocol):
 
     @property
     def pii(self) -> PiiOptions | None: ...
+
+    @property
+    def describe_upload(self) -> bool:
+        """An image upload of ``describe_images``: never failed for lacking text (V-S8)."""
+        ...
 
 
 class DocumentRun(Protocol):
@@ -324,13 +340,47 @@ def document_input(
     )
 
 
+def describes(run: DocumentRun, document: DocumentInput) -> bool:
+    """Whether ``document`` is an image upload whose description is asked (V-S8): it is never
+    failed for lacking text."""
+    return run.req.describe_upload and media_type(document.meta.kind) in VISION_UPLOAD_TYPES
+
+
+def image_stand_in(
+    run: DocumentRun, document: DocumentInput, *, warnings: list[str]
+) -> Envelope[ExtractResult]:
+    """The answer of an image upload of ``describe_images`` that gets no OCR (V-S8):
+    ``success`` without text, for the description the llm worker adds; ``warnings`` follow the
+    run's own."""
+    return Envelope(
+        status="success",
+        data=run.result(
+            content_type=document.meta.content_type,
+            content="",
+            word_count=0,
+            metadata=PageMetadata(),
+            warnings=[*run.warnings, *warnings],
+            document=DocumentInfo(
+                kind=document.meta.kind,
+                converter="docling",
+                pages=None,
+                pages_converted=None,
+                ocr=False,
+            ),
+        ),
+    )
+
+
 def without_ocr(
     needed: OcrNeeded, run: DocumentRun, *, message: str = OCR_DISABLED_MESSAGE
 ) -> Envelope[ExtractResult]:
     """The answer when the OCR is not done: the draft with the warning ``ocr_unavailable``, or
-    ``unsupported_content_type`` with ``message`` for a document without one."""
+    ``unsupported_content_type`` with ``message`` for a document without one (an image upload
+    of ``describe_images``: ``image_stand_in`` with that warning)."""
     draft = needed.draft
     if draft is None or draft.data is None:
+        if describes(run, needed.input):
+            return image_stand_in(run, needed.input, warnings=[OCR_UNAVAILABLE_WARNING])
         return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, message)
     warnings = [*draft.data.warnings, OCR_UNAVAILABLE_WARNING]
     return draft.model_copy(update={"data": draft.data.model_copy(update={"warnings": warnings})})
@@ -368,6 +418,9 @@ class DocumentSteps:
         if kind in DOCLING_KINDS:
             if needs_ocr(kind, None, req.ocr, self._settings):
                 return OcrNeeded(draft=None, input=document)
+            if describes(run, document):  # described without its text (V-S8)
+                warnings = [] if req.ocr == "never" else [OCR_UNAVAILABLE_WARNING]
+                return image_stand_in(run, document, warnings=warnings)
             if req.ocr == "never":
                 return run.failed(
                     ErrorCode.UNSUPPORTED_CONTENT_TYPE,
@@ -439,9 +492,10 @@ class DocumentSteps:
         warnings: list[str],
     ) -> Envelope[ExtractResult]:
         """The result of a judged conversion, in its envelope: the quality verdict decides the
-        status."""
+        status, but for an image upload of ``describe_images``, whose few or no words keep
+        ``success`` (V-S8)."""
         req = run.req
-        return self._judge(
+        envelope = self._judge(
             run.result(
                 content_type=document.meta.content_type,
                 language=judged.language,
@@ -462,6 +516,15 @@ class DocumentSteps:
                 ),
             )
         )
+        error = envelope.error
+        if (
+            error is not None
+            and error.code in _FEW_WORDS
+            and envelope.data is not None
+            and describes(run, document)
+        ):
+            return envelope.model_copy(update={"status": "success", "error": None})
+        return envelope
 
     async def _convert(
         self, run: DocumentRun, document: DocumentInput, deadline: float

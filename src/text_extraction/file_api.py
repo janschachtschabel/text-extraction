@@ -90,6 +90,7 @@ from text_extraction.extract_api import (
 from text_extraction.extract_models import ExtractResult
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
 from text_extraction.job_models import JobAccepted, JobOptions
+from text_extraction.llm_dispatch import UploadInput
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, sniff_media
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_media import asr_available
@@ -103,6 +104,7 @@ from text_extraction.structured.checks import (
     llm_key_of,
     wants_llm,
 )
+from text_extraction.vision.checks import check_describe_request
 
 PATH: Final = "/v1/extract/file"
 MAX_FILES: Final = 1
@@ -318,9 +320,10 @@ def check_upload_request(
 ) -> tuple[str | None, str | None]:
     """The checks of an upload that need no byte of the file, before it is read: ``ocr``,
     ``pii``, the selector access of the key, the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers
-    (``asr_header`` and ``llm_header``, as the route received them) and ``structured`` and
-    ``chunking`` (ruling S12). Returns the caller's ASR and LLM keys (None without the header).
-    Shared with ``POST /v1/chunk`` (``structured_api.py``)."""
+    (``asr_header`` and ``llm_header``, as the route received them), ``structured`` and
+    ``chunking`` (ruling S12) and ``describe_images`` (ruling V-S2). Returns the caller's ASR
+    and LLM keys (None without the header). Shared with ``POST /v1/chunk``
+    (``structured_api.py``)."""
     check_ocr_request(form.ocr, settings)
     check_pii_request(form.pii, form.format, False, settings)
     check_selector_access(form.structured, principal)
@@ -328,6 +331,9 @@ def check_upload_request(
     caller_llm_key = llm_key_of(llm_header)
     check_structured_request(
         form.structured, form.chunking, form.pii, form.format, settings, llm_key=caller_llm_key
+    )
+    check_describe_request(
+        form.describe_images, form.pii, form.metadata, settings, llm_key=caller_llm_key
     )
     return key, caller_llm_key
 
@@ -352,16 +358,13 @@ async def answer_upload(
     state = request.app.state
     settings: Settings = state.settings
     # Only a request that may need the LLM keeps the caller's key with its jobs.
-    job_llm_key = llm_key if wants_llm(form.structured, form.chunking, settings) else None
+    llm = wants_llm(form.structured, form.chunking, settings, describe=form.describe_images)
+    job_llm_key = llm_key if llm else None
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)
     wait_seconds = form.wait_seconds
     if wait_seconds is None:  # D4 (a) and S13, as for ``POST /v1/extract``
-        wait_seconds = default_wait_seconds(
-            settings,
-            pii=form.pii is not None,
-            llm=wants_llm(form.structured, form.chunking, settings),
-        )
+        wait_seconds = default_wait_seconds(settings, pii=form.pii is not None, llm=llm)
     handover = Handover()
     flow = partial(
         _flow,
@@ -400,6 +403,7 @@ async def answer_upload(
         pii=form.pii,
         structured=form.structured,
         chunking=form.chunking,
+        describe=form.describe_images,
     )
 
 
@@ -429,7 +433,9 @@ async def _flow(
     its job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the
     LLM), kept with every job the flow creates. With ``pii`` the envelope goes through the nlp
     workers (``pii_dispatch.PiiHandoff``), then it gets the post stage (``extract_api.post_stage``),
-    whose LLM work goes to the llm workers (``llm_dispatch.LlmHandoff``)."""
+    whose LLM work goes to the llm workers (``llm_dispatch.LlmHandoff``); with
+    ``describe_images`` the hop gets the upload's bytes, which a new llm job keeps as its input
+    when they are an image the llm worker can describe (ruling V-S7)."""
     started = time.perf_counter()
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
@@ -491,4 +497,9 @@ async def _flow(
         url=None,
         wait_until=wait_until,
         llm_key=llm_key,
+        upload=(
+            UploadInput(body, UploadInputMeta(file_name=name, content_type=content_type))
+            if form.describe_images is not None
+            else None
+        ),
     )

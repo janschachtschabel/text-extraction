@@ -136,6 +136,7 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         pii=req.pii,
         structured=req.structured,
         chunking=req.chunking,
+        describe_images=req.describe_images,
     )
 
 
@@ -468,13 +469,15 @@ type UnservedReason = Literal["busy", "failed"]
 class LastHopHandoff(ABC):
     """The hand-over of one sync request's envelope to a last-hop pool (``pool``; the module
     docstring). ``kind`` is the job kind of the request (``extract`` for a URL, ``file`` for an
-    upload), ``options`` its stored options and ``url`` its URL (None for an upload);
-    ``llm_key`` is the caller's ``X-LLM-Api-Key`` of a request that may need the LLM, stored
-    with a new job. ``wait_until`` is the ``time.monotonic()`` reading at which the route answers
-    202: the request waits that much longer, so that the route finds the job to answer with. A
-    call answers the envelope the pool's worker produced, ``unserved(...)``, or None once the job
-    belongs to the pool's worker (the route answered 202 with it, or it is the request's P1
-    job). An envelope that does not ``need`` the hop comes back as it is."""
+    upload), ``options`` its stored options and ``url`` its URL (None for an upload); ``llm_key`` is
+    the caller's ``X-LLM-Api-Key`` of a request that may need the LLM, stored with a new job;
+    ``prepare`` runs with a new job's id before its draft is stored (``PoolDispatcher.submit_job``:
+    an upload's input for the llm worker; whatever it raises propagates, the job deleted).
+    ``wait_until`` is the ``time.monotonic()`` reading at which the route answers 202: the request
+    waits that much longer, so that the route finds the job to answer with. A call answers the
+    envelope the pool's worker produced, ``unserved(...)``, or None once the job belongs to the
+    pool's worker (the route answered 202 with it, or it is the request's P1 job). An envelope that
+    does not ``need`` the hop comes back as it is."""
 
     def __init__(
         self,
@@ -488,11 +491,13 @@ class LastHopHandoff(ABC):
         url: str | None,
         wait_until: float | None = None,
         llm_key: str | None = None,
+        prepare: Callable[[str], Awaitable[None]] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._dispatcher = dispatcher
         self._guard = guard
         self._pool = pool
+        self._prepare = prepare
         self._kind = kind
         self._options = options
         self._principal = principal
@@ -570,8 +575,9 @@ class LastHopHandoff(ABC):
 
     async def _submit(self, envelope: Envelope[ExtractResult], job_id: str | None = None) -> str:
         """Queue item 0 on the pool with ``envelope`` as its draft: of a new job (with the
-        caller's LLM key, if any) or of ``job_id`` (the request's P1 job, whose lease is
-        cleared). Valkey errors propagate; a new job is deleted again first."""
+        caller's LLM key, if any, and after ``prepare``) or of ``job_id`` (the request's P1 job,
+        whose lease is cleared; it holds what ``prepare`` would store already: an upload's
+        input). Valkey errors propagate; a new job is deleted again first."""
         return await self._dispatcher.submit_job(
             self._kind,
             self._options,
@@ -579,6 +585,7 @@ class LastHopHandoff(ABC):
             self._url,
             job_id=job_id,
             draft=envelope,
+            prepare=self._prepare if job_id is None else None,
             llm_key=self._llm_key,
         )
 

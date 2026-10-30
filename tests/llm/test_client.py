@@ -5,6 +5,7 @@ one repair call for an answer that does not fit, how the endpoint's failures map
 The SDK's own retries (429, 5xx) are left on, with a short ``retry-after-ms`` so they are quick."""
 
 import asyncio
+import base64
 import json
 from collections.abc import Callable
 from typing import Any
@@ -117,6 +118,47 @@ def chat(
     return asyncio.run(run())
 
 
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(32))
+IMAGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"description": {"type": ["string", "null"]}},
+    "required": ["description"],
+    "additionalProperties": False,
+}
+
+
+class Described(BaseModel):
+    description: str | None
+
+
+def validate_described(parsed: Any) -> Described:
+    return Described.model_validate(parsed)
+
+
+def describe(
+    settings: Settings,
+    *,
+    key: str | None = None,
+    registry: CollectorRegistry | None = None,
+    image: bytes = PNG,
+) -> tuple[Described, LlmUsage]:
+    async def run() -> tuple[Described, LlmUsage]:
+        client = LlmClient(settings, key, registry=registry or CollectorRegistry())
+        try:
+            return await client.describe_image(
+                "system text",
+                "Language: en",
+                image,
+                "image/png",
+                IMAGE_SCHEMA,
+                validate=validate_described,
+            )
+        finally:
+            await client.aclose()
+
+    return asyncio.run(run())
+
+
 def error_response(status: int, body: str = "", **headers: str) -> Response:
     return Response(body, status=status, headers=headers, content_type="application/json")
 
@@ -142,6 +184,142 @@ def test_chat_json_sends_strict_schema_and_parses(httpserver: HTTPServer) -> Non
         "type": "json_schema",
         "json_schema": {"name": "extraction", "strict": True, "schema": SCHEMA},
     }
+
+
+def test_describe_image_sends_image_url_part(httpserver: HTTPServer) -> None:
+    serve_chat(httpserver, completion('{"description": "A red bicycle."}'))
+
+    value, usage = describe(settings_for(httpserver))
+
+    assert value == Described(description="A red bicycle.")
+    assert usage == LlmUsage(model="gpt-6-luna", calls=1, prompt_tokens=11, completion_tokens=5)
+    (request,) = sent(httpserver)
+    body = request.get_json()
+    b64 = base64.b64encode(PNG).decode("ascii")
+    assert body["messages"][0] == {"role": "system", "content": "system text"}
+    assert body["messages"][1]["role"] == "user"
+    assert body["messages"][1]["content"][0] == {"type": "text", "text": "Language: en"}
+    assert body["messages"][1]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64," + b64},
+    }
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "image_description", "strict": True, "schema": IMAGE_SCHEMA},
+    }
+    assert body["temperature"] == 0
+    assert body["max_tokens"] == 4096
+
+
+def test_describe_image_uses_vision_model_else_llm_model(httpserver: HTTPServer) -> None:
+    serve_chat(httpserver, completion('{"description": null}'))
+
+    _value, usage = describe(settings_for(httpserver, llm_model="text-model"))
+    _value, vision_usage = describe(
+        settings_for(httpserver, llm_model="text-model", llm_vision_model="vision-model")
+    )
+
+    first, second = sent(httpserver)
+    assert first.get_json()["model"] == "text-model"
+    assert second.get_json()["model"] == "vision-model"
+    assert usage.model == "text-model"
+    assert vision_usage.model == "vision-model"
+
+
+def test_describe_image_header_key_wins(httpserver: HTTPServer) -> None:
+    serve_chat(httpserver, completion('{"description": null}'))
+
+    describe(settings_for(httpserver), key=HEADER_KEY)
+
+    (request,) = sent(httpserver)
+    assert request.headers["Authorization"] == f"Bearer {HEADER_KEY}"
+
+
+def test_describe_image_repair_call_resends_the_image(httpserver: HTTPServer) -> None:
+    serve_chat(
+        httpserver,
+        completion("not json", prompt_tokens=100, completion_tokens=7),
+        completion('{"description": "Fixed."}', prompt_tokens=120, completion_tokens=9),
+    )
+
+    value, usage = describe(settings_for(httpserver))
+
+    assert value == Described(description="Fixed.")
+    assert usage == LlmUsage(model="gpt-6-luna", calls=2, prompt_tokens=220, completion_tokens=16)
+    first, second = (request.get_json()["messages"] for request in sent(httpserver))
+    assert [message["role"] for message in second] == ["system", "user", "assistant", "user"]
+    assert second[1] == first[1]  # the repair call carries the image again
+    assert second[1]["content"][1]["type"] == "image_url"
+
+
+def test_describe_image_metrics_kind_vision_and_usage(httpserver: HTTPServer) -> None:
+    serve_chat(
+        httpserver, completion('{"description": "x"}', prompt_tokens=30, completion_tokens=4)
+    )
+    registry = CollectorRegistry()
+
+    describe(settings_for(httpserver), registry=registry)
+
+    calls = "text_extraction_llm_calls_total"
+    assert registry.get_sample_value(calls, {"kind": "vision", "outcome": "ok"}) == 1
+    assert registry.get_sample_value(calls, {"kind": "chat", "outcome": "ok"}) in (None, 0)
+    tokens = "text_extraction_llm_tokens_total"
+    assert registry.get_sample_value(tokens, {"kind": "prompt"}) == 30
+    assert registry.get_sample_value(tokens, {"kind": "completion"}) == 4
+
+
+def test_describe_image_failures_are_counted_as_vision_errors(httpserver: HTTPServer) -> None:
+    serve_chat(httpserver, error_response(400, "no"))
+    registry = CollectorRegistry()
+
+    with pytest.raises(LlmError):
+        describe(settings_for(httpserver), registry=registry)
+
+    assert (
+        registry.get_sample_value(
+            "text_extraction_llm_calls_total", {"kind": "vision", "outcome": "error"}
+        )
+        == 1
+    )
+
+
+def test_llm_error_carries_http_status(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    serve_chat(httpserver, error_response(400, '{"error": {"message": "bad image"}}'))
+    with pytest.raises(LlmError) as rejected:
+        describe(settings_for(httpserver))
+    assert rejected.value.status == 400
+
+    monkeypatch.setattr(client_module, "MAX_RETRIES", 0)
+    with pytest.raises(LlmError) as unreachable:
+        chat(settings_for(httpserver, llm_base_url="http://127.0.0.1:1/v1"))
+    assert unreachable.value.status is None
+
+    assert LlmError("x", retryable=False).status is None
+
+
+def test_llm_error_tells_an_invalid_answer_from_a_transport_failure(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R-V1: both have no HTTP status; only the answer that does not fit after the repair
+    call is ``invalid_answer`` (V-S11 counts it against the image, not the endpoint)."""
+    serve_chat(httpserver, completion("this is not json"))
+    with pytest.raises(LlmError) as invalid:
+        describe(settings_for(httpserver))
+    assert (invalid.value.status, invalid.value.invalid_answer) == (None, True)
+
+    monkeypatch.setattr(client_module, "MAX_RETRIES", 0)
+    with pytest.raises(LlmError) as unreachable:
+        chat(settings_for(httpserver, llm_base_url="http://127.0.0.1:1/v1"))
+    assert unreachable.value.invalid_answer is False
+
+    httpserver.clear()
+    serve_chat(httpserver, error_response(422, "no"))
+    with pytest.raises(LlmError) as rejected:
+        describe(settings_for(httpserver))
+    assert (rejected.value.status, rejected.value.invalid_answer) == (422, False)
+    assert LlmError("x", retryable=False).invalid_answer is False
 
 
 def test_header_key_wins_over_env_key(httpserver: HTTPServer) -> None:
@@ -591,3 +769,12 @@ def test_truncate_input_leaves_a_text_that_fits() -> None:
     assert truncate_input("short text", 10) == ("short text", False)
     assert truncate_input("short text", 100) == ("short text", False)
     assert truncate_input("", 5) == ("", False)
+
+
+def test_usage_plus_adds_calls_and_tokens_and_keeps_the_first_model() -> None:
+    first = LlmUsage(model="gpt-6-luna", calls=1, prompt_tokens=11, completion_tokens=5)
+    second = LlmUsage(model="other", calls=2, prompt_tokens=20, completion_tokens=3)
+
+    assert first.plus(second) == LlmUsage(
+        model="gpt-6-luna", calls=3, prompt_tokens=31, completion_tokens=8
+    )

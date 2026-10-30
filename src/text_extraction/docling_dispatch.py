@@ -345,7 +345,10 @@ class DoclingHandoff:
                 detached=lambda: handover.detached,
                 pii=self._options.pii is not None,
                 llm=wants_llm(
-                    self._options.structured, self._options.chunking, dispatcher.settings
+                    self._options.structured,
+                    self._options.chunking,
+                    dispatcher.settings,
+                    describe=self._options.describe_images,
                 ),
             )
         except asyncio.CancelledError:

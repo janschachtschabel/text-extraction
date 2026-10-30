@@ -35,6 +35,7 @@ from text_extraction.pipeline import create_pipeline
 from text_extraction.scheduler import FairQueue, QueueCounts
 from text_extraction.settings import Settings
 from text_extraction.structured.types import StructuredOptions
+from text_extraction.vision.types import DescribeImagesOptions
 from text_extraction.worker import ExtractRunner, Worker
 
 KEYS = {"alice": "alice-key-raw-secret", "bob": "bob-key-raw-secret", "root": "root-key-raw-secret"}
@@ -1150,3 +1151,26 @@ def test_batch_refuses_an_invalid_llm_key_header(make_api: Callable[..., Api]) -
     assert response.status_code == 400
     assert "has space" not in response.text
     assert api.keys("job:*") == []
+
+
+# --- describe_images on the batch route (issue #20, ruling V-S1) -------------------------------
+
+
+def test_batch_stores_describe_images_in_the_job_options(make_api: Callable[..., Api]) -> None:
+    api = make_api(**llm_overrides(llm_api_key="sk-operator-key"))
+
+    response = api.batch([PAGE], describe_images={"max_images": 4})
+    plain = api.batch([PAGE])
+
+    assert response.status_code == 202, response.text
+    assert plain.status_code == 202
+
+    async def options(valkey: FakeAsyncRedis, job_id: str) -> JobOptions:
+        record = await JobStore(valkey, api.settings).get(job_id)
+        assert record is not None
+        return record.options
+
+    stored = api.run(lambda valkey: options(valkey, response.json()["data"]["id"]))
+    assert stored.describe_images == DescribeImagesOptions(max_images=4)
+    unset = api.run(lambda valkey: options(valkey, plain.json()["data"]["id"]))
+    assert unset.describe_images is None

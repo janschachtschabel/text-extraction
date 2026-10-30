@@ -24,7 +24,8 @@ for LLM work without any key (neither ``X-LLM-Api-Key`` nor ``LLM_API_KEY``); 42
 with ``format: html``, for ``pii`` with what reads the raw page (strategies ``metadata`` and
 ``selectors``, ``tables``, ``learn_selectors``, caller ``selectors``; ruling D3 a) and for
 ``learn_selectors`` with a strategy that never calls the LLM. ``wants_llm`` says whether a request
-may need the LLM, for the default wait and the key check. ``llm_key_of`` reads the caller's key
+may need the LLM (``describe_images`` too, ruling V-S2), for the default wait and the key check;
+``describe_images`` has its own checks (``vision/checks.py``). ``llm_key_of`` reads the caller's key
 from the ``X-LLM-Api-Key`` header as ``asr_dispatch.asr_key_of`` reads ``X-ASR-Api-Key``.
 """
 
@@ -39,6 +40,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.pii.types import PiiOptions
 from text_extraction.settings import Settings, llm_available
 from text_extraction.structured.types import SelectorRule, StructuredOptions
+from text_extraction.vision.types import DescribeImagesOptions
 
 XPATH_NEEDS_ADMIN_MESSAGE = "XPath selectors need an admin key; use CSS."
 HAS_LIMIT_MESSAGE = "A CSS selector may use :has() at most once without an admin key."
@@ -119,14 +121,23 @@ def _calls_llm(structured: StructuredOptions | None) -> bool:
 
 
 def wants_llm(
-    structured: StructuredOptions | None, chunking: ChunkingOptions | None, settings: Settings
+    structured: StructuredOptions | None,
+    chunking: ChunkingOptions | None,
+    settings: Settings,
+    *,
+    describe: DescribeImagesOptions | None = None,
 ) -> bool:
     """Whether the request may need the LLM: the service has one and the options use it
-    (``llm`` or ``auto`` with a schema, ``semantic`` chunking). ``auto`` may end up without an
-    LLM call, but the request waits for the llm worker as long as it might need it."""
+    (``llm`` or ``auto`` with a schema, ``semantic`` chunking, ``describe_images``). ``auto``
+    may end up without an LLM call, but the request waits for the llm worker as long as it might
+    need it."""
     if not llm_available(settings):
         return False
-    return _calls_llm(structured) or (chunking is not None and chunking.strategy == "semantic")
+    return (
+        describe is not None
+        or _calls_llm(structured)
+        or (chunking is not None and chunking.strategy == "semantic")
+    )
 
 
 def check_structured_request(

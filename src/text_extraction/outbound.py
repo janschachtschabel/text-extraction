@@ -33,6 +33,7 @@ end times and lease expiry times decide.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import math
 import random
@@ -44,12 +45,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC
 from email.utils import parsedate_to_datetime
+from typing import TYPE_CHECKING, Final
 
 import structlog
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from text_extraction.envelope import ErrorCode
 from text_extraction.settings import Settings
+
+if TYPE_CHECKING:  # the gate itself needs no HTTP client
+    from text_extraction.fetch import FetchError
 
 _log = structlog.get_logger(__name__)
 
@@ -475,3 +481,73 @@ class DomainGate:
         await self._extend_pause(
             keys=[key], args=[f"{until:.6f}", math.ceil(duration) + _TTL_MARGIN_SECONDS]
         )
+
+
+# Fetch failures that say something about the host's health.
+HOST_FAILURES: Final = frozenset(
+    {ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT}
+)
+# A fetch timeout counts against the host only if the request had this share of
+# FETCH_TIMEOUT_SECONDS.
+FAIR_BUDGET_SHARE: Final = 0.5
+
+
+async def record_fetch_failure(
+    gate: DomainGate,
+    host: str,
+    error: "FetchError",
+    *,
+    budget: float,
+    fetch_timeout_seconds: float,
+) -> None:
+    """Report a failed fetch of ``host`` to the gate.
+
+    An error with a status (too large, too many redirects) still got an answer: that status
+    counts. DNS and connection errors count as failures of the host. A timeout counts only when
+    the request to this host had at least half of ``fetch_timeout_seconds`` (``budget``, the
+    time left once the gate let the request go): one cut short by the caller's own deadline or
+    by a long wait at the gate says little about the host, and a redirect target only gets what
+    the chain left over. Errors that say nothing about the host's health (a redirect to a
+    blocked or invalid URL, an unsupported encoding) are not reported.
+    """
+    fair_budget = budget >= fetch_timeout_seconds * FAIR_BUDGET_SHARE
+    if error.upstream_status is not None:
+        await gate.record(host, status=error.upstream_status, retry_after=None)
+    elif error.code in HOST_FAILURES and (error.code != ErrorCode.TIMEOUT or fair_budget):
+        await gate.record(host, status=None, retry_after=None)
+
+
+class HostTurn:
+    """The gate's turn for the host being fetched; it moves along a redirect chain.
+
+    ``answering`` is the host whose answer the fetch waits for: None while no turn is held (a
+    redirect target on another host is being checked, or its turn is being waited for)."""
+
+    def __init__(self, gate: DomainGate) -> None:
+        self._gate = gate
+        self._held: contextlib.AsyncExitStack | None = None
+        self._host: str | None = None  # host of the turn held
+        self.answering: str | None = None
+
+    def holds(self, host: str) -> bool:
+        """Whether the turn held (if any) is this host's: a redirect that stays on the host
+        keeps it, and waits for no further spacing slot or crawl delay."""
+        return self._held is not None and normalize_host(host) == self._host
+
+    async def take(self, host: str, crawl_delay: float | None) -> None:
+        """Wait for a turn at ``host``; a turn already held for it is kept. A turn at another
+        host is given back first, so we never hold two at once."""
+        if self.holds(host):
+            return
+        await self.give_back()
+        held = contextlib.AsyncExitStack()
+        await held.enter_async_context(self._gate.slot(host, crawl_delay))
+        self._held = held
+        self._host = normalize_host(host)
+        self.answering = self._host
+
+    async def give_back(self) -> None:
+        held, self._held, self._host = self._held, None, None
+        self.answering = None
+        if held is not None:
+            await held.aclose()

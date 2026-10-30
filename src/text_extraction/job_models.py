@@ -15,6 +15,7 @@ from text_extraction.media.types import MAX_LANGUAGES, LanguageCode
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pii.types import BareModeOrObject, PiiOptions
 from text_extraction.structured.types import StructuredOptions
+from text_extraction.vision.types import DescribeImagesOptions
 
 JobKind = Literal["extract", "batch", "screenshot", "file"]
 JobState = Literal["queued", "running", "completed"]
@@ -85,6 +86,12 @@ class BatchRequest(BaseModel, extra="forbid"):
         default=None,
         description="As for `/v1/extract`: split every item's content into chunks.",
     )
+    describe_images: DescribeImagesOptions | None = Field(
+        default=None,
+        description="As for `/v1/extract`: describe every item's images with the vision model. "
+        "400 while the service has no LLM or without any LLM key; 422 with `pii` or "
+        "`metadata: false`.",
+    )
 
 
 class JobOptions(BaseModel, extra="forbid"):
@@ -105,6 +112,7 @@ class JobOptions(BaseModel, extra="forbid"):
     pii: PiiOptions | None = None
     structured: StructuredOptions | None = None
     chunking: ChunkingOptions | None = None
+    describe_images: DescribeImagesOptions | None = None
 
     @model_validator(mode="after")
     def _screenshot_needs_browser(self) -> Self:

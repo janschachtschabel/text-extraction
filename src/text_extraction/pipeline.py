@@ -113,7 +113,6 @@ the deadline.
 """
 
 import asyncio
-import contextlib
 import hashlib
 import html as html_lib
 import math
@@ -184,9 +183,11 @@ from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.outbound import (
     CircuitOpen,
     DomainGate,
+    HostTurn,
     OutboundBusy,
     normalize_host,
     parse_retry_after,
+    record_fetch_failure,
 )
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pipeline_documents import (
@@ -254,7 +255,7 @@ from text_extraction.structured.dom import (
     structured_cache_part,
     usable_learned,
 )
-from text_extraction.structured.post import without_dom_stage
+from text_extraction.structured.post import post_done, without_dom_stage
 from text_extraction.structured.selector_pool import (
     SELECTORS_FAILED_WARNING,
     SELECTORS_TIMED_OUT_WARNING,
@@ -269,6 +270,8 @@ from text_extraction.structured.store import (
 )
 from text_extraction.structured.types import SelectorRule, StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
+from text_extraction.vision.describe import count_images, needs_vision, undescribable_upload
+from text_extraction.vision.images import describable_upload
 
 _log = structlog.get_logger(__name__)
 
@@ -294,7 +297,6 @@ _UNCACHED_WARNINGS = frozenset(
     {CONTENT_NOT_STORED_WARNING, SELECTORS_TIMED_OUT_WARNING, SELECTORS_FAILED_WARNING}
 )
 # Fetch errors that say the host itself is in trouble; they count towards its circuit breaker.
-_HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429})
 # The fetch gets the time left before the deadline minus this, so it times out first and the
@@ -305,9 +307,6 @@ _MIN_FETCH_SECONDS = 1.0
 # The renderer's deadline is this much before the extraction's, so the render ends in time for
 # the conversion and the result after it.
 _RENDER_MARGIN_SECONDS = 2.0
-# A fetch timeout counts against the host only if the fetch had this share of
-# FETCH_TIMEOUT_SECONDS.
-_FAIR_BUDGET_SHARE = 0.5
 # Only the start of a page is searched for the <html lang> attribute.
 _LANG_SCAN_CHARS = 65_536
 _MAX_TAG_CHARS = 4096
@@ -495,6 +494,20 @@ class _UploadOptions:
     links: bool = False  # the form has no `links`: without a URL, links stay relative
     structured: StructuredOptions | None = None
     pii: PiiOptions | None = None
+    # ``describe_images`` of an image upload: never failed for lacking text (ruling V-S8).
+    describe_upload: bool = False
+
+
+def _upload_options(form: FileForm) -> _UploadOptions:
+    """The options of an upload's form as the conversion steps read them."""
+    return _UploadOptions(
+        format=form.format,
+        metadata=form.metadata,
+        ocr=form.ocr,
+        structured=form.structured,
+        pii=form.pii,
+        describe_upload=form.describe_images is not None,
+    )
 
 
 @dataclass
@@ -555,42 +568,6 @@ class _UploadRun:
         self, code: ErrorCode, message: str, *, retryable: bool = False
     ) -> Envelope[ExtractResult]:
         return _failed(self.result(), code, message, retryable=retryable)
-
-
-class _Turn:
-    """The outbound gate's turn for the host being fetched; it moves along a redirect chain.
-
-    ``answering`` is the host whose answer the fetch waits for: None while no turn is held (a
-    redirect target on another host is being checked, or its turn is being waited for)."""
-
-    def __init__(self, gate: DomainGate) -> None:
-        self._gate = gate
-        self._held: contextlib.AsyncExitStack | None = None
-        self._host: str | None = None  # host of the turn held
-        self.answering: str | None = None
-
-    def holds(self, host: str) -> bool:
-        """Whether the turn held (if any) is this host's: a redirect that stays on the host
-        keeps it, and waits for no further spacing slot or crawl delay."""
-        return self._held is not None and normalize_host(host) == self._host
-
-    async def take(self, host: str, crawl_delay: float | None) -> None:
-        """Wait for a turn at ``host``; a turn already held for it is kept. A turn at another
-        host is given back first, so we never hold two at once."""
-        if self.holds(host):
-            return
-        await self.give_back()
-        held = contextlib.AsyncExitStack()
-        await held.enter_async_context(self._gate.slot(host, crawl_delay))
-        self._held = held
-        self._host = normalize_host(host)
-        self.answering = self._host
-
-    async def give_back(self) -> None:
-        held, self._held, self._host = self._held, None, None
-        self.answering = None
-        if held is not None:
-            await held.aclose()
 
 
 @dataclass(frozen=True)
@@ -675,6 +652,7 @@ class Pipeline:
         self._pool = pool if pool is not None else ConversionPool(settings.convert_concurrency)
         self._rules = load_boilerplate_rules()
         self._metrics = _metrics_for(registry)
+        self._registry = registry
         self._renderer = renderer
         self._unblock_renderer = unblock_renderer
         self._clearance = clearance
@@ -837,13 +815,7 @@ class Pipeline:
         """
         mode = resolve_mode(None, principal, self._settings)
         run = _UploadRun(
-            req=_UploadOptions(
-                format=form.format,
-                metadata=form.metadata,
-                ocr=form.ocr,
-                structured=form.structured,
-                pii=form.pii,
-            ),
+            req=_upload_options(form),
             report=ComplianceReport(mode=mode, decision="skipped"),
             file_name=name,
             ocr_handoff=ocr_handoff,
@@ -858,6 +830,9 @@ class Pipeline:
                 envelope = await run.ocr_handoff(run.ocr_needed, envelope)
             if run.asr_needed is not None and run.asr_handoff is not None:
                 envelope = await run.asr_handoff(run.asr_needed, envelope)
+            if run.ocr_needed is None or run.ocr_handoff is None:
+                # A result the Docling worker makes gets this there (convert_queued_document).
+                envelope = self._undescribable(envelope, form, body)
             if envelope.data is not None:
                 envelope.data.timings = _with_pii_time(run.timings(), envelope.data.timings)
             envelope.trace_id = current_trace_id()
@@ -896,13 +871,7 @@ class Pipeline:
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
-                req=_UploadOptions(
-                    format=req.format,
-                    metadata=req.metadata,
-                    ocr=req.ocr,
-                    structured=req.structured,
-                    pii=req.pii,
-                ),
+                req=_upload_options(req),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
                 ),
@@ -949,8 +918,36 @@ class Pipeline:
                 else Validators(etag=meta.etag, last_modified=meta.last_modified)
             )
             kept = await self._finish(run, kept, validators)
+        if isinstance(req, FileForm):
+            kept = self._undescribable(kept, req, document.body)
         kept.trace_id = current_trace_id()
         return kept
+
+    def _undescribable(
+        self, envelope: Envelope[ExtractResult], form: FileForm, body: bytes
+    ) -> Envelope[ExtractResult]:
+        """An image upload of ``describe_images`` whose bytes the vision model cannot take
+        (``vision.images.describable_upload``: over ``LLM_VISION_MAX_IMAGE_BYTES``, or not PNG,
+        JPEG or WebP by their magic bytes) gets its image ``skipped`` here, where the bytes are
+        known, counted in the pipeline's registry (ruling R-V3). ``needs_vision`` is false after
+        it, so the result takes no llm hop for its description, and no input is kept for it.
+        Any other envelope comes back as it is."""
+        describe = form.describe_images
+        data = envelope.data
+        if (
+            describe is None
+            or data is None
+            or post_done(envelope, None, None, describe=describe)
+            or not needs_vision(data, describe)
+            or describable_upload(body, self._settings.llm_vision_max_image_bytes)
+        ):
+            return envelope
+        outcome = undescribable_upload(data, describe)
+        count_images(outcome.report, self._registry)
+        warnings = list(data.warnings)
+        warnings.extend(warning for warning in outcome.warnings if warning not in warnings)
+        update = {"data": outcome.data.model_copy(update={"warnings": warnings})}
+        return envelope.model_copy(update=update)
 
     def _queued_run(
         self, req: ExtractRequest, principal: Principal, meta: DocumentInputMeta
@@ -1011,13 +1008,7 @@ class Pipeline:
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
-                req=_UploadOptions(
-                    format=req.format,
-                    metadata=req.metadata,
-                    ocr=req.ocr,
-                    structured=req.structured,
-                    pii=req.pii,
-                ),
+                req=_upload_options(req),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
                 ),
@@ -1224,7 +1215,7 @@ class Pipeline:
         if self._media is None:  # pragma: no cover - only called with media on
             raise RuntimeError("no media steps")
         run.final_url = target.canonical_url
-        turn = _Turn(self._gate)
+        turn = HostTurn(self._gate)
         try:
             run.report = await self._check_origin(run, target.canonical_url, turn)
             if (code := blocking_code(run.report)) is not None:
@@ -1311,7 +1302,7 @@ class Pipeline:
     async def _fetch_and_extract(
         self, run: _Run, stored: _Stored | None
     ) -> Envelope[ExtractResult]:
-        turn = _Turn(self._gate)
+        turn = HostTurn(self._gate)
         try:
             run.report = await self._check_origin(run, run.target, turn)
             if (code := blocking_code(run.report)) is not None:
@@ -1480,7 +1471,7 @@ class Pipeline:
             return None
         return quality.model_copy(update={"challenge_status": True})
 
-    async def _check_origin(self, run: _Run, url: str, turn: _Turn) -> ComplianceReport:
+    async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
         turn of ``url``'s host, taken here (or kept, when ``turn`` holds it already), so the
         origin's files are fetched under the host's limits. The wait for the turn counts as
@@ -1499,7 +1490,7 @@ class Pipeline:
         run.compliance_ms += _ms(started)
         return report
 
-    async def _fetch(self, run: _Run, validators: Validators | None, turn: _Turn) -> FetchResult:
+    async def _fetch(self, run: _Run, validators: Validators | None, turn: HostTurn) -> FetchResult:
         """Fetch the target in its host's turn and report the outcome to the gate.
 
         A redirect target is checked against the compliance files of its origin before it is
@@ -1598,22 +1589,14 @@ class Pipeline:
         return budget
 
     async def _record_failure(self, host: str, error: FetchError, budget: float) -> None:
-        """Report a failed fetch to the gate.
-
-        An error with a status (too large, too many redirects) still got an answer: that status
-        counts. DNS and connection errors count as failures of the host. A timeout counts only
-        when the request to this host had at least half of ``FETCH_TIMEOUT_SECONDS`` (``budget``,
-        the time left once the gate let the request go): one cut short by the extraction's own
-        deadline or by a long wait at the gate says little about the host, and a redirect target
-        only gets what the chain left over. Errors
-        that say nothing about the host's health (a redirect to a blocked or invalid URL, an
-        unsupported encoding) are not reported.
-        """
-        fair_budget = budget >= self._settings.fetch_timeout_seconds * _FAIR_BUDGET_SHARE
-        if error.upstream_status is not None:
-            await self._gate.record(host, status=error.upstream_status, retry_after=None)
-        elif error.code in _HOST_FAILURES and (error.code != ErrorCode.TIMEOUT or fair_budget):
-            await self._gate.record(host, status=None, retry_after=None)
+        """Report a failed fetch to the gate (``record_fetch_failure``)."""
+        await record_fetch_failure(
+            self._gate,
+            host,
+            error,
+            budget=budget,
+            fetch_timeout_seconds=self._settings.fetch_timeout_seconds,
+        )
 
     async def _revalidated(
         self, run: _Run, stored: _Stored, fetched: FetchResult
@@ -2027,7 +2010,7 @@ class Pipeline:
         run.mode_used, run.unblocked = "browser", unblock
         run.report = ComplianceReport(mode=run.report.mode, decision="skipped")
         run.final_url = run.upstream_status = run.content_type = None
-        turn = _Turn(self._gate)
+        turn = HostTurn(self._gate)
         checked = {req.url}
         try:
             run.report = await self._check_origin(run, req.url, turn)
@@ -2058,7 +2041,7 @@ class Pipeline:
         run: _Run,
         renderer: Renderer,
         options: RenderOptions,
-        turn: _Turn,
+        turn: HostTurn,
         checked: set[str],
     ) -> Rendered:
         """Take the host's turn and render. Each later main-frame navigation is checked before
@@ -2107,7 +2090,7 @@ class Pipeline:
             run.render_ms += _ms(started)
 
     async def _check_answers(
-        self, run: _Run, rendered: Rendered, turn: _Turn, checked: set[str]
+        self, run: _Run, rendered: Rendered, turn: HostTurn, checked: set[str]
     ) -> Envelope[ExtractResult] | None:
         """Report each document answer to the gate (but a cleared challenge's, B14), then check
         every URL the render arrived at that was not checked before it was sent (HTTP redirect

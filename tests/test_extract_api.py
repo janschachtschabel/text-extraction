@@ -40,7 +40,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobRecord, JobStore
-from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.pipeline import Pipeline, _cache_options, create_pipeline
 from text_extraction.pool_dispatch import GracefulShutdown
 from text_extraction.pool_dispatch import Handover as PoolHandover
 from text_extraction.scheduler import FairQueue
@@ -179,6 +179,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "pii",
         "structured",
         "chunks",
+        "image_descriptions",
     }
     assert data["structured"] is None
     assert data["chunks"] is None
@@ -2626,3 +2627,135 @@ def test_a_shutdown_cut_that_loses_to_a_release_answers_the_flow_once() -> None:
     assert calls == ["flow"]
     assert not handover.detached
     assert background == set()
+
+
+# --- describe_images: the request checks on every route (issue #20, ruling V-S2) -----------------
+
+DESCRIBE: dict[str, Any] = {"max_images": 2}
+DESCRIBE_PII = "describe_images sends images to the LLM and cannot be combined with pii."
+DESCRIBE_METADATA = "describe_images needs metadata: true."
+IMAGES_PAGE = ARTICLE.replace(
+    "<h1>Photosynthesis explained</h1>",
+    '<h1>Photosynthesis explained</h1><img src="/img/leaf.png" alt="A leaf">'
+    '<img src="/img/sun.jpg">',
+)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_describe_400_without_llm(route: str) -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, describe_images=DESCRIBE)
+
+    refusal(response, 400, LLM_DISABLED)
+    assert service.fetcher.calls == []  # refused before anything was fetched
+    assert service.keys() == []  # and never a job
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_describe_400_without_any_key(route: str) -> None:
+    service = Service(llm_settings(llm_api_key=None))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, describe_images=DESCRIBE)
+
+    refusal(response, 400, LLM_KEY_MISSING)
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize(("route", "status"), [("extract", 200), ("file", 200), ("batch", 202)])
+def test_describe_accepted_with_header_key_only(route: str, status: int) -> None:
+    service = Service(llm_settings(llm_api_key=None))
+    without_llm_hop(service.app)  # the answer comes at once, without an llm worker
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, describe_images=DESCRIBE)
+
+    assert response.status_code == status, response.text
+    assert LLM_KEY not in response.text
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_describe_with_pii_422(route: str) -> None:
+    service = Service(llm_settings(pii_enabled=True))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, pii="mask", describe_images=DESCRIBE)
+
+    refusal(response, 422, DESCRIBE_PII)
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_describe_with_metadata_false_422(route: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(client, route, metadata=False, describe_images=DESCRIBE)
+
+    refusal(response, 422, DESCRIBE_METADATA)
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+def test_describe_waits_llm_sync_wait_by_default() -> None:
+    settings = llm_settings(llm_sync_wait_seconds=50)
+
+    assert request_wait_seconds(wait_body(describe_images={}), settings) == 50
+    assert request_wait_seconds(wait_body(describe_images=DESCRIBE), settings) == 50
+    assert request_wait_seconds(wait_body(), settings) is None
+    # An explicit wait_seconds wins.
+    assert request_wait_seconds(wait_body(wait_seconds=3, describe_images={}), settings) == 3
+    # The default is LLM_SYNC_WAIT_SECONDS.
+    plain = llm_settings()
+    assert request_wait_seconds(wait_body(describe_images={}), plain) == (
+        plain.llm_sync_wait_seconds
+    )
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_describe_keeps_caller_llm_key_with_its_jobs(
+    route: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job of a request with describe_images carries the caller's key for the llm worker; the
+    same request without it stores none."""
+    stored: list[str] = []
+    put_llm_key = JobStore.put_llm_key
+
+    async def recording(self: JobStore, job_id: str, key: str) -> None:
+        stored.append(key)
+        await put_llm_key(self, job_id, key)
+
+    monkeypatch.setattr(JobStore, "put_llm_key", recording)
+    service = Service(llm_settings())
+    without_llm_hop(service.app)
+    with TestClient(service.app) as client, capture_logs() as logs:
+        plain = post_route(client, route, headers=LLM_KEY_HEADERS, wait_seconds=0)
+        assert plain.status_code == 202, plain.text
+        assert stored == []
+        response = post_route(
+            client, route, headers=LLM_KEY_HEADERS, wait_seconds=0, describe_images=DESCRIBE
+        )
+        assert response.status_code == 202, response.text
+
+    assert stored == [LLM_KEY]
+    assert LLM_KEY not in response.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+def test_answer_without_describe_unchanged_but_new_nulls() -> None:
+    service = Service()
+    service.fetcher.answers[PAGE] = fetched(body=IMAGES_PAGE)
+    with TestClient(service.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "mode": "fast"}, headers=AUTH)
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["image_descriptions"] is None
+    images = data["metadata"]["images"]
+    assert len(images) == 2
+    for image in images:
+        assert set(image) == {"url", "alt", "description"}
+        assert image["description"] is None
+    # A post-stage option: the cache key of a request is the same with and without it.
+    plain = ExtractRequest(url=PAGE)
+    describe = ExtractRequest.model_validate({"url": PAGE, "describe_images": DESCRIBE})
+    assert _cache_options(describe, "enforce") == _cache_options(plain, "enforce")

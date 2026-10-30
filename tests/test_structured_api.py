@@ -311,6 +311,18 @@ def test_chunk_text_with_url_only_options_422() -> None:
         assert "cannot be combined with text" in messages(response)
 
 
+def test_chunk_text_refuses_describe_images() -> None:
+    """A text has no page and no image: describe_images is one of the page options (V-S1)."""
+    service = Service()
+    with TestClient(service.app) as client:
+        response = chunk(
+            client, text=MARKDOWN, chunking=CHUNKING_MARKDOWN, describe_images={"max_images": 2}
+        )
+
+    assert response.status_code == 422, response.text
+    assert "cannot be combined with text: describe_images" in messages(response)
+
+
 def test_chunk_text_becomes_a_file_job_when_handed_over() -> None:
     service = Service()
     with TestClient(service.app) as client:

@@ -1,7 +1,7 @@
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from typing import Any, cast
@@ -9,11 +9,15 @@ from typing import Any, cast
 import pytest
 from fakeredis import FakeAsyncRedis, FakeServer
 
+from text_extraction.envelope import ErrorCode
+from text_extraction.fetch import FetchError
 from text_extraction.outbound import (
     CircuitOpen,
     DomainGate,
+    HostTurn,
     OutboundBusy,
     parse_retry_after,
+    record_fetch_failure,
 )
 from text_extraction.settings import Settings
 
@@ -1013,3 +1017,79 @@ def test_the_starts_set_stays_small() -> None:
 
     # One start per second over 60 s; only the last few delays' worth are kept.
     assert asyncio.run(scenario()) <= 12
+
+
+# --- the turn that moves along a redirect chain, and the host failure rule ----------------------
+
+
+class NotingGate:
+    """Notes the turns taken and given back, and each outcome recorded."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, float | None]] = []
+        self.records: list[tuple[str, int | None]] = []
+
+    @asynccontextmanager
+    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
+        self.events.append(("take", host, crawl_delay))
+        try:
+            yield
+        finally:
+            self.events.append(("give back", host, None))
+
+    async def record(self, host: str, *, status: int | None, retry_after: float | None) -> None:
+        self.records.append((host, status))
+
+
+def test_host_turn_keeps_its_host_and_gives_back_before_another() -> None:
+    async def scenario() -> tuple[NotingGate, list[str | None], bool]:
+        gate = NotingGate()
+        turn = HostTurn(cast(DomainGate, gate))
+        answering: list[str | None] = []
+        await turn.take("Example.COM", None)
+        answering.append(turn.answering)
+        await turn.take("example.com", 2.0)  # held already: kept, no second turn
+        holds = turn.holds("EXAMPLE.com")
+        await turn.take("cdn.example.net", 1.0)
+        answering.append(turn.answering)
+        await turn.give_back()
+        answering.append(turn.answering)
+        await turn.give_back()  # nothing held: nothing happens
+        return gate, answering, holds
+
+    gate, answering, holds = asyncio.run(scenario())
+
+    assert gate.events == [
+        ("take", "Example.COM", None),
+        ("give back", "Example.COM", None),
+        ("take", "cdn.example.net", 1.0),
+        ("give back", "cdn.example.net", None),
+    ]
+    assert answering == ["example.com", "cdn.example.net", None]
+    assert holds is True
+
+
+@pytest.mark.parametrize(
+    ("error", "budget", "recorded"),
+    [
+        (FetchError(ErrorCode.TOO_LARGE, "x", upstream_status=200), 0.1, [(HOST, 200)]),
+        (FetchError(ErrorCode.DNS_ERROR, "x"), 0.1, [(HOST, None)]),
+        (FetchError(ErrorCode.CONNECTION_ERROR, "x"), 0.1, [(HOST, None)]),
+        (FetchError(ErrorCode.TIMEOUT, "x"), 10.0, [(HOST, None)]),  # half of 20 s: fair
+        (FetchError(ErrorCode.TIMEOUT, "x"), 9.9, []),  # cut short: says little about the host
+        (FetchError(ErrorCode.BLOCKED_URL, "x"), 20.0, []),
+        (FetchError(ErrorCode.UNSUPPORTED_CONTENT_TYPE, "x"), 20.0, []),
+    ],
+)
+def test_record_fetch_failure_counts_only_what_says_something_about_the_host(
+    error: FetchError, budget: float, recorded: list[tuple[str, int | None]]
+) -> None:
+    gate = NotingGate()
+
+    asyncio.run(
+        record_fetch_failure(
+            cast(DomainGate, gate), HOST, error, budget=budget, fetch_timeout_seconds=20
+        )
+    )
+
+    assert gate.records == recorded

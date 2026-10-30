@@ -554,17 +554,21 @@ workers:
         # Use this PVC instead of creating one.
         existingClaim: ""
 
-  # LLM workers (structured output with an LLM, semantic chunking; off by default): they claim the
-  # items of the pool `llm` (the last hop of a request with `structured` or `chunking`) and call the
-  # OpenAI-compatible endpoint below. They run the API image (`image.repository`): no model, no
+  # LLM workers (structured output with an LLM, semantic chunking, image descriptions; off by
+  # default): they claim the items of the pool `llm` (the last hop of a request with `structured`,
+  # `chunking` or `describe_images`) and call the OpenAI-compatible endpoint below. For
+  # `describe_images` they also fetch a page's images (through the SSRF guard, the compliance
+  # checks and the per-domain outbound limits, with the service's user agent), so their egress is
+  # the endpoint plus the image hosts. They run the API image (`image.repository`): no model, no
   # browser, no volume. Internal port 9090 only, no ingress, same ConfigMap and Secrets as the API
   # pods. The chart renders LLM_ENABLED from `enabled` into every pod (API, extract, browser,
   # Docling, ASR, NLP and llm workers) and, while enabled, LLM_BASE_URL, LLM_MODEL and
   # LLM_EMBEDDING_MODEL from the values below into every pod too: config.LLM_ENABLED,
-  # config.LLM_BASE_URL, config.LLM_MODEL and config.LLM_EMBEDDING_MODEL entries are ignored. The
-  # other LLM settings of docs/configuration.md (LLM_TEMPERATURE, LLM_MAX_TOKENS,
-  # LLM_TIMEOUT_SECONDS, LLM_MAX_INPUT_TOKENS, LLM_SYNC_WAIT_SECONDS, LLM_ALLOW_HTTP, ...) are
-  # service defaults: set them in `config`. Needs JOBS_ENABLED=true on the API pods (see
+  # config.LLM_BASE_URL, config.LLM_MODEL and config.LLM_EMBEDDING_MODEL entries are ignored.
+  # LLM_VISION_MODEL is rendered the same way while `visionModel` is set. The other LLM settings
+  # of docs/configuration.md (LLM_TEMPERATURE, LLM_MAX_TOKENS, LLM_TIMEOUT_SECONDS,
+  # LLM_MAX_INPUT_TOKENS, LLM_SYNC_WAIT_SECONDS, LLM_ALLOW_HTTP, LLM_VISION_MAX_IMAGE_BYTES, ...)
+  # are service defaults: set them in `config`. Needs JOBS_ENABLED=true on the API pods (see
   # `jobs.enabled`). Without it a request that needs the LLM answers 400.
   llm:
     enabled: false
@@ -581,6 +585,9 @@ workers:
     # LLM_EMBEDDING_MODEL: model of the endpoint's /embeddings route. Empty: `semantic` chunking
     # answers 400.
     embeddingModel: ""
+    # LLM_VISION_MODEL: the model of the image descriptions (`describe_images`, issue #20); it must
+    # take images. Empty: LLM_MODEL describes them.
+    visionModel: ""
     # LLM_API_KEY, the key of the endpoint, from a Secret of your own (the chart creates none).
     # The API pods (which only check that a key exists) and the llm worker container read it.
     # A caller's X-LLM-Api-Key header wins over it. Empty: callers must send the header.
@@ -601,7 +608,11 @@ workers:
     terminationGracePeriodSeconds: 40
     # Placeholder values until package 11 measures real consumption: the worker waits for the
     # endpoint and holds no model; 512 MiB of the limit are the selector child that checks the
-    # proposals of learn_selectors (STRUCTURED_SELECTOR_MEMORY_MB).
+    # proposals of learn_selectors (STRUCTURED_SELECTOR_MEMORY_MB). describe_images holds up to
+    # concurrency x 2 (DESCRIBE_CONCURRENCY) images at once, each its bytes plus their base64
+    # copy and the SDK's request body: about 5 x config.LLM_VISION_MAX_IMAGE_BYTES per image
+    # (about 200 MB with the defaults, 800 MB at 20 MB). Raise the memory limit, or lower
+    # concurrency, with LLM_VISION_MAX_IMAGE_BYTES.
     resources:
       requests:
         cpu: 100m

@@ -50,6 +50,7 @@ from text_extraction.escalation import needs_browser
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
+from text_extraction.metadata import PageMetadata
 from text_extraction.outbound import DomainGate
 from text_extraction.pipeline import Pipeline, _cache_options, create_pipeline
 from text_extraction.pipeline_documents import (
@@ -63,7 +64,9 @@ from text_extraction.pipeline_documents import (
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
+from text_extraction.structured.post import finish_post, needs_llm
 from text_extraction.structured.selector_pool import SELECTOR_TARGET
+from text_extraction.vision.types import DescribeImagesOptions
 
 CORPUS = Path(__file__).parent / "documents" / "corpus"
 GOLDEN = Path(__file__).parent / "documents" / "golden" / "package4_answers.json"
@@ -535,6 +538,38 @@ def test_image_with_ocr_never_unsupported() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
     assert "ocr: never" in envelope.error.message
+
+
+def test_url_image_target_not_described() -> None:
+    """V-S4: a URL whose body is an image keeps today's path (no stand-in without OCR), and its
+    OCR result has no image to describe: an empty report, no hop to the LLM."""
+    harness = Harness(
+        None,
+        {DOC: fetched(DOC, PNG, content_type="image/png")},
+        pool=FakePool(AssertionError("not converted")),
+        llm_enabled=True,
+        llm_api_key="sk-operator",
+    )
+    describe = DescribeImagesOptions()
+
+    envelope = harness.run(describe_images={}, metadata=True)
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert not ExtractRequest(url=DOC).describe_upload
+    # As the Docling worker answers it: OCR text, mode fast, the URL's image type.
+    ocr = data_of(envelope).model_copy(
+        update={"content": "Bruch 3/4", "word_count": 2, "metadata": PageMetadata()}
+    )
+    answered = Envelope[ExtractResult](status="success", data=ocr)
+    assert not needs_llm(answered, None, None, harness.settings, describe=describe)
+    done = finish_post(answered, None, None, settings=harness.settings, describe=describe)
+    report = data_of(done).image_descriptions
+    assert report is not None
+    assert (report.asked, report.described, report.skipped, report.failed) == (0, 0, 0, 0)
+    assert done.status == "success"
+    assert data_of(done).content == "Bruch 3/4"
 
 
 def test_scan_with_docling_returns_ocr_needed() -> None:

@@ -265,6 +265,59 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   http://localhost:8080/v1/batch
 ```
 
+### Image descriptions
+
+`describe_images` asks the LLM (the operator's vision model, `LLM_VISION_MODEL`, else `LLM_MODEL`)
+for a short description of each image of the page, for a search index and for people who cannot
+see it. It needs `metadata` (on by default; with `"metadata": false` it is 422): the descriptions
+go on the entries of `metadata.images` (cover images first, then the page's `<img>`), at most
+`max_images` of them (default 5, at most 20). `content` stays the page text:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/natur/wasserkreislauf", "describe_images": {"max_images": 3}}' \
+  http://localhost:8080/v1/extract
+# {"status": "success", "data": {"metadata": {"images": [
+#   {"url": "https://example.org/bilder/titel.png", "alt": "Wolken über einem See",
+#    "description": "Wolken ziehen über einen See, an dessen Ufer Bäume stehen."},
+#   {"url": "https://example.org/bilder/tafel.jpg", "alt": "", "description": "Ein Tafelbild ..."},
+#   {"url": "https://cdn.example.net/x.png", "alt": "", "description": null}], ...},
+#  "image_descriptions": {"asked": 3, "described": 2, "skipped": 1, "failed": 0,
+#   "llm": {"model": "gpt-6-luna", "calls": 2, ...}},
+#  "warnings": ["image_not_described"], "timings": {"llm_ms": 2140, ...}, ...}, ...}
+```
+
+The images are fetched the way pages are: through the SSRF guard, robots.txt and the TDM checks of
+the request's `compliance`, and the per-domain limits, with the service's user agent and never
+your cookies or headers. An image that is not fetched, not a PNG, JPEG, GIF or WebP, larger than
+`LLM_VISION_MAX_IMAGE_BYTES` (5 MB) or that the model cannot describe keeps `description: null`,
+with the warning `image_not_described`; the status stays. `timings.llm_ms` covers the descriptions,
+their image fetches included. An uploaded PNG, JPEG or WebP is described too: its description is
+also appended to `content` after the OCR text (`> Image description: ...` in Markdown), on an image
+entry with `url: null`:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -F file=@arbeitsblatt.png -F 'describe_images={}' \
+  http://localhost:8080/v1/extract/file
+# {"status": "success", "data": {"content": "Der Wasserkreislauf ...\n\n> Image description:
+#  Ein Arbeitsblatt mit einer Skizze des Wasserkreislaufs.", "metadata": {"images": [
+#  {"url": null, "alt": "", "description": "Ein Arbeitsblatt mit einer Skizze ..."}], ...}, ...}, ...}
+```
+
+`describe_images` cannot be combined with `pii` (422): no unmasked image goes to the LLM. As for
+`structured`, your `X-LLM-Api-Key` wins over the operator's key, a request waits
+`LLM_SYNC_WAIT_SECONDS` (30 s) before it answers 202 with a job, and descriptions are never cached:
+a repeated request describes its images again. Images inside PDFs and other documents are not
+described.
+
+The descriptions have their own time budget (1.5 × `LLM_TIMEOUT_SECONDS`), on top of the time of
+`structured` and `semantic` chunking; descriptions already made stay when a later LLM step fails.
+Images still being fetched when the budget ends, for example on a host whose robots.txt sets a
+long `Crawl-delay`, are skipped (`image_not_described`), and the status stays. A page whose result
+is close to `JOB_ITEM_MAX_BYTES` (2 MB) can come back without its `content`, with the warning
+`content_not_stored_too_large`, once `describe_images` sends it through the LLM workers, as with
+`structured`: the descriptions do not need it.
+
 ### Browser mode
 
 Pages that need JavaScript are rendered in Chromium by the browser worker. `mode` is `fast` (HTTP

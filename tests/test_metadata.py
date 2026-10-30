@@ -349,13 +349,34 @@ def test_images_with_alt_capped_at_20() -> None:
     assert result.images[0].model_dump() == {
         "url": "https://www.example.org/cover.jpg",
         "alt": "Titelbild",
+        "description": None,
     }
-    assert result.images[1].model_dump() == {"url": "https://www.example.org/lazy.png", "alt": ""}
+    assert result.images[1].model_dump() == {
+        "url": "https://www.example.org/lazy.png",
+        "alt": "",
+        "description": None,
+    }
     assert result.images[2].model_dump() == {
         "url": "https://www.example.org/img/0.png",
         "alt": "Bild 0",
+        "description": None,
     }
-    assert all(not image.url.startswith("data:") for image in result.images)
+    assert all(not (image.url or "").startswith("data:") for image in result.images)
+
+
+def test_image_url_may_be_null() -> None:
+    """An image upload's entry has no URL, as ``data.url`` is null for uploads (V-S3)."""
+    image = metadata.Image(url=None, alt="", description="A bar chart of rainfall per month.")
+
+    assert image.model_dump() == {
+        "url": None,
+        "alt": "",
+        "description": "A bar chart of rainfall per month.",
+    }
+    assert metadata.Image(url="https://example.org/a.png", alt="A").description is None
+    parsed = PageMetadata.model_validate({"images": [{"url": None, "alt": ""}]})
+    assert parsed.images[0].url is None
+    assert parsed.images[0].description is None
 
 
 def test_images_resolve_against_base_href() -> None:

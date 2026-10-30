@@ -146,6 +146,15 @@ def test_default_policy_allows_private_networks_only_when_configured(
     assert fetch(httpserver.url_for("/ok"), fetcher=fetcher).content == b"ok"
 
 
+def test_policy_is_the_one_given_or_the_default() -> None:
+    assert make_fetcher().policy is allow_loopback_only
+    public = Fetcher(Settings(auth_mode="none")).policy
+    assert public(IPv4Address("8.8.8.8"))
+    assert not public(LOOPBACK)
+    private = Fetcher(Settings(auth_mode="none", fetch_allow_private_networks=True)).policy
+    assert private(LOOPBACK)
+
+
 def test_redirect_to_invalid_scheme_is_invalid_url(httpserver: HTTPServer) -> None:
     httpserver.expect_request("/go").respond_with_data(
         "", 302, headers={"Location": "file:///etc/passwd"}

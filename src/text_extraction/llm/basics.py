@@ -11,13 +11,27 @@ from text_extraction.envelope import ErrorCode
 
 class LlmError(Exception):
     """An LLM call failed. ``message`` is safe to put into an answer: a fixed text that names
-    the HTTP status at most. ``code`` is ``ErrorCode.LLM_FAILED``."""
+    the HTTP status at most. ``code`` is ``ErrorCode.LLM_FAILED``. ``status`` is the endpoint's
+    HTTP status when it answered with one, else None (timeout, connection, an answer that does
+    not fit); ``invalid_answer`` is true only for an answer that did not fit the schema after the
+    repair call (ruling R-V1). With both, the vision step tells an image the endpoint refuses
+    (400, 413, 422, or an invalid answer) from an endpoint that is down."""
 
-    def __init__(self, message: str, *, retryable: bool, code: ErrorCode = ErrorCode.LLM_FAILED):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        code: ErrorCode = ErrorCode.LLM_FAILED,
+        status: int | None = None,
+        invalid_answer: bool = False,
+    ):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.message = message
+        self.status = status
+        self.invalid_answer = invalid_answer
 
 
 def truncate_input(text: str, max_chars: int) -> tuple[str, bool]:

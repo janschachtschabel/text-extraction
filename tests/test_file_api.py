@@ -20,11 +20,14 @@ from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from pytest_httpserver import HTTPServer
 from starlette.datastructures import UploadFile
 from starlette.types import Message
 from structlog.testing import capture_logs
 
 from tests.fakes import ARTICLE, PARAGRAPH
+from tests.test_llm_dispatch import LLM_HEADERS, LlmService
+from tests.vision.describe_helpers import described, serve_llm, vision_requests
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
@@ -35,6 +38,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_api import sanitize_file_name
 from text_extraction.file_models import FileForm
 from text_extraction.jobs import JobStore
+from text_extraction.metadata import PageMetadata
 from text_extraction.pipeline import create_pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
 from text_extraction.pipeline_media import (
@@ -44,6 +48,7 @@ from text_extraction.pipeline_media import (
     MediaInputMeta,
 )
 from text_extraction.settings import Settings
+from text_extraction.vision.types import DescribeImagesOptions
 
 CORPUS = Path(__file__).parent / "documents" / "corpus"
 USER_KEY = "user-key-0123456789-raw-secret"
@@ -483,9 +488,12 @@ def test_option_form_field_over_64_kib_is_422(client: TestClient) -> None:
         assert response.json()["error"]["message"] == "Part exceeded maximum size of 64KB."
 
 
-@pytest.mark.parametrize("name", ["pii", "format", "ocr", "wait_seconds", "metadata"])
+@pytest.mark.parametrize(
+    "name", ["pii", "format", "ocr", "wait_seconds", "metadata", "describe_images"]
+)
 def test_other_form_field_over_1_kib_is_422(client: TestClient, name: str) -> None:
-    value = '{"mode": "mask"}' + " " * 1024 if name == "pii" else "x" * 1025
+    padded = {"pii": '{"mode": "mask"}', "describe_images": "{}"}
+    value = padded[name] + " " * 1024 if name in padded else "x" * 1025
 
     response = upload(client, GIF, "a.gif", "image/gif", form={name: value})
 
@@ -531,6 +539,40 @@ def test_invalid_form_is_422(client: TestClient, form: dict[str, str]) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("value", ["x", "{not json", '{"max_images": 21}', '{"detail": "high"}'])
+def test_describe_images_form_field_that_does_not_parse_is_422(
+    client: TestClient, value: str
+) -> None:
+    response = upload(client, GIF, "a.gif", "image/gif", form={"describe_images": value})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    locations = [detail["loc"] for detail in response.json()["error"]["details"]]
+    assert any("describe_images" in location for location in locations)
+
+
+def test_the_form_takes_every_field_at_once() -> None:
+    """All eight small fields fit MAX_FIELDS: the form parses, and only the LLM check is left
+    (this service has none)."""
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    form = {
+        "format": "markdown",
+        "metadata": "true",
+        "ocr": "auto",
+        "wait_seconds": "5",
+        "pii": "mask",
+        "structured": json.dumps({"tables": True}),
+        "chunking": json.dumps({"strategy": "fixed"}),
+        "describe_images": "{}",
+    }
+    assert set(form) == set(FileForm.model_fields)
+    with TestClient(app) as test_client:
+        response = upload(test_client, ARTICLE.encode(), "page.html", "text/html", form=form)
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["message"] == "PII handling is not enabled on this service."
 
 
 @pytest.mark.parametrize("pii", ["mask", '{"mode": "annotate", "entities": ["PERSON"]}'])
@@ -884,9 +926,10 @@ def test_openapi_documents_multipart(client: TestClient) -> None:
         "pii",
         "structured",
         "chunking",
+        "describe_images",
     }
     assert form["properties"]["wait_seconds"]["default"] == 25
-    for name in ("pii", "structured", "chunking"):
+    for name in ("pii", "structured", "chunking", "describe_images"):
         assert form["properties"][name]["type"] == "string"
     assert "202" in operation["responses"]
 
@@ -1012,6 +1055,149 @@ def test_extract_upload_image_without_handoff_is_unsupported() -> None:
     assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
     assert "not enabled" not in envelope.error.message  # OCR exists; no handoff was given
     assert "OCR" in envelope.error.message
+
+
+# --- image uploads with describe_images (ruling V-S8) ---------------------------------------------
+
+DESCRIBE_FORM = FileForm(describe_images=DescribeImagesOptions(), metadata=True)
+
+
+def assert_image_stand_in(envelope: Envelope[ExtractResult], kind: str = "png") -> ExtractResult:
+    """The stand-in of an image the service cannot OCR: ``success``, no text, for its
+    description."""
+    assert envelope.status == "success", envelope.error
+    assert envelope.error is None
+    data = envelope.data
+    assert data is not None
+    assert (data.content, data.word_count) == ("", 0)
+    assert data.metadata == PageMetadata()
+    assert data.document is not None
+    document = data.document
+    assert (document.kind, document.converter, document.ocr) == (kind, "docling", False)
+    assert (document.pages, document.pages_converted) == (None, None)
+    assert document.file_name == "photo.png"
+    assert data.mode_used == "upload"
+    return data
+
+
+@pytest.mark.parametrize("docling", [False, True], ids=["docling-off", "no-handoff"])
+def test_image_upload_without_ocr_stands_in_for_its_description(docling: bool) -> None:
+    envelope, pool, _ = run_upload(
+        AssertionError("not converted"),
+        PNG,
+        name="photo.png",
+        content_type="image/png",
+        form=DESCRIBE_FORM,
+        docling_enabled=docling,
+    )
+
+    data = assert_image_stand_in(envelope)
+    assert data.content_type == "image/png"
+    assert OCR_UNAVAILABLE_WARNING in data.warnings
+    assert pool.calls == []
+
+
+def test_image_upload_ocr_never_has_no_ocr_warning() -> None:
+    form = DESCRIBE_FORM.model_copy(update={"ocr": "never"})
+    for docling in (False, True):
+        envelope, _, _ = run_upload(
+            AssertionError("not converted"),
+            PNG,
+            name="photo.png",
+            content_type="image/png",
+            form=form,
+            docling_enabled=docling,
+        )
+
+        data = assert_image_stand_in(envelope)
+        assert OCR_UNAVAILABLE_WARNING not in data.warnings
+
+
+def test_image_upload_with_handoff_stands_in_until_the_ocr() -> None:
+    seen: list[Envelope[ExtractResult]] = []
+
+    async def handoff(
+        needed: OcrNeeded, without: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        seen.append(without)
+        return without
+
+    envelope, _, _ = run_upload(
+        AssertionError("not converted"),
+        PNG,
+        handoff=handoff,
+        name="photo.png",
+        content_type="image/png",
+        form=DESCRIBE_FORM,
+        docling_enabled=True,
+    )
+
+    [without] = seen
+    assert_image_stand_in(without)
+    assert envelope.status == "success"
+
+
+def test_image_upload_without_ocr_is_described(httpserver: HTTPServer) -> None:
+    """Review Focus 5: a photo without text while Docling is off is described, end to end: the
+    stand-in goes to the llm workers with its bytes, which they describe and then delete."""
+    picture = "Ein Foto von drei Äpfeln auf einem Tisch."
+    serve_llm(httpserver, lambda _body, _n: described(picture))
+    service = LlmService(httpserver)
+    with TestClient(service.app) as test_client, service.workers():
+        response = upload(
+            test_client,
+            PNG,
+            "photo.png",
+            "image/png",
+            headers=LLM_HEADERS,
+            form={"describe_images": "{}"},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "success", body["error"]
+        data = body["data"]
+        assert data["content"] == f"> Image description: {picture}"
+        assert data["metadata"]["images"] == [{"url": None, "alt": "", "description": picture}]
+        assert data["image_descriptions"]["described"] == 1
+        assert OCR_UNAVAILABLE_WARNING in data["warnings"]
+        assert data["document"]["converter"] == "docling"
+        assert service.wait_for_no_jobs() == []
+    assert len(vision_requests(httpserver)) == 1
+
+
+def test_image_upload_without_describe_unchanged() -> None:
+    off, _, _ = run_upload(
+        AssertionError("not converted"), PNG, name="photo.png", content_type="image/png"
+    )
+    never, _, _ = run_upload(
+        AssertionError("not converted"),
+        PNG,
+        name="photo.png",
+        content_type="image/png",
+        form=FileForm(ocr="never"),
+        docling_enabled=True,
+    )
+
+    for envelope in (off, never):
+        assert envelope.status == "failed"
+        assert envelope.error is not None
+        assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+
+
+def test_tiff_and_pdf_uploads_are_no_stand_ins() -> None:
+    """Only the image types the vision model takes (PNG, JPEG, WebP) stand in."""
+    tiff, _, _ = run_upload(
+        AssertionError("not converted"),
+        b"II*\x00" + b"\x00" * 64,
+        name="scan.tiff",
+        content_type="image/tiff",
+        form=DESCRIBE_FORM,
+    )
+
+    assert tiff.status == "failed"
+    assert tiff.error is not None
+    assert tiff.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
 
 
 def test_extract_upload_hands_over_after_the_deadline() -> None:

@@ -25,6 +25,7 @@ from structlog.testing import capture_logs
 from tests.fakes import PARAGRAPH, Answer, FakeFetcher, RefusingGate, fetched
 from tests.structured.post_helpers import answer, chat_requests, serve_chat
 from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
+from tests.vision.describe_helpers import FakeImages, described, image_url, serve_llm
 from text_extraction import worker as worker_module
 from text_extraction.asr_dispatch import asr_queue
 from text_extraction.auth import Principal
@@ -55,8 +56,10 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
 from text_extraction.settings import Settings
+from text_extraction.structured.post import BUSY_MESSAGE
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import StructuredOptions
+from text_extraction.vision.types import DescribeImagesOptions, StoredInputMeta
 from text_extraction.worker import ExtractRunner, Worker, _serve, build_worker, main
 
 START = 1_000_000.0
@@ -2533,11 +2536,13 @@ class LlmPool:
     """The llm worker of a harness: the real ``Worker`` and ``LlmRunner`` on its store and queue
     ``llm``; the endpoint is the test's pytest-httpserver."""
 
-    def __init__(self, harness: Harness) -> None:
+    def __init__(self, harness: Harness, *, images: FakeImages | None = None) -> None:
         self.queue = llm_queue(harness.valkey, harness.settings)
         self.registry = CollectorRegistry()
         selectors = SelectorStore(harness.valkey, harness.settings.selector_learn_ttl_seconds)
-        self.runner = LlmRunner(harness.settings, harness.store, selectors, registry=self.registry)
+        self.runner = LlmRunner(
+            harness.settings, harness.store, selectors, registry=self.registry, images=images
+        )
         self.worker = Worker(
             harness.settings,
             harness.valkey,
@@ -2831,3 +2836,163 @@ def test_every_pool_but_llm_moves_results_to_llm(tmp_path: Path) -> None:
             pool.shutdown()
         asr.conversion_pool.shutdown()
         plain.pool.shutdown()
+
+
+# --- image descriptions (issue #20, rulings V-S5, V-S7, V-S11) ------------------------------------
+
+PICTURE = "Ein Balkendiagramm mit drei Balken."
+IMAGES_PAGE = (
+    "<!doctype html><html lang='de'><head><title>Brüche</title></head><body><article>"
+    f"<h1>Brüche</h1><p>{PARAGRAPH * 4}</p>"
+    f"<img src='{image_url(0)}' alt='Bild 0'><img src='{image_url(1)}' alt='Bild 1'>"
+    "</article></body></html>"
+)
+DESCRIBE_JOB = JobOptions(
+    compliance="enforce", metadata=True, describe_images=DescribeImagesOptions()
+)
+
+
+def images_harness(server: HTTPServer, url: str) -> Harness:
+    return Harness(
+        {url: fetched(url, IMAGES_PAGE)},
+        llm_enabled=True,
+        llm_base_url=server.url_for("/v1"),
+        llm_allow_http=True,
+        llm_api_key=LLM_ENV_KEY,
+    )
+
+
+@scenario
+async def test_batch_item_moves_to_llm_for_descriptions(httpserver: HTTPServer) -> None:
+    """A batch item with ``describe_images`` and images moves to ``llm``; the llm worker
+    describes them with its image fetcher."""
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    url = page("example.org")
+    harness = images_harness(httpserver, url)
+    job_id = await submit_with(harness, [url], DESCRIBE_JOB)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert outcome_count(harness, "escalated") == 1
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.image_descriptions is None  # owed: the llm worker's
+    images = FakeImages()
+    llm = LlmPool(harness, images=images)
+    assert await llm.drain() == 1
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "success", item.result.error
+    data = item.result.data
+    assert data is not None
+    assert data.metadata is not None
+    assert [image.description for image in data.metadata.images] == [PICTURE, PICTURE]
+    assert data.image_descriptions is not None
+    assert data.image_descriptions.described == 2
+    assert [call[0] for call in images.calls] == [image_url(0), image_url(1)]
+
+
+@pytest.mark.parametrize("cause", ["memory-guard", "no-move"])
+@scenario
+async def test_worker_without_move_reports_descriptions_failed(
+    httpserver: HTTPServer, cause: str
+) -> None:
+    """V-S11: without the llm hop (the memory guard, a worker without the move) the item is
+    written with its images ``failed``: ``partial``/``llm_failed``, retryable, its content."""
+    url = page("example.org")
+    harness = images_harness(httpserver, url)
+    if cause == "memory-guard":
+        harness.guard.high = True
+    else:
+        harness.worker._llm_move = None
+    job_id = await submit_with(harness, [url], DESCRIBE_JOB)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    error = item.result.error
+    assert error is not None
+    assert (error.code, error.retryable) == (ErrorCode.LLM_FAILED, True)
+    if cause == "memory-guard":
+        assert error.message == BUSY_MESSAGE
+    data = item.result.data
+    assert data is not None
+    assert data.content
+    report = data.image_descriptions
+    assert report is not None
+    assert (report.asked, report.described, report.failed) == (2, 0, 2)
+    assert httpserver.log == []
+    failed = harness.sample("text_extraction_vision_images_total", {"outcome": "failed"})
+    assert failed == 2  # in the worker's registry
+
+
+@scenario
+async def test_llm_worker_deletes_upload_input_with_result(httpserver: HTTPServer) -> None:
+    """V-S7: an image upload's file job (Docling off) moves to ``llm`` with its input kept;
+    the llm worker describes the stored bytes and deletes them with the result."""
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    harness = images_harness(httpserver, page("example.org"))
+    options = JobOptions(
+        mode="fast",
+        compliance="enforce",
+        cache=False,
+        metadata=True,
+        describe_images=DescribeImagesOptions(),
+    )
+    job_id = await harness.store.create("file", OWNER, options, [None])
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    meta = UploadInputMeta(file_name="photo.png", content_type="image/png")
+    await harness.store.put_input(job_id, 0, png, meta, 600)
+    await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert outcome_count(harness, "escalated") == 1
+    stored = await harness.store.get_input(job_id, 0, StoredInputMeta)
+    assert stored is not None
+    assert stored[0] == png
+    llm = LlmPool(harness)
+    assert await llm.drain() == 1
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "success", item.result.error
+    data = item.result.data
+    assert data is not None
+    assert data.content == f"> Image description: {PICTURE}"
+    assert OCR_UNAVAILABLE_WARNING in data.warnings
+    assert await harness.valkey.keys("job:*:input:*") == []
+    assert await harness.store.draft(job_id, 0) is None
+
+
+@scenario
+async def test_non_image_upload_moving_to_llm_drops_its_input(httpserver: HTTPServer) -> None:
+    """V-S7: only an image upload that can be described keeps its input past the move. A text
+    upload that moves to ``llm`` for ``structured`` alone, with ``describe_images`` set, has no
+    image to describe: its input goes with the move, as without the option."""
+    harness = images_harness(httpserver, page("example.org"))
+    options = JobOptions(
+        mode="fast",
+        compliance="enforce",
+        cache=False,
+        metadata=True,
+        describe_images=DescribeImagesOptions(),
+        structured=StructuredOptions.model_validate(
+            {
+                "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "strategy": "llm",
+            }
+        ),
+    )
+    job_id = await harness.store.create("file", OWNER, options, [None])
+    meta = UploadInputMeta(file_name="notes.md", content_type="text/markdown")
+    await harness.store.put_input(job_id, 0, (PARAGRAPH * 4).encode(), meta, 600)
+    await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert outcome_count(harness, "escalated") == 1
+    assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 1
+    assert await harness.store.get_input(job_id, 0, StoredInputMeta) is None

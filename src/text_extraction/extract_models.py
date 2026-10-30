@@ -29,6 +29,7 @@ from text_extraction.pii.types import BareModeOrObject, PiiOptions, PiiReport
 from text_extraction.quality import Quality
 from text_extraction.structured.types import StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
+from text_extraction.vision.types import DescribeImagesOptions, ImageDescriptionReport
 
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
@@ -129,6 +130,23 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="Split the content into chunks for retrieval: `data.chunks`. Needs "
         "`format: markdown` or `text`.",
     )
+    describe_images: DescribeImagesOptions | None = Field(
+        default=None,
+        description="Describe the page's images with the vision model: the first `max_images` "
+        "of `metadata.images` (cover images first) get a `description`, and "
+        "`data.image_descriptions` reports what came of it. An uploaded PNG, JPEG or WebP "
+        "(`POST /v1/extract/file`) is described too, and its description is appended to "
+        "`content`. The images are fetched with the service's checks and limits, never with the "
+        "request's cookies, headers or browser. `{}` takes the defaults. 400 while the service "
+        "has no LLM or without any LLM key; 422 with `pii` or `metadata: false`. A request "
+        "without `wait_seconds` waits `LLM_SYNC_WAIT_SECONDS`, then answers 202.",
+    )
+
+    @property
+    def describe_upload(self) -> bool:
+        """Whether the request's own upload is described (ruling V-S8): never for a URL
+        request; only the options of an upload with ``describe_images`` say yes."""
+        return False
 
     @model_validator(mode="after")
     def _browser_options(self) -> Self:
@@ -171,6 +189,7 @@ _URL_ONLY_OPTIONS = (
     "ocr",
     "transcribe",
     "languages",
+    "describe_images",
 )
 
 
@@ -192,8 +211,8 @@ class ChunkRequest(ExtractRequest):
         "is handled as an upload of `text/markdown` or `text/plain` (`text_type`), as by "
         "`POST /v1/extract/file`: `mode_used: upload`, no fetch, no cache. With `text` the "
         "options that belong to a page (`mode`, `links`, `compliance`, `cache`, `actions`, "
-        "`cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`) are "
-        "422. Exactly one of `url` and `text`.",
+        "`cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, "
+        "`describe_images`) are 422. Exactly one of `url` and `text`.",
     )
     text_type: Literal["markdown", "plain"] = Field(
         default="markdown",
@@ -260,7 +279,9 @@ class Timings(BaseModel):
     convert_ms: int
     render_ms: int = 0  # browser: navigation, actions and settling; 0 in fast mode
     pii_ms: int = 0  # the PII step; 0 without ``pii``
-    llm_ms: int = 0  # the LLM calls of ``structured``; 0 without them
+    # The LLM calls of ``structured`` and ``chunking``, and the image descriptions of
+    # ``describe_images`` (their step, image fetches included); 0 without them.
+    llm_ms: int = 0
 
 
 class ExtractResult(BaseModel):
@@ -322,8 +343,10 @@ class ExtractResult(BaseModel):
         "characters: the first ones), `chunks_truncated` (more chunks than `CHUNK_MAX_CHUNKS`: "
         "the first ones), "
         "`chunking_fallback_recursive` (the chunking strategy needed Markdown or too many "
-        "sentences for embeddings: `recursive` was used) (structured output and chunking). "
-        "Converter notes may follow."
+        "sentences for embeddings: `recursive` was used) (structured output and chunking); "
+        "`image_not_described` (an image of `describe_images` was skipped or the model did not "
+        "describe it: its `description` is null, `data.image_descriptions` counts why) (image "
+        "descriptions). Converter notes may follow."
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
@@ -337,6 +360,8 @@ class ExtractResult(BaseModel):
     # With a ``structured`` or ``chunking`` request only; the defaults keep older results valid.
     structured: StructuredResult | None = None
     chunks: list[Chunk] | None = None
+    # With a ``describe_images`` request only; the default keeps older results valid.
+    image_descriptions: ImageDescriptionReport | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

@@ -95,6 +95,7 @@ from typing import Annotated, Any, Literal
 import structlog
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import CollectorRegistry
 from redis.exceptions import RedisError
 
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, AsrDispatcher, AsrHandoff, asr_key_of
@@ -125,7 +126,7 @@ from text_extraction.extract_models import (
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
-from text_extraction.llm_dispatch import LlmDispatcher, LlmHandoff
+from text_extraction.llm_dispatch import LlmDispatcher, LlmHandoff, UploadInput
 from text_extraction.pii.fields import ANNOTATE_HTML_MESSAGE, fail_closed
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, pii_available
@@ -150,6 +151,8 @@ from text_extraction.structured.checks import (
 from text_extraction.structured.post import LlmHop, post_at_finish
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.tracing import current_trace_id
+from text_extraction.vision.checks import check_describe_request
+from text_extraction.vision.types import DescribeImagesOptions
 
 _log = structlog.get_logger(__name__)
 
@@ -350,7 +353,7 @@ def request_wait_seconds(body: ExtractRequest, settings: Settings) -> float | No
         settings,
         transcribe=body.transcribe,
         pii=body.pii is not None,
-        llm=wants_llm(body.structured, body.chunking, settings),
+        llm=wants_llm(body.structured, body.chunking, settings, describe=body.describe_images),
     )
 
 
@@ -388,11 +391,13 @@ async def respond(
     check_structured_request(
         body.structured, body.chunking, body.pii, body.format, settings, llm_key=llm_key
     )
+    check_describe_request(body.describe_images, body.pii, body.metadata, settings, llm_key=llm_key)
     wait_seconds = request_wait_seconds(body, settings)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)
     # Only a request that may need the LLM keeps the caller's key with its jobs.
-    job_llm_key = llm_key if wants_llm(body.structured, body.chunking, settings) else None
+    llm = wants_llm(body.structured, body.chunking, settings, describe=body.describe_images)
+    job_llm_key = llm_key if llm else None
     flow = partial(
         _flow,
         state,
@@ -425,6 +430,7 @@ async def respond(
         pii=body.pii,
         structured=body.structured,
         chunking=body.chunking,
+        describe=body.describe_images,
     )
 
 
@@ -473,14 +479,16 @@ async def answer_or_hand_over(
     pii: PiiOptions | None = None,
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
+    describe: DescribeImagesOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run ``flow``, or answer 202 with a job after ``wait_seconds`` (the module docstring):
     the pool job the flow dispatched (of ``kind``), or a P1 job that ``hand_over`` creates (of
     kind ``file`` for an upload, else ``extract``). ``renders_first`` says that the flow goes to
     the browser at once. Every envelope answered or stored in the P1 job passes
     ``pii.fields.fail_closed`` with the request's ``pii`` (N12); one stored in the P1 job gets
-    the post stage of the request's ``structured`` and ``chunking`` first, if it lacks it (S13).
-    Shared with ``POST /v1/extract/file`` (``file_api.py``)."""
+    the post stage of the request's ``structured``, ``chunking`` and ``describe_images``
+    (``describe``) first, if it lacks it (S13). Shared with ``POST /v1/extract/file``
+    (``file_api.py``)."""
     settings: Settings = state.settings
     if wait_seconds is None or not settings.jobs_enabled:
         return await _answer(state, await flow(), handover, kind, pii)
@@ -541,8 +549,10 @@ async def answer_or_hand_over(
             pii=pii,
             structured=structured,
             chunking=chunking,
+            describe=describe,
             settings=settings,
             threads=state.post_pool,
+            registry=state.registry,
         )
     )
     _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
@@ -717,15 +727,16 @@ async def post_stage(
     url: str | None,
     wait_until: float | None,
     llm_key: str | None,
+    upload: UploadInput | None = None,
 ) -> _Answer:
     """Step 8 of a sync flow (``_flow``, ``file_api._flow``): the post stage of the request's
-    ``structured`` and ``chunking`` (``options``) for an envelope that still owes it
-    (``structured.post.post_at_finish``), on the app's post pool (rulings R10, R21), timed into
-    ``total_ms``. An envelope that needs the LLM goes to the llm workers
-    (``llm_dispatch.LlmHandoff``, S13) with the caller's ``llm_key``: the answer is their
-    result, the content without the LLM work (``llm_failed``, retryable) when they could not
-    take it, or None once the llm job is the route's or the P1 job's. Any other envelope comes
-    back as it is."""
+    ``structured``, ``chunking`` and ``describe_images`` (``options``) for an envelope that
+    still owes it (``structured.post.post_at_finish``), on the app's post pool (rulings R10,
+    R21), timed into ``total_ms``. An envelope that needs the LLM goes to the llm workers
+    (``llm_dispatch.LlmHandoff``, S13) with the caller's ``llm_key`` (and ``upload``, an image
+    upload's bytes for its description, V-S7): the answer is their result, the content without
+    the LLM work (``llm_failed``, retryable) when they could not take it, or None once the llm
+    job is the route's or the P1 job's. Any other envelope comes back as it is."""
     handoff = llm_handoff(
         state,
         kind=kind,
@@ -734,6 +745,7 @@ async def post_stage(
         url=url,
         wait_until=wait_until,
         llm_key=llm_key,
+        upload=upload,
     )
 
     finished = await post_at_finish(
@@ -744,6 +756,8 @@ async def post_stage(
         settings=state.settings,
         threads=state.post_pool,
         hop=_llm_hop(handoff, handover) if handoff is not None else None,
+        describe=options.describe_images,
+        registry=state.registry,
     )
     if finished is None or finished is envelope:
         return finished
@@ -862,8 +876,10 @@ def llm_handoff(
     url: str | None,
     wait_until: float | None,
     llm_key: str | None = None,
+    upload: UploadInput | None = None,
 ) -> LlmHandoff | None:
-    """The LLM hop of one request (S13); None while the service has no LLM."""
+    """The LLM hop of one request (S13); None while the service has no LLM. ``upload`` is an
+    upload's bytes of a request with ``describe_images`` (V-S7)."""
     dispatcher: LlmDispatcher | None = state.llm_dispatcher
     if dispatcher is None:
         return None
@@ -877,6 +893,7 @@ def llm_handoff(
         threads=state.post_pool,
         wait_until=wait_until,
         llm_key=llm_key,
+        upload=upload,
     )
 
 
@@ -986,7 +1003,9 @@ async def _in_browser(
             unblock=unblock,
             detached=lambda: handover.detached,
             pii=body.pii is not None,
-            llm=wants_llm(body.structured, body.chunking, state.settings),
+            llm=wants_llm(
+                body.structured, body.chunking, state.settings, describe=body.describe_images
+            ),
         )
     except asyncio.CancelledError:
         if handover.release():
@@ -1156,8 +1175,10 @@ def _store_when_done(
     pii: PiiOptions | None = None,
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
+    describe: DescribeImagesOptions | None = None,
     settings: Settings | None = None,
     threads: ConversionPool | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
     went on to a pool's worker, which writes it. The storing task is added to ``background``
@@ -1176,8 +1197,10 @@ def _store_when_done(
                 pii=pii,
                 structured=structured,
                 chunking=chunking,
+                describe=describe,
                 settings=settings,
                 threads=threads,
+                registry=registry,
             )
         )
         background.add(storing)
@@ -1196,24 +1219,34 @@ async def _store_result(
     pii: PiiOptions | None = None,
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
+    describe: DescribeImagesOptions | None = None,
     settings: Settings | None = None,
     threads: ConversionPool | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> None:
-    """Store the envelope as item 0, after the post stage of the request's ``structured`` and
-    ``chunking`` (with ``settings`` and ``threads``, the post pool; for an envelope that lacks it:
-    the flow's own answer has it, S13) and past the PII guard (``pii.fields.fail_closed`` with the
-    request's ``pii``, N12), and observe the job's duration (``created_at`` is a
-    ``time.monotonic()`` reading from just before the job was created); an upload's input is deleted
-    then, and so is the caller's LLM key. A Valkey failure is logged and not raised: the job's lease
-    then runs out and ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its
-    own)."""
+    """Store the envelope as item 0, after the post stage of the request's ``structured``,
+    ``chunking`` and ``describe_images`` (``describe``; with ``settings`` and ``threads``, the post
+    pool, and ``registry``, the app's, for the images' counter; for an envelope that lacks it:
+    the flow's own answer has it, S13) and past the PII guard
+    (``pii.fields.fail_closed`` with the request's ``pii``, N12), and observe the job's duration
+    (``created_at`` is a ``time.monotonic()`` reading from just before the job was created); an
+    upload's input is deleted then, and so is the caller's LLM key. A Valkey failure is logged and
+    not raised: the job's lease then runs out and ``GET /v1/jobs/{id}`` reports the item as lost (an
+    input expires on its own)."""
     if settings is not None:
         if threads is None:  # a caller's mistake: the guard would be skipped without a word
             raise TypeError("_store_result needs threads together with settings")
         # The guard: LLM work an envelope still owes here (a task that raised, a pod without
         # the hop) is ``llm_failed``; the flow's own answer has had its post stage.
         finished = await post_at_finish(
-            envelope, structured, chunking, pii, settings=settings, threads=threads
+            envelope,
+            structured,
+            chunking,
+            pii,
+            settings=settings,
+            threads=threads,
+            describe=describe,
+            registry=registry,
         )
         if finished is not None:  # always, without a hop
             envelope = finished
