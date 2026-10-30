@@ -5,9 +5,9 @@ Markdown, with a fast HTTP mode and a browser mode.
 
 ## Status
 
-Under construction: packages 0-7 are merged (foundation, service skeleton, fast extraction,
-jobs and batch, browser worker, documents and OCR, audio and video, PII); package 8 (structured
-output and chunking) is in review (PR #18). See
+Under construction: packages 0-8 are merged (foundation, service skeleton, fast extraction,
+jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
+chunking). See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Quick start

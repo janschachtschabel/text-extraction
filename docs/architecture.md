@@ -100,7 +100,7 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
    Tesseract OCR, in the Docling worker. A document never escalates to the browser. See
-   "Documents and OCR". Vision LLM: later (not in package 8). Video and audio (package 6): a URL of a
+   "Documents and OCR". Vision LLM: later (not in package 8, issue #20). Video and audio (package 6): a URL of a
    supported platform (YouTube, Vimeo, ARD, ZDF, arte, 3sat) is recognised before step 3,
    passes step 2 under its canonical URL and is not fetched: the media children read its
    subtitles and details in the host's turn. A body that sniffs as audio or video is a media
