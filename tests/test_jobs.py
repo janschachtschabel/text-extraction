@@ -16,8 +16,15 @@ from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions, JobProgress
-from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore, browser_lease_seconds
+from text_extraction.jobs import (
+    InputBudgetExceeded,
+    JobLost,
+    JobStore,
+    _options_json,
+    browser_lease_seconds,
+)
 from text_extraction.settings import Settings
+from text_extraction.site.types import SiteOptions
 from text_extraction.structured.types import StructuredResult, Table
 from text_extraction.vision.types import DescribeImagesOptions
 
@@ -1106,3 +1113,41 @@ async def test_a_describe_images_choice_is_stored_and_read_back() -> None:
     record = await store.get(job_id)
     assert record is not None
     assert record.options == options
+
+
+def test_job_options_omit_unset_site() -> None:
+    """P9-S1: pods of the release before package 9 parse the options strictly, so a job that is
+    not a site job stores no ``site`` key."""
+    stored = _options_json(JobOptions(compliance="enforce"))
+    assert "site" not in json.loads(stored)
+    assert JobOptions.model_validate_json(stored).site is None
+    # The workers build the request of the other kinds from the dump; it has no ``site``.
+    assert "site" not in JobOptions(compliance="enforce").model_dump()
+
+    options = JobOptions(
+        mode="fast", compliance="enforce", ocr="never", site=SiteOptions(depth=3, scope="path")
+    )
+    stored = _options_json(options)
+
+    assert json.loads(stored)["site"] == {
+        "depth": 3,
+        "max_pages": 100,
+        "sitemaps": True,
+        "scope": "path",
+        "metadata": True,
+        "cache": True,
+    }
+    assert JobOptions.model_validate_json(stored) == options
+
+
+@scenario
+async def test_site_job_round_trip() -> None:
+    store = make_store(FakeAsyncRedis())
+    options = JobOptions(mode="fast", compliance="enforce", ocr="never", site=SiteOptions())
+
+    job_id = await store.create("site", OWNER, options, ["https://a.example/"])
+
+    job = await store.get(job_id)
+    assert job is not None
+    assert job.kind == "site"
+    assert job.options.site == SiteOptions()

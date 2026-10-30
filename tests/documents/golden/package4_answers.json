@@ -23,6 +23,7 @@
       "structured": null,
       "chunks": null,
       "image_descriptions": null,
+      "site": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": {
         "changed": null,
@@ -131,6 +132,7 @@
       "structured": null,
       "chunks": null,
       "image_descriptions": null,
+      "site": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": {
         "changed": null,
@@ -190,6 +192,7 @@
       "structured": null,
       "chunks": null,
       "image_descriptions": null,
+      "site": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": null,
       "format": "markdown",

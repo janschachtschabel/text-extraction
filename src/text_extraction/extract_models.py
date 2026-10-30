@@ -27,6 +27,7 @@ from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pii.types import BareModeOrObject, PiiOptions, PiiReport
 from text_extraction.quality import Quality
+from text_extraction.site.types import SiteInfo
 from text_extraction.structured.types import StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
 from text_extraction.vision.types import DescribeImagesOptions, ImageDescriptionReport
@@ -346,7 +347,15 @@ class ExtractResult(BaseModel):
         "sentences for embeddings: `recursive` was used) (structured output and chunking); "
         "`image_not_described` (an image of `describe_images` was skipped or the model did not "
         "describe it: its `description` is null, `data.image_descriptions` counts why) (image "
-        "descriptions). Converter notes may follow."
+        "descriptions); `sitemap_not_found` (a guessed `/sitemap.xml` does not exist), "
+        "`sitemap_truncated` (the sitemap file was over `SITE_SITEMAP_MAX_BYTES`, compressed "
+        "or inflated: the entries before the cut), `sitemap_urls_truncated` (the crawl reached "
+        "`SITE_MAX_SITEMAP_URLS`: the first entries), `sitemap_files_truncated` (more sitemap "
+        "files than `SITE_MAX_SITEMAP_FILES`: the first ones are read), `links_truncated` (more "
+        "links than `SITE_MAX_LINKS_PER_PAGE`: the first ones), `max_pages_reached` (links of "
+        "the page were not followed: the crawl has `max_pages` pages), `site_memory_guard` "
+        "(Valkey was nearly full: no link of the page was followed) (site structure). Converter "
+        "notes may follow."
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
@@ -362,6 +371,9 @@ class ExtractResult(BaseModel):
     chunks: list[Chunk] | None = None
     # With a ``describe_images`` request only; the default keeps older results valid.
     image_descriptions: ImageDescriptionReport | None = None
+    # Items of a ``site`` job only (and pages fetched for one); the default keeps older results
+    # valid.
+    site: SiteInfo | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

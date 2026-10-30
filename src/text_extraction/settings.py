@@ -317,6 +317,15 @@ class Settings(BaseSettings):
     # The post stage's CPU work (patterns, chunking, learning checks) at once per process, on a
     # thread pool of its own (ruling R21).
     post_concurrency: int = Field(default=2, ge=1)
+    # Site structure (package 9, ruling P9-S14): the caps of one crawl. A request's ``depth`` and
+    # ``max_pages`` above the first two answer 422.
+    site_max_depth: int = Field(default=5, ge=0, le=10)
+    site_max_pages: int = Field(default=1000, ge=1, le=100_000)  # page items of one crawl
+    site_max_sitemap_files: int = Field(default=500, ge=1, le=50_000)  # sitemap items of one crawl
+    site_max_sitemap_urls: int = Field(default=200_000, ge=1, le=5_000_000)  # entries of one crawl
+    # One sitemap file: the fetch cap and the cap of its gzip inflate (the protocol's 50 MiB).
+    site_sitemap_max_bytes: int = Field(default=52_428_800, ge=1024, le=209_715_200)
+    site_max_links_per_page: int = Field(default=1000, ge=10, le=50_000)  # more: links_truncated
 
     @field_validator("log_level", mode="before")
     @classmethod

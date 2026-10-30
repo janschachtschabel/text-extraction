@@ -14,10 +14,11 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pii.types import BareModeOrObject, PiiOptions
+from text_extraction.site.types import SiteOptions
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.vision.types import DescribeImagesOptions
 
-JobKind = Literal["extract", "batch", "screenshot", "file"]
+JobKind = Literal["extract", "batch", "screenshot", "file", "site"]
 JobState = Literal["queued", "running", "completed"]
 ItemState = Literal["pending", "done"]
 
@@ -113,6 +114,10 @@ class JobOptions(BaseModel, extra="forbid"):
     structured: StructuredOptions | None = None
     chunking: ChunkingOptions | None = None
     describe_images: DescribeImagesOptions | None = None
+    # A ``site`` job's crawl options (P9-S1); None for every other kind. Left out of a dump
+    # while None, so the workers' ``ExtractRequest(url=url, **options.model_dump())`` of the
+    # other kinds stays as it is (a site job never builds one: ``SiteRunner`` runs it).
+    site: SiteOptions | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _screenshot_needs_browser(self) -> Self:

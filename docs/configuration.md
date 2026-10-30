@@ -590,6 +590,26 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm wo
 | `workers.llm.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `llm` queue or on CPU. |
 | `alerts.llmQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `llm`. |
 
+## Site structure
+
+`POST /v1/site-structure` crawls a site's sitemaps and its link graph as a job of kind `site`: each
+page, the site's robots.txt and each sitemap file is an item of the job, fetched by the extract
+workers in fast mode with the checks and outbound limits of every extraction. These settings cap
+one crawl. All are service defaults; the Helm chart sets them under `config` with these values.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SITE_MAX_DEPTH` | `5` | Deepest link distance from the start page that a request's `depth` may ask for; more answers 422 `invalid_request`. 0 to 10. |
+| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). 1 to 100000. |
+| `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
+| `SITE_MAX_SITEMAP_URLS` | `200000` | Most sitemap entries one crawl keeps, over all its sitemaps; a sitemap that reaches it keeps its first entries and answers `partial` (warning `sitemap_urls_truncated`). 1 to 5000000. |
+| `SITE_SITEMAP_MAX_BYTES` | `52428800` | Largest sitemap file in bytes (the protocol's 50 MiB): the fetch stops there, and a gzip sitemap is inflated to at most this many bytes. A cut sitemap keeps the entries before the cut and answers `partial` (warning `sitemap_truncated`). 1024 to 209715200. |
+| `SITE_MAX_LINKS_PER_PAGE` | `1000` | Most links kept of one crawled page, in document order; the others are neither listed nor followed (warning `links_truncated`). 10 to 50000. |
+
+A crawl's items live in Valkey with its job, until `JOB_TTL_SECONDS`. Size Valkey for the crawls
+open at once: each page item holds up to `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about
+100 bytes. A crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` like a batch.
+
 ## Headers
 
 Read from the request:
