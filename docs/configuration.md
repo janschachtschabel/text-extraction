@@ -544,7 +544,7 @@ transcription client is the same SDK). Neither the chart nor docker compose sets
 | `LLM_MAX_TOKENS` | `4096` | Most tokens of one answer (`max_tokens`). A longer answer is cut off and counts as invalid. Minimum 1. |
 | `LLM_TIMEOUT_SECONDS` | `120` | Timeout of one request to the endpoint, in seconds (the SDK's, per phase of the request). Timeouts are retried twice by the SDK, so a call may take about three times this before it fails, retryable. The llm worker gives one item at most 3 × this in all (then the item answers its content without the LLM work: `llm_failed`, retryable) and leases it for 4 × this + 10 s, so an item whose worker died runs again elsewhere after that. 5 to 600. |
 | `LLM_MAX_INPUT_TOKENS` | `32000` | Most input the LLM gets of one document, in tokens estimated as 4 characters each. Longer content is cut at a paragraph border with the warning `llm_input_truncated`; the cleaned HTML that `learn_selectors` shows the LLM is cut to the same size at an element border. 1000 to 1000000. |
-| `LLM_GRACEFUL_SECONDS` | `30` | How long the llm worker's items in flight may finish after SIGTERM, in seconds; then the ones still running go back to the queue at once and run again on another worker, which pays their LLM calls again. One call may take `LLM_TIMEOUT_SECONDS` (120 s by default), so with the defaults every rollout cancels the long calls in flight. To avoid that, raise this and `workers.llm.terminationGracePeriodSeconds` together, e.g. to `LLM_TIMEOUT_SECONDS + 10` and that + 10 s (the chart sets it from `workers.llm.gracefulSeconds` and refuses a grace period below it + 10 s). 10 to 900. |
+| `LLM_GRACEFUL_SECONDS` | `30` | How long the llm worker's items in flight may finish after SIGTERM, in seconds; then the ones still running go back to the queue at once and run again on another worker, which pays their LLM calls again. One call may take `LLM_TIMEOUT_SECONDS` (120 s by default), so with the defaults every rollout cancels the long calls in flight. To avoid that, raise this and `workers.llm.terminationGracePeriodSeconds` together, e.g. to `LLM_TIMEOUT_SECONDS + 10` and that + 10 s (the chart sets it from `workers.llm.gracefulSeconds` and refuses a grace period below it + 10 s; docker compose: raise the llm worker's `stop_grace_period`, 45 s, to at least this + 10 s). Every pod validates it at start, the llm worker reads it. 10 to 900. |
 | `LLM_CONCURRENCY` | `4` | LLM items one llm worker (`text-extraction-llm-worker`, pool `llm`) runs at once: its slot loops, each with one item and its calls to the endpoint at a time. Minimum 1. |
 | `LLM_SYNC_WAIT_SECONDS` | `30` | How long a sync request that needs the LLM waits for the llm worker before it answers 202 with its job (without `wait_seconds`; the largest default of `transcribe`, `pii` and the LLM wins). Its waits for a browser, Docling or nlp worker get this much more, because their result moves on to the llm worker. 1 to 60. |
 | `SELECTOR_LEARN_TTL_SECONDS` | `2592000` | How long learned selectors stay in Valkey (30 days), per API key, host and schema (`sel:{<key name>}:<host>:<schema id>`, the key name's `%`, `{` and `}` percent-escaped); renewed on each write, not on reads. Minimum 60. |
@@ -564,7 +564,8 @@ entries of the same name. The other `LLM_*` settings and `SELECTOR_LEARN_TTL_SEC
 `STRUCTURED_SELECTOR_PROCESSES`, `STRUCTURED_SELECTOR_MEMORY_MB` and `POST_CONCURRENCY` are service
 defaults (the chart sets the last four under `config` with these values): set them under
 `config` (for example `config.LLM_TIMEOUT_SECONDS`, and `config.LLM_ALLOW_HTTP` for an `http` URL).
-docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`.
+docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm worker's
+`stop_grace_period` (45 s) must stay at least `LLM_GRACEFUL_SECONDS` + 10 s: raise both together.
 
 | Key | Default | Variable or effect |
 | --- | --- | --- |
@@ -575,7 +576,7 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`.
 | `workers.llm.apiKey.existingSecret`, `.existingSecretKey` | `""`, `LLM_API_KEY` | Your own Secret with `LLM_API_KEY` (API pods and the llm worker container only). Empty: callers send `X-LLM-Api-Key`. |
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY` on the llm workers. |
 | `workers.llm.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a sync request waits only `LLM_SYNC_WAIT_SECONDS`. |
-| `workers.llm.gracefulSeconds` | `30` | `LLM_GRACEFUL_SECONDS` on the llm workers (a `config` entry is ignored). Raise it with the grace period, e.g. to `LLM_TIMEOUT_SECONDS + 10`, so that a rollout does not pay calls in flight twice. |
+| `workers.llm.gracefulSeconds` | `30` | `LLM_GRACEFUL_SECONDS` on the llm workers; the render fails outside 10 to 900 (a `config.LLM_GRACEFUL_SECONDS` entry is overridden on the llm workers, but every pod validates it at start (10 to 900, else exit code 2), so leave it out). Raise it with the grace period, e.g. to `LLM_TIMEOUT_SECONDS + 10`, so that a rollout does not pay calls in flight twice. |
 | `workers.llm.terminationGracePeriodSeconds` | `40` | See Response times. At least `workers.llm.gracefulSeconds` + 10, or the render fails. |
 | `workers.llm.resources` | 100m / 256Mi to 1 / 1Gi | Placeholder until package 11 measures real consumption; 512 MiB of it are the selector child. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global one. |

@@ -314,7 +314,9 @@ services:
       retries: 3
       start_period: 20s
     # SIGTERM stops claiming and gives items in flight LLM_GRACEFUL_SECONDS (30 s), then hands the
-    # ones still running back to the queue. Raise this with it.
+    # ones still running back to the queue. Keep this at least LLM_GRACEFUL_SECONDS + 10 s: raise
+    # both together (e.g. 130 s and 140s), or Docker kills the worker before the hand-back and
+    # its items wait for their lease (4 x LLM_TIMEOUT_SECONDS + 10 s).
     stop_grace_period: 45s
 
   valkey:

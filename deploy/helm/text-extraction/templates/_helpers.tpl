@@ -701,6 +701,9 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- fail (printf "workers.nlp.terminationGracePeriodSeconds (%v) is too short: the NLP workers give analyses in flight %v s + a 10 s margin must fit." $nlp.terminationGracePeriodSeconds $nlpGraceful) -}}
 {{- end -}}
 {{- $llmGraceful := include "text-extraction.llmGracefulSeconds" . | float64 -}}
+{{- if and $llm.enabled (or (lt $llmGraceful 10.0) (gt $llmGraceful 900.0)) -}}
+{{- fail (printf "workers.llm.gracefulSeconds (%v) must be 10 to 900 (LLM_GRACEFUL_SECONDS): the llm workers would exit with code 2." $llm.gracefulSeconds) -}}
+{{- end -}}
 {{- if and $llm.enabled (gt $llmGraceful (subf (float64 $llm.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.llm.terminationGracePeriodSeconds (%v) is too short: the llm workers give calls in flight %v s before they hand the items back to the queue, + a 10 s margin must fit." $llm.terminationGracePeriodSeconds $llmGraceful) -}}
 {{- end -}}
