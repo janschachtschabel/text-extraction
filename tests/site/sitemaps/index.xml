@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://lernen.example.org/sitemap-pages.xml</loc>
+    <lastmod>2026-10-01</lastmod>
+  </sitemap>
+  <sitemap>
+    <loc>/sitemap-posts.xml.gz</loc>
+  </sitemap>
+  <sitemap>
+    <loc>ftp://lernen.example.org/sitemap-old.xml</loc>
+  </sitemap>
+</sitemapindex>

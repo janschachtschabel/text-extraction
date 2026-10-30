@@ -187,6 +187,14 @@ add a note of its own):
 - Image descriptions: `image_not_described` (at least one image of `describe_images` was
   skipped or got no description while the status stays: not fetched, refused, not a type the
   model takes, too large, or the endpoint refused it or found nothing to describe; V-S11).
+- Site structure (items of a `site` job): `sitemap_not_found` (the guessed `/sitemap.xml`
+  answered 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
+  its inflate or by its time limit, or its children did not fit the item; the entries before the
+  cut), `sitemap_urls_truncated` (`SITE_MAX_SITEMAP_URLS` reached: the first entries),
+  `sitemap_files_truncated` (`SITE_MAX_SITEMAP_FILES` reached: the further sitemaps are not
+  read), `links_truncated` (more links than `SITE_MAX_LINKS_PER_PAGE`, or than fit the item: the
+  first ones), `max_pages_reached` (links found after `max_pages` page items), `site_memory_guard`
+  (Valkey was nearly full: nothing appended).
 - Jobs: `content_not_stored_too_large` (an item stored without its content),
   `chunks_not_stored_too_large` and `tables_not_stored_too_large` (still over
   `JOB_ITEM_MAX_BYTES` without its content, the item was stored without its chunks or its
@@ -257,8 +265,8 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | `POST /v1/extract` with `structured` required (422 without; S15): strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`, and every option, check, header (`X-ASR-Api-Key`, `X-LLM-Api-Key`) and answer of `/v1/extract` | sync, job fallback (`wait_seconds`; 202 for a browser, nlp or llm job) |
 | `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
-| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
-| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
+| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 503 while jobs are off or Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
+| `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `/mcp` | MCP tools (optional, `MCP_ENABLED`) | streamable HTTP |
@@ -401,6 +409,14 @@ a queue key. Items are `<job>:<index>:<attempts>` in lists per client and domain
 - A gate refusal (busy, paused) defers the item: back to the front of its domain, the domain not
   claimed before the gate's retry time. At the attempt limit the pipeline's own `rate_limited` or
   `connection_error` envelope is stored instead.
+
+**Site jobs (package 9).** A job of kind `site` (`POST /v1/site-structure`) starts with one
+item, the start page, and grows while it runs: an item appends the pages, the robots.txt item, the
+sitemaps and the further parts of a sitemap it finds to the job's URLs (`total` grows with them)
+and queues them, before it writes its own result, so the job completes with its last item. Its
+crawl lives in four more hashes under the job's hash tag (`nodes`, `seen`, `children`, `site`;
+see configuration.md, "Job keys"), with the job's TTL, deleted with it. The items run on the
+extract pool, fair between clients and hosts as a batch's; see "Site structure".
 
 **Workers.** `text-extraction-worker` runs `WORKER_CONCURRENCY` slot loops on the internal port
 only (`/health`, `/ready`, `/metrics`). An item is leased for `EXTRACT_TIMEOUT_SECONDS` × 2 + 10 s;
@@ -2114,6 +2130,198 @@ not changed.
 - **Not in this work:** images inside PDF, DOCX, PPTX and other documents; a URL whose target is
   itself an image; screenshots; a model per request; MCP tools.
 
+## Site structure
+
+Package 9: `site/` (`types.py`, `urls.py`, `links.py`, `follow.py`, `sitemaps.py`, `store.py`,
+`runner.py`), `site_api.py`, hooks in `pipeline.py` and `compliance.py`. `POST
+/v1/site-structure {"url": ..., "depth": 2}` answers 202 with a job of kind `site` that lists every
+sitemap of the site (robots.txt's `Sitemap:` lines, sitemap indexes, gzip, text, RSS and Atom
+sitemaps) with their URLs, and the site's link graph from the start page to the given depth: one
+item per page, each with its typed outgoing links and the item each followed link leads to. The
+crawl runs on the extract workers; it never runs inline. Keys and settings are listed in
+[configuration.md](configuration.md) ("Site structure", "Job keys").
+
+The evidence is `tests/site/test_done_when.py`, the done-when test in the default suite: two sample
+sites (`tests/site/sites/`) served by pytest-httpserver, crawled through `POST /v1/site-structure`
+by the real extract `Worker` with `ExtractRunner` and `SiteRunner` on the real fetcher, and read
+back through `GET /v1/jobs/{id}` in pages of 50. Site A has robots.txt with `Disallow: /intern/`
+and two `Sitemap:` lines (an index with a plain and a gzipped urlset, and a text sitemap) and 14
+pages (the start page and three levels below it) with the typed-links elements, a 404, a redirect, a cycle, a `nofollow` link,
+a PDF, an iframe and an external link; every sitemap entry arrives, every page to depth 2 is one
+item, the disallowed page is never requested, and every followed link points at the right item.
+Site B has no robots.txt; its `/sitemap.xml` is found by the guess and its 300 entries arrive in
+parts (`JOB_ITEM_MAX_BYTES` at its minimum). The live site run (`tests/live/run_site.py`, five
+WLO-type sites, depth 1, 25 pages each, `compliance: enforce`) is reported by the live workflow,
+never a gate (R-P9-3): the build sandbox reaches none of the sites.
+
+**Decisions of Jan (2026-10-30; Jan confirmed the recommended options).**
+
+- **D1, a growing job (a, decided).** Every page, robots.txt and sitemap file is an item of the
+  fair queue on the extract pool; the items an item finds are appended to the running job, and
+  the results are paged by `GET /v1/jobs/{id}`. Per-host fairness, leases, retries and deferrals
+  come from package 3.
+- **D2, rich link types (a, decided).** `kind` (`internal`, `external`, `file`, as `links` of
+  `/v1/extract`), `source` (`a`, `area`, head `link`, `iframe`), `rel` tokens, `hreflang`, `region`
+  (`nav`, `header`, `footer`, `aside`, `main`, `breadcrumb`, `pagination`) and the crawl decision
+  per link. Media sources (`img`, `video`, `audio`) are not links.
+- **D3, fast mode only (a, decided).** Links come from the HTML as served; a JavaScript-only menu
+  yields no links, and the page's `quality.js_heavy` says so.
+- **D4, the checks of an extraction (a, decided).** Every fetch, sitemaps included, runs the
+  compliance checks of the job's mode: under `enforce` a page or sitemap that robots.txt disallows
+  or whose TDM rights are reserved is not fetched, and its link says `blocked`.
+- **D5, structure only (a, decided).** A page item keeps title, status, metadata and quality;
+  `content` and `links` are null. Callers send the URLs they want as text to `POST /v1/batch`.
+- **D6, the start page's host (a, decided).** A leading `www.` is ignored; with `scope: "path"`
+  only URLs under the start URL's directory. Subdomains and a caller list of hosts are not
+  followed.
+
+**Rulings of the plan (P9-S1 to P9-S15).**
+
+- **P9-S1, the request** (`site/types.py`). `url`, `depth` (default 2, 0 to 10, over
+  `SITE_MAX_DEPTH` 422), `max_pages` (default 100, 1 to 100,000, over `SITE_MAX_PAGES` 422; page
+  items, the start page included), `sitemaps` (default true), `scope` (`host` or `path`),
+  `metadata` (default true), `compliance` (`ignore` for admins only), `cache` (default true); other
+  fields 422. `depth: 0` fetches the start page only (and the sitemaps). The options are stored as
+  `JobOptions.site` (left out of the stored JSON while null); `JobKind` has `site`. A site item never
+  moves to another pool: `ExtractRunner` hands every item of a `site` job to `SiteRunner`.
+- **P9-S2, the result.** `data.site` on every item (null on every other route's answers): `role`
+  (`page`, `robots`, `sitemap`, `sitemap_part`), `depth` (a page's link distance from the start; a
+  sitemap's nesting, robots-listed = 0), `parent` (the item that found it), `links`, `nofollow`
+  (the page said `nofollow`), `sitemaps` (the robots item: the sitemap URLs it appended) and
+  `sitemap`: `format` (`urlset`, `index`, `text`, `rss`, `atom`, `absent`), `guessed`, `entries`
+  (`loc`, `lastmod`, `changefreq`, `priority`; null fields left out of the JSON), `children` (an
+  index's: `url`, `lastmod`, `crawl`, `target`), `entry_count` (the whole file's), `part`,
+  `parts`. A link: `url`, `text` (whitespace collapsed, at most 200 characters), `kind`,
+  `source`, `rel` (lower case, at most 8), `hreflang`, `region`, `crawl` and `target` (the item
+  index of the linked page).
+- **P9-S3, the crawl's keys** (`site/store.py`): `nodes`, `seen`, `children` and `site` under the
+  job's hash tag, with the job's TTL, deleted with it (see "Jobs and the fair queue").
+  `SiteStore.init` makes the start page node 0; `SiteStore.extend`, one Lua script, appends what
+  an item found (deduplicated by seen key, under the caps, idempotent per parent);
+  `SiteStore.reserve_entries` grants sitemap entries against `SITE_MAX_SITEMAP_URLS`, the same
+  grant on a rerun.
+- **P9-S4, URLs and scope** (`site/urls.py`). A URL is normalised (scheme and host lower case,
+  default port and fragment dropped, empty path `/`, query and percent-encoding kept); its seen
+  key drops the scheme and a leading `www.` (and folds IDN and a trailing dot), so the http,
+  https and `www.` spellings are one page and the first one seen is the item's. The scope is set
+  by item 0 from its `final_url`.
+- **P9-S5, typed links** (`site/links.py`, pure). One parse; `<a href>`, `<area href>`, head
+  `<link>` with `rel` `canonical`, `alternate`, `prev` or `next`, and `<iframe src>`, in document
+  order, first occurrence per URL and source. `region` from the nearest ancestor, first match:
+  `breadcrumb`, `pagination`, `nav`, `header` and `footer` (outside `<article>`/`<main>`),
+  `aside`, `main`. `nofollow` from `<meta name="robots">`, `<meta name="text-extraction">` or
+  `X-Robots-Tag`. At most `SITE_MAX_LINKS_PER_PAGE` links (`links_truncated`).
+- **P9-S6, follow rules** (`site/follow.py`). `crawl` per link: `listed` (head `link` and
+  `iframe`: never followed), `file`, `out_of_scope`, `nofollow`, `blocked` (the cached compliance
+  verdict blocks it; not cached means follow and let the item decide), `depth` (deeper than
+  `depth`; still looked up, so a page that is an item anyway says `seen` with its `target`), then `extend` decides `queued`,
+  `seen` or `max_pages` (`memory_guard` while Valkey is nearly full); an index's child over
+  `SITE_MAX_SITEMAP_FILES` says `max_files`. The queue is FIFO per host, so the crawl is
+  breadth-first in practice and `max_pages` keeps the pages found first.
+- **P9-S7, sitemap discovery.** Item 0, whatever its outcome, appends the robots item when
+  `sitemaps` is asked. It reads robots.txt through the compliance checker's cache (or loads it in
+  the host's turn, in every compliance mode): its `Sitemap:` lines (relative ones resolved, at most
+  `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them one guess,
+  `<origin>/sitemap.xml` (`guessed: true`); robots.txt unavailable fails the item
+  `target_http_error`, retryable, without a guess.
+- **P9-S8, sitemap parsing** (`site/sitemaps.py`, pure). A gzip body (by its magic bytes) is
+  inflated to at most `SITE_SITEMAP_MAX_BYTES`; a body that does not start with `<` is a text
+  sitemap; XML is read by `defusedxml`'s `iterparse` (no DTD, no entities, no external
+  references), namespaces ignored, undeclared prefixes tolerated, nesting depth bounded.
+  `urlset`, `sitemapindex`, `rss` and `feed` are read; any other root is `unsupported`. The parse
+  checks a deadline itself.
+- **P9-S9, parts.** A sitemap's entries are packed into parts of at most half of
+  `JOB_ITEM_MAX_BYTES`: part 1 is the sitemap item's own result, parts 2 and up are finished
+  `sitemap_part` items appended with its children.
+- **P9-S10, pipeline hooks.** `Pipeline.run(..., site_links=True)` adds the typed links to a page's
+  result (a request without it keeps its cache key); `Pipeline.fetch_raw` fetches a sitemap with
+  the SSRF guard on every hop, the compliance checks in the host's turn and the byte cap, without
+  conversion; `Pipeline.robots_sitemaps` and `Pipeline.blocked_from_cache` read the checker's
+  cache.
+- **P9-S11, the runner** (`site/runner.py`). A page runs `Pipeline.run` in fast mode
+  (`format: text`, `ocr: never`), judges its links and `extend`s with them (its `final_url` as an
+  alias, so a redirect's target is the same item) before it answers; a robots item lists the
+  sitemaps; a sitemap item fetches, inflates and parses on a pool of its own, reserves its
+  entries, appends its parts and children (`queued` while nesting depth stays at most 3 and the
+  child is on the index's host or the crawl's) and answers `partial` with `sitemap_truncated` or
+  `sitemap_urls_truncated` when it was cut (`too_large`, or `timeout` at its time limit), `failed`/`conversion_failed` for XML it
+  cannot read and `failed`/`unsupported_content_type` for an HTML page answered as a sitemap. A
+  guessed sitemap that answers 404 or 410 is `success`, `format: absent`, `sitemap_not_found`.
+- **P9-S12, reruns and failures.** A parent whose lease was lost runs again: `extend` answers its
+  stored answer and appends nothing, and the runner queues those items again (a copy of a finished
+  item is skipped). An exhausted item first queues its stored children again, then fails
+  `internal_error`, so the job still completes. A gate refusal defers the item as in a batch.
+- **P9-S13, the route** (`site_api.py`). User role; 503 while jobs are off or Valkey's memory is at
+  the guard ratio; 422 for a URL that is no http(s) URL and for `depth` or `max_pages` over the
+  settings; 403 for a compliance mode the caller may not choose; 429 at
+  `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together (`jobs_api.open_job`, shared
+  with `POST /v1/batch`); 202 `{"kind": "site", "total": 1, ...}`. The body limit is
+  `REQUEST_MAX_BODY_BYTES`.
+- **P9-S14, settings.** `SITE_MAX_DEPTH` (5), `SITE_MAX_PAGES` (1,000), `SITE_MAX_SITEMAP_FILES`
+  (500), `SITE_MAX_SITEMAP_URLS` (200,000), `SITE_SITEMAP_MAX_BYTES` (50 MiB),
+  `SITE_MAX_LINKS_PER_PAGE` (1,000); in the Helm chart's `config` with these values.
+- **P9-S15, metrics and logs.** `text_extraction_site_items_total{role, outcome}`,
+  `text_extraction_site_links_total{crawl}`, `text_extraction_site_caps_total{cap}` (`pages`,
+  `files`, `urls`, `links`, `memory`); the log line `site_item_done` with role, host and counts,
+  never a path, a query, a link text or sitemap content.
+
+**Rulings of the build (R-P9-1 to R-P9-3).** R-P9-1: `extend` takes at most 1,000 candidates a
+call (`EXTEND_BATCH`); an item sends its batches in order, each stored under its own key, so one
+script never blocks Valkey long and a rerun gets every batch's answer back. R-P9-2: sitemap
+parses run on a pool of one thread per worker pod (`ConversionPool(1, "sitemap")`), so a large
+sitemap (seconds of CPU) never holds the threads that convert pages. R-P9-3: the live site run is
+a report-only step of the live workflow.
+
+**Operations.**
+
+- **Upgrade the extract workers, then the API pods, then send site jobs.** Pods of an older
+  release cannot parse a `site` job's options (`JobOptions.site` is new and the options forbid
+  unknown fields). An older worker that claims a site item raises in `Worker.process`
+  (`store.get`) before it runs it. The slot logs `worker_slot_error`, nothing is written and the
+  item stays leased. It comes back after each lease until a new worker runs it, or a new worker
+  fails it `internal_error` ("lost too often") after `JOB_ITEM_MAX_ATTEMPTS` leases. With only
+  older workers it cycles until the job's TTL, so the job never completes. An older API pod
+  answers 500 to `GET /v1/jobs/{id}` of a site job, and to `POST /v1/batch` from an owner whose
+  open set holds one. `helm upgrade` rolls all Deployments at once, so send site jobs only once
+  every pod runs the new release (configuration.md, "Site structure").
+- **One sitemap parse at a time per pod.** Sitemap items of all crawls queue behind each other for
+  the pod's one sitemap thread while they hold a worker slot (of `WORKER_CONCURRENCY`). An item
+  that waits longer than its budget (`EXTRACT_TIMEOUT_SECONDS` × 2, 50 s) plus 5 s fails `timeout`,
+  retryable, with "the worker was busy". Many large sitemaps at once therefore take slots from
+  page items; more worker pods spread them.
+- **Memory.** A sitemap item holds the raw body (up to `SITE_SITEMAP_MAX_BYTES`, 50 MiB), the
+  inflated copy of a gzip file (up to the same) and the parsed entries while it runs; several in
+  one pod (fetched while one parses) add up. Size the extract worker's memory limit with that
+  headroom; package 11 measures it.
+- **Shutdown.** A sitemap item's budget (50 s) outlasts the workers' shutdown grace (30 s by
+  default): on SIGTERM such an item is cancelled and runs again on another worker after its lease,
+  without duplicates (P9-S12).
+- **Reruns can fetch a page twice.** A child that a rerun queues again (`<job>:<i>:0`) is
+  another queue member than the same item reclaimed after a lost lease (`<job>:<i>:1`), so two
+  workers may fetch that page at once. The results stay correct (a result is written once), and
+  the site sees one extra request within its per-host limits. It needs a lost lease, so it is
+  rare.
+- **Valkey.** A crawl's state lives with its job until `JOB_TTL_SECONDS`: each page item holds up to
+  `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes. The memory guard stops a
+  crawl from appending (`site_memory_guard`) and refuses new ones (503).
+
+**Known limits.**
+
+- **No JavaScript.** A site whose menus are built by JavaScript yields few links (D3); its pages say
+  `quality.js_heavy`.
+- **One host.** Subdomains are out of scope (D6); a sitemap on another host is read when robots.txt
+  lists it, but its entries are not crawled.
+- **Sitemap entries are listed, not crawled.** A page reached only through a sitemap is an entry,
+  not a page item; send it to `POST /v1/batch` for its text.
+- **A redirect target seen first is its own item, and so is a redirect to an existing item.** A
+  page's `final_url` becomes an alias of its item only once that item ran, and only when no item
+  has that URL yet. A link to the target found earlier makes an item of its own, and a link that
+  redirects to a page that already is an item (`/old` to `/a`) is an item too, with `/a`'s
+  `final_url` and links. An item whose `final_url` is another item's URL is a redirect to it:
+  dedupe the graph by `final_url`.
+- **Not in this package:** browser rendering, page content, sitemap extensions (`image:`,
+  `video:`, `news:`, `xhtml:link` alternates), an MCP tool (package 10).
+
 ## Observability
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
@@ -2126,7 +2334,9 @@ outcome, transcriptions by backend and outcome with their seconds and audio seco
 by kind (chat, vision, embeddings) and outcome (ok, invalid, error) and tokens by kind (prompt,
 completion), never by prompt, value, selector or key, images of `describe_images` by outcome
 (`text_extraction_vision_images_total`: described, skipped, failed; never by image, URL, alt text
-or description), sync NLP and LLM dispatches by outcome (answered, not claimed, no result, handed
+or description), items of site jobs by role and outcome, their links by crawl decision and the
+caps they ran into (`text_extraction_site_items_total`, `…_site_links_total`,
+`…_site_caps_total`; never by URL), sync NLP and LLM dispatches by outcome (answered, not claimed, no result, handed
 over, backend error, memory guard; LLM also input budget), entities found by PII
 handling by type (never by value), rate-limit rejections. The queue gauges, the backlog alert and
 the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship in the Helm chart

@@ -163,6 +163,10 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `"5"` | Time all selector rules of one result may take in their child process, which is then killed (`selectors_timed_out`). |
 | `config.STRUCTURED_SELECTOR_PROCESSES` | `"1"` | Selector child processes per pod (API, extract, browser and llm workers), about 40 MB each when idle. |
 | `config.STRUCTURED_SELECTOR_MEMORY_MB` | `"512"` | Address space of one selector child. The default memory limits and `documentParentReserveMiB` values hold 512 MiB for it (the llm worker's limit too); raise them by `STRUCTURED_SELECTOR_PROCESSES` x this when you raise either. |
+| `config.SITE_MAX_DEPTH`, `config.SITE_MAX_PAGES` | `"5"`, `"1000"` | Deepest `depth` and most `max_pages` a `POST /v1/site-structure` may ask for; more answers 422. |
+| `config.SITE_MAX_SITEMAP_FILES`, `config.SITE_MAX_SITEMAP_URLS` | `"500"`, `"200000"` | Sitemap files and sitemap entries one crawl reads at most. A crawl's items live in Valkey with its job: size `valkey.maxmemory` for the open crawls (each page item with up to `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes). |
+| `config.SITE_SITEMAP_MAX_BYTES` | `"52428800"` | Largest sitemap file, as fetched and after a gzip inflate (the protocol's 50 MiB). |
+| `config.SITE_MAX_LINKS_PER_PAGE` | `"1000"` | Most links kept of one crawled page. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.*` | | Any further non-secret setting is added here. |

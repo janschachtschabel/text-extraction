@@ -130,6 +130,12 @@ SETTING_ENV_VARS = (
     "SELECTOR_LEARN_TTL_SECONDS",
     "STRUCTURED_REGEX_TIMEOUT_SECONDS",
     "CHUNK_MAX_CHUNKS",
+    "SITE_MAX_DEPTH",
+    "SITE_MAX_PAGES",
+    "SITE_MAX_SITEMAP_FILES",
+    "SITE_MAX_SITEMAP_URLS",
+    "SITE_SITEMAP_MAX_BYTES",
+    "SITE_MAX_LINKS_PER_PAGE",
 )
 
 
@@ -1473,3 +1479,35 @@ def test_llm_numeric_settings_are_bounded(
         monkeypatch.setenv(name, value)
         with pytest.raises(ConfigError, match=name.lower()):
             load_settings()
+
+
+# P9-S14: (variable, default, lowest, highest).
+SITE_SETTINGS = (
+    ("SITE_MAX_DEPTH", 5, 0, 10),
+    ("SITE_MAX_PAGES", 1000, 1, 100_000),
+    ("SITE_MAX_SITEMAP_FILES", 500, 1, 50_000),
+    ("SITE_MAX_SITEMAP_URLS", 200_000, 1, 5_000_000),
+    ("SITE_SITEMAP_MAX_BYTES", 52_428_800, 1024, 209_715_200),
+    ("SITE_MAX_LINKS_PER_PAGE", 1000, 10, 50_000),
+)
+
+
+def test_site_settings_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    for name, default, _, _ in SITE_SETTINGS:
+        assert getattr(settings, name.lower()) == default
+
+    for name, _, lowest, highest in SITE_SETTINGS:
+        for accepted in (lowest, highest):
+            monkeypatch.setenv(name, str(accepted))
+            assert getattr(load_settings(), name.lower()) == accepted
+        for refused in (lowest - 1, highest + 1):
+            monkeypatch.setenv(name, str(refused))
+            with pytest.raises(ConfigError, match=name.lower()):
+                load_settings()
+        monkeypatch.delenv(name)
+
+    monkeypatch.setenv("SITE_MAX_DEPTH", "11")
+    with pytest.raises(ConfigError, match="site_max_depth"):
+        load_settings()

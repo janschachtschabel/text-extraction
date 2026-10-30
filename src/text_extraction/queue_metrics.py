@@ -6,8 +6,8 @@
   visible. Every API pod reads the same queue, so a query takes ``max()`` over pods (``sum()``
   would count the backlog once per pod).
 - ``text_extraction_jobs_created_total{kind}``: jobs accepted by this pod (``batch``,
-  ``extract``, ``screenshot`` or ``file``). A sync request's browser, Docling or ASR job counts
-  once it is handed over to the caller (202), like a P1 job.
+  ``extract``, ``screenshot``, ``file`` or ``site``). A sync request's browser, Docling or ASR
+  job counts once it is handed over to the caller (202), like a P1 job.
 - ``text_extraction_job_duration_seconds{kind}``: observed by whichever process writes the last
   result of a job. The definition lives here so that the worker and the API cannot drift apart;
   each process has its own registry.
@@ -106,11 +106,11 @@ def job_metrics_for(registry: CollectorRegistry) -> JobMetrics:
             "text_extraction_jobs_created_total",
             "Jobs accepted by this pod, by kind: batch (POST /v1/batch), extract (a slow "
             "POST /v1/extract handed over to a job), screenshot (a slow POST /v1/screenshot) or "
-            "file (a slow POST /v1/extract/file).",
+            "file (a slow POST /v1/extract/file) or site (POST /v1/site-structure).",
             ["kind"],
             registry=registry,
         )
-        for kind in ("batch", "extract", "screenshot", "file"):
+        for kind in ("batch", "extract", "screenshot", "file", "site"):
             created.labels(kind=kind)  # export 0 from the start, so rate() sees the first job
         metrics = JobMetrics(created=created, duration=job_duration_for(registry))
         _JOB_METRICS[registry] = metrics

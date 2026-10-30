@@ -45,6 +45,8 @@ from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.screenshot_api import router as screenshot_router
 from text_extraction.settings import Settings, llm_available
+from text_extraction.site.store import SiteStore
+from text_extraction.site_api import router as site_router
 from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured_api import CHUNK_PATH
 from text_extraction.structured_api import router as structured_router
@@ -168,7 +170,8 @@ def create_public_app(
 
     ``app.state.pipeline`` runs the extractions; tests may replace it (for example with a
     pipeline around a fake fetcher) before the app starts. ``app.state.job_store`` and
-    ``app.state.job_queue`` back the batch and job routes; with ``BROWSER_ENABLED``,
+    ``app.state.job_queue`` back the batch and job routes, with ``app.state.site_store`` (the
+    crawl keys of a ``site`` job) also ``POST /v1/site-structure``; with ``BROWSER_ENABLED``,
     ``app.state.browser_queue`` is the ``browser`` pool's queue and
     ``app.state.browser_dispatcher`` sends sync requests there (both None otherwise); while the
     service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), ``app.state.docling_queue`` and
@@ -221,6 +224,7 @@ def create_public_app(
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
+    app.state.site_store = SiteStore(valkey, app.state.job_store, settings)
     queues = [app.state.job_queue]
     app.state.browser_queue = None
     app.state.browser_dispatcher = None
@@ -272,6 +276,7 @@ def create_public_app(
     app.include_router(screenshot_router)
     app.include_router(structured_router)
     app.include_router(jobs_router)
+    app.include_router(site_router)
 
     @app.get("/v1/info", dependencies=[Depends(rate_limited)])
     async def info(

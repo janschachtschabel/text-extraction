@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Lernen</title>
+  <link href="https://lernen.example.org/feed.atom" rel="self"/>
+  <entry>
+    <title>Bruchrechnung</title>
+    <link rel="edit" href="https://lernen.example.org/edit/1"/>
+    <link href="https://lernen.example.org/mathe/bruchrechnung"/>
+    <updated>2026-10-29T10:00:00Z</updated>
+  </entry>
+  <entry>
+    <title>Optik</title>
+    <link rel="alternate" href="/physik/optik"/>
+  </entry>
+</feed>

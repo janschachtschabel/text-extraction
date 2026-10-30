@@ -27,7 +27,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
 | `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB) and `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
-| `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` answers 503 `internal_error` (retryable), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
+| `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` and `POST /v1/site-structure` answer 503 `internal_error` (retryable), a running site job appends no further pages or sitemaps (warning `site_memory_guard`), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
 | `FETCH_MAX_BYTES` | `20000000` | Largest response body the fetcher accepts, in bytes. Minimum 1024. |
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
@@ -58,8 +58,8 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `SCHEDULER_CLAIM_SCAN_BUDGET` | `200` | Client-domain pairs one claim of the job queue looks at, at most. A claim that finds nothing within the budget answers "try again in 0.05 s", and the next claim goes on where it stopped (a client whose domains the budget ran out in moves to the end of the rotation), so fairness holds across claims. Workers back off from 0.05 s up to 1 s while such answers repeat. It bounds the time one claim blocks Valkey when many domains are deferred or at their limit. Minimum 1, maximum 5000. |
 | `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. Helm: `workers.extract.concurrency`. |
 | `BATCH_MAX_URLS` | `1000` | Most URLs one `POST /v1/batch` may carry. More answers 422 `invalid_request`. A body over `BATCH_MAX_URLS` × (`MAX_URL_LENGTH` (2048) + 8) bytes plus 4 KiB answers 413 `invalid_request` before it is read whole or parsed (see `REQUEST_MAX_BODY_BYTES`). Minimum 1, maximum 100000. |
-| `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches one API key may have unfinished (queued or running) at a time. The next `POST /v1/batch` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
-| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
+| `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches and site jobs (`POST /v1/site-structure`) one API key may have unfinished (queued or running) at a time, both kinds counted together. The next `POST /v1/batch` or `POST /v1/site-structure` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
+| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch`, `POST /v1/site-structure` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
 | `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `BROWSER_ENABLED` | `false` | Switch browser mode on: pages are rendered by the browser workers (`text-extraction-browser-worker`, pool `browser`); the API pods queue them and wait. Off, `mode: browser`, `screenshot: true`, `actions`, `cookies`, `headers`, `POST /v1/screenshot` and a batch with `mode: browser` answer 400 `invalid_request` ("Browser mode is not enabled on this service."), and `mode: auto` never uses a browser (its answers are those of fast mode). The image of an API pod has no browser; the browser worker image has. On, the graceful shutdown of the API covers a sync request that waits for the browser: the fast phase of an escalating `auto` request (`EXTRACT_TIMEOUT_SECONDS`) + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 s, that is 75 s by default and 105 s with unblock mode. The Kubernetes `terminationGracePeriodSeconds` of the API pods must cover `SHUTDOWN_DRAIN_SECONDS` plus that plus a margin: the Helm chart sets it to 90 s (120 s with unblock mode) unless you set it, and docker compose stops the API with a 120 s grace period. Extract workers keep their own bound; browser workers have theirs (see Ports and probes). Helm: `workers.browser.enabled` (default true) deploys the browser workers and renders this variable into the API, extract worker and browser worker pods. docker compose always starts a browser worker and sets it to true for every service. |
 | `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. 5 to 120. |
@@ -590,6 +590,60 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm wo
 | `workers.llm.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `llm` queue or on CPU. |
 | `alerts.llmQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `llm`. |
 
+## Site structure
+
+`POST /v1/site-structure` crawls a site's sitemaps and its link graph as a job of kind `site`: each
+page, the site's robots.txt and each sitemap file is an item of the job, fetched by the extract
+workers in fast mode with the checks and outbound limits of every extraction. These settings cap
+one crawl. All are service defaults; the Helm chart sets them under `config` with these values.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SITE_MAX_DEPTH` | `5` | Deepest link distance from the start page that a request's `depth` may ask for; more answers 422 `invalid_request`. 0 to 10. |
+| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). A crawl must finish within `JOB_TTL_SECONDS`: nothing renews the job's TTL while it runs, and a job that expires mid-crawl is gone (404). One host's pages and sitemap files are spaced by `OUTBOUND_MIN_DELAY_MS` or its `Crawl-delay` (up to `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`), so (pages + sitemap files) × spacing must stay well under it: 100,000 pages at 1 s take about 28 h, more than the default 24 h; 1,000 pages and 500 sitemaps at 10 s take about 4 h. 1 to 100000. |
+| `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
+| `SITE_MAX_SITEMAP_URLS` | `200000` | Most sitemap entries one crawl keeps, over all its sitemaps; a sitemap that reaches it keeps its first entries and answers `partial` (warning `sitemap_urls_truncated`). 1 to 5000000. |
+| `SITE_SITEMAP_MAX_BYTES` | `52428800` | Largest sitemap file in bytes (the protocol's 50 MiB): the fetch stops there, and a gzip sitemap is inflated to at most this many bytes. A cut sitemap keeps the entries before the cut and answers `partial` (warning `sitemap_truncated`). 1024 to 209715200. |
+| `SITE_MAX_LINKS_PER_PAGE` | `1000` | Most links kept of one crawled page, in document order; the others are neither listed nor followed (warning `links_truncated`). 10 to 50000. |
+
+A crawl's items live in Valkey with its job, until `JOB_TTL_SECONDS`. Size Valkey for the crawls
+open at once: each page item holds up to `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about
+100 bytes. A crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` like a batch.
+
+**Upgrading to package 9: extract workers first, then API pods, then site jobs.** Pods of an
+older release cannot parse a `site` job's options (the new field `site`; the options forbid
+unknown fields), and that breaks them in two ways:
+
+- An older extract worker that claims a site item fails before it runs it (its slot logs
+  `worker_slot_error`). It writes no result and the item stays leased, so it comes back after
+  each lease (2 × `EXTRACT_TIMEOUT_SECONDS` + 10 s, 60 s). It runs normally once a new worker
+  claims it; after `JOB_ITEM_MAX_ATTEMPTS` (5) leases a new worker fails it instead
+  (`internal_error`, "The item was lost by a worker too often."). With only older workers the
+  item cycles until the job expires: the job never completes and keeps one of the owner's
+  `BATCH_MAX_OPEN_PER_CLIENT` slots.
+- An older API pod answers 500 to `GET /v1/jobs/{id}` of a site job. It also answers 500 to
+  `POST /v1/batch` from an owner whose open set holds a site job, completed or not, until a new
+  pod has removed the finished ids.
+
+Roll out the extract workers first and the API pods after them. `helm upgrade` rolls both
+Deployments at once, so send site jobs only once every pod runs the new release.
+
+**Capacity of the extract workers.**
+
+- Each extract worker pod parses one sitemap at a time, on a thread of its own, so sitemaps never
+  hold the threads that convert pages (`CONVERT_CONCURRENCY`). Sitemap items of all crawls queue
+  for that thread while each holds one of the pod's `WORKER_CONCURRENCY` slots; an item that
+  waits longer than its budget (2 × `EXTRACT_TIMEOUT_SECONDS`, 50 s) plus 5 s fails `timeout`,
+  retryable ("the worker was busy"). Many large sitemaps at once take slots from pages; more pods
+  spread them.
+- A sitemap item holds the raw file (up to `SITE_SITEMAP_MAX_BYTES`, 50 MiB), for a gzip file its
+  inflated copy (up to the same) and the parsed entries; items that fetch while another parses
+  add up. Leave that headroom in the extract workers' memory limit (`workers.extract.resources`);
+  package 11 measures it.
+- A sitemap item may take 50 s, longer than the workers' shutdown grace (30 s by default): on
+  SIGTERM it is cancelled and runs again on another worker after its lease, without duplicate
+  items.
+
 ## Headers
 
 Read from the request:
@@ -681,10 +735,11 @@ slot.
 A result is written once: storing the same index again changes nothing, so an item that is run a
 second time after a lost lease counts once. Times are epoch seconds from the pod's clock.
 
-Per API key (the job's owner) one more key lists the unfinished batches:
+Per API key (the job's owner) one more key lists the unfinished batches and site jobs:
 `jobs:{owner:<name>}:open` is a set of job ids with a TTL of `JOB_TTL_SECONDS`, renewed on each
-batch. `POST /v1/batch` removes the ids of finished or expired jobs before it counts, and refuses
-the batch when the owner has `BATCH_MAX_OPEN_PER_CLIENT` open ones. The name is escaped (`%` as
+batch or site job. `POST /v1/batch` and `POST /v1/site-structure` remove the ids of finished or
+expired jobs before they count, and refuse the job when the owner has
+`BATCH_MAX_OPEN_PER_CLIENT` open ones. The name is escaped (`%` as
 `%25`, `{` as `%7B`, `}` as `%7D`), so the braces always enclose exactly the name. No script
 touches this key together with a job key or a queue key.
 
@@ -715,9 +770,25 @@ it; it is deleted with the job, and by whoever writes the item's result: the wor
 (a sync request's job at once, a batch with its last result) and the pod that ran the whole
 request. A worker that moves the item on to the llm worker keeps it.
 
+A `site` job (`POST /v1/site-structure`) grows while it runs: its items append the pages, the
+robots.txt item and the sitemaps they find to `urls`, and `total` grows with them. Its crawl lives
+in four more hashes of the job's slot, each with the remaining TTL of `meta` when written, and
+deleted with the job:
+
+| Key | Content |
+| --- | --- |
+| `job:{<id>}:nodes` | Hash of item index to the item's role (`page`, `robots`, `sitemap`, `sitemap_part`), depth, parent, whether a sitemap was guessed, and a part's number (JSON). |
+| `job:{<id>}:seen` | Hash of a URL's seen key to its item index. The key is the normal URL without its scheme and without a leading `www.`, so the http, https and `www.` spellings are one page; sitemap and robots.txt items are kept under `s:<key>`. A redirected page's final URL points to its item too. |
+| `job:{<id>}:children` | Hash of an item's index to what its links or sitemap children appended; an item with more than 1,000 sends them in batches, and batch 1 and later are stored under `<index>:<batch>`. An item that runs a second time (after a lost lease) gets each batch's answer back and appends nothing. |
+| `job:{<id>}:site` | Hash: the crawl's scope, the counters `pages` (against the request's `max_pages`), `files` (against `SITE_MAX_SITEMAP_FILES`) and `entries` (against `SITE_MAX_SITEMAP_URLS`), and `e:<index>` (the entries granted to one sitemap item). |
+
+One script per batch of at most 1,000 links appends an item's finds (with batch 0 also its sitemap
+parts, results included) and stores its answer, so a worker that dies halfway leaves each batch
+either complete or untouched, and its rerun carries on.
+
 ## Queue keys
 
-Batch items wait in a fair queue per worker pool (`extract` for the fast workers). The pool name is
+Batch items and the items of site jobs wait in a fair queue per worker pool (`extract` for the fast workers). The pool name is
 a literal cluster hash tag, so all keys of one pool share a slot. Client names (the API key name)
 and domains appear escaped in the keys (`%` as `%25`, `:` as `%3A`, tab as `%09`).
 
@@ -766,8 +837,8 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
 | `text_extraction_valkey_used_memory_bytes` | gauge | none | API pods, workers | Valkey's `used_memory` (`INFO memory`), read every 5 s; exported from the first successful read on and left unchanged while Valkey fails. Every pod reads the same Valkey: use `max()`. |
 | `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
-| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`) | API pods | Jobs accepted by the pod: a batch counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser, Docling, nlp or llm worker answers 202 with that job, or one that needs a transcription answers 202 with its ASR job. |
-| `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
+| `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`, `site`) | API pods | Jobs accepted by the pod: a batch or a site job counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser, Docling, nlp or llm worker answers 202 with that job, or one that needs a transcription answers 202 with its ASR job. |
+| `text_extraction_job_duration_seconds` | histogram | `kind` | workers (`batch`, `site`), API pods (`extract`) | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result. Buckets 1 s to 24 h. |
 | `text_extraction_browser_dispatch_total` | counter | `outcome` (`rendered`, `not_claimed`, `no_result`, `handed_over`, `backend_error`) | API pods (with `BROWSER_ENABLED`) | Sync requests (`POST /v1/extract`, `POST /v1/screenshot`) the pod sent to the browser workers, by how the wait ended: `rendered` (the worker's result came back), `not_claimed` (no worker took the page within `BROWSER_QUEUE_WAIT_SECONDS`), `no_result` (taken, but no result by the render deadline + 5 s, or the job was gone), `handed_over` (answered 202; the worker writes the job's result) or `backend_error` (Valkey failed). `not_claimed`, `no_result` and `backend_error` answer `auto` with its fast result and the warning `browser_unavailable`, and `browser` and screenshots with `timeout` (or 503): alert on their rate to see sync requests that silently fell back to fast mode. Every outcome is exported as 0 from the start. Use `sum()` over pods. |
 | `text_extraction_docling_dispatch_total` | counter | `outcome` (`answered`, `not_claimed`, `no_result`, `handed_over`, `backend_error`, `memory_guard`, `open_limit`, `input_budget`) | API pods and extract workers (with `DOCLING_ENABLED` and `JOBS_ENABLED`) | Sync requests (`POST /v1/extract`, `POST /v1/extract/file`) that needed OCR, by how the hand-over to the Docling workers ended: `answered` (the worker's result came back), `not_claimed` (no worker claimed the item within `DOCLING_SYNC_WAIT_SECONDS`), `no_result` (claimed, but no result in time, or the job was gone), `handed_over` (answered 202, or the document joined the request's own job), `backend_error` (Valkey failed), `memory_guard` (Valkey's memory guard was high), `open_limit` (the key had `DOCLING_MAX_OPEN_PER_CLIENT` unfinished Docling jobs) or `input_budget` (the inputs of all jobs would exceed `DOCLING_INPUT_BUDGET_BYTES`); the last three dispatch nothing. Extract workers count the batch items they could not move to the Docling workers (`memory_guard`, `input_budget`). Every outcome but `answered` and `handed_over` answers without OCR (`ocr_unavailable`, or a retryable failure for an image). Every outcome is exported as 0 from the start. Use `sum()` over pods. |
 | `text_extraction_asr_dispatch_total` | counter | `outcome` (`handed_over`, `backend_error`, `memory_guard`, `open_limit`, `input_budget`) | API pods and extract workers (with `ASR_ENABLED` and `JOBS_ENABLED`) | Media that needed a transcription (`transcribe: true` on `POST /v1/extract`, an audio or video upload on `POST /v1/extract/file`), by how the hand-over to the ASR workers ended: `handed_over` (the job was queued and answered 202, or the media joined the request's own job), `backend_error` (Valkey failed), `memory_guard` (Valkey's memory guard was high), `open_limit` (the key had `ASR_MAX_OPEN_PER_CLIENT` unfinished ASR jobs) or `input_budget` (the inputs of all jobs would exceed `DOCLING_INPUT_BUDGET_BYTES`); the last four answer without a transcription (`asr_unavailable`, or a retryable failure for a media file or an upload). Nothing waits for a transcription, so there is no `answered`. Extract workers count the batch items they could not move to the ASR workers (`memory_guard`, `input_budget`). Every outcome is exported as 0 from the start. Use `sum()` over pods. |
@@ -782,6 +853,9 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_document_conversions_total` | counter | `converter` (`markitdown`, `docling`), `kind` (`pdf`, `docx`, ...), `outcome` (`success` or the error code) | API pods, workers (extract, browser, docling) | Document conversions, where they run: MarkItDown in API pods (URLs and uploads) and in the extract and browser workers, Docling in the Docling workers. |
 | `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
 | `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |
+| `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`, `unknown` for an item without a crawl record), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
+| `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
+| `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |
 | `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |

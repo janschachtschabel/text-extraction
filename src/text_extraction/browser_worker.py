@@ -79,6 +79,7 @@ from text_extraction.jobs import (
     JobRecord,
     JobStore,
     browser_lease_seconds,
+    job_principal,
 )
 from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
@@ -99,12 +100,7 @@ from text_extraction.server import (
 from text_extraction.settings import Settings
 from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.valkey import create_valkey
-from text_extraction.worker import (
-    Worker,
-    _load_language_model,
-    _serve,
-    job_principal,
-)
+from text_extraction.worker import Worker, _load_language_model, _serve
 
 _log = structlog.get_logger(__name__)
 

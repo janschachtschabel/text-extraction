@@ -2,8 +2,9 @@
 
 Runs a started service against real, public URLs and counts how many yield usable text. It finds
 what fixtures cannot: dead links, cookie and bot walls, script-only pages, sites whose text is
-mostly navigation. Nothing here runs in `uv run pytest` (`tests/live` is ignored there); only the
-classifier is unit-tested, in `tests/test_live_classify.py`.
+mostly navigation. Nothing here runs in `uv run pytest` (`tests/live` is ignored there); the
+harnesses are unit-tested against fake services (`tests/test_live_classify.py`,
+`tests/test_live_run.py`, `tests/test_live_site.py`).
 
 ## URL lists
 
@@ -16,6 +17,7 @@ kept; a row without a URL is skipped with a warning.
 | `wlo_200.csv` | 200 | Sample of the corpus. **The gate:** in `auto` mode at or above 80 % ok (the browser baseline). Also reported in `browser` mode. |
 | `wlo_50.csv` | 50 | Quicker sample for local runs. |
 | `smoke.csv` | 24 | Curated watchlist of known-hard pages and expected failures, with `category`, `expected_lang` and `notes`. Reported in `auto` mode, never a gate: its ok rate is not comparable to the baseline. |
+| `sites.csv` | 5 | Five WLO-type sites (lehrer-online, planet-schule, Klexikon, LEIFIphysik, serlo) for the site structure run (`run_site.py`, package 9). Reported, never a gate. See "The site run" below. |
 | `media.csv` | 28 | The media set (package 6): YouTube, Vimeo, ARD, ZDF, arte and 3sat videos, two media files and two pages with HTML5 tracks, with `platform`, `expected_source` (the `transcript_source` the row should get), `expected_lang`, `transcribe` (`true` for the media files, which only ASR can answer) and `notes`. Reported, never a gate. See "The media set" below. |
 
 ## Run it
@@ -114,6 +116,45 @@ curl -H "Authorization: Bearer $KEY" -F file=@tests/media/corpus/speech_de.ogg \
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/jobs/<job id>
 ```
 
+## The site run
+
+`run_site.py` maps each site of a list with `POST /v1/site-structure` (package 9) and reports what
+the crawl found. The crawl is a `site` job, so the service needs an extract worker
+(`uv run text-extraction-worker`; give it `INTERNAL_PORT=9092` next to the API):
+
+```bash
+uv run python -m tests.live.run_site --urls tests/live/urls/sites.csv --depth 1 \
+  --max-pages 25 --compliance enforce
+```
+
+Each site is one request (`depth`, `max_pages`, `compliance` as given, `cache: false`); all sites
+run at once (each is a host of its own, so the per-host limits keep them apart). The harness reads
+the job every `--poll-seconds` until it is `completed`, then all its items in pages of 500, and
+prints a Markdown summary: per site the job's state and duration (created to finished), its items,
+page items, page items with `success`, failed items, sitemap files, further sitemap parts and
+sitemap entries; a histogram of the pages' links by `region` and one by `crawl` decision; and the
+warnings and error codes of the items. A request the service refuses (a 4xx or 5xx) or a job that
+does not complete within `--job-timeout` is reported in the State column, with what the job had
+so far. The exit code is always 0: the run is a report.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--base-url` | `http://127.0.0.1:8080` | The service's public API. |
+| `--api-key` | env `LIVE_API_KEY` | As for `run_live.py`. |
+| `--urls` | `urls/sites.csv` | CSV with a `url` column: the start pages. |
+| `--depth` | 1 | The request's `depth`. |
+| `--max-pages` | 25 | The request's `max_pages`. |
+| `--compliance` | `enforce` | The request's `compliance`. A crawler follows links, so it respects robots.txt and TDM opt-outs (CLAUDE.md rule 6, decision D4): what they exclude is not fetched and its link says `blocked`, counted in the crawl histogram. `report` fetches it anyway; use it only against a site you run. |
+| `--timeout` | 60 | Deadline of one HTTP request in seconds. |
+| `--job-timeout` | 1800 | Seconds to wait for a site's job to complete. |
+| `--poll-seconds` | 5 | Seconds between two reads of a job. |
+| `--out` | `results/site_<UTC time>.jsonl` | One JSON line per site, the numbers of the summary. |
+| `--summary-out` | none | Also write the Markdown summary to this file. |
+
+The summary's formatting and paging are unit-tested against a fake service in
+`tests/test_live_site.py`. The build sandbox of package 9 had no route to the five sites, so the
+run is a report-only step of the live workflow (below); its summary goes into the pull request.
+
 ## Buckets
 
 `classify` in `classify.py` reads the envelope: `status`, `error.code`, `data.word_count` and
@@ -153,6 +194,12 @@ and worker logs as the `live-results` artifact.
 - **Weekly**, Mondays 03:00 UTC: the same as for pull requests.
 - **Every run** also reports the media set (`media.csv`, `--mode auto --no-transcribe`; no ASR
   worker runs there), never as a gate: YouTube may refuse the runners' data-centre IPs (D1).
+- **Every run** also reports the site run (`run_site.py` on `sites.csv`, depth 1, 25 pages per
+  site, `compliance: enforce`), last and never as a gate: it starts an extract worker (internal
+  port 9092; the runs before it measure the rig without one), the step may fail without failing
+  the job (`continue-on-error`, at most 20 minutes, `--job-timeout 900`; skipped once the run
+  is cancelled), and its summary goes to the job log and the job summary; the worker's log is in
+  the artifact.
 
 If the gate misses, do not tune a setting first: compare the buckets per domain, fast against
 browser, and debug the domains that differ. When the ok rate drops between two commits, run both

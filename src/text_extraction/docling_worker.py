@@ -80,7 +80,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.jobs import JobRecord, JobStore, docling_lease_seconds
+from text_extraction.jobs import JobRecord, JobStore, docling_lease_seconds, job_principal
 from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pii_dispatch import create_pii_move
@@ -97,7 +97,7 @@ from text_extraction.scheduler import QueueItem
 from text_extraction.server import _Server, _server, configured_settings
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
-from text_extraction.worker import Worker, _serve, job_principal
+from text_extraction.worker import Worker, _serve
 
 _log = structlog.get_logger(__name__)
 

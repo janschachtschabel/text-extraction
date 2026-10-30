@@ -1,12 +1,12 @@
 """``POST /v1/batch`` and ``GET /v1/jobs/{id}``: the public routes in front of the job store and
-the fair queue.
+the fair queue, and ``open_job``, which ``POST /v1/site-structure`` (``site_api.py``) shares.
 
 Besides the job keys and the queue keys, each owner has one key of its own,
-``jobs:{owner:<name>}:open``: a set of the ids of the owner's batches that were accepted and have
-not been seen finished. It is how ``BATCH_MAX_OPEN_PER_CLIENT`` is counted. A job counts as open
-only while it exists and is not completed; the ids of the others are removed on each check. The
-name is escaped (``%``, ``{`` and ``}``), so the braces enclose exactly the name. No Lua script
-touches this key, so it shares no slot with a job or a queue.
+``jobs:{owner:<name>}:open``: a set of the ids of the owner's batches and site jobs that were
+accepted and have not been seen finished. It is how ``BATCH_MAX_OPEN_PER_CLIENT`` is counted. A
+job counts as open only while it exists and is not completed; the ids of the others are removed
+on each check. The name is escaped (``%``, ``{`` and ``}``), so the braces enclose exactly the
+name. No Lua script touches this key, so it shares no slot with a job or a queue.
 """
 
 import asyncio
@@ -41,6 +41,7 @@ from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
     JobItem,
+    JobKind,
     JobOptions,
     JobProgress,
     JobView,
@@ -110,8 +111,7 @@ def _log_unavailable(error: Exception) -> None:
 def _memory_high() -> ServiceError:
     return ServiceError(
         ErrorCode.INTERNAL_ERROR,
-        "The job backend is nearly out of memory and accepts no new batches for now. "
-        "Try again later.",
+        "The job backend is nearly out of memory and accepts no new jobs for now. Try again later.",
         503,
         retryable=True,
     )
@@ -120,7 +120,8 @@ def _memory_high() -> ServiceError:
 def _too_many_open(limit: int) -> ServiceError:
     return ServiceError(
         ErrorCode.RATE_LIMITED,
-        f"At most {limit} batches may be unfinished at a time. Retry when one has completed.",
+        f"At most {limit} batches and site jobs may be unfinished at a time. "
+        "Retry when one has completed.",
         429,
         retryable=True,
     )
@@ -142,7 +143,8 @@ def batch_body_limit(settings: Settings) -> int:
 
 
 async def _open_count(valkey: Redis, store: JobStore, owner: str) -> int:
-    """The owner's unfinished batches. Ids of jobs that are completed or gone are removed."""
+    """The owner's unfinished batches and site jobs. Ids of jobs that are completed or gone are
+    removed."""
     key = _open_key(owner)
     ids = [reply_text(raw) for raw in await valkey.smembers(key)]
     records = await asyncio.gather(*(store.get(job_id) for job_id in ids))
@@ -177,6 +179,53 @@ async def _discard(valkey: Redis, store: JobStore, owner: str, job_id: str) -> N
         _log_unavailable(error)
 
 
+async def open_job(
+    request: Request,
+    principal: Principal,
+    kind: JobKind,
+    options: JobOptions,
+    urls: list[str],
+) -> str:
+    """Create a job that will be queued, and count it as one of the owner's open jobs: the part
+    that ``POST /v1/batch`` and ``POST /v1/site-structure`` share. Returns the job's id.
+
+    503 while Valkey's memory is high; 429 (retryable) while the owner has
+    ``BATCH_MAX_OPEN_PER_CLIENT`` unfinished jobs, batches and site jobs alike. The job is
+    created with one item per URL, then added to the owner's open set; the count after the add
+    keeps the limit under concurrent requests, and a job beyond it is given back. A job whose
+    add fails is given back as well. The caller stores what else the job needs and enqueues it,
+    and gives the job back with ``discard_job`` when that fails. Valkey errors propagate."""
+    settings: Settings = request.app.state.settings
+    valkey: Redis = request.app.state.valkey
+    store: JobStore = request.app.state.job_store
+    guard: MemoryPressure = request.app.state.memory_guard
+    if guard.high:
+        raise _memory_high()
+    limit = settings.batch_max_open_per_client
+    if await _open_count(valkey, store, principal.name) >= limit:
+        raise _too_many_open(limit)
+    job_id = await store.create(kind, principal, options, urls, trace_id=current_trace_id())
+    try:
+        # Counting again after the add keeps the limit under concurrent requests: of several
+        # that passed the check above, those beyond the limit give their job back.
+        if await _add_open(valkey, principal.name, job_id, settings.job_ttl_seconds) > limit:
+            raise _too_many_open(limit)
+    except BaseException:
+        await discard_job(request, principal, job_id)
+        raise
+    return job_id
+
+
+async def discard_job(request: Request, principal: Principal, job_id: str) -> None:
+    """Give back a job from ``open_job`` that will not run: delete it with all its keys and
+    remove it from the owner's open set. Also on cancellation, and shielded from a second one:
+    the job must not be left queued (it would hold a slot of the client's quota until it
+    expires). A Valkey error is logged, not raised."""
+    valkey: Redis = request.app.state.valkey
+    store: JobStore = request.app.state.job_store
+    await asyncio.shield(_discard(valkey, store, principal.name, job_id))
+
+
 @router.post(
     "/v1/batch",
     status_code=202,
@@ -204,7 +253,7 @@ async def create_batch(
     4xx answers: an invalid body or more URLs than `BATCH_MAX_URLS` (422), a body larger than
     `BATCH_MAX_URLS` URLs of the longest allowed length can take (413, before it is read whole),
     a compliance mode the caller may not choose (403), `BATCH_MAX_OPEN_PER_CLIENT` unfinished
-    batches (429, retryable).
+    batches and site jobs together (429, retryable).
     503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
 
@@ -224,10 +273,8 @@ async def create_batch(
     combinations); the key serves all items of the batch, as long as the job.
     """
     settings: Settings = request.app.state.settings
-    valkey: Redis = request.app.state.valkey
     store: JobStore = request.app.state.job_store
     queue: FairQueue = request.app.state.job_queue
-    guard: MemoryPressure = request.app.state.memory_guard
 
     _check_size(body, settings.batch_max_urls)
     if body.mode == "browser":  # B9: the browser workers take the items, if there are any
@@ -267,20 +314,9 @@ async def create_batch(
         chunking=body.chunking,
         describe_images=body.describe_images,
     )
-    if guard.high:
-        raise _memory_high()
-    limit = settings.batch_max_open_per_client
     try:
-        if await _open_count(valkey, store, principal.name) >= limit:
-            raise _too_many_open(limit)
-        job_id = await store.create(
-            "batch", principal, options, body.urls, trace_id=current_trace_id()
-        )
+        job_id = await open_job(request, principal, "batch", options, body.urls)
         try:
-            # Counting again after the add keeps the limit under concurrent requests: of
-            # several that passed the check above, those beyond the limit give their job back.
-            if await _add_open(valkey, principal.name, job_id, settings.job_ttl_seconds) > limit:
-                raise _too_many_open(limit)
             if key is not None and body.transcribe:
                 # The caller's key of the external endpoint, for any item that moves to the ASR
                 # workers, while the job lives (M11); the job's deletion takes it along.
@@ -292,9 +328,7 @@ async def create_batch(
             # Enqueued exactly once and never retried: a retry could queue some items twice.
             await queue.enqueue(job_id, principal.name, body.urls)
         except BaseException:
-            # Also on cancellation, and shielded from a second one: the job must not be left
-            # queued (it would hold a slot of the client's quota until it expires).
-            await asyncio.shield(_discard(valkey, store, principal.name, job_id))
+            await discard_job(request, principal, job_id)
             raise
     except (RedisError, OSError) as error:
         _log_unavailable(error)
@@ -417,8 +451,10 @@ async def get_job(
     The envelope `status` is `success` while the job is queued or running and when all items
     succeeded, `partial` when the finished job has failed or partial items, and `failed` when
     every item failed; `error` then has the most frequent error code among the first items and
-    the message "All N items failed.". `next_offset` is set while more items follow. A job that
-    does not exist, has expired or belongs to another caller (admins see all) answers 404.
+    the message "All N items failed.". `next_offset` is set while more items follow. A `site`
+    job (`POST /v1/site-structure`) grows while it runs: each page, robots.txt and sitemap it
+    finds becomes an item, so its `total` rises until it is completed. A job that does not
+    exist, has expired or belongs to another caller (admins see all) answers 404.
     """
     store: JobStore = request.app.state.job_store
     try:

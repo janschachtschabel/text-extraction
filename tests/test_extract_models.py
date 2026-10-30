@@ -14,6 +14,7 @@ from text_extraction.file_models import FileForm, form_of, upload_options
 from text_extraction.job_models import BatchRequest, JobOptions
 from text_extraction.jobs import _options_json
 from text_extraction.pool_dispatch import job_options
+from text_extraction.site.types import SiteInfo
 from text_extraction.structured.types import SelectorRule, StructuredOptions
 from text_extraction.vision.types import (
     IMAGE_NOT_DESCRIBED_WARNING,
@@ -298,3 +299,38 @@ def test_result_documents_image_not_described() -> None:
     description = ExtractResult.model_fields["warnings"].description or ""
 
     assert f"`{IMAGE_NOT_DESCRIBED_WARNING}`" in description
+
+
+def test_old_cached_result_parses_with_site_null() -> None:
+    """A stored result without ``site`` (every result before package 9) stays readable, and a
+    result of the other routes answers ``site: null``."""
+    old = {**PACKAGE_4_RESULT, "media": None, "pii": None}
+    assert "site" not in old
+
+    result = ExtractResult.model_validate(old)
+
+    assert result.site is None
+    assert result.model_dump(mode="json")["site"] is None
+
+
+def test_result_takes_site_info() -> None:
+    site = SiteInfo(role="robots", depth=0, parent=0, sitemaps=["https://a.example/sitemap.xml"])
+
+    result = ExtractResult.model_validate({**PACKAGE_4_RESULT, "site": site.model_dump()})
+
+    assert result.site == site
+
+
+def test_result_documents_the_site_warnings() -> None:
+    description = ExtractResult.model_fields["warnings"].description or ""
+
+    for warning in (
+        "sitemap_not_found",
+        "sitemap_truncated",
+        "sitemap_urls_truncated",
+        "sitemap_files_truncated",
+        "links_truncated",
+        "max_pages_reached",
+        "site_memory_guard",
+    ):
+        assert f"`{warning}`" in description

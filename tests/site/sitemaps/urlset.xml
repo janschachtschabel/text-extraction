@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://lernen.example.org/</loc>
+    <lastmod>2026-10-01</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://lernen.example.org/mathe/bruchrechnung?seite=2&amp;x=1</loc>
+    <lastmod>2026-09-15T10:00:00+00:00</lastmod>
+    <changefreq>sometimes</changefreq>
+    <priority>1.5</priority>
+  </url>
+  <url>
+    <loc>https://lernen.example.org/physik/</loc>
+  </url>
+</urlset>

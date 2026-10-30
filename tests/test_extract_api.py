@@ -180,9 +180,11 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "structured",
         "chunks",
         "image_descriptions",
+        "site",
     }
     assert data["structured"] is None
     assert data["chunks"] is None
+    assert data["site"] is None  # package 9: the only new field of the existing routes
     assert data["timings"]["llm_ms"] == 0
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"

@@ -49,6 +49,16 @@ config:
   STRUCTURED_SELECTOR_TIMEOUT_SECONDS: "5"
   STRUCTURED_SELECTOR_PROCESSES: "1"
   STRUCTURED_SELECTOR_MEMORY_MB: "512"
+  # Site structure (POST /v1/site-structure): the caps of one crawl. A request's depth or max_pages
+  # above the first two answers 422. A crawl's items live in Valkey with its job: size
+  # valkey.maxmemory for the open crawls, each page item with up to SITE_MAX_LINKS_PER_PAGE links
+  # and each sitemap entry about 100 bytes.
+  SITE_MAX_DEPTH: "5"
+  SITE_MAX_PAGES: "1000"
+  SITE_MAX_SITEMAP_FILES: "500"
+  SITE_MAX_SITEMAP_URLS: "200000"
+  SITE_SITEMAP_MAX_BYTES: "52428800"
+  SITE_MAX_LINKS_PER_PAGE: "1000"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both

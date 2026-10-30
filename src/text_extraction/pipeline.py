@@ -110,6 +110,16 @@ run on the ``ConversionPool`` (``CONVERT_CONCURRENCY`` threads); waiting for a s
 against the deadline. The deadline cannot stop a running thread, but every step bounds its
 own cost. Documents convert in the child processes of the ``DocumentPool``, which are killed at
 the deadline.
+
+The site crawl (package 9, ruling P9-S10) uses four hooks. ``run(..., site_links=True)`` adds
+the page's typed links (``site.links.site_links``, on the conversion pool with the rest of the
+page's conversion) as ``data.site``: an HTML page's links (at most ``SITE_MAX_LINKS_PER_PAGE``,
+else the warning ``links_truncated``), ``[]`` for plain text, no ``site`` for a document or
+media; the option joins the cache key only when set. ``fetch_raw`` fetches a file (a sitemap)
+with steps 2, 4 and 5 and the header checks of step 7, under the same deadline and gate
+refusals, and returns the answer of any HTTP status as it came. ``robots_sitemaps`` reads the
+``Sitemap:`` lines of an origin's robots.txt, from the cache or loaded in the host's turn.
+``blocked_from_cache`` says from the cached origin files alone whether step 4 would block a URL.
 """
 
 import asyncio
@@ -138,6 +148,7 @@ from text_extraction.compliance import (
     ComplianceChecker,
     ComplianceMode,
     ComplianceReport,
+    RobotsSitemaps,
     blocking_code,
     resolve_mode,
     with_page_findings,
@@ -244,6 +255,8 @@ from text_extraction.render import (
 )
 from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
 from text_extraction.settings import Settings
+from text_extraction.site.links import site_links as typed_links
+from text_extraction.site.types import SiteInfo
 from text_extraction.structured.dom import (
     dom_options,
     dom_stage,
@@ -290,6 +303,8 @@ _DOCUMENT_TYPES = frozenset(
     {media_type(kind) for kind in get_args(DocumentKind)} | {"application/octet-stream"}
 )
 DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
+# A page of a ``site_links`` run had more links than ``SITE_MAX_LINKS_PER_PAGE``: the first ones.
+LINKS_TRUNCATED_WARNING = "links_truncated"
 # Kinds Docling converts without OCR: OpenDocument files have their text.
 _NO_OCR_KINDS: frozenset[DocumentKind] = frozenset({"odt", "ods", "odp"})
 # A result with one of these is not written to the result cache (see ``_finish``).
@@ -436,6 +451,7 @@ class _Run:
     owner: str | None = None
     learned: dict[str, SelectorRule] = field(default_factory=dict)
     learned_unavailable: bool = False
+    site_links: bool = False  # the page's typed links go into ``data.site`` (P9-S10)
 
     @property
     def cache_url(self) -> str:
@@ -590,6 +606,7 @@ class _Processed:
     fingerprint: Fingerprint | None  # not yet compared with the previous one
     structured: StructuredResult | None = None  # the DOM stage's (S3), for HTML only
     dom: "_DomWork | None" = None  # the DOM stage still to run, once ``_process`` is done
+    site: SiteInfo | None = None  # the page's typed links, for a ``site_links`` run
 
 
 @dataclass(frozen=True)
@@ -604,6 +621,20 @@ class _DomWork:
     metadata: PageMetadata | None
     items: StructuredItems
     rules: dict[str, SelectorRule]
+
+
+@dataclass(frozen=True)
+class RawFetch:
+    """What ``Pipeline.fetch_raw`` got: the answer (``fetched``, any HTTP status) or the
+    ``failure`` that ended it (a compliance block, a fetch error, a gate refusal, the deadline),
+    never both; the compliance ``report``, the requests sent for the URL (``attempts``) and the
+    ``timings``."""
+
+    fetched: FetchResult | None
+    report: ComplianceReport
+    failure: Envelope[ExtractResult] | None
+    attempts: int
+    timings: Timings
 
 
 class Pipeline:
@@ -714,6 +745,7 @@ class Pipeline:
         draft: Envelope[ExtractResult] | None = None,
         ocr_handoff: OcrHandoff | None = None,
         asr_handoff: TranscriptionHandoff | None = None,
+        site_links: bool = False,
     ) -> Envelope[ExtractResult]:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
         and an unavailable Valkey (503).
@@ -735,6 +767,9 @@ class Pipeline:
         Media that needs speech recognition (``transcribe: true``) goes to ``asr_handoff`` the
         same way, with the answer without a transcription (``pipeline_media.without_asr``).
         Without it that answer is final.
+
+        ``site_links`` (the site crawl's pages, P9-S10) adds the page's typed links as
+        ``data.site``, and keys the result cache apart.
         """
         mode = resolve_mode(req.compliance, principal, self._settings)
         private = not req.secrets().empty()
@@ -755,6 +790,7 @@ class Pipeline:
             target=req.url,
             asr_handoff=asr_handoff,
             owner=principal.name,
+            site_links=site_links,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -1097,6 +1133,135 @@ class Pipeline:
             owner=principal.name,
         )
 
+    # --- hooks of the site crawl (P9-S10) -------------------------------------------------------
+
+    async def fetch_raw(
+        self,
+        url: str,
+        principal: Principal,
+        compliance: ComplianceMode | None,
+        *,
+        max_bytes: int,
+        truncate: bool,
+        gate_refusals: Literal["fail", "raise"] = "fail",
+    ) -> RawFetch:
+        """Fetch ``url`` (a sitemap) as ``run`` fetches a page, without converting it: the URL
+        is validated (step 2), its origin's files are checked (step 4, in the host's turn when
+        they are not cached), it is fetched in that turn with every redirect hop checked before
+        its request and the outcome recorded for the gate (step 5), and the answer's headers
+        get the checks of step 7 (``after_fetch`` without a page). A block, a fetch error, a
+        refusal of the gate and the deadline (``EXTRACT_TIMEOUT_SECONDS``) end as the
+        ``failure`` envelope ``run`` would answer; an answer of any HTTP status is ``fetched``.
+        At most ``max_bytes`` are read; with ``truncate`` a longer body is cut there
+        (``fetched.truncated``), otherwise it fails ``too_large``.
+
+        Raises ``ServiceError`` for a refused compliance mode (403) and an unavailable Valkey
+        (503), and with ``gate_refusals="raise"`` the gate's ``OutboundBusy`` or
+        ``CircuitOpen``, as ``run`` does."""
+        mode = resolve_mode(compliance, principal, self._settings)
+        # Internal: only the URL, the mode and the format (of a failure's result) are read.
+        req = ExtractRequest.model_construct(
+            url=url, mode="fast", format="text", metadata=False, compliance=compliance
+        )
+        run = _Run(
+            req=req,
+            report=ComplianceReport(mode=mode, decision="skipped"),  # until it is checked
+            cache="bypass",
+            started=time.perf_counter(),
+            raise_refusals=gate_refusals == "raise",
+            cacheable=False,
+            target=url,
+        )
+        deadline = asyncio.timeout(self._timeout_seconds or self._settings.extract_timeout_seconds)
+        outcome: FetchResult | Envelope[ExtractResult]
+        try:
+            async with deadline:
+                run.deadline = deadline
+                outcome = await self._raw(run, max_bytes=max_bytes, truncate=truncate)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            outcome = run.failed(
+                ErrorCode.TIMEOUT, "The fetch did not finish in time.", retryable=True
+            )
+        if isinstance(outcome, Envelope):
+            outcome.trace_id = current_trace_id()
+            return RawFetch(None, run.report, outcome, run.attempts, run.timings())
+        return RawFetch(outcome, run.report, None, run.attempts, run.timings())
+
+    async def _raw(
+        self, run: _Run, *, max_bytes: int, truncate: bool
+    ) -> FetchResult | Envelope[ExtractResult]:
+        """The steps of ``fetch_raw``: the answer, or the envelope of what ended it."""
+        try:
+            validate_url(run.target)
+        except InvalidUrlError as error:
+            return run.failed(ErrorCode.INVALID_URL, str(error))
+        run.host = urlsplit(run.target).hostname
+
+        async def checked_fetch() -> FetchResult | Envelope[ExtractResult]:
+            turn = HostTurn(self._gate)
+            try:
+                run.report = await self._check_origin(run, run.target, turn)
+                if (code := blocking_code(run.report)) is not None:
+                    return run.failed(code, _BLOCK_MESSAGES[code])
+                return await self._fetch(run, None, turn, max_bytes=max_bytes, truncate=truncate)
+            finally:
+                await turn.give_back()  # `_fetch` gives it back as soon as the fetch ends
+
+        outcome = await self._guarded(run, checked_fetch())
+        if isinstance(outcome, Envelope):
+            return outcome
+        started = time.perf_counter()
+        run.report = self._checker.after_fetch(run.report, outcome, None)  # the headers only
+        run.compliance_ms += _ms(started)
+        if (code := blocking_code(run.report)) is not None:
+            return run.failed(code, _BLOCK_MESSAGES[code])
+        return outcome
+
+    async def robots_sitemaps(
+        self, url: str, *, gate_refusals: Literal["fail", "raise"] = "fail"
+    ) -> RobotsSitemaps:
+        """The sitemaps the robots.txt of ``url``'s origin lists (``state`` and ``urls``): from
+        the compliance cache without a request, else loaded in the host's turn (robots.txt
+        alone, within the 10 s budget of an origin's files) and cached for the checks. It reads
+        in every compliance mode: reading robots.txt checks nothing.
+
+        A refusal of the gate answers ``unavailable``, or with ``gate_refusals="raise"``
+        propagates; an unavailable gate backend is a ``ServiceError`` (503), as in ``run``."""
+        cached = await self._checker.robots_sitemaps(url, cached_only=True)
+        if cached is not None:
+            return cached
+        turn = HostTurn(self._gate)
+        try:
+            await turn.take(urlsplit(url).hostname or "", None)
+            loaded = await self._checker.robots_sitemaps(url, cached_only=False)
+        except (OutboundBusy, CircuitOpen):
+            if gate_refusals == "raise":
+                raise
+            return RobotsSitemaps(state="unavailable")
+        except RedisError as error:
+            _log.warning("outbound_gate_unavailable", error_type=type(error).__name__)
+            raise ServiceError(
+                ErrorCode.INTERNAL_ERROR,
+                "The outbound state backend is unavailable. Try again later.",
+                503,
+                retryable=True,
+            ) from None
+        finally:
+            await turn.give_back()
+        if loaded is None:  # pragma: no cover - only `cached_only` answers None
+            raise RuntimeError("robots.txt was not loaded")
+        return loaded
+
+    async def blocked_from_cache(self, url: str, mode: ComplianceMode) -> bool | None:
+        """Whether step 4 would block ``url`` under ``mode``, judged from the cached origin
+        files alone (no request): None while they are not cached."""
+        report = await self._checker.cached_before_fetch(url, mode)
+        if report is None:
+            return None
+        return blocking_code(report) is not None
+
     # --- steps ---------------------------------------------------------------------------------
 
     async def _within_deadline(self, run: _Run) -> Envelope[ExtractResult]:
@@ -1273,6 +1438,7 @@ class Pipeline:
             run.report.mode,
             media=run.media is not None,
             structured=structured_cache_part(options, run.learned) if options is not None else None,
+            site_links=run.site_links,
         )
 
     async def _cached(self, run: _Run) -> _Stored | None:
@@ -1490,7 +1656,15 @@ class Pipeline:
         run.compliance_ms += _ms(started)
         return report
 
-    async def _fetch(self, run: _Run, validators: Validators | None, turn: HostTurn) -> FetchResult:
+    async def _fetch(
+        self,
+        run: _Run,
+        validators: Validators | None,
+        turn: HostTurn,
+        *,
+        max_bytes: int | None = None,
+        truncate: bool = False,
+    ) -> FetchResult:
         """Fetch the target in its host's turn and report the outcome to the gate.
 
         A redirect target is checked against the compliance files of its origin before it is
@@ -1498,9 +1672,13 @@ class Pipeline:
         and the previous host's turn is given back first; one on the same host keeps the turn.
         Missing files of the target's origin are fetched in the target's turn.
         The outcome is recorded for the host that gave it, judged against the time that host's
-        request actually had.
+        request actually had. ``max_bytes`` and ``truncate`` (``fetch_raw`` only) replace the
+        fetcher's byte limit and let it cut a longer body instead of failing.
         """
         checked = {run.target}
+        limits: dict[str, Any] = {}
+        if max_bytes is not None:
+            limits = {"max_bytes": max_bytes, "truncate": truncate}
         started = time.perf_counter()
         hop_checks = 0.0  # seconds of compliance checks inside the fetch
         budget = 0.0  # seconds the request at `turn.answering` has, for `_record_failure`
@@ -1551,6 +1729,7 @@ class Pipeline:
                     validators=validators,
                     timeout_seconds=budget,  # the whole chain's budget; a hop gets what is left
                     on_redirect=on_redirect,
+                    **limits,
                 )
             except FetchError as error:
                 gate_timeout = error.code == ErrorCode.TIMEOUT and error.cleared_after is None
@@ -1659,6 +1838,7 @@ class Pipeline:
             fingerprint=processed.fingerprint,
             warnings=processed.warnings,
             structured=processed.structured,
+            site=processed.site,
         )
         envelope = self._envelope(result)
         if self._escalates(run, envelope):
@@ -1681,8 +1861,11 @@ class Pipeline:
         (``_dom_stage``), or the failed envelope of a page that broke them."""
         started = time.perf_counter()
         learned = run.learned if isinstance(run, _Run) else {}
+        site = isinstance(run, _Run) and run.site_links
         try:
-            processed = await self._pool.run(self._process, run.req, fetched, kind, text, learned)
+            processed = await self._pool.run(
+                self._process, run.req, fetched, kind, text, learned, site
+            )
             if processed.dom is not None:
                 processed = await self._dom_stage(run, processed, processed.dom)
             return processed
@@ -2190,6 +2373,7 @@ class Pipeline:
             warnings=[*processed.warnings, *rendered.warnings],
             screenshot=screenshot,
             structured=processed.structured,
+            site=processed.site,
         )
         if self._media is not None and screenshot is None:
             result = await self._media.tracks(
@@ -2285,17 +2469,22 @@ class Pipeline:
         kind: Literal["html", "text"],
         text: str,
         learned: Mapping[str, SelectorRule] | None = None,
+        site_links: bool = False,
     ) -> _Processed:
         """Convert and judge the decoded page, and prepare the DOM stage of ``structured`` on an
         HTML page (S3) with the ``learned`` selectors (``_DomWork``: ``_dom_stage`` runs it).
         CPU-bound: runs on the conversion pool. The page is parsed once for the metadata and
-        the DOM stage."""
+        the DOM stage. With ``site_links`` the page's typed links become its ``site`` (P9-S10):
+        an HTML page's (at most ``SITE_MAX_LINKS_PER_PAGE``, else ``links_truncated``), none
+        for plain text."""
         final_url = fetched.final_url
         metadata: PageMetadata | None = None
         links: list[Link] | None = None
         html_lang: str | None = None
         dom_work: _DomWork | None = None
         dom_warnings: list[str] = []
+        site: SiteInfo | None = None
+        site_warnings: list[str] = []
         if kind == "html":
             conversion = convert_html(text, final_url, req.format)
             host = urlsplit(final_url).hostname or ""
@@ -2319,6 +2508,18 @@ class Pipeline:
                 dom_work = _DomWork(text, final_url, dom, page_metadata, items, rules)
             if req.links:
                 links = page_links(text, final_url)
+            if site_links:
+                found = typed_links(
+                    text,
+                    final_url,
+                    fetched.headers,
+                    max_links=self._settings.site_max_links_per_page,
+                )
+                site = SiteInfo(
+                    role="page", depth=0, parent=None, links=found.links, nofollow=found.nofollow
+                )
+                if found.truncated:
+                    site_warnings.append(LINKS_TRUNCATED_WARNING)
         else:
             if fetched.content_type in _MARKDOWN_TYPES:
                 conversion = Conversion(
@@ -2335,19 +2536,22 @@ class Pipeline:
             quality = assess(None, content)
             if req.links:
                 links = []
+            if site_links:
+                site = SiteInfo(role="page", depth=0, parent=None, links=[])
         language = detect_language(html_lang, fetched.headers.get("content-language"), content)
         verdict = quality_error(quality, self._settings.quality_min_words)
         failed = verdict is not None and verdict[0] == "failed"
         return _Processed(
             content=content,
             title=conversion.title,
-            warnings=[*conversion.warnings, *dom_warnings],
+            warnings=[*conversion.warnings, *dom_warnings, *site_warnings],
             quality=quality,
             language=language,
             metadata=metadata,
             links=links,
             fingerprint=None if failed else compute_fingerprint(fetched.raw_sha256, content),
             dom=dom_work,
+            site=site,
         )
 
     def _envelope(
@@ -2464,6 +2668,7 @@ def _cache_options(
     *,
     media: bool = False,
     structured: Mapping[str, Any] | None = None,
+    site_links: bool = False,
 ) -> dict[str, Any]:
     """Every request option that changes the result; the cache key covers them.
 
@@ -2485,6 +2690,9 @@ def _cache_options(
     ``llm``), keeps the key of a request without it; so does a request with ``pii``, which has no
     DOM stage (``dom.dom_options``, R12). ``chunking`` and the post stage's options never change
     the cached result, so they are never part of the key.
+
+    ``site_links`` (a site crawl's page, P9-S10) adds the page's typed links to the result; it
+    is part of the key only when set, so the keys of other requests stay as they were.
     """
     options: dict[str, Any] = {
         "mode": req.mode,
@@ -2501,6 +2709,8 @@ def _cache_options(
         options["languages"] = list(req.languages)
     if structured is not None:
         options["structured"] = dict(structured)
+    if site_links:
+        options["site_links"] = True
     return options
 
 

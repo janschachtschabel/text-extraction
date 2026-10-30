@@ -56,6 +56,7 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
 from text_extraction.settings import Settings
+from text_extraction.site.types import SiteOptions
 from text_extraction.structured.post import BUSY_MESSAGE
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import StructuredOptions
@@ -403,6 +404,94 @@ async def test_item_deferred_too_often_fails_with_the_gate_code(
     assert (counts.pending, counts.leased) == (0, 0)
     assert outcome_count(harness, "deferred") == 2
     assert outcome_count(harness, code.value) == 1
+
+
+# --- site jobs (package 9) ----------------------------------------------------------------------
+
+
+class RecordingSite:
+    """A site runner that answers every item with one envelope and notes its calls."""
+
+    def __init__(self) -> None:
+        self.runs: list[tuple[str, int, str, str]] = []
+        self.requeued: list[tuple[str, int]] = []
+
+    async def run(
+        self, job: JobRecord, item: QueueItem, url: str, *, gate_refusals: str
+    ) -> Envelope[ExtractResult]:
+        self.runs.append((job.kind, item.index, url, gate_refusals))
+        return Envelope[ExtractResult](
+            status="failed",
+            error=ErrorInfo(code=ErrorCode.TIMEOUT, message="site", retryable=True),
+        )
+
+    async def requeue_children(self, job: JobRecord, item: QueueItem) -> None:
+        self.requeued.append((job.kind, item.index))
+
+
+SITE_OPTIONS = JobOptions(mode="fast", format="text", compliance="enforce", site=SiteOptions())
+
+
+async def submit_site(harness: Harness, url: str) -> str:
+    job_id = await harness.store.create("site", OWNER, SITE_OPTIONS, [url])
+    await harness.queue.enqueue(job_id, OWNER.name, [url])
+    return job_id
+
+
+@scenario
+async def test_extract_runner_hands_site_jobs_to_site_runner() -> None:
+    urls = [page("example.org", 0)]
+    harness = Harness({url: fetched(url) for url in urls})
+    site = RecordingSite()
+    harness.runner.site = cast(Any, site)
+    site_job = await submit_site(harness, page("lernen.example.org"))
+    batch_job = await harness.submit(urls)
+
+    async def both_done() -> bool:
+        return await harness.completed(site_job) and await harness.completed(batch_job)
+
+    await harness.run_until(both_done)
+
+    assert site.runs == [("site", 0, page("lernen.example.org"), "raise")]
+    [site_item] = await harness.items(site_job)
+    assert error_of(site_item) == (ErrorCode.TIMEOUT, True, "site")
+    [batch_item] = await harness.items(batch_job)
+    assert batch_item.result is not None
+    assert batch_item.result.status == "success"
+    assert [url for url, _ in harness.fetcher.calls if url == urls[0]] == urls
+
+
+@scenario
+async def test_site_item_without_site_runner_fails() -> None:
+    harness = Harness()
+    job_id = await submit_site(harness, page("lernen.example.org"))
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    code, retryable, _ = error_of(item)
+    assert (code, retryable) == (ErrorCode.INTERNAL_ERROR, False)
+    assert harness.fetcher.calls == []
+
+
+@scenario
+async def test_exhausted_site_item_requeues_its_children_first() -> None:
+    harness = Harness(job_item_max_attempts=1)
+    site = RecordingSite()
+    harness.runner.site = cast(Any, site)
+    job_id = await submit_site(harness, page("lernen.example.org"))
+    for _ in range(2):
+        await harness.claim()
+        harness.clock.now += harness.lease_seconds + 1
+    claim = await harness.claim()
+    assert claim.exhausted
+
+    await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
+
+    assert site.requeued == [("site", 0)]
+    assert site.runs == []
+    [item] = await harness.items(job_id)
+    assert error_of(item) == (ErrorCode.INTERNAL_ERROR, True, LOST_MESSAGE)
 
 
 # --- lost leases -------------------------------------------------------------------------------
@@ -1096,8 +1185,21 @@ def test_worker_process_wires_one_guard_into_cache_and_registry() -> None:
         assert runner._pipeline._cache._guard is parts.guard
         assert parts.guard in registry._collector_to_names
         assert "text_extraction_valkey_used_memory_bytes" in registry._names_to_collectors
+        # The site runner (package 9) shares the worker's pipeline, pool, queue and guard.
+        site = runner.site
+        assert site is not None
+        assert site._pipeline is runner._pipeline
+        # Sitemap parses run on a pool of their own, so they never take the pages' threads.
+        assert site._pool is parts.sitemap_pool
+        assert site._pool is not parts.pool
+        assert site._pool._executor._thread_name_prefix == "sitemap"
+        assert site._pool._slots._value == 1
+        assert site._queue is parts.worker._queue
+        assert site._guard is parts.guard
+        assert "text_extraction_site_items_total" in registry._names_to_collectors
     finally:
         parts.pool.shutdown()
+        parts.sitemap_pool.shutdown()
 
 
 @scenario

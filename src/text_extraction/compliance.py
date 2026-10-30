@@ -44,6 +44,11 @@ share one load of each file (cache read, fetch, cache write); other pods load th
 whose last waiting check is cancelled is cancelled too, so no request outlives the gate turn it
 ran in.
 Parsing a rules file runs in a worker thread, off the event loop.
+
+``ComplianceChecker.robots_sitemaps`` reads the ``Sitemap:`` lines of an origin's robots.txt
+for the site crawl (package 9), from the same cache entry: with ``cached_only`` it answers None
+while the file is not cached; otherwise it loads robots.txt alone, in the caller's turn. It
+checks nothing, so it reads the file in every mode.
 """
 
 import asyncio
@@ -54,10 +59,11 @@ import math
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import structlog
 from protego import Protego
@@ -100,6 +106,17 @@ _BOT_NAME = re.compile(r"[a-z0-9_.*-]+")
 
 _CacheState = Literal["found", "absent", "unavailable"]
 _CACHE_STATES: frozenset[str] = frozenset({"found", "absent", "unavailable"})
+
+
+class RobotsSitemaps(BaseModel):
+    """The sitemaps an origin's robots.txt lists: its ``state`` (``found``, ``absent`` or
+    ``unavailable``, as cached) and the ``Sitemap:`` URLs of a found file, in the file's order:
+    each resolved against the robots.txt URL (a relative line such as ``/sitemap.xml`` is common),
+    normalized (``site.urls.normalize_url``), kept when it is http(s), duplicates dropped. They
+    are text: any host or address may appear, and the fetch that follows one checks it."""
+
+    state: _CacheState
+    urls: list[str] = Field(default_factory=list)
 
 
 class ComplianceReport(BaseModel):
@@ -287,6 +304,26 @@ class ComplianceChecker:
         if robots is None or tdmrep is None or ai is None:
             return None
         return await self._judge(mode, url, robots, tdmrep, ai)
+
+    async def robots_sitemaps(self, url: str, *, cached_only: bool) -> RobotsSitemaps | None:
+        """The sitemaps the robots.txt of ``url``'s origin lists. With ``cached_only`` from the
+        cache alone (None while robots.txt is not cached, or the cache cannot be read);
+        otherwise the file is loaded when it is not cached (shared with concurrent checks,
+        within the 10 s budget of an origin's files), so call it in the host's turn."""
+        origin = _origin(url)
+        key = _cache_key("robots", origin)
+        if cached_only:
+            entry = await self._cache_get(key)
+            if entry is None:
+                return None
+        else:
+            entry = await self._load(
+                "robots", origin, _ROBOTS_PATH, time.monotonic() + _FILE_TIMEOUT_SECONDS
+            )
+        rules = await self._rules(entry)
+        return RobotsSitemaps(
+            state=entry.state, urls=_sitemap_urls(rules, origin.base + _ROBOTS_PATH)
+        )
 
     async def _judge(
         self, mode: ComplianceMode, url: str, robots: _Entry, tdmrep: _Entry, ai: _Entry
@@ -559,6 +596,27 @@ def _parse_rules(text: str) -> Protego | None:
         return None
 
 
+def _sitemap_urls(rules: Protego | None, robots_url: str) -> list[str]:
+    """The ``Sitemap:`` URLs of parsed rules, resolved against ``robots_url`` (RFC 9309 asks
+    for absolute URLs, but relative and protocol-relative lines occur), normalized, each once;
+    only http(s) ones are kept."""
+    # Imported here: ``site.urls`` imports ``site.types``, which imports this module.
+    from text_extraction.site.urls import normalize_url
+
+    if rules is None:
+        return []
+    urls: dict[str, None] = {}
+    for raw in rules.sitemaps:
+        try:
+            resolved = urljoin(robots_url, raw.strip())
+        except ValueError:  # an unparsable line, e.g. a broken IPv6 literal
+            continue
+        normal = normalize_url(resolved)
+        if normal is not None:
+            urls.setdefault(normal, None)
+    return list(urls)
+
+
 def _crawl_delay(rules: Protego) -> float | None:
     delay = rules.crawl_delay(PRODUCT_TOKEN)
     if delay is None or not math.isfinite(delay) or delay < 0:
@@ -666,8 +724,9 @@ def _first_content(metas: list[tuple[str, str]], name: str) -> str | None:
     return next((content for meta_name, content in metas if meta_name == name), None)
 
 
-def _x_robots_noai(value: str) -> bool:
-    """``noai``/``noml`` in an ``X-Robots-Tag`` that addresses everyone or this service.
+def x_robots_tag_says(value: str, directives: frozenset[str]) -> bool:
+    """One of ``directives`` (lower case) in an ``X-Robots-Tag`` that addresses everyone or this
+    service.
 
     A directive list may be introduced by a bot name (``googlebot: noindex, noai``); it then
     holds for that bot until the next name.
@@ -679,17 +738,24 @@ def _x_robots_noai(value: str) -> bool:
         head = head.strip()
         if separator and _BOT_NAME.fullmatch(head) and head not in _VALUE_DIRECTIVES:
             scope, part = head, rest.strip()
-        if scope in (None, "*", "robots", PRODUCT_TOKEN) and part in _NOAI_DIRECTIVES:
+        if scope in (None, "*", "robots", PRODUCT_TOKEN) and part in directives:
             return True
     return False
 
 
-def _has_noai(x_robots_tag: str | None, metas: list[tuple[str, str]]) -> bool:
-    if x_robots_tag and _x_robots_noai(x_robots_tag):
-        return True
+def robots_metas_say(metas: Iterable[tuple[str, str]], directives: frozenset[str]) -> bool:
+    """One of ``directives`` (lower case) in a ``<meta name="robots">`` or
+    ``<meta name="text-extraction">``; ``metas`` are ``(name, content)`` with lower-case
+    names."""
     return any(
-        directive.strip().lower() in _NOAI_DIRECTIVES
+        directive.strip().lower() in directives
         for name, content in metas
         if name in ("robots", PRODUCT_TOKEN)
         for directive in content.split(",")
     )
+
+
+def _has_noai(x_robots_tag: str | None, metas: list[tuple[str, str]]) -> bool:
+    if x_robots_tag and x_robots_tag_says(x_robots_tag, _NOAI_DIRECTIVES):
+        return True
+    return robots_metas_say(metas, _NOAI_DIRECTIVES)

@@ -1,7 +1,7 @@
 """Job records in Valkey: the storage under the job API and the workers.
 
-A job lives in four keys; the braces around the id are a literal cluster hash tag, so one job's
-keys share a slot and a Lua script can touch all of them:
+A job lives in four keys (a ``site`` job in four more, below); the braces around the id are a
+literal cluster hash tag, so one job's keys share a slot and a Lua script can touch all of them:
 
 - ``job:{<id>}:meta``     hash: kind, owner, owner_role, options (JSON; ``ocr``, ``transcribe``
                           and ``languages`` only when not the default), state, created_at,
@@ -89,6 +89,22 @@ two hash tags would not run on a Valkey cluster. A pod that dies between them le
 reservation that its expiry prunes, never a leak. A reservation lasts the requested TTL even
 where the job's shorter life cuts the input's: it then counts a little longer, never shorter.
 
+A ``site`` job (package 9, ruling P9-S3) grows while it runs: its items append new items to
+``urls`` (``total`` grows with them). Its crawl lives in four more hashes, written by
+``site.store.SiteStore``, each with the remaining TTL of ``meta`` when written (completion renews
+only the four keys above; nothing reads the crawl keys of a completed job):
+
+- ``job:{<id>}:nodes``    hash: item index -> ``SiteNode`` JSON (role, depth, parent, guessed,
+                          part)
+- ``job:{<id>}:seen``     hash: seen key (``site.urls.seen_key``) -> item index; sitemap and
+                          robots items under ``s:<key>``
+- ``job:{<id>}:children`` hash: parent index (``<parent>:<batch>`` for batch 1 and later) ->
+                          the stored answer of its ``extend``, so a parent that runs again
+                          appends nothing
+- ``job:{<id>}:site``     hash: ``scope`` (``SiteScope`` JSON), the counters ``pages``,
+                          ``files`` and ``entries``, and ``e:<index>`` (the sitemap entries
+                          granted to that item)
+
 A browser job whose result a sync request answered with (``browser_dispatch.py``) is deleted
 then; one with a screenshot is kept only as long as the screenshot (``shorten``).
 
@@ -138,9 +154,21 @@ TABLES_NOT_STORED_WARNING = "tables_not_stored_too_large"
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
 
-# The keys of a job: the four of every job, those of browser jobs and the caller's ASR and LLM
-# keys.
-_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts", "asr_key", "llm_key")
+# The crawl keys of a site job (P9-S3), which ``delete`` removes and ``shorten`` cuts.
+_CRAWL_KINDS = ("nodes", "seen", "children", "site")
+# The keys of a job: the four of every job, those of browser jobs, the caller's ASR and LLM keys
+# and the crawl keys of a site job.
+_KINDS = (
+    "meta",
+    "urls",
+    "results",
+    "done",
+    "secrets",
+    "drafts",
+    "asr_key",
+    "llm_key",
+    *_CRAWL_KINDS,
+)
 
 # The input of item 0 (the only item of a sync job), which ``delete`` and ``shorten`` remove.
 _FIRST_INPUT = "input:0"
@@ -401,6 +429,11 @@ def escape_owner(owner: str) -> str:
     return owner
 
 
+def job_principal(job: JobRecord) -> Principal:
+    """The job's owner as the principal of its items: its role decides what they may do."""
+    return Principal(name=job.owner, role=job.owner_role, rate_limit_per_minute=None)
+
+
 def owner_key(owner: str, name: str) -> str:
     """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the owner is escaped
     (``escape_owner``), so a name cannot break the hash tag."""
@@ -410,6 +443,11 @@ def owner_key(owner: str, name: str) -> str:
 def _key(job_id: str, kind: str) -> str:
     """``job:{<id>}:<kind>`` with the id in literal braces: a cluster hash tag."""
     return f"job:{{{job_id}}}:{kind}"
+
+
+def job_key(job_id: str, kind: str) -> str:
+    """``job:{<id>}:<kind>``, a key of the job (for the crawl store, which shares its slot)."""
+    return _key(job_id, kind)
 
 
 def valid_artifact_name(name: str) -> bool:
@@ -425,10 +463,10 @@ def _artifact_key(job_id: str, name: str) -> str:
 
 def _options_json(options: JobOptions) -> str:
     """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false),
-    ``languages`` (none), ``pii`` (none), ``structured`` (none), ``chunking`` (none) and
-    ``describe_images`` (none) are left out while they are the default: pods of a release before
-    them parse the options strictly, and during a rolling upgrade they read the jobs that new pods
-    create."""
+    ``languages`` (none), ``pii`` (none), ``structured`` (none), ``chunking`` (none),
+    ``describe_images`` (none) and ``site`` (none) are left out while they are the default: pods
+    of a release before them parse the options strictly, and during a rolling upgrade they read
+    the jobs that new pods create."""
     defaults = JobOptions.model_fields
     omit = {
         name
@@ -440,6 +478,7 @@ def _options_json(options: JobOptions) -> str:
             "structured",
             "chunking",
             "describe_images",
+            "site",
         )
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }
@@ -550,8 +589,9 @@ class JobStore:
         return job_id
 
     async def delete(self, job_id: str) -> None:
-        """Remove all keys of the job, its secrets, drafts, files and the input of item 0 too
-        (its bytes leave the input budget). A job that is gone already is not an error."""
+        """Remove all keys of the job, its secrets, drafts, crawl keys, files and the input of
+        item 0 too (its bytes leave the input budget). A job that is gone already is not an
+        error."""
         await self._valkey.delete(
             *(_key(job_id, kind) for kind in _KINDS),
             *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
@@ -560,12 +600,12 @@ class JobStore:
         await self._release(job_id, 0)
 
     async def shorten(self, job_id: str, seconds: int) -> None:
-        """Let the job and its files expire within ``seconds`` (never later than they would)
-        and delete its secrets (the ASR and LLM keys too), drafts and the input of item 0: a sync
-        answer's screenshot job, which only the artifact route still reads. A job that is gone
-        already is not an error."""
+        """Let the job (its crawl keys too) and its files expire within ``seconds`` (never later
+        than they would) and delete its secrets (the ASR and LLM keys too), drafts and the input
+        of item 0: a sync answer's screenshot job, which only the artifact route still reads. A
+        job that is gone already is not an error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
-            for kind in ("meta", "urls", "results", "done"):
+            for kind in ("meta", "urls", "results", "done", *_CRAWL_KINDS):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
             for name in ARTIFACT_NAMES:
                 pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
@@ -896,6 +936,11 @@ class JobStore:
     async def clear_lease(self, job_id: str) -> None:
         """End the job's claim and keep it ``running`` (``mark_running`` without a lease)."""
         await self.mark_running(job_id, lease_seconds=None)
+
+    def encode_result(self, envelope: Envelope[ExtractResult]) -> str:
+        """The envelope as ``write_result`` stores it (cut to ``JOB_ITEM_MAX_BYTES``), for a
+        script that writes a result itself (the crawl store's finished items)."""
+        return self._encode(envelope)
 
     def _encode(self, envelope: Envelope[ExtractResult]) -> str:
         """The envelope as JSON; over the size limit, without the content, and when that is
