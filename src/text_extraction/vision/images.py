@@ -5,12 +5,22 @@ import base64
 import html
 from typing import TYPE_CHECKING
 
-from text_extraction.vision.types import DESCRIPTION_MAX_CHARS, VisionMediaType
+from text_extraction.vision.types import (
+    DESCRIPTION_MAX_CHARS,
+    VISION_UPLOAD_TYPES,
+    VisionMediaType,
+)
 
 if TYPE_CHECKING:  # the conversion libraries stay out of the LLM client's imports
     from text_extraction.convert import OutputFormat
 
-__all__ = ["append_description", "clean_description", "data_url", "sniff_image"]
+__all__ = [
+    "append_description",
+    "clean_description",
+    "data_url",
+    "describable_upload",
+    "sniff_image",
+]
 
 
 def sniff_image(body: bytes) -> VisionMediaType | None:
@@ -25,6 +35,12 @@ def sniff_image(body: bytes) -> VisionMediaType | None:
     if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+def describable_upload(body: bytes, max_bytes: int) -> bool:
+    """Whether the vision model can take an image upload's bytes (V-S7, V-S8): PNG, JPEG or
+    WebP by their magic bytes, at most ``max_bytes`` (``LLM_VISION_MAX_IMAGE_BYTES``)."""
+    return len(body) <= max_bytes and sniff_image(body) in VISION_UPLOAD_TYPES
 
 
 def data_url(body: bytes, media_type: str) -> str:

@@ -55,7 +55,11 @@ from text_extraction.llm_dispatch import LlmMove, create_llm_move, llm_queue
 from text_extraction.pipeline import DOCUMENT_FETCHED_DIRECTLY_WARNING
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
 from text_extraction.structured.types import StructuredOptions
-from text_extraction.vision.types import DescribeImagesOptions, StoredInputMeta
+from text_extraction.vision.types import (
+    IMAGE_NOT_DESCRIBED_WARNING,
+    DescribeImagesOptions,
+    StoredInputMeta,
+)
 from text_extraction.worker import Worker
 
 OCR_TEXT = " ".join(
@@ -515,12 +519,15 @@ async def test_an_expired_input_answers_the_draft() -> None:
     assert await harness.valkey.keys("fp:*") == []
 
 
-async def moved_image(harness: Harness, options: JobOptions | None = None) -> str:
-    """An image upload's job the extract worker moved to ``docling`` (no draft)."""
+async def moved_image(
+    harness: Harness, options: JobOptions | None = None, image: bytes | None = None
+) -> str:
+    """An image upload's job the extract worker moved to ``docling`` (no draft); ``image`` is
+    its bytes (default: ``IMAGE``)."""
     if options is None:
         options = JobOptions(mode="fast", compliance="enforce", cache=False)
     job_id = await harness.store.create("file", OWNER, options, [None])
-    image = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    image = image if image is not None else b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
     meta = UploadInputMeta(file_name="scan.png", content_type="image/png")
     await harness.store.put_input(job_id, 0, image, meta, 600)
     await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
@@ -547,13 +554,14 @@ LLM_IMAGE_JOB = PLAIN_IMAGE_JOB.model_copy(
 )
 
 
-def llm_docling(answer: dict[str, Any]) -> tuple[Harness, Docling]:
+def llm_docling(answer: dict[str, Any], **overrides: Any) -> tuple[Harness, Docling]:
     """A harness with OCR and the LLM, and a Docling worker that moves results to ``llm``."""
     harness = Harness(
         document_pool=OcrPool(),
         docling_enabled=True,
         llm_enabled=True,
         llm_api_key="sk-operator",
+        **overrides,
     )
     move = create_llm_move(harness.settings, harness.valkey, harness.store, None, harness.registry)
     return harness, Docling(harness, FakeDoclingPool(answer), llm_move=move)
@@ -607,6 +615,33 @@ async def test_docling_image_upload_keeps_input_for_llm(options: JobOptions, kep
     body, meta = stored
     assert body == IMAGE
     assert meta.content_type == "image/png"
+
+
+@scenario
+async def test_image_upload_over_vision_cap_takes_no_llm_hop() -> None:
+    """Ruling R-V3 (final review m1): an image upload over ``LLM_VISION_MAX_IMAGE_BYTES``
+    cannot be described. Its result reports the image skipped at once, takes no llm hop for
+    its description and keeps no input in the budget."""
+    harness, docling = llm_docling(reply(), llm_vision_max_image_bytes=10_000)
+    job_id = await moved_image(harness, DESCRIBED_IMAGE_JOB, image=IMAGE + b"\x00" * 20_000)
+
+    await docling.process_next()
+
+    assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 0
+    assert await harness.store.get_input(job_id, 0, StoredInputMeta) is None
+    item = await only_item(harness, job_id)
+    assert item.result is not None
+    assert item.result.status == "success", item.result.error
+    data = item.result.data
+    assert data is not None
+    assert data.image_descriptions is not None
+    report = data.image_descriptions
+    assert (report.asked, report.described, report.skipped, report.failed) == (1, 0, 1, 0)
+    assert IMAGE_NOT_DESCRIBED_WARNING in data.warnings
+    skipped = harness.registry.get_sample_value(
+        "text_extraction_vision_images_total", {"outcome": "skipped"}
+    )
+    assert skipped == 1
 
 
 @scenario

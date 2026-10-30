@@ -498,10 +498,10 @@ def test_sync_page_with_describe_goes_to_llm_hop(httpserver: HTTPServer) -> None
 
 
 def test_sync_upload_handoff_stores_image_input(httpserver: HTTPServer) -> None:
-    """V-S7: the sync hop of an image upload stores its bytes as the llm job's input; a PDF,
-    or an image over LLM_VISION_MAX_IMAGE_BYTES, stores nothing."""
-    service = LlmService(httpserver, llm_sync_wait_seconds=1, llm_vision_max_image_bytes=10_000)
-    large = PNG + b"\x00" * 20_000
+    """V-S7: the sync hop of an image upload stores its bytes as the llm job's input; a PDF
+    stores nothing (an image over LLM_VISION_MAX_IMAGE_BYTES takes no hop for its description:
+    ``test_sync_upload_over_vision_cap_takes_no_llm_hop``)."""
+    service = LlmService(httpserver, llm_sync_wait_seconds=1)
     structured = {"schema": HEADING, "strategy": "llm"}
     with TestClient(service.app) as client:
         image = upload(
@@ -517,13 +517,10 @@ def test_sync_upload_handoff_stores_image_input(httpserver: HTTPServer) -> None:
             structured=structured,
             wait_seconds=1,
         )
-        over = upload(
-            client, large, "big.png", "image/png", LLM_HEADERS, describe_images={}, wait_seconds=1
-        )
         service.wait_for_idle()
 
         jobs = []
-        for response in (image, pdf, over):
+        for response in (image, pdf):
             assert response.status_code == 202, response.text
             jobs.append(response.json()["data"]["id"])
         kept = stored_input(service, jobs[0])
@@ -532,9 +529,38 @@ def test_sync_upload_handoff_stores_image_input(httpserver: HTTPServer) -> None:
         assert body == PNG
         assert (meta.file_name, meta.content_type) == ("photo.png", "image/png")
         assert stored_input(service, jobs[1]) is None
-        assert stored_input(service, jobs[2]) is None
-        assert service.pending() == 3
+        assert service.pending() == 2
     assert httpserver.log == []
+
+
+def test_sync_upload_over_vision_cap_takes_no_llm_hop(httpserver: HTTPServer) -> None:
+    """Ruling R-V3 (final review m1): an image upload over LLM_VISION_MAX_IMAGE_BYTES cannot be
+    described. With ``describe_images`` alone it takes no llm hop: it answers at once, the
+    image skipped, and stores no input."""
+    service = LlmService(httpserver, llm_sync_wait_seconds=1, llm_vision_max_image_bytes=10_000)
+    large = PNG + b"\x00" * 20_000
+    with TestClient(service.app) as client:
+        response = upload(
+            client, large, "big.png", "image/png", LLM_HEADERS, describe_images={}, wait_seconds=1
+        )
+        service.wait_for_idle()
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "success", body["error"]
+        data = body["data"]
+        report = data["image_descriptions"]
+        assert (report["asked"], report["described"], report["skipped"]) == (1, 0, 1)
+        assert report["failed"] == 0
+        assert "image_not_described" in data["warnings"]
+        assert service.pending() == 0
+        assert service.stored("job:*:input:*") == []
+    assert httpserver.log == []
+    assert service.llm_outcomes() == {}
+    skipped = service.registry.get_sample_value(
+        "text_extraction_vision_images_total", {"outcome": "skipped"}
+    )
+    assert skipped == 1
 
 
 def test_p1_upload_job_is_described_from_its_own_input(httpserver: HTTPServer) -> None:

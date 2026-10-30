@@ -255,7 +255,7 @@ from text_extraction.structured.dom import (
     structured_cache_part,
     usable_learned,
 )
-from text_extraction.structured.post import without_dom_stage
+from text_extraction.structured.post import post_done, without_dom_stage
 from text_extraction.structured.selector_pool import (
     SELECTORS_FAILED_WARNING,
     SELECTORS_TIMED_OUT_WARNING,
@@ -270,6 +270,8 @@ from text_extraction.structured.store import (
 )
 from text_extraction.structured.types import SelectorRule, StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
+from text_extraction.vision.describe import count_images, needs_vision, undescribable_upload
+from text_extraction.vision.images import describable_upload
 
 _log = structlog.get_logger(__name__)
 
@@ -650,6 +652,7 @@ class Pipeline:
         self._pool = pool if pool is not None else ConversionPool(settings.convert_concurrency)
         self._rules = load_boilerplate_rules()
         self._metrics = _metrics_for(registry)
+        self._registry = registry
         self._renderer = renderer
         self._unblock_renderer = unblock_renderer
         self._clearance = clearance
@@ -827,6 +830,9 @@ class Pipeline:
                 envelope = await run.ocr_handoff(run.ocr_needed, envelope)
             if run.asr_needed is not None and run.asr_handoff is not None:
                 envelope = await run.asr_handoff(run.asr_needed, envelope)
+            if run.ocr_needed is None or run.ocr_handoff is None:
+                # A result the Docling worker makes gets this there (convert_queued_document).
+                envelope = self._undescribable(envelope, form, body)
             if envelope.data is not None:
                 envelope.data.timings = _with_pii_time(run.timings(), envelope.data.timings)
             envelope.trace_id = current_trace_id()
@@ -912,8 +918,36 @@ class Pipeline:
                 else Validators(etag=meta.etag, last_modified=meta.last_modified)
             )
             kept = await self._finish(run, kept, validators)
+        if isinstance(req, FileForm):
+            kept = self._undescribable(kept, req, document.body)
         kept.trace_id = current_trace_id()
         return kept
+
+    def _undescribable(
+        self, envelope: Envelope[ExtractResult], form: FileForm, body: bytes
+    ) -> Envelope[ExtractResult]:
+        """An image upload of ``describe_images`` whose bytes the vision model cannot take
+        (``vision.images.describable_upload``: over ``LLM_VISION_MAX_IMAGE_BYTES``, or not PNG,
+        JPEG or WebP by their magic bytes) gets its image ``skipped`` here, where the bytes are
+        known, counted in the pipeline's registry (ruling R-V3). ``needs_vision`` is false after
+        it, so the result takes no llm hop for its description, and no input is kept for it.
+        Any other envelope comes back as it is."""
+        describe = form.describe_images
+        data = envelope.data
+        if (
+            describe is None
+            or data is None
+            or post_done(envelope, None, None, describe=describe)
+            or not needs_vision(data, describe)
+            or describable_upload(body, self._settings.llm_vision_max_image_bytes)
+        ):
+            return envelope
+        outcome = undescribable_upload(data, describe)
+        count_images(outcome.report, self._registry)
+        warnings = list(data.warnings)
+        warnings.extend(warning for warning in outcome.warnings if warning not in warnings)
+        update = {"data": outcome.data.model_copy(update={"warnings": warnings})}
+        return envelope.model_copy(update=update)
 
     def _queued_run(
         self, req: ExtractRequest, principal: Principal, meta: DocumentInputMeta

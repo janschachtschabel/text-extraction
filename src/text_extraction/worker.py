@@ -783,7 +783,8 @@ class Worker:
         own), and the caller's LLM key, which the llm worker needs. Otherwise a last hop that is
         down would keep the inputs of ``docling`` and ``asr`` filling their budget and
         Valkey. An image upload that moved with its description owed keeps its input too (ruling
-        V-S7; ``envelope`` is the result that moved, ``vision.describe.needs_vision``): its bytes
+        V-S7; ``envelope`` is the result that moved, ``vision.describe.needs_vision``, which is
+        false for an upload the pipeline skipped as one the model cannot take, R-V3): its bytes
         are what the llm worker describes, and it deletes them with the result (``_drop_input``;
         such a job has no ``pii``, so no nlp hop in between). Any other upload's input goes, also
         with ``describe_images`` (a PDF that moved for ``structured``: nothing to describe)."""

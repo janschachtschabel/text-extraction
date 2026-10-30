@@ -34,7 +34,8 @@ the LLM.
   stores its bytes as the item's input (``DOCLING_INPUT_TTL_SECONDS``, the input budget), for
   the llm worker to describe, when they are PNG, JPEG or WebP by their magic bytes and at most
   ``LLM_VISION_MAX_IMAGE_BYTES`` (anything else stores nothing: the image is skipped, ruling
-  V-S7); a full budget answers as the memory guard does (``finish_post(..., reason="busy")``,
+  V-S7; the pipeline already skipped such an image upload, so it hops only for other LLM work,
+  R-V3); a full budget answers as the memory guard does (``finish_post(..., reason="busy")``,
   counted ``input_budget``). The request waits ``LLM_SYNC_WAIT_SECONDS`` (plus whatever is
   left until its route hands it over), and its route answers 202 with the llm job once its
   ``wait_seconds`` pass (a request that may need the LLM and has no ``wait_seconds`` waits
@@ -126,8 +127,7 @@ from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings, llm_available
 from text_extraction.structured.post import finish_post, needs_llm
-from text_extraction.vision.images import sniff_image
-from text_extraction.vision.types import VISION_UPLOAD_TYPES
+from text_extraction.vision.images import describable_upload
 
 LLM_POOL: Final = "llm"
 _LLM_DOMAIN_CAP: Final = 1_000_000
@@ -215,9 +215,7 @@ class LlmDispatcher(PoolDispatcher):
 def _describable(upload: UploadInput, settings: Settings) -> bool:
     """Whether the llm worker can describe these bytes: PNG, JPEG or WebP by their magic
     bytes, at most ``LLM_VISION_MAX_IMAGE_BYTES`` (V-S7)."""
-    if len(upload.body) > settings.llm_vision_max_image_bytes:
-        return False
-    return sniff_image(upload.body) in VISION_UPLOAD_TYPES
+    return describable_upload(upload.body, settings.llm_vision_max_image_bytes)
 
 
 class LlmHandoff(LastHopHandoff):

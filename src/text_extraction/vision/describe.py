@@ -85,6 +85,7 @@ __all__ = [
     "describe_owed",
     "describe_result",
     "needs_vision",
+    "undescribable_upload",
     "vision_targets",
     "without_vision",
 ]
@@ -355,6 +356,16 @@ def without_vision(
     outcomes = [_Done("failed" if sent else "skipped") for _ in targets]
     failure = LlmError(message, retryable=True) if targets and sent else None
     return _outcome(data, targets, outcomes, failure, None, 0)
+
+
+def undescribable_upload(data: ExtractResult, describe: DescribeImagesOptions) -> DescribeOutcome:
+    """The step of an image upload whose bytes the vision model cannot take
+    (``vision.images.describable_upload`` says no: over ``LLM_VISION_MAX_IMAGE_BYTES``, or not
+    PNG, JPEG or WebP by its magic bytes), without the LLM: the upload is ``skipped``, with the
+    warning (ruling R-V3). The extraction that has the bytes calls it, so ``needs_vision`` is
+    false after it: the result takes no llm hop for its description and keeps no input."""
+    targets = vision_targets(data, describe)
+    return _outcome(data, targets, [_Done("skipped") for _ in targets], None, None, 0)
 
 
 def _outcome(
