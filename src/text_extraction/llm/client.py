@@ -26,7 +26,7 @@ refuses them while ``LLM_ENABLED`` is true (``settings.OPENAI_ENV_REFUSED``).
 JSON, does not validate, has no choice, no content or ``finish_reason: length`` (cut off) is
 invalid; it gets exactly one more call, with the model's invalid answer appended as an assistant
 turn (when it gave one) and the error text as a user message, then
-``LlmError(llm_failed, retryable=False)``.
+``LlmError(llm_failed, retryable=False, invalid_answer=True)``.
 
 **Failures** are ``LlmError`` with a fixed message that names the HTTP status at most, never the
 endpoint's text (which may echo the key or the prompt). The SDK's exception is not kept as the
@@ -263,7 +263,9 @@ class LlmClient:
                 completion_tokens=completion_tokens,
             )
             return value, usage
-        raise LlmError("The LLM answer did not match the schema.", retryable=False)
+        raise LlmError(
+            "The LLM answer did not match the schema.", retryable=False, invalid_answer=True
+        )
 
     async def embed_batches(self, texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
         """The embeddings of the texts (each cut to ``EMBED_TEXT_CHARS`` characters), in order,

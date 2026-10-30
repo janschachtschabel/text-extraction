@@ -4,6 +4,11 @@ The DOM stage (``dom.py``) ran on the page's HTML; PII may have masked the conte
 post stage reads ``data.content`` as it is now (masked content gives masked values and chunks,
 D3 a) and runs, in this order:
 
+0. The image descriptions of ``describe_images`` (``vision/describe.py``, ruling V-S5): the
+   first ``max_images`` page images, or an image upload itself, each with one vision call; a
+   description goes on its ``metadata.images`` entry, an upload's is also appended to
+   ``content``, so the steps below read it. Their report (``image_descriptions``) marks them
+   done; a result without images gets an empty one, without the LLM.
 1. ``patterns`` (``patterns.py``): strategy ``patterns`` for every field with a rule, ``auto``
    for the fields still missing. They run once per result, within a total budget of 2 s, and
    their outcome stays on the result (``patterns_done``, ruling R10): ``run_post_patterns``
@@ -29,13 +34,15 @@ D3 a) and runs, in this order:
 **Two entry points.** ``apply_post`` (async) runs it with an LLM client (the llm worker,
 ruling S14). ``finish_post`` (sync, no LLM) is the guard at every finish point: an envelope
 whose post stage has not run gets it without the LLM. LLM work that was asked and not done
-(the extraction, and with it learning, which only learns the LLM's values, or ``semantic``)
-turns a ``success`` into ``partial`` with ``llm_failed``, retryable (``BUSY_MESSAGE`` for
-``reason="busy"``, else ``NOT_RUN_MESSAGE``); its fields stay in ``missing`` and
-``semantic`` falls back to ``recursive`` with the warning ``chunking_fallback_recursive``.
-``auto`` on a service without an LLM is no failure: the fields stay missing, with the warning
-``llm_unavailable``. A failing LLM call in ``apply_post`` does the same with the call's
-``LlmError`` (a learning call excepted, R9). A result that already is ``partial`` or
+(the descriptions, the extraction, and with it learning, which only learns the LLM's values,
+or ``semantic``) turns a ``success`` into ``partial`` with ``llm_failed``, retryable
+(``BUSY_MESSAGE`` for ``reason="busy"``, else ``NOT_RUN_MESSAGE``); its fields stay in
+``missing`` and ``semantic`` falls back to ``recursive`` with the warning
+``chunking_fallback_recursive``. ``auto`` on a service without an LLM is no failure: the fields
+stay missing, with the warning ``llm_unavailable``. A failing LLM call in ``apply_post`` does
+the same with the call's ``LlmError`` (a learning call excepted, R9; for the descriptions see
+``vision/describe.py``: an image the endpoint refuses costs only itself). The first failure of
+the stage wins. A result that already is ``partial`` or
 ``failed`` keeps its status and error. The content always stays.
 
 **Where it runs** (ruling S13). Every finish point runs it last, after the PII step and before
@@ -60,7 +67,7 @@ never on asyncio's default executor, which also resolves host names. The proposa
 ``run_post_patterns``, ``needs_llm`` (cheap) and ``finish_post`` run where they are called, so
 callers on an event loop run ``run_post_patterns`` and ``finish_post`` on the post pool. The
 LLM's time is added to ``timings.llm_ms``. Nothing here logs the content, a value, a pattern, a
-selector or a key.
+selector, a key, an image, its URL or its description.
 """
 
 import time
@@ -73,12 +80,14 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 import numpy as np
 import numpy.typing as npt
 import structlog
+from prometheus_client import CollectorRegistry
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 
 from text_extraction.chunking.semantic import Embed, semantic_chunks
 from text_extraction.chunking.split import WARNING_FALLBACK_RECURSIVE, chunk
 from text_extraction.chunking.types import Chunk, ChunkingOptions
+from text_extraction.compliance import ComplianceMode
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorInfo
 from text_extraction.extract_models import ExtractResult
@@ -105,6 +114,15 @@ from text_extraction.structured.types import (
     StructuredOptions,
     StructuredResult,
 )
+from text_extraction.vision.describe import (
+    DescribeOutcome,
+    describe_owed,
+    describe_result,
+    needs_vision,
+    without_vision,
+)
+from text_extraction.vision.fetch import ImageSource
+from text_extraction.vision.types import DescribeImagesOptions
 
 if TYPE_CHECKING:  # the OpenAI SDK only where a client is made (``llm/basics.py``)
     from text_extraction.llm.client import LlmClient
@@ -202,14 +220,21 @@ def post_done(
     envelope: Envelope[ExtractResult],
     structured: StructuredOptions | None,
     chunking: ChunkingOptions | None,
+    *,
+    describe: DescribeImagesOptions | None = None,
 ) -> bool:
     """Whether the post stage has nothing (more) to do: ``structured`` is at ``stage: "done"``
-    (or not asked) and the chunks are there (or not asked). An envelope that gets no post stage
-    (no data; ``failed`` without content) counts as done."""
+    (or not asked), the chunks are there (or not asked) and so is the report of the image
+    descriptions (or ``describe`` is None). An envelope that gets no post stage (no data;
+    ``failed`` without content) counts as done."""
     data = envelope.data
     if data is None or not _eligible(envelope):
         return True
-    return _structured_done(data, structured) and _chunks_done(data, chunking)
+    return (
+        _structured_done(data, structured)
+        and _chunks_done(data, chunking)
+        and not describe_owed(data, describe)
+    )
 
 
 def post_pending(
@@ -217,13 +242,15 @@ def post_pending(
     structured: StructuredOptions | None,
     chunking: ChunkingOptions | None,
     pii: PiiOptions | None,
+    *,
+    describe: DescribeImagesOptions | None = None,
 ) -> bool:
     """Whether a finish point still owes this envelope its post stage (ruling S13): the stage
     has not run (``post_done``), and the envelope does not owe the PII step any more. The post
     stage only ever reads the final content (D3 a): an envelope that still owes PII (no nlp
     worker took it) is withheld by ``pii.fields.fail_closed`` right after (which drops
     ``structured`` and ``chunks`` too, R13), so it gets none."""
-    if post_done(envelope, structured, chunking):
+    if post_done(envelope, structured, chunking, describe=describe):
         return False
     return pii is None or not needs_pii(envelope, pii)
 
@@ -253,18 +280,28 @@ def needs_llm(
     structured: StructuredOptions | None,
     chunking: ChunkingOptions | None,
     settings: Settings,
+    *,
+    describe: DescribeImagesOptions | None = None,
 ) -> bool:
     """Whether the post stage of this envelope needs the LLM (S5, rulings R8, R10): the service
-    has one, the stage has not run, there is content, and strategy ``llm``; or ``auto`` with
-    fields missing after the DOM stage and the patterns; or chunking ``semantic``.
+    has one, the stage has not run, and image descriptions are owed with an image to send
+    (whatever the content: an image upload may have no text, V-S5); or there is content, and
+    strategy ``llm``; or ``auto`` with fields missing after the DOM stage and the patterns; or
+    chunking ``semantic``.
     ``learn_selectors`` needs the LLM only through those (it learns from the LLM's values).
 
     It runs no regex: the patterns' outcome is the one ``run_post_patterns`` kept on the result.
     Before they ran, a field a pattern might fill counts as missing; so call
     ``run_post_patterns`` (off the event loop) first, to send fewer results to the LLM."""
     data = envelope.data
-    if data is None or not llm_available(settings) or post_done(envelope, structured, chunking):
+    if (
+        data is None
+        or not llm_available(settings)
+        or post_done(envelope, structured, chunking, describe=describe)
+    ):
         return False
+    if needs_vision(data, describe):
+        return True
     content = data.content or ""
     if not content.strip():
         return False
@@ -290,11 +327,15 @@ def too_large_for_llm(
     envelope: Envelope[ExtractResult],
     structured: StructuredOptions | None,
     chunking: ChunkingOptions | None,
+    *,
+    describe: DescribeImagesOptions | None = None,
 ) -> bool:
     """Whether a draft lost its content to ``JOB_ITEM_MAX_BYTES`` (``content_not_stored_too_large``)
-    and owes LLM work or ``semantic`` chunking, which it cannot get any more (ruling R20)."""
+    and owes LLM work on its content or ``semantic`` chunking, which it cannot get any more
+    (ruling R20). Image descriptions do not read the content: they alone never make a draft too
+    large."""
     data = envelope.data
-    if data is None or post_done(envelope, structured, chunking):
+    if data is None or post_done(envelope, structured, chunking, describe=describe):
         return False
     return CONTENT_NOT_STORED_WARNING in data.warnings and _owes_llm(data, structured, chunking)
 
@@ -305,13 +346,15 @@ def finish_too_large(
     chunking: ChunkingOptions | None,
     *,
     settings: Settings,
+    describe: DescribeImagesOptions | None = None,
 ) -> Envelope[ExtractResult]:
-    """The post stage of a draft that is ``too_large_for_llm``: ``finish_post``, then
-    ``llm_failed`` with ``TOO_LARGE_FOR_LLM_MESSAGE``, not retryable (the same draft would be
-    stored without its content again). A result that already is ``partial`` or ``failed`` keeps
-    its status and error."""
-    finished = finish_post(envelope, structured, chunking, settings=settings)
-    if finished.status != "success":
+    """The post stage of a draft that is ``too_large_for_llm``: ``finish_post`` (image
+    descriptions it owes count ``failed``), then ``llm_failed`` with
+    ``TOO_LARGE_FOR_LLM_MESSAGE``, not retryable (the same draft would be stored without its
+    content again). A result that already was ``partial`` or ``failed`` keeps its status and
+    error."""
+    finished = finish_post(envelope, structured, chunking, settings=settings, describe=describe)
+    if envelope.status != "success":
         return finished
     failure = LlmError(TOO_LARGE_FOR_LLM_MESSAGE, retryable=False)
     error = ErrorInfo(code=failure.code, message=failure.message, retryable=failure.retryable)
@@ -366,6 +409,7 @@ class _Post:
     options: StructuredOptions | None
     chunking: ChunkingOptions | None
     settings: Settings
+    describe: DescribeImagesOptions | None = None
     result: StructuredResult | None = None
     chunks: list[Chunk] | None = None
     warnings: list[str] = field(default_factory=list)
@@ -381,9 +425,10 @@ class _Post:
         options: StructuredOptions | None,
         chunking: ChunkingOptions | None,
         settings: Settings,
+        describe: DescribeImagesOptions | None = None,
     ) -> "_Post":
         """The work on ``data``, the envelope's data."""
-        work = cls(envelope, data, options, chunking, settings)
+        work = cls(envelope, data, options, chunking, settings, describe)
         if options is not None and not _structured_done(data, options):
             work.result = _starting_result(data.structured, options)
         return work
@@ -419,6 +464,19 @@ class _Post:
         if self.result is None:
             return []
         return [name for name, value in self.result.values.items() if value is None]
+
+    # 0. image descriptions
+    def owes_descriptions(self) -> bool:
+        return describe_owed(self.data, self.describe)
+
+    def described(self, outcome: DescribeOutcome) -> None:
+        """Step 0's outcome: the data with the descriptions (an upload's in its content), which
+        the later steps read."""
+        self.data = outcome.data
+        self.note(*outcome.warnings)
+        if outcome.failure is not None:
+            self.fail(outcome.failure)
+        self.llm_ms += outcome.llm_ms
 
     # 1. patterns
     def pattern_fields(self) -> list[str]:
@@ -618,16 +676,20 @@ def finish_post(
     *,
     settings: Settings,
     reason: Literal["busy", "failed"] | None = None,
+    describe: DescribeImagesOptions | None = None,
 ) -> Envelope[ExtractResult]:
     """The post stage without the LLM, for an envelope whose post stage has not run (see the
     module docstring); an envelope that has it, or gets none, comes back as it is. ``reason``
     says why the LLM work did not run (``busy``: the memory guard; ``failed`` or None:
-    anything else)."""
+    anything else). Owed image descriptions get their report: a result without images an empty
+    one, else every image that would be sent counts ``failed`` (``without_vision``)."""
     data = envelope.data
-    if data is None or post_done(envelope, structured, chunking):
+    if data is None or post_done(envelope, structured, chunking, describe=describe):
         return envelope
-    work = _Post.start(envelope, data, structured, chunking, settings)
+    work = _Post.start(envelope, data, structured, chunking, settings, describe)
     message = BUSY_MESSAGE if reason == "busy" else NOT_RUN_MESSAGE
+    if describe is not None and work.owes_descriptions():
+        work.described(without_vision(data, describe, message=message))
     if work.result is not None:
         work.run_patterns()
         asked = work.llm_fields()
@@ -668,6 +730,7 @@ async def post_at_finish(
     settings: Settings,
     threads: ConversionPool,
     hop: LlmHop | None = None,
+    describe: DescribeImagesOptions | None = None,
 ) -> Envelope[ExtractResult] | None:
     """The post stage at a finish point (ruling S13), the one sequence that the sync flows
     (``extract_api.post_stage``), the P1 job's write (``extract_api._store_result``) and
@@ -677,19 +740,24 @@ async def post_at_finish(
     ``LlmHandoff``, a worker's ``LlmMove``), and None comes back once the llm worker has it (the
     request handed it over, the item moved). Last, ``finish_post`` (on the post pool) is the
     guard: LLM work that did not run, with or without a hop, is ``llm_failed`` with the hop's
-    reason. Whatever ``hop`` raises propagates."""
-    if not post_pending(envelope, structured, chunking, pii):
+    reason. ``describe`` is the request's ``describe_images``: owed descriptions with an image
+    to send need the LLM too; without images their empty report is written here. Whatever
+    ``hop`` raises propagates."""
+    if not post_pending(envelope, structured, chunking, pii, describe=describe):
         return envelope
     patterns = partial(run_post_patterns, settings=settings)
     envelope = await threads.run(patterns, envelope, structured)
     reason: LlmHopReason | None = None
-    if hop is not None and needs_llm(envelope, structured, chunking, settings):
+    if hop is not None and needs_llm(envelope, structured, chunking, settings, describe=describe):
         hopped, reason = await hop(envelope)
         if hopped is None:
             return None
         envelope = hopped
     return await threads.run(
-        partial(finish_post, settings=settings, reason=reason), envelope, structured, chunking
+        partial(finish_post, settings=settings, reason=reason, describe=describe),
+        envelope,
+        structured,
+        chunking,
     )
 
 
@@ -707,21 +775,51 @@ async def apply_post(
     owner: str,
     threads: ConversionPool,
     selectors: SelectorRunner,
+    describe: DescribeImagesOptions | None = None,
+    images: ImageSource | None = None,
+    upload: bytes | None = None,
+    mode: ComplianceMode = "enforce",
+    describe_seconds: float | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> Envelope[ExtractResult]:
     """The post stage with the LLM client ``llm`` (see the module docstring); without one it is
     ``finish_post``. ``store`` and ``owner`` (the API key's name) keep the learned selectors;
     without them nothing is stored. ``threads`` is the post pool, ``selectors`` runs the
     proposals of ``learn_selectors``. An envelope that has had its post stage, or gets none,
     comes back as it is. LLM failures become ``llm_failed`` in the answer, never an
-    exception."""
+    exception.
+
+    Step 0, with ``describe``: ``images`` fetches the page images in the job's compliance
+    ``mode``, ``upload`` holds an image upload's bytes (None: gone), ``describe_seconds`` is the
+    step's budget (default: ``1.5 * LLM_TIMEOUT_SECONDS``, half the llm item's deadline) and
+    ``registry`` gets its counter (default: the global one)."""
     data = envelope.data
-    if data is None or post_done(envelope, structured, chunking):
+    if data is None or post_done(envelope, structured, chunking, describe=describe):
         return envelope
     if llm is None:
         return await threads.run(
-            partial(finish_post, settings=settings), envelope, structured, chunking
+            partial(finish_post, settings=settings, describe=describe),
+            envelope,
+            structured,
+            chunking,
         )
-    work = _Post.start(envelope, data, structured, chunking, settings)
+    work = _Post.start(envelope, data, structured, chunking, settings, describe)
+    if describe is not None and work.owes_descriptions():
+        seconds = describe_seconds
+        if seconds is None:
+            seconds = 1.5 * settings.llm_timeout_seconds
+        outcome = await describe_result(
+            work.data,
+            describe,
+            llm=llm,
+            images=images,
+            upload=upload,
+            mode=mode,
+            settings=settings,
+            seconds=seconds,
+            registry=registry,
+        )
+        work.described(outcome)
     if work.result is not None and structured is not None:
         await threads.run(work.run_patterns)
         await _extract(work, llm, structured)

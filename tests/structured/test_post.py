@@ -16,6 +16,16 @@ from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from werkzeug import Request, Response
 
+from tests.vision.describe_helpers import (
+    PNG,
+    FakeImages,
+    described,
+    is_vision,
+    page_envelope,
+    serve_llm,
+    upload_envelope,
+    vision_requests,
+)
 from text_extraction import llm_dispatch, llm_worker
 from text_extraction import worker as worker_module
 from text_extraction.chunking import semantic as semantic_module
@@ -24,6 +34,7 @@ from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
+from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.llm import client as client_module
 from text_extraction.llm.client import LlmClient
 from text_extraction.settings import Settings
@@ -41,6 +52,7 @@ from text_extraction.structured.post import (
 )
 from text_extraction.structured.selector_pool import create_selector_runner
 from text_extraction.structured.types import LearnReport, StructuredOptions, Table
+from text_extraction.vision.types import IMAGE_NOT_DESCRIBED_WARNING, DescribeImagesOptions
 
 from .post_helpers import (
     CHAT,
@@ -814,3 +826,246 @@ def test_post_stage_work_runs_on_the_post_pool(
     names = {name for name, _ in where}
     assert names == {"run_patterns", "chunk", "split_sentences", "build_chunks"}
     assert all(thread.startswith("post") for _, thread in where), where
+
+
+# --- image descriptions (step 0, ruling V-S5) ---
+
+
+def describe_options(max_images: int = 5) -> DescribeImagesOptions:
+    return DescribeImagesOptions(max_images=max_images)
+
+
+def test_describe_runs_before_chunking_and_structured_llm(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An upload's description is part of the content that the structured LLM and the chunks
+    read."""
+    monkeypatch.setattr(client_module, "MAX_RETRIES", 0)
+    picture = "Ein Kreis, zu drei Vierteln gefüllt."
+    serve_llm(
+        httpserver,
+        lambda _body, _n: described(picture),
+        extraction=answer({"summary": "three quarters"}),
+    )
+    settings = llm_settings(httpserver)
+    draft = upload_envelope("Bruch 3/4")
+
+    async def scenario() -> Envelope[ExtractResult]:
+        client = LlmClient(settings, None, registry=CollectorRegistry())
+        try:
+            async with post_pools(settings) as (threads, selectors):
+                return await apply_post(
+                    draft,
+                    structured(schema=schema(summary=STRING), strategy="llm"),
+                    ChunkingOptions(strategy="recursive", size=200, overlap=0),
+                    settings=settings,
+                    llm=client,
+                    store=None,
+                    owner="alice",
+                    threads=threads,
+                    selectors=selectors,
+                    describe=describe_options(),
+                    images=FakeImages(),
+                    upload=PNG,
+                    mode="enforce",
+                )
+        finally:
+            await client.aclose()
+
+    done = asyncio.run(scenario())
+
+    result = data_of(done)
+    assert done.status == "success", done.error
+    assert result.chunks is not None
+    assert picture in " ".join(chunk.text for chunk in result.chunks)
+    extraction = [body for body in chat_requests(httpserver) if not is_vision(body)]
+    assert len(extraction) == 1
+    assert picture in json.dumps(extraction[0], ensure_ascii=False)
+    assert result.structured is not None
+    assert result.structured.values == {"summary": "three quarters"}
+    assert result.image_descriptions is not None
+    assert result.image_descriptions.described == 1
+    assert len(vision_requests(httpserver)) == 1
+
+
+def test_finish_post_without_llm_marks_targets_failed() -> None:
+    settings = llm_settings(llm_enabled=True)
+
+    busy = finish_post(
+        page_envelope(3), None, None, settings=settings, reason="busy", describe=describe_options(2)
+    )
+    failed = finish_post(
+        page_envelope(1), None, None, settings=settings, describe=describe_options()
+    )
+    tiff = finish_post(
+        upload_envelope(content_type="image/tiff"),
+        None,
+        None,
+        settings=settings,
+        describe=describe_options(),
+    )
+
+    assert busy.status == "partial"
+    assert busy.error is not None
+    assert (busy.error.code, busy.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert busy.error.message == BUSY_MESSAGE
+    report = data_of(busy).image_descriptions
+    assert report is not None
+    assert (report.asked, report.described, report.skipped, report.failed) == (2, 0, 0, 2)
+    assert IMAGE_NOT_DESCRIBED_WARNING in data_of(busy).warnings
+    assert data_of(busy).content == data_of(page_envelope(3)).content
+    assert failed.error is not None
+    assert failed.error.message == NOT_RUN_MESSAGE
+    # A TIFF upload is skipped, never sent: nothing of the LLM was owed.
+    assert tiff.status == "success"
+    report = data_of(tiff).image_descriptions
+    assert report is not None
+    assert (report.asked, report.skipped, report.failed) == (1, 1, 0)
+    assert IMAGE_NOT_DESCRIBED_WARNING in data_of(tiff).warnings
+
+
+def test_no_targets_reported_inline_without_hop() -> None:
+    settings = llm_settings(llm_enabled=True)
+    describe = describe_options()
+    pages = [page_envelope(0), upload_envelope(content_type="application/pdf")]
+
+    for draft in pages:
+        assert not post_done(draft, None, None, describe=describe)
+        assert not needs_llm(draft, None, None, settings, describe=describe)
+        done = finish_post(draft, None, None, settings=settings, describe=describe)
+
+        assert done.status == "success"
+        report = data_of(done).image_descriptions
+        assert report is not None
+        assert (report.asked, report.described, report.skipped, report.failed) == (0, 0, 0, 0)
+        assert report.llm is None
+        assert IMAGE_NOT_DESCRIBED_WARNING not in data_of(done).warnings
+        assert post_done(done, None, None, describe=describe)
+
+
+def test_no_targets_at_a_finish_point_never_hop() -> None:
+    settings = llm_settings(llm_enabled=True)
+
+    async def hop(_envelope: Envelope[ExtractResult]) -> Any:
+        raise AssertionError("no hop for a result without images")
+
+    async def scenario() -> Envelope[ExtractResult] | None:
+        threads = ConversionPool(1, name="post")
+        try:
+            return await post_module.post_at_finish(
+                page_envelope(0),
+                None,
+                None,
+                None,
+                settings=settings,
+                threads=threads,
+                hop=hop,
+                describe=describe_options(),
+            )
+        finally:
+            threads.shutdown()
+
+    done = asyncio.run(scenario())
+
+    assert done is not None
+    assert data_of(done).image_descriptions is not None
+
+
+def test_page_images_at_a_finish_point_hop_to_llm() -> None:
+    settings = llm_settings(llm_enabled=True)
+    hopped: list[Envelope[ExtractResult]] = []
+
+    async def hop(envelope: Envelope[ExtractResult]) -> Any:
+        hopped.append(envelope)
+        return None, None
+
+    async def scenario() -> Envelope[ExtractResult] | None:
+        threads = ConversionPool(1, name="post")
+        try:
+            return await post_module.post_at_finish(
+                page_envelope(2),
+                None,
+                None,
+                None,
+                settings=settings,
+                threads=threads,
+                hop=hop,
+                describe=describe_options(),
+            )
+        finally:
+            threads.shutdown()
+
+    assert asyncio.run(scenario()) is None
+    assert len(hopped) == 1
+
+
+def test_needs_llm_for_image_upload_without_text() -> None:
+    settings = llm_settings(llm_enabled=True)
+    draft = upload_envelope("")
+
+    assert needs_llm(draft, None, None, settings, describe=describe_options())
+    assert not needs_llm(draft, None, None, settings)
+    assert not needs_llm(draft, None, None, llm_settings(), describe=describe_options())
+    assert post_module.post_pending(draft, None, None, None, describe=describe_options())
+
+
+def test_post_done_waits_for_descriptions(httpserver: HTTPServer) -> None:
+    serve_llm(httpserver, lambda _body, _n: described("A chart."))
+    describe = describe_options()
+    draft = page_envelope(1)
+    settings = llm_settings(httpserver)
+
+    assert not post_done(draft, None, None, describe=describe)
+    assert post_done(draft, None, None)
+
+    async def scenario() -> Envelope[ExtractResult]:
+        client = LlmClient(settings, None, registry=CollectorRegistry())
+        try:
+            async with post_pools(settings) as (threads, selectors):
+                return await apply_post(
+                    draft,
+                    None,
+                    None,
+                    settings=settings,
+                    llm=client,
+                    store=None,
+                    owner="alice",
+                    threads=threads,
+                    selectors=selectors,
+                    describe=describe,
+                    images=FakeImages(),
+                )
+        finally:
+            await client.aclose()
+
+    done = asyncio.run(scenario())
+
+    assert post_done(done, None, None, describe=describe)
+    assert data_of(done).image_descriptions is not None
+    assert data_of(done).timings.llm_ms >= data_of(draft).timings.llm_ms
+
+
+def test_too_large_draft_with_descriptions_keeps_too_large_message() -> None:
+    settings = llm_settings(llm_enabled=True)
+    lost = page_envelope(2, content="")
+    assert lost.data is not None
+    lost = lost.model_copy(
+        update={
+            "data": lost.data.model_copy(
+                update={"content": None, "warnings": [CONTENT_NOT_STORED_WARNING]}
+            )
+        }
+    )
+    llm = structured(schema=schema(summary=STRING), strategy="llm")
+    describe = describe_options()
+
+    assert post_module.too_large_for_llm(lost, llm, None, describe=describe)
+    done = post_module.finish_too_large(lost, llm, None, settings=settings, describe=describe)
+
+    assert done.status == "partial"
+    assert done.error is not None
+    assert done.error.message == post_module.TOO_LARGE_FOR_LLM_MESSAGE
+    assert done.error.retryable is False
+    report = data_of(done).image_descriptions
+    assert report is not None
+    assert report.failed == 2

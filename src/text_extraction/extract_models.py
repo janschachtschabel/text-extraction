@@ -279,7 +279,9 @@ class Timings(BaseModel):
     convert_ms: int
     render_ms: int = 0  # browser: navigation, actions and settling; 0 in fast mode
     pii_ms: int = 0  # the PII step; 0 without ``pii``
-    llm_ms: int = 0  # the LLM calls of ``structured``; 0 without them
+    # The LLM calls of ``structured`` and ``chunking``, and the image descriptions of
+    # ``describe_images`` (their step, image fetches included); 0 without them.
+    llm_ms: int = 0
 
 
 class ExtractResult(BaseModel):

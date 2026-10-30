@@ -668,7 +668,12 @@ class Worker:
             if draft is not None:
                 structured, chunking = job.options.structured, job.options.chunking
                 envelope = await self._post_pool.run(
-                    partial(finish_post, settings=self._settings, reason="failed"),
+                    partial(
+                        finish_post,
+                        settings=self._settings,
+                        reason="failed",
+                        describe=job.options.describe_images,
+                    ),
                     draft,
                     structured,
                     chunking,

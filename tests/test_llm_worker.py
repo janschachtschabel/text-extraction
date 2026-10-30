@@ -26,21 +26,40 @@ from tests.structured.post_helpers import (
     error_response,
     serve_chat,
 )
+from tests.vision.describe_helpers import (
+    PNG,
+    FakeImages,
+    described,
+    image_url,
+    page_envelope,
+    serve_llm,
+    upload_envelope,
+    vision_requests,
+)
 from text_extraction import llm_worker
 from text_extraction.auth import Principal
 from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult
+from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import CONTENT_NOT_STORED_WARNING, JobStore, llm_lease_seconds
+from text_extraction.llm import client as client_module
 from text_extraction.llm_dispatch import LLM_POOL, llm_queue
 from text_extraction.llm_worker import LlmRunner, build_llm_worker
 from text_extraction.pii.types import PiiOptions
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
-from text_extraction.structured.post import NOT_RUN_MESSAGE, TOO_LARGE_FOR_LLM_MESSAGE
+from text_extraction.structured.post import (
+    NOT_RUN_MESSAGE,
+    TOO_LARGE_FOR_LLM_MESSAGE,
+    apply_post,
+)
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import StructuredOptions, StructuredResult
+from text_extraction.vision.fetch import ImageFetcher
+from text_extraction.vision.types import IMAGE_NOT_DESCRIBED_WARNING, DescribeImagesOptions
+from text_extraction.worker import Worker
 
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 CALLER_KEY = "sk-caller-key-0d9e"
@@ -65,7 +84,7 @@ def settings_for(server: HTTPServer, **overrides: Any) -> Settings:
 class Case:
     """A job with one item whose draft waits for the llm worker."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, *, images: FakeImages | None = None) -> None:
         self.settings = settings
         self.valkey = FakeAsyncRedis()
         self.store = JobStore(self.valkey, settings)
@@ -75,6 +94,7 @@ class Case:
             self.store,
             SelectorStore(self.valkey, settings.selector_learn_ttl_seconds),
             registry=self.registry,
+            images=images,
         )
 
     async def job(
@@ -85,9 +105,14 @@ class Case:
         structured: StructuredOptions | None = PRICE,
         chunking: ChunkingOptions | None = None,
         pii: PiiOptions | None = None,
+        describe: DescribeImagesOptions | None = None,
     ) -> tuple[Any, QueueItem]:
         options = JobOptions(
-            compliance="enforce", structured=structured, chunking=chunking, pii=pii
+            compliance="enforce",
+            structured=structured,
+            chunking=chunking,
+            pii=pii,
+            describe_images=describe,
         )
         job_id = await self.store.create("extract", OWNER, options, [URL])
         if draft is not None:
@@ -334,6 +359,166 @@ def test_runner_lease_covers_its_deadline(httpserver: HTTPServer) -> None:
     assert runner.deadline_seconds == 300
 
 
+# --- image descriptions ---
+
+DESCRIBE = DescribeImagesOptions(max_images=5)
+PICTURE = "Ein Balkendiagramm mit drei Balken."
+
+
+def test_runner_describes_with_its_image_fetcher(httpserver: HTTPServer) -> None:
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    images = FakeImages()
+    case = Case(settings_for(httpserver), images=images)
+
+    result = asyncio.run(case.run(draft=page_envelope(2), structured=None, describe=DESCRIBE))
+
+    assert result.status == "success", result.error
+    assert result.data is not None
+    assert result.data.metadata is not None
+    assert [image.description for image in result.data.metadata.images] == [PICTURE, PICTURE]
+    assert result.data.image_descriptions is not None
+    assert result.data.image_descriptions.described == 2
+    assert [call[:2] for call in images.calls] == [
+        (image_url(0), "enforce"),  # the job's compliance mode
+        (image_url(1), "enforce"),
+    ]
+    assert len(vision_requests(httpserver)) == 2
+    described_count = case.registry.get_sample_value(
+        "text_extraction_vision_images_total", {"outcome": "described"}
+    )
+    assert described_count == 2
+
+
+def test_runner_reads_upload_input_and_skips_when_gone(httpserver: HTTPServer) -> None:
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    case = Case(settings_for(httpserver))
+
+    async def scenario(stored: bool) -> Envelope[ExtractResult]:
+        record, item = await case.job(
+            draft=upload_envelope("Bruch 3/4"), structured=None, describe=DESCRIBE
+        )
+        if stored:
+            meta = UploadInputMeta(file_name="bruch.png", content_type="image/png")
+            await case.store.put_input(record.id, 0, PNG, meta, 600)
+        return await case.runner.run(record, item, URL, gate_refusals="raise")
+
+    kept = asyncio.run(scenario(True))
+    gone = asyncio.run(scenario(False))
+
+    assert kept.data is not None
+    assert kept.data.content == f"Bruch 3/4\n\n> Image description: {PICTURE}"
+    assert kept.data.image_descriptions is not None
+    assert kept.data.image_descriptions.described == 1
+    assert gone.status == "success"
+    assert gone.data is not None
+    assert gone.data.content == "Bruch 3/4"
+    assert gone.data.image_descriptions is not None
+    assert gone.data.image_descriptions.skipped == 1
+    assert IMAGE_NOT_DESCRIBED_WARNING in gone.data.warnings
+    assert len(vision_requests(httpserver)) == 1
+
+
+def test_runner_uses_caller_key_for_vision(httpserver: HTTPServer) -> None:
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    case = Case(settings_for(httpserver), images=FakeImages())
+
+    result = asyncio.run(
+        case.run(draft=page_envelope(1), structured=None, describe=DESCRIBE, key=CALLER_KEY)
+    )
+
+    assert result.status == "success", result.error
+    assert keys_sent(httpserver) == [f"Bearer {CALLER_KEY}"]
+
+
+def test_runner_describe_budget_is_half_the_deadline(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def spy(*args: Any, **kwargs: Any) -> Envelope[ExtractResult]:
+        seen.update(kwargs)
+        return await apply_post(*args, **kwargs)
+
+    monkeypatch.setattr(llm_worker, "apply_post", spy)
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    images = FakeImages()
+    case = Case(settings_for(httpserver, llm_timeout_seconds=100), images=images)
+
+    asyncio.run(case.run(draft=page_envelope(1), structured=None, describe=DESCRIBE))
+
+    assert case.runner.deadline_seconds == 300
+    assert case.runner.describe_seconds == 150
+    assert seen["describe_seconds"] == 150
+    assert seen["describe"] == DESCRIBE
+    assert seen["images"] is images
+    assert seen["mode"] == "enforce"
+    assert seen["upload"] is None  # a page reads no input
+    assert seen["registry"] is case.registry
+    case.runner.deadline_seconds = 0.4
+    assert case.runner.describe_seconds == 0.2
+
+
+def test_runner_without_any_key_marks_descriptions_failed(httpserver: HTTPServer) -> None:
+    result = run_case(
+        settings_for(httpserver, llm_api_key=None),
+        draft=page_envelope(2),
+        structured=None,
+        describe=DESCRIBE,
+    )
+
+    assert result.status == "partial"
+    assert result.error is not None
+    assert result.error.message == NOT_RUN_MESSAGE
+    assert result.data is not None
+    assert result.data.image_descriptions is not None
+    assert result.data.image_descriptions.failed == 2
+    assert httpserver.log == []
+
+
+def test_runner_answers_a_described_draft_as_it_is(httpserver: HTTPServer) -> None:
+    case = Case(settings_for(httpserver))
+    # No images: the empty report, without a call.
+    first = asyncio.run(case.run(draft=page_envelope(0), structured=None, describe=DESCRIBE))
+    again = asyncio.run(case.run(draft=first, structured=None, describe=DESCRIBE))
+
+    assert first.data is not None
+    assert first.data.image_descriptions is not None
+    assert again == first
+    assert httpserver.log == []
+
+
+def test_exhausted_item_answers_draft_with_descriptions_failed(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(client_module, "MAX_RETRIES", 0)
+    case = Case(settings_for(httpserver), images=FakeImages())
+    queue = llm_queue(case.valkey, case.settings)
+    worker = Worker(case.settings, case.valkey, case.runner, case.store, queue, case.registry)
+
+    async def scenario() -> Envelope[ExtractResult] | None:
+        record, _item = await case.job(
+            draft=page_envelope(3), structured=None, describe=DESCRIBE, key=CALLER_KEY
+        )
+        await queue.enqueue_items(record.id, "alice", [(0, URL)])
+        claim = await queue.claim(case.runner.lease_seconds)
+        assert claim.item is not None
+        await worker.process(claim.item, exhausted=True)
+        [item] = await case.store.items(record.id, 0, 10)
+        return item.result
+
+    result = asyncio.run(scenario())
+
+    assert result is not None
+    assert result.status == "partial"
+    assert result.error is not None
+    assert (result.error.code, result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert result.data is not None
+    assert result.data.image_descriptions is not None
+    report = result.data.image_descriptions
+    assert (report.asked, report.described, report.failed) == (3, 0, 3)
+    assert httpserver.log == []
+
+
 # --- the process ---
 
 
@@ -348,6 +533,8 @@ def test_build_worker_serves_the_llm_pool() -> None:
     assert parts.worker._llm_move is None  # the last hop
     assert parts.worker._pii_move is None
     assert parts.worker._give_back_on_cancel
+    assert isinstance(parts.images, ImageFetcher)
+    assert parts.worker._runner._images is parts.images  # type: ignore[attr-defined]
 
 
 def test_serve_gives_items_in_flight_llm_graceful_seconds(

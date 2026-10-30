@@ -299,6 +299,29 @@ def test_llm_error_carries_http_status(
     assert LlmError("x", retryable=False).status is None
 
 
+def test_llm_error_tells_an_invalid_answer_from_a_transport_failure(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R-V1: both have no HTTP status; only the answer that does not fit after the repair
+    call is ``invalid_answer`` (V-S11 counts it against the image, not the endpoint)."""
+    serve_chat(httpserver, completion("this is not json"))
+    with pytest.raises(LlmError) as invalid:
+        describe(settings_for(httpserver))
+    assert (invalid.value.status, invalid.value.invalid_answer) == (None, True)
+
+    monkeypatch.setattr(client_module, "MAX_RETRIES", 0)
+    with pytest.raises(LlmError) as unreachable:
+        chat(settings_for(httpserver, llm_base_url="http://127.0.0.1:1/v1"))
+    assert unreachable.value.invalid_answer is False
+
+    httpserver.clear()
+    serve_chat(httpserver, error_response(422, "no"))
+    with pytest.raises(LlmError) as rejected:
+        describe(settings_for(httpserver))
+    assert (rejected.value.status, rejected.value.invalid_answer) == (422, False)
+    assert LlmError("x", retryable=False).invalid_answer is False
+
+
 def test_header_key_wins_over_env_key(httpserver: HTTPServer) -> None:
     serve_chat(httpserver, completion('{"title": null}'))
 

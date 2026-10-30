@@ -1,12 +1,16 @@
 """The llm worker (entry point ``text-extraction-llm-worker``): reads the results of the ``llm``
-pool, runs their post stage with the LLM and stores the finished results in the job (ruling S14).
+pool, runs their post stage with the LLM and stores the finished results in the job (ruling S14),
+with the image descriptions of ``describe_images`` (issue #20).
 
 It is the extract worker's ``Worker`` (``worker.py``: slot loops, leases, exhausted items, result
 writes, metrics, ``/ready`` and the shutdown) with another runner. The ``llm_dispatch`` module
-docstring has the contract of the pool's items: their job, key and draft. There are no input
-bytes and no page is fetched; the only outbound calls go to the operator's endpoint
-(``LLM_BASE_URL``). It runs from the API image: it imports the OpenAI SDK, and no model, NLP or
-browser library.
+docstring has the contract of the pool's items: their job, key and draft. Besides the operator's
+endpoint (``LLM_BASE_URL``) its only outbound requests fetch a page's images for their
+descriptions, through its image fetcher (``vision.fetch.create_image_fetcher``: the SSRF guard,
+the job's compliance mode, the outbound gate's per-domain turns, ``USER_AGENT``; never a page,
+never the caller's cookies or headers). An image upload's bytes are read from the job item's
+input (``input:{index}``), which the ``Worker`` deletes with the result. It runs from the API
+image: it imports the OpenAI SDK, and no model, NLP or browser library.
 
 **The runner** (``LlmRunner``) leases an item for ``4 * LLM_TIMEOUT_SECONDS + 10`` seconds. For
 each item it:
@@ -16,12 +20,15 @@ each item it:
    data: there is nothing to post-process, and the caller sends the request again. So does a
    draft that does not validate (logged by its error's type only: pydantic's message quotes the
    input). A draft whose post stage ran already (an item that ran twice) is answered as it is;
-2. reads the job's ``structured`` and ``chunking`` and the caller's key (``JobStore.llm_key``,
-   else ``LLM_API_KEY``: rule 3);
+2. reads the job's ``structured``, ``chunking`` and ``describe_images`` and the caller's key
+   (``JobStore.llm_key``, else ``LLM_API_KEY``: rule 3); for an image upload that owes its
+   description, the item's stored input (gone: the image is skipped);
 3. runs ``structured.post.apply_post`` with an ``LlmClient`` of that key, under an overall
    deadline of ``3 * LLM_TIMEOUT_SECONDS`` (the SDK retries a call twice, ``LLM_TIMEOUT_SECONDS``
    each). Learned selectors are stored for the job's owner and the page's host
-   (``structured.store.SelectorStore``), where the pipeline reads them. LLM failures are
+   (``structured.store.SelectorStore``), where the pipeline reads them. The image descriptions
+   (step 0) get half the deadline (``describe_seconds``), so the structured and semantic work
+   keep theirs; the images are fetched in the job's compliance mode. LLM failures are
    ``llm_failed`` in the result, with its content; the deadline, and no key at all, answer the
    draft without the LLM work (``finish_post(..., reason="failed")``: ``llm_failed``,
    retryable), and so does an unexpected error of the post stage (logged by its type only).
@@ -88,6 +95,9 @@ from text_extraction.structured.selector_pool import SelectorRunner, create_sele
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.valkey import create_valkey
+from text_extraction.vision.describe import needs_vision
+from text_extraction.vision.fetch import ImageFetcher, ImageSource, create_image_fetcher
+from text_extraction.vision.types import DescribeImagesOptions, StoredInputMeta
 from text_extraction.worker import Worker, _serve
 
 _log = structlog.get_logger(__name__)
@@ -105,7 +115,8 @@ _CHECK_DOCUMENT: Final = "# Check\n\nThis short page is titled Check."
 
 class LlmRunner:
     """The ``llm`` pool's ``ItemRunner``; see the module docstring. ``selectors`` keeps the
-    learned selectors; ``registry`` gets the LLM client's metrics."""
+    learned selectors; ``registry`` gets the LLM client's and the descriptions' metrics;
+    ``images`` fetches the page images to describe (None: they are skipped)."""
 
     def __init__(
         self,
@@ -116,6 +127,7 @@ class LlmRunner:
         registry: CollectorRegistry = REGISTRY,
         post_pool: ConversionPool | None = None,
         selector_runner: SelectorRunner | None = None,
+        images: ImageSource | None = None,
     ) -> None:
         """``post_pool`` runs the post stage's CPU work and ``selector_runner`` the proposals of
         ``learn_selectors`` (rulings R21, R19); without them the runner makes its own."""
@@ -123,6 +135,7 @@ class LlmRunner:
         self._store = store
         self._selectors = selectors
         self._registry = registry
+        self._images = images
         self._post_pool = (
             post_pool
             if post_pool is not None
@@ -134,6 +147,11 @@ class LlmRunner:
         self.lease_seconds = llm_lease_seconds(settings)
         # The item's overall deadline: three requests to the endpoint (the SDK's retries).
         self.deadline_seconds = 3 * settings.llm_timeout_seconds
+
+    @property
+    def describe_seconds(self) -> float:
+        """The image descriptions' budget: half the item's deadline (ruling V-S12)."""
+        return self.deadline_seconds / 2
 
     async def run(
         self,
@@ -155,17 +173,21 @@ class LlmRunner:
             _log.warning("llm_draft_expired")
             return failed_extract(ErrorCode.INTERNAL_ERROR, DRAFT_EXPIRED_MESSAGE, retryable=True)
         structured, chunking = job.options.structured, job.options.chunking
-        if post_done(draft, structured, chunking):
+        describe = job.options.describe_images
+        if post_done(draft, structured, chunking, describe=describe):
             return draft  # nothing is owed: done before, or nothing to read
         if needs_pii(draft, job.options.pii):
             # No path hands such a draft over, but this is the only code that sends content to
             # a third party: the LLM never sees personal data (D3 a, M-a).
             _log.error("llm_draft_owes_pii")
             return withheld(draft, job.options.pii)
-        if too_large_for_llm(draft, structured, chunking):
+        if too_large_for_llm(draft, structured, chunking, describe=describe):
             # Its content was not stored (JOB_ITEM_MAX_BYTES): the LLM work cannot be done (R20).
             return await self._post_pool.run(
-                partial(finish_too_large, settings=self._settings), draft, structured, chunking
+                partial(finish_too_large, settings=self._settings, describe=describe),
+                draft,
+                structured,
+                chunking,
             )
         key = await self._store.llm_key(job.id)
         try:
@@ -173,6 +195,11 @@ class LlmRunner:
         except LlmError:  # no key at all: the requests' side refuses this earlier
             _log.error("llm_key_missing")
             return await self._without_llm(draft, structured, job)
+        try:
+            upload = await self._upload_of(draft, describe, job, item)
+        except BaseException:
+            await client.aclose()
+            raise
         try:
             async with asyncio.timeout(self.deadline_seconds):
                 return await apply_post(
@@ -185,6 +212,12 @@ class LlmRunner:
                     owner=job.owner,
                     threads=self._post_pool,
                     selectors=self._selector_runner,
+                    describe=describe,
+                    images=self._images,
+                    upload=upload,
+                    mode=job.options.compliance,
+                    describe_seconds=self.describe_seconds,
+                    registry=self._registry,
                 )
         except TimeoutError:
             _log.warning("llm_item_deadline", seconds=self.deadline_seconds)
@@ -197,12 +230,35 @@ class LlmRunner:
         finally:
             await client.aclose()
 
+    async def _upload_of(
+        self,
+        draft: Envelope[ExtractResult],
+        describe: DescribeImagesOptions | None,
+        job: JobRecord,
+        item: QueueItem,
+    ) -> bytes | None:
+        """An image upload's bytes for its description: the item's stored input (V-S7), or None
+        for anything else, and when the input is gone (the image is skipped then)."""
+        data = draft.data
+        if data is None or data.mode_used != "upload" or not needs_vision(data, describe):
+            return None
+        stored = await self._store.get_input(job.id, item.index, StoredInputMeta)
+        if stored is None:
+            _log.warning("llm_upload_input_gone")
+            return None
+        return stored[0]
+
     async def _without_llm(
         self, draft: Envelope[ExtractResult], structured: StructuredOptions | None, job: JobRecord
     ) -> Envelope[ExtractResult]:
         """The draft's post stage without the LLM: ``llm_failed``, retryable, its content."""
         return await self._post_pool.run(
-            partial(finish_post, settings=self._settings, reason="failed"),
+            partial(
+                finish_post,
+                settings=self._settings,
+                reason="failed",
+                describe=job.options.describe_images,
+            ),
             draft,
             structured,
             job.options.chunking,
@@ -215,12 +271,13 @@ class LlmRunner:
 @dataclass(frozen=True)
 class LlmWorkerParts:
     """What one llm worker process runs on: the worker and the settings, and the selector
-    children and post pool to close at the end."""
+    children, post pool and image fetcher to close at the end."""
 
     worker: Worker
     settings: Settings
     selectors: SelectorRunner
     post_pool: ConversionPool
+    images: ImageFetcher
 
 
 def build_llm_worker(
@@ -231,6 +288,7 @@ def build_llm_worker(
     selectors = SelectorStore(valkey, settings.selector_learn_ttl_seconds)
     selector_runner = create_selector_runner(settings)
     post_pool = ConversionPool(settings.post_concurrency, name="post")
+    images = create_image_fetcher(settings, valkey)
     runner = LlmRunner(
         settings,
         store,
@@ -238,6 +296,7 @@ def build_llm_worker(
         registry=registry,
         post_pool=post_pool,
         selector_runner=selector_runner,
+        images=images,
     )
     worker = Worker(
         settings,
@@ -251,7 +310,11 @@ def build_llm_worker(
         post_pool=post_pool,
     )
     return LlmWorkerParts(
-        worker=worker, settings=settings, selectors=selector_runner, post_pool=post_pool
+        worker=worker,
+        settings=settings,
+        selectors=selector_runner,
+        post_pool=post_pool,
+        images=images,
     )
 
 
@@ -283,6 +346,7 @@ async def _run(settings: Settings) -> None:
     finally:
         await parts.selectors.shutdown()
         parts.post_pool.shutdown()
+        await parts.images.aclose()
         await valkey.aclose()
         _log.info("valkey_closed")
 
