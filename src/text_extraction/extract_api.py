@@ -135,6 +135,7 @@ from text_extraction.pipeline_media import (
     TRANSCRIPTION_DISABLED_MESSAGE,
     asr_available,
 )
+from text_extraction.pool_dispatch import GracefulShutdown
 from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
@@ -440,6 +441,26 @@ async def wait_for_flow(task: asyncio.Task[Any], seconds: float) -> None:
     await asyncio.wait({task}, timeout=seconds)
 
 
+async def _wait_unless_shut_down(
+    shutdown: GracefulShutdown, task: asyncio.Task[Any], handover: Handover, seconds: float
+) -> None:
+    """``wait_for_flow``, cut short once the pod's graceful shutdown has begun while the flow
+    waits for a last-hop pool (``nlp``, ``llm``; issue #19): the route then answers as at the
+    end of its wait, 202 with that job, instead of being cut off by the shutdown."""
+
+    async def last_hop_at_shutdown() -> None:
+        await shutdown.wait()
+        await handover.in_last_hop()
+
+    waiting = asyncio.ensure_future(wait_for_flow(task, seconds))
+    cut = asyncio.ensure_future(last_hop_at_shutdown())
+    try:
+        await asyncio.wait({waiting, cut}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        waiting.cancel()
+        cut.cancel()
+
+
 async def answer_or_hand_over(
     state: Any,
     flow: Callable[[], Coroutine[Any, Any, _Answer]],
@@ -469,7 +490,7 @@ async def answer_or_hand_over(
     background.add(task)
     try:
         if wait_seconds > 0:
-            await wait_for_flow(task, wait_seconds)
+            await _wait_unless_shut_down(state.graceful_shutdown, task, handover, wait_seconds)
     except asyncio.CancelledError:
         task.cancel()  # nobody is waiting for it any more, and no job exists
         background.discard(task)

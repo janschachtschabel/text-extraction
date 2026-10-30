@@ -343,7 +343,11 @@ optional rate limit.
   computed, not stored, and a completed job never gets it. If Valkey fails when the job is
   created, the request keeps waiting and answers 200 with the envelope, not 503; if it fails when
   the result is stored, the lease expires and the lost view takes over. The shutdown waits up to
-  `EXTRACT_TIMEOUT_SECONDS` + 7 s for such tasks (after the graceful phase). Extract jobs do not
+  `EXTRACT_TIMEOUT_SECONDS` + 7 s for such tasks (after the graceful phase). When the graceful
+  phase begins, a request that still waits for an nlp or llm job (whose wait, with a long
+  `wait_seconds`, may outlast the phase) answers 202 with that job at once, as at the end of its
+  wait, and the worker completes it (issue #19); waits for a browser or Docling job are covered by
+  the grace period and keep going. Extract jobs do not
   count toward `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`. A pod
   holds at most `EXTRACT_MAX_BACKGROUND` (32) such tasks; beyond it a request keeps waiting inline
   and answers 200.

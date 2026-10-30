@@ -254,6 +254,11 @@ its start and runs while the graceful phase does, so normally the whole sequence
 pods' `terminationGracePeriodSeconds`; its worst case does not, and then the pod is killed
 and the job's lease expires (the job then reports a lost extraction).
 
+A sync request that waits for the nlp or llm workers (`pii`, or `structured` and `chunking` work
+that needs the LLM; with a long `wait_seconds` this wait may outlast the graceful phase) answers
+202 with its nlp or llm job as soon as the graceful phase begins, as it would when its wait runs
+out; the worker completes the job, and the caller polls `GET /v1/jobs/{id}` (issue #19).
+
 While `BROWSER_ENABLED`, the graceful phase is at least
 `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds (75 s by
 default, 105 s with unblock mode; the render deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock

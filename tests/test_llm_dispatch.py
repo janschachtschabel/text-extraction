@@ -28,7 +28,9 @@ from tests.test_pii_dispatch import (
     EMAIL,
     NAME,
     PiiService,
+    answer_in_thread,
     assert_processed,
+    begin_shutdown,
 )
 from text_extraction.app import create_public_app
 from text_extraction.jobs import JobStore
@@ -242,6 +244,38 @@ def test_sync_llm_slow_answers_202_after_wait(httpserver: HTTPServer) -> None:
         assert service.stored("job:*:drafts") == []
     assert keys_sent(httpserver) == [f"Bearer {CALLER_KEY}"]
     assert service.llm_outcomes() == {"handed_over": 1}  # the task saw the route take the job
+
+
+def test_graceful_shutdown_answers_an_llm_wait_with_its_job_at_once(
+    httpserver: HTTPServer,
+) -> None:
+    """Issue #19 (M11.4): a request whose long ``wait_seconds`` waits for the llm worker answers
+    202 with the llm job as soon as the pod's graceful shutdown begins; the worker writes it."""
+    serve_chat(httpserver, answer({"heading": "Photosynthesis explained"}))
+    service = LlmService(httpserver)
+    with TestClient(service.app) as client:
+        response = answer_in_thread(
+            lambda: extract(client, LLM_HEADERS, structured=LLM_HEADING, wait_seconds=60)
+        )
+        deadline = time.monotonic() + 10
+        while not service.pending() and time.monotonic() < deadline:
+            time.sleep(0.02)  # the request now waits for its llm job
+        assert response(0.3) is None
+        began = time.monotonic()
+        begin_shutdown(client)
+        answered = response(10)
+        took = time.monotonic() - began
+
+        assert answered is not None
+        assert answered.status_code == 202, answered.text
+        assert took < 3
+        with service.workers():
+            final = service.wait_for_job(client, answered.json()["data"]["id"])
+        result = final["data"]["items"][0]["result"]
+        assert result["status"] == "success", result["error"]
+        assert result["data"]["structured"]["values"] == {"heading": "Photosynthesis explained"}
+        service.wait_for_idle()
+    assert service.llm_outcomes() == {"handed_over": 1}
 
 
 def test_no_llm_worker_running_answers_202_and_job_waits(httpserver: HTTPServer) -> None:

@@ -59,6 +59,13 @@ policy and its worker's contract.
   completes the item without a result. Draft first: the pool's worker may claim the item as soon
   as it is queued. While the memory guard is high nothing is stored and the move declines.
 
+**The graceful shutdown** (issue #19, M11.4): a sync request may wait for a last hop longer than
+the API pod's grace period (``wait_seconds`` up to 60 s). ``server._serve`` calls
+``GracefulShutdown.begin`` when the public server stops accepting connections; from then on a
+route whose task waits for a last-hop job (``Handover.in_last_hop``) answers at once as it does
+when its wait runs out: 202 with that job, which the pool's worker completes. Waits for the
+browser and Docling pools are not cut short: the grace period covers them.
+
 The ``docling`` pool's policy (OCR) and the contract of its worker are in ``docling_dispatch.py``,
 the ``asr`` pool's in ``asr_dispatch.py``, the ``nlp`` pool's in ``pii_dispatch.py``.
 
@@ -128,14 +135,46 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
     )
 
 
+class GracefulShutdown:
+    """Whether the API pod's graceful shutdown has begun (the module docstring). ``begin`` and
+    ``wait`` run on the server's event loop; each ``wait`` makes its own future on the running
+    loop, so one instance serves apps that tests run on several loops."""
+
+    def __init__(self) -> None:
+        self._begun = False
+        self._waiters: set[asyncio.Future[None]] = set()
+
+    @property
+    def begun(self) -> bool:
+        return self._begun
+
+    def begin(self) -> None:
+        self._begun = True
+        for waiter in self._waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+
+    async def wait(self) -> None:
+        """Return once the graceful shutdown has begun."""
+        if self._begun:
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        self._waiters.add(waiter)
+        try:
+            await waiter
+        finally:
+            self._waiters.discard(waiter)
+
+
 class Handover:
     """What the route of a request with ``wait_seconds`` and its task (``extract_api._flow``)
     share; see the module docstring.
 
     ``job_id`` is the P1 job the route created, ``pool_job`` the job the task dispatched to
-    ``pool`` (``browser``, ``docling`` or ``asr``). The side that claimed calls ``settle`` once
-    its job exists, or failed to; the other side waits for ``settled`` before it looks at the
-    ids.
+    ``pool`` (``browser``, ``docling``, ``asr``, or a last hop: ``nlp``, ``llm``). The side that
+    claimed calls ``settle`` once its job exists, or failed to; the other side waits for
+    ``settled`` before it looks at the ids. ``in_last_hop`` returns while the task waits for a
+    last-hop job that it has not released.
     """
 
     def __init__(self) -> None:
@@ -144,6 +183,7 @@ class Handover:
         self.pool: str | None = None
         self._claimed: Literal["p1", "pool"] | None = None
         self._settled = asyncio.Event()
+        self._last_hop = asyncio.Event()
         self._detached = False
         self._released = False
 
@@ -184,16 +224,23 @@ class Handover:
         self._claimed = side
         return True
 
-    def settle(self, job_id: str | None) -> None:
-        """The claiming side's job is created (``job_id``) or could not be (None)."""
+    def settle(self, job_id: str | None, *, last_hop: bool = False) -> None:
+        """The claiming side's job is created (``job_id``) or could not be (None). ``last_hop``:
+        the task's pool job is a last hop's (``LastHopHandoff``), which it now waits for."""
         if self._claimed == "p1":
             self.job_id = job_id
         else:
             self.pool_job = job_id
+            if last_hop and job_id is not None:
+                self._last_hop.set()
         self._settled.set()
 
     async def settled(self) -> None:
         await self._settled.wait()
+
+    async def in_last_hop(self) -> None:
+        """Return once the task waits for a last-hop job (at once while it does)."""
+        await self._last_hop.wait()
 
     def detach(self) -> bool:
         """The route answers 202 with the pool job: the task stops waiting for it and leaves
@@ -210,6 +257,7 @@ class Handover:
         if self._detached:
             return False
         self._released = True
+        self._last_hop.clear()
         return True
 
     @property
@@ -491,7 +539,7 @@ class LastHopHandoff(ABC):
             return self.unserved(envelope, "failed")
         finally:
             if claimed:
-                handover.settle(job_id)
+                handover.settle(job_id, last_hop=True)
         try:
             result = await self._wait(
                 job_id, extra_seconds=extra, detached=lambda: handover.detached
