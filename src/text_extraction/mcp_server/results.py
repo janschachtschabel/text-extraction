@@ -24,13 +24,14 @@ INVALID_MESSAGE = "The request is invalid."
 TRUNCATED_WARNING = "mcp_content_truncated"
 
 
-def _result(
+def payload_result(
     payload: dict[str, Any],
     *,
     is_error: bool,
     hints: Sequence[str] = (),
     images: Sequence[ImageContent] = (),
 ) -> ToolResult:
+    """The result of an envelope (``payload``): the hints, the images, then the JSON."""
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     content: list[TextContent | ImageContent] = [
         TextContent(type="text", text=hint) for hint in hints
@@ -70,7 +71,7 @@ def error_result(error: Exception) -> ToolResult:
     envelope: Envelope[None] = Envelope(
         status="failed", error=error_info(error), trace_id=current_trace_id()
     )
-    return _result(envelope.model_dump(mode="json"), is_error=True)
+    return payload_result(envelope.model_dump(mode="json"), is_error=True)
 
 
 def answer_payload(answer: Envelope[Any] | Response) -> tuple[dict[str, Any], bool]:
@@ -85,22 +86,11 @@ def answer_payload(answer: Envelope[Any] | Response) -> tuple[dict[str, Any], bo
     return payload, answer.status_code >= 400
 
 
-def payload_result(
-    payload: dict[str, Any],
-    *,
-    is_error: bool,
-    hints: Sequence[str] = (),
-    images: Sequence[ImageContent] = (),
-) -> ToolResult:
-    """The result of an envelope (``payload``): the hints, the images, then the JSON."""
-    return _result(payload, is_error=is_error, hints=hints, images=images)
-
-
 def envelope_result(answer: Envelope[Any] | Response, *, hints: Sequence[str] = ()) -> ToolResult:
     """The result of a route core's answer (``answer_payload``); ``hints`` are one-line texts
     put before the JSON."""
     payload, is_error = answer_payload(answer)
-    return _result(payload, is_error=is_error, hints=hints)
+    return payload_result(payload, is_error=is_error, hints=hints)
 
 
 def job_hint(payload: Mapping[str, Any], wait_seconds: int) -> str | None:
@@ -116,7 +106,8 @@ def job_hint(payload: Mapping[str, Any], wait_seconds: int) -> str | None:
 
 
 def slice_content(envelope: dict[str, Any], *, offset: int, share: int) -> str | None:
-    """Cut ``data.content`` of ``envelope`` (in place) to ``share`` characters from ``offset``.
+    """Cut ``data.content`` of ``envelope`` (in place) to ``share`` characters from ``offset``;
+    characters are Unicode code points (a Python ``str`` slice), never split.
     A content that is not returned whole gets the warning ``mcp_content_truncated``. Returns the
     hint to read on, or None when nothing follows (or there is no content)."""
     data = envelope.get("data")

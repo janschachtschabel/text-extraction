@@ -7,6 +7,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -15,13 +16,18 @@ import pytest
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from pydantic import ValidationError
+from starlette.datastructures import State
 
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from tests.mcp_server.rpc import call_tool, rpc
 from tests.test_extract_api import BrowserCase
 from text_extraction.app import create_public_app
+from text_extraction.auth import Principal
 from text_extraction.fetch import Fetcher
 from text_extraction.mcp_server.results import TRUNCATED_WARNING, slice_content
+from text_extraction.mcp_server.server import mcp_body_limit
+from text_extraction.mcp_server.tools_extract import ExtractFileArguments, ScreenshotUrlTool
 from text_extraction.pipeline import create_pipeline
 from text_extraction.settings import Settings
 from text_extraction.structured.checks import XPATH_NEEDS_ADMIN_MESSAGE
@@ -171,10 +177,12 @@ def test_user_options_checked_as_rest() -> None:
     """Review Focus 1: a user key cannot reach an admin option through ``options``."""
     case = BrowserCase(mcp_enabled=True)
     with TestClient(case.app) as client:
-        for tool in ("extract_url", "screenshot_url", "extract_structured"):
+        for tool in ("extract_url", "screenshot_url", "extract_structured", "chunk"):
             arguments: dict[str, Any] = {"url": PAGE}
             if tool == "extract_structured":
                 arguments["structured"] = {"strategy": "metadata", "schema": SCHEMA}
+            if tool == "chunk":
+                arguments["chunking"] = {"strategy": "recursive"}
             ignore = refusal(
                 call_tool(
                     client, tool, {**arguments, "options": {"compliance": "ignore"}}, headers=AUTH
@@ -190,22 +198,22 @@ def test_user_options_checked_as_rest() -> None:
                 )
             )
             assert evaluate["code"] == "forbidden", tool
-        xpath = refusal(
-            call_tool(
-                client,
-                "extract_structured",
-                {
-                    "url": PAGE,
-                    "structured": {
-                        "strategy": "selectors",
-                        "schema": SCHEMA,
-                        "selectors": {"name": {"xpath": "//h1"}},
-                    },
-                },
-                headers=AUTH,
-            )
-        )
-        assert (xpath["code"], xpath["message"]) == ("invalid_request", XPATH_NEEDS_ADMIN_MESSAGE)
+        rule = {"strategy": "selectors", "schema": SCHEMA, "selectors": {"name": {"xpath": "//h1"}}}
+        for tool, arguments in (
+            ("extract_url", {"url": PAGE, "options": {"structured": rule}}),
+            ("extract_structured", {"url": PAGE, "structured": rule}),
+            ("chunk", {"url": PAGE, "chunking": {}, "options": {"structured": rule}}),
+            ("chunk", {"text": TEXT, "chunking": {}, "options": {"structured": rule}}),
+            (
+                "extract_file",
+                {"content_base64": b64(TEXT.encode()), "options": {"structured": rule}},
+            ),
+        ):
+            xpath = refusal(call_tool(client, tool, arguments, headers=AUTH))
+            assert (xpath["code"], xpath["message"]) == (
+                "invalid_request",
+                XPATH_NEEDS_ADMIN_MESSAGE,
+            ), tool
 
     with running() as client:  # browser mode off
         browser = refusal(
@@ -213,6 +221,106 @@ def test_user_options_checked_as_rest() -> None:
         )
         assert browser["code"] == "invalid_request"
         assert browser["message"] == "Browser mode is not enabled on this service."
+
+
+def big_schema(size: int) -> dict[str, Any]:
+    properties = {f"field_{index:05d}": {"type": "string"} for index in range(size // 30)}
+    return {"type": "object", "properties": properties}
+
+
+def test_body_cap_as_rest() -> None:
+    """The merged body of a tool is held to its REST route's body limit, before the core."""
+    fetcher = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+    with running(fetcher) as client:
+        huge = {"strategy": "metadata", "schema": big_schema(100_000)}
+        rest = client.post("/v1/structured", json={"url": PAGE, "structured": huge}, headers=AUTH)
+        assert rest.status_code == 413
+        expected = rest.json()["error"]
+        for tool, arguments in (
+            ("extract_url", {"url": PAGE, "options": {"structured": huge}}),
+            ("screenshot_url", {"url": PAGE, "options": {"headers": {"x": "y" * 70_000}}}),
+            ("extract_structured", {"url": PAGE, "structured": huge}),
+        ):
+            error = refusal(call_tool(client, tool, arguments, headers=AUTH))
+            assert (error["code"], error["message"]) == (
+                expected["code"],
+                expected["message"],
+            ), tool
+        assert fetcher.calls == []
+        # Under the limit the body reaches the REST model, which answers as for REST.
+        small = {"strategy": "metadata", "schema": big_schema(30_000)}
+        rest = client.post("/v1/structured", json={"url": PAGE, "structured": small}, headers=AUTH)
+        assert rest.status_code == 422
+        arguments = {"url": PAGE, "structured": small}
+        error = refusal(call_tool(client, "extract_structured", arguments, headers=AUTH))
+        expected = rest.json()["error"]
+        assert error["message"] == expected["message"]
+        # REST's locations start with "body"; a tool's name the argument.
+        assert error["details"] == [
+            {**item, "loc": item["loc"][1:]} for item in expected["details"]
+        ]
+
+    with running(fetcher, document_max_bytes=4096) as client:
+        # `POST /v1/chunk` is held to the text limit (the upload limit + 64 KiB).
+        text = "w " * 35_000  # over the text limit (69,632), under /mcp's (71,000)
+        rest = client.post(
+            "/v1/chunk", json={"text": text, "chunking": {}, "pii": "mask"}, headers=AUTH
+        )
+        assert rest.status_code == 413
+        error = refusal(
+            call_tool(
+                client,
+                "chunk",
+                {"text": text, "chunking": {}, "options": {"pii": "mask"}},
+                headers=AUTH,
+            )
+        )
+        assert error["message"] == rest.json()["error"]["message"]
+
+        # `POST /v1/extract/file` holds each form field to its part limit.
+        for options, limit in (
+            # Just over 64 KiB, under /mcp's body limit (71,000 bytes here).
+            ({"structured": {"schema": {"type": "object", "description": "x" * 66_000}}}, "64KB"),
+            ({"pii": {"mode": "mask", "entities": ["PERSON"] * 200}}, "1KB"),
+        ):
+            form = {
+                name: value if isinstance(value, str) else json.dumps(value)
+                for name, value in options.items()
+            }
+            rest = client.post(
+                "/v1/extract/file",
+                files={"file": ("a.txt", b"hello", "text/plain")},
+                data=form,
+                headers=AUTH,
+            )
+            assert rest.status_code == 422
+            error = refusal(
+                call_tool(
+                    client,
+                    "extract_file",
+                    {"content_base64": b64(b"hello"), "options": options},
+                    headers=AUTH,
+                )
+            )
+            assert (error["code"], error["message"]) == (
+                "invalid_request",
+                rest.json()["error"]["message"],
+            )
+            assert limit in error["message"]
+
+
+def test_explicit_wait_is_bounded_by_the_setting() -> None:
+    """Review Focus 5: an explicit wait_seconds is cut to MCP_WAIT_SECONDS."""
+    slow = SlowFetcher({PAGE: fetched(body=ARTICLE)}, 3)
+    with running(slow, mcp_wait_seconds=1) as client:
+        for arguments in (
+            {"url": PAGE, "wait_seconds": 30},
+            {"url": PAGE, "options": {"wait_seconds": 30}},
+        ):
+            started = time.monotonic()
+            result = call_tool(client, "extract_url", arguments, headers=AUTH)
+            assert time.monotonic() - started < 2.5
+            assert "status_url" in envelope_of(result)["data"]
 
 
 def test_target_failure_is_not_tool_error() -> None:
@@ -282,6 +390,15 @@ def test_content_slicing() -> None:
     assert whole == envelope
     for empty in ({"status": "failed", "data": None}, {"status": "success", "data": {}}):
         assert slice_content(empty, offset=0, share=10) is None
+
+    # Offsets count code points: characters outside the BMP are never split.
+    wide = "a😀b🎉c" * 1000 + "\u0301e\u0301"
+    for offset, share in ((0, 3), (1, 2), (4, 997), (4997, 10)):
+        piece: dict[str, Any] = {"status": "success", "data": {"content": wide, "warnings": []}}
+        slice_content(piece, offset=offset, share=share)
+        sliced = json.loads(json.dumps(piece, ensure_ascii=False))
+        assert sliced["data"]["content"] == wide[offset : offset + share]
+        assert len(sliced["data"]["content"]) == min(share, len(wide) - offset)
 
     # End to end: the content of a text upload, cut and read on.
     text = "\n\n".join(f"Paragraph {index:05d} " + "w" * 44 for index in range(1100))
@@ -430,6 +547,23 @@ def test_extract_file_base64() -> None:
         )
 
 
+def test_file_argument_bounded(client: TestClient) -> None:
+    tools = {
+        tool["name"]: tool for tool in rpc(client, "tools/list", headers=AUTH)["result"]["tools"]
+    }
+    app: Any = client.app
+    limit = mcp_body_limit(app.state.settings)
+    schema = tools["extract_file"]["inputSchema"]["properties"]["content_base64"]
+    assert schema["maxLength"] == limit
+
+    # The gate's body limit stops a larger argument first; the model holds it without the gate.
+    context = {"settings": app.state.settings}
+    ExtractFileArguments.model_validate({"content_base64": "A" * limit}, context=context)
+    with pytest.raises(ValidationError) as caught:
+        ExtractFileArguments.model_validate({"content_base64": "A" * (limit + 1)}, context=context)
+    assert caught.value.errors()[0]["loc"] == ("content_base64",)
+
+
 def test_structured_and_chunk_tools(client: TestClient) -> None:
     structured = {"strategy": "metadata", "schema": SCHEMA}
     rest = client.post(
@@ -506,3 +640,22 @@ def test_screenshot_image_attached_and_capped(limit: int) -> None:
             f"The screenshot ({len(PNG)} bytes) is over MCP_IMAGE_MAX_BYTES; download it from "
             f"{shot['url']}."
         ]
+
+
+def test_screenshot_hint_without_a_size() -> None:
+    """A screenshot reference the tool cannot read is linked, never 'None bytes'."""
+    state = State({"settings": make_settings()})
+    for ref in (
+        {"url": "/v1/jobs/j/artifacts/screenshot.png", "bytes": None},
+        {"url": "https://elsewhere.example/shot.png", "bytes": 10},
+    ):
+        hints: list[str] = []
+        images: list[Any] = []
+        payload = {"status": "success", "data": {"screenshot": ref}}
+        asyncio.run(
+            ScreenshotUrlTool().attach(
+                state, Principal("alice", "user", None), payload, hints, images
+            )
+        )
+        assert images == []
+        assert hints == [f"The screenshot is not attached; download it from {ref['url']}."]

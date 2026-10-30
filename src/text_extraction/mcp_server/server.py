@@ -85,7 +85,7 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
         mask_error_details=True,
         middleware=[CallGuard(state, metrics)],
     )
-    tools: list[ModelTool] = [*extraction_tools(), ServiceInfoTool()]
+    tools: list[ModelTool] = [*extraction_tools(settings), ServiceInfoTool()]
     for tool in tools:
         register(server, state, tool)
     metrics.export(tool.name for tool in tools)

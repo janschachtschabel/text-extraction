@@ -10,8 +10,10 @@ request. The answer is the route's envelope; ``content`` is cut to ``max_chars``
 ``content_offset``, and a screenshot is attached as an image.
 """
 
+import json
 import re
 from abc import abstractmethod
+from collections.abc import Mapping
 from typing import Annotated, Any, ClassVar, Literal
 
 from mcp_types import ImageContent, ToolAnnotations
@@ -27,9 +29,13 @@ from text_extraction.errors import BodyTooLarge, ServiceError
 from text_extraction.extract_api import respond
 from text_extraction.extract_models import ChunkRequest, ExtractRequest, StructuredRequest
 from text_extraction.file_api import (
+    MAX_FIELD_BYTES,
+    MAX_OPTION_FIELD_BYTES,
+    OPTION_FIELDS,
     check_upload_request,
     run_upload,
     sanitize_file_name,
+    text_body_limit,
     upload_file_limit,
 )
 from text_extraction.file_models import FileForm
@@ -44,6 +50,7 @@ from text_extraction.mcp_server.results import (
     png_content,
     slice_content,
 )
+from text_extraction.mcp_server.server import mcp_body_limit
 from text_extraction.screenshot_api import read_artifact, run_screenshot
 from text_extraction.settings import Settings
 from text_extraction.structured.checks import LLM_KEY_HEADER, llm_key_of
@@ -81,7 +88,7 @@ class _Arguments(BaseModel):
         ge=0,
         le=60,
         description="Seconds to wait for the result before it continues as a job "
-        "(default MCP_WAIT_SECONDS).",
+        "(default and at most MCP_WAIT_SECONDS).",
     )
 
 
@@ -89,7 +96,10 @@ class _Sliced(_Arguments):
     """The arguments of a tool whose answer has ``content``."""
 
     content_offset: int = Field(
-        default=0, ge=0, description="First character of content to return (to read on)."
+        default=0,
+        ge=0,
+        description="First character of content to return, to read on; characters are Unicode "
+        "code points, and chunk offsets count in the whole content.",
     )
     max_chars: int | None = Field(
         default=None,
@@ -126,6 +136,15 @@ class ExtractFileArguments(_Sliced):
     content_base64: str = Field(
         description="The file as base64; a data:<type>;base64, prefix and line breaks are fine."
     )
+
+    @field_validator("content_base64")
+    @classmethod
+    def _within_the_body_limit(cls, value: str, info: ValidationInfo) -> str:
+        settings = (info.context or {}).get("settings")
+        if isinstance(settings, Settings) and len(value) > mcp_body_limit(settings):
+            raise ValueError(f"content_base64 has at most {mcp_body_limit(settings)} characters")
+        return value
+
     file_name: str | None = Field(default=None, max_length=1024, description="The file's name.")
     content_type: str | None = Field(
         default=None,
@@ -187,14 +206,51 @@ def merge_options(args: dict[str, Any], options: dict[str, Any] | None) -> dict[
     return {**options, **args}
 
 
-def _body(args: BaseModel, settings: Settings) -> dict[str, Any]:
-    """The REST body of a call's arguments (those the caller gave, ``options`` merged), with
-    ``wait_seconds`` set to ``MCP_WAIT_SECONDS`` when the caller gives none (P10-S7)."""
+def _body(args: BaseModel) -> dict[str, Any]:
+    """The REST body of a call's arguments: those the caller gave, ``options`` merged."""
     given = args.model_dump(exclude_unset=True, exclude=set(_TOOL_ONLY))
-    body = merge_options(given, getattr(args, "options", None))
-    if body.get("wait_seconds") is None:
-        body["wait_seconds"] = settings.mcp_wait_seconds
-    return body
+    return merge_options(given, getattr(args, "options", None))
+
+
+def _bounded_wait(body: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """``body`` with ``wait_seconds`` set to ``MCP_WAIT_SECONDS`` when the caller gives none, and
+    cut to it when the caller gives more (P10-S7), so a call ends within the setting plus the
+    route's hand-over time. A value that is no number is left to the REST model to refuse."""
+    wait = body.get("wait_seconds")
+    if wait is None:
+        return {**body, "wait_seconds": settings.mcp_wait_seconds}
+    try:
+        over = float(wait) > settings.mcp_wait_seconds
+    except (TypeError, ValueError):
+        return body
+    return {**body, "wait_seconds": settings.mcp_wait_seconds} if over else body
+
+
+def _json_bytes(value: object) -> int:
+    """The size of ``value`` as compact JSON in UTF-8, as a client would send it."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
+def check_body_size(body: Mapping[str, Any], limit: int) -> None:
+    """413 ``invalid_request`` with the REST message (``BodyTooLarge``) when ``body`` as JSON is
+    over ``limit`` bytes: a tool's body is held to its route's body limit."""
+    if _json_bytes(body) > limit:
+        raise ServiceError(ErrorCode.INVALID_REQUEST, BodyTooLarge(limit).detail, 413)
+
+
+def check_form_fields(fields: Mapping[str, Any]) -> None:
+    """422 ``invalid_request``, as the upload route answers, for a form field over its part
+    limit: ``structured`` and ``chunking`` 64 KiB, every other field 1 KiB."""
+    for name, value in fields.items():
+        size = len(value.encode("utf-8", "surrogatepass")) if isinstance(value, str) else None
+        if size is None:
+            size = _json_bytes(value)
+        limit = MAX_OPTION_FIELD_BYTES if name in OPTION_FIELDS else MAX_FIELD_BYTES
+        if size > limit:
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST, f"Part exceeded maximum size of {limit // 1024}KB.", 422
+            )
 
 
 def _keys() -> tuple[str | None, str | None]:
@@ -221,9 +277,15 @@ class _ExtractionTool(ModelTool):
     ) -> Answer:
         """Validate ``body`` with the REST model and run the route's core."""
 
+    def check_body(self, body: dict[str, Any], settings: Settings) -> None:
+        """The route's body limit, before the core runs: ``REQUEST_MAX_BODY_BYTES``."""
+        check_body_size(body, settings.request_max_body_bytes)
+
     async def call(self, state: State, principal: Principal, args: BaseModel) -> object:
         settings: Settings = state.settings
-        answer = await self.answer(state, principal, args, _body(args, settings))
+        body = _body(args)
+        self.check_body(body, settings)
+        answer = await self.answer(state, principal, args, _bounded_wait(body, settings))
         payload, is_error = answer_payload(answer)
         hints: list[str] = []
         images: list[ImageContent] = []
@@ -279,12 +341,17 @@ class ExtractUrlTool(_ExtractionTool):
 class ExtractFileTool(_ExtractionTool):
     args_model = ExtractFileArguments
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings) -> None:
         super().__init__(
             "extract_file",
             "Extract a file you send as base64 (PDF, DOCX, PPTX, XLSX, EPUB, CSV, HTML, text) "
             "as Markdown or text (POST /v1/extract/file). For a file at a URL use extract_url.",
         )
+        self.parameters["properties"]["content_base64"]["maxLength"] = mcp_body_limit(settings)
+
+    def check_body(self, body: dict[str, Any], settings: Settings) -> None:
+        """The upload route's part limits; the file is held to its own limit (``decode_file``)."""
+        check_form_fields(body)
 
     async def answer(
         self, state: State, principal: Principal, args: BaseModel, body: dict[str, Any]
@@ -338,7 +405,10 @@ class ScreenshotUrlTool(_ExtractionTool):
         url, size = str(ref.get("url")), ref.get("bytes")
         location = _ARTIFACT_URL.fullmatch(url)
         limit: int = state.settings.mcp_image_max_bytes
-        if location is None or not isinstance(size, int) or size > limit:
+        if location is None or not isinstance(size, int):
+            hints.append(f"The screenshot is not attached; download it from {url}.")
+            return
+        if size > limit:
             hints.append(image_over_limit_hint(size, url))
             return
         try:
@@ -376,6 +446,10 @@ class ExtractStructuredTool(_ExtractionTool):
 class ChunkTool(_ExtractionTool):
     args_model = ChunkArguments
 
+    def check_body(self, body: dict[str, Any], settings: Settings) -> None:
+        """``POST /v1/chunk``'s body limit: the upload limit + 64 KiB (``text_body_limit``)."""
+        check_body_size(body, text_body_limit(settings))
+
     def __init__(self) -> None:
         super().__init__(
             "chunk",
@@ -395,11 +469,11 @@ class ChunkTool(_ExtractionTool):
             raise ServiceError(ErrorCode.INVALID_REQUEST, error.detail, 413) from None
 
 
-def extraction_tools() -> list[ModelTool]:
-    """The five extraction tools."""
+def extraction_tools(settings: Settings) -> list[ModelTool]:
+    """The five extraction tools of a server with ``settings``."""
     return [
         ExtractUrlTool(),
-        ExtractFileTool(),
+        ExtractFileTool(settings),
         ScreenshotUrlTool(),
         ExtractStructuredTool(),
         ChunkTool(),
