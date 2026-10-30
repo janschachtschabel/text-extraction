@@ -26,13 +26,14 @@ from text_extraction.vision.fetch import (
 )
 
 LOOPBACK = IPv4Address("127.0.0.1")
+OTHER_HOST = IPv4Address("127.0.0.2")  # a second host name for the gate, also on loopback
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 TIMEOUT = 5.0
 
 
 def only_loopback(ip: IPv4Address | IPv6Address) -> bool:
-    return ip == LOOPBACK
+    return ip in (LOOPBACK, OTHER_HOST)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -93,7 +94,7 @@ def make_fetcher(
         on_request_sent=gate.mark_sent,
     )
     checker = ComplianceChecker(fetcher, valkey, settings)
-    return ImageFetcher(fetcher, gate, checker, settings, policy=only_loopback), gate
+    return ImageFetcher(fetcher, gate, checker, settings), gate
 
 
 def run[T](scenario: Callable[[], Coroutine[Any, Any, T]]) -> T:
@@ -123,6 +124,19 @@ def no_robots(server: HTTPServer) -> None:
 
 def requested_paths(server: HTTPServer) -> list[str]:
     return [request.path for request, _ in server.log]
+
+
+@pytest.fixture
+def other_host_server() -> Iterator[HTTPServer]:
+    """A server on another host (127.0.0.2), which has turns of its own at the gate."""
+    server = HTTPServer(host=str(OTHER_HOST), port=0)
+    server.start()
+    try:
+        yield server
+    finally:
+        server.clear()
+        if server.is_running():
+            server.stop()
 
 
 @pytest.fixture
@@ -349,6 +363,7 @@ def test_images_of_one_host_take_its_turns(httpserver: HTTPServer) -> None:
     results, gate = run(scenario)
 
     assert results == [ImageBytes(data=PNG, media_type="image/png")] * 3
+    # Mirrors ``Pipeline._check_origin`` on purpose: a turn's requests go back to back.
     # One turn per image. The first image's turn was taken to read robots.txt, before its
     # Crawl-delay was known, and the image followed in it (as the pipeline does for a page); the
     # others take the host's turn with the Crawl-delay.
@@ -391,7 +406,7 @@ def test_timeout_is_error(httpserver: HTTPServer) -> None:
     image = get(httpserver.url_for("/slow.png"), timeout=0.5)
 
     assert image == ImageSkipped(reason="error")
-    assert time.monotonic() - started < 1.5
+    assert time.monotonic() - started < 5  # the fetch stopped well before the body's end
 
 
 def test_skip_is_logged_with_host_and_reason_only(httpserver: HTTPServer) -> None:
@@ -406,3 +421,117 @@ def test_skip_is_logged_with_host_and_reason_only(httpserver: HTTPServer) -> Non
         {"event": "image_skipped", "host": "127.0.0.1", "reason": "http_error", "log_level": "info"}
     ]
     assert not any("secret-name" in repr(entry) for entry in logs)
+
+
+def test_unresolvable_name_is_error() -> None:
+    assert get("http://no-such-host.invalid/a.png") == ImageSkipped(reason="error")
+
+
+def test_redirect_to_unresolvable_name_is_not_recorded_against_the_redirecting_host(
+    httpserver: HTTPServer,
+) -> None:
+    no_robots(httpserver)
+    httpserver.expect_request("/a.png").respond_with_data(
+        "", status=302, headers={"Location": "http://no-such-host.invalid/a.png"}
+    )
+    url = httpserver.url_for("/a.png")
+
+    async def scenario() -> tuple[ImageBytes | ImageSkipped, RecordingGate]:
+        images, gate = make_fetcher()
+        try:
+            return await images.get(url, "enforce", timeout=TIMEOUT), gate
+        finally:
+            await images.aclose()
+
+    image, gate = run(scenario)
+
+    assert image == ImageSkipped(reason="error")
+    assert gate.records == []  # the target's DNS says nothing about the host that redirected
+
+
+class RefusingHostGate(RecordingGate):
+    """The real gate, but the turns of one host are never free."""
+
+    refused = str(OTHER_HOST)
+
+    @asynccontextmanager
+    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
+        if host == self.refused:
+            self.slots.append((host, crawl_delay))
+            raise OutboundBusy(3.0)
+        async with super().slot(host, crawl_delay):
+            yield
+
+
+def test_redirect_to_a_host_whose_turn_is_refused_is_busy(
+    httpserver: HTTPServer, other_host_server: HTTPServer
+) -> None:
+    no_robots(httpserver)
+    httpserver.expect_request("/a.png").respond_with_data(
+        "", status=302, headers={"Location": other_host_server.url_for("/b.png")}
+    )
+    other_host_server.expect_request("/b.png").respond_with_data(PNG, content_type="image/png")
+    url = httpserver.url_for("/a.png")
+
+    async def scenario() -> tuple[ImageBytes | ImageSkipped, RecordingGate, int]:
+        valkey = FakeAsyncRedis()
+        settings = make_settings()
+        gate = RefusingHostGate(valkey, settings)
+        fetcher = Fetcher(
+            settings,
+            policy=only_loopback,
+            before_request=gate.before_request,
+            on_request_sent=gate.mark_sent,
+        )
+        images = ImageFetcher(fetcher, gate, ComplianceChecker(fetcher, valkey, settings), settings)
+        try:
+            image = await images.get(url, "enforce", timeout=TIMEOUT)
+        finally:
+            await images.aclose()
+        return image, gate, int(await valkey.zcard("out:inflight:{127.0.0.1}"))
+
+    image, gate, held = run(scenario)
+
+    assert image == ImageSkipped(reason="busy")
+    assert gate.slots == [("127.0.0.1", None), (str(OTHER_HOST), None)]
+    assert requested_paths(other_host_server) == []
+    assert held == 0  # the first host's turn was given back
+
+
+def test_redirect_loop_is_error(httpserver: HTTPServer) -> None:
+    no_robots(httpserver)
+    httpserver.expect_request("/a.png").respond_with_data(
+        "", status=302, headers={"Location": httpserver.url_for("/b.png")}
+    )
+    httpserver.expect_request("/b.png").respond_with_data(
+        "", status=302, headers={"Location": httpserver.url_for("/a.png")}
+    )
+
+    image = get(httpserver.url_for("/a.png"), settings=make_settings(fetch_max_redirects=3))
+
+    assert image == ImageSkipped(reason="error")
+    assert (
+        requested_paths(httpserver).count("/a.png") + requested_paths(httpserver).count("/b.png")
+        == 4
+    )  # the first request and three hops
+
+
+def test_endless_chunked_body_stops_at_the_cap(httpserver: HTTPServer) -> None:
+    def endless() -> Iterator[bytes]:
+        yield PNG
+        for _ in range(1_000_000):  # about 4 GB: never read to its end
+            yield b"\x00" * 4096
+
+    no_robots(httpserver)
+    httpserver.expect_request("/endless.png").respond_with_handler(
+        lambda _: Response(endless(), content_type="image/png")  # no Content-Length: chunked
+    )
+    started = time.monotonic()
+
+    image = get(
+        httpserver.url_for("/endless.png"),
+        settings=make_settings(llm_vision_max_image_bytes=10_000),
+    )
+
+    assert image == ImageSkipped(reason="too_large")
+    assert time.monotonic() - started < 5

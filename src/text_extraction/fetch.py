@@ -306,6 +306,7 @@ class Fetcher:
                 if settings.fetch_allow_private_networks
                 else is_public_address
             )
+        self._policy = policy
         self._client = httpx.AsyncClient(
             transport=GuardedTransport(
                 policy,
@@ -321,6 +322,12 @@ class Fetcher:
         self._client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
         self._before_request = before_request
         self._on_request_sent = on_request_sent
+
+    @property
+    def policy(self) -> AddressPolicy:
+        """The address policy every connection is checked against (the given one or the
+        default: public addresses only, any with ``FETCH_ALLOW_PRIVATE_NETWORKS``)."""
+        return self._policy
 
     @property
     def before_request(self) -> SentHook | None:

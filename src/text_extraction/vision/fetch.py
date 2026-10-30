@@ -21,11 +21,9 @@ Logs carry the host and the reason only, never the URL.
 """
 
 import asyncio
-import contextlib
 import socket
 import time
 from dataclasses import dataclass
-from ipaddress import IPv4Address, IPv6Address
 from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
 
@@ -45,16 +43,16 @@ from text_extraction.netguard import (
     AddressPolicy,
     BlockedAddressError,
     InvalidUrlError,
-    is_public_address,
     resolve_allowed,
     validate_url,
 )
 from text_extraction.outbound import (
     CircuitOpen,
     DomainGate,
+    HostTurn,
     OutboundBusy,
-    normalize_host,
     parse_retry_after,
+    record_fetch_failure,
 )
 from text_extraction.settings import Settings
 from text_extraction.vision.images import sniff_image
@@ -76,12 +74,6 @@ SkipReason = Literal[
 ]
 
 _DEFAULT_PORTS: Final = {"http": 80, "https": 443}
-# Failures that say something about the host's health (as the pipeline counts them).
-_HOST_FAILURES: Final = frozenset(
-    {ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT}
-)
-# A timeout counts against the host only if the request had this share of FETCH_TIMEOUT_SECONDS.
-_FAIR_BUDGET_SHARE: Final = 0.5
 
 
 @dataclass(frozen=True)
@@ -118,59 +110,20 @@ class _BlockedRedirectError(FetchError):
     """A redirect target the compliance checks block: ends the chain."""
 
 
-class _Turn:
-    """The gate's turn for the host being fetched; it moves along a redirect chain (as the
-    pipeline's). ``answering`` is the host whose answer the fetch waits for: None while no turn
-    is held."""
-
-    def __init__(self, gate: DomainGate) -> None:
-        self._gate = gate
-        self._held: contextlib.AsyncExitStack | None = None
-        self._host: str | None = None
-        self.answering: str | None = None
-
-    def holds(self, host: str) -> bool:
-        return self._held is not None and normalize_host(host) == self._host
-
-    async def take(self, host: str, crawl_delay: float | None) -> None:
-        """Wait for a turn at ``host``; one already held there is kept, one at another host is
-        given back first."""
-        if self.holds(host):
-            return
-        await self.give_back()
-        held = contextlib.AsyncExitStack()
-        await held.enter_async_context(self._gate.slot(host, crawl_delay))
-        self._held = held
-        self._host = normalize_host(host)
-        self.answering = self._host
-
-    async def give_back(self) -> None:
-        held, self._held, self._host = self._held, None, None
-        self.answering = None
-        if held is not None:
-            await held.aclose()
-
-
 class ImageFetcher:
     """Fetches page images (see the module docstring). ``aclose`` closes its ``fetcher``.
 
-    ``policy`` is the address policy of ``fetcher`` (default: as ``Fetcher``'s), used to refuse
-    a target before anything is requested from its host."""
+    A target is refused before anything is requested from its host by ``fetcher``'s own address
+    policy (``Fetcher.policy``), so the check and the guard below it cannot disagree."""
 
     def __init__(
-        self,
-        fetcher: Fetcher,
-        gate: DomainGate,
-        checker: ComplianceChecker,
-        settings: Settings,
-        *,
-        policy: AddressPolicy | None = None,
+        self, fetcher: Fetcher, gate: DomainGate, checker: ComplianceChecker, settings: Settings
     ) -> None:
         self._fetcher = fetcher
         self._gate = gate
         self._checker = checker
         self._settings = settings
-        self._policy = policy if policy is not None else _default_policy(settings)
+        self._policy: AddressPolicy = fetcher.policy
 
     async def aclose(self) -> None:
         await self._fetcher.aclose()
@@ -201,7 +154,7 @@ class ImageFetcher:
             await self._check_address(url)
         except FetchError as error:
             return ImageSkipped(_reason_of(error))
-        turn = _Turn(self._gate)
+        turn = HostTurn(self._gate)
         try:
             try:
                 async with asyncio.timeout_at(deadline):
@@ -235,19 +188,24 @@ class ImageFetcher:
         url: str,
         mode: ComplianceMode,
         report: ComplianceReport,
-        turn: _Turn,
+        turn: HostTurn,
         budget: float,
     ) -> tuple[FetchResult, ComplianceReport]:
         """Fetch ``url`` in the turn held for its host; the outcome is recorded for the host
-        that gave it while its turn is held. Raises ``FetchError``."""
+        that gave it while its turn is held, judged against the time that host's request had
+        (as ``Pipeline._fetch``). Raises ``FetchError``."""
         checked = {url}
+        hop_budget = budget  # seconds the request at `turn.answering` has
+        chain_started = time.monotonic()
 
         async def on_redirect(target: str) -> None:
-            nonlocal report
-            await self._check_address(target)
+            nonlocal report, hop_budget
             host = _host_of(target)
             if not turn.holds(host):
+                # Until the target's turn is taken, no answer (and no failure) is a host's: not
+                # even a refused or unresolvable target is the redirecting host's fault.
                 turn.answering = None
+            await self._check_address(target)
             if target not in checked:
                 checked.add(target)
                 hop = await self._check_origin(target, mode, turn)
@@ -256,6 +214,8 @@ class ImageFetcher:
                 if code is not None:
                     raise _BlockedRedirectError(code, "The image's redirect target is blocked.")
             await turn.take(host, report.crawl_delay)
+            # The hop starts now, with what is left of the whole chain's deadline.
+            hop_budget = budget - (time.monotonic() - chain_started)
 
         try:
             fetched = await self._fetcher.fetch(
@@ -271,9 +231,17 @@ class ImageFetcher:
                 and not gate_timeout
                 and not isinstance(error, _BlockedRedirectError)
             ):
-                # The gate's wait before the send is not time the host had.
-                had = budget - (error.cleared_after or 0.0)
-                await self._record_failure(turn.answering, error, had)
+                had = hop_budget
+                if error.cleared_after is not None:
+                    # The gate's wait before the send is not time the host had.
+                    had = min(had, budget - error.cleared_after)
+                await record_fetch_failure(
+                    self._gate,
+                    turn.answering,
+                    error,
+                    budget=had,
+                    fetch_timeout_seconds=self._settings.fetch_timeout_seconds,
+                )
             raise
         if turn.answering is not None:
             await self._gate.record(
@@ -283,7 +251,9 @@ class ImageFetcher:
             )
         return fetched, report
 
-    async def _check_origin(self, url: str, mode: ComplianceMode, turn: _Turn) -> ComplianceReport:
+    async def _check_origin(
+        self, url: str, mode: ComplianceMode, turn: HostTurn
+    ) -> ComplianceReport:
         """``before_fetch`` for ``url``: from the cache when it can be, else in the turn of
         ``url``'s host, taken here (or kept), so the origin's files are fetched under the host's
         limits. The Crawl-delay is not known yet; the image fetched next in the turn keeps it."""
@@ -310,40 +280,19 @@ class ImageFetcher:
                 ErrorCode.DNS_ERROR, "The host name could not be resolved.", retryable=True
             ) from None
 
-    async def _record_failure(self, host: str, error: FetchError, had: float) -> None:
-        """Report a failed fetch to the gate, as the pipeline does: an answer's status counts,
-        DNS and connection errors count as failures of the host, a timeout only when the request
-        had a fair share of ``FETCH_TIMEOUT_SECONDS``."""
-        fair = had >= self._settings.fetch_timeout_seconds * _FAIR_BUDGET_SHARE
-        if error.upstream_status is not None:
-            await self._gate.record(host, status=error.upstream_status, retry_after=None)
-        elif error.code in _HOST_FAILURES and (error.code != ErrorCode.TIMEOUT or fair):
-            await self._gate.record(host, status=None, retry_after=None)
-
 
 def create_image_fetcher(
     settings: Settings, valkey: Redis, *, policy: AddressPolicy | None = None
 ) -> ImageFetcher:
     """An image fetcher with a gate and compliance cache in ``valkey`` and a fetcher of its own
     that announces every request to that gate (as ``pipeline.create_outbound`` builds them).
-    ``aclose`` it last."""
+    ``policy`` is the fetcher's address policy (default: ``Fetcher``'s). ``aclose`` it last."""
     gate = DomainGate(valkey, settings)
     fetcher = Fetcher(
         settings, policy=policy, before_request=gate.before_request, on_request_sent=gate.mark_sent
     )
     checker = ComplianceChecker(fetcher, valkey, settings)
-    return ImageFetcher(fetcher, gate, checker, settings, policy=policy)
-
-
-def _default_policy(settings: Settings) -> AddressPolicy:
-    """The address policy ``Fetcher`` uses without one."""
-    if settings.fetch_allow_private_networks:
-        return _allow_all
-    return is_public_address
-
-
-def _allow_all(_address: IPv4Address | IPv6Address) -> bool:
-    return True
+    return ImageFetcher(fetcher, gate, checker, settings)
 
 
 def _reason_of(error: FetchError) -> SkipReason:
