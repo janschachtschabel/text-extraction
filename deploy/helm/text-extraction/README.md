@@ -251,7 +251,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.llm.apiKey.existingSecretKey` | `LLM_API_KEY` | Key inside that Secret. |
 | `workers.llm.replicaCount` | `1` | Ignored with KEDA or HPA. Keep one: a sync request that needs the LLM waits only `LLM_SYNC_WAIT_SECONDS` (30) for a worker. |
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY`: items per pod at once, each with one call to the endpoint at a time. |
-| `workers.llm.terminationGracePeriodSeconds` | `30` | Items in flight get 30 s after SIGTERM, then the ones still running go back to the queue at once and run again elsewhere. The render fails below 30. 30 leaves no margin before the kill: set 40 to give the hand-back time. |
+| `workers.llm.terminationGracePeriodSeconds` | `40` | Items in flight get 30 s after SIGTERM, then the ones still running go back to the queue at once and run again elsewhere. The render fails below 40 (30 s + a 10 s margin, so the hand-back happens before the kill). |
 | `workers.llm.resources` | requests 100m / 256Mi, limits 1 / 512Mi | Placeholder until package 11 measures real consumption: the worker waits for the endpoint and holds no model. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The workers run the API image. |
 | `workers.llm.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (`concurrency`), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="llm"})`. The API pods export it while `JOBS_ENABLED` and `LLM_ENABLED` are true. Keep one replica. |

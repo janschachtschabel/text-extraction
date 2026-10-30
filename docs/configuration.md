@@ -262,7 +262,7 @@ a browser worker and its render after the fast phase. While `DOCLING_ENABLED`, i
 `EXTRACT_TIMEOUT_SECONDS + DOCLING_SYNC_WAIT_SECONDS + 5` seconds (50 s by default), because a
 sync request with a document that needs OCR waits for the Docling worker after its fast phase.
 
-The grace periods in the Helm chart, each with a 10 s margin (the llm workers' 30 s have none, see the row):
+The grace periods in the Helm chart, each with a 10 s margin:
 
 | Pods | Value | Default | Must cover |
 | --- | --- | --- | --- |
@@ -272,7 +272,7 @@ The grace periods in the Helm chart, each with a 10 s margin (the llm workers' 3
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
 | ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items go back to the queue at once and start again elsewhere) |
 | NLP workers | `workers.nlp.terminationGracePeriodSeconds` | 60 | 30 s for the analyses in flight (then their items run again elsewhere once their lease expires, `2 × PII_TIMEOUT_SECONDS + 10`) |
-| llm workers | `workers.llm.terminationGracePeriodSeconds` | 30 | 30 s for the items in flight (then the ones still running go back to the queue at once). No 10 s margin is required: set 40 for one |
+| llm workers | `workers.llm.terminationGracePeriodSeconds` | 40 | 30 s for the items in flight (then the ones still running go back to the queue at once) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -552,7 +552,7 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`.
 | `workers.llm.apiKey.existingSecret`, `.existingSecretKey` | `""`, `LLM_API_KEY` | Your own Secret with `LLM_API_KEY` (API pods and the llm worker container only). Empty: callers send `X-LLM-Api-Key`. |
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY` on the llm workers. |
 | `workers.llm.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a sync request waits only `LLM_SYNC_WAIT_SECONDS`. |
-| `workers.llm.terminationGracePeriodSeconds` | `30` | See Response times. |
+| `workers.llm.terminationGracePeriodSeconds` | `40` | See Response times. |
 | `workers.llm.resources` | 100m / 256Mi to 1 / 512Mi | Placeholder until package 11 measures real consumption. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global one. |
 | `workers.llm.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `llm` queue or on CPU. |

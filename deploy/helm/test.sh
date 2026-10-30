@@ -841,7 +841,7 @@ expect_absent "llm worker needs no models mount" "$llm" "mountPath: /models"
 expect_absent "llm worker is not an nlp worker" "$llm" "PII_MODEL"
 expect_contains "llm worker serves the internal port" "$llm" "containerPort: 9090"
 expect_absent "llm worker has no public port" "$llm" "containerPort: 8080"
-expect_contains "llm worker grace period" "$llm" "terminationGracePeriodSeconds: 30"
+expect_contains "llm worker grace period" "$llm" "terminationGracePeriodSeconds: 40"
 expect_contains "llm worker CPU request" "$(flat "$llm")" "requests: cpu: 100m memory: 256Mi"
 expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: \"1\" memory: 512Mi"
 expect_contains "llm worker internal Service" "$(document "$llm_on" Service "$LLM-internal")" "port: 9090"
@@ -902,11 +902,11 @@ expect_render_fails "llm autoscaling needs the workers" "workers.llm.autoscaling
 
 expect_render_fails "llm needs jobs" "workers.llm.enabled needs JOBS_ENABLED=true" \
   --set workers.llm.enabled=true --set jobs.enabled=false
-# llm worker: 30 s for the items in flight (then they are given back).
+# llm worker: 30 s for the items in flight (then they are given back) + 10
 expect_render_fails "llm worker grace period too short" "workers.llm.terminationGracePeriodSeconds" \
-  --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=29
+  --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=39
 expect_render_succeeds "llm worker grace period just long enough" \
-  --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=30
+  --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=40
 
 llm_policies="$(render --set workers.llm.enabled=true --set networkPolicy.enabled=true)"
 expect_contains "llm worker NetworkPolicy" "$(document "$llm_policies" NetworkPolicy "$LLM")" "port: 9090"

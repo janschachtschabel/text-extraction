@@ -578,8 +578,8 @@ workers:
       existingSecretKey: LLM_API_KEY
     # No drain wait. On SIGTERM the worker stops claiming and gives items in flight 30 s, then
     # hands the ones still running back to the queue at once (they run again elsewhere). The
-    # render fails below 30. Raise it (for example to 40) to leave a margin before the kill.
-    terminationGracePeriodSeconds: 30
+    # render fails below 30 + a 10 s margin, so that the hand-back happens before the kill.
+    terminationGracePeriodSeconds: 40
     # Placeholder values until package 11 measures real consumption: the worker waits for the
     # endpoint and holds no model.
     resources:

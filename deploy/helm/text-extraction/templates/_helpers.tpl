@@ -698,11 +698,9 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- if and $nlp.enabled (gt $nlpGraceful (subf (float64 $nlp.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.nlp.terminationGracePeriodSeconds (%v) is too short: the NLP workers give analyses in flight %v s + a 10 s margin must fit." $nlp.terminationGracePeriodSeconds $nlpGraceful) -}}
 {{- end -}}
-{{- /* The llm workers give calls in flight 30 s and then hand the items back to the queue at once,
-which takes no time to speak of; the kill comes after the grace period, so no margin is required. */ -}}
 {{- $llmGraceful := include "text-extraction.llmGracefulSeconds" . | float64 -}}
-{{- if and $llm.enabled (gt $llmGraceful (float64 $llm.terminationGracePeriodSeconds)) -}}
-{{- fail (printf "workers.llm.terminationGracePeriodSeconds (%v) is too short: the llm workers give calls in flight %v s before they hand the items back to the queue." $llm.terminationGracePeriodSeconds $llmGraceful) -}}
+{{- if and $llm.enabled (gt $llmGraceful (subf (float64 $llm.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.llm.terminationGracePeriodSeconds (%v) is too short: the llm workers give calls in flight %v s before they hand the items back to the queue, + a 10 s margin must fit." $llm.terminationGracePeriodSeconds $llmGraceful) -}}
 {{- end -}}
 {{- end -}}
 
