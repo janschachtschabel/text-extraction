@@ -74,6 +74,8 @@ class Endpoint:
                     "file": (upload.filename, upload.mimetype, upload.read()),
                     "authorization": request.headers.get("Authorization"),
                     "user_agent": request.headers.get("User-Agent"),
+                    "organization": request.headers.get("OpenAI-Organization"),
+                    "project": request.headers.get("OpenAI-Project"),
                 }
             )
         return self.answer(index, request)
@@ -255,6 +257,26 @@ def test_header_key_wins(httpserver: HTTPServer) -> None:
     (request,) = endpoint.requests
     assert request["authorization"] == "Bearer caller-header-key"
     assert request["user_agent"] == "text-extraction/0.1.0"
+
+
+def test_openai_environment_does_not_reach_the_endpoint(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #19: the SDK's organization and project from the environment are never sent, and
+    an Authorization line of OPENAI_CUSTOM_HEADERS (refused at start-up anyway) does not replace
+    the key."""
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-from-env")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-from-env")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer sk-from-env")
+    endpoint = Endpoint(httpserver)
+
+    run(endpoint, tone(30), api_key="caller-header-key", user_agent="text-extraction/0.1.0")
+
+    (request,) = endpoint.requests
+    assert request["authorization"] == "Bearer caller-header-key"
+    assert request["user_agent"] == "text-extraction/0.1.0"
+    assert request["organization"] is None
+    assert request["project"] is None
 
 
 @pytest.mark.parametrize("status", [401, 403])

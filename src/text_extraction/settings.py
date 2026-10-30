@@ -24,8 +24,9 @@ from text_extraction.pii.types import ENTITY_TYPES, EntityType
 
 # Environment the OpenAI SDK reads whatever ``llm/client.py`` passes it (issue #19): extra
 # headers (an ``Authorization`` line would replace the caller's key) and its plain-text log.
-# Start-up refuses them while LLM_ENABLED is true. ``OPENAI_ORG_ID`` and ``OPENAI_PROJECT_ID``
-# are read too, but the client never sends them.
+# Start-up refuses them while LLM_ENABLED is true, and while ASR runs on the external backend
+# (``media/asr_external.py``, the same SDK). ``OPENAI_ORG_ID`` and ``OPENAI_PROJECT_ID`` are read
+# too, but neither client sends them.
 OPENAI_ENV_REFUSED = ("OPENAI_CUSTOM_HEADERS", "OPENAI_LOG")
 
 # Playwright's resource types (``Request.resource_type``). A blocked type is not loaded.
@@ -412,13 +413,18 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _no_openai_environment_with_llm(self) -> Self:
+    def _no_openai_environment_with_sdk_clients(self) -> Self:
         """Issue #19: the names of the refused variables, never their values."""
+        clients = []
         if self.llm_enabled:
+            clients.append("LLM_ENABLED is true")
+        if self.asr_enabled and self.asr_backend == "openai":
+            clients.append("ASR_BACKEND=openai")
+        if clients:
             found = [name for name in OPENAI_ENV_REFUSED if os.environ.get(name, "").strip()]
             if found:
                 raise ValueError(
-                    f"{' and '.join(found)} must not be set while LLM_ENABLED is true "
+                    f"{' and '.join(found)} must not be set while {' and '.join(clients)} "
                     "(the OpenAI SDK would read them)"
                 )
         return self

@@ -221,7 +221,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.docling.models.persistence.storageClass` | `""` | Cluster default when empty. |
 | `workers.docling.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
 | `workers.asr.enabled` | `false` | Deploy the ASR workers (transcription). Also renders `ASR_ENABLED` into every pod: false makes `transcribe: true` answer 400 and audio or video uploads `unsupported_content_type`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
-| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `local`: faster-whisper with the model from the volume. `openai`: the external endpoint below; no models volume, no download. |
+| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `local`: faster-whisper with the model from the volume. `openai`: the external endpoint below; no models volume, no download. With `openai` and `workers.asr.enabled`, do not set `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG`: every pod refuses to start (exit code 2), as with the LLM. |
 | `workers.asr.model` | `large-v3-turbo` | `ASR_MODEL`: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, about twice as fast on CPU). Only this one is downloaded. Anything else fails the render. |
 | `workers.asr.image.repository` | `ghcr.io/janschachtschabel/text-extraction-asr` | ASR worker image (faster-whisper, PyAV on an LGPL FFmpeg, yt-dlp with Deno; no models, no `ffmpeg` program; linux/amd64). |
 | `workers.asr.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
@@ -498,8 +498,9 @@ caller's schema), and every pod gets `LLM_ENABLED=true`; without the workers suc
   Raise `workers.llm.gracefulSeconds` and `workers.llm.terminationGracePeriodSeconds` together
   (e.g. 130 and 140) to let calls in flight end.
 - Do not set `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG` (under `config` or otherwise): the OpenAI
-  SDK would read them, so with `workers.llm.enabled` every pod refuses to start (exit code 2).
-  `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are never sent to the endpoint.
+  SDK would read them, so with `workers.llm.enabled` (or `workers.asr.enabled` with `workers.asr.backend: openai`) every pod
+  refuses to start (exit code 2). `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are never sent to the
+  endpoint.
 - `kubectl exec <llm worker pod> -- text-extraction-llm-worker --check` sends one tiny extraction
   to the endpoint and exits 0 when its answer fits the schema (an operator's smoke test).
 - A prompt, a page text, an extracted value or a key never reaches a log, a metric label or the

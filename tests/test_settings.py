@@ -1360,6 +1360,30 @@ def test_llm_enabled_refuses_openai_environment_the_sdk_reads(
     assert load_settings().llm_enabled is False  # no LLM client is built
 
 
+@pytest.mark.parametrize("name", ["OPENAI_CUSTOM_HEADERS", "OPENAI_LOG"])
+def test_external_asr_refuses_openai_environment_the_sdk_reads(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Issue #19: the external ASR client is the same SDK, so start-up refuses these while ASR
+    runs on the external backend (ASR_ENABLED and ASR_BACKEND=openai), naming the variable."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
+    monkeypatch.setenv("ASR_BACKEND", "openai")
+    monkeypatch.setenv("ASR_EXTERNAL_BASE_URL", "https://asr.example.org/v1")
+    monkeypatch.setenv(name, "debug" if name == "OPENAI_LOG" else "Authorization: Bearer x")
+
+    with pytest.raises(ConfigError, match=name) as info:
+        load_settings()
+
+    assert "ASR_BACKEND=openai" in str(info.value)
+    assert "Bearer x" not in str(info.value)
+    monkeypatch.setenv("ASR_BACKEND", "local")  # the local backend calls no SDK
+    assert load_settings().asr_backend == "local"
+    monkeypatch.setenv("ASR_BACKEND", "openai")
+    monkeypatch.setenv("ASR_ENABLED", "false")
+    assert load_settings().asr_enabled is False
+
+
 def test_llm_enabled_names_every_refused_openai_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
     monkeypatch.setenv("LLM_ENABLED", "true")

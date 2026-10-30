@@ -25,7 +25,11 @@ failure, so a request with the key never goes to another host), ``max_retries=0`
 outcome says whether to try again; retries would multiply the time a chunk takes) and our user
 agent. Each chunk's whole request (upload, the endpoint's work, the answer) gets ``timeout``
 (``ASR_EXTERNAL_TIMEOUT_SECONDS``) or what is left of ``budget`` (the item's
-``ASR_TIMEOUT_SECONDS``), whichever is less.
+``ASR_TIMEOUT_SECONDS``), whichever is less. As for the LLM client (``llm/client.py``) the
+``Authorization`` header is set and ``OpenAI-Organization`` and ``OpenAI-Project`` are omitted
+explicitly, so the SDK's ``OPENAI_*`` environment never reaches the endpoint (issue #19; the
+child's environment is allowlisted and carries none of it, and start-up refuses
+``OPENAI_CUSTOM_HEADERS`` and ``OPENAI_LOG`` with the external backend).
 
 **Failures** are raised as the types the worker maps, with a status code or a fixed word as the
 message and outside the SDK's exception, so neither the message nor a traceback's context can
@@ -135,13 +139,22 @@ def _decoder(max_duration: float | None) -> Callable[[str], Audio]:
 def _client(base_url: str, api_key: str, *, timeout: float, user_agent: str | None) -> Any:
     """The OpenAI client of one transcription; see the module docstring."""
     http = httpx2.Client(follow_redirects=False, trust_env=False, timeout=timeout)
+    # Issue #19: the SDK would take these from OPENAI_ORG_ID, OPENAI_PROJECT_ID and an
+    # Authorization line of OPENAI_CUSTOM_HEADERS; omitted and set here, they never do.
+    headers: dict[str, Any] = {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Organization": openai.omit,
+        "OpenAI-Project": openai.omit,
+    }
+    if user_agent:
+        headers["User-Agent"] = user_agent
     return openai.OpenAI(
         api_key=api_key,
         base_url=base_url,
         timeout=timeout,
         max_retries=0,
         http_client=http,
-        default_headers={"User-Agent": user_agent} if user_agent else None,
+        default_headers=headers,
     )
 
 
