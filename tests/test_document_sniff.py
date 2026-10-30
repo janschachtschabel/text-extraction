@@ -12,6 +12,7 @@ from text_extraction.documents.sniff import (
     DocumentUnreadable,
     check_container,
     media_type,
+    named_text_type,
     sniff,
 )
 from text_extraction.documents.types import DocumentKind
@@ -138,6 +139,33 @@ def test_markdown_is_text_like_plain_text(declared: str) -> None:
     assert sniff(PDF, declared, None) == "pdf"
     assert sniff(b"<html><body>x</body></html>", declared, None) == "text"
     assert sniff(b"a,b\n1,2\n", declared, "data.csv") == "csv"
+
+
+@pytest.mark.parametrize("name", ["notes.md", "notes.markdown", "NOTES.MD", "a.b.Markdown"])
+@pytest.mark.parametrize("declared", [None, "", "application/octet-stream"])
+def test_a_markdown_name_makes_an_untyped_text_body_markdown(
+    name: str, declared: str | None
+) -> None:
+    """Issue #17: a part named ``*.md`` or ``*.markdown`` (any case), declared
+    ``application/octet-stream`` or not at all, whose bytes look like text, is Markdown."""
+    assert named_text_type(b"# Notes\n\nSome *text*.", declared, name) == "text/markdown"
+    assert named_text_type("# Überblick\n".encode("utf-16"), declared, name) == "text/markdown"
+
+
+def test_a_markdown_name_needs_text_bytes_and_no_declared_type() -> None:
+    """Binary bytes named ``.md`` stay unsupported, a declared real type is never overridden,
+    and other names are no Markdown."""
+    text = b"# Notes\n\nSome *text*."
+    assert named_text_type(b"\x00\x01\x02\x03" * 100, "application/octet-stream", "x.md") is None
+    assert named_text_type(text, "application/pdf", "x.md") is None
+    assert named_text_type(text, "text/html", "x.md") is None
+    assert named_text_type(text, "image/png", "x.markdown") is None
+    assert named_text_type(text, "application/octet-stream", "x.mdx") is None
+    assert named_text_type(text, "application/octet-stream", "md") is None
+    assert named_text_type(text, None, None) is None
+    assert named_text_type(text, "Application/Octet-Stream; charset=utf-8", "x.md") == (
+        "text/markdown"
+    )
 
 
 def test_html_bytes_need_the_tag_at_the_start() -> None:

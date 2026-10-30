@@ -52,12 +52,14 @@ Media that needs speech recognition (``transcribe: true``) becomes an ``AsrNeede
 ``asr_handoff``, which ``run`` calls once the deadline's steps are done, with the answer without
 a transcription as its stand-in (never stored), as a document is handed to ``ocr_handoff``.
 
-An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on the bytes in
-hand: no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor
-stored (ruling F17). With ``MEDIA_ENABLED``, bytes that sniff as audio or video (``sniff_media``,
-before the document kinds; the part's declared type never decides) are transcribed (M14): while
-the service has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``) the upload is
-``unsupported_content_type`` ("Transcription is not enabled on this service."), over
+An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on the bytes in hand:
+no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor stored
+(ruling F17). A part that sniffs as no kind, named ``*.md`` or ``*.markdown``, declared
+``application/octet-stream`` or not at all, with bytes that look like text, is read as
+``text/markdown`` (``named_text_type``, issue #17). With ``MEDIA_ENABLED``, bytes that sniff as
+audio or video (``sniff_media``, before the document kinds; the part's declared type never decides)
+are transcribed (M14): while the service has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``) the
+upload is ``unsupported_content_type`` ("Transcription is not enabled on this service."), over
 ``MEDIA_UPLOAD_MAX_BYTES`` it is ``too_large``, otherwise an ``AsrNeeded`` (``MediaInputMeta`` with
 ``source: upload`` and the file name, for the result only) goes to ``asr_handoff`` once the
 deadline's steps are done, as media of a URL does. Without a handoff the stand-in is final. Any
@@ -155,7 +157,7 @@ from text_extraction.convert import (
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
-from text_extraction.documents.sniff import media_type, sniff
+from text_extraction.documents.sniff import media_type, named_text_type, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
@@ -1819,6 +1821,8 @@ class Pipeline:
         # directory sectors), so a body over its limit is refused with its own type before the
         # whole of it is hashed.
         kind = await self._pool.run(sniff, body, declared, run.file_name)
+        if kind is None and (named := named_text_type(body, declared, run.file_name)):
+            declared, kind = named, "text"  # a `.md` part sent untyped (issue #17)
         run.kind = kind
         if kind is None:
             run.content_type = declared
