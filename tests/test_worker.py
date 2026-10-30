@@ -2965,3 +2965,34 @@ async def test_llm_worker_deletes_upload_input_with_result(httpserver: HTTPServe
     assert OCR_UNAVAILABLE_WARNING in data.warnings
     assert await harness.valkey.keys("job:*:input:*") == []
     assert await harness.store.draft(job_id, 0) is None
+
+
+@scenario
+async def test_non_image_upload_moving_to_llm_drops_its_input(httpserver: HTTPServer) -> None:
+    """V-S7: only an image upload that can be described keeps its input past the move. A text
+    upload that moves to ``llm`` for ``structured`` alone, with ``describe_images`` set, has no
+    image to describe: its input goes with the move, as without the option."""
+    harness = images_harness(httpserver, page("example.org"))
+    options = JobOptions(
+        mode="fast",
+        compliance="enforce",
+        cache=False,
+        metadata=True,
+        describe_images=DescribeImagesOptions(),
+        structured=StructuredOptions.model_validate(
+            {
+                "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "strategy": "llm",
+            }
+        ),
+    )
+    job_id = await harness.store.create("file", OWNER, options, [None])
+    meta = UploadInputMeta(file_name="notes.md", content_type="text/markdown")
+    await harness.store.put_input(job_id, 0, (PARAGRAPH * 4).encode(), meta, 600)
+    await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert outcome_count(harness, "escalated") == 1
+    assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 1
+    assert await harness.store.get_input(job_id, 0, StoredInputMeta) is None

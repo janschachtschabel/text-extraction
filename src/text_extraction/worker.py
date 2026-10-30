@@ -100,8 +100,9 @@ stored: the result is written without the LLM work (``partial``/``llm_failed``, 
 step is busy; retry later.", its content kept); so is a result of a worker without the move. The
 image descriptions of ``describe_images`` are LLM work too (issue #20): a result with images to
 describe moves, one without gets its empty report here; without the move its images count
-``failed``, ``llm_failed``. An upload's job with ``describe_images`` keeps the item's input when it
-moves on (an image upload's bytes, which the llm worker describes and deletes with the result). The
+``failed``, ``llm_failed``. An image upload (PNG, JPEG, WebP) that moves on with its description
+owed keeps the item's input (its bytes, which the llm worker describes and deletes with the
+result); any other upload's input goes with the move, as without the option. The
 ``llm_dispatch`` module docstring has what the llm worker reads. Whichever pool writes an item's
 result drops the caller's LLM key of the job (R11): a sync request's job at once, a batch with its
 last result.
@@ -205,6 +206,7 @@ from text_extraction.settings import Settings
 from text_extraction.structured.post import LlmHop, finish_post, post_at_finish
 from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.valkey import create_valkey
+from text_extraction.vision.describe import needs_vision
 
 _log = structlog.get_logger(__name__)
 
@@ -720,7 +722,7 @@ class Worker:
             except JobLost:
                 return await self._drop(item)
             if moved:
-                return await self._moved_on(job, item)
+                return await self._moved_on(job, item, envelope)
             envelope = withheld(envelope, pii, message=PII_BUSY_MESSAGE)
         try:
             finished = await post_at_finish(
@@ -737,7 +739,7 @@ class Worker:
         except JobLost:
             return await self._drop(item)
         if finished is None:
-            return await self._moved_on(job, item)
+            return await self._moved_on(job, item, envelope)
         envelope = fail_closed(finished, pii)
         try:
             write = await self._store.write_result(item.job_id, item.index, envelope)
@@ -771,22 +773,30 @@ class Worker:
 
         return hop
 
-    async def _moved_on(self, job: JobRecord, item: QueueItem) -> str | None:
+    async def _moved_on(
+        self, job: JobRecord, item: QueueItem, envelope: Envelope[ExtractResult]
+    ) -> str | None:
         """Complete an item that moved to a last hop, ``nlp`` or ``llm`` (``_moved``). Once that
         completion holds, the item never runs on this pool again: what this pool kept for a
         rerun goes at once (ruling R13), as ``_drop_input`` would delete it with a result, but
         for the draft, which is the last hop's now (``nlp`` moving on to ``llm`` overwrote its
         own), and the caller's LLM key, which the llm worker needs. Otherwise a last hop that is
         down would keep the inputs of ``docling`` and ``asr`` filling their budget and
-        Valkey. An upload's job with ``describe_images`` keeps its input too (ruling V-S7): an
-        image upload's bytes are what the llm worker describes, and it deletes them with the
-        result (``_drop_input``; such a job has no ``pii``, so no nlp hop in between)."""
+        Valkey. An image upload that moved with its description owed keeps its input too (ruling
+        V-S7; ``envelope`` is the result that moved, ``vision.describe.needs_vision``): its bytes
+        are what the llm worker describes, and it deletes them with the result (``_drop_input``;
+        such a job has no ``pii``, so no nlp hop in between). Any other upload's input goes, also
+        with ``describe_images`` (a PDF that moved for ``structured``: nothing to describe)."""
         outcome = await self._moved(item)
         if outcome is None:
             return None  # the lease was lost: the current holder may need them
         pool = self._queue.pool
         pooled = pool in (DOCLING_POOL, ASR_POOL)
-        described = job.kind == "file" and job.options.describe_images is not None
+        described = (
+            job.kind == "file"
+            and envelope.data is not None
+            and needs_vision(envelope.data, job.options.describe_images)
+        )
         if (job.kind == "file" or pooled or pool == PII_POOL) and not described:
             await self._store.delete_input(item.job_id, item.index)
         if pool in (ASR_POOL, PII_POOL) and job.kind != "batch":

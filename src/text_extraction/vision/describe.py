@@ -245,7 +245,7 @@ class _Step:
         try:
             return await self.images.get(target.url, self.mode, timeout=timeout)
         except Exception as error:
-            # only. The type only: a message may quote the URL.
+            # This image only; log the type, a message may quote the URL.
             _log.warning("image_fetch_failed", error=type(error).__name__)
             return ImageSkipped("error")
 
