@@ -20,6 +20,7 @@ from text_extraction.documents.types import OcrOption
 from text_extraction.job_models import JobOptions
 from text_extraction.pii.types import PiiOptions
 from text_extraction.structured.types import StructuredOptions
+from text_extraction.vision.types import DescribeImagesOptions
 
 # The form part that carries the file; the route takes it as a parameter of its own.
 FILE_PART = "file"
@@ -66,6 +67,14 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
         description="Split the content into chunks: a JSON object as a string, e.g. "
         '`{"strategy": "markdown", "size": 800}`; see `POST /v1/extract` for its fields.',
     )
+    describe_images: Annotated[DescribeImagesOptions | None, WithJsonSchema({"type": "string"})] = (
+        Field(
+            default=None,
+            description="Describe an uploaded PNG, JPEG or WebP (and a page's images) with the "
+            'vision model: a JSON object as a string, e.g. `{"max_images": 3}` (`{}` takes the '
+            "defaults); see `POST /v1/extract` for its fields.",
+        )
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -87,7 +96,7 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
                 raise ValueError("pii is not valid JSON") from None
         return value
 
-    @field_validator("structured", "chunking", mode="before")
+    @field_validator("structured", "chunking", "describe_images", mode="before")
     @classmethod
     def _options_from_their_form_string(cls, value: Any, info: ValidationInfo) -> Any:
         """The part is text: a JSON object."""
@@ -124,6 +133,7 @@ def upload_options(form: FileForm, compliance: ComplianceMode) -> JobOptions:
         pii=form.pii,
         structured=form.structured,
         chunking=form.chunking,
+        describe_images=form.describe_images,
     )
 
 
@@ -137,4 +147,5 @@ def form_of(options: JobOptions) -> FileForm:
         pii=options.pii,
         structured=options.structured,
         chunking=options.chunking,
+        describe_images=options.describe_images,
     )

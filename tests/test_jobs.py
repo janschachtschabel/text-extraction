@@ -19,6 +19,7 @@ from text_extraction.job_models import JobOptions, JobProgress
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore, browser_lease_seconds
 from text_extraction.settings import Settings
 from text_extraction.structured.types import StructuredResult, Table
+from text_extraction.vision.types import DescribeImagesOptions
 
 START = 1_000_000.0
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -1090,3 +1091,18 @@ async def test_the_budget_holds_under_concurrent_writes() -> None:
     assert len(stored) == BUDGET // input_size(b"x" * 2_000)
     assert len(stored) + len(refused) == len(jobs)
     assert await budget_used(valkey) <= BUDGET
+
+
+@scenario
+async def test_a_describe_images_choice_is_stored_and_read_back() -> None:
+    """Issue #20 (V-S1): the option is stored when set, and a job without it keeps the keys of
+    the release before it (``test_default_ocr_is_not_stored_so_older_pods_read_the_job``)."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    options = JobOptions(compliance="enforce", describe_images=DescribeImagesOptions())
+    job_id = await store.create("batch", OWNER, options, URLS[:1])
+
+    assert (await stored_options(valkey, job_id))["describe_images"] == {"max_images": 5}
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options == options

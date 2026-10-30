@@ -60,6 +60,7 @@ from text_extraction.structured.checks import (
 )
 from text_extraction.tracing import current_trace_id
 from text_extraction.valkey import reply_text
+from text_extraction.vision.checks import check_describe_request
 
 _log = structlog.get_logger(__name__)
 
@@ -246,6 +247,11 @@ async def create_batch(
     check_structured_request(
         body.structured, body.chunking, body.pii, body.format, settings, llm_key=caller_llm_key
     )
+    # 400 without LLM or key, 422 with pii or without metadata (V-S2).
+    check_describe_request(
+        body.describe_images, body.pii, body.metadata, settings, llm_key=caller_llm_key
+    )
+    llm = wants_llm(body.structured, body.chunking, settings, describe=body.describe_images)
     options = JobOptions(
         mode=body.mode,
         format=body.format,
@@ -259,6 +265,7 @@ async def create_batch(
         pii=body.pii,
         structured=body.structured,
         chunking=body.chunking,
+        describe_images=body.describe_images,
     )
     if guard.high:
         raise _memory_high()
@@ -278,7 +285,7 @@ async def create_batch(
                 # The caller's key of the external endpoint, for any item that moves to the ASR
                 # workers, while the job lives (M11); the job's deletion takes it along.
                 await store.put_asr_key(job_id, key, whole_job=True)
-            if caller_llm_key is not None and wants_llm(body.structured, body.chunking, settings):
+            if caller_llm_key is not None and llm:
                 # The caller's key of the LLM endpoint, for any item that moves to the llm
                 # workers, while the job lives (ruling S9); the job's deletion takes it along.
                 await store.put_llm_key(job_id, caller_llm_key)

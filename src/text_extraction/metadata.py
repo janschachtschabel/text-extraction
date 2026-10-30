@@ -174,8 +174,13 @@ _JSON_LD_WRAPPERS = re.compile(
 
 
 class Image(BaseModel):
-    url: str
+    """An image of the page (``url``), or of an image upload (``url`` null, ruling V-S3), with
+    its alternative text and, with ``describe_images``, the vision model's description (null
+    without it, or when the image was not described)."""
+
+    url: str | None
     alt: str
+    description: str | None = None
 
 
 class PageMetadata(BaseModel):

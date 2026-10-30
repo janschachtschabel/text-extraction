@@ -150,6 +150,7 @@ from text_extraction.structured.checks import (
 from text_extraction.structured.post import LlmHop, post_at_finish
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.tracing import current_trace_id
+from text_extraction.vision.checks import check_describe_request
 
 _log = structlog.get_logger(__name__)
 
@@ -350,7 +351,7 @@ def request_wait_seconds(body: ExtractRequest, settings: Settings) -> float | No
         settings,
         transcribe=body.transcribe,
         pii=body.pii is not None,
-        llm=wants_llm(body.structured, body.chunking, settings),
+        llm=wants_llm(body.structured, body.chunking, settings, describe=body.describe_images),
     )
 
 
@@ -388,11 +389,13 @@ async def respond(
     check_structured_request(
         body.structured, body.chunking, body.pii, body.format, settings, llm_key=llm_key
     )
+    check_describe_request(body.describe_images, body.pii, body.metadata, settings, llm_key=llm_key)
     wait_seconds = request_wait_seconds(body, settings)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)
     # Only a request that may need the LLM keeps the caller's key with its jobs.
-    job_llm_key = llm_key if wants_llm(body.structured, body.chunking, settings) else None
+    llm = wants_llm(body.structured, body.chunking, settings, describe=body.describe_images)
+    job_llm_key = llm_key if llm else None
     flow = partial(
         _flow,
         state,

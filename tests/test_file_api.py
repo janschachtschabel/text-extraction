@@ -483,9 +483,12 @@ def test_option_form_field_over_64_kib_is_422(client: TestClient) -> None:
         assert response.json()["error"]["message"] == "Part exceeded maximum size of 64KB."
 
 
-@pytest.mark.parametrize("name", ["pii", "format", "ocr", "wait_seconds", "metadata"])
+@pytest.mark.parametrize(
+    "name", ["pii", "format", "ocr", "wait_seconds", "metadata", "describe_images"]
+)
 def test_other_form_field_over_1_kib_is_422(client: TestClient, name: str) -> None:
-    value = '{"mode": "mask"}' + " " * 1024 if name == "pii" else "x" * 1025
+    padded = {"pii": '{"mode": "mask"}', "describe_images": "{}"}
+    value = padded[name] + " " * 1024 if name in padded else "x" * 1025
 
     response = upload(client, GIF, "a.gif", "image/gif", form={name: value})
 
@@ -531,6 +534,40 @@ def test_invalid_form_is_422(client: TestClient, form: dict[str, str]) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("value", ["x", "{not json", '{"max_images": 21}', '{"detail": "high"}'])
+def test_describe_images_form_field_that_does_not_parse_is_422(
+    client: TestClient, value: str
+) -> None:
+    response = upload(client, GIF, "a.gif", "image/gif", form={"describe_images": value})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    locations = [detail["loc"] for detail in response.json()["error"]["details"]]
+    assert any("describe_images" in location for location in locations)
+
+
+def test_the_form_takes_every_field_at_once() -> None:
+    """All eight small fields fit MAX_FIELDS: the form parses, and only the LLM check is left
+    (this service has none)."""
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    form = {
+        "format": "markdown",
+        "metadata": "true",
+        "ocr": "auto",
+        "wait_seconds": "5",
+        "pii": "mask",
+        "structured": json.dumps({"tables": True}),
+        "chunking": json.dumps({"strategy": "fixed"}),
+        "describe_images": "{}",
+    }
+    assert set(form) == set(FileForm.model_fields)
+    with TestClient(app) as test_client:
+        response = upload(test_client, ARTICLE.encode(), "page.html", "text/html", form=form)
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["message"] == "PII handling is not enabled on this service."
 
 
 @pytest.mark.parametrize("pii", ["mask", '{"mode": "annotate", "entities": ["PERSON"]}'])
@@ -884,9 +921,10 @@ def test_openapi_documents_multipart(client: TestClient) -> None:
         "pii",
         "structured",
         "chunking",
+        "describe_images",
     }
     assert form["properties"]["wait_seconds"]["default"] == 25
-    for name in ("pii", "structured", "chunking"):
+    for name in ("pii", "structured", "chunking", "describe_images"):
         assert form["properties"][name]["type"] == "string"
     assert "202" in operation["responses"]
 

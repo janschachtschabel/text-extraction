@@ -136,6 +136,7 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         pii=req.pii,
         structured=req.structured,
         chunking=req.chunking,
+        describe_images=req.describe_images,
     )
 
 
