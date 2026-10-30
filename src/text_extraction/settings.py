@@ -292,6 +292,9 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-6-luna", min_length=1)
     llm_api_key: SecretStr | None = None  # secret; a request's X-LLM-Api-Key wins over it
     llm_embedding_model: str | None = None  # without it `semantic` chunking answers 400
+    llm_vision_model: str | None = None  # image descriptions; unset: llm_model
+    # Largest image (bytes) that is fetched or taken from an upload to be described.
+    llm_vision_max_image_bytes: int = Field(default=5_000_000, ge=10_000, le=20_000_000)
     llm_temperature: float = Field(default=0, ge=0, le=2)
     llm_max_tokens: int = Field(default=4096, ge=1)  # most tokens of one answer
     llm_timeout_seconds: float = Field(default=120, ge=5, le=600)  # one request to the endpoint
@@ -352,11 +355,12 @@ class Settings(BaseSettings):
         caller's key is refused (``extract_api.check_asr_key``)."""
         return value if value is not None and value.strip() else None
 
-    @field_validator("llm_api_key", "llm_embedding_model", mode="before")
+    @field_validator("llm_api_key", "llm_embedding_model", "llm_vision_model", mode="before")
     @classmethod
     def _empty_llm_value_is_unset(cls, value: object) -> object:
         """Empty means unset (the Helm chart renders an unset value so): no key is sent by us,
-        and `semantic` chunking is refused without an embedding model."""
+        `semantic` chunking is refused without an embedding model, and image descriptions use
+        `llm_model` without a vision model."""
         return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("pii_default_entities", mode="before")

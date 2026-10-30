@@ -1325,6 +1325,38 @@ def test_llm_empty_key_and_embedding_model_mean_unset(
     assert settings.llm_embedding_model is None
 
 
+def test_llm_vision_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+
+    settings = load_settings()
+
+    assert settings.llm_vision_model is None
+    assert settings.llm_vision_max_image_bytes == 5_000_000
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_llm_vision_model_empty_is_unset(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """The Helm chart renders an unset value as an empty string (V-S13)."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_VISION_MODEL", value)
+
+    assert load_settings().llm_vision_model is None
+
+    monkeypatch.setenv("LLM_VISION_MODEL", "vision-1")
+    assert load_settings().llm_vision_model == "vision-1"
+
+
+def test_llm_vision_max_image_bytes_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    for accepted in ("10000", "20000000"):
+        monkeypatch.setenv("LLM_VISION_MAX_IMAGE_BYTES", accepted)
+        assert load_settings().llm_vision_max_image_bytes == int(accepted)
+    for refused in ("9999", "20000001"):
+        monkeypatch.setenv("LLM_VISION_MAX_IMAGE_BYTES", refused)
+        with pytest.raises(ConfigError, match="llm_vision_max_image_bytes"):
+            load_settings()
+
+
 def test_llm_enabled_needs_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     """D5: the LLM hop is a job of pool llm; start-up refuses LLM_ENABLED without jobs."""
     monkeypatch.setenv("AUTH_MODE", "none")
