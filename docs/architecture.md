@@ -346,8 +346,10 @@ optional rate limit.
   `EXTRACT_TIMEOUT_SECONDS` + 7 s for such tasks (after the graceful phase). When the graceful
   phase begins, a request that still waits for an nlp or llm job (whose wait, with a long
   `wait_seconds`, may outlast the phase) answers 202 with that job at once, as at the end of its
-  wait, and the worker completes it (issue #19); waits for a browser or Docling job are covered by
-  the grace period and keep going. Extract jobs do not
+  wait, and the worker completes it (issue #19). Waits for a browser or Docling job keep going,
+  also when that job's item has moved on to nlp or llm: they end within the graceful phase only
+  while it is at least the request's wait (75 s or more with browser workers, 50 s with Docling
+  workers only, against a `wait_seconds` of up to 60 s). Extract jobs do not
   count toward `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`. A pod
   holds at most `EXTRACT_MAX_BACKGROUND` (32) such tasks; beyond it a request keeps waiting inline
   and answers 200.

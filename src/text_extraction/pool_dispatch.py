@@ -63,8 +63,12 @@ policy and its worker's contract.
 the API pod's grace period (``wait_seconds`` up to 60 s). ``server._serve`` calls
 ``GracefulShutdown.begin`` when the public server stops accepting connections; from then on a
 route whose task waits for a last-hop job (``Handover.in_last_hop``) answers at once as it does
-when its wait runs out: 202 with that job, which the pool's worker completes. Waits for the
-browser and Docling pools are not cut short: the grace period covers them.
+when its wait runs out: 202 with that job, which the pool's worker completes. Waits for a
+browser or Docling job are not cut short, also when its item has moved on to ``nlp`` or ``llm``
+(``LastHopMove``: the handover still names the earlier pool). They end within the graceful phase
+only while it is at least the request's wait: 75 s or more with browser workers, 50 s with
+Docling workers only (``server.graceful_shutdown_seconds``), against a ``wait_seconds`` of up to
+60 s.
 
 The ``docling`` pool's policy (OCR) and the contract of its worker are in ``docling_dispatch.py``,
 the ``asr`` pool's in ``asr_dispatch.py``, the ``nlp`` pool's in ``pii_dispatch.py``.

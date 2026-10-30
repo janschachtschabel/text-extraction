@@ -257,7 +257,10 @@ and the job's lease expires (the job then reports a lost extraction).
 A sync request that waits for the nlp or llm workers (`pii`, or `structured` and `chunking` work
 that needs the LLM; with a long `wait_seconds` this wait may outlast the graceful phase) answers
 202 with its nlp or llm job as soon as the graceful phase begins, as it would when its wait runs
-out; the worker completes the job, and the caller polls `GET /v1/jobs/{id}` (issue #19).
+out; the worker completes the job, and the caller polls `GET /v1/jobs/{id}` (issue #19). A
+request that waits for a browser or Docling job (also one whose item moves on to the nlp or llm
+workers) is not answered early: it ends within the graceful phase only while that phase is at
+least its wait, which with Docling workers only (50 s) a `wait_seconds` of 60 can exceed.
 
 While `BROWSER_ENABLED`, the graceful phase is at least
 `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds (75 s by
