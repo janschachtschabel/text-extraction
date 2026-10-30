@@ -62,7 +62,7 @@ or the input budget is full, nothing is stored: the item keeps its draft with
 - Job: ``JobStore.get``: kind ``extract`` (a sync URL request), ``file`` (an upload) or
   ``batch``; ``options`` are the request's (``format``, ``metadata``, ``transcribe``,
   ``languages``, ``cache``, ``compliance``, ...); the owner is the principal
-  (``worker.job_principal``). A reused P1 job is ``running`` without a lease when its item is
+  (``jobs.job_principal``). A reused P1 job is ``running`` without a lease when its item is
   queued. ``JobStore.url(job, index)`` is the request URL, ``""`` for an upload.
 - Input: ``JobStore.get_input(job, index, MediaInputMeta)``: ``source`` (``platform``,
   ``file`` or ``upload``), ``platform``, ``url`` (the canonical URL of a platform video, to be

@@ -47,7 +47,7 @@ fails ``rate_limited``, retryable), counted as ``memory_guard`` or ``input_budge
   ``jobs.docling_lease_seconds`` (``2 * DOCLING_TIMEOUT_SECONDS + 10``).
 - Job: ``JobStore.get``: kind ``extract`` (a sync URL request), ``file`` (an upload) or
   ``batch``; ``options`` are the request's (``format``, ``metadata``, ``ocr``, ``cache``,
-  ``compliance``, ...); the owner is the principal (``worker.job_principal``). A reused P1 job
+  ``compliance``, ...); the owner is the principal (``jobs.job_principal``). A reused P1 job
   is ``running`` without a lease when its item is queued.
   ``JobStore.url(job, index)`` is the request URL, ``""`` for an upload.
 - Input: ``JobStore.get_input(job, index, DocumentInputMeta)``: the document's bytes and their

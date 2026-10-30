@@ -429,6 +429,11 @@ def escape_owner(owner: str) -> str:
     return owner
 
 
+def job_principal(job: JobRecord) -> Principal:
+    """The job's owner as the principal of its items: its role decides what they may do."""
+    return Principal(name=job.owner, role=job.owner_role, rate_limit_per_minute=None)
+
+
 def owner_key(owner: str, name: str) -> str:
     """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the owner is escaped
     (``escape_owner``), so a name cannot break the hash tag."""

@@ -537,3 +537,32 @@ def test_utf16_is_invalid_not_an_empty_text_sitemap(bom: bytes) -> None:
     body = bom + f"<urlset {NS}><url><loc>https://a.example/</loc></url></urlset>".encode(codec)
 
     assert parse_sitemap(body, BASE, max_entries=10).error == "invalid"
+
+
+# --- the parse's deadline (the item's lease bounds a parse that runs on a thread) -------------
+
+
+@pytest.mark.parametrize("text", [False, True])
+def test_parse_stops_at_its_deadline_with_what_it_read(text: bool) -> None:
+    body = (
+        "\n".join(f"https://lernen.example.org/p{i}" for i in range(5000)).encode()
+        if text
+        else urlset(5000)
+    )
+    past = time.monotonic() - 1
+
+    parsed = parse_sitemap(body, BASE, max_entries=10_000, deadline=past)
+
+    assert parsed.timed_out
+    assert parsed.truncated
+    assert parsed.error is None
+    assert 0 < len(parsed.entries) < 5000  # the clock is read every 1,024 events
+    assert parsed.entry_count == len(parsed.entries)
+
+
+def test_parse_within_its_deadline_is_whole() -> None:
+    parsed = parse_sitemap(urlset(5000), BASE, max_entries=10_000, deadline=time.monotonic() + 60)
+
+    assert not parsed.timed_out
+    assert not parsed.truncated
+    assert len(parsed.entries) == 5000

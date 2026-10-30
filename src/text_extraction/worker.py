@@ -107,6 +107,12 @@ result); any other upload's input goes with the move, as without the option. The
 result drops the caller's LLM key of the job (R11): a sync request's job at once, a batch with its
 last result.
 
+**Site jobs (package 9).** Every item of a ``site`` job (a page, robots.txt, a sitemap) goes
+to the ``SiteRunner`` (``site.runner``), which appends what the item found as new items of the
+same job and queues them before the item's own result is written; its items never move to
+another pool. An exhausted item of a ``site`` job first queues again the items it appended
+(``SiteRunner.requeue_children``), then fails as above, so the job still completes.
+
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
 expired fails ``timeout``, retryable. Once such an item's result is written, the worker deletes
@@ -176,7 +182,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import Fetcher
 from text_extraction.file_models import UploadInputMeta, form_of
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.jobs import JobLost, JobRecord, JobStore
+from text_extraction.jobs import JobLost, JobRecord, JobStore, job_principal
 from text_extraction.llm_dispatch import LLM_POOL, LlmMove, create_llm_move
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
@@ -203,6 +209,8 @@ from text_extraction.server import (
     extraction_graceful_seconds,
 )
 from text_extraction.settings import Settings
+from text_extraction.site.runner import SiteRunner
+from text_extraction.site.store import SiteStore
 from text_extraction.structured.post import LlmHop, finish_post, post_at_finish
 from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.valkey import create_valkey
@@ -226,6 +234,7 @@ _GIVE_BACK_SECONDS = 5.0
 _LOST_MESSAGE = "The item was lost by a worker too often."
 _INPUT_EXPIRED_MESSAGE = "The uploaded file expired before it was extracted. Upload it again."
 _INTERNAL_MESSAGE = "Internal server error."
+_NO_SITE_MESSAGE = "This worker cannot run site structure items."
 
 # Outcomes of an item besides its envelope's: given back to the queue, its job is gone, or it
 # moved to another pool (the browser's, Docling's, ASR's, nlp's or llm's).
@@ -314,7 +323,9 @@ class ExtractRunner:
     ``docling_queue`` the Docling pool's, None while the service has no OCR; ``asr_queue`` the
     ASR pool's, None while the service has no ASR; then nothing moves there. ``guard`` tells
     whether Valkey is nearly full; ``registry`` gets ``text_extraction_docling_dispatch_total``
-    and ``text_extraction_asr_dispatch_total`` for the refused moves."""
+    and ``text_extraction_asr_dispatch_total`` for the refused moves. ``site`` runs the items of
+    ``site`` jobs (package 9), which never move to another pool; without it they fail
+    ``internal_error``."""
 
     def __init__(
         self,
@@ -327,11 +338,13 @@ class ExtractRunner:
         asr_queue: FairQueue | None = None,
         guard: MemoryPressure | None = None,
         registry: CollectorRegistry | None = None,
+        site: SiteRunner | None = None,
     ) -> None:
         self._pipeline = pipeline
         self._store = store
         self._settings = settings
         self._browser_queue = browser_queue
+        self.site = site
         self._docling_queue = docling_queue
         self._asr_queue = asr_queue
         self._guard = guard
@@ -356,6 +369,11 @@ class ExtractRunner:
         *,
         gate_refusals: Literal["fail", "raise"],
     ) -> Envelope[ExtractResult] | None:
+        if job.kind == "site":
+            # Its options are no extraction's (P9-S1): no request is built from them here.
+            if self.site is None:
+                return failed_extract(ErrorCode.INTERNAL_ERROR, _NO_SITE_MESSAGE, retryable=False)
+            return await self.site.run(job, item, url, gate_refusals=gate_refusals)
         principal = job_principal(job)
         move = self._docling_move(job, item, url or None)
         if job.kind == "file":
@@ -438,11 +456,6 @@ class ExtractRunner:
         if (move is not None and move.moved) or (transcription is not None and transcription.moved):
             return None
         return envelope
-
-
-def job_principal(job: JobRecord) -> Principal:
-    """The job's owner as the principal of its items: its role decides what they may do."""
-    return Principal(name=job.owner, role=job.owner_role, rate_limit_per_minute=None)
 
 
 class Worker:
@@ -651,6 +664,10 @@ class Worker:
         _log.warning("job_item_exhausted", attempts=item.attempts)
         if job is None:
             return await self._drop(item)
+        site = self._runner.site if isinstance(self._runner, ExtractRunner) else None
+        if job.kind == "site" and site is not None:
+            # A crash after its extend and before its queueing: its children still run (P9-S12).
+            await site.requeue_children(job, item)
         envelope = failed_extract(ErrorCode.INTERNAL_ERROR, _LOST_MESSAGE, retryable=True)
         if self._queue.pool == DOCLING_POOL:
             # A document whose OCR never finished keeps its text layer, unstored.
@@ -952,6 +969,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         selector_runner=selectors,
     )
     store = JobStore(valkey, settings)
+    queue = FairQueue(valkey, settings)
     browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None
     ocr_queue = docling_queue(valkey, settings) if ocr_available(settings) else None
     transcription_queue = asr_queue(valkey, settings) if asr_available(settings) else None
@@ -967,9 +985,19 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
             asr_queue=transcription_queue,
             guard=guard,
             registry=registry,
+            site=SiteRunner(
+                pipeline,
+                store,
+                SiteStore(valkey, store, settings),
+                queue,
+                settings,
+                pool,
+                guard=guard,
+                registry=registry,
+            ),
         ),
         store,
-        FairQueue(valkey, settings),
+        queue,
         registry,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
         llm_move=create_llm_move(settings, valkey, store, guard, registry),

@@ -175,7 +175,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import USER_AGENT, Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.jobs import JobRecord, JobStore, asr_lease_seconds
+from text_extraction.jobs import JobRecord, JobStore, asr_lease_seconds, job_principal
 from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.media.captions import Cue
 from text_extraction.media.transcript import Transcription
@@ -189,7 +189,7 @@ from text_extraction.scheduler import QueueItem
 from text_extraction.server import EXIT_CONFIG_ERROR, _Server, _server, configured_settings
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
-from text_extraction.worker import Worker, _serve, job_principal
+from text_extraction.worker import Worker, _serve
 
 __all__ = [
     "ASR_TARGET",

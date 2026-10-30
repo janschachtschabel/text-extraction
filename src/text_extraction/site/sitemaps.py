@@ -21,6 +21,7 @@ Not read: the ``image:``, ``video:``, ``news:`` and ``xhtml:link`` extensions.
 
 import io
 import re
+import time
 import zlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -57,6 +58,8 @@ _LEADING_BLANKS = re.compile(rb"[ \t\r\n]*")
 # The deepest layout read is rss/channel/item/<field>; deeper nesting is refused, since every
 # open element stays in memory until it closes.
 MAX_XML_DEPTH = 32
+# How many parser events (or text lines) pass between two looks at the clock of a deadline.
+_CLOCK_EVERY = 1024
 # A tag's namespace prefix, for the retry of a file that uses one without declaring it.
 _PREFIXED_TAG = re.compile(rb"(</?)[A-Za-z_][\w.\-]*:")
 _UNBOUND_PREFIX = expat_errors.codes[expat_errors.XML_ERROR_UNBOUND_PREFIX]
@@ -64,6 +67,10 @@ _UNBOUND_PREFIX = expat_errors.codes[expat_errors.XML_ERROR_UNBOUND_PREFIX]
 
 class _UnboundPrefixError(Exception):
     """The file uses a namespace prefix it does not declare (``image:`` without ``xmlns``)."""
+
+
+class _DeadlineError(Exception):
+    """The parse ran into its deadline: what was read by then is the answer."""
 
 
 @dataclass(frozen=True)
@@ -100,7 +107,8 @@ class ParsedSitemap:
     ``crawl: listed`` until the runner decides. ``truncated``: entries or children were left out
     (over the caps, or the file broke after some were read). ``error``: ``"unsupported"`` (another
     root, such as an HTML page) or ``"invalid"`` (no XML, a DTD or entity, broken before any
-    entry).
+    entry). ``timed_out``: the parse stopped at its deadline (``truncated`` too); ``entry_count``
+    then counts what was read by then.
     """
 
     format: ParsedFormat | None
@@ -109,6 +117,7 @@ class ParsedSitemap:
     entry_count: int = 0
     truncated: bool = False
     error: Literal["invalid", "unsupported"] | None = None
+    timed_out: bool = False
 
 
 def inflate_bounded(body: bytes, max_bytes: int) -> tuple[bytes, bool]:
@@ -173,9 +182,20 @@ def _resolve(loc: str | None, base_url: str) -> str | None:
 class _Collector:
     """Counts and keeps the records of one file within the caps."""
 
-    def __init__(self, max_entries: int) -> None:
+    def __init__(self, max_entries: int, deadline: float | None = None) -> None:
         self.max_entries = max_entries
         self.parsed = ParsedSitemap(format=None)
+        self._deadline = deadline
+        self._ticks = 0
+
+    def tick(self) -> None:
+        """Count one parser event; every ``_CLOCK_EVERY`` events, raise ``_DeadlineError``
+        once the deadline (``time.monotonic``) has passed."""
+        if self._deadline is None:
+            return
+        self._ticks += 1
+        if self._ticks % _CLOCK_EVERY == 0 and time.monotonic() >= self._deadline:
+            raise _DeadlineError
 
     @property
     def found(self) -> bool:
@@ -209,10 +229,14 @@ def _text_lines(body: bytes, start: int) -> Iterator[str]:
 
 def _parse_text(body: bytes, start: int, collector: _Collector) -> ParsedSitemap:
     collector.parsed.format = "text"
-    for line in _text_lines(body, start):
-        url = normalize_url(line)
-        if url is not None:
-            collector.entry(url, {})
+    try:
+        for line in _text_lines(body, start):
+            collector.tick()
+            url = normalize_url(line)
+            if url is not None:
+                collector.entry(url, {})
+    except _DeadlineError:
+        collector.parsed.truncated = collector.parsed.timed_out = True
     return collector.parsed
 
 
@@ -250,6 +274,7 @@ def _parse_xml(
                 forbid_entities=True,
                 forbid_external=True,
             ):
+                collector.tick()
                 name = _local(element.tag)
                 if event == "start":
                     if layout is None:
@@ -279,6 +304,8 @@ def _parse_xml(
                     stack[-1].remove(element)  # keep only the open path in memory
                 else:
                     root_closed = True
+        except _DeadlineError:
+            parsed.truncated = parsed.timed_out = True
         except DTDForbidden as exc:
             if (exc.name or "").lower() == "html":
                 return ParsedSitemap(format=None, error="unsupported")  # an HTML page
@@ -303,20 +330,29 @@ def _parse_xml(
         source.close()
 
 
-def parse_sitemap(body: bytes, base_url: str, *, max_entries: int) -> ParsedSitemap:
+def parse_sitemap(
+    body: bytes, base_url: str, *, max_entries: int, deadline: float | None = None
+) -> ParsedSitemap:
     """Read a sitemap file (already inflated): its format, at most ``max_entries`` entries (or an
     index's children), and how many entries it held. Each ``loc`` is resolved against
     ``base_url`` and normalized; one that is no http(s) URL is dropped and not counted. A body
-    whose first byte after a BOM and blanks is not ``<`` is a text sitemap."""
+    whose first byte after a BOM and blanks is not ``<`` is a text sitemap.
+
+    ``deadline`` (``time.monotonic``) bounds the parse's time, which grows with the file (about
+    0.35 s per MB of an ordinary sitemap, up to 2.7 s per MB of a tag-dense one): at it the
+    parse stops with what it has read (``timed_out``). A thread cannot be stopped from outside,
+    so the runner gives the deadline here, where the work is."""
     if body.startswith(_UTF16_BOMS):
         return ParsedSitemap(format=None, error="invalid")  # not read: no empty text sitemap
     start = len(_UTF8_BOM) if body.startswith(_UTF8_BOM) else 0
     match = _LEADING_BLANKS.match(body, start)
     start = match.end() if match else start
     if not body.startswith(b"<", start):
-        return _parse_text(body, start, _Collector(max_entries))
+        return _parse_text(body, start, _Collector(max_entries, deadline))
     try:
-        return _parse_xml(body, start, base_url, _Collector(max_entries), retry_prefixes=True)
+        return _parse_xml(
+            body, start, base_url, _Collector(max_entries, deadline), retry_prefixes=True
+        )
     except _UnboundPrefixError:
         pass
     # Elements match by local name anyway, so a prefix nobody declared is dropped and the file
@@ -327,7 +363,7 @@ def parse_sitemap(body: bytes, base_url: str, *, max_entries: int) -> ParsedSite
         _PREFIXED_TAG.sub(rb"\1", memoryview(body)[start:]),
         0,
         base_url,
-        _Collector(max_entries),
+        _Collector(max_entries, deadline),
         retry_prefixes=False,
     )
 
