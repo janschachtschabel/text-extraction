@@ -16,6 +16,7 @@ from text_extraction.tracing import B3_HEADERS, TRACE_HEADER, current_trace_id
 # the outer request's trace id, so both requests log under one id.
 PASSED_HEADERS: Final = ("authorization", "x-llm-api-key", "x-asr-api-key", *B3_HEADERS)
 BASE_URL: Final = "http://ui.internal"
+API_PREFIX: Final = "/v1/"
 
 Method = Literal["GET", "POST", "DELETE"]
 
@@ -29,6 +30,28 @@ class Forwarded:
     body: dict[str, Any] | None
     content: bytes
     content_type: str
+
+
+# Percent-encoded dot, slash and backslash: a path that holds one is refused, so no segment can
+# turn into a dot segment or a separator after decoding.
+_ENCODED_SEPARATORS: Final = ("%2e", "%2f", "%5c")
+
+
+def checked_path(path: str) -> str:
+    """``path`` when it is a plain relative path under ``/v1/``: printable ASCII without a
+    backslash, ``?``, ``#``, an empty or dot segment or an encoded dot or separator. Anything
+    else (an absolute URL, a scheme or host, ``..``) raises `ValueError`: query parameters go
+    through ``params``, and the path never leaves the REST API."""
+    if not path.startswith(API_PREFIX) or not all(" " < char < "\x7f" for char in path):
+        raise ValueError("forward takes a relative path under /v1/")
+    if any(char in path for char in "\\?#") or any(
+        encoded in path.lower() for encoded in _ENCODED_SEPARATORS
+    ):
+        raise ValueError("forward takes no backslash, query, fragment or encoded separator")
+    segments = path[1:].split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise ValueError("forward takes no empty or dot segment")
+    return path
 
 
 def _outer_trace_id(request: Request) -> str | None:
@@ -69,7 +92,9 @@ async def forward(
 ) -> Forwarded:
     """Send ``method path`` to the app of ``request`` in-process, with only the headers of
     ``PASSED_HEADERS``, and return its answer. No timeout of its own: the route bounds its work
-    (``wait_seconds``, the hand-over to a job). An exception of the app is its 500 answer."""
+    (``wait_seconds``, the hand-over to a job). An exception of the app is its 500 answer.
+    ``path`` must pass `checked_path` (else `ValueError`, before anything is sent)."""
+    path = checked_path(path)
     transport = httpx.ASGITransport(app=request.app, raise_app_exceptions=False)
     # No timeout of the client's own: the route bounds its work.
     async with httpx.AsyncClient(

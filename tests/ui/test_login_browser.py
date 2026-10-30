@@ -114,6 +114,22 @@ def test_login_keeps_the_key_in_the_tab_only() -> None:
         assert context.cookies() == []
         assert USER_KEY not in page.content()
 
+        # The keys go only to /ui/run/ of the page's own origin.
+        headers_for = (
+            "path => { const detail = {path, headers: {}};"
+            " document.dispatchEvent(new CustomEvent('htmx:configRequest', {detail}));"
+            " return detail.headers; }"
+        )
+        for foreign in (
+            "https://evil.example/ui/run/extract",
+            "//evil.example/ui/run/extract",
+            f"{url.replace('127.0.0.1', 'localhost')}/../run/extract",
+            "/ui/static/ui.js",
+        ):
+            assert page.evaluate(headers_for, foreign) == {}, foreign
+        own = page.evaluate(headers_for, "/ui/run/extract")
+        assert own["Authorization"] == f"Bearer {USER_KEY}"
+
         page.click("[data-action=logout]")
         page.wait_for_selector("#login-form")
         stored = page.evaluate("Object.keys(sessionStorage)")

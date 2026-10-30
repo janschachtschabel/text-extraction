@@ -197,8 +197,9 @@ def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
 
 
 def _add_ui_headers(app: FastAPI) -> None:
-    """The security headers of every ``/ui`` answer (P10-S12); added after the body limit, so
-    it wraps it and a 413 under ``/ui`` carries them too."""
+    """The security headers of every ``/ui`` answer (P10-S12) and the guard of ``/ui/run/*``
+    (P10-S13); added after the body limit, so it wraps it: a 413 under ``/ui`` carries the
+    headers, and a refused ``/ui/run`` request is answered before its body is read."""
     from text_extraction.ui.security import UiHeadersMiddleware  # only with UI_ENABLED
 
     app.add_middleware(UiHeadersMiddleware)

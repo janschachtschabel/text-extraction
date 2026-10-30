@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Final
 from urllib.parse import urlsplit
 
+from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -60,10 +61,11 @@ def _ui_headers(raw: Iterable[tuple[bytes, bytes]], *, cache: str) -> list[tuple
 class UiHeadersMiddleware:
     """Pure ASGI middleware: every answer under ``/ui`` gets the CSP and the other security
     headers of P10-S12 and ``Cache-Control: no-store`` (``public, max-age=3600`` for a static
-    file that was found); a ``Set-Cookie`` is dropped. An exception that no handler answered
-    before the response started becomes a plain 500 with these headers here (and is raised on,
-    so the app's handler still logs it), since Starlette's own 500 is sent outside every
-    middleware."""
+    file that was found); a ``Set-Cookie`` is dropped. A request to ``/ui/run/*`` that is not
+    `from_the_page` is answered 403 (plain text) here, before anything reads its body. An
+    exception that no handler answered before the response started becomes a plain 500 with
+    these headers here (and is raised on, so the app's handler still logs it), since
+    Starlette's own 500 is sent outside every middleware."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -85,6 +87,11 @@ class UiHeadersMiddleware:
                 message = {**message, "headers": headers}
             await send(message)
 
+        if is_run_path(scope["path"]) and not from_the_page(Headers(scope=scope)):
+            # Before the body limit, the routing and any body parsing: nothing is read.
+            refused = PlainTextResponse(REFUSED_TEXT, status_code=403)
+            await refused(scope, receive, send_with_headers)
+            return
         try:
             await self.app(scope, receive, send_with_headers)
         except Exception:
@@ -132,15 +139,27 @@ def same_origin(origin: str, host: str | None) -> bool:
     return theirs is not None and theirs == ours
 
 
+def from_the_page(headers: Headers) -> bool:
+    """Whether a request to ``/ui/run/*`` is an htmx request of the page's own origin (P10-S13):
+    ``HX-Request: true``, and no ``Origin`` or one that names the ``Host`` header's host and port.
+    A cross-site page cannot send ``HX-Request``: the header needs a CORS preflight, and the
+    service answers none."""
+    if headers.get("hx-request") != "true":
+        return False
+    origin = headers.get("origin")
+    return origin is None or same_origin(origin, headers.get("host"))
+
+
+def is_run_path(path: str) -> bool:
+    return path == RUN_PREFIX or path.startswith(f"{RUN_PREFIX}/")
+
+
 async def require_htmx(request: Request) -> None:
-    """Dependency of every ``/ui/run/*`` route (P10-S13), run before the body is read: refuse
-    (403, plain text) a request without ``HX-Request: true`` and one whose ``Origin`` is not the
-    page's own. A cross-site page cannot send ``HX-Request``: the header needs a CORS preflight,
-    and the service answers none."""
-    if request.headers.get("hx-request") != "true":
-        raise UiRefused
-    origin = request.headers.get("origin")
-    if origin is not None and not same_origin(origin, request.headers.get("host")):
+    """Dependency of every ``/ui/run/*`` route: refuse (403, plain text) a request that is not
+    `from_the_page`. `UiHeadersMiddleware` refuses such a request already, before any body is
+    read or a route runs (FastAPI parses ``Form`` and ``File`` parameters before dependencies);
+    this repeats the check for a route reached some other way."""
+    if not from_the_page(request.headers):
         raise UiRefused
 
 

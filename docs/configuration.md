@@ -714,8 +714,10 @@ caller's rate limit. Views that combine several reads count one hit per view.
 
 Requests to `/ui/run/*` answer 403 (plain text) without `HX-Request: true`, and when their
 `Origin` names another host or port than the `Host` header (a default port counts as none; the
-scheme is not compared, as TLS may end at the ingress). The service has no CORS middleware, so a
-page of another origin cannot send `HX-Request`. The UI never sets a cookie.
+scheme is not compared, as TLS may end at the ingress), before the body is read or any route
+runs. The service has no CORS middleware, so a page of another origin cannot send `HX-Request`.
+The UI never sets a cookie. The page's script sends the keys only to `/ui/run/*` of its own
+origin, and the UI forwards only to relative paths under `/v1/`.
 
 Every answer under `/ui` carries `Content-Security-Policy: default-src 'none'; script-src 'self';
 style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none';

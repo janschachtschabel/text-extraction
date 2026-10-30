@@ -59,10 +59,16 @@
     });
   }
 
-  // Every request to /ui/run/ carries the stored keys as headers.
+  // Every request to /ui/run/ of this page's own origin carries the stored keys as headers; no
+  // other request does (htmx's selfRequestsOnly refuses a foreign one anyway).
   document.addEventListener("htmx:configRequest", function (event) {
-    var path = new URL(event.detail.path, window.location.href).pathname;
-    if (path.indexOf(RUN_PREFIX) !== 0) {
+    var url;
+    try {
+      url = new URL(event.detail.path, window.location.href);
+    } catch (error) {
+      return;
+    }
+    if (url.origin !== window.location.origin || url.pathname.indexOf(RUN_PREFIX) !== 0) {
       return;
     }
     var api = readKey(KEYS.api);

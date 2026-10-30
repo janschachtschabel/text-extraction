@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Annotated, Any, Final, cast
 
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -21,7 +21,7 @@ from structlog.testing import capture_logs
 from tests.ui.conftest import AUTH, HX, USER_KEY, running
 from text_extraction.auth import Principal
 from text_extraction.settings import ConfigError, load_settings
-from text_extraction.ui.forward import forward
+from text_extraction.ui.forward import checked_path, forward
 from text_extraction.ui.security import ui_principal
 
 UI_PACKAGE = Path(__file__).parents[2] / "src" / "text_extraction" / "ui"
@@ -147,7 +147,7 @@ def test_login_ok_renders_app_with_principal(client: TestClient) -> None:
     assert answer.status_code == 200
     assert 'id="app-shell"' in answer.text
     assert "alice" in answer.text
-    assert "user" in answer.text
+    assert '<span class="role">user</span>' in answer.text
     assert "Log out" in answer.text
     assert NOT_VALID not in answer.text
     assert USER_KEY not in answer.text
@@ -199,16 +199,19 @@ def test_security_headers_on_every_ui_answer(client: TestClient) -> None:
         "run": login(client),
         "refused": client.post("/ui/run/login", headers=AUTH),
         "missing": client.get("/ui/static/missing.js"),
+        "unknown": client.get("/ui/nope"),
+        "too_large": client.post("/ui/run/login", headers=HX, content=b"x" * 70_000),
     }
     assert answers["page"].status_code == 200
     assert answers["run"].status_code == 200
     assert answers["refused"].status_code == 403
-    assert answers["missing"].status_code == 404
+    assert answers["missing"].status_code == answers["unknown"].status_code == 404
+    assert answers["too_large"].status_code == 413
     for name, answer in answers.items():
         for header, value in SECURITY_HEADERS.items():
             assert answer.headers.get(header) == value, (name, header)
     assert answers["static"].headers["cache-control"] == "public, max-age=3600"
-    for name in ("page", "run", "refused"):
+    for name in ("page", "run", "refused", "unknown", "too_large"):
         assert answers[name].headers["cache-control"] == "no-store", name
 
     # The REST API keeps its own headers.
@@ -338,7 +341,7 @@ def test_forward_passes_only_listed_headers() -> None:
     with running() as client:
         app = cast(FastAPI, client.app)
 
-        @app.get("/echo")
+        @app.get("/v1/test-echo")
         async def echo(request: Request) -> JSONResponse:
             return JSONResponse(
                 {
@@ -349,16 +352,16 @@ def test_forward_passes_only_listed_headers() -> None:
                 }
             )
 
-        app.add_api_route("/echo", echo, methods=["POST"])
+        app.add_api_route("/v1/test-echo", echo, methods=["POST"])
 
-        @app.get("/text")
+        @app.get("/v1/test-text")
         async def text() -> PlainTextResponse:
             return PlainTextResponse("plain")
 
         @app.post("/ui/test-forward")
         async def outer(request: Request) -> JSONResponse:
-            got = await forward(request, "POST", "/echo", json={"a": 1}, params={"q": "1"})
-            plain = await forward(request, "GET", "/text")
+            got = await forward(request, "POST", "/v1/test-echo", json={"a": 1}, params={"q": "1"})
+            plain = await forward(request, "GET", "/v1/test-text")
             return JSONResponse(
                 {
                     "status": got.status,
@@ -448,6 +451,135 @@ def test_run_body_limits() -> None:
         batch_file = client.post("/ui/run/batch-file", headers=HX, content=b"x" * 2049)
 
     assert over_default.status_code == 413
-    assert file_route.status_code != 413
+    # Neither route exists before Task 8 and 9: within their limits they reach the router.
+    assert file_route.status_code == 404
     assert over_batch_file.status_code == 413
-    assert batch_file.status_code != 413
+    assert batch_file.status_code == 404
+
+
+def test_refused_before_the_body_is_read() -> None:
+    """The guard answers a foreign or non-htmx request to /ui/run before anything reads the body,
+    also for a route with ``File`` and ``Form`` parameters (FastAPI parses those before any
+    dependency)."""
+    with running() as client:
+        app = cast(FastAPI, client.app)
+        handled: list[str] = []
+
+        @app.post("/ui/run/test-upload")
+        async def upload(
+            file: Annotated[UploadFile, File()], note: Annotated[str, Form()]
+        ) -> dict[str, str]:
+            handled.append(note)
+            return {"name": file.filename or ""}
+
+        body = (
+            b'--b\r\nContent-Disposition: form-data; name="file"; filename="a.csv"\r\n\r\n'
+            b'https://example.org/\r\n--b\r\nContent-Disposition: form-data; name="note"\r\n\r\n'
+            b"hi\r\n--b--\r\n"
+        )
+        base = [
+            (b"host", b"testserver"),
+            (b"content-type", b"multipart/form-data; boundary=b"),
+            (b"content-length", str(len(body)).encode()),
+        ]
+
+        async def call(headers: list[tuple[bytes, bytes]]) -> tuple[int, bool]:
+            read = False
+            sent: list[Any] = []
+
+            async def receive() -> dict[str, Any]:
+                nonlocal read
+                read = True
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            async def send(message: Any) -> None:
+                sent.append(message)
+
+            scope = {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/ui/run/test-upload",
+                "raw_path": b"/ui/run/test-upload",
+                "root_path": "",
+                "query_string": b"",
+                "headers": base + headers,
+                "client": ("127.0.0.1", 1),
+                "server": ("testserver", 80),
+            }
+            await app(scope, receive, send)
+            return sent[0]["status"], read
+
+        async def calls() -> list[tuple[int, bool]]:
+            return [
+                await call([(b"hx-request", b"true"), (b"origin", b"https://evil.example")]),
+                await call([(b"origin", b"http://testserver")]),
+                await call([(b"hx-request", b"true"), (b"origin", b"http://testserver")]),
+            ]
+
+        outcomes = client.portal.call(calls)  # type: ignore[union-attr]
+
+    assert outcomes == [(403, False), (403, False), (200, True)]
+    assert handled == ["hi"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "http://evil.example/v1/info",
+        "//evil.example/v1/info",
+        "https:/v1/info",
+        "v1/info",
+        "/mcp",
+        "/v1",
+        "/v1/jobs/../../mcp",
+        "/v1/jobs/./x",
+        "/v1/jobs/%2e%2e/x",
+        "/v1/jobs/a%2Fb",
+        "/v1/jobs\\..\\mcp",
+        "/v1/jobs/a?x=1",
+        "/v1/jobs/a#x",
+        "/v1/jobs//a",
+        "/v1/jobs/a b",
+        "/v1/jobs/a\nb",
+        "/v1/jobs/\u00e4",
+    ],
+)
+def test_forward_refuses_paths_outside_v1(path: str) -> None:
+    with running() as client:
+        app = cast(FastAPI, client.app)
+
+        @app.post("/ui/test-forward-path")
+        async def outer(request: Request) -> dict[str, str]:
+            try:
+                await forward(request, "GET", path)
+            except ValueError as error:
+                return {"refused": str(error)}
+            return {"refused": ""}
+
+        with capture_logs() as logs:
+            answer = client.post("/ui/test-forward-path").json()
+
+    assert answer["refused"]
+    # Only the outer request's access line: nothing was sent.
+    assert [log["path"] for log in logs if log["event"] == "request"] == ["/ui/test-forward-path"]
+
+
+def test_forward_takes_query_parameters_through_params() -> None:
+    assert checked_path("/v1/jobs/3f2a/artifacts/screenshot.png") == (
+        "/v1/jobs/3f2a/artifacts/screenshot.png"
+    )
+    with running() as client:
+        app = cast(FastAPI, client.app)
+
+        @app.post("/ui/test-forward-params")
+        async def outer(request: Request) -> dict[str, Any]:
+            got = await forward(request, "GET", "/v1/info", params={"x": "a?b#c"})
+            return {"status": got.status, "body": got.body}
+
+        answer = client.post("/ui/test-forward-params", headers=AUTH).json()
+
+    assert answer["status"] == 200
+    assert answer["body"]["data"]["principal"] == "alice"
