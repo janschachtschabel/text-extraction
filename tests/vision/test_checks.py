@@ -88,6 +88,20 @@ def test_422_with_pii() -> None:
     refused(422, DESCRIBE_PII_MESSAGE, pii=PII)
 
 
+def test_400_checks_come_before_the_422_checks() -> None:
+    """V-S2's order (Task 2 review m4): a request that also has ``pii`` and ``metadata: false``
+    gets the 400 of a missing LLM or key first."""
+    refused(
+        400,
+        LLM_KEY_MISSING_MESSAGE,
+        settings=settings(llm_api_key=None),
+        pii=PII,
+        metadata=False,
+    )
+    refused(400, LLM_DISABLED_MESSAGE, settings=no_llm(), pii=PII, metadata=False)
+    refused(422, DESCRIBE_PII_MESSAGE, pii=PII, metadata=False)
+
+
 def test_422_with_metadata_false() -> None:
     refused(422, DESCRIBE_METADATA_MESSAGE, metadata=False)
 

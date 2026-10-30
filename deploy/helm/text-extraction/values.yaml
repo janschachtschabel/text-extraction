@@ -608,7 +608,11 @@ workers:
     terminationGracePeriodSeconds: 40
     # Placeholder values until package 11 measures real consumption: the worker waits for the
     # endpoint and holds no model; 512 MiB of the limit are the selector child that checks the
-    # proposals of learn_selectors (STRUCTURED_SELECTOR_MEMORY_MB).
+    # proposals of learn_selectors (STRUCTURED_SELECTOR_MEMORY_MB). describe_images holds up to
+    # concurrency x 2 (DESCRIBE_CONCURRENCY) images at once, each its bytes plus their base64
+    # copy and the SDK's request body: about 5 x config.LLM_VISION_MAX_IMAGE_BYTES per image
+    # (about 200 MB with the defaults, 800 MB at 20 MB). Raise the memory limit, or lower
+    # concurrency, with LLM_VISION_MAX_IMAGE_BYTES.
     resources:
       requests:
         cpu: 100m

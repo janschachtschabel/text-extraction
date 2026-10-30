@@ -95,6 +95,7 @@ from typing import Annotated, Any, Literal
 import structlog
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
+from prometheus_client import CollectorRegistry
 from redis.exceptions import RedisError
 
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, AsrDispatcher, AsrHandoff, asr_key_of
@@ -551,6 +552,7 @@ async def answer_or_hand_over(
             describe=describe,
             settings=settings,
             threads=state.post_pool,
+            registry=state.registry,
         )
     )
     _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
@@ -755,6 +757,7 @@ async def post_stage(
         threads=state.post_pool,
         hop=_llm_hop(handoff, handover) if handoff is not None else None,
         describe=options.describe_images,
+        registry=state.registry,
     )
     if finished is None or finished is envelope:
         return finished
@@ -1175,6 +1178,7 @@ def _store_when_done(
     describe: DescribeImagesOptions | None = None,
     settings: Settings | None = None,
     threads: ConversionPool | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
     went on to a pool's worker, which writes it. The storing task is added to ``background``
@@ -1196,6 +1200,7 @@ def _store_when_done(
                 describe=describe,
                 settings=settings,
                 threads=threads,
+                registry=registry,
             )
         )
         background.add(storing)
@@ -1217,10 +1222,12 @@ async def _store_result(
     describe: DescribeImagesOptions | None = None,
     settings: Settings | None = None,
     threads: ConversionPool | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> None:
     """Store the envelope as item 0, after the post stage of the request's ``structured``,
     ``chunking`` and ``describe_images`` (``describe``; with ``settings`` and ``threads``, the post
-    pool; for an envelope that lacks it: the flow's own answer has it, S13) and past the PII guard
+    pool, and ``registry``, the app's, for the images' counter; for an envelope that lacks it:
+    the flow's own answer has it, S13) and past the PII guard
     (``pii.fields.fail_closed`` with the request's ``pii``, N12), and observe the job's duration
     (``created_at`` is a ``time.monotonic()`` reading from just before the job was created); an
     upload's input is deleted then, and so is the caller's LLM key. A Valkey failure is logged and
@@ -1239,6 +1246,7 @@ async def _store_result(
             settings=settings,
             threads=threads,
             describe=describe,
+            registry=registry,
         )
         if finished is not None:  # always, without a hop
             envelope = finished

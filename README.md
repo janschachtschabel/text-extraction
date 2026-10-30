@@ -310,6 +310,14 @@ curl -H "Authorization: Bearer $KEY" -F file=@arbeitsblatt.png -F 'describe_imag
 a repeated request describes its images again. Images inside PDFs and other documents are not
 described.
 
+The descriptions have their own time budget (1.5 × `LLM_TIMEOUT_SECONDS`), on top of the time of
+`structured` and `semantic` chunking; descriptions already made stay when a later LLM step fails.
+Images still being fetched when the budget ends, for example on a host whose robots.txt sets a
+long `Crawl-delay`, are skipped (`image_not_described`), and the status stays. A page whose result
+is close to `JOB_ITEM_MAX_BYTES` (2 MB) can come back without its `content`, with the warning
+`content_not_stored_too_large`, once `describe_images` sends it through the LLM workers, as with
+`structured`: the descriptions do not need it.
+
 ### Browser mode
 
 Pages that need JavaScript are rendered in Chromium by the browser worker. `mode` is `fast` (HTTP

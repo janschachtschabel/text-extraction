@@ -499,7 +499,8 @@ answer is validated against the caller's schema or the description's), and every
   caller's `X-LLM-Api-Key` wins over it. The checksum annotation of the pods does not cover your
   own Secret: after rotating the key, restart the API and llm worker pods (`kubectl rollout
   restart`).
-- A worker leases an item for `4 x LLM_TIMEOUT_SECONDS + 10` s (490 s by default). On SIGTERM it
+- A worker leases an item for `5.5 x LLM_TIMEOUT_SECONDS + 10` s (670 s by default: the longest
+  deadline, of an item with image descriptions, plus one timeout). On SIGTERM it
   stops claiming and gives items in flight `workers.llm.gracefulSeconds` (30 s), then hands the
   ones still running back to the queue at once. Calls to the endpoint are billed again when an
   item runs twice; with the default 120 s `LLM_TIMEOUT_SECONDS` every rollout can do that.

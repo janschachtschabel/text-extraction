@@ -1838,8 +1838,8 @@ XPath and `:has(` limits of S3.
 
 **S13, the hop** (`llm_dispatch.py`, on the generic `pool_dispatch.LastHopHandoff` and
 `LastHopMove` that `PiiHandoff` and `PiiMove` now share). Pool `llm` without the per-domain lease
-cap, lease `4 × LLM_TIMEOUT_SECONDS + 10`; the draft is the envelope after the DOM stage, the
-patterns and PII. A result goes when its post stage needs the LLM (`needs_llm`: the service has the
+cap, lease `5.5 × LLM_TIMEOUT_SECONDS + 10` (`4 ×` before issue #20, R-V2); the draft is the
+envelope after the DOM stage, the patterns and PII. A result goes when its post stage needs the LLM (`needs_llm`: the service has the
 LLM, there is content, and strategy `llm`, `auto` with fields missing after the DOM stage and the
 patterns, or `semantic`); any other gets its post stage where it is.
 
@@ -1864,9 +1864,11 @@ patterns, or `semantic`); any other gets its post stage where it is.
 `llm`, internal port only). The extract worker's `Worker` with an `LlmRunner`, `LLM_CONCURRENCY`
 (4) slot loops. Per item: read the draft (gone with its job: `internal_error`, retryable, there is
 nothing to post-process), the job's `structured` and `chunking` and the caller's key, then
-`apply_post` with an `LlmClient` under an overall deadline of `3 × LLM_TIMEOUT_SECONDS` (past it the
-draft answers without the LLM work, `llm_failed`, retryable; so does an unexpected error of the
-post stage, logged by its type only). Before any client is made, a draft that still owes the PII
+`apply_post` with an `LlmClient` under an overall deadline of `3 × LLM_TIMEOUT_SECONDS`, plus
+`1.5 × LLM_TIMEOUT_SECONDS` for an item that owes image descriptions (issue #20, R-V2). Past it the
+result answers without the LLM work still to do, `llm_failed`, retryable; so does an unexpected
+error of the post stage, logged by its type only. Image descriptions already made stay in that
+answer (R-V2). Before any client is made, a draft that still owes the PII
 step is withheld (`pii_failed`; no path hands one over, but the LLM never sees personal data), and
 a draft stored without its content (over `JOB_ITEM_MAX_BYTES`) that owes LLM work or `semantic`
 chunking answers `llm_failed`, not retryable, "The document is too large for the LLM step." (R20).
@@ -2019,11 +2021,14 @@ pending until he answers).**
 - **V-S7, an upload's bytes.** They reach the llm hop as the job item's input (`input:{index}`,
   `DOCLING_INPUT_TTL_SECONDS`, within `DOCLING_INPUT_BUDGET_BYTES`), never in the draft (a draft is
   capped at `JOB_ITEM_MAX_BYTES`). A P1 file job and a Docling job hold the input already; the
-  worker that moves such a job on to `llm` keeps it when the upload is an image whose description
-  is owed; a sync hand-off of an upload stores it (PNG, JPEG or WebP by its magic bytes, at most
-  `LLM_VISION_MAX_IMAGE_BYTES`). A full budget answers `partial`/`llm_failed`, busy, retryable
-  (`input_budget`). The llm worker deletes the input with the result; an input that is gone skips
-  the image.
+  worker that moves such a job on to `llm` keeps it when the upload is a PNG, JPEG or WebP whose
+  description is owed; a sync hand-off of an upload stores it (PNG, JPEG or WebP by its magic
+  bytes, at most `LLM_VISION_MAX_IMAGE_BYTES`). An image upload the vision model cannot take
+  (over `LLM_VISION_MAX_IMAGE_BYTES`, or another type by its magic bytes) is `skipped` where it
+  is extracted, which has its bytes (`Pipeline.extract_upload`, `convert_queued_document`): it
+  takes no llm hop for its description and keeps no input (R-V3). A full budget answers
+  `partial`/`llm_failed`, busy, retryable (`input_budget`). The llm worker deletes the input with
+  the result; an input that is gone skips the image.
 - **V-S8, image uploads.** With `describe_images` an uploaded PNG, JPEG or WebP is never failed
   for lacking text: without OCR (`ocr: never`, no Docling) it answers `success` with an empty
   `content` (and `ocr_unavailable` unless the request said `ocr: never`), and an OCR result with no
@@ -2050,12 +2055,15 @@ pending until he answers).**
   `image_not_described`, and the other images go on. Any other LLM error (401, 403, 404, 429, 5xx,
   timeouts, no connection, an unreadable answer) stops the step: no further image is sent, the
   rest count `failed`, and a `success` becomes `partial`/`llm_failed` with that error's
-  `retryable`. The step's budget running out does the same, retryable. Without the LLM work (the
+  `retryable`. The step's budget running out while a vision call is outstanding does the same,
+  retryable; running out while only fetches are left (e.g. a host's `Crawl-delay` spacing the
+  turns), the images not done count `skipped` and the status stays (R-V5). Without the LLM work (the
   memory guard, a failed hop, an exhausted item, no key) every image that would be sent counts
   `failed`, `llm_failed` busy or not run, retryable. An upload's content always stays.
 - **V-S12, bounds.** At most `max_images` vision calls per result (plus one repair call each), two
   images at once, results in target order. The step gets at most half the llm item's deadline
-  (`3 × LLM_TIMEOUT_SECONDS / 2`), so the structured and semantic work keep theirs; each fetch gets
+  (`3 × LLM_TIMEOUT_SECONDS / 2`), given on top of it, so the structured and semantic work keep
+  their whole `3 × LLM_TIMEOUT_SECONDS` (R-V2); each fetch gets
   `min(FETCH_TIMEOUT_SECONDS, what is left)`. Image bytes live only in the step's memory (and an
   upload's in its job input): never logged, never in the answer, never in the result cache.
   `text_extraction_vision_images_total{outcome}` (`described`, `skipped`, `failed`), counted once per
@@ -2082,6 +2090,20 @@ skipped. A Docling hand-off of an image upload that is busy or timed out stays t
 failure it was and gets no description. Only an image upload whose description is owed keeps its
 input past the move to `llm`; a PDF or a text upload with `describe_images` that moves for
 `structured` drops it at the move, as without the option.
+
+Rulings of the final review (2026-10-30). R-V2: an llm item with an image to describe gets
+`describe_seconds` (`1.5 × LLM_TIMEOUT_SECONDS`) on top of its `3 × LLM_TIMEOUT_SECONDS`, and the
+lease (fixed at the claim) covers that longest case plus one timeout: `5.5 × LLM_TIMEOUT_SECONDS
++ 10`. `LLM_GRACEFUL_SECONDS` and the give-back on SIGTERM are unchanged, so a dead worker's item
+waits longer before it runs again, never a live one's. `apply_post` runs the steps after the
+descriptions under the item's deadline; when it passes or one of them raises, the answer is
+`finish_post` of the envelope after the descriptions, so they stay. R-V3: see V-S7. R-V4: the
+memory an image in flight takes is documented with `LLM_VISION_MAX_IMAGE_BYTES`. R-V5: the
+step's budget ending with no vision call outstanding (only fetches, e.g. a `Crawl-delay`) skips
+the images not done, without `llm_failed`. R-V6: the API pods count the images in the app's
+registry. A describe-only request on a page whose result is near `JOB_ITEM_MAX_BYTES` can answer
+without `content` (`content_not_stored_too_large`), as every last hop does; this is documented,
+not changed.
 
 **Known limits.**
 

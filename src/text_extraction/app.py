@@ -195,6 +195,7 @@ def create_public_app(
     )
     app.state.settings = settings
     app.state.valkey = valkey
+    app.state.registry = registry  # the post stage's image counter (issue #20) counts here too
     app.state.rate_limiter = RateLimiter(valkey, settings.rate_limit_per_minute)
     app.state.memory_guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, app.state.fetcher = create_outbound(settings, valkey)

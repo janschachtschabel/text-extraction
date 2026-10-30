@@ -865,9 +865,10 @@ for name in "$API" "$EXTRACT" "$BROWSER" "$LLM"; do
   expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_MODEL "my-model"
   expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_EMBEDDING_MODEL "my-embeddings"
 done
-# visionModel reaches every pod while set.
-llm_vision="$(render --set workers.llm.enabled=true --set workers.llm.visionModel=my-vision)"
-for name in "$API" "$EXTRACT" "$BROWSER" "$LLM"; do
+# visionModel reaches every pod while set (review m3 of issue #20: all seven Deployments).
+llm_vision="$(render --set workers.llm.enabled=true --set workers.llm.visionModel=my-vision \
+  --set workers.docling.enabled=true --set workers.asr.enabled=true --set workers.nlp.enabled=true)"
+for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
   expect_every_value "llm on renders LLM_VISION_MODEL only when workers.llm.visionModel is set ($name)" \
     "$(document "$llm_vision" Deployment "$name")" LLM_VISION_MODEL "my-vision"
 done

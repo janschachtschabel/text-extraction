@@ -173,6 +173,7 @@ class LlmDispatcher(PoolDispatcher):
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        self.registry = registry  # the images' counter of an unserved envelope (None: global)
         super().__init__(
             LLM_POOL,
             store,
@@ -285,6 +286,7 @@ class LlmHandoff(LastHopHandoff):
                 settings=self._llm.settings,
                 reason=self._unserved,
                 describe=options.describe_images,
+                registry=self._llm.registry,
             ),
             result,
             options.structured,

@@ -326,6 +326,25 @@ def test_sync_memory_guard_is_partial_llm_failed_with_content(httpserver: HTTPSe
     assert service.llm_outcomes() == {"memory_guard": 1}
 
 
+@pytest.mark.usefixtures("high_memory")
+def test_api_pod_counts_images_in_the_apps_registry(httpserver: HTTPServer) -> None:
+    """Ruling R-V6 (Task 5 review m3): the API pods count the images of ``describe_images`` in
+    the app's own registry, as the workers do in theirs."""
+    service = LlmService(httpserver, {PAGE: fetched(body=IMAGES_ARTICLE)})
+    with TestClient(service.app) as client:
+        response = extract(client, LLM_HEADERS, describe_images={}, metadata=True)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "partial"
+        assert body["error"]["message"] == BUSY_MESSAGE
+        assert body["data"]["image_descriptions"]["failed"] == 2
+    failed = service.registry.get_sample_value(
+        "text_extraction_vision_images_total", {"outcome": "failed"}
+    )
+    assert failed == 2
+
+
 def test_sync_valkey_down_is_partial_not_5xx(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
