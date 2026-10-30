@@ -1960,18 +1960,17 @@ and four `<img>`, one under a path robots.txt disallows, one at a private addres
 gone), and an image upload through OCR, end to end through the API with the real llm worker, a
 real image fetcher and pytest-httpserver as both the OpenAI-compatible endpoint and the image host.
 
-**Decisions of Jan (cards of 2026-10-30, still unanswered: the recommended options apply and are
-pending until he answers).**
+**Decisions of Jan (cards of 2026-10-30; on 2026-10-30 Jan confirmed the recommended options).**
 
-- **V1, scope (a, pending).** The images already collected for a page in `metadata.images` (cover
+- **V1, scope (a, decided).** The images already collected for a page in `metadata.images` (cover
   images first, then `<img>`, at most 20), and image uploads (PNG, JPEG, WebP through
   `/v1/extract/file`, which otherwise only go through OCR). Images inside PDFs, DOCX and other
   documents are out of scope.
-- **V2, output (a, pending).** The description goes on the image's entry,
+- **V2, output (a, decided).** The description goes on the image's entry,
   `metadata.images[].description`. For a page `content` stays the page text. For an image upload
   the description is also appended to `content` after the OCR text and recorded on an image entry
   with `url: null`.
-- **V3, `pii` (a, pending).** `describe_images` with `pii` is 422, as the DOM strategies of package
+- **V3, `pii` (a, decided).** `describe_images` with `pii` is 422, as the DOM strategies of package
   8 (D3): nothing unmasked goes to the LLM.
 
 **Rulings of the plan (V-S1 to V-S13).**

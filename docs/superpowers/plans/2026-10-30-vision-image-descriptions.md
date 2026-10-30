@@ -13,7 +13,7 @@
 
 **Spec:**
 - GitHub issue #20 ("Vision LLM: describe images in pages and documents"): which images, size and count limits, where the call runs, the caller's key, PII.
-- Jan's cards V1-V3 below (pending; the plan uses the recommended options).
+- Jan's cards V1-V3 below: on 2026-10-30 at 12:07 UTC Jan confirmed the recommended options ("ja weiter wie empfohlen").
 - The controller's rulings of 2026-10-30 (request option, llm pool, guarded fetch, `LLM_VISION_MAX_IMAGE_BYTES`, `LLM_VISION_MODEL`, prompt, failures, bounds, docs, done-when), refined as V-S1 to V-S13.
 - `docs/architecture.md` "Structured output and chunking" (S5, S9, S11-S14, D3, D4, D5) and `CLAUDE.md` rules 1-7.
 
@@ -32,9 +32,9 @@
 
 Jan approved this plan on 2026-10-30 ("ja", 08:14 UTC). The cards are still unanswered, so the recommended options apply.
 
-- **V1, scope** (pending). (a, recommended) The images already collected for web pages in `metadata.images` (`metadata._images`: cover images, then `<img>`, at most 20), plus image uploads (PNG, JPEG, WebP through `/v1/extract/file`, which today only go through OCR). Images inside PDFs and DOCX are out of scope. (b) Pages only. (c) Pages, uploads and figures inside documents.
-- **V2, output** (pending). (a, recommended) The description goes on the image entry, `metadata.images[].description`. For pages `content` stays the page text. For an image upload the description is also appended to `content` after the OCR text (V-S8) and recorded on an image entry with `url: null` (V-S3). (b) A separate list `data.image_descriptions[]`. (c) Inline into `content` for pages too.
-- **V3, pii** (pending). (a, recommended) `describe_images` together with `pii` is 422, like the DOM strategies in package 8 (D3): nothing unmasked goes to the LLM. (b) Mask the descriptions afterwards. (c) Describe, and mask with the nlp hop after the llm hop.
+- **V1, scope** (decided: a). (a, recommended) The images already collected for web pages in `metadata.images` (`metadata._images`: cover images, then `<img>`, at most 20), plus image uploads (PNG, JPEG, WebP through `/v1/extract/file`, which today only go through OCR). Images inside PDFs and DOCX are out of scope. (b) Pages only. (c) Pages, uploads and figures inside documents.
+- **V2, output** (decided: a). (a, recommended) The description goes on the image entry, `metadata.images[].description`. For pages `content` stays the page text. For an image upload the description is also appended to `content` after the OCR text (V-S8) and recorded on an image entry with `url: null` (V-S3). (b) A separate list `data.image_descriptions[]`. (c) Inline into `content` for pages too.
+- **V3, pii** (decided: a). (a, recommended) `describe_images` together with `pii` is 422, like the DOM strategies in package 8 (D3): nothing unmasked goes to the LLM. (b) Mask the descriptions afterwards. (c) Describe, and mask with the nlp hop after the llm hop.
 
 ## Rulings in this plan
 
