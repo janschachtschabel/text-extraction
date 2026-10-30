@@ -166,3 +166,10 @@ class JobAccepted(BaseModel):
     state: JobState
     total: int
     status_url: str
+
+
+class JobDeleted(BaseModel):
+    """Answer to the deletion of a job (``DELETE /v1/jobs/{id}``): the job that is gone."""
+
+    id: str
+    kind: JobKind

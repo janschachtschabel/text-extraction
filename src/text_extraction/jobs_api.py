@@ -1,5 +1,6 @@
-"""``POST /v1/batch`` and ``GET /v1/jobs/{id}``: the public routes in front of the job store and
-the fair queue, and ``open_job``, which ``POST /v1/site-structure`` (``site_api.py``) shares.
+"""``POST /v1/batch``, ``GET /v1/jobs/{id}`` and ``DELETE /v1/jobs/{id}``: the public routes in
+front of the job store and the fair queue, and ``open_job``, which ``POST /v1/site-structure``
+(``site_api.py``) shares.
 
 Besides the job keys and the queue keys, each owner has one key of its own,
 ``jobs:{owner:<name>}:open``: a set of the ids of the owner's batches and site jobs that were
@@ -41,6 +42,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
+    JobDeleted,
     JobItem,
     JobKind,
     JobOptions,
@@ -174,12 +176,18 @@ async def _add_open(valkey: Redis, owner: str, job_id: str, ttl_seconds: int) ->
     return size
 
 
+async def _remove(valkey: Redis, store: JobStore, owner: str, job_id: str) -> None:
+    """Delete the job with all its keys, then remove it from ``owner``'s open set. Valkey
+    errors propagate."""
+    await store.delete(job_id)
+    await valkey.srem(_open_key(owner), job_id)
+
+
 async def _discard(valkey: Redis, store: JobStore, owner: str, job_id: str) -> None:
     """Delete a job that was created but will not run. Failing to do so only leaves the job to
     expire, so the error is logged and not raised over the one that caused the discard."""
     try:
-        await store.delete(job_id)
-        await valkey.srem(_open_key(owner), job_id)
+        await _remove(valkey, store, owner, job_id)
     except (RedisError, OSError) as error:
         _log_unavailable(error)
 
@@ -528,5 +536,51 @@ async def read_job(
         status=status,
         data=view,
         error=failure,
+        trace_id=current_trace_id(),
+    )
+
+
+@router.delete(
+    "/v1/jobs/{job_id}", dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)]
+)
+async def remove_job(
+    job_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_role("user"))],
+) -> Envelope[JobDeleted]:
+    """Cancel a job and delete it with everything stored for it: its results, its files and the
+    keys it keeps for the caller.
+
+    Any kind of job can be deleted, running or completed. A batch or site job no longer counts
+    toward `BATCH_MAX_OPEN_PER_CLIENT`, also when an admin deletes another caller's job. Items
+    still queued are dropped when a worker reaches them, and an item that is running finishes
+    without its result being stored. Afterwards `GET /v1/jobs/{id}` and a second delete answer
+    404. A job that does not exist, has expired or belongs to another caller (admins may delete
+    all) answers 404. 503 when jobs are disabled or Valkey is unavailable (retryable).
+    """
+    return await delete_job(request.app.state, principal, job_id)
+
+
+async def delete_job(state: State, principal: Principal, job_id: str) -> Envelope[JobDeleted]:
+    """The core of ``DELETE /v1/jobs/{id}`` (ruling P10-S10): delete the job with all its keys
+    (``JobStore.delete``) and remove it from its owner's open set, the record's owner, so an
+    admin's delete frees the owner's slot. 404 as ``visible_job``; a Valkey error is a 503
+    (retryable), and the job may then still be there. Workers drop the job's queued items
+    (``job_item_dropped``, ``job_gone``); an item in flight, or the pod's task of a handed-over
+    request (P1), stores nothing once it ends (``JobLost``).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    valkey: Redis = state.valkey
+    store: JobStore = state.job_store
+    try:
+        record = await visible_job(store, job_id, principal)
+        await _remove(valkey, store, record.owner, job_id)
+    except (RedisError, OSError) as error:
+        raise backend_unavailable(error) from None
+    _log.info("job_deleted", job_id=job_id, kind=record.kind)
+    return Envelope(
+        status="success",
+        data=JobDeleted(id=job_id, kind=record.kind),
         trace_id=current_trace_id(),
     )

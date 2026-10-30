@@ -20,6 +20,7 @@ from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from redis.exceptions import ConnectionError as RedisConnectionError
+from starlette.datastructures import State
 from structlog.testing import capture_logs
 
 from tests.fakes import PARAGRAPH, Answer, FakeFetcher, RefusingGate, fetched
@@ -42,6 +43,7 @@ from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import JobLost, JobRecord, JobStore, ResultWrite
+from text_extraction.jobs_api import delete_job
 from text_extraction.llm_dispatch import create_llm_move, llm_queue
 from text_extraction.llm_worker import LlmRunner
 from text_extraction.memory_guard import MemoryGuard
@@ -345,6 +347,57 @@ async def test_expired_job_drops_the_item() -> None:
     assert (counts.pending, counts.leased) == (0, 0)
     assert outcome_count(harness, "lost") == 1
     assert any(log["event"] == "job_item_dropped" for log in logs)
+
+
+def api_state(harness: Harness) -> State:
+    """The parts of the public app's state that ``delete_job`` uses, on the harness's Valkey."""
+    return State(
+        {"settings": harness.settings, "valkey": harness.valkey, "job_store": harness.store}
+    )
+
+
+async def job_keys(harness: Harness, job_id: str) -> list[Any]:
+    return list(await harness.valkey.keys(f"job:{{{job_id}}}*"))
+
+
+@scenario
+async def test_worker_drops_items_of_deleted_job() -> None:
+    harness = Harness()
+    job_id = await harness.submit([page("example.org"), page("example.org", 1)])
+
+    await delete_job(api_state(harness), OWNER, job_id)
+    with capture_logs() as logs:
+        for _ in range(2):
+            await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert harness.fetcher.calls == []
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert outcome_count(harness, "lost") == 2
+    dropped = [log for log in logs if log["event"] == "job_item_dropped"]
+    assert [log["reason"] for log in dropped] == ["job_gone", "job_gone"]
+    assert await job_keys(harness, job_id) == []  # nothing came back
+
+
+@scenario
+async def test_item_in_flight_of_deleted_job_stores_nothing() -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url, body=PARAGRAPH)})
+    job_id = await harness.submit([url])
+
+    async def delete_once(_host: str) -> None:
+        # The caller deletes the job while the item runs (before its first request).
+        harness.fetcher.before_request = None
+        await delete_job(api_state(harness), OWNER, job_id)
+
+    harness.fetcher.before_request = delete_once
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert url in [called for called, _ in harness.fetcher.calls]  # it ran to the end
+    counts = await harness.queue.counts()
+    assert (counts.pending, counts.leased) == (0, 0)
+    assert outcome_count(harness, "lost") == 1
+    assert await job_keys(harness, job_id) == []
 
 
 # --- deferrals ---------------------------------------------------------------------------------

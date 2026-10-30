@@ -544,6 +544,28 @@ def test_wait_seconds_zero_is_immediate_202(handover: Callable[..., Handover]) -
         assert final["data"]["items"][0]["result"]["status"] == "success"
 
 
+def test_deleted_p1_job_stores_nothing(handover: Callable[..., Handover]) -> None:
+    case = handover()
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=AUTH)
+        assert response.status_code == 202
+        job_id = response.json()["data"]["id"]
+
+        with capture_logs() as logs:
+            deleted = client.delete(f"/v1/jobs/{job_id}", headers=AUTH)
+            assert deleted.status_code == 200
+            assert deleted.json()["data"] == {"id": job_id, "kind": "extract"}
+            case.pipeline.release.set()
+            case.wait_for_idle()
+
+        # The task ran to its end and stored nothing: no key of the job came back.
+        assert case.app.state.background == set()
+        assert all(task.done() for task in case.pipeline.tasks)
+        assert case.keys(f"job:{{{job_id}}}*") == []
+        assert any(log["event"] == "extract_job_gone" for log in logs)
+        assert client.get(f"/v1/jobs/{job_id}", headers=AUTH).status_code == 404
+
+
 @pytest.mark.parametrize("value", [-1, 61, "soon"])
 def test_wait_seconds_is_bounded(client: TestClient, value: object) -> None:
     response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": value}, headers=AUTH)
