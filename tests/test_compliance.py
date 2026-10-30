@@ -1327,9 +1327,54 @@ def test_robots_sitemaps_lists_normalized_http_urls() -> None:
 
     assert answer == compliance.RobotsSitemaps(
         state="found",
-        urls=["https://example.org/sitemap.xml", "https://example.org/news.xml"],
+        urls=[
+            "https://example.org/sitemap.xml",
+            "https://example.org/news.xml",
+            "https://example.org/relative.xml",  # resolved against the robots.txt URL
+        ],
     )
     assert fetcher.urls() == [ROBOTS]  # robots.txt only
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("/sitemap.xml", "https://example.org/sitemap.xml"),
+        ("sitemap.xml", "https://example.org/sitemap.xml"),
+        ("maps/a.xml", "https://example.org/maps/a.xml"),
+        ("//cdn.example.net/x.xml", "https://cdn.example.net/x.xml"),
+        ("  /padded.xml  ", "https://example.org/padded.xml"),
+    ],
+)
+def test_robots_sitemaps_resolves_relative_lines(line: str, expected: str) -> None:
+    checker, _, _ = make_checker(robots_answer(f"User-agent: *\nDisallow:\nSitemap: {line}\n"))
+
+    answer = asyncio.run(checker.robots_sitemaps(PAGE, cached_only=False))
+
+    assert answer == compliance.RobotsSitemaps(state="found", urls=[expected])
+
+
+def test_robots_sitemaps_skip_unparsable_and_other_schemes() -> None:
+    body = (
+        "Sitemap: http://[broken/x.xml\nSitemap: ftp://example.org/a.xml\n"
+        "Sitemap: mailto:maps@example.org\nSitemap: /kept.xml\n"
+    )
+    checker, _, _ = make_checker(robots_answer(body))
+
+    answer = asyncio.run(checker.robots_sitemaps(PAGE, cached_only=False))
+
+    assert answer == compliance.RobotsSitemaps(state="found", urls=["https://example.org/kept.xml"])
+
+
+def test_robots_sitemaps_resolve_against_the_origin_with_its_port() -> None:
+    robots = "http://example.org:8080/robots.txt"
+    checker, _, _ = make_checker({robots: result(robots, "Sitemap: /map.xml\n")})
+
+    answer = asyncio.run(checker.robots_sitemaps("http://example.org:8080/a", cached_only=False))
+
+    assert answer == compliance.RobotsSitemaps(
+        state="found", urls=["http://example.org:8080/map.xml"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -1364,5 +1409,9 @@ def test_robots_sitemaps_cached_only() -> None:
     assert before is None
     assert isinstance(after, compliance.RobotsSitemaps)
     assert after.state == "found"
-    assert after.urls == ["https://example.org/sitemap.xml", "https://example.org/news.xml"]
+    assert after.urls == [
+        "https://example.org/sitemap.xml",
+        "https://example.org/news.xml",
+        "https://example.org/relative.xml",
+    ]
     assert fetcher.calls == []

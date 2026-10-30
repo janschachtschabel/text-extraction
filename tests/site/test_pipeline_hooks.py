@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from tests.fakes import (
     ARTICLE,
@@ -26,8 +27,9 @@ from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker, RobotsSitemaps
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
+from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractRequest, ExtractResult
-from text_extraction.fetch import Fetcher, FetchError
+from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline, RawFetch
@@ -65,7 +67,12 @@ class Hooks:
     """A pipeline around a fake fetcher, with a recording gate unless one is given."""
 
     def __init__(
-        self, answers: dict[str, Answer], *, gate: object | None = None, **overrides: Any
+        self,
+        answers: dict[str, Answer],
+        *,
+        gate: object | None = None,
+        timeout_seconds: float | None = None,
+        **overrides: Any,
     ) -> None:
         self.fetcher = FakeFetcher(answers)
         self.valkey = FakeAsyncRedis()
@@ -87,6 +94,7 @@ class Hooks:
             self.settings,
             CollectorRegistry(),
             document_pool=cast(DocumentPool, FakeDocumentPool()),
+            timeout_seconds=timeout_seconds,
         )
 
     def go[T](self, work: Coroutine[Any, Any, T]) -> T:
@@ -334,6 +342,55 @@ def test_fetch_raw_failures_are_envelopes() -> None:
     assert invalid.failure.error.code == ErrorCode.INVALID_URL
 
 
+def test_fetch_raw_over_long_url_is_invalid() -> None:
+    hooks = Hooks({})
+
+    raw = hooks.fetch_raw(f"{ORIGIN}/{'a' * 3000}.xml")
+
+    assert raw.fetched is None
+    assert raw.failure is not None
+    assert raw.failure.error is not None
+    assert raw.failure.error.code == ErrorCode.INVALID_URL
+    assert hooks.urls() == []
+
+
+def test_fetch_raw_deadline_is_a_timeout_envelope() -> None:
+    async def hanging(_validators: Validators | None) -> FetchResult:
+        await asyncio.sleep(5)
+        raise AssertionError("the deadline ends it first")
+
+    hooks = Hooks({ROBOTS: hanging}, timeout_seconds=0.3)
+
+    raw = hooks.fetch_raw()
+
+    assert raw.fetched is None
+    assert raw.failure is not None
+    assert raw.failure.error is not None
+    assert raw.failure.error.code == ErrorCode.TIMEOUT
+    assert raw.failure.error.retryable is True
+    assert SITEMAP not in hooks.urls()
+
+
+def test_fetch_raw_refused_mode_is_403() -> None:
+    hooks = Hooks({})
+
+    with pytest.raises(ServiceError) as refused:
+        hooks.fetch_raw(compliance="ignore")  # a user may not switch the checks off
+
+    assert refused.value.http_status == 403
+    assert hooks.urls() == []
+
+
+def test_fetch_raw_gate_backend_outage_is_503() -> None:
+    hooks = Hooks({}, gate=RefusingGate(RedisConnectionError("down")))
+
+    with pytest.raises(ServiceError) as unavailable:
+        hooks.fetch_raw()
+
+    assert unavailable.value.http_status == 503
+    assert unavailable.value.retryable is True
+
+
 def test_fetch_raw_under_report_and_ignore() -> None:
     admin = Principal(name="root", role="admin", rate_limit_per_minute=None)
     hooks = Hooks(
@@ -384,6 +441,7 @@ LISTED = [
     f"{ORIGIN}/sitemap.xml",
     "https://cdn.example.net/maps/index.xml.gz",
     "http://169.254.169.254/latest",  # kept as text: the fetch's guard acts on it
+    f"{ORIGIN}/relative.xml",  # resolved against the robots.txt URL
 ]
 
 

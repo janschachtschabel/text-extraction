@@ -63,7 +63,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import structlog
 from protego import Protego
@@ -110,9 +110,10 @@ _CACHE_STATES: frozenset[str] = frozenset({"found", "absent", "unavailable"})
 
 class RobotsSitemaps(BaseModel):
     """The sitemaps an origin's robots.txt lists: its ``state`` (``found``, ``absent`` or
-    ``unavailable``, as cached) and the ``Sitemap:`` URLs of a found file, absolute http(s) only,
-    normalized (``site.urls.normalize_url``), duplicates dropped, in the file's order. They are
-    text: any host or address may appear, and the fetch that follows one checks it."""
+    ``unavailable``, as cached) and the ``Sitemap:`` URLs of a found file, in the file's order:
+    each resolved against the robots.txt URL (a relative line such as ``/sitemap.xml`` is common),
+    normalized (``site.urls.normalize_url``), kept when it is http(s), duplicates dropped. They
+    are text: any host or address may appear, and the fetch that follows one checks it."""
 
     state: _CacheState
     urls: list[str] = Field(default_factory=list)
@@ -320,7 +321,9 @@ class ComplianceChecker:
                 "robots", origin, _ROBOTS_PATH, time.monotonic() + _FILE_TIMEOUT_SECONDS
             )
         rules = await self._rules(entry)
-        return RobotsSitemaps(state=entry.state, urls=_sitemap_urls(rules))
+        return RobotsSitemaps(
+            state=entry.state, urls=_sitemap_urls(rules, origin.base + _ROBOTS_PATH)
+        )
 
     async def _judge(
         self, mode: ComplianceMode, url: str, robots: _Entry, tdmrep: _Entry, ai: _Entry
@@ -593,8 +596,10 @@ def _parse_rules(text: str) -> Protego | None:
         return None
 
 
-def _sitemap_urls(rules: Protego | None) -> list[str]:
-    """The ``Sitemap:`` URLs of parsed rules: absolute http(s) ones, normalized, each once."""
+def _sitemap_urls(rules: Protego | None, robots_url: str) -> list[str]:
+    """The ``Sitemap:`` URLs of parsed rules, resolved against ``robots_url`` (RFC 9309 asks
+    for absolute URLs, but relative and protocol-relative lines occur), normalized, each once;
+    only http(s) ones are kept."""
     # Imported here: ``site.urls`` imports ``site.types``, which imports this module.
     from text_extraction.site.urls import normalize_url
 
@@ -602,7 +607,11 @@ def _sitemap_urls(rules: Protego | None) -> list[str]:
         return []
     urls: dict[str, None] = {}
     for raw in rules.sitemaps:
-        normal = normalize_url(raw)
+        try:
+            resolved = urljoin(robots_url, raw.strip())
+        except ValueError:  # an unparsable line, e.g. a broken IPv6 literal
+            continue
+        normal = normalize_url(resolved)
         if normal is not None:
             urls.setdefault(normal, None)
     return list(urls)
