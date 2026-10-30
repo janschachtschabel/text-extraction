@@ -37,12 +37,11 @@ answers its draft without the LLM work, or ``internal_error``, retryable, when t
 gone), and drops the caller's LLM key (a sync job's at once, a batch's with its last result).
 
 **The process** runs ``LLM_CONCURRENCY`` slot loops and serves only the internal port;
-``/ready`` answers 200 once the loops run. At start-up it starts the selector children that
-check the proposals of ``learn_selectors`` (``structured.selector_pool``, ruling R19); the post
-stage's CPU work runs on its post pool (``POST_CONCURRENCY`` threads, R21). No model is
-loaded. On SIGTERM the loops
-stop claiming and the items in flight get 30 s; the ones still running are then given back to
-the queue at once (``give_back_on_cancel``: an item's lease is long), and run again elsewhere.
+``/ready`` answers 200 once the loops run. At start-up it starts the selector children that check
+the proposals of ``learn_selectors`` (``structured.selector_pool``, ruling R19); the post stage's
+CPU work runs on its post pool (``POST_CONCURRENCY`` threads, R21). No model is loaded. On SIGTERM
+the loops stop claiming and the items in flight get 30 s; the ones still running are then given back
+to the queue at once (``give_back_on_cancel``: an item's lease is long), and run again elsewhere.
 
 - ``--check`` sends one tiny extraction to the configured endpoint (``LLM_BASE_URL``,
   ``LLM_MODEL``, ``LLM_API_KEY``) and exits 0 when its answer fits the schema, else 1 (an
