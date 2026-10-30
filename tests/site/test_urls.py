@@ -25,6 +25,9 @@ def test_normalize_url() -> None:
         ("  https://example.org/a  ", "https://example.org/a"),
         ("https://[2001:DB8::1]:443/a", "https://[2001:db8::1]/a"),
         ("https://example.org?x=1", "https://example.org/?x=1"),
+        ("https://example.org/p?", "https://example.org/p?"),
+        ("https://example.org/p?#top", "https://example.org/p?"),
+        ("https://example.org/p#a?b", "https://example.org/p"),
     ],
 )
 def test_normalize_url_keeps_query_and_encoding(url: str, expected: str) -> None:

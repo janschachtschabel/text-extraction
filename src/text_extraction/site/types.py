@@ -72,7 +72,7 @@ ChangeFreq = Literal["always", "hourly", "daily", "weekly", "monthly", "yearly",
 _CHANGEFREQS: frozenset[str] = frozenset(get_args(ChangeFreq))
 
 
-def _bounded_lastmod(value: object) -> object:
+def _bound_lastmod(value: object) -> object:
     """A sitemap's ``lastmod`` as given, stripped; blank or over 64 characters is None."""
     if isinstance(value, str):
         value = value.strip()
@@ -195,7 +195,7 @@ class SitemapEntry(BaseModel):
     @field_validator("lastmod", mode="before")
     @classmethod
     def _bounded_lastmod(cls, value: object) -> object:
-        return _bounded_lastmod(value)
+        return _bound_lastmod(value)
 
     @field_validator("changefreq", mode="before")
     @classmethod
@@ -237,7 +237,7 @@ class SitemapChild(BaseModel):
     @field_validator("lastmod", mode="before")
     @classmethod
     def _bounded_lastmod(cls, value: object) -> object:
-        return _bounded_lastmod(value)
+        return _bound_lastmod(value)
 
 
 class SitemapInfo(BaseModel):

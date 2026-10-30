@@ -41,6 +41,8 @@ def normalize_url(url: str) -> str | None:
     if port is not None and port != _DEFAULT_PORTS[scheme]:
         netloc = f"{netloc}:{port}"
     normal = urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
+    if not parts.query and "?" in url.partition("#")[0]:
+        normal += "?"  # an empty query is kept as given (urlunsplit drops it)
     try:
         return validate_url(normal)  # the same rules as a fetch (length, port range)
     except InvalidUrlError:

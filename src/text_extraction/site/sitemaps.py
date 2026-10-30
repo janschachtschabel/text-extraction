@@ -11,7 +11,11 @@ entries into parts that each fit an item's result.
 Formats: ``urlset`` (``url/loc``, ``lastmod``, ``changefreq``, ``priority``), ``index``
 (``sitemapindex``: ``sitemap/loc``, ``lastmod``), ``rss`` (``channel/item/link``, ``pubDate``),
 ``atom`` (``feed/entry/link[@href]`` with ``rel`` ``alternate`` or none, ``updated``) and
-``text`` (one URL per line). Namespaces and prefixes are ignored; elements match by local name.
+``text`` (one URL per line). Namespaces and prefixes are ignored; elements match by local name,
+and a file that uses a prefix without declaring it (``image:`` with no ``xmlns:image``) is read
+again with its tag prefixes dropped. Nesting deeper than ``MAX_XML_DEPTH``, an encoding Python
+cannot read incrementally (``shift_jis``, ``big5``, an unknown name) and a UTF-16 file are
+``invalid``.
 Not read: the ``image:``, ``video:``, ``news:`` and ``xhtml:link`` extensions.
 """
 
@@ -20,6 +24,7 @@ import re
 import zlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from pyexpat import errors as expat_errors
 from typing import Literal
 from urllib.parse import urljoin
 from xml.etree.ElementTree import Element, ParseError
@@ -32,6 +37,7 @@ from text_extraction.site.urls import normalize_url
 
 __all__ = [
     "MAX_INDEX_CHILDREN",
+    "MAX_XML_DEPTH",
     "ParsedFormat",
     "ParsedSitemap",
     "inflate_bounded",
@@ -46,7 +52,18 @@ MAX_INDEX_CHILDREN = 50_000
 _GZIP_MAGIC = b"\x1f\x8b"
 _INFLATE_STEP = 1 << 16
 _UTF8_BOM = b"\xef\xbb\xbf"
+_UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 _LEADING_BLANKS = re.compile(rb"[ \t\r\n]*")
+# The deepest layout read is rss/channel/item/<field>; deeper nesting is refused, since every
+# open element stays in memory until it closes.
+MAX_XML_DEPTH = 32
+# A tag's namespace prefix, for the retry of a file that uses one without declaring it.
+_PREFIXED_TAG = re.compile(rb"(</?)[A-Za-z_][\w.\-]*:")
+_UNBOUND_PREFIX = expat_errors.codes[expat_errors.XML_ERROR_UNBOUND_PREFIX]
+
+
+class _UnboundPrefixError(Exception):
+    """The file uses a namespace prefix it does not declare (``image:`` without ``xmlns``)."""
 
 
 @dataclass(frozen=True)
@@ -212,13 +229,18 @@ def _read_field(layout: _Layout, element: Element, name: str, record: dict[str, 
         record.setdefault(key, text)  # the first one that says something wins
 
 
-def _parse_xml(body: bytes, start: int, base_url: str, collector: _Collector) -> ParsedSitemap:
+def _parse_xml(
+    body: bytes, start: int, base_url: str, collector: _Collector, *, retry_prefixes: bool
+) -> ParsedSitemap:
+    """Raises ``_UnboundPrefixError`` (when ``retry_prefixes``) for the caller to parse again
+    without prefixes; every other failure is in the answer."""
     parsed = collector.parsed
     source = io.BytesIO(body)  # shares the bytes, no copy
     source.seek(start)
     layout: _Layout | None = None
     stack: list[Element] = []
     record: dict[str, str] | None = None
+    root_closed = False
     try:
         for event, element in iterparse(
             source,
@@ -237,6 +259,8 @@ def _parse_xml(body: bytes, start: int, base_url: str, collector: _Collector) ->
                 if len(stack) == layout.depth and name == layout.record:
                     record = {}
                 stack.append(element)
+                if len(stack) > MAX_XML_DEPTH:
+                    raise ParseError("nested too deep")
                 continue
             stack.pop()
             if layout is not None and record is not None:
@@ -252,11 +276,22 @@ def _parse_xml(body: bytes, start: int, base_url: str, collector: _Collector) ->
                     record = None
             if stack:
                 stack[-1].remove(element)  # keep only the open path in memory
+            else:
+                root_closed = True
     except DTDForbidden as exc:
         if (exc.name or "").lower() == "html":
             return ParsedSitemap(format=None, error="unsupported")  # an HTML page
         return ParsedSitemap(format=None, error="invalid")
-    except (ParseError, DefusedXmlException):
+    except ParseError as exc:
+        if retry_prefixes and getattr(exc, "code", None) == _UNBOUND_PREFIX:
+            raise _UnboundPrefixError from None
+        if root_closed:
+            return parsed  # junk after the root: every record was read
+        if not collector.found:
+            return ParsedSitemap(format=parsed.format, error="invalid")
+        parsed.truncated = True
+    except (DefusedXmlException, LookupError, ValueError):
+        # LookupError, ValueError: an unknown or a multi-byte encoding declared
         if not collector.found:
             return ParsedSitemap(format=parsed.format, error="invalid")
         parsed.truncated = True
@@ -268,13 +303,22 @@ def parse_sitemap(body: bytes, base_url: str, *, max_entries: int) -> ParsedSite
     index's children), and how many entries it held. Each ``loc`` is resolved against
     ``base_url`` and normalized; one that is no http(s) URL is dropped and not counted. A body
     whose first byte after a BOM and blanks is not ``<`` is a text sitemap."""
-    collector = _Collector(max_entries)
+    if body.startswith(_UTF16_BOMS):
+        return ParsedSitemap(format=None, error="invalid")  # not read: no empty text sitemap
     start = len(_UTF8_BOM) if body.startswith(_UTF8_BOM) else 0
     match = _LEADING_BLANKS.match(body, start)
     start = match.end() if match else start
     if not body.startswith(b"<", start):
-        return _parse_text(body, start, collector)
-    return _parse_xml(body, start, base_url, collector)
+        return _parse_text(body, start, _Collector(max_entries))
+    try:
+        return _parse_xml(body, start, base_url, _Collector(max_entries), retry_prefixes=True)
+    except _UnboundPrefixError:
+        pass
+    # Elements match by local name anyway, so a prefix nobody declared is dropped and the file
+    # read once more from the start, with a fresh count and the same defusedxml rules. The copy
+    # lives only for the retry.
+    unprefixed = _PREFIXED_TAG.sub(rb"\1", memoryview(body)[start:])
+    return _parse_xml(unprefixed, 0, base_url, _Collector(max_entries), retry_prefixes=False)
 
 
 def pack_parts(entries: Sequence[SitemapEntry], max_bytes: int) -> list[list[SitemapEntry]]:

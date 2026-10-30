@@ -415,3 +415,105 @@ def test_inflate_copies_the_input_only_in_slices() -> None:
     assert (len(body), cut) == (30_000_000, True)
     # the output and its copy, plus at most a slice of input at a time
     assert peak < 2 * 30_000_000 + 1_000_000
+
+
+IMAGE_URL = (
+    "<url><loc>https://a.example/1</loc>"
+    "<image:image><image:loc>https://a.example/1.png</image:loc></image:image></url>"
+)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"<urlset {NS}>{IMAGE_URL}<url><loc>https://a.example/2</loc></url></urlset>",
+        f"<urlset {NS}><url><loc>https://a.example/1</loc></url>"
+        "<url><loc>https://a.example/2</loc><video:video><video:title>T</video:title>"
+        "</video:video></url></urlset>",
+        "<sm:urlset><sm:url><sm:loc>https://a.example/1</sm:loc></sm:url>"
+        "<sm:url><sm:loc>https://a.example/2</sm:loc></sm:url></sm:urlset>",
+    ],
+)
+def test_undeclared_prefixes_are_ignored(body: str) -> None:
+    """Extensions used without their ``xmlns``: elements still match by local name, the
+    extension's ``loc`` is no entry, and nothing is counted twice."""
+    parsed = parse_sitemap(body.encode(), BASE, max_entries=10)
+
+    assert parsed.error is None
+    assert parsed.truncated is False
+    assert locs(parsed.entries) == ["https://a.example/1", "https://a.example/2"]
+    assert parsed.entry_count == 2
+
+
+def test_undeclared_prefix_retry_keeps_entities_refused() -> None:
+    body = fixture("external_entity.xml").replace(b"<url>", b"<url><image:image/>")
+
+    assert parse_sitemap(body, BASE, max_entries=10).error == "invalid"
+
+
+def test_undeclared_prefix_retry_keeps_caps() -> None:
+    body = urlset(25).replace(b"</urlset>", IMAGE_URL.encode() + b"</urlset>")
+
+    parsed = parse_sitemap(body, BASE, max_entries=10)
+
+    assert (len(parsed.entries), parsed.entry_count, parsed.truncated) == (10, 26, True)
+
+
+def test_deep_nesting_is_invalid_and_bounded() -> None:
+    """A gzip bomb of a million nested elements: refused early, memory stays small."""
+    nested = b"<urlset>" + b"<a>" * 1_000_000
+    body, cut = inflate_bounded(gzip.compress(nested), 50_000_000)
+    assert (len(body), cut) == (len(nested), False)
+
+    tracemalloc.start()
+    try:
+        parsed = parse_sitemap(body, BASE, max_entries=10)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert parsed.error == "invalid"
+    assert peak < 5_000_000
+
+
+def test_deep_nesting_after_entries_is_truncated() -> None:
+    body = urlset(2, close=False) + b"<a>" * 100
+
+    parsed = parse_sitemap(body, BASE, max_entries=10)
+
+    assert (parsed.error, parsed.entry_count, parsed.truncated) == (None, 2, True)
+
+
+def test_legit_depth_is_read() -> None:
+    body = (
+        b'<feed xmlns="http://www.w3.org/2005/Atom"><entry><link href="https://a.example/x"/>'
+        b'<content type="xhtml"><div><div><div><p><b>x</b></p></div></div></div></content>'
+        b"</entry></feed>"
+    )
+
+    assert locs(parse_sitemap(body, BASE, max_entries=10).entries) == ["https://a.example/x"]
+
+
+@pytest.mark.parametrize("encoding", ["bogus", "shift_jis", "big5", "utf-32", "rot13"])
+def test_unsupported_encoding_is_invalid(encoding: str) -> None:
+    body = f'<?xml version="1.0" encoding="{encoding}"?><urlset {NS}></urlset>'.encode()
+
+    parsed = parse_sitemap(body, BASE, max_entries=10)
+
+    assert (parsed.format, parsed.error) == (None, "invalid")
+
+
+def test_trailing_junk_after_the_root_is_not_truncated() -> None:
+    body = urlset(2) + b"<stray/>"
+
+    parsed = parse_sitemap(body, BASE, max_entries=10)
+
+    assert (parsed.error, parsed.entry_count, parsed.truncated) == (None, 2, False)
+
+
+@pytest.mark.parametrize("bom", [b"\xff\xfe", b"\xfe\xff"])
+def test_utf16_is_invalid_not_an_empty_text_sitemap(bom: bytes) -> None:
+    codec = "utf-16-le" if bom == b"\xff\xfe" else "utf-16-be"
+    body = bom + f"<urlset {NS}><url><loc>https://a.example/</loc></url></urlset>".encode(codec)
+
+    assert parse_sitemap(body, BASE, max_entries=10).error == "invalid"
