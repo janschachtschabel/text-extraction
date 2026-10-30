@@ -1,0 +1,18 @@
+<form class="op" hx-post="/ui/run/chunk" hx-target="#result" hx-swap="innerHTML">
+  {% set prefix = "chunk" %}
+  <p class="hint">A URL or a text, not both.</p>
+  <label for="chunk-url">URL</label>
+  <input id="chunk-url" name="url" type="url" placeholder="https://" spellcheck="false">
+  <label for="chunk-text">Text</label>
+  <textarea id="chunk-text" name="text" rows="6"></textarea>
+  <label for="chunk-text-type">The text is</label>
+  <select id="chunk-text-type" name="text_type">
+    <option value="markdown" selected>Markdown</option>
+    <option value="plain">plain text</option>
+  </select>
+  {% include "forms/format.html" %}
+  <label for="chunk-chunking">Chunking (JSON)</label>
+  <textarea id="chunk-chunking" name="chunking" rows="3" spellcheck="false" required>{"strategy": "recursive", "size": 800}</textarea>
+  {% include "forms/common.html" %}
+  <button type="submit">Chunk</button>
+</form>

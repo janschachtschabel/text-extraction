@@ -58,6 +58,7 @@ from text_extraction.structured.selector_pool import SelectorRunner, create_sele
 from text_extraction.structured_api import CHUNK_PATH
 from text_extraction.structured_api import router as structured_router
 from text_extraction.tracing import TraceMiddleware
+from text_extraction.vision.fetch import ImageFetcher
 
 _log = structlog.get_logger(__name__)
 
@@ -114,8 +115,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     the queue gauges; wait for extractions handed over to a job; stop the guard and the gauges
     (their tasks read Valkey, whose client the server closes after the lifespan); close the
     fetcher's connections, the conversion pool, the document pool, the selector children, the
-    media fetcher and, last, the post pool. With ``MCP_ENABLED`` it runs the MCP app's lifespan
-    (its session manager) while the app serves."""
+    media fetcher, the UI's image fetcher and, last, the post pool. With ``MCP_ENABLED`` it runs
+    the MCP app's lifespan (its session manager) while the app serves."""
     documents: DocumentPool = app.state.document_pool
     selectors: SelectorRunner = app.state.selector_runner
     media: MediaFetcher | None = app.state.media_fetcher
@@ -152,6 +153,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await selectors.shutdown()
         if media is not None:
             await media.stop()
+        ui_images: ImageFetcher | None = app.state.ui_images
+        if ui_images is not None:
+            await ui_images.aclose()
         post_pool: ConversionPool = app.state.post_pool
         post_pool.shutdown()
 
@@ -176,12 +180,14 @@ def _add_mcp(app: FastAPI, settings: Settings, registry: CollectorRegistry) -> M
 
 
 def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
-    """Serve the UI at ``/ui`` (rulings P10-S12 to P10-S14): its routes (left out of the OpenAPI
-    spec), its static files at ``/ui/static`` and the plain-text 403 of the ``/ui/run`` guard.
+    """Serve the UI at ``/ui`` (rulings P10-S12 to P10-S16): its routes (left out of the OpenAPI
+    spec), its static files at ``/ui/static``, the plain-text 403 of the ``/ui/run`` guard and
+    the previews' ``ImageFetcher`` in ``app.state.ui_images`` (with its counter).
     Returns the body limits of its ``/ui/run`` routes. The UI's modules are imported only here
     and in `_add_ui_headers`, so ``jinja2`` is not imported while the UI is off."""
     from fastapi.staticfiles import StaticFiles  # only with UI_ENABLED
 
+    from text_extraction.ui.previews import preview_counter
     from text_extraction.ui.routes import STATIC_DIR, create_ui_router
     from text_extraction.ui.security import (
         STATIC_PREFIX,
@@ -189,7 +195,12 @@ def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
         run_body_limits,
         ui_refused_response,
     )
+    from text_extraction.vision.fetch import create_image_fetcher
 
+    # The previews' fetcher (P10-S16): the vision step's checks, a fetcher of its own; the
+    # lifespan closes it.
+    app.state.ui_images = create_image_fetcher(settings, app.state.valkey)
+    app.state.ui_image_previews = preview_counter(app.state.registry)
     app.include_router(create_ui_router(settings))
     app.mount(STATIC_PREFIX, StaticFiles(directory=STATIC_DIR), name="ui-static")
     app.add_exception_handler(UiRefused, ui_refused_response)
@@ -345,6 +356,7 @@ def create_public_app(
         CHUNK_PATH: text_body_limit(settings),  # a text is chunked as an upload
     }
     app.state.mcp = None
+    app.state.ui_images = None
     if settings.mcp_enabled:
         app.state.mcp = _add_mcp(app, settings, registry)
         path_limits[MCP_PATH] = mcp_body_limit(settings)

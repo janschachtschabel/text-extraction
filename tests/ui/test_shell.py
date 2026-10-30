@@ -451,8 +451,9 @@ def test_run_body_limits() -> None:
         batch_file = client.post("/ui/run/batch-file", headers=HX, content=b"x" * 2049)
 
     assert over_default.status_code == 413
-    # Neither route exists before Task 8 and 9: within their limits they reach the router.
-    assert file_route.status_code == 404
+    # Within its limit the upload route reads the form (here not one: "Choose a file").
+    assert file_route.status_code == 200
+    # The batch file route does not exist before Task 9: within its limit it reaches the router.
     assert over_batch_file.status_code == 413
     assert batch_file.status_code == 404
 

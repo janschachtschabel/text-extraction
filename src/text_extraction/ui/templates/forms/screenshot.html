@@ -1,0 +1,11 @@
+<form class="op" hx-post="/ui/run/screenshot" hx-target="#result" hx-swap="innerHTML">
+  {% set prefix = "screenshot" %}
+  <label for="screenshot-url">URL</label>
+  <input id="screenshot-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  <fieldset class="choice">
+    <legend>Capture</legend>
+    <label class="inline"><input type="checkbox" name="full_page" value="on" checked> The whole page</label>
+  </fieldset>
+  {% include "forms/common.html" %}
+  <button type="submit">Take a screenshot</button>
+</form>

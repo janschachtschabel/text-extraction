@@ -1,0 +1,17 @@
+<form class="op" hx-post="/ui/run/extract" hx-target="#result" hx-swap="innerHTML">
+  {% set prefix = "extract" %}
+  <label for="extract-url">URL</label>
+  <input id="extract-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  {% include "forms/format.html" %}
+  {% include "forms/mode.html" %}
+  <fieldset class="choice">
+    <legend>Also</legend>
+    <label class="inline"><input type="checkbox" name="metadata" value="on" checked> Metadata</label>
+    <label class="inline"><input type="checkbox" name="metadata_structured" value="on"> Metadata, structured</label>
+    <label class="inline"><input type="checkbox" name="describe_images" value="on"> Describe images</label>
+  </fieldset>
+  <label for="extract-max-images">Images to describe (1 to 20)</label>
+  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5">
+  {% include "forms/common.html" %}
+  <button type="submit">Extract</button>
+</form>

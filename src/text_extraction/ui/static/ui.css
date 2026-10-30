@@ -170,3 +170,156 @@ button.secondary {
 .result:empty {
   display: none;
 }
+
+/* Forms of the operations. */
+fieldset.choice {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+label.inline {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  margin: 0 1rem 0 0;
+  font-weight: 400;
+}
+
+label.inline input {
+  width: auto;
+}
+
+.hint {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+/* The result view. */
+.result {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.answer {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.http-status,
+.badge {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  font-size: 0.85em;
+}
+
+.badge-success {
+  color: #1d6b35;
+}
+
+.badge-partial {
+  color: var(--warn);
+}
+
+.badge-failed {
+  color: var(--error);
+}
+
+.error-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+}
+
+pre {
+  overflow-x: auto;
+  max-height: 32rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--wash);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+dl.facts,
+dl.meta,
+dl.info {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+dt {
+  font-weight: 600;
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.35rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.download {
+  display: inline-block;
+  margin-bottom: 0.5rem;
+}
+
+.markdown {
+  padding: 0 0.75rem;
+  border-left: 3px solid var(--line);
+}
+
+ol.timeline .step {
+  font-weight: 600;
+}
+
+.ms,
+.kind {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+.preview-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+figure.preview {
+  margin: 0;
+  max-width: 14rem;
+}
+
+figure.preview img,
+img.screenshot {
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+}
+
+.skipped {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border-radius: 6px;
+  background: var(--warn-wash);
+  color: var(--warn);
+}
