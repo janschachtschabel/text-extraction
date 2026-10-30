@@ -6,6 +6,7 @@ counters, next to the job's own keys and under the same hash tag, so one script 
                           or robots item under ``s:<key>`` (a sitemap at a page's URL is another
                           item). The caller passes the plain seen key; the store adds the prefix.
 - ``job:{<id>}:children`` hash: parent index -> the stored answer of the parent's ``extend``
+                          (batch 0), ``<parent>:<batch>`` -> that of a later batch
 - ``job:{<id>}:site``     hash: ``scope`` (``SiteScope`` JSON, set once), ``pages`` (page items,
                           the start page included), ``files`` (sitemap items), ``entries``
                           (sitemap entries granted) and ``e:<index>`` (the grant of one item)
@@ -13,13 +14,14 @@ counters, next to the job's own keys and under the same hash tag, so one script 
 Every write gives the keys the remaining TTL of ``meta``, so they expire with the job; ``delete``
 and ``shorten`` of ``JobStore`` remove or cut them.
 
-``extend`` is the one step that grows the job: in one script it appends the parent's new items
-(``urls``, ``total``, node, seen key, counter) and its finished items (with result, done bit and
-the counters ``_STORE_RESULT`` keeps), then stores its answer under the parent. A parent that runs
-again (a lost lease) gets that answer back and appends nothing, so its children can be queued
-again without new items. Finished and new items both raise ``total``, and the parent itself is
-not done yet, so an ``extend`` never completes the job; one for a parent that has its result
-already (a worker whose lease was taken back finishing late) appends nothing at all.
+``extend`` is the one step that grows the job: in one script per batch of at most
+``EXTEND_BATCH`` candidates it appends the parent's new items (``urls``, ``total``, node, seen
+key, counter) and, with batch 0, its finished items (with result, done bit and the counters
+``_STORE_RESULT`` keeps), then stores its answer under the parent and batch. A parent that runs
+again (a lost lease) gets each batch's answer back and appends nothing, so its children can be
+queued again without new items. Finished and new items both raise ``total``, and the parent
+itself is not done yet, so an ``extend`` never completes the job; one for a parent that has its
+result already (a worker whose lease was taken back finishing late) appends nothing at all.
 """
 
 from collections.abc import Sequence
@@ -36,7 +38,14 @@ from text_extraction.site.types import SiteNode, SiteScope
 from text_extraction.site.urls import seen_key
 from text_extraction.valkey import reply_text
 
-__all__ = ["Candidate", "ExtendAnswer", "Finished", "SiteContext", "SiteStore"]
+__all__ = ["EXTEND_BATCH", "Candidate", "ExtendAnswer", "Finished", "SiteContext", "SiteStore"]
+
+# The most candidates of one ``extend`` call (ruling R-P9-1): a parent with more sends them in
+# batches, so one script holds Valkey for tens of milliseconds at most.
+EXTEND_BATCH = 1000
+
+# A candidate without an index in a stored answer.
+_NO_INDEX = "-"
 
 # The prefix of a sitemap's or the robots item's seen key.
 _FILE_PREFIX = "s:"
@@ -58,13 +67,17 @@ end
 """
 
 # KEYS = meta, nodes, seen, site; ARGV = the start URL's seen key, node 0 JSON, ttl_ms (used when
-# meta has no TTL). Returns 1, or -1 when the job is gone (nothing is written).
+# meta has no TTL). Returns 1 (a job with node 0 already is left as it is), or -1 when the job is
+# gone (nothing is written).
 _INIT = (
     "#!lua\n"
     + _TTL
     + """
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return -1
+end
+if redis.call('HEXISTS', KEYS[2], '0') == 1 then
+  return 1
 end
 redis.call('HSET', KEYS[2], '0', ARGV[2])
 redis.call('HSET', KEYS[3], ARGV[1], '0')
@@ -79,12 +92,14 @@ return 1
 
 # KEYS = meta, urls, results, done, nodes, seen, children, site.
 # ARGV = parent, max_pages, max_files, ttl_ms, scope JSON ('' for none), candidate count,
-# finished count, alias count, then per candidate key (prefixed), url, node JSON, add ('1'/'0'),
+# finished count, alias count, the ``children`` field of the call (``<parent>`` for batch 0,
+# ``<parent>:<batch>`` after it), then per candidate key (prefixed), url, node JSON, add ('1'/'0'),
 # cap ('p', 'f', '-'); per finished item url, node JSON, result JSON, status; per alias its key.
-# Returns {code, answer, url...}: code 1 (appended), 0 (repeat: the stored answer, or the parent
-# has its result already) or -1 (job gone) / -2 (parent outside the job), nothing written then.
-# The answer is ``capped|indexes|new``: capped '1' or '0', the candidates' indexes ('' for none)
-# and the new indexes, each comma-separated; the URLs of the new indexes follow it.
+# Returns {code, answer, url...}: code 1 (appended), 0 (repeat: the stored answer of the batch, or
+# the parent has its result already) or -1 (job gone) / -2 (parent outside the job), nothing
+# written then. The answer is ``capped|indexes|new``: capped '1' or '0', the candidates' indexes
+# ('-' for none; '' only when there are no candidates) and the new indexes, each comma-separated;
+# the URLs of the new indexes follow it.
 _EXTEND = (
     "#!lua\n"
     + _TTL
@@ -112,7 +127,8 @@ local function with_urls(code, answer)
   return reply
 end
 
-local stored = redis.call('HGET', KEYS[7], parent)
+local field = ARGV[9]
+local stored = redis.call('HGET', KEYS[7], field)
 if stored then
   return with_urls(0, stored)
 end
@@ -120,7 +136,7 @@ end
 local candidates = tonumber(ARGV[6])
 local finished = tonumber(ARGV[7])
 local aliases = tonumber(ARGV[8])
-local first_candidate = 9
+local first_candidate = 10
 local first_finished = first_candidate + 5 * candidates
 local first_alias = first_finished + 4 * finished
 -- A parent with its result already: its links count no more; answer the look-ups only.
@@ -153,6 +169,10 @@ if not closed then
     redis.call('HINCRBY', KEYS[1], 'done', 1)
     redis.call('HINCRBY', KEYS[1], ARGV[base + 3], 1)
   end
+  -- Before the candidates: a redirected page's link to its own final URL is the page.
+  for i = 0, aliases - 1 do
+    redis.call('HSETNX', KEYS[6], ARGV[first_alias + i], parent)
+  end
 end
 
 for i = 0, candidates - 1 do
@@ -162,11 +182,11 @@ for i = 0, candidates - 1 do
   if index then
     indexes[#indexes + 1] = index
   elseif closed or ARGV[base + 3] ~= '1' then
-    indexes[#indexes + 1] = ''
+    indexes[#indexes + 1] = '-'
   else
     local cap = ARGV[base + 4]
     if cap == 'p' and pages >= max_pages or cap == 'f' and files >= max_files then
-      indexes[#indexes + 1] = ''
+      indexes[#indexes + 1] = '-'
       capped = '1'
     else
       if cap == 'p' then
@@ -187,14 +207,11 @@ if closed then
   return {0, answer}
 end
 
-for i = 0, aliases - 1 do
-  redis.call('HSETNX', KEYS[6], ARGV[first_alias + i], parent)
-end
 if appended > 0 then
   redis.call('HSET', KEYS[1], 'total', total)
 end
 redis.call('HSET', KEYS[8], 'pages', pages, 'files', files)
-redis.call('HSET', KEYS[7], parent, answer)
+redis.call('HSET', KEYS[7], field, answer)
 for i = 2, 8 do
   if redis.call('EXISTS', KEYS[i]) == 1 then
     redis.call('PEXPIRE', KEYS[i], ttl)
@@ -275,11 +292,18 @@ class SiteContext:
     scope: SiteScope | None
 
 
+def _children_field(parent: int, batch: int) -> str:
+    """Where the answer of a parent's batch is stored in ``children``."""
+    return str(parent) if batch == 0 else f"{parent}:{batch}"
+
+
 def _decode_answer(answer: str) -> tuple[bool, list[int | None], list[int]]:
     capped, indexes, new = answer.split("|")
     return (
         capped == "1",
-        [int(value) if value else None for value in indexes.split(",")] if indexes else [],
+        [None if value == _NO_INDEX else int(value) for value in indexes.split(",")]
+        if indexes
+        else [],
         [int(value) for value in new.split(",")] if new else [],
     )
 
@@ -329,8 +353,9 @@ class SiteStore:
         aliases: Sequence[str] = (),
         max_pages: int,
         scope: SiteScope | None = None,
+        batch: int = 0,
     ) -> ExtendAnswer:
-        """Grow the job by what item ``parent`` found, in one step (P9-S3).
+        """Grow the job by what item ``parent`` found, in one step per batch (P9-S3, R-P9-1).
 
         A candidate whose key is seen answers that item's index. An ``add`` candidate under its
         cap (page items fewer than ``max_pages``, sitemap items fewer than
@@ -338,9 +363,22 @@ class SiteStore:
         None and sets ``capped``. ``finished`` items are appended first, done, with their
         results. ``aliases`` (the parent's other URLs, its ``final_url`` after a redirect) are
         seen as the parent, unless another item has the key. ``scope`` is kept if none is set.
-        The answer is stored under the parent: a second call for it answers the same and
-        appends nothing (``repeat``). Raises ``JobLost`` when the job is gone and ``ValueError``
-        when ``parent`` is outside the job; nothing is written then."""
+        The answer is stored under the parent and ``batch``: a second call for them answers the
+        same and appends nothing (``repeat``).
+
+        A parent with more than ``EXTEND_BATCH`` candidates sends them in batches 0, 1, 2, ...
+        of at most that many, in the same order on a rerun; ``finished``, ``aliases`` and
+        ``scope`` go with batch 0 only. The batches share the caps, and each one is all or
+        nothing. Raises ``JobLost`` when the job is gone and ``ValueError`` when ``parent`` is
+        outside the job (nothing is written then), or for a call against these rules."""
+        if batch < 0:
+            raise ValueError(f"batch {batch} is negative")
+        if len(candidates) > EXTEND_BATCH:
+            raise ValueError(
+                f"{len(candidates)} candidates: one batch takes at most {EXTEND_BATCH}"
+            )
+        if batch > 0 and (finished or aliases or scope is not None):
+            raise ValueError("finished items, aliases and the scope go with batch 0 only")
         args: list[Any] = [
             parent,
             max_pages,
@@ -350,6 +388,7 @@ class SiteStore:
             len(candidates),
             len(finished),
             len(aliases),
+            _children_field(parent, batch),
         ]
         for candidate in candidates:
             cap = _CAPS.get(candidate.node.role)
@@ -398,12 +437,16 @@ class SiteStore:
         return granted
 
     async def stored_children(self, job_id: str, parent: int) -> list[tuple[int, str]]:
-        """The items that the stored answer of ``parent`` appended, as ``(index, url)``; empty
-        when it has none (it never extended, or the job is gone)."""
-        stored = await self._valkey.hget(job_key(job_id, "children"), str(parent))
-        if stored is None:
-            return []
-        _, _, new = _decode_answer(reply_text(stored))
+        """The items that the stored answers of ``parent`` appended, as ``(index, url)``, its
+        batches in order; empty when it has none (it never extended, or the job is gone)."""
+        children = job_key(job_id, "children")
+        answers: list[tuple[int, str]] = []
+        stored = await self._valkey.hget(children, str(parent))
+        if stored is not None:
+            answers.append((0, reply_text(stored)))
+        async for field, value in self._valkey.hscan_iter(children, match=f"{parent}:*"):
+            answers.append((int(reply_text(field).split(":", 1)[1]), reply_text(value)))
+        new = [index for _, answer in sorted(answers) for index in _decode_answer(answer)[2]]
         if not new:
             return []
         async with self._valkey.pipeline(transaction=False) as pipe:

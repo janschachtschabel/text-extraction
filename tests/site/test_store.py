@@ -15,7 +15,7 @@ from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobLost, JobStore
 from text_extraction.settings import Settings
-from text_extraction.site.store import Candidate, ExtendAnswer, Finished, SiteStore
+from text_extraction.site.store import EXTEND_BATCH, Candidate, ExtendAnswer, Finished, SiteStore
 from text_extraction.site.types import SiteInfo, SiteNode, SiteOptions, SiteScope
 from text_extraction.site.urls import seen_key
 
@@ -453,3 +453,129 @@ def test_scripts_carry_script_flags() -> None:
 
     for name in ("_INIT", "_EXTEND", "_RESERVE_ENTRIES"):
         assert getattr(store, name).startswith("#!lua\n"), name
+
+
+@scenario
+async def test_one_unindexed_candidate_keeps_its_slot() -> None:
+    """A single candidate without an index answers ``[None]``, not ``[]``, also on a repeat."""
+    valkey = FakeAsyncRedis()
+    _, sites, job_id = await start(valkey)
+    lookup = page("https://example.org/deep", add=False)
+
+    first = await sites.extend(job_id, 0, [lookup], max_pages=10)
+    again = await sites.extend(job_id, 0, [lookup], max_pages=10)
+
+    assert first == ExtendAnswer(indexes=[None], new=[], capped=False, repeat=False)
+    assert again == ExtendAnswer(indexes=[None], new=[], capped=False, repeat=True)
+    # Refused by the cap: the slot stays as well.
+    _, capped_sites, capped_job = await start(valkey)
+    refused = page("https://example.org/full")
+    first = await capped_sites.extend(capped_job, 0, [refused], max_pages=1)
+    again = await capped_sites.extend(capped_job, 0, [refused], max_pages=1)
+    assert first == ExtendAnswer(indexes=[None], new=[], capped=True, repeat=False)
+    assert again == ExtendAnswer(indexes=[None], new=[], capped=True, repeat=True)
+    # No candidates at all is an empty answer.
+    empty = await capped_sites.extend(capped_job, 0, [], max_pages=1, batch=1)
+    assert empty.indexes == []
+
+
+@scenario
+async def test_self_link_after_a_redirect_is_the_parent() -> None:
+    """Review Focus 1: ``/`` redirects to ``/de/`` and the page links to ``/de/``: the link is
+    the page itself, not a second item."""
+    valkey = FakeAsyncRedis()
+    jobs, sites, job_id = await start(valkey)
+    final = "https://example.org/de/"
+
+    answer = await sites.extend(job_id, 0, [page(final)], aliases=[final], max_pages=10)
+
+    assert answer.indexes == [0]
+    assert answer.new == []
+    record = await jobs.get(job_id)
+    assert record is not None
+    assert record.progress.total == 1
+
+
+@scenario
+async def test_batched_extend_of_a_large_parent() -> None:
+    """R-P9-1: a parent sends its candidates in batches of at most ``EXTEND_BATCH``; each batch
+    is stored and repeated on its own, and the batches share the caps."""
+    valkey = FakeAsyncRedis()
+    jobs, sites, job_id = await start(valkey)
+    urls = [f"https://example.org/p{n}" for n in range(2500)]
+    candidates = [page(url) for url in urls]
+    batches = [candidates[start : start + EXTEND_BATCH] for start in range(0, 2500, EXTEND_BATCH)]
+    assert [len(batch) for batch in batches] == [1000, 1000, 500]
+
+    answers = [
+        await sites.extend(job_id, 0, batch, max_pages=2001, batch=number)
+        for number, batch in enumerate(batches)
+    ]
+
+    assert [answer.repeat for answer in answers] == [False, False, False]
+    assert answers[0].indexes == list(range(1, 1001))
+    assert answers[1].indexes == list(range(1001, 2001))
+    assert answers[2].indexes == [None] * 500  # the page cap counts across batches
+    assert answers[2].capped
+    record = await jobs.get(job_id)
+    assert record is not None
+    assert record.progress.total == 2001
+
+    again = await sites.extend(job_id, 0, batches[1], max_pages=2001, batch=1)
+
+    assert again == ExtendAnswer(
+        indexes=answers[1].indexes, new=answers[1].new, capped=False, repeat=True
+    )
+    children = await sites.stored_children(job_id, 0)
+    assert children == [(n, urls[n - 1]) for n in range(1, 2001)]
+    record = await jobs.get(job_id)
+    assert record is not None
+    assert record.progress.total == 2001
+
+
+@scenario
+async def test_stored_children_in_batch_order() -> None:
+    valkey = FakeAsyncRedis()
+    _, sites, job_id = await start(valkey)
+    # Batches stored out of order (a rerun that died after batch 2); ten and more batches sort
+    # by number, not as text.
+    for number in (2, 10, 0, 1):
+        url = f"https://example.org/b{number}"
+        await sites.extend(job_id, 0, [page(url)], max_pages=100, batch=number)
+
+    children = await sites.stored_children(job_id, 0)
+
+    assert [url for _, url in children] == [
+        f"https://example.org/b{number}" for number in (0, 1, 2, 10)
+    ]
+    assert await sites.stored_children(job_id, 1) == []
+
+
+@scenario
+async def test_batch_limits() -> None:
+    _, sites, job_id = await start(FakeAsyncRedis())
+    too_many = [page(f"https://example.org/p{n}") for n in range(EXTEND_BATCH + 1)]
+
+    with pytest.raises(ValueError, match="batch"):
+        await sites.extend(job_id, 0, too_many, max_pages=10)
+    for extra in (
+        {"finished": [part(ROOT, 2)]},
+        {"aliases": ["https://example.org/de/"]},
+        {"scope": SCOPE},
+    ):
+        with pytest.raises(ValueError, match="batch 0"):
+            await sites.extend(job_id, 0, [], max_pages=10, batch=1, **extra)
+    with pytest.raises(ValueError, match="batch"):
+        await sites.extend(job_id, 0, [], max_pages=10, batch=-1)
+
+
+@scenario
+async def test_init_twice_changes_nothing() -> None:
+    valkey = FakeAsyncRedis()
+    _, sites, job_id = await start(valkey)
+    await sites.extend(job_id, 0, [page("https://example.org/a")], max_pages=10)
+
+    await sites.init(job_id, "https://other.example/")
+
+    assert await valkey.hget(f"job:{{{job_id}}}:site", "pages") == b"2"
+    assert await seen_index(valkey, job_id, seen_key("https://other.example/")) is None

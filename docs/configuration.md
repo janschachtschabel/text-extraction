@@ -744,11 +744,12 @@ deleted with the job:
 | --- | --- |
 | `job:{<id>}:nodes` | Hash of item index to the item's role (`page`, `robots`, `sitemap`, `sitemap_part`), depth, parent, whether a sitemap was guessed, and a part's number (JSON). |
 | `job:{<id>}:seen` | Hash of a URL's seen key to its item index. The key is the normal URL without its scheme and without a leading `www.`, so the http, https and `www.` spellings are one page; sitemap and robots.txt items are kept under `s:<key>`. A redirected page's final URL points to its item too. |
-| `job:{<id>}:children` | Hash of an item's index to what its links or sitemap entries appended. An item that runs a second time (after a lost lease) gets that answer back and appends nothing. |
+| `job:{<id>}:children` | Hash of an item's index to what its links or sitemap children appended; an item with more than 1,000 sends them in batches, and batch 1 and later are stored under `<index>:<batch>`. An item that runs a second time (after a lost lease) gets each batch's answer back and appends nothing. |
 | `job:{<id>}:site` | Hash: the crawl's scope, the counters `pages` (against the request's `max_pages`), `files` (against `SITE_MAX_SITEMAP_FILES`) and `entries` (against `SITE_MAX_SITEMAP_URLS`), and `e:<index>` (the entries granted to one sitemap item). |
 
-One script appends an item's finds, its sitemap parts with their results included, and stores its
-answer, so a worker that dies halfway leaves either all of it or nothing.
+One script per batch of at most 1,000 links appends an item's finds (with batch 0 also its sitemap
+parts, results included) and stores its answer, so a worker that dies halfway leaves each batch
+either complete or untouched, and its rerun carries on.
 
 ## Queue keys
 

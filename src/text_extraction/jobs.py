@@ -98,8 +98,9 @@ only the four keys above; nothing reads the crawl keys of a completed job):
                           part)
 - ``job:{<id>}:seen``     hash: seen key (``site.urls.seen_key``) -> item index; sitemap and
                           robots items under ``s:<key>``
-- ``job:{<id>}:children`` hash: parent index -> the stored answer of its ``extend``, so a parent
-                          that runs again appends nothing
+- ``job:{<id>}:children`` hash: parent index (``<parent>:<batch>`` for batch 1 and later) ->
+                          the stored answer of its ``extend``, so a parent that runs again
+                          appends nothing
 - ``job:{<id>}:site``     hash: ``scope`` (``SiteScope`` JSON), the counters ``pages``,
                           ``files`` and ``entries``, and ``e:<index>`` (the sitemap entries
                           granted to that item)
