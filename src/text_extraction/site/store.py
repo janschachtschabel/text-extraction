@@ -444,7 +444,9 @@ class SiteStore:
         stored = await self._valkey.hget(children, str(parent))
         if stored is not None:
             answers.append((0, reply_text(stored)))
-        async for field, value in self._valkey.hscan_iter(children, match=f"{parent}:*"):
+        # Many batches of a large page: 1,000 fields a step, not the default 10.
+        scan = self._valkey.hscan_iter(children, match=f"{parent}:*", count=1000)
+        async for field, value in scan:
             answers.append((int(reply_text(field).split(":", 1)[1]), reply_text(value)))
         new = [index for _, answer in sorted(answers) for index in _decode_answer(answer)[2]]
         if not new:

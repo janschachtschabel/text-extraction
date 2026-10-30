@@ -44,6 +44,11 @@ share one load of each file (cache read, fetch, cache write); other pods load th
 whose last waiting check is cancelled is cancelled too, so no request outlives the gate turn it
 ran in.
 Parsing a rules file runs in a worker thread, off the event loop.
+
+``ComplianceChecker.robots_sitemaps`` reads the ``Sitemap:`` lines of an origin's robots.txt
+for the site crawl (package 9), from the same cache entry: with ``cached_only`` it answers None
+while the file is not cached; otherwise it loads robots.txt alone, in the caller's turn. It
+checks nothing, so it reads the file in every mode.
 """
 
 import asyncio
@@ -101,6 +106,16 @@ _BOT_NAME = re.compile(r"[a-z0-9_.*-]+")
 
 _CacheState = Literal["found", "absent", "unavailable"]
 _CACHE_STATES: frozenset[str] = frozenset({"found", "absent", "unavailable"})
+
+
+class RobotsSitemaps(BaseModel):
+    """The sitemaps an origin's robots.txt lists: its ``state`` (``found``, ``absent`` or
+    ``unavailable``, as cached) and the ``Sitemap:`` URLs of a found file, absolute http(s) only,
+    normalized (``site.urls.normalize_url``), duplicates dropped, in the file's order. They are
+    text: any host or address may appear, and the fetch that follows one checks it."""
+
+    state: _CacheState
+    urls: list[str] = Field(default_factory=list)
 
 
 class ComplianceReport(BaseModel):
@@ -288,6 +303,24 @@ class ComplianceChecker:
         if robots is None or tdmrep is None or ai is None:
             return None
         return await self._judge(mode, url, robots, tdmrep, ai)
+
+    async def robots_sitemaps(self, url: str, *, cached_only: bool) -> RobotsSitemaps | None:
+        """The sitemaps the robots.txt of ``url``'s origin lists. With ``cached_only`` from the
+        cache alone (None while robots.txt is not cached, or the cache cannot be read);
+        otherwise the file is loaded when it is not cached (shared with concurrent checks,
+        within the 10 s budget of an origin's files), so call it in the host's turn."""
+        origin = _origin(url)
+        key = _cache_key("robots", origin)
+        if cached_only:
+            entry = await self._cache_get(key)
+            if entry is None:
+                return None
+        else:
+            entry = await self._load(
+                "robots", origin, _ROBOTS_PATH, time.monotonic() + _FILE_TIMEOUT_SECONDS
+            )
+        rules = await self._rules(entry)
+        return RobotsSitemaps(state=entry.state, urls=_sitemap_urls(rules))
 
     async def _judge(
         self, mode: ComplianceMode, url: str, robots: _Entry, tdmrep: _Entry, ai: _Entry
@@ -558,6 +591,21 @@ def _parse_rules(text: str) -> Protego | None:
     except Exception:  # untrusted input: any parser failure means the file is unusable
         _log.warning("compliance_rules_unparsable")
         return None
+
+
+def _sitemap_urls(rules: Protego | None) -> list[str]:
+    """The ``Sitemap:`` URLs of parsed rules: absolute http(s) ones, normalized, each once."""
+    # Imported here: ``site.urls`` imports ``site.types``, which imports this module.
+    from text_extraction.site.urls import normalize_url
+
+    if rules is None:
+        return []
+    urls: dict[str, None] = {}
+    for raw in rules.sitemaps:
+        normal = normalize_url(raw)
+        if normal is not None:
+            urls.setdefault(normal, None)
+    return list(urls)
 
 
 def _crawl_delay(rules: Protego) -> float | None:

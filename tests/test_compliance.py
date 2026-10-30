@@ -1306,3 +1306,63 @@ def test_a_spent_budget_sends_no_request_and_caches_unavailable(
     assert report.robots == "unavailable"
     assert report.decision == "reported"
     assert blocking_code(report) is None
+
+
+# --- robots.txt's sitemaps (package 9, ruling P9-S10) ------------------------------------------
+
+ROBOTS_WITH_SITEMAPS = (
+    "User-agent: *\nDisallow: /docs/\n"
+    "Sitemap: HTTPS://Example.ORG/sitemap.xml#part\n"
+    "Sitemap: https://example.org/news.xml\n"
+    "Sitemap: https://example.org/sitemap.xml\n"
+    "Sitemap: ftp://example.org/files.xml\n"
+    "Sitemap: /relative.xml\n"
+)
+
+
+def test_robots_sitemaps_lists_normalized_http_urls() -> None:
+    checker, fetcher, _ = make_checker(robots_answer(ROBOTS_WITH_SITEMAPS))
+
+    answer = asyncio.run(checker.robots_sitemaps(PAGE, cached_only=False))
+
+    assert answer == compliance.RobotsSitemaps(
+        state="found",
+        urls=["https://example.org/sitemap.xml", "https://example.org/news.xml"],
+    )
+    assert fetcher.urls() == [ROBOTS]  # robots.txt only
+
+
+@pytest.mark.parametrize(
+    ("answers", "state"),
+    [
+        (robots_answer("Not found", 404), "absent"),
+        (robots_answer("Busy", 429), "unavailable"),
+        (robots_answer("Down", 503), "unavailable"),
+        ({ROBOTS: FetchError(ErrorCode.CONNECTION_ERROR, "Refused.")}, "unavailable"),
+        (robots_answer("User-agent: *\nDisallow: /docs/\n"), "found"),
+    ],
+)
+def test_robots_sitemaps_states(answers: dict[str, FetchResult | FetchError], state: str) -> None:
+    checker, _, _ = make_checker(answers)
+
+    answer = asyncio.run(checker.robots_sitemaps(PAGE, cached_only=False))
+
+    assert answer == compliance.RobotsSitemaps(state=state, urls=[])  # type: ignore[arg-type]
+
+
+def test_robots_sitemaps_cached_only() -> None:
+    checker, fetcher, _ = make_checker(robots_answer(ROBOTS_WITH_SITEMAPS))
+
+    async def scenario() -> tuple[object, object]:
+        before = await checker.robots_sitemaps(PAGE, cached_only=True)
+        await checker.before_fetch(PAGE, "enforce")  # caches the origin's files
+        fetcher.calls.clear()
+        return before, await checker.robots_sitemaps(PAGE, cached_only=True)
+
+    before, after = asyncio.run(scenario())
+
+    assert before is None
+    assert isinstance(after, compliance.RobotsSitemaps)
+    assert after.state == "found"
+    assert after.urls == ["https://example.org/sitemap.xml", "https://example.org/news.xml"]
+    assert fetcher.calls == []

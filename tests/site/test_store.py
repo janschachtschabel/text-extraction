@@ -552,6 +552,27 @@ async def test_stored_children_in_batch_order() -> None:
 
 
 @scenario
+async def test_stored_children_scans_in_large_steps() -> None:
+    valkey = FakeAsyncRedis()
+    _, sites, job_id = await start(valkey)
+    await sites.extend(job_id, 0, [page("https://example.org/b1")], max_pages=100, batch=1)
+    scans: list[dict[str, Any]] = []
+    scan = valkey.hscan_iter
+
+    def recording_scan(name: Any, **options: Any) -> Any:
+        scans.append(options)
+        return scan(name, **options)
+
+    valkey.hscan_iter = recording_scan  # type: ignore[method-assign, assignment]
+
+    children = await sites.stored_children(job_id, 0)
+
+    assert [url for _, url in children] == ["https://example.org/b1"]
+    # A crawl's children hash holds many batches: the default of 10 fields a step is slow.
+    assert [options.get("count") for options in scans] == [1000]
+
+
+@scenario
 async def test_batch_limits() -> None:
     _, sites, job_id = await start(FakeAsyncRedis())
     too_many = [page(f"https://example.org/p{n}") for n in range(EXTEND_BATCH + 1)]
