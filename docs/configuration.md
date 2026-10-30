@@ -745,20 +745,24 @@ Every answer is shown with its HTTP status, the envelope's status and error (wit
 of a 422), the raw JSON and the request as a curl command, with `$API_KEY`, `$LLM_API_KEY` and
 `$ASR_API_KEY` in place of the keys. A result shows its content as source, Markdown also
 rendered (raw HTML shown as text, links only for http(s), images as their alt text), a download
-(`.md` or `.txt`), its title, language and word count, its metadata, structured values (with
+(`.md` or `.txt`; an `html` result saves as `.html` but is served as `text/plain`), its title, language and word count, its metadata, structured values (with
 their sources and the missing fields), chunks, images with their alt texts and descriptions, its
 links (clickable only for http(s)) and a timeline built from its fields: the job item's claim,
 compliance, fetch (attempts, upstream status, final URL, cache), render (with "escalated from
 fast" after `auto`), convert, PII, LLM and the outcome, with a one-line text for each warning. A
-screenshot is read from the artifact route (one more REST call) and shown inline.
+screenshot is read from the artifact route (one more REST call) and shown inline, or a note says
+why it could not be read. A large content is bounded in the page: the source, the raw JSON and
+the chunks show at most 200,000 characters each (and only such a content is rendered as
+Markdown), with a note when cut; the download is the full copy, up to 10,000,000 characters.
 
 "Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit, then the
-service fetches at most 20 of them (4 at once, 10 s each) itself, with the vision step's checks:
+service fetches at most 20 of them (4 at once, 10 s each, 25 s for the whole view) itself, with the vision step's checks:
 the SSRF guard on the URL and every redirect, the caller's compliance mode, the host's outbound
 turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF or
 WebP by their bytes. A fetched image is inlined as a `data:` URI, so the image hosts never see
 the viewer and the CSP stays `img-src 'self' data:`; a skipped one shows why (`blocked`,
-`refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`).
+`refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`, or `time` when the view's
+25 s ran out). An unexpected failure of one image skips that image as `error`; the others go on.
 
 Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/file`,
 `/ui/run/chunk` that of `POST /v1/chunk`, `/ui/run/batch-file` `UI_BATCH_FILE_MAX_BYTES` + 64 KiB,
@@ -1013,7 +1017,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
 | `text_extraction_mcp_tool_calls_total` | counter | `tool`, `outcome` (`success`, `partial`, `failed`, `job` or the error code of a refusal or error result) | API pods (with `MCP_ENABLED`) | MCP tool calls. `tool` is the tool's name, or `unknown` for a name the server has no tool of (a caller's text is never a label). Every tool is exported with `success` at 0 from the start. Use `sum()` over pods. |
 | `text_extraction_mcp_tool_seconds` | histogram | `tool` | API pods (with `MCP_ENABLED`) | Seconds of one MCP tool call, the rate limit check included. Buckets 0.05 s to 120 s. |
-| `text_extraction_ui_image_previews_total` | counter | `outcome` (`shown`, `blocked`, `refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`) | API pods (with `UI_ENABLED`) | Preview images the UI fetched for "Load previews": `shown` (inlined) or why one was skipped. Every outcome is exported at 0 from the start. Never a label of a URL or an alt text. |
+| `text_extraction_ui_image_previews_total` | counter | `outcome` (`shown`, `time`, `blocked`, `refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`) | API pods (with `UI_ENABLED`) | Preview images the UI fetched for "Load previews": `shown` (inlined) or why one was skipped. Every outcome is exported at 0 from the start. Never a label of a URL or an alt text. |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |
 | `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |

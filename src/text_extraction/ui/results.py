@@ -19,7 +19,7 @@ from text_extraction.browser_models import ScreenshotResult
 from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
-from text_extraction.ui.markdown import RENDER_MAX_CHARS, render_markdown
+from text_extraction.ui.markdown import is_http, render_markdown
 from text_extraction.ui.templating import templates
 from text_extraction.ui.texts import warning_text
 from text_extraction.ui.timeline import RequestedMode, TimelineStep, timeline
@@ -27,21 +27,21 @@ from text_extraction.ui.timeline import RequestedMode, TimelineStep, timeline
 DOWNLOADS: Final = {
     "markdown": ("text/markdown", ".md"),
     "text": ("text/plain", ".txt"),
-    "html": ("text/html", ".html"),
+    # Never an HTML media type: the page's own markup is saved, never shown.
+    "html": ("text/plain", ".html"),
 }
 DOWNLOAD_NAME: Final = "result"
-_SCHEMES: Final = ("http://", "https://")
+# Each copy of a large content in one fragment is bounded: the source shown, the raw JSON and the
+# chunks show at most SHOWN_MAX_CHARS (and only such a content is rendered as Markdown); the
+# download is the full copy, up to DOWNLOAD_MAX_CHARS.
+SHOWN_MAX_CHARS: Final = 200_000
+DOWNLOAD_MAX_CHARS: Final = 10_000_000
 # The headers a curl line names, with the shell variable that stands for each value.
 _CURL_HEADERS: Final = (
     ("authorization", "Authorization: Bearer $API_KEY"),
     ("x-llm-api-key", "X-LLM-Api-Key: $LLM_API_KEY"),
     ("x-asr-api-key", "X-ASR-Api-Key: $ASR_API_KEY"),
 )
-
-
-def is_http(url: object) -> bool:
-    """Whether ``url`` is an http(s) URL, the only kind the UI makes clickable."""
-    return isinstance(url, str) and url.strip().lower().startswith(_SCHEMES)
 
 
 def _quoted(text: str) -> str:
@@ -158,11 +158,13 @@ def _details(error: Mapping[str, Any]) -> list[str]:
 
 @dataclass(frozen=True)
 class Download:
-    """The content as a ``data:`` URI to save, its file name and its suffix."""
+    """The content as a ``data:`` URI to save, its file name, its suffix and, when the content
+    was cut to ``DOWNLOAD_MAX_CHARS``, the note that says so."""
 
     href: str
     name: str
     suffix: str
+    note: str | None = None
 
 
 def _download(data: Mapping[str, Any]) -> Download | None:
@@ -171,9 +173,49 @@ def _download(data: Mapping[str, Any]) -> Download | None:
     if not isinstance(content, str) or media is None:
         return None
     media_type, suffix = media
+    note = None
+    if len(content) > DOWNLOAD_MAX_CHARS:
+        note = (
+            f"The download is cut at {DOWNLOAD_MAX_CHARS} of {len(content)} characters; the curl "
+            "command reads all of it."
+        )
+        content = content[:DOWNLOAD_MAX_CHARS]
     encoded = base64.b64encode(content.encode()).decode("ascii")
     href = f"data:{media_type};charset=utf-8;base64,{encoded}"
-    return Download(href=href, name=f"{DOWNLOAD_NAME}{suffix}", suffix=suffix)
+    return Download(href=href, name=f"{DOWNLOAD_NAME}{suffix}", suffix=suffix, note=note)
+
+
+def _content_note(content: str) -> str | None:
+    if len(content) <= SHOWN_MAX_CHARS:
+        return None
+    where = (
+        "the download has all of them"
+        if len(content) <= DOWNLOAD_MAX_CHARS
+        else f"the download has the first {DOWNLOAD_MAX_CHARS}"
+    )
+    return f"Showing the first {SHOWN_MAX_CHARS} of {len(content)} characters; {where}."
+
+
+def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], str | None]:
+    """The chunks whose texts fit ``SHOWN_MAX_CHARS`` together, and a note on the rest."""
+    chunks = [chunk for chunk in data.get("chunks") or [] if isinstance(chunk, Mapping)]
+    shown: list[Mapping[str, Any]] = []
+    budget = SHOWN_MAX_CHARS
+    for chunk in chunks:
+        budget -= len(_shown(chunk.get("text") or ""))
+        if budget < 0:
+            break
+        shown.append(chunk)
+    rest = len(chunks) - len(shown)
+    return shown, (f"{rest} more chunks not shown; see the download." if rest else None)
+
+
+def _raw_json(envelope: Mapping[str, Any]) -> tuple[str, str | None]:
+    text = json.dumps(envelope, indent=2, ensure_ascii=False)
+    if len(text) <= SHOWN_MAX_CHARS:
+        return text, None
+    note = f"The raw JSON is cut at {SHOWN_MAX_CHARS} of {len(text)} characters."
+    return text[:SHOWN_MAX_CHARS], note
 
 
 def _images(data: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -237,23 +279,30 @@ def result_context(
     curl: str | None = None,
     requested_mode: RequestedMode | None = None,
     screenshot: str | None = None,
+    screenshot_note: str | None = None,
+    retry_after: str | None = None,
     item: JobItem | None = None,
 ) -> dict[str, Any]:
     """The context of ``result.html`` for one REST answer: ``envelope`` is its JSON object (None
-    for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its PNG."""
+    for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its PNG (or
+    ``screenshot_note`` why it could not be read), ``retry_after`` the seconds of a 429."""
     envelope = envelope or {}
     data = envelope.get("data")
     data = data if isinstance(data, Mapping) else None
     error = envelope.get("error")
+    raw_json, raw_note = _raw_json(envelope) if envelope else (raw, None)
     context: dict[str, Any] = {
         "op": op,
         "http_status": http_status,
         "status": envelope.get("status"),
         "error": error if isinstance(error, Mapping) else None,
         "details": _details(error) if isinstance(error, Mapping) else [],
-        "raw_json": json.dumps(envelope, indent=2, ensure_ascii=False) if envelope else raw,
+        "retry_after": retry_after,
+        "raw_json": raw_json,
+        "raw_note": raw_note,
         "curl": curl,
         "screenshot": screenshot,
+        "screenshot_note": screenshot_note,
         "job": None,
         "info": None,
         "data": None,
@@ -269,16 +318,19 @@ def result_context(
     context["data"] = data
     context["download"] = _download(data)
     content = data.get("content")
+    if isinstance(content, str):
+        context["shown_content"] = content[:SHOWN_MAX_CHARS]
+        context["content_note"] = _content_note(content)
     markdown = (
         data.get("format") == "markdown"
         and isinstance(content, str)
-        and 0 < len(content) <= RENDER_MAX_CHARS
+        and 0 < len(content) <= SHOWN_MAX_CHARS
     )
     context["markdown"] = render_markdown(content) if markdown and content else None
     metadata = data.get("metadata")
     context["metadata"] = _metadata_rows(metadata) if isinstance(metadata, Mapping) else []
     context["structured"] = _structured(data)
-    context["chunks"] = [chunk for chunk in data.get("chunks") or [] if isinstance(chunk, Mapping)]
+    context["chunks"], context["chunks_note"] = _chunks(data)
     context["images"] = _images(data)
     compliance = data.get("compliance")
     context["compliance_mode"] = compliance.get("mode") if isinstance(compliance, Mapping) else None
@@ -308,6 +360,8 @@ def render_result(
     curl: str | None = None,
     requested_mode: RequestedMode | None = None,
     screenshot: str | None = None,
+    screenshot_note: str | None = None,
+    retry_after: str | None = None,
     item: JobItem | None = None,
 ) -> str:
     """``result.html`` rendered with `result_context` of the same arguments."""
@@ -319,6 +373,8 @@ def render_result(
         curl=curl,
         requested_mode=requested_mode,
         screenshot=screenshot,
+        screenshot_note=screenshot_note,
+        retry_after=retry_after,
         item=item,
     )
     return templates.get_template("result.html").render(context)

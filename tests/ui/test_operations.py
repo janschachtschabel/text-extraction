@@ -19,6 +19,7 @@ from text_extraction.envelope import ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import ItemRun, JobItem
 from text_extraction.structured.types import StructuredOptions
+from text_extraction.ui import results
 from text_extraction.ui.forms import (
     OPERATIONS,
     UI_METADATA_SCHEMA,
@@ -626,3 +627,78 @@ def test_timeline_from_fields() -> None:
     steps_html = texts(root, "//ol[@class='timeline']/li")
     assert steps_html[0].startswith("Compliance")
     assert steps_html[-1].startswith("Outcome")
+
+
+# --- review fixes ---------------------------------------------------------------------------
+
+
+def test_html_download_is_plain_text() -> None:
+    root = tree(rendered(result_data(format="html", content=f"<p>{SCRIPT}</p>")))
+
+    links = root.xpath("//a[@download]")
+    assert [link.get("download") for link in links] == ["result.html"]
+    assert links[0].get("href").startswith("data:text/plain;charset=utf-8;base64,")
+    assert "data:text/html" not in rendered(result_data(format="html", content="<p>x</p>"))
+
+
+def test_large_content_copies_are_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(results, "SHOWN_MAX_CHARS", 1_000)
+    monkeypatch.setattr(results, "DOWNLOAD_MAX_CHARS", 5_000)
+    content = "".join(f"line {index:05d}\n" for index in range(400))  # 4,400 characters
+    chunks = [
+        {
+            "index": i,
+            "text": content[i * 400 : (i + 1) * 400],
+            "start": i * 400,
+            "end": (i + 1) * 400,
+            "headings": [],
+        }
+        for i in range(11)
+    ]
+    html = rendered(result_data(content=content, chunks=chunks))
+    root = tree(html)
+
+    shown = root.xpath("//pre[@class='content']")[0].text_content()
+    assert shown == content[:1_000]
+    notes = texts(root, "//*[@class='cut-note']")
+    assert "Showing the first 1000 of 4400 characters; the download has all of them." in notes
+    raw = root.xpath("//details[@class='raw']/pre")[0].text_content()
+    assert len(raw) <= 1_000
+    assert any(note.startswith("The raw JSON is cut at 1000 of ") for note in notes)
+    href = root.xpath("//a[@download]")[0].get("href")
+    assert base64.b64decode(href.split(",", 1)[1]).decode() == content  # the full copy
+    assert len(root.xpath("//ol[@class='chunks']/li")) == 2  # 800 of the 1,000 characters
+    assert "9 more chunks not shown; see the download." in notes
+    assert root.xpath("//div[@class='markdown']") == []  # not rendered over the cap
+
+    big = "x" * 6_000
+    root = tree(rendered(result_data(content=big)))
+    href = root.xpath("//a[@download]")[0].get("href")
+    assert base64.b64decode(href.split(",", 1)[1]).decode() == big[:5_000]
+    assert (
+        "The download is cut at 5000 of 6000 characters; the curl command reads all of it."
+        in texts(root, "//*[@class='cut-note']")
+    )
+
+
+def test_screenshot_read_failure_is_noted() -> None:
+    # One call a minute: the screenshot call takes it, the read of the artifact gets a 429.
+    case = BrowserCase(ui_enabled=True, rate_limit_per_minute=1)
+    with TestClient(case.app) as client, case.worker(artifact=PNG):
+        html = run(client, "screenshot", url=PAGE, full_page="on", wait_seconds="25").text
+
+    root = tree(html)
+    assert root.xpath("//img[@class='screenshot']") == []
+    notes = texts(root, "//*[@class='screenshot-note']")
+    assert len(notes) == 1
+    assert notes[0].startswith("The screenshot could not be read: HTTP 429")
+
+
+def test_refusal_shows_when_to_retry() -> None:
+    with running(rate_limit_per_minute=1) as client:
+        run(client, "images", url=["https://example.org/a.png"], alt=["a"])
+        html = run(client, "images", url=["https://example.org/a.png"], alt=["a"]).text
+
+    root = tree(html)
+    assert texts(root, "//*[@class='error-code']") == ["rate_limited"]
+    assert texts(root, "//*[@class='retry-after']")[0].startswith("Retry after ")

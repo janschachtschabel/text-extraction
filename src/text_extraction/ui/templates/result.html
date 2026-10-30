@@ -6,6 +6,7 @@
   {% if error %}
   <div class="error" role="alert">
     <p><span class="error-code">{{ error["code"] }}</span> {{ error["message"] }}{% if error["retryable"] %} <span class="retryable">(retryable)</span>{% endif %}</p>
+    {% if retry_after %}<p class="retry-after">Retry after {{ retry_after }} s.</p>{% endif %}
     {% if details %}
     <ul class="details">
       {% for line in details %}<li>{{ line }}</li>{% endfor %}
@@ -26,6 +27,8 @@
   {% endif %}
   {% if screenshot %}
   <img class="screenshot" src="{{ screenshot }}" alt="Screenshot of the page">
+  {% elif screenshot_note %}
+  <p class="screenshot-note">{{ screenshot_note }}</p>
   {% endif %}
   {% if data %}
   {% if data["title"] %}<h3 class="title">{{ data["title"] }}</h3>{% endif %}
@@ -40,14 +43,16 @@
   {% if data["content"] is string %}
   <section class="content-view" aria-label="Content">
     <h4>Content</h4>
-    {% if download %}<a class="download" href="{{ download.href }}" download="{{ download.name }}">Download {{ download.suffix }}</a>{% endif %}
+    {% if download %}<a class="download" href="{{ download.href }}" download="{{ download.name }}">Download {{ download.suffix }}</a>
+    {% if download.note %}<p class="cut-note">{{ download.note }}</p>{% endif %}{% endif %}
     {% if markdown %}
     <details class="rendered">
       <summary>Show rendered</summary>
       <div class="markdown">{{ markdown }}</div>
     </details>
     {% endif %}
-    <pre class="content">{{ data["content"] }}</pre>
+    {% if content_note %}<p class="cut-note">{{ content_note }}</p>{% endif %}
+    <pre class="content">{{ shown_content }}</pre>
   </section>
   {% endif %}
   {% if metadata %}
@@ -90,6 +95,7 @@
       <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>
       {% endfor %}
     </ol>
+    {% if chunks_note %}<p class="cut-note">{{ chunks_note }}</p>{% endif %}
   </section>
   {% endif %}
   {% if images or image_report %}
@@ -148,6 +154,7 @@
   {% if raw_json %}
   <details class="raw">
     <summary>Raw JSON</summary>
+    {% if raw_note %}<p class="cut-note">{{ raw_note }}</p>{% endif %}
     <pre>{{ raw_json }}</pre>
   </details>
   {% endif %}

@@ -70,7 +70,10 @@ KEY_HEADERS: Final = ("authorization", "x-llm-api-key", "x-asr-api-key")
 NO_FILE: Final = "Choose a file to upload."
 # A body that is not JSON is shown up to this many characters.
 RAW_MAX_CHARS: Final = 10_000
-_ARTIFACT_URL: Final = re.compile(r"/v1/jobs/([A-Za-z0-9_-]+)/artifacts/([A-Za-z0-9_.-]+)")
+# An artifact name never starts with a dot (so never "." or "..").
+_ARTIFACT_URL: Final = re.compile(
+    r"/v1/jobs/([A-Za-z0-9_-]+)/artifacts/([A-Za-z0-9_-][A-Za-z0-9_.-]*)"
+)
 _MODES: Final = frozenset(get_args(RequestedMode))
 _COMPLIANCE_MODES: Final = frozenset(get_args(ComplianceMode))
 
@@ -100,24 +103,29 @@ def _raw(answer: Forwarded) -> str:
     return answer.content[: RAW_MAX_CHARS * 4].decode("utf-8", "replace")[:RAW_MAX_CHARS]
 
 
-async def _screenshot(request: Request, envelope: Mapping[str, Any] | None) -> str | None:
+async def _screenshot(
+    request: Request, envelope: Mapping[str, Any] | None
+) -> tuple[str | None, str | None]:
     """The ``data:`` URI of the PNG that an answer's ``data.screenshot`` references, read from
-    the artifact route (a REST call with the browser's key); None when there is none, it cannot
-    be read or it is not a PNG."""
+    the artifact route (a REST call with the browser's key), or the note why it could not be
+    read; (None, None) when the answer references none."""
     data = (envelope or {}).get("data")
     shot = data.get("screenshot") if isinstance(data, Mapping) else None
     url = shot.get("url") if isinstance(shot, Mapping) else None
     found = _ARTIFACT_URL.fullmatch(url) if isinstance(url, str) else None
     if found is None:
-        return None
+        return None, None
     path = OPERATIONS["artifact"].path.format(job_id=found[1], name=found[2])
     try:
         answer = await forward(request, "GET", path)
     except ValueError:  # not a plain path under /v1/
-        return None
-    if answer.status != 200 or sniff_image(answer.content) != "image/png":
-        return None
-    return data_url(answer.content, "image/png")
+        return None, None
+    if answer.status != 200:
+        message = _envelope_message(answer.body, answer.status)
+        return None, f"The screenshot could not be read: HTTP {answer.status} {message}"
+    if sniff_image(answer.content) != "image/png":
+        return None, "The screenshot could not be read: it is not a PNG."
+    return data_url(answer.content, "image/png"), None
 
 
 async def _forward_single(
@@ -165,6 +173,7 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
             return templates.TemplateResponse(request, "form_error.html", {"message": forwarded})
         answer, curl = forwarded
         mode = body.get("mode")
+        screenshot, screenshot_note = await _screenshot(request, answer.body)
         # In a thread: a long content's Markdown takes a while to render.
         html = await asyncio.to_thread(
             render_result,
@@ -174,7 +183,8 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
             raw=_raw(answer),
             curl=curl,
             requested_mode=mode if mode in _MODES else None,
-            screenshot=await _screenshot(request, answer.body),
+            screenshot=screenshot,
+            screenshot_note=screenshot_note,
         )
         return HTMLResponse(html)
 
@@ -188,7 +198,11 @@ def _refusal(error: ServiceError) -> Response:
         "status": "failed",
         "error": {"code": str(error.code), "message": error.message, "retryable": error.retryable},
     }
-    return HTMLResponse(render_result(op="view", http_status=error.http_status, envelope=envelope))
+    retry_after = (error.headers or {}).get("Retry-After")
+    html = render_result(
+        op="view", http_status=error.http_status, envelope=envelope, retry_after=retry_after
+    )
+    return HTMLResponse(html)
 
 
 async def _preview_view(request: Request, settings: Settings) -> Response:

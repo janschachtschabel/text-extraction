@@ -1,7 +1,7 @@
 <div class="preview-grid">
   {% for entry in previews %}
   <figure class="preview" data-url="{{ entry.url }}">
-    {% if entry.data_uri %}<img src="{{ entry.data_uri }}" alt="{{ entry.alt }}">{% else %}<span class="skipped">{{ entry.skipped }}</span>{% endif %}
+    {% if entry.data_uri %}<img src="{{ entry.data_uri }}" alt="{{ entry.alt }}">{% else %}<p class="skipped-line">skipped (<span class="skipped">{{ entry.skipped }}</span>)</p>{% endif %}
     <figcaption>{{ entry.alt }}</figcaption>
   </figure>
   {% endfor %}

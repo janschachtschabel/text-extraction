@@ -5,6 +5,7 @@ gate, sniffed types, ``UI_IMAGE_MAX_BYTES``) and inlines them as ``data:`` URIs.
 import asyncio
 import base64
 import socket
+import time
 from typing import Any
 
 import httpcore
@@ -215,3 +216,84 @@ def test_ui_images_fetcher_is_an_image_fetcher() -> None:
         assert isinstance(client.app.state.ui_images, ImageFetcher)  # type: ignore[attr-defined]
     with running(ui_enabled=False) as client:
         assert client.app.state.ui_images is None  # type: ignore[attr-defined]
+
+
+class FlakySource(FakeSource):
+    """Raises an unexpected error for ``boom`` URLs, and takes ``delay`` seconds per image."""
+
+    def __init__(self, delay: float = 0.01) -> None:
+        super().__init__()
+        self.delay = delay
+
+    async def get(
+        self,
+        url: str,
+        mode: ComplianceMode,
+        *,
+        timeout: float,  # noqa: ASYNC109 - the ImageFetcher's interface
+        max_bytes: int | None = None,
+    ) -> ImageBytes | ImageSkipped:
+        self.calls.append((url, mode, timeout, max_bytes))
+        await asyncio.sleep(self.delay)
+        if "boom" in url:
+            raise RuntimeError("the gate's Valkey is gone")
+        return ImageBytes(data=PNG, media_type="image/png")
+
+
+def test_one_failing_image_fails_alone() -> None:
+    source = FlakySource()
+    urls = [
+        "https://example.org/a.png",
+        "https://example.org/boom.png",
+        "https://example.org/c.png",
+    ]
+
+    previews = asyncio.run(
+        load_previews(urls, fetcher=source, mode="enforce", max_bytes=10_000)  # type: ignore[arg-type]
+    )
+
+    assert [preview.skipped for preview in previews] == [None, "error", None]
+
+
+def test_previews_stop_at_the_deadline() -> None:
+    source = FlakySource(delay=0.3)
+    urls = [f"https://example.org/{index}.png" for index in range(8)]
+
+    started = time.monotonic()
+    previews = asyncio.run(
+        load_previews(
+            urls,
+            fetcher=source,  # type: ignore[arg-type]
+            mode="enforce",
+            max_bytes=10_000,
+            deadline_seconds=0.5,
+        )
+    )
+
+    assert time.monotonic() - started < 1.0
+    assert [preview.skipped for preview in previews] == [None] * 4 + ["time"] * 4
+    assert all(call[2] <= 0.5 for call in source.calls)  # each fetch has at most what is left
+
+
+def test_preview_view_survives_an_unexpected_error() -> None:
+    registry = CollectorRegistry()
+    with running(registry=registry) as client:
+        state = client.app.state  # type: ignore[attr-defined]
+        state.ui_images, real = FlakySource(), state.ui_images
+        answer = run(
+            client,
+            "images",
+            url=["https://example.org/a.png", "https://example.org/boom.png"],
+            alt=["a", "b"],
+        )
+        state.ui_images = real  # the lifespan closes it
+
+    assert answer.status_code == 200
+    root = lxml.html.fragment_fromstring(answer.text, create_parent="div")
+    assert len(root.xpath("//figure[@class='preview']//img")) == 1
+    skipped = [" ".join(node.text_content().split()) for node in root.xpath("//figure/p")]
+    assert skipped == ["skipped (error)"]
+    assert (
+        registry.get_sample_value("text_extraction_ui_image_previews_total", {"outcome": "error"})
+        == 1.0
+    )

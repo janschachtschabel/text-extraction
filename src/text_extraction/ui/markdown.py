@@ -11,15 +11,14 @@ from markdown_it.token import Token
 from markdown_it.utils import EnvType, OptionsDict
 from markupsafe import Markup, escape
 
-# Content longer than this is shown as source only: rendering it would cost the pod more than a
-# look at it is worth.
-RENDER_MAX_CHARS: Final = 200_000
 LINK_REL: Final = "noopener noreferrer"
 _SCHEMES: Final = ("http://", "https://")
 
 
-def _http_only(url: str) -> bool:
-    return url.strip().lower().startswith(_SCHEMES)
+def is_http(url: object) -> bool:
+    """Whether ``url`` is an http(s) URL, the only kind the UI makes clickable (Markdown links
+    and the result's links alike)."""
+    return isinstance(url, str) and url.strip().lower().startswith(_SCHEMES)
 
 
 def _link_open(
@@ -38,7 +37,7 @@ def _image(
 
 def _parser() -> MarkdownIt:
     parser = MarkdownIt("commonmark", {"html": False})
-    parser.validateLink = _http_only  # type: ignore[method-assign]
+    parser.validateLink = is_http  # type: ignore[method-assign]
     renderer: Any = parser.renderer
     renderer.rules["link_open"] = _link_open.__get__(renderer)
     renderer.rules["image"] = _image.__get__(renderer)
