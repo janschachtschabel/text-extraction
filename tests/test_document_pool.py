@@ -474,3 +474,31 @@ def test_a_failing_respawn_is_logged_once(monkeypatch: pytest.MonkeyPatch) -> No
     assert failures == [
         {"event": "document_pool_respawn_failed", "log_level": "warning", "error": "OSError"}
     ]
+
+
+def is_gone(pid: int) -> bool:
+    """True once ``pid`` is reaped: no process, not even a zombie."""
+    return not Path(f"/proc/{pid}").exists()
+
+
+def test_abandon_reaps_its_children_without_blocking() -> None:
+    """Issue #19 (N-m2): ``abandon`` kills the children of a pool whose event loop is gone, and
+    reaps them on a thread of its own, so no zombie stays behind."""
+    pool = DocumentPool(2, MEMORY_LIMIT_MB, target=TARGET, extra_env=TEST_ENV)
+
+    async def start() -> list[int]:
+        await pool.start()
+        await pool.run("pid", b"", deadline_in(5))  # a child that has served a call
+        return pool.child_pids()
+
+    pids = asyncio.run(start())
+    started = time.monotonic()
+    pool.abandon()
+    returned = time.monotonic() - started
+    until = time.monotonic() + 5
+    while not all(is_gone(pid) for pid in pids) and time.monotonic() < until:
+        time.sleep(0.05)
+
+    assert returned < 0.5
+    assert pool.closed
+    assert [pid for pid in pids if not is_gone(pid)] == []  # no zombie either
