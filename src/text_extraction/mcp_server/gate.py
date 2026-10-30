@@ -2,8 +2,9 @@
 
 Pure ASGI. For every HTTP request to ``/mcp``, in order:
 
-1. An ``Origin`` header whose value is not in ``MCP_ALLOWED_ORIGINS`` (exact match on scheme and
-   host) gets a 403 envelope ``forbidden``. A client without a browser sends no ``Origin``.
+1. An ``Origin`` header whose value is not in ``MCP_ALLOWED_ORIGINS`` (exact match on scheme,
+   host and port, in any case, a default port dropped: ``normalize_origin``) gets a 403 envelope
+   ``forbidden``. A client without a browser sends no ``Origin``.
 2. ``principal_for`` checks the key; a failure is the REST 401 envelope with
    ``WWW-Authenticate: Bearer``.
 3. The principal goes into the scope state (``mcp_principal``, and its name as ``principal`` for
@@ -25,7 +26,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from text_extraction.auth import principal_for
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.settings import Settings
+from text_extraction.settings import Settings, normalize_origin
 
 PRINCIPAL_STATE = "mcp_principal"
 
@@ -47,7 +48,9 @@ class McpGate:
             await self.app(scope, receive, send)
             return
         headers = Headers(scope=scope)
-        if any(origin.lower() not in self._origins for origin in headers.getlist("origin")):
+        if any(
+            normalize_origin(origin) not in self._origins for origin in headers.getlist("origin")
+        ):
             raise _forbidden_origin()
         principal = principal_for(self._settings, headers.get("authorization"))
         state: MutableMapping[str, Any] = scope.setdefault("state", {})

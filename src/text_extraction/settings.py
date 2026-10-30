@@ -91,6 +91,34 @@ def _read_api_keys_file(path: Path) -> list[ApiKey]:
         ) from None
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def normalize_origin(value: str) -> str | None:
+    """An origin as a browser sends it in ``Origin``: ``scheme://host[:port]`` in lower case,
+    without a default port (``:443`` for https, ``:80`` for http). None for anything else (a
+    path, a query, userinfo, another scheme, ``null``)."""
+    origin = value.lower()
+    try:
+        parts = urlsplit(origin)
+        port = parts.port
+    except ValueError:
+        return None
+    if (
+        parts.scheme not in _DEFAULT_PORTS
+        or not parts.hostname
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or "@" in parts.netloc
+    ):
+        return None
+    if port is not None and port == _DEFAULT_PORTS[parts.scheme]:
+        host = parts.netloc.rsplit(":", 1)[0]
+        return f"{parts.scheme}://{host}"
+    return origin
+
+
 class Settings(BaseSettings):
     """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content and
     ``ASR_EXTERNAL_API_KEY`` and ``PII_HASH_KEY``."""
@@ -393,24 +421,12 @@ class Settings(BaseSettings):
     @field_validator("mcp_allowed_origins")
     @classmethod
     def _origins_are_scheme_and_host(cls, value: list[str]) -> list[str]:
-        """Each entry is ``http(s)://host[:port]`` (a trailing slash is dropped), stored in lower
-        case as a browser sends it in ``Origin``."""
+        """Each entry is ``http(s)://host[:port]`` (a trailing slash is dropped), stored as
+        ``normalize_origin`` gives it, as a browser sends it in ``Origin``."""
         origins: list[str] = []
         for entry in value:
-            origin = entry.strip().rstrip("/").lower()
-            try:
-                parts = urlsplit(origin)
-                parts.port  # noqa: B018 - raises on a port that is not a number
-            except ValueError:
-                raise ValueError("expected http(s)://host[:port] entries") from None
-            if (
-                parts.scheme not in ("http", "https")
-                or not parts.hostname
-                or parts.path
-                or parts.query
-                or parts.fragment
-                or "@" in parts.netloc
-            ):
+            origin = normalize_origin(entry.strip().rstrip("/"))
+            if origin is None:
                 raise ValueError("expected http(s)://host[:port] entries")
             origins.append(origin)
         return list(dict.fromkeys(origins))

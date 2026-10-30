@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 import text_extraction.pipeline as pipeline_module
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
-from text_extraction.app import create_public_app, service_info
+from text_extraction.app import create_public_app
 from text_extraction.auth import Principal, principal_for
 from text_extraction.browser_models import ScreenshotRequest
 from text_extraction.envelope import ErrorCode
@@ -29,6 +29,7 @@ from text_extraction.extract_models import ChunkRequest, ExtractRequest, Structu
 from text_extraction.fetch import Fetcher
 from text_extraction.file_api import run_upload, upload_file_limit
 from text_extraction.file_models import FileForm
+from text_extraction.info import service_info
 from text_extraction.job_models import BatchRequest, JobOptions
 from text_extraction.jobs import SCREENSHOT_ARTIFACT
 from text_extraction.jobs_api import check_jobs_enabled, read_job, start_batch

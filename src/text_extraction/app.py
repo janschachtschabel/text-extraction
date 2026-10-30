@@ -9,7 +9,6 @@ import structlog
 from fastapi import Depends, FastAPI
 from prometheus_client import REGISTRY, CollectorRegistry
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
 from redis.asyncio import Redis
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
@@ -18,7 +17,7 @@ from starlette.routing import Route
 
 from text_extraction import __version__
 from text_extraction.asr_dispatch import AsrDispatcher, asr_queue
-from text_extraction.auth import Principal, Role, require_role
+from text_extraction.auth import Principal, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
 from text_extraction.conversion_pool import ConversionPool
@@ -32,6 +31,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_api import PATH as UPLOAD_PATH
 from text_extraction.file_api import router as file_router
 from text_extraction.file_api import text_body_limit, upload_body_limit
+from text_extraction.info import InfoData, service_info
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
@@ -57,11 +57,10 @@ from text_extraction.site_api import router as site_router
 from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured_api import CHUNK_PATH
 from text_extraction.structured_api import router as structured_router
-from text_extraction.tracing import TraceMiddleware, current_trace_id
+from text_extraction.tracing import TraceMiddleware
 
 _log = structlog.get_logger(__name__)
 
-SERVICE_NAME = "text-extraction"
 DESCRIPTION = (
     "Turns web pages, files, audio and video into clean text or Markdown, "
     "with a fast HTTP mode and a browser mode."
@@ -73,28 +72,6 @@ DESCRIPTION = (
 _BACKGROUND_GRACE_SECONDS = 5.0
 # What the shutdown waits for the result writes of extractions it had to cancel.
 _CANCELLED_WRITE_SECONDS = 2.0
-
-
-class InfoData(BaseModel):
-    name: str
-    version: str
-    principal: str
-    role: Role
-
-
-def service_info(principal: Principal) -> Envelope[InfoData]:
-    """The core of ``GET /v1/info`` (ruling P10-S1): name and version of the service, and who
-    the caller is.
-
-    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), then one ``check_rate`` hit."""
-    data = InfoData(
-        name=SERVICE_NAME,
-        version=__version__,
-        principal=principal.name,
-        role=principal.role,
-    )
-    return Envelope(status="success", data=data, trace_id=current_trace_id())
 
 
 async def _wait_for(background: set[asyncio.Task[Any]], seconds: float) -> None:

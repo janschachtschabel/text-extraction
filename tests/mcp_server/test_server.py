@@ -3,6 +3,7 @@ errors as results) and the service_info tool (rulings P10-S2, P10-S3, P10-S4, P1
 
 import hashlib
 import json
+import logging
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -80,7 +81,8 @@ def test_disabled_has_no_mcp_route_and_no_import() -> None:
         "from text_extraction.app import create_public_app\n"
         "from text_extraction.settings import Settings\n"
         "create_public_app(Settings(auth_mode='none'), FakeAsyncRedis(), CollectorRegistry())\n"
-        "print(sorted(name for name in sys.modules if name.split('.')[0] in ('fastmcp', 'mcp')))\n"
+        "print(sorted(name for name in sys.modules\n"
+        "             if name.split('.')[0] in ('fastmcp', 'mcp', 'mcp_types')))\n"
     )
     found = subprocess.run(  # noqa: S603 - our own interpreter and script
         [sys.executable, "-c", script], capture_output=True, text=True, check=True
@@ -176,10 +178,9 @@ def test_foreign_origin_403_allowed_origin_ok(auth_mode: str) -> None:
                     == "This origin may not call the MCP endpoint."
                 )
 
-        allowed = call_tool(
-            client, "service_info", headers={**AUTH, "Origin": "https://app.example"}
-        )
-        assert allowed["isError"] is False
+        for origin in ("https://app.example", "https://APP.example:443"):
+            allowed = call_tool(client, "service_info", headers={**AUTH, "Origin": origin})
+            assert allowed["isError"] is False
         # A client without a browser sends no Origin.
         assert call_tool(client, "service_info", headers=AUTH)["isError"] is False
 
@@ -211,8 +212,12 @@ def test_rate_limit_shared_with_rest() -> None:
         assert client.get("/v1/info", headers=AUTH).status_code == 429
 
 
+def json_lines_of(out: str) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in out.splitlines() if line]
+
+
 def json_lines(capsys: pytest.CaptureFixture[str]) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    return json_lines_of(capsys.readouterr().out)
 
 
 def test_trace_id_in_envelope_and_logs(capsys: pytest.CaptureFixture[str]) -> None:
@@ -245,6 +250,70 @@ def test_trace_id_in_envelope_and_logs(capsys: pytest.CaptureFixture[str]) -> No
     text = json.dumps(lines)
     assert "argument-value-42" not in text
     assert USER_KEY not in text
+
+
+def test_arguments_never_logged_at_debug(capsys: pytest.CaptureFixture[str]) -> None:
+    """FastMCP logs a call's arguments at DEBUG: its logger is held at WARNING whatever the
+    service's level, by ``configure_logging`` and again by ``build_mcp`` (FastMCP sets its
+    level at import, from ``FASTMCP_LOG_LEVEL``)."""
+    loggers = [logging.getLogger(name) for name in ("fastmcp", "mcp")]
+    levels = [logger.level for logger in loggers]
+    try:
+        for logger in loggers:
+            logger.setLevel(logging.DEBUG)
+        configure_logging("DEBUG", "json")
+        assert all(logger.getEffectiveLevel() >= logging.WARNING for logger in loggers)
+
+        loggers[0].setLevel(logging.DEBUG)  # as FASTMCP_LOG_LEVEL=DEBUG leaves it
+        with running() as client:
+            capsys.readouterr()
+            call_tool(client, "service_info", {"secret": "argument-value-77"}, headers=AUTH)
+            rpc(
+                client,
+                "tools/call",
+                {"name": "no_such_tool", "arguments": {"x": "argument-value-78"}},
+                headers=AUTH,
+            )
+        captured = capsys.readouterr()
+    finally:
+        configure_logging("INFO", "json")
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)
+
+    assert [line for line in json_lines_of(captured.out) if line["event"] == "mcp_tool_call"]
+    assert "argument-value-7" not in captured.out
+    assert "argument-value-7" not in captured.err
+
+
+def test_tools_do_not_import_the_app() -> None:
+    script = (
+        "import sys\n"
+        "import text_extraction.mcp_server.tools_info\n"
+        "print('text_extraction.app' in sys.modules)\n"
+    )
+    found = subprocess.run(  # noqa: S603 - our own interpreter and script
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True
+    )
+    assert found.stdout.strip() == "False"
+
+
+def test_tool_lookup_failure_is_a_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure while the guard looks the tool up is an error result with its log line and
+    metric, under the label ``unknown``."""
+    registry = CollectorRegistry()
+    with running(registry=registry) as client:
+        app: Any = client.app
+
+        async def failing(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("lookup failed")
+
+        monkeypatch.setattr(app.state.mcp.server, "get_tool", failing)
+        result = call_tool(client, "service_info", headers=AUTH)
+
+    assert result["isError"] is True
+    assert envelope_of(result)["error"]["code"] == "internal_error"
+    calls = "text_extraction_mcp_tool_calls_total"
+    assert sample(registry, calls, tool="unknown", outcome="internal_error") == 1
 
 
 def sample(registry: CollectorRegistry, name: str, **labels: str) -> float | None:

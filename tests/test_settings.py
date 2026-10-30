@@ -1550,6 +1550,18 @@ def test_mcp_settings_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> No
     assert settings.mcp_enabled is True
     assert settings.mcp_allowed_origins == ["https://app.example.org", "http://localhost:3000"]
 
+    # A default port is dropped: a browser never sends it in Origin.
+    monkeypatch.setenv(
+        "MCP_ALLOWED_ORIGINS",
+        "https://app.example:443,http://app.example:80,https://app.example:8443,http://b.example:443",
+    )
+    assert load_settings().mcp_allowed_origins == [
+        "https://app.example",
+        "http://app.example",
+        "https://app.example:8443",
+        "http://b.example:443",
+    ]
+
     monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "")
     assert load_settings().mcp_allowed_origins == []
     for wrong in ("app.example.org", "ftp://app.example.org", "https://a.example/path", "*"):

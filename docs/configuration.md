@@ -675,7 +675,7 @@ own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MCP_ENABLED` | `false` | Serve the MCP endpoint at `/mcp`. |
-| `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash is dropped). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
+| `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash and a default port, `:443` for https and `:80` for http, are dropped, in the setting and in the `Origin` header). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
 | `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of `get_job`. 0 to 60. |
 | `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
 | `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |

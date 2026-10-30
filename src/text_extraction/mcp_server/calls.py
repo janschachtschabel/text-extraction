@@ -179,11 +179,10 @@ class CallGuard(Middleware):
         call_next: CallNext[CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         started = time.perf_counter()
-        server = context.fastmcp_context.fastmcp if context.fastmcp_context else None
-        known = server is not None and await server.get_tool(context.message.name) is not None
-        tool = context.message.name if known else UNKNOWN_TOOL
+        tool = UNKNOWN_TOOL
         with structlog.contextvars.bound_contextvars(**_log_context()):
             try:
+                tool = await _tool_label(context)
                 await check_rate(self._state, call_principal())
                 result = await call_next(context)
             except Exception as error:
@@ -210,6 +209,14 @@ class CallGuard(Middleware):
         if not isinstance(error, ServiceError | ValidationError | RequestValidationError):
             _log.error("mcp_tool_failed", tool=tool, exc_info=error)
         return error_result(error)
+
+
+async def _tool_label(context: MiddlewareContext[CallToolRequestParams]) -> str:
+    """The ``tool`` label of a call: its name when the server has such a tool, else
+    ``UNKNOWN_TOOL``."""
+    server = context.fastmcp_context.fastmcp if context.fastmcp_context else None
+    known = server is not None and await server.get_tool(context.message.name) is not None
+    return context.message.name if known else UNKNOWN_TOOL
 
 
 def _log_context() -> dict[str, str]:

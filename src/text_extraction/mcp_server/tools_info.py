@@ -4,8 +4,8 @@ from mcp_types import ToolAnnotations
 from pydantic import BaseModel, ConfigDict
 from starlette.datastructures import State
 
-from text_extraction.app import service_info
 from text_extraction.auth import Principal
+from text_extraction.info import service_info
 from text_extraction.mcp_server.calls import ModelTool
 
 
