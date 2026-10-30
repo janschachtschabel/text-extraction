@@ -4,3 +4,5 @@
 *.jpg binary
 *.pdf binary
 *.gz binary
+# Vendored htmx: kept byte for byte as published (its checksum is tested).
+src/text_extraction/ui/static/htmx-*.min.js -text

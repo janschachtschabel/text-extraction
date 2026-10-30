@@ -4,8 +4,11 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-yaml
+      # The vendored htmx stays byte for byte as published (its SHA-256 is checked in a test).
       - id: end-of-file-fixer
+        exclude: ^src/text_extraction/ui/static/htmx-[0-9.]+\.min\.js$
       - id: trailing-whitespace
+        exclude: ^src/text_extraction/ui/static/htmx-[0-9.]+\.min\.js$
       - id: check-added-large-files
         args: [--maxkb=500]
   - repo: local

@@ -17,6 +17,9 @@ dependencies = [
     "fastmcp==4.1.0",  # Apache-2.0
     "httpcore>=1.0.9",
     "httpx[http2]>=0.28.1",
+    # The UI's templates (UI_ENABLED), imported only when it is on. Newest release at least 14
+    # days old when added (ruling R16).
+    "jinja2==3.1.6",  # BSD-3-Clause
     "jstyleson>=0.0.2",
     "lxml>=6.1.3",
     "markdown-it-py==4.2.0",
