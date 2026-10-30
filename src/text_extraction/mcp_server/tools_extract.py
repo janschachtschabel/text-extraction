@@ -38,6 +38,7 @@ from text_extraction.mcp_server.calls import ModelTool, call_header
 from text_extraction.mcp_server.files import MAX_CONTENT_TYPE_CHARS, decode_file
 from text_extraction.mcp_server.results import (
     answer_payload,
+    image_over_limit_hint,
     job_hint,
     payload_result,
     png_content,
@@ -338,7 +339,7 @@ class ScreenshotUrlTool(_ExtractionTool):
         location = _ARTIFACT_URL.fullmatch(url)
         limit: int = state.settings.mcp_image_max_bytes
         if location is None or not isinstance(size, int) or size > limit:
-            hints.append(_over_limit(size, url))
+            hints.append(image_over_limit_hint(size, url))
             return
         try:
             check_jobs_enabled(state.settings)
@@ -351,10 +352,6 @@ class ScreenshotUrlTool(_ExtractionTool):
             hints.append(content)
         else:
             images.append(content)
-
-
-def _over_limit(size: object, url: str) -> str:
-    return f"The screenshot ({size} bytes) is over MCP_IMAGE_MAX_BYTES; download it from {url}."
 
 
 class ExtractStructuredTool(_ExtractionTool):

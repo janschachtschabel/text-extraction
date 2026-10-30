@@ -139,12 +139,14 @@ def slice_content(envelope: dict[str, Any], *, offset: int, share: int) -> str |
     return f"Cut at {end} of {total} characters; call again with content_offset={end}."
 
 
+def image_over_limit_hint(size: object, url: str) -> str:
+    """The hint of a screenshot of ``size`` bytes that is not attached."""
+    return f"The screenshot ({size} bytes) is over MCP_IMAGE_MAX_BYTES; download it from {url}."
+
+
 def png_content(data: bytes, *, limit: int, url: str) -> ImageContent | str:
     """A screenshot as image content when it is at most ``limit`` bytes
     (``MCP_IMAGE_MAX_BYTES``), else the hint to download it from ``url``."""
     if len(data) > limit:
-        return (
-            f"The screenshot ({len(data)} bytes) is over MCP_IMAGE_MAX_BYTES; download it "
-            f"from {url}."
-        )
+        return image_over_limit_hint(len(data), url)
     return ImageContent(type="image", data=base64.b64encode(data).decode(), mime_type="image/png")
