@@ -1,5 +1,6 @@
 /*
- * The UI's own script (rulings P10-S13 and P10-S20), the only one besides htmx.
+ * The UI's own script (rulings P10-S13 and P10-S20), the only one besides htmx: the keys, the
+ * tabs and the site tree's selection.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -122,7 +123,64 @@
     } else if (action === "save-keys") {
       writeKey(KEYS.llm, valueOf("keys-llm"));
       writeKey(KEYS.asr, valueOf("keys-asr"));
+    } else if (action === "tree-all" || action === "tree-none") {
+      selectAll(button.closest("form"), action === "tree-all");
     }
+  });
+
+  // The site tree (P10-S20): checking a node checks its subtree, a node shows indeterminate
+  // while part of its subtree is checked, and the counter shows how many URLs are selected.
+  function nodeBox(item) {
+    var label = item.querySelector(":scope > label");
+    return label ? label.querySelector("input[type=checkbox]") : null;
+  }
+
+  function countSelected(form) {
+    var counter = form.querySelector(".tree-counter");
+    if (counter) {
+      counter.textContent = form.querySelectorAll("input[name=url]:checked").length + " selected";
+    }
+  }
+
+  function settleParents(item) {
+    var parent = item.parentElement ? item.parentElement.closest("li") : null;
+    while (parent && parent.closest(".tree")) {
+      var boxes = Array.prototype.map.call(
+        parent.querySelectorAll(":scope > ul > li"),
+        nodeBox
+      ).filter(Boolean);
+      var checked = boxes.filter(function (box) { return box.checked; }).length;
+      var partly = boxes.some(function (box) { return box.indeterminate; });
+      var own = nodeBox(parent);
+      if (own) {
+        own.checked = boxes.length > 0 && checked === boxes.length;
+        own.indeterminate = partly || (checked > 0 && checked < boxes.length);
+      }
+      parent = parent.parentElement ? parent.parentElement.closest("li") : null;
+    }
+  }
+
+  function selectAll(form, value) {
+    form.querySelectorAll(".tree input[type=checkbox]").forEach(function (box) {
+      box.checked = value;
+      box.indeterminate = false;
+    });
+    countSelected(form);
+  }
+
+  document.addEventListener("change", function (event) {
+    var box = event.target;
+    if (!(box instanceof HTMLInputElement) || !box.closest(".tree")) {
+      return;
+    }
+    var item = box.closest("li");
+    item.querySelectorAll("ul input[type=checkbox]").forEach(function (inner) {
+      inner.checked = box.checked;
+      inner.indeterminate = false;
+    });
+    box.indeterminate = false;
+    settleParents(item);
+    countSelected(box.closest("form"));
   });
 
   // On a reload the stored key logs in again; the login is only a convenience, every request
