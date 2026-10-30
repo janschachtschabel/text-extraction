@@ -1,14 +1,18 @@
 """``POST /v1/extract/file``: extract an uploaded file (ruling F17).
 
 - The body is ``multipart/form-data`` with one file part ``file`` and the fields of
-  ``FileForm``. Its limit is ``upload_file_limit`` + 64 KiB (``upload_body_limit``, applied by
+  ``FileForm``. Its limit is ``upload_file_limit`` + 192 KiB (``upload_body_limit``, applied by
   ``BodyLimitMiddleware``): a larger ``Content-Length`` is 413 before anything is read, and a
   body without one is refused at the chunk that goes over the limit. ``upload_file_limit`` is
   ``DOCUMENT_MAX_BYTES``, or the larger ``MEDIA_UPLOAD_MAX_BYTES`` while uploaded audio and video
   are transcribed (``MEDIA_ENABLED`` and the service has ASR); with ASR off the setting does not
   widen the path. A document over ``DOCUMENT_MAX_BYTES`` still answers ``too_large``.
 - The form is parsed with at most ``MAX_FILES`` file and ``MAX_FIELDS`` fields of at most
-  ``MAX_FIELD_BYTES`` each; more, or a malformed body, is 422 ``invalid_request``.
+  ``MAX_FIELD_BYTES`` (1 KiB) each, but ``structured`` and ``chunking`` (``OPTION_FIELDS``), whose
+  JSON may describe a schema of 50 properties with its rules, of at most
+  ``MAX_OPTION_FIELD_BYTES`` (64 KiB) each (ruling R18); more, or a malformed body, is 422
+  ``invalid_request``. The body limit leaves room for a file at its limit and every field at
+  its own.
 - The file part is read into memory up to ``upload_file_limit`` + 1 bytes and closed at once,
   which deletes its spooled file; the pipeline answers a longer one with ``too_large``.
 - The part's file name is reduced to its base name (``sanitize_file_name``) and reported as
@@ -104,9 +108,16 @@ PATH: Final = "/v1/extract/file"
 MAX_FILES: Final = 1
 MAX_FIELDS: Final = 8
 MAX_FIELD_BYTES: Final = 1024
+# `structured` and `chunking` carry JSON options: a schema of up to 50 properties with its
+# selector and pattern rules does not fit 1 KiB (ruling R18).
+OPTION_FIELDS: Final = frozenset({"structured", "chunking"})
+MAX_OPTION_FIELD_BYTES: Final = 64 * 1024
 MAX_FILE_NAME_CHARS: Final = 255
-# What the body may have beyond the file: the part headers, the fields and the boundaries.
-_FORM_OVERHEAD_BYTES: Final = 64 * 1024
+# What the body may have beyond the file: the part headers, the small fields and the boundaries,
+# plus the option fields at their limit.
+_FORM_OVERHEAD_BYTES: Final = 64 * 1024 + len(OPTION_FIELDS) * MAX_OPTION_FIELD_BYTES
+# The body limit of `POST /v1/chunk`'s JSON (a text as an upload): the text plus 64 KiB.
+_TEXT_OVERHEAD_BYTES: Final = 64 * 1024
 
 
 def upload_file_limit(settings: Settings) -> int:
@@ -120,8 +131,15 @@ def upload_file_limit(settings: Settings) -> int:
 
 
 def upload_body_limit(settings: Settings) -> int:
-    """The body limit of the upload route: ``upload_file_limit`` + 64 KiB."""
+    """The body limit of the upload route: ``upload_file_limit`` + 192 KiB (64 KiB for the part
+    headers, the small fields and the boundaries, and 64 KiB for each option field)."""
     return upload_file_limit(settings) + _FORM_OVERHEAD_BYTES
+
+
+def text_body_limit(settings: Settings) -> int:
+    """The body limit of ``POST /v1/chunk`` (a JSON body whose text is chunked as an upload):
+    ``upload_file_limit`` + 64 KiB."""
+    return upload_file_limit(settings) + _TEXT_OVERHEAD_BYTES
 
 
 def sanitize_file_name(name: str | None) -> str | None:
@@ -169,8 +187,10 @@ class _UploadRoute(AuthFirstRoute):
 
     async def read_body(self, request: Request) -> None:
         try:
-            await request.form(
-                max_files=MAX_FILES, max_fields=MAX_FIELDS, max_part_size=MAX_FIELD_BYTES
+            # Starlette has one part limit for every field: the larger one of the option fields;
+            # the other fields are held to MAX_FIELD_BYTES below.
+            form = await request.form(
+                max_files=MAX_FILES, max_fields=MAX_FIELDS, max_part_size=MAX_OPTION_FIELD_BYTES
             )
         except StarletteHTTPException as error:
             # Starlette refuses a form over the limits, or a malformed one, with a 400 whose
@@ -180,6 +200,18 @@ class _UploadRoute(AuthFirstRoute):
             raise ServiceError(
                 ErrorCode.INVALID_REQUEST, error.detail, HTTPStatus.UNPROCESSABLE_ENTITY
             ) from None
+        for name, value in form.multi_items():
+            if (
+                isinstance(value, str)
+                and name not in OPTION_FIELDS
+                and len(value.encode()) > MAX_FIELD_BYTES
+            ):
+                await form.close()  # its file part's spooled file
+                raise ServiceError(
+                    ErrorCode.INVALID_REQUEST,
+                    f"Part exceeded maximum size of {MAX_FIELD_BYTES // 1024}KB.",
+                    HTTPStatus.UNPROCESSABLE_ENTITY,
+                )
 
 
 router = APIRouter(route_class=_UploadRoute)
@@ -232,8 +264,9 @@ async def extract_file(
     `too_large`; otherwise it becomes a job at once (202, kind `file`), whose result has
     `media.platform: "upload"` (while the key has `ASR_MAX_OPEN_PER_CLIENT` transcriptions
     waiting, or the service is busy: `failed`/`rate_limited`, retryable). 422 for a form with
-    more than one file or eight fields, or unknown fields; 413 for a body over
-    `DOCUMENT_MAX_BYTES` + 64 KiB (the larger `MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where audio and
+    more than one file or eight fields, a field over 1 KiB (`structured` and `chunking`: over
+    64 KiB), or unknown fields; 413 for a body over
+    `DOCUMENT_MAX_BYTES` + 192 KiB (the larger `MEDIA_UPLOAD_MAX_BYTES` + 192 KiB where audio and
     video are transcribed); 400 for `ocr: always` while the service has no OCR, `pii` while it
     has no PII handling, an `X-ASR-Api-Key` header that is not 1 to 1024 visible ASCII
     characters, or an audio or video file without that header where the service transcribes

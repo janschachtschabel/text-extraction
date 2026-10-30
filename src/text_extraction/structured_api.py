@@ -17,8 +17,8 @@ structured output and for chunking.
   413 as a body over the limit would be (a text is never media; ruling R14), and a short text is
   fine: the word-count gate (``QUALITY_MIN_WORDS``) does not apply to it (R15). The route
   authenticates and rate-limits before it reads the body (R16, ``file_api.AuthFirstRoute``), and
-  its body limit is the upload's (``upload_body_limit``), not the small limit of the other JSON
-  routes.
+  its body limit is the upload's file limit + 64 KiB (``file_api.text_body_limit``), not the
+  small limit of the other JSON routes.
 """
 
 from typing import Annotated, Any, Final
@@ -53,8 +53,9 @@ _PRODUCT_SCHEMA: Final[dict[str, Any]] = {
 _STRUCTURED_EXAMPLES: Final[dict[str, Any]] = {
     "auto": {
         "summary": "Fields of a JSON schema, found by the cheapest strategy that works",
-        "description": "`auto` reads the page's metadata first, then your rules, then patterns, "
-        "and asks the LLM only for the fields still missing.",
+        "description": "`auto` takes your selectors first (else the ones learned for your key "
+        "and the site), then the page's metadata, then your patterns, and asks the LLM only for "
+        "the fields still missing.",
         "value": {
             "url": "https://shop.example.org/item/1",
             "structured": {"schema": _PRODUCT_SCHEMA},

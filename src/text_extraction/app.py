@@ -27,7 +27,7 @@ from text_extraction.extract_api import router as extract_router
 from text_extraction.fetch import Fetcher
 from text_extraction.file_api import PATH as UPLOAD_PATH
 from text_extraction.file_api import router as file_router
-from text_extraction.file_api import upload_body_limit
+from text_extraction.file_api import text_body_limit, upload_body_limit
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
@@ -276,7 +276,7 @@ def create_public_app(
         path_limits={
             "/v1/batch": batch_body_limit(settings),
             UPLOAD_PATH: upload_body_limit(settings),
-            CHUNK_PATH: upload_body_limit(settings),  # a text is chunked as an upload
+            CHUNK_PATH: text_body_limit(settings),  # a text is chunked as an upload
         },
     )
     Instrumentator(registry=registry).instrument(app)

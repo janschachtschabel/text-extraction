@@ -215,8 +215,10 @@ Request bodies of the public API are limited before they are read whole, parsed 
 authenticated (`src/text_extraction/body_limit.py`): over the limit of its path a body answers
 413 `invalid_request`, at once for a `Content-Length` over it and otherwise as soon as the bytes
 read pass it. The limit is `REQUEST_MAX_BODY_BYTES` (64 KiB), the batch bound for
-`POST /v1/batch`, and `DOCUMENT_MAX_BYTES` + 64 KiB for `POST /v1/extract/file` and `POST /v1/chunk` (the larger
-`MEDIA_UPLOAD_MAX_BYTES` + 64 KiB while uploaded audio and video are transcribed: `MEDIA_ENABLED`,
+`POST /v1/batch`, `DOCUMENT_MAX_BYTES` + 192 KiB for `POST /v1/extract/file` (room for the file,
+the 64 KiB of `structured` and of `chunking` and the small fields, R18) and `DOCUMENT_MAX_BYTES` +
+64 KiB for `POST /v1/chunk`, each with the larger `MEDIA_UPLOAD_MAX_BYTES` in place of
+`DOCUMENT_MAX_BYTES` while uploaded audio and video are transcribed (`MEDIA_ENABLED`,
 `ASR_ENABLED` and `JOBS_ENABLED`).
 
 `POST /v1/extract` (fast mode, `src/text_extraction/pipeline.py`) puts these fields into `data`,
@@ -235,10 +237,10 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
 | `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii` (`mask`, `redact`, `hash` or `annotate`, with `entities`, `language` and `score_threshold`: see "PII"; 400 `invalid_request` while the service has no PII, 422 with `screenshot` and for `annotate` with `format: html`, and without `wait_seconds` it waits `PII_SYNC_WAIT_SECONDS`, 20 s), `links`, `metadata`, `screenshot`, `full_page`, `structured` and `chunking` (see "Structured output and chunking"; 400 `invalid_request` for LLM work while the service has no LLM, 422 for chunking with `format: html`, for `pii` with what reads the raw page, and for an XPath rule of a non-admin key), `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The header `X-LLM-Api-Key` (the caller's key of the LLM endpoint, a secret; on the same three routes) goes with `structured` and `chunking` work that calls the LLM; without `wait_seconds` such a request waits `LLM_SYNC_WAIT_SECONDS`, 30 s (the largest default of `transcribe`, `pii` and the LLM wins). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9); a result with `pii` goes through the pool `nlp` and waits up to `PII_SYNC_WAIT_SECONDS` (D4) |
-| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `pii` (a bare mode or a JSON object as a string), `structured` and `chunking` (JSON objects as strings), `wait_seconds` (default 25); at most one file and 8 fields of at most 1 KiB each, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
+| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `pii` (a bare mode or a JSON object as a string), `structured` and `chunking` (JSON objects as strings), `wait_seconds` (default 25); at most one file and 8 fields of at most 1 KiB each, `structured` and `chunking` at most 64 KiB each (R18; over it 422), unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 192 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | `POST /v1/extract` with `structured` required (422 without; S15): strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`, and every option, check, header (`X-ASR-Api-Key`, `X-LLM-Api-Key`) and answer of `/v1/extract` | sync, job fallback (`wait_seconds`; 202 for a browser, nlp or llm job) |
-| `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's (`DOCUMENT_MAX_BYTES` + 64 KiB, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
+| `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured` and `chunking` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
@@ -877,8 +879,9 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
 - **F17, `POST /v1/extract/file`** (`file_api.py`). `multipart/form-data` with one file part
   `file` and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25, D2); at most one
   file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB (`MEDIA_UPLOAD_MAX_BYTES`
-  + 64 KiB where it is larger and audio and video uploads are transcribed). Auth (role `user`) and the
-  inbound rate limit are checked before a byte of the body is read, so a caller without a key or
+  + 64 KiB where it is larger and audio and video uploads are transcribed); package 8 added the
+  form fields `structured` and `chunking` (64 KiB each) and raised the 64 KiB to 192 KiB (R18).
+  Auth (role `user`) and the inbound rate limit are checked before a byte of the body is read, so a caller without a key or
   over its limit never makes the pod receive or spool the upload. The part is read into memory
   and its spooled file in `/tmp` deleted at once. The file name is reduced to its base name,
   control characters removed, at most 255 characters, reported as `document.file_name` and never
@@ -1207,8 +1210,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
 - **M14, uploads** (`file_api.py`). A part whose bytes are audio or video is transcribed, no form
   field needed: up to `MEDIA_UPLOAD_MAX_BYTES` as the item's input, a job of kind `file` on pool
   `asr`, 202 at once (the form's `wait_seconds` does not apply). The path's body limit becomes the
-  larger of `DOCUMENT_MAX_BYTES` and `MEDIA_UPLOAD_MAX_BYTES`, plus 64 KiB, while media and ASR are
-  on; a document over `DOCUMENT_MAX_BYTES` still answers `too_large`. Without ASR an audio upload
+  larger of `DOCUMENT_MAX_BYTES` and `MEDIA_UPLOAD_MAX_BYTES`, plus 192 KiB (64 KiB before R18),
+  while media and ASR are on; a document over `DOCUMENT_MAX_BYTES` still answers `too_large`. Without ASR an audio upload
   answers `failed`/`unsupported_content_type` ("Transcription is not enabled on this service.").
 - **M15, metrics and alerts.** `text_extraction_media_extractions_total{platform, source,
   outcome}` and `text_extraction_media_seconds{platform}` (API pods and workers);
@@ -1609,7 +1612,7 @@ as the OpenAI-compatible endpoint (`/chat/completions`, `/embeddings`).
   202 with its job. The API pods and the other workers never call the endpoint.
 
 **S1, the options** (`structured/types.py`, `chunking/types.py`). `ExtractRequest`, `BatchRequest`,
-`JobOptions` and the form of `/v1/extract/file` (a JSON object as a string each) have
+`JobOptions` and the form of `/v1/extract/file` (a JSON object as a string each, up to 64 KiB, R18) have
 `structured: StructuredOptions | None` and `chunking: ChunkingOptions | None`, stored in a job only
 when set. A broken option is 422 at validation, with a message that names the field and never
 repeats a selector or a pattern.
@@ -1836,13 +1839,12 @@ item's final writer drops it. R12: a request with `pii` has no DOM stage (no met
 learned rules, tables or `learn_html`), and any DOM-stage value (a cache hit's too) is reset before
 the PII step. R13: a withheld PII answer (`pii_failed`) drops `structured` and `chunks` too. R14 to
 R16: the `text` of `/v1/chunk` (limit, word gate, auth before the body). R17: the llm worker's
-grace period is 40 s in the chart (30 s plus the chart's 10 s margin).
+grace period is 40 s in the chart (30 s plus the chart's 10 s margin). R18: on `/v1/extract/file`
+the form fields `structured` and `chunking` may have 64 KiB each (every other field keeps 1 KiB),
+and the route's body limit grows to the file limit + 192 KiB to hold them.
 
 **Known limits.**
 
-- **Form fields of `/v1/extract/file` are at most 1 KiB each.** `structured` as a form field over
-  1,024 bytes (a schema of more than a handful of fields, rules) is 422 ("Part exceeded maximum
-  size of 1KB."). A larger schema goes with a URL (`/v1/structured`) or a text (`/v1/chunk`).
 - **Learned selectors are checked on `learn_html`.** A positional selector (`div:nth-child(3)`) that
   reproduced the value on the cleaned HTML may select something else on the full page; then the
   field gets another value, or none and `auto` asks the LLM. Uploads have no host and learn nothing

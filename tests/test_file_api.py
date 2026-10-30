@@ -260,6 +260,9 @@ def asgi_post(
 
 
 BOUNDARY = b"upload-boundary"
+# What the route's body limit allows beyond the file (R18): 64 KiB for the part headers, the small
+# fields and the boundaries, and 64 KiB for each of `structured` and `chunking`.
+FORM_OVERHEAD = 192 * 1024
 MULTIPART = [(b"content-type", b"multipart/form-data; boundary=" + BOUNDARY)]
 BEARER = [(b"authorization", AUTH["Authorization"].encode())]
 PART_HEAD = (
@@ -272,7 +275,7 @@ PART_HEAD = (
 def test_upload_over_limit_413_before_parse() -> None:
     settings = make_settings(document_max_bytes=2048)
     app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
-    limit = 2048 + 64 * 1024
+    limit = 2048 + FORM_OVERHEAD
     declared = [(b"content-length", str(limit + 1).encode())]
 
     status, pulled, body = asgi_post(
@@ -285,7 +288,7 @@ def test_upload_over_limit_413_before_parse() -> None:
 
 
 def test_upload_at_the_route_limit_is_read() -> None:
-    """The route's limit is DOCUMENT_MAX_BYTES + 64 KiB, far above the JSON default."""
+    """The route's limit is DOCUMENT_MAX_BYTES + 192 KiB, far above the JSON default."""
     settings = make_settings(document_max_bytes=200_000, request_max_body_bytes=1024)
     app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
     with TestClient(app) as test_client:
@@ -303,7 +306,7 @@ def test_chunked_upload_over_limit_413_without_reading_it_all() -> None:
     status, pulled, body = asgi_post(app, chunks, [*MULTIPART, *BEARER])
 
     assert status == 413
-    assert pulled <= 3  # refused at the chunk that went over 66,560 bytes
+    assert pulled <= 5  # refused at the chunk that went over 198,656 bytes (2,048 + 192 KiB)
     assert json.loads(body)["error"]["code"] == "invalid_request"
 
 
@@ -437,6 +440,78 @@ def test_too_many_fields_refused(client: TestClient) -> None:
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
     assert "Too many fields" in response.json()["error"]["message"]
+
+
+# R18: `structured` and `chunking` may be up to 64 KiB each; every other field 1 KiB.
+WIDE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        f"field_{n:02d}": {"type": "string", "description": "A field of the worksheet."}
+        for n in range(24)
+    }
+    | {"title": {"type": "string"}},
+}
+WIDE_STRUCTURED = json.dumps({"schema": WIDE_SCHEMA, "strategy": "metadata"})
+
+
+def test_structured_form_field_over_1_kib_is_accepted(client: TestClient) -> None:
+    assert len(WIDE_STRUCTURED.encode()) > 1024  # 25 fields
+
+    response = upload(
+        client,
+        ARTICLE.encode(),
+        "page.html",
+        "text/html",
+        form={"structured": WIDE_STRUCTURED, "chunking": '{"strategy": "fixed"}'},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["structured"]["values"]["title"] == "Photosynthesis explained"
+    assert len(data["structured"]["values"]) == 25
+    assert data["chunks"]
+
+
+def test_option_form_field_over_64_kib_is_422(client: TestClient) -> None:
+    padded = WIDE_STRUCTURED + " " * (65 * 1024)  # still valid JSON, but over 64 KiB
+
+    for name in ("structured", "chunking"):
+        response = upload(client, ARTICLE.encode(), "page.html", "text/html", form={name: padded})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert response.json()["error"]["message"] == "Part exceeded maximum size of 64KB."
+
+
+@pytest.mark.parametrize("name", ["pii", "format", "ocr", "wait_seconds", "metadata"])
+def test_other_form_field_over_1_kib_is_422(client: TestClient, name: str) -> None:
+    value = '{"mode": "mask"}' + " " * 1024 if name == "pii" else "x" * 1025
+
+    response = upload(client, GIF, "a.gif", "image/gif", form={name: value})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["message"] == "Part exceeded maximum size of 1KB."
+
+
+def test_body_limit_holds_a_full_file_and_both_option_fields_at_their_limit() -> None:
+    settings = make_settings(document_max_bytes=2048)
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    structured = WIDE_STRUCTURED.ljust(64 * 1024 - 16)
+    chunking = '{"strategy": "fixed"}'.ljust(64 * 1024 - 16)
+    page = (b"<html><body><p>" + b"word " * 400)[:2048]  # the file at DOCUMENT_MAX_BYTES
+
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            page,
+            "page.html",
+            "text/html",
+            form={"structured": structured, "chunking": chunking},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["chunks"]
 
 
 @pytest.mark.parametrize(
@@ -989,7 +1064,7 @@ def test_body_limit_is_max_of_both() -> None:
     assert response.json()["error"]["code"] == "too_large"
     assert "4096" in response.json()["error"]["message"]
 
-    over = [(b"content-length", str(1_000_000 + 64 * 1024 + 1).encode())]
+    over = [(b"content-length", str(1_000_000 + FORM_OVERHEAD + 1).encode())]
     status, pulled, _ = asgi_post(app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *over])
     assert (status, pulled) == (413, 0)
 
