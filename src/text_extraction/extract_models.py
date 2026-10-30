@@ -147,6 +147,108 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         return BrowserSecrets(actions=self.actions, cookies=self.cookies, headers=self.headers)
 
 
+class StructuredRequest(ExtractRequest):
+    """Body of ``POST /v1/structured``: the body of ``POST /v1/extract`` with ``structured``
+    required (ruling S15)."""
+
+    structured: StructuredOptions = Field(
+        description="Extract the fields of a JSON schema (and the page's tables) from the "
+        "result: `data.structured` has the values, where each came from and what is missing.",
+    )
+
+
+# The options that only a URL request has: a ``text`` has no page to fetch, render or transcribe.
+_URL_ONLY_OPTIONS = (
+    "mode",
+    "links",
+    "compliance",
+    "cache",
+    "actions",
+    "cookies",
+    "headers",
+    "screenshot",
+    "full_page",
+    "ocr",
+    "transcribe",
+    "languages",
+)
+
+
+class ChunkRequest(ExtractRequest):
+    """Body of ``POST /v1/chunk``: exactly one of ``url`` (then the options of
+    ``POST /v1/extract``) or ``text``, and ``chunking`` (ruling S15)."""
+
+    url: str | None = Field(  # type: ignore[assignment]
+        default=None,
+        max_length=MAX_URL_LENGTH,
+        description="The http(s) URL to extract and chunk, with the options of "
+        "`POST /v1/extract`. Exactly one of `url` and `text`.",
+    )
+    text: str | None = Field(
+        default=None,
+        min_length=1,
+        repr=False,
+        description="The text to chunk, at most `DOCUMENT_MAX_BYTES` as UTF-8 (413 over it). It "
+        "is handled as an upload of `text/markdown` or `text/plain` (`text_type`), as by "
+        "`POST /v1/extract/file`: `mode_used: upload`, no fetch, no cache. With `text` the "
+        "options that belong to a page (`mode`, `links`, `compliance`, `cache`, `actions`, "
+        "`cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`) are "
+        "422. Exactly one of `url` and `text`.",
+    )
+    text_type: Literal["markdown", "plain"] = Field(
+        default="markdown",
+        description="What `text` is. `markdown`: the chunks have heading paths. `plain`: plain "
+        "text; the content is `format: text` whatever `format` says, and the chunks have no "
+        "headings.",
+    )
+    format: Literal["markdown", "text"] = Field(
+        default="markdown",
+        description="Format of `content` (and of the chunks). The chunks need Markdown or text: "
+        "`html` is 422.",
+    )
+    chunking: ChunkingOptions = Field(
+        description="Split the content into chunks for retrieval: `data.chunks`.",
+    )
+
+    @model_validator(mode="after")
+    def _browser_options(self) -> Self:  # replaces ExtractRequest's: a text has no URL
+        if self.url is not None:
+            if self.mode == "fast" and (
+                self.actions
+                or self.cookies
+                or self.headers
+                or self.screenshot
+                or not self.full_page
+            ):
+                raise ValueError(
+                    "mode fast cannot take actions, cookies, headers, screenshot or full_page: "
+                    "they need the browser (use mode auto or browser)"
+                )
+            check_cookie_domains(self.url, self.cookies)
+        return self
+
+    @model_validator(mode="after")
+    def _one_source(self) -> Self:
+        if (self.url is None) == (self.text is None):
+            raise ValueError("send exactly one of url and text")
+        if self.text is not None:
+            page_options = [name for name in _URL_ONLY_OPTIONS if name in self.model_fields_set]
+            if page_options:
+                raise ValueError(
+                    "options of a page cannot be combined with text: " + ", ".join(page_options)
+                )
+        return self
+
+    def as_extract(self) -> ExtractRequest:
+        """The request of ``POST /v1/extract`` that a ``url`` request is."""
+        given = {
+            name: getattr(self, name)
+            for name in self.model_fields_set
+            if name in ExtractRequest.model_fields
+        }
+        return ExtractRequest.model_validate(given)
+
+
 class Timings(BaseModel):
     """Milliseconds spent in this request. ``fetch_ms`` includes the wait for the host's turn;
     ``convert_ms`` covers decoding, conversion and the steps after it; ``render_ms`` is the time

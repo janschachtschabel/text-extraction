@@ -44,6 +44,8 @@ from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.screenshot_api import router as screenshot_router
 from text_extraction.settings import Settings, llm_available
+from text_extraction.structured_api import CHUNK_PATH
+from text_extraction.structured_api import router as structured_router
 from text_extraction.tracing import TraceMiddleware, current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -251,6 +253,7 @@ def create_public_app(
     app.include_router(extract_router)
     app.include_router(file_router)
     app.include_router(screenshot_router)
+    app.include_router(structured_router)
     app.include_router(jobs_router)
 
     @app.get("/v1/info", dependencies=[Depends(rate_limited)])
@@ -273,6 +276,7 @@ def create_public_app(
         path_limits={
             "/v1/batch": batch_body_limit(settings),
             UPLOAD_PATH: upload_body_limit(settings),
+            CHUNK_PATH: upload_body_limit(settings),  # a text is chunked as an upload
         },
     )
     Instrumentator(registry=registry).instrument(app)

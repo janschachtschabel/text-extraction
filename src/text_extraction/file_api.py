@@ -237,25 +237,71 @@ async def extract_file(
     document that needs OCR waits up to `DOCLING_SYNC_WAIT_SECONDS` for it without
     `wait_seconds`, then answers its text layer with the warning `ocr_unavailable`.
     """
-    state = request.app.state
-    settings: Settings = state.settings
-    check_ocr_request(form.ocr, settings)
-    check_pii_request(form.pii, form.format, False, settings)
-    check_selector_access(form.structured, principal)
-    key = asr_key_of(asr_key)
-    caller_llm_key = llm_key_of(llm_key)
-    check_structured_request(
-        form.structured, form.chunking, form.pii, form.format, settings, llm_key=caller_llm_key
+    settings: Settings = request.app.state.settings
+    key, caller_llm_key = check_upload_request(
+        form, principal, settings, asr_header=asr_key, llm_header=llm_key
     )
-    # Only a request that may need the LLM keeps the caller's key with its jobs.
-    job_llm_key = caller_llm_key if wants_llm(form.structured, form.chunking, settings) else None
     try:
         body = await file.read(upload_file_limit(settings) + 1)
     finally:
         await file.close()  # deletes the spooled part now, not when the answer is sent
     if key is None and _transcribed(body, file.content_type, settings):
         check_asr_key(settings, key)  # 400 without any key for the external endpoint (M11)
-    name = sanitize_file_name(file.filename)
+    return await answer_upload(
+        request,
+        principal,
+        form,
+        body,
+        sanitize_file_name(file.filename),
+        file.content_type,
+        asr_key=key,
+        llm_key=caller_llm_key,
+    )
+
+
+def check_upload_request(
+    form: FileForm,
+    principal: Principal,
+    settings: Settings,
+    *,
+    asr_header: str | None,
+    llm_header: str | None,
+) -> tuple[str | None, str | None]:
+    """The checks of an upload that need no byte of the file, before it is read: ``ocr``,
+    ``pii``, the selector access of the key, the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers
+    (``asr_header`` and ``llm_header``, as the route received them) and ``structured`` and
+    ``chunking`` (ruling S12). Returns the caller's ASR and LLM keys (None without the header).
+    Shared with ``POST /v1/chunk`` (``structured_api.py``)."""
+    check_ocr_request(form.ocr, settings)
+    check_pii_request(form.pii, form.format, False, settings)
+    check_selector_access(form.structured, principal)
+    key = asr_key_of(asr_header)
+    caller_llm_key = llm_key_of(llm_header)
+    check_structured_request(
+        form.structured, form.chunking, form.pii, form.format, settings, llm_key=caller_llm_key
+    )
+    return key, caller_llm_key
+
+
+async def answer_upload(
+    request: Request,
+    principal: Principal,
+    form: FileForm,
+    body: bytes,
+    name: str | None,
+    content_type: str | None,
+    *,
+    asr_key: str | None,
+    llm_key: str | None,
+) -> Envelope[ExtractResult] | Response:
+    """Convert the upload's ``body`` (``name`` is its sanitised file name, ``content_type`` the
+    declared type) and answer, or hand it over to a job after ``form.wait_seconds`` (the module
+    docstring). The request has passed ``check_upload_request``; ``asr_key`` and ``llm_key`` are
+    its keys. Shared with ``POST /v1/chunk`` for a ``text`` (``structured_api.py``)."""
+    state = request.app.state
+    settings: Settings = state.settings
+    # Only a request that may need the LLM keeps the caller's key with its jobs.
+    job_llm_key = llm_key if wants_llm(form.structured, form.chunking, settings) else None
     compliance = resolve_mode(None, principal, settings)
     options = upload_options(form, compliance)
     wait_seconds = form.wait_seconds
@@ -273,14 +319,14 @@ async def extract_file(
         name,
         form,
         principal,
-        file.content_type,
+        content_type,
         handover,
         options,
         handover_time(wait_seconds, settings),
-        key,
+        asr_key,
         job_llm_key,
     )
-    meta = UploadInputMeta(file_name=name, content_type=file.content_type)
+    meta = UploadInputMeta(file_name=name, content_type=content_type)
     return await answer_or_hand_over(
         state,
         flow,
