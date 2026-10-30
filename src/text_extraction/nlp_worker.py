@@ -54,6 +54,12 @@ each), each with ``PII_MEMORY_LIMIT_MB`` of address space, by a deadline of its 
 deadline the child is killed. The models' path and size go to the children in the payload, never
 through this process's environment. The pool replaces a child after ``CHILD_MAX_TASKS`` calls.
 
+**Moving on.** A processed result whose post stage needs the LLM (``structured``, ``chunking``)
+moves on to the ``llm`` pool (``llm_dispatch.LlmMove``, ruling S13) instead of being written: the
+masked result overwrites the item's draft, and the caller's LLM key stays for the llm worker.
+While Valkey's memory guard (``memory_guard.py``, read every 5 s while the process runs) is high,
+the result is written without the LLM work (``llm_failed``, retryable).
+
 **The process** serves only the internal port. Before anything else it checks the models
 (``model_store``): a model of ``PII_MODEL_SIZE`` that is missing under ``PII_MODELS_PATH`` ends the
 process with exit code 1 and a log line naming that path. Then it starts the children (each
@@ -88,6 +94,7 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from text_extraction import model_store
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.documents.pool import (
     ConversionCrashed,
     ConversionError,
@@ -99,6 +106,8 @@ from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult, failed_extract
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, pii_lease_seconds
+from text_extraction.llm_dispatch import create_llm_move
+from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pii.fields import (
     ANNOTATE_HTML_MESSAGE,
     TOO_LARGE_MESSAGE,
@@ -442,11 +451,15 @@ def models_missing(settings: Settings) -> bool:
 
 @dataclass(frozen=True)
 class NlpWorkerParts:
-    """What one nlp worker process runs on: the worker, its children, and the settings."""
+    """What one nlp worker process runs on: the worker, its children, the settings, the
+    memory guard of its moves to the ``llm`` pool and the post stage's pool (None: the worker's
+    own)."""
 
     worker: Worker
     pool: PiiChildrenPool
     settings: Settings
+    guard: MemoryGuard | None = None
+    post_pool: ConversionPool | None = None
 
     async def start(self) -> None:
         """Start the children, load the models in each and run the self-check (before
@@ -457,9 +470,12 @@ class NlpWorkerParts:
 def build_nlp_worker(
     settings: Settings, valkey: Redis, registry: CollectorRegistry
 ) -> NlpWorkerParts:
-    """The nlp worker of a process, nothing started yet."""
+    """The nlp worker of a process, nothing started yet. Its results that need the LLM move on
+    to the ``llm`` pool, unless the memory guard reports Valkey as nearly full."""
     pool = create_nlp_pool(settings)
     store = JobStore(valkey, settings)
+    guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
     worker = Worker(
         settings,
         valkey,
@@ -468,8 +484,12 @@ def build_nlp_worker(
         nlp_queue(valkey, settings),
         registry,
         concurrency=settings.pii_concurrency,
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
+        post_pool=post_pool,
     )
-    return NlpWorkerParts(worker=worker, pool=pool, settings=settings)
+    return NlpWorkerParts(
+        worker=worker, pool=pool, settings=settings, guard=guard, post_pool=post_pool
+    )
 
 
 async def serve(parts: NlpWorkerParts, internal: _Server, readiness: Readiness) -> None:
@@ -480,6 +500,7 @@ async def serve(parts: NlpWorkerParts, internal: _Server, readiness: Readiness) 
         internal,
         readiness,
         graceful_seconds=GRACEFUL_SECONDS,
+        guard=parts.guard,
         startup=parts.start,
     )
 
@@ -499,6 +520,8 @@ async def _run(settings: Settings) -> None:
         await serve(parts, internal, readiness)
     finally:
         await parts.pool.shutdown()  # after the loops: their items are given back
+        if parts.post_pool is not None:
+            parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

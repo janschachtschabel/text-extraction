@@ -16,6 +16,7 @@ from text_extraction.browser_options import (
     WaitSeconds,
     check_cookie_domains,
 )
+from text_extraction.chunking.types import Chunk, ChunkingOptions
 from text_extraction.compliance import ComplianceMode, ComplianceReport
 from text_extraction.convert import Link, OutputFormat
 from text_extraction.documents.types import DocumentInfo, OcrOption
@@ -26,6 +27,7 @@ from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
 from text_extraction.pii.types import BareModeOrObject, PiiOptions, PiiReport
 from text_extraction.quality import Quality
+from text_extraction.structured.types import StructuredOptions, StructuredResult
 from text_extraction.tracing import current_trace_id
 
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
@@ -117,6 +119,16 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         "`wait_seconds` waits `PII_SYNC_WAIT_SECONDS`, then answers 202. 400 while the service "
         "has no PII handling. Not with `screenshot`.",
     )
+    structured: StructuredOptions | None = Field(
+        default=None,
+        description="Extract the fields of a JSON schema (and the page's tables) from the "
+        "result: `data.structured` has the values, where each came from and what is missing.",
+    )
+    chunking: ChunkingOptions | None = Field(
+        default=None,
+        description="Split the content into chunks for retrieval: `data.chunks`. Needs "
+        "`format: markdown` or `text`.",
+    )
 
     @model_validator(mode="after")
     def _browser_options(self) -> Self:
@@ -135,6 +147,108 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
         return BrowserSecrets(actions=self.actions, cookies=self.cookies, headers=self.headers)
 
 
+class StructuredRequest(ExtractRequest):
+    """Body of ``POST /v1/structured``: the body of ``POST /v1/extract`` with ``structured``
+    required (ruling S15)."""
+
+    structured: StructuredOptions = Field(
+        description="Extract the fields of a JSON schema (and the page's tables) from the "
+        "result: `data.structured` has the values, where each came from and what is missing.",
+    )
+
+
+# The options that only a URL request has: a ``text`` has no page to fetch, render or transcribe.
+_URL_ONLY_OPTIONS = (
+    "mode",
+    "links",
+    "compliance",
+    "cache",
+    "actions",
+    "cookies",
+    "headers",
+    "screenshot",
+    "full_page",
+    "ocr",
+    "transcribe",
+    "languages",
+)
+
+
+class ChunkRequest(ExtractRequest):
+    """Body of ``POST /v1/chunk``: exactly one of ``url`` (then the options of
+    ``POST /v1/extract``) or ``text``, and ``chunking`` (ruling S15)."""
+
+    url: str | None = Field(  # type: ignore[assignment]
+        default=None,
+        max_length=MAX_URL_LENGTH,
+        description="The http(s) URL to extract and chunk, with the options of "
+        "`POST /v1/extract`. Exactly one of `url` and `text`.",
+    )
+    text: str | None = Field(
+        default=None,
+        min_length=1,
+        repr=False,
+        description="The text to chunk, at most `DOCUMENT_MAX_BYTES` as UTF-8 (413 over it). It "
+        "is handled as an upload of `text/markdown` or `text/plain` (`text_type`), as by "
+        "`POST /v1/extract/file`: `mode_used: upload`, no fetch, no cache. With `text` the "
+        "options that belong to a page (`mode`, `links`, `compliance`, `cache`, `actions`, "
+        "`cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`) are "
+        "422. Exactly one of `url` and `text`.",
+    )
+    text_type: Literal["markdown", "plain"] = Field(
+        default="markdown",
+        description="What `text` is. `markdown`: the chunks have heading paths. `plain`: plain "
+        "text; the content is `format: text` whatever `format` says, and the chunks have no "
+        "headings.",
+    )
+    format: Literal["markdown", "text"] = Field(
+        default="markdown",
+        description="Format of `content` (and of the chunks). The chunks need Markdown or text: "
+        "`html` is 422.",
+    )
+    chunking: ChunkingOptions = Field(
+        description="Split the content into chunks for retrieval: `data.chunks`.",
+    )
+
+    @model_validator(mode="after")
+    def _browser_options(self) -> Self:  # replaces ExtractRequest's: a text has no URL
+        if self.url is not None:
+            if self.mode == "fast" and (
+                self.actions
+                or self.cookies
+                or self.headers
+                or self.screenshot
+                or not self.full_page
+            ):
+                raise ValueError(
+                    "mode fast cannot take actions, cookies, headers, screenshot or full_page: "
+                    "they need the browser (use mode auto or browser)"
+                )
+            check_cookie_domains(self.url, self.cookies)
+        return self
+
+    @model_validator(mode="after")
+    def _one_source(self) -> Self:
+        if (self.url is None) == (self.text is None):
+            raise ValueError("send exactly one of url and text")
+        if self.text is not None:
+            page_options = [name for name in _URL_ONLY_OPTIONS if name in self.model_fields_set]
+            if page_options:
+                raise ValueError(
+                    "options of a page cannot be combined with text: " + ", ".join(page_options)
+                )
+        return self
+
+    def as_extract(self) -> ExtractRequest:
+        """The request of ``POST /v1/extract`` that a ``url`` request is."""
+        given = {
+            name: getattr(self, name)
+            for name in self.model_fields_set
+            if name in ExtractRequest.model_fields
+        }
+        return ExtractRequest.model_validate(given)
+
+
 class Timings(BaseModel):
     """Milliseconds spent in this request. ``fetch_ms`` includes the wait for the host's turn;
     ``convert_ms`` covers decoding, conversion and the steps after it; ``render_ms`` is the time
@@ -146,6 +260,7 @@ class Timings(BaseModel):
     convert_ms: int
     render_ms: int = 0  # browser: navigation, actions and settling; 0 in fast mode
     pii_ms: int = 0  # the PII step; 0 without ``pii``
+    llm_ms: int = 0  # the LLM calls of ``structured``; 0 without them
 
 
 class ExtractResult(BaseModel):
@@ -184,8 +299,31 @@ class ExtractResult(BaseModel):
         "had or read this time: the metadata answers), `asr_unavailable` (no transcription in "
         "time, or it failed: the metadata answers), `tracks_truncated` (more tracks than the "
         "limit: the first ones), `tracks_failed` (no track of the page could be read) (media); "
-        "`content_not_stored_too_large` (a job item stored without its content). Converter "
-        "notes may follow."
+        "`content_not_stored_too_large` (a job item stored without its content), "
+        "`chunks_not_stored_too_large`, `tables_not_stored_too_large` (still too large without "
+        "its content, it was stored without its chunks or tables too); "
+        "`structured_value_invalid` (a value from the LLM or a rule did not fit its field's "
+        "type: the field is missing), `pattern_timeout` (a pattern ran into its time limit: its "
+        "field is looked up by the next strategy), `llm_unavailable` (`auto` would have asked "
+        "the LLM for the fields still missing, but the service has none: they stay missing), "
+        "`llm_input_truncated` (the "
+        "content was cut to the model's input limit for the LLM), "
+        "`learned_selectors_unavailable` (learned selectors could not be read or stored this "
+        "time), `nothing_to_learn` (`learn_selectors` was asked, but no field went to the LLM, "
+        "so there was no value to learn from, or there is no page to learn on: an upload or a "
+        "text), `selector_learning_failed` (the LLM call that proposes selectors failed, or "
+        "checking its selectors did not finish in time: the values stand, nothing was learned), "
+        "`selectors_skipped_large_page` (the page has more than 50,000 elements: the selector "
+        "rules did not run, and nothing is learned on it), `selectors_timed_out` (the selector "
+        "rules did not finish within their time limit: their fields are missing), "
+        "`selectors_failed` (the selector rules could not run: their fields are missing), "
+        "`structured_truncated` (a selector found more than a "
+        "field's limit: the first values), `tables_truncated` (the tables are over 1,000,000 "
+        "characters: the first ones), `chunks_truncated` (more chunks than `CHUNK_MAX_CHUNKS`: "
+        "the first ones), "
+        "`chunking_fallback_recursive` (the chunking strategy needed Markdown or too many "
+        "sentences for embeddings: `recursive` was used) (structured output and chunking). "
+        "Converter notes may follow."
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None
@@ -196,6 +334,9 @@ class ExtractResult(BaseModel):
     media: MediaInfo | None = None
     # With a ``pii`` request only; the default keeps results cached before PII valid.
     pii: PiiReport | None = None
+    # With a ``structured`` or ``chunking`` request only; the defaults keep older results valid.
+    structured: StructuredResult | None = None
+    chunks: list[Chunk] | None = None
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

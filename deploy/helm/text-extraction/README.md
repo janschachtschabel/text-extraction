@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription and optional NLP workers for PII handling (all off by default), and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription, optional NLP workers for PII handling and optional llm workers for structured output with an LLM and semantic chunking (all off by default), and an optional single-replica Valkey (with a password).
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -22,6 +22,7 @@ Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`
 | Worker Deployment `<release>-text-extraction-worker-asr` | `workers.asr.enabled` | Runs `text-extraction-asr-worker` from the ASR image (`workers.asr.image`): claims the items of the pool `asr` (`transcribe: true` without subtitles, audio and video uploads) and transcribes them with faster-whisper, or on an external endpoint (`workers.asr.backend: openai`). An init container downloads the model first (local backend). Downloaded media live on a bounded emptyDir at `/scratch`. Serves only port 9090. Same ConfigMap and Secrets as the API. See [ASR workers](#asr-workers-and-the-models-volume). |
 | PersistentVolumeClaim `<release>-text-extraction-asr-models` | `workers.asr.enabled`, `workers.asr.backend: local` and no `workers.asr.models.persistence.existingClaim` | The Whisper model volume of the ASR workers, `ReadWriteMany` by default. |
 | Worker Deployment `<release>-text-extraction-worker-nlp` | `workers.nlp.enabled` | Runs `text-extraction-nlp-worker` from the NLP image (`workers.nlp.image`): claims the items of the pool `nlp` (results of requests with `pii`) and finds and replaces personal data with Presidio and spaCy. An init container downloads the spaCy models first. Serves only port 9090. Same ConfigMap and Secrets as the API; `PII_HASH_KEY` from `workers.nlp.hashKey.existingSecret`. See [NLP workers](#nlp-workers-and-the-models-volume). |
+| Worker Deployment `<release>-text-extraction-worker-llm` | `workers.llm.enabled` | Runs `text-extraction-llm-worker` from the API image: claims the items of the pool `llm` (the last hop of a request with `structured` or `chunking` that needs the LLM) and calls the OpenAI-compatible endpoint `workers.llm.baseUrl`. No model, no volume, no init container. Serves only port 9090. Same ConfigMap and Secrets as the API; `LLM_API_KEY` from `workers.llm.apiKey.existingSecret`. See [llm workers](#llm-workers). |
 | PersistentVolumeClaim `<release>-text-extraction-nlp-models` | `workers.nlp.enabled` and no `workers.nlp.models.persistence.existingClaim` | The spaCy models volume of the NLP workers, `ReadWriteMany` by default. |
 | Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`, `nlp`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
 | Secret `<release>-text-extraction-asr` | `workers.asr.backend: openai`, `workers.asr.external.apiKey` set and no `workers.asr.external.existingSecret` | Holds `ASR_EXTERNAL_API_KEY`. |
@@ -64,14 +65,18 @@ the mount of the models volume) on the Docling workers, `ASR_CONCURRENCY`, `ASR_
 `ASR_MODELS_PATH` (`/models`), `ASR_SCRATCH_PATH` (`/scratch`) and, with the external backend,
 `ASR_EXTERNAL_BASE_URL` and `ASR_EXTERNAL_MODEL` on the ASR workers, `PII_CONCURRENCY`,
 `PII_MODEL_SIZE` (from `workers.nlp.modelSize`) and `PII_MODELS_PATH` (`/models`) on the NLP
-workers, and `BROWSER_ENABLED` (from
+workers, `LLM_CONCURRENCY` (from `workers.llm.concurrency`) on the llm workers, and `BROWSER_ENABLED` (from
 `workers.browser.enabled`), `BROWSER_UNBLOCK_ENABLED` (from `workers.browser.unblock`),
 `DOCLING_ENABLED` (from `workers.docling.enabled`), `ASR_ENABLED` (from `workers.asr.enabled`),
 `ASR_BACKEND` (from `workers.asr.backend`) and `MEDIA_UPLOAD_MAX_BYTES` (from
-`workers.asr.uploadMaxBytes`) and `PII_ENABLED` (from `workers.nlp.enabled`) on every pod (API,
-extract, browser, Docling, ASR and NLP workers): entries for them under `config` are ignored. So
-browser mode, OCR, transcription and PII handling are on exactly when the chart deploys their
-workers.
+`workers.asr.uploadMaxBytes`), `PII_ENABLED` (from `workers.nlp.enabled`) and `LLM_ENABLED` (from
+`workers.llm.enabled`) on every pod (API, extract, browser, Docling, ASR, NLP and llm workers):
+entries for them under `config` are ignored. While `workers.llm.enabled` is true, `LLM_BASE_URL`,
+`LLM_MODEL` and `LLM_EMBEDDING_MODEL` (from `workers.llm.baseUrl`, `.model` and `.embeddingModel`,
+the last only when set) go to every pod too, and `config` entries for them are ignored; the other
+`LLM_*` settings (`LLM_TEMPERATURE`, `LLM_TIMEOUT_SECONDS`, `LLM_ALLOW_HTTP`, ...) are set under
+`config`. So browser mode, OCR, transcription, PII handling and the LLM are on exactly when the
+chart deploys their workers.
 
 `config.FETCH_MAX_BYTES` (the download limit) and `config.DOCUMENT_MAX_BYTES` (the largest
 document and upload) are both 20000000 by default: lower them together. A `DOCUMENT_MAX_BYTES`
@@ -81,8 +86,10 @@ The API, extract and browser pods convert documents (MarkItDown) in `DOCUMENT_CO
 child processes, each with an address-space limit of `DOCUMENT_MEMORY_LIMIT_MB`. The chart
 renders that limit from the container's memory limit: `floor((limits.memory in MiB -
 documentParentReserveMiB) / DOCUMENT_CONCURRENCY)`, 768 MiB for every pod with the defaults
-(`(2048 - 512) / 2` for the API and extract pods, `(4096 - 2560) / 2` for the browser pods, whose
-reserve covers Chromium). So a child runs out of memory and answers `too_large` before the
+(`(2560 - 1024) / 2` for the API and extract pods, `(4608 - 3072) / 2` for the browser pods, whose
+reserve covers Chromium). Each reserve holds the selector child as well
+(`STRUCTURED_SELECTOR_PROCESSES` x `STRUCTURED_SELECTOR_MEMORY_MB`, 512 MiB): raise the reserve and
+the limit together when you raise either. So a child runs out of memory and answers `too_large` before the
 container's OOM killer ends the pod; the children also raise their `oom_score_adj` to 1000, so
 the kernel picks them before the server when the pod runs out anyway. A share below 256 MiB fails
 the render. `config.DOCUMENT_MEMORY_LIMIT_MB` wins when set; without a memory limit the
@@ -99,6 +106,7 @@ Secrets, listed separately:
 | `VALKEY_PASSWORD` | Only with the in-chart Valkey: the generated Secret, or `valkey.auth.existingSecret` + `valkey.auth.existingSecretKey`. API and worker pods get it as an env var and build `VALKEY_URL=redis://:$(VALKEY_PASSWORD)@<valkey>:6379/0` with it. |
 | `VALKEY_URL` | Plain `externalValkey.url`, or for a URL with a password `externalValkey.existingSecret.name` + `.key`. The in-chart Valkey sets it from `VALKEY_PASSWORD`. |
 | `PII_HASH_KEY` | Optional, with `workers.nlp.enabled`: your own Secret, `workers.nlp.hashKey.existingSecret` + `.existingSecretKey` (at least 32 bytes, `openssl rand -hex 32`). Rendered into the NLP worker container only (not its models init container or Job, not the API or other workers). Without it each result is hashed with a random key (`hash_scope: result`). |
+| `LLM_API_KEY` | Optional, with `workers.llm.enabled`: your own Secret, `workers.llm.apiKey.existingSecret` + `.existingSecretKey` (the chart creates none, and never renders the key as a literal). Rendered into the API pods (which answer 400 when neither it nor the caller's `X-LLM-Api-Key` is there) and the llm worker container, no other pod. A caller's `X-LLM-Api-Key` wins over it. |
 | `ASR_EXTERNAL_API_KEY` | Only with `workers.asr.backend: openai`, optional: `workers.asr.external.apiKey` (chart-managed Secret) or `workers.asr.external.existingSecret` + `.existingSecretKey`. Rendered into the API pods (which answer 400 when neither it nor the caller's `X-ASR-Api-Key` is there) and the ASR workers, no other pod. |
 
 ### Valkey password
@@ -150,14 +158,18 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.RATE_LIMIT_ENABLED` | `"true"` | Inbound rate limit per API key. |
 | `config.RATE_LIMIT_PER_MINUTE` | `"60"` | Default limit per key. |
 | `config.CONVERT_CONCURRENCY` | `"2"` | Conversions at once per pod. The memory limit is sized for it. |
+| `config.POST_CONCURRENCY` | `"2"` | Threads of the post stage (patterns, chunking) per process, in every pod. |
+| `config.STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `"5"` | Time all selector rules of one result may take in their child process, which is then killed (`selectors_timed_out`). |
+| `config.STRUCTURED_SELECTOR_PROCESSES` | `"1"` | Selector child processes per pod (API, extract, browser and llm workers), about 40 MB each when idle. |
+| `config.STRUCTURED_SELECTOR_MEMORY_MB` | `"512"` | Address space of one selector child. The default memory limits and `documentParentReserveMiB` values hold 512 MiB for it (the llm worker's limit too); raise them by `STRUCTURED_SELECTOR_PROCESSES` x this when you raise either. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.*` | | Any further non-secret setting is added here. |
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
 | `secrets.existingSecretKey` | `API_KEYS` | Key inside that Secret. |
-| `resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
-| `documentParentReserveMiB` | `512` | MiB of the API container's memory limit kept for everything but the document conversion children; the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
+| `resources` | requests 100m / 256Mi, limits 1 / 2560Mi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
+| `documentParentReserveMiB` | `1024` | MiB of the API container's memory limit kept for everything but the document conversion children: the server (512) and the selector child (512); the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
@@ -167,8 +179,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
 | `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
 | `workers.extract.nodeSelector` | `{}` | Merged over the global `nodeSelector` for the extract workers; a key set here wins. |
-| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
-| `workers.extract.documentParentReserveMiB` | `512` | As `documentParentReserveMiB`, for the extract workers. |
+| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2560Mi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
+| `workers.extract.documentParentReserveMiB` | `1024` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
 | `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica (pending plus leased with `countLeased`). `null`: the pool's `concurrency`. Must be positive. |
@@ -185,8 +197,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
-| `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4Gi | Placeholder for a browser with 4 pages plus the conversions. |
-| `workers.browser.documentParentReserveMiB` | `2560` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages, so each document conversion child gets `(4096 - 2560) / 2` = 768 MiB. |
+| `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4608Mi | Placeholder for a browser with 4 pages plus the conversions and the selector child. |
+| `workers.browser.documentParentReserveMiB` | `3072` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages and the selector child, so each document conversion child gets `(4608 - 3072) / 2` = 768 MiB. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
 | `workers.browser.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector` for the browser workers; a key set here wins. The browser image is linux/amd64 only (Google Chrome stable), so the default keeps its pods off arm64 nodes. Set the key to `null` to drop it. |
 | `workers.browser.autoscaling.keda.*` | as for the extract workers, `threshold` `8` | Scales on `max(text_extraction_queue_pending_items{pool="browser"})`; the API pods export it while `JOBS_ENABLED` and `BROWSER_ENABLED` are true. Keep `minReplicaCount` at 1 or more: a sync request waits only `BROWSER_QUEUE_WAIT_SECONDS` (10) for a worker. |
@@ -237,6 +249,20 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.asr.external.existingSecret` | `""` | Your own Secret with the key; takes precedence over `apiKey`. |
 | `workers.asr.external.existingSecretKey` | `ASR_EXTERNAL_API_KEY` | Key inside that Secret (also used for the chart-managed one). |
 | `workers.nlp.enabled` | `false` | Deploy the NLP workers (PII handling). Also renders `PII_ENABLED` into every pod: false makes a request with `pii` answer 400 `invalid_request`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
+| `workers.llm.enabled` | `false` | Deploy the llm workers. Also renders `LLM_ENABLED` into every pod: false makes a request that needs the LLM (`structured` with strategy `llm` or `auto`, `learn_selectors`, `chunking` `semantic`) answer 400 `invalid_request`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
+| `workers.llm.baseUrl` | `https://api.openai.com/v1` | `LLM_BASE_URL` in every pod: the OpenAI-compatible endpoint (`/chat/completions`, `/embeddings`). Required, `https://` only (the pods exit with code 2 otherwise) unless `config.LLM_ALLOW_HTTP` is `"true"` (local model server, development). |
+| `workers.llm.model` | `gpt-6-luna` | `LLM_MODEL` in every pod, sent with every chat request. Required. |
+| `workers.llm.embeddingModel` | `""` | `LLM_EMBEDDING_MODEL` in every pod: model of the `/embeddings` route. Empty: `semantic` chunking answers 400. |
+| `workers.llm.apiKey.existingSecret` | `""` | Your own Secret with `LLM_API_KEY`. Empty: callers must send `X-LLM-Api-Key`. |
+| `workers.llm.apiKey.existingSecretKey` | `LLM_API_KEY` | Key inside that Secret. |
+| `workers.llm.replicaCount` | `1` | Ignored with KEDA or HPA. Keep one: a sync request that needs the LLM waits only `LLM_SYNC_WAIT_SECONDS` (30) for a worker. |
+| `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY`: items per pod at once, each with one call to the endpoint at a time. |
+| `workers.llm.terminationGracePeriodSeconds` | `40` | Items in flight get 30 s after SIGTERM, then the ones still running go back to the queue at once and run again elsewhere. The render fails below 40 (30 s + a 10 s margin, so the hand-back happens before the kill). |
+| `workers.llm.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption: the worker waits for the endpoint and holds no model; 512 MiB are its selector child, which checks the proposals of `learn_selectors`. |
+| `workers.llm.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The workers run the API image. |
+| `workers.llm.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (`concurrency`), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="llm"})`. The API pods export it while `JOBS_ENABLED` and `LLM_ENABLED` are true. Keep one replica. |
+| `workers.llm.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
+| `workers.llm.autoscaling.scaleDownStabilizationWindowSeconds` | `null` | As for the extract workers. |
 | `workers.nlp.modelSize` | `lg` | `PII_MODEL_SIZE` on the NLP workers: `lg` (about 1 GB on the volume, 1.6 GB resident, better German names) or `md` (about 115 MB, half the memory, more names missed). Only the German and English models of this size are downloaded. Anything else fails the render. |
 | `workers.nlp.image.repository` | `ghcr.io/janschachtschabel/text-extraction-nlp` | NLP worker image (Presidio and spaCy, no models). |
 | `workers.nlp.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
@@ -289,8 +315,9 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `alerts.doclingQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `docling` (an item takes minutes). |
 | `alerts.asrQueueBacklogItems` | `50` | Threshold of `TextExtractionQueueBacklog` for the pool `asr` (an item takes up to hours). |
 | `alerts.nlpQueueBacklogItems` | `200` | Threshold of `TextExtractionQueueBacklog` for the pool `nlp` (an item takes seconds). |
+| `alerts.llmQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `llm` (an item takes seconds to minutes). |
 | `alerts.valkeyMemoryRatio` | `0.8` | Threshold of `TextExtractionValkeyMemoryHigh` (share of Valkey's maxmemory). Keep it at or below `config.VALKEY_MEMORY_GUARD_RATIO`. |
-| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling, asr, nlp) and the models Jobs get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
+| `podAnnotations`, `nodeSelector`, `tolerations`, `affinity` | empty | Applied to the API pods. Workers (extract, browser, docling, asr, nlp, llm) and the models Jobs get `podAnnotations`, `nodeSelector` (merged with `workers.<pool>.nodeSelector`) and `tolerations`; Valkey gets only `nodeSelector` and `tolerations`. `affinity` is for the API pods only. |
 
 With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 `externalValkey.existingSecret.name` is set.
@@ -309,15 +336,15 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 
 The backlog thresholds are `alerts.queueBacklogItems` (1000) for `extract` and `browser`,
 `alerts.doclingQueueBacklogItems` (100), `alerts.asrQueueBacklogItems` (50) and
-`alerts.nlpQueueBacklogItems` (200).
+`alerts.nlpQueueBacklogItems` (200) and `alerts.llmQueueBacklogItems` (100).
 
 The job alerts are rendered while jobs are enabled (`JOBS_ENABLED=true` on the API pods);
 `TextExtractionWorkersDown` also needs the pool's `workers.<pool>.enabled`, and the alerts of the
-pools `browser`, `docling`, `asr` and `nlp` need `workers.browser.enabled`, `workers.docling.enabled`,
-`workers.asr.enabled` or `workers.nlp.enabled` (without it there is no such queue). For the pools `docling`, `asr` and `nlp` the two
+pools `browser`, `docling`, `asr`, `nlp` and `llm` need `workers.browser.enabled`, `workers.docling.enabled`,
+`workers.asr.enabled`, `workers.nlp.enabled` or `workers.llm.enabled` (without it there is no such queue). For the pools `docling`, `asr`, `nlp` and `llm` the two
 alerts are the backlog and "workers down" (for example models missing on the volume: the workers
 exit before `/ready`). The item counter has no `pool` label, so the pools are told apart by the
-scrape target: the browser, docling, asr and nlp pools count the series of their workers' internal
+scrape target: the browser, docling, asr, nlp and llm pools count the series of their workers' internal
 Service, the extract pool all others. The queue gauges come from the API
 pods and every pod reports the same queue, so the rules use `max()`, never `sum()`. The counter
 `text_extraction_job_items_total` appears with the first item a worker handles and the kube-state
@@ -340,13 +367,13 @@ enabled. Only 5xx answers from the public API count; a target failure is a `200`
 
 With `networkPolicy.enabled` the chart creates a policy for Valkey, the API and each enabled worker
 pool, all for ingress only (the API and the workers must reach arbitrary sites, so egress stays
-open; that also covers the model downloads and the external ASR endpoint, which the ASR workers
-call directly):
+open; that also covers the model downloads, the external ASR endpoint, which the ASR workers
+call directly, and the LLM endpoint, which the llm workers call):
 
-- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling, asr, nlp) of this
+- Valkey accepts port 6379 from the API and worker pods (extract, browser, docling, asr, nlp, llm) of this
   release only.
 - The API accepts port 8080 from anywhere and port 9090 from `networkPolicy.metricsFrom`.
-- The extract, browser, Docling, ASR and NLP workers accept port 9090 from `networkPolicy.metricsFrom`
+- The extract, browser, Docling, ASR, NLP and llm workers accept port 9090 from `networkPolicy.metricsFrom`
   only.
 
 `metricsFrom` is a list of NetworkPolicy peers, by default every pod of the release namespace. For a
@@ -446,6 +473,31 @@ workers such a request answers 400. The API pods keep their grace period: a sync
 - The text of a result never reaches a log, a metric label or the ConfigMap; the workers count
   found entities by type only.
 
+## llm workers
+
+The LLM is off by default (`workers.llm.enabled: false`). With it on, a request with `structured`
+(strategy `llm` or `auto`, or `learn_selectors`) or `chunking` `semantic` has its last hop run in the
+pool `llm` (the page is data for the model: no tool calls, its answer is validated against the
+caller's schema), and every pod gets `LLM_ENABLED=true`; without the workers such a request answers
+400. A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
+
+- The workers run the API image (`text-extraction-llm-worker` as its args): no model, no volume,
+  no init container. They call `workers.llm.baseUrl` (`/chat/completions`, and `/embeddings` with
+  `workers.llm.embeddingModel`); the endpoint is the operator's, so it is exempt from the SSRF
+  guard. Egress stays open, as for the other workers.
+- `workers.llm.apiKey.existingSecret` names a Secret with `LLM_API_KEY`; the API pods and the llm
+  worker container get it (the chart never renders it as a literal, and creates no Secret). A
+  caller's `X-LLM-Api-Key` wins over it. The checksum annotation of the pods does not cover your
+  own Secret: after rotating the key, restart the API and llm worker pods (`kubectl rollout
+  restart`).
+- A worker leases an item for `4 x LLM_TIMEOUT_SECONDS + 10` s (490 s by default). On SIGTERM it
+  stops claiming and gives items in flight 30 s, then hands the ones still running back to the
+  queue at once. Calls to the endpoint may be billed again when an item runs twice.
+- `kubectl exec <llm worker pod> -- text-extraction-llm-worker --check` sends one tiny extraction
+  to the endpoint and exits 0 when its answer fits the schema (an operator's smoke test).
+- A prompt, a page text, an extracted value or a key never reaches a log, a metric label or the
+  ConfigMap; the workers count calls and tokens by outcome only.
+
 ## Local checks
 
 ```bash
@@ -453,6 +505,7 @@ docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --s
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.docling.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.asr.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.nlp.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.llm.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

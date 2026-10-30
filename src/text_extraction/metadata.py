@@ -13,12 +13,18 @@ Licences are ranked in ``text_extraction.licenses``.
 Structured data is read from the page's own items only: top-level items, ``@graph`` members and
 ``mainEntity``. What hangs off them (list entries, parts, sources, media) describes other things.
 
+The DOM stage of structured output (``structured/dom.py``) reads the same parse: the page's
+JSON-LD, microdata, RDFa, OpenGraph and meta items and the lxml tree (``StructuredItems``, from
+``structured_items`` or, together with the metadata, ``metadata_with_items``), so a page is
+parsed once for both.
+
 ``extract_metadata`` is synchronous and CPU-bound: callers run it in a thread.
 """
 
 import json
 import re
 from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, field
 from functools import cache
 from itertools import chain, islice
 from typing import Any, Literal
@@ -30,7 +36,7 @@ from extruct.rdfa import RDFaExtractor
 from extruct.utils import parse_html as parse_lxml
 from extruct.utils import parse_xmldom_html
 from extruct.w3cmicrodata import MicrodataExtractor
-from lxml.html import HtmlElement, HTMLParser, fromstring
+from lxml.html import HtmlElement
 from py3langid.langid import MODEL_FILE, LanguageIdentifier
 from pydantic import BaseModel, Field
 
@@ -41,6 +47,7 @@ from text_extraction.licenses import (
     LicenseSource,
     link_header_licenses,
 )
+from text_extraction.structured.rules import page_base, parse_page
 
 _log = structlog.get_logger(__name__)
 
@@ -444,12 +451,9 @@ def _meta_pairs(tree: HtmlElement) -> list[tuple[str, str]]:
 
 
 def _base_url(tree: HtmlElement, url: str) -> str:
-    """The URL that relative references resolve against: ``<base href>`` when it is usable."""
-    for tag in tree.iter("base"):
-        href = (tag.get("href") or "").strip()
-        if href:
-            return absolute_url(url, href) or url
-    return url
+    """The URL that relative references resolve against: ``<base href>`` when it is usable
+    (``structured.rules.page_base``, which a selector child uses too)."""
+    return page_base(tree, url)
 
 
 def _http_url(base: str, value: str) -> str | None:
@@ -604,14 +608,9 @@ def _publishers(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _parse(html: str) -> HtmlElement:
-    """The page as an lxml tree; an empty document when it cannot be parsed. Bytes, because
-    lxml rejects a str that carries an XML encoding declaration. ``huge_tree`` lifts libxml2's
-    limit of 256 nested elements, which would cut a deeply nested page off, footer and all."""
-    try:
-        return fromstring(html.encode(), parser=HTMLParser(encoding="utf-8", huge_tree=True))
-    except Exception as error:  # an empty document, or lxml giving up
-        _log.debug("metadata_parse_failed", error=type(error).__name__)
-        return fromstring(b"<html></html>", parser=HTMLParser(encoding="utf-8"))
+    """The page as an lxml tree (``structured.rules.parse_page``, so that a selector child's
+    XPath sees the tree this module reads)."""
+    return parse_page(html)
 
 
 def page_tree(html: str) -> HtmlElement:
@@ -680,17 +679,87 @@ def _media_nodes(items: list[Any]) -> list[dict[str, Any]]:
     return nodes
 
 
+@dataclass(frozen=True)
+class StructuredItems:
+    """What a page says about itself as data, for the ``metadata`` strategy of structured
+    output (ruling S3), and the parsed page for its selectors and tables.
+
+    ``json_ld``, ``microdata`` and ``rdfa`` are the page's own items as ``extract_metadata``
+    reads them (top-level items, ``@graph`` members and ``mainEntity``, with plain property
+    names); the JSON-LD items that describe the page come before those of its site.
+    ``opengraph`` has the ``og:`` tags as (name without ``og:``, content), ``meta`` every other
+    ``<meta>`` name or property, lower case, with its content; both in document order. ``tree``
+    is the lxml tree of the page and ``base`` the URL its relative references resolve against.
+    """
+
+    json_ld: list[dict[str, Any]]
+    microdata: list[dict[str, Any]]
+    rdfa: list[dict[str, Any]]
+    opengraph: list[tuple[str, str]]
+    meta: list[tuple[str, str]]
+    base: str
+    tree: HtmlElement = field(repr=False, compare=False)
+
+
+def _items(
+    tree: HtmlElement, base: str, structured: _Structured | None, pairs: list[tuple[str, str]]
+) -> StructuredItems:
+    json_ld: list[dict[str, Any]] = []
+    if structured is not None:
+        content = structured.content_nodes()
+        taken = {id(node) for node in content}
+        json_ld = content + [node for node in structured.json_ld if id(node) not in taken]
+    return StructuredItems(
+        json_ld=json_ld,
+        microdata=list(structured.microdata) if structured is not None else [],
+        rdfa=list(structured.rdfa) if structured is not None else [],
+        opengraph=[(key[3:], content) for key, content in pairs if key.startswith("og:")],
+        meta=[(key, content) for key, content in pairs if not key.startswith("og:")],
+        base=base,
+        tree=tree,
+    )
+
+
+def structured_items(html: str, url: str, *, syntaxes: bool = True) -> StructuredItems:
+    """The page's ``StructuredItems`` (``url`` is the final URL). With ``syntaxes=False`` the
+    JSON-LD, microdata and RDFa are not read (they stay empty): for selectors and tables only,
+    which need the tree. Never raises on bad markup."""
+    tree = _parse(html)
+    base = _base_url(tree, url)
+    structured = _Structured(tree, html, base) if syntaxes else None
+    return _items(tree, base, structured, _meta_pairs(tree))
+
+
+def metadata_with_items(
+    html: str, url: str, headers: Mapping[str, str]
+) -> tuple[PageMetadata, StructuredItems]:
+    """``extract_metadata`` and ``structured_items`` of the page from one parse."""
+    tree = _parse(html)
+    base = _base_url(tree, url)
+    structured = _Structured(tree, html, base)
+    pairs = _meta_pairs(tree)
+    return _metadata(tree, structured, pairs, base, headers), _items(tree, base, structured, pairs)
+
+
 def extract_metadata(html: str, url: str, headers: Mapping[str, str]) -> PageMetadata:
     """The metadata a page declares. ``url`` is the final URL (relative references resolve
     against it, or against ``<base href>``); ``headers`` are the response headers.
 
     Never raises on bad markup: a source that cannot be read is left out."""
     tree = _parse(html)
-    lowered = {name.lower(): value for name, value in headers.items()}
     base = _base_url(tree, url)
-    structured = _Structured(tree, html, base)
+    return _metadata(tree, _Structured(tree, html, base), _meta_pairs(tree), base, headers)
+
+
+def _metadata(
+    tree: HtmlElement,
+    structured: _Structured,
+    pairs: list[tuple[str, str]],
+    base: str,
+    headers: Mapping[str, str],
+) -> PageMetadata:
+    lowered = {name.lower(): value for name, value in headers.items()}
     nodes = structured.content_nodes()
-    pairs = _meta_pairs(tree)
     index: dict[str, list[str]] = {}
     for key, content in pairs:
         index.setdefault(key, []).append(content)

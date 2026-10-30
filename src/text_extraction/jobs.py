@@ -41,6 +41,19 @@ Jobs that wait for a transcription (package 6, M11) may have:
                           and with a batch's last result. No read of the job shows it, and it is
                           never logged.
 
+Jobs that need LLM work (package 8, ruling S9) may have:
+
+- ``job:{<id>}:llm_key``  string: the caller's key of the LLM endpoint (the request header
+                          ``X-LLM-Api-Key``). Kept as long as the job, since the draft the llm
+                          worker reads lives that long and the item may wait for the worker
+                          until then. Deleted with the job, by ``shorten``, and by whoever
+                          writes the item's result (``drop_llm_key``): the worker of any pool
+                          (a sync request's job at once, a batch with its last result) and the
+                          pod that ran the whole request; a worker that moves the item on to
+                          the llm worker keeps it. ``drop_secrets`` leaves it, because the
+                          browser, ASR and nlp workers that call it may run before the llm
+                          worker. No read of the job shows it, and it is never logged.
+
 Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR; M9: media queued
 for transcription, with an empty body for a URL) have:
 
@@ -119,12 +132,15 @@ _WRITES: dict[int, ResultWrite] = {0: "repeat", 1: "first", 2: "last"}
 
 # Set in ``data.warnings`` of a result that was stored without its content.
 CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
+CHUNKS_NOT_STORED_WARNING = "chunks_not_stored_too_large"
+TABLES_NOT_STORED_WARNING = "tables_not_stored_too_large"
 
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
 
-# The keys of a job: the four of every job, those of browser jobs and the caller's ASR key.
-_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts", "asr_key")
+# The keys of a job: the four of every job, those of browser jobs and the caller's ASR and LLM
+# keys.
+_KINDS = ("meta", "urls", "results", "done", "secrets", "drafts", "asr_key", "llm_key")
 
 # The input of item 0 (the only item of a sync job), which ``delete`` and ``shorten`` remove.
 _FIRST_INPUT = "input:0"
@@ -369,12 +385,24 @@ def pii_lease_seconds(settings: Settings) -> float:
     return 2 * settings.pii_timeout_seconds + 10
 
 
-def owner_key(owner: str, name: str) -> str:
-    """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
-    escaped, so a name cannot break the hash tag."""
+def llm_lease_seconds(settings: Settings) -> float:
+    """How long the llm worker holds an item: its overall deadline (three times
+    ``LLM_TIMEOUT_SECONDS``, ruling S14) plus one more timeout and 10 s (ruling S13)."""
+    return 4 * settings.llm_timeout_seconds + 10
+
+
+def escape_owner(owner: str) -> str:
+    """An owner's name for a key's hash tag: ``%``, ``{`` and ``}`` percent-escaped, so a name
+    cannot break the hash tag or look like another name."""
     for char, code in _OWNER_ESCAPES.items():
         owner = owner.replace(char, code)
-    return f"jobs:{{owner:{owner}}}:{name}"
+    return owner
+
+
+def owner_key(owner: str, name: str) -> str:
+    """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the owner is escaped
+    (``escape_owner``), so a name cannot break the hash tag."""
+    return f"jobs:{{owner:{escape_owner(owner)}}}:{name}"
 
 
 def _key(job_id: str, kind: str) -> str:
@@ -395,13 +423,13 @@ def _artifact_key(job_id: str, name: str) -> str:
 
 def _options_json(options: JobOptions) -> str:
     """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false),
-    ``languages`` (none) and ``pii`` (none) are left out while they are the default: pods of a
-    release before them parse the options strictly, and during a rolling upgrade they read the
-    jobs that new pods create."""
+    ``languages`` (none), ``pii`` (none), ``structured`` (none) and ``chunking`` (none) are left
+    out while they are the default: pods of a release before them parse the options strictly, and
+    during a rolling upgrade they read the jobs that new pods create."""
     defaults = JobOptions.model_fields
     omit = {
         name
-        for name in ("ocr", "transcribe", "languages", "pii")
+        for name in ("ocr", "transcribe", "languages", "pii", "structured", "chunking")
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }
     return options.model_dump_json(exclude=omit or None)
@@ -522,9 +550,9 @@ class JobStore:
 
     async def shorten(self, job_id: str, seconds: int) -> None:
         """Let the job and its files expire within ``seconds`` (never later than they would)
-        and delete its secrets (the ASR key too), drafts and the input of item 0: a sync answer's
-        screenshot job, which only the artifact route still reads. A job that is gone already is
-        not an error."""
+        and delete its secrets (the ASR and LLM keys too), drafts and the input of item 0: a sync
+        answer's screenshot job, which only the artifact route still reads. A job that is gone
+        already is not an error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
             for kind in ("meta", "urls", "results", "done"):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
@@ -533,6 +561,7 @@ class JobStore:
             pipe.delete(
                 _key(job_id, "secrets"),
                 _key(job_id, "asr_key"),
+                _key(job_id, "llm_key"),
                 _key(job_id, "drafts"),
                 _key(job_id, _FIRST_INPUT),
             )
@@ -573,6 +602,34 @@ class JobStore:
         """The caller's key of the external transcription endpoint, or None when the job had
         none or it is gone."""
         raw = await self._valkey.get(_key(job_id, "asr_key"))
+        return reply_text(raw) if raw is not None else None
+
+    async def put_llm_key(self, job_id: str, key: str) -> None:
+        """Keep the caller's key of the LLM endpoint for the job (ruling S9, R11) for the job's
+        TTL, whatever the job is (a sync request's, a pool job's, a batch's). Unlike the ASR key
+        there is no shorter bound: the draft the llm worker reads lives as long as the job, a
+        202 job may wait for the worker until then, and a batch's items move to pool ``llm`` at
+        any time. The key is not left to expire: whoever writes the item's result drops it
+        (``drop_llm_key``: ``Worker._finish`` of any pool, a sync job's at once and a batch's with
+        its last result, and ``extract_api._store_result`` when the API pod ran the whole
+        request); a worker that moves the item on to the llm worker keeps it. ``delete`` and
+        ``shorten`` remove it too. Raises ``JobLost`` when the job is gone; nothing is stored
+        then."""
+        outcome = await self._put_with_job(
+            keys=[_key(job_id, "meta"), _key(job_id, "llm_key")],
+            args=[key, self._ttl_seconds * 1000],
+        )
+        if outcome == _NOT_FOUND:
+            raise JobLost(job_id)
+
+    async def drop_llm_key(self, job_id: str) -> None:
+        """Delete the caller's key of the LLM endpoint only (the item's result is written, or a
+        hand-over failed after storing it)."""
+        await self._valkey.delete(_key(job_id, "llm_key"))
+
+    async def llm_key(self, job_id: str) -> str | None:
+        """The caller's key of the LLM endpoint, or None when the job had none or it is gone."""
+        raw = await self._valkey.get(_key(job_id, "llm_key"))
         return reply_text(raw) if raw is not None else None
 
     async def put_draft(self, job_id: str, index: int, envelope: Envelope[ExtractResult]) -> None:
@@ -787,7 +844,9 @@ class JobStore:
 
         Only the first write of an index counts and is kept: a repeat (an item that ran again
         after a lost lease) changes nothing. A result over ``JOB_ITEM_MAX_BYTES`` as UTF-8 JSON is
-        stored without its content and with the warning ``content_not_stored_too_large``. Raises
+        stored without its content and with the warning ``content_not_stored_too_large``; still
+        over it, without its chunks and tables too (``chunks_not_stored_too_large``,
+        ``tables_not_stored_too_large``; ``_encode``). Raises
         ``JobLost`` when the job's keys are gone and ``ValueError`` when the index is outside the
         job.
         """
@@ -828,14 +887,28 @@ class JobStore:
         await self.mark_running(job_id, lease_seconds=None)
 
     def _encode(self, envelope: Envelope[ExtractResult]) -> str:
-        """The envelope as JSON; over the size limit, without the content."""
+        """The envelope as JSON; over the size limit, without the content, and when that is
+        not enough, without the chunks and the tables either (ruling R20), each with its
+        warning. What is left (the structured values, metadata, links) is stored as it is."""
         payload = envelope.model_dump_json()
         if len(payload.encode()) <= self._item_max_bytes or envelope.data is None:
             return payload
-        data = envelope.data.model_copy(
-            update={
-                "content": None,
-                "warnings": [*envelope.data.warnings, CONTENT_NOT_STORED_WARNING],
-            }
+        data = envelope.data
+        data = data.model_copy(
+            update={"content": None, "warnings": [*data.warnings, CONTENT_NOT_STORED_WARNING]}
         )
+        payload = envelope.model_copy(update={"data": data}).model_dump_json()
+        if len(payload.encode()) <= self._item_max_bytes:
+            return payload
+        warnings = list(data.warnings)
+        update: dict[str, Any] = {}
+        if data.chunks:
+            update["chunks"] = None
+            warnings.append(CHUNKS_NOT_STORED_WARNING)
+        if data.structured is not None and data.structured.tables:
+            update["structured"] = data.structured.model_copy(update={"tables": None})
+            warnings.append(TABLES_NOT_STORED_WARNING)
+        if not update:
+            return payload
+        data = data.model_copy(update={**update, "warnings": warnings})
         return envelope.model_copy(update={"data": data}).model_dump_json()

@@ -23,7 +23,8 @@ Per package:
 | 5 | Documents and OCR | merged 2026-10-25 | #9, #10 | corpus converts, scans yield text (CI `documents`); `wlo_200` auto 84.0 % in an A/B run against package 4 (83.0 %) |
 | 6 | Audio and video | merged 2026-10-26 | #12 | subtitles from YouTube and Mediathek samples, an upload transcribed (CI `asr`, live run on Jan's PC) |
 | 7 | PII | merged 2026-10-29 | #13 | corpus test `tests/pii/test_corpus.py` (CI job `nlp`: `md` on every push, `lg` weekly): every mode through `POST /v1/extract/file` as Markdown and HTML with the real nlp worker loop; pattern types found 100 %, `PERSON` recall pinned per model size (`lg` German 0.96, English 1.00; `md` 1.00 and 1.00); no keep word touched except the listed known false positives (`Pythagoras`, `Calvin`: historical names used as concepts); live `wlo_200` auto 83.0 % unchanged; Docker check with `lg` on Jan's PC (2026-10-29) |
-| 8-11 | | open | | |
+| 8 | Structured output and chunking | merged 2026-10-30 | #18 | done-when test `tests/structured/test_done_when.py` (default suite, no real LLM): on a German teaching page, `metadata`, `selectors` (CSS for a user key, XPath for an admin key), `patterns`, `llm`, `auto` (the LLM asked only for the missing field), `tables`, `learn_selectors` and its reuse without an LLM call (`sources: learned`, per key), every chunker, `POST /v1/structured`, `POST /v1/chunk` (URL and text) and a batch, through the real llm worker loop against a mock OpenAI-compatible endpoint (pytest-httpserver: `/chat/completions`, `/embeddings`); live `wlo_200` auto 82.5 % |
+| 9-11 | | open | | |
 
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |
@@ -71,3 +72,20 @@ this package: PII in screenshots, `/v1/structured` and `/v1/chunk` (package 8), 
 custom lists. The done-when evidence runs in CI (`nlp` job) and locally with
 `PII_TEST_MODEL_SIZE=lg uv run pytest -m nlp tests/pii/test_corpus.py`. Details in
 [architecture.md](architecture.md), "PII".
+
+Package 8 note (Jan, D1-D5): `structured` (strategies `metadata`, `selectors`, `patterns`, `llm`,
+`auto`; `tables`; `learn_selectors`) and `chunking` (`fixed`, `recursive`, `markdown`, `sentence`,
+`semantic`) on `POST /v1/extract`, `/v1/extract/file`, `/v1/batch` and the new routes
+`POST /v1/structured` and `POST /v1/chunk` (a URL or a text). The LLM is an OpenAI-compatible
+endpoint of the operator (`LLM_BASE_URL`, default model `gpt-6-luna`), off by default
+(`LLM_ENABLED`, Helm `workers.llm.enabled`, compose profile `llm`); its calls run only in the llm
+worker (API image, no model), as the last hop after PII, so the LLM only sees masked content, and a
+sync request that needs it waits `LLM_SYNC_WAIT_SECONDS` (30 s), then answers 202 with its job. The
+caller's `X-LLM-Api-Key` wins over `LLM_API_KEY`. `semantic` embeds with the same endpoint's
+`/embeddings` (`LLM_EMBEDDING_MODEL`). Learned selectors are kept per API key and host, 30 days.
+When the LLM step cannot run the answer keeps its content and is `partial`/`llm_failed`. Not in
+this package: vision-LLM image descriptions, MCP tools, a model per request, tokenisers. The
+done-when evidence is `uv run pytest tests/structured/test_done_when.py`; the compose check against
+a local mock endpoint and a real `gpt-6-luna` call (`text-extraction-llm-worker --check`) were not
+run in the build sandbox (no Docker daemon, no endpoint key). Details in
+[architecture.md](architecture.md), "Structured output and chunking".

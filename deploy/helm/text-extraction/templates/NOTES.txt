@@ -90,6 +90,22 @@ No NLP workers are deployed: PII handling is off (PII_ENABLED=false), so a reque
 400 invalid_request.
 {{- end }}
 
+{{- $llm := .Values.workers.llm }}
+{{- if $llm.enabled }}
+
+llm workers: {{ include "text-extraction.workerName" (list . "llm") }} ({{ ternary "KEDA" (ternary "HPA" "fixed replicas" $llm.autoscaling.hpa.enabled) $llm.autoscaling.keda.enabled }}), image {{ include "text-extraction.workerImage" (list . "llm") }}; internal port 9090 on svc/{{ include "text-extraction.workerInternalServiceName" (list . "llm") }}.
+The LLM is on (LLM_ENABLED=true in every pod): structured output with an LLM and semantic chunking run as the last hop of a job in the pool llm, against {{ $llm.baseUrl }} (model {{ $llm.model }}{{ if $llm.embeddingModel }}, embeddings {{ $llm.embeddingModel }}{{ else }}, no embedding model: `semantic` chunking answers 400{{ end }}).
+{{- if $llm.apiKey.existingSecret }}
+LLM_API_KEY comes from Secret {{ $llm.apiKey.existingSecret }}; a caller's X-LLM-Api-Key wins over it.
+{{- else }}
+No LLM_API_KEY is set (workers.llm.apiKey.existingSecret): callers must send X-LLM-Api-Key, or a request that needs the LLM answers 400.
+{{- end }}
+{{- else }}
+
+No llm workers are deployed: the LLM is off (LLM_ENABLED=false), so structured output with an LLM and
+semantic chunking answer 400 invalid_request.
+{{- end }}
+
 {{- if and .Values.valkey.enabled (eq (toString .Values.valkey.maxmemory) "768mb") (or .Values.workers.docling.enabled $asr.enabled) }}
 
 NOTE: Valkey keeps its default maxmemory (768mb). With Docling or ASR workers it also holds the bytes

@@ -223,13 +223,15 @@ class AsrDispatcher(PoolDispatcher):
         *,
         key: str | None = None,
         job_id: str | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue the media on the ``asr`` pool and return its job's id: a new job of ``kind``,
         or ``job_id`` (the request's P1 job), whose lease is cleared. ``body`` is an upload's
-        bytes, ``key`` the caller's ``X-ASR-Api-Key``. The job counts as one of the caller's ASR
-        jobs before its input is stored; over ``ASR_MAX_OPEN_PER_CLIENT`` this raises
-        ``AsrOpenLimitReached``, over ``DOCLING_INPUT_BUDGET_BYTES`` ``InputBudgetExceeded``,
-        and a new job is deleted again. Valkey errors propagate."""
+        bytes, ``key`` the caller's ``X-ASR-Api-Key``, ``llm_key`` the caller's
+        ``X-LLM-Api-Key`` (a new job keeps it for the llm worker). The job counts as one of the
+        caller's ASR jobs before its input is stored; over ``ASR_MAX_OPEN_PER_CLIENT`` this
+        raises ``AsrOpenLimitReached``, over ``DOCLING_INPUT_BUDGET_BYTES``
+        ``InputBudgetExceeded``, and a new job is deleted again. Valkey errors propagate."""
         settings = self._settings
         limit = settings.asr_max_open_per_client
         owner = principal.name
@@ -255,7 +257,14 @@ class AsrDispatcher(PoolDispatcher):
             if await self._open_jobs(owner) >= limit:
                 raise AsrOpenLimitReached
             return await self.submit_job(
-                kind, options, principal, url, job_id=job_id, draft=needed.draft, prepare=prepare
+                kind,
+                options,
+                principal,
+                url,
+                job_id=job_id,
+                draft=needed.draft,
+                prepare=prepare,
+                llm_key=llm_key,
             )
         except AsrOpenLimitReached:
             self.count("open_limit")
@@ -296,7 +305,8 @@ class AsrHandoff:
 
     ``kind`` is the job kind of the request (``extract`` for a URL, ``file`` for an upload),
     ``options`` its stored options, ``url`` its URL (None for an upload), ``body`` an upload's
-    bytes and ``key`` the caller's ``X-ASR-Api-Key``. ``handed_over`` is True once the job
+    bytes, ``key`` the caller's ``X-ASR-Api-Key`` and ``llm_key`` its ``X-LLM-Api-Key`` (for the
+    llm worker, where the request may need the LLM). ``handed_over`` is True once the job
     belongs to the worker (the route answers 202 with it, or it is the request's P1 job): the
     caller then answers None."""
 
@@ -312,6 +322,7 @@ class AsrHandoff:
         url: str | None,
         body: bytes = b"",
         key: str | None = None,
+        llm_key: str | None = None,
     ) -> None:
         self._dispatcher = dispatcher
         self._guard = guard
@@ -322,6 +333,7 @@ class AsrHandoff:
         self._url = url
         self._body = body
         self._key = key
+        self._llm_key = llm_key
         self.handed_over = False
 
     async def __call__(
@@ -365,6 +377,7 @@ class AsrHandoff:
             self._body,
             key=self._key,
             job_id=job_id,
+            llm_key=self._llm_key,
         )
 
     async def _on_p1_job(

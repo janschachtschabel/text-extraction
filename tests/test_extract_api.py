@@ -24,10 +24,17 @@ from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import Handover as BrowserHandover
 from text_extraction.browser_options import ArtifactRef, BrowserSecrets, EvaluateAction
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
-from text_extraction.extract_api import _in_browser, _store_result, extract
+from text_extraction.extract_api import (
+    _in_browser,
+    _store_result,
+    default_wait_seconds,
+    extract,
+    request_wait_seconds,
+)
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
@@ -167,7 +174,12 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "document",
         "media",
         "pii",
+        "structured",
+        "chunks",
     }
+    assert data["structured"] is None
+    assert data["chunks"] is None
+    assert data["timings"]["llm_ms"] == 0
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
     assert data["upstream_status"] == 200
@@ -178,6 +190,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "convert_ms",
         "render_ms",
         "pii_ms",
+        "llm_ms",
     }
     assert data["compliance"]["decision"] == "allowed"
     assert {"url", "text", "kind"} <= set(data["links"][0])
@@ -969,6 +982,7 @@ class Seen:
     client: str
     secrets: BrowserSecrets
     draft: Envelope[ExtractResult] | None
+    llm_key: str | None = None
 
 
 class FakeBrowserWorker:
@@ -1019,7 +1033,13 @@ class FakeBrowserWorker:
                 continue
             if job.state == "queued":
                 await store.mark_running(item.job_id)
-            seen = Seen(job, item.client, await store.secrets(job.id), await store.draft(job.id, 0))
+            seen = Seen(
+                job,
+                item.client,
+                await store.secrets(job.id),
+                await store.draft(job.id, 0),
+                await store.llm_key(job.id),
+            )
             self.seen.append(seen)
             self.claimed.set()
             while not self.hold.is_set():  # noqa: ASYNC110 - set by another thread
@@ -1740,8 +1760,9 @@ def test_annotate_with_html_is_422() -> None:
 @pytest.mark.parametrize("pii_enabled", [False, True], ids=["pii-off", "pii-on"])
 def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled: bool) -> None:
     """The answer of a request without ``pii`` is the package-6 one (the golden recording),
-    whether the service has PII or not: the result only gained ``pii: null`` and
-    ``timings.pii_ms: 0``, and no job or nlp item is made."""
+    whether the service has PII or not: the result only gained ``pii: null``, ``structured: null``,
+    ``chunks: null``, ``timings.pii_ms: 0`` and ``timings.llm_ms: 0``, and no job or nlp item is
+    made."""
     golden = json.loads(GOLDEN.read_text())["article"]
     settings = make_settings(pii_enabled=pii_enabled)
     valkey = FakeAsyncRedis()
@@ -1755,8 +1776,11 @@ def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled:
     answer = response.json()
     timings = answer["data"].pop("timings")
     assert timings["pii_ms"] == 0
+    assert timings["llm_ms"] == 0
     assert answer.pop("trace_id")
     assert answer["data"]["pii"] is None
+    assert answer["data"]["structured"] is None
+    assert answer["data"]["chunks"] is None
     assert json.dumps(answer, sort_keys=True) == json.dumps(golden, sort_keys=True)
 
     async def keys(pattern: str) -> list[Any]:
@@ -1764,3 +1788,776 @@ def test_request_without_pii_unchanged(registry: CollectorRegistry, pii_enabled:
 
     assert asyncio.run(keys("job*")) == []
     assert asyncio.run(keys("q:{nlp}*")) == []
+
+
+XPATH_STRUCTURED: dict[str, Any] = {
+    "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+    "strategy": "selectors",
+    "selectors": {"title": {"xpath": "//h1"}},
+}
+
+
+def test_xpath_selectors_need_an_admin_key(client: TestClient) -> None:
+    """Ruling R4: a user's XPath is 422 before anything is fetched; CSS is fine."""
+    response = client.post(
+        "/v1/extract", json={"url": PAGE, "structured": XPATH_STRUCTURED}, headers=AUTH
+    )
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert body["error"]["message"] == "XPath selectors need an admin key; use CSS."
+    assert "//h1" not in response.text
+
+    css = {**XPATH_STRUCTURED, "selectors": {"title": {"css": "h1"}}}
+    allowed = client.post("/v1/extract", json={"url": PAGE, "structured": css}, headers=AUTH)
+    assert allowed.status_code == 200
+    assert allowed.json()["data"]["structured"]["values"] == {"title": "Photosynthesis explained"}
+
+
+# --- structured and chunking: the request checks and the caller's LLM key (rulings S12, S9) -----
+
+LLM_KEY = "sk-llm-caller-key-9c2b"
+LLM_KEY_HEADERS = {**AUTH, "X-LLM-Api-Key": LLM_KEY}
+SCHEMA_ONE: dict[str, Any] = {"type": "object", "properties": {"title": {"type": "string"}}}
+LLM_STRUCTURED: dict[str, Any] = {"schema": SCHEMA_ONE, "strategy": "llm"}
+ROUTES = ["extract", "file", "batch"]
+LLM_DISABLED = "LLM features are not enabled on this service."
+LLM_KEY_MISSING = "No LLM key: send X-LLM-Api-Key."
+
+
+def without_llm_hop(app: Any) -> None:
+    """A pod without the hop to the llm workers: LLM work is answered ``llm_failed`` at once,
+    for the tests whose point is elsewhere (the hop is ``tests/test_llm_dispatch.py``'s)."""
+    app.state.llm_dispatcher = None
+
+
+def llm_settings(**overrides: Any) -> Settings:
+    values: dict[str, Any] = {
+        "llm_enabled": True,
+        "llm_api_key": "sk-operator-key",
+        "llm_embedding_model": "embed-1",
+    }
+    values.update(overrides)
+    return make_settings(**values)
+
+
+class Service:
+    """The public app on a fakeredis server with a fake fetcher, for the three routes that take
+    ``structured`` and ``chunking``."""
+
+    def __init__(self, settings: Settings | None = None) -> None:
+        self.settings = settings or make_settings()
+        self.server = FakeServer()
+        valkey = FakeAsyncRedis(server=self.server)
+        registry = CollectorRegistry()
+        self.app = create_public_app(self.settings, valkey, registry)
+        self.fetcher = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+        self.app.state.pipeline = create_pipeline(
+            self.settings, valkey, cast(Fetcher, self.fetcher), registry
+        )
+
+    def keys(self, pattern: str = "job*") -> list[str]:
+        async def scan() -> list[str]:
+            valkey = FakeAsyncRedis(server=self.server)
+            return sorted(
+                key.decode() if isinstance(key, bytes) else key
+                for key in await valkey.keys(pattern)
+            )
+
+        return asyncio.run(scan())
+
+
+def post_route(
+    client: TestClient,
+    route: str,
+    *,
+    structured: dict[str, Any] | None = None,
+    chunking: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    **options: Any,
+) -> Any:
+    """The same request on ``POST /v1/extract``, ``/v1/extract/file`` or ``/v1/batch``."""
+    given = {
+        name: value
+        for name, value in (("structured", structured), ("chunking", chunking))
+        if value is not None
+    }
+    headers = AUTH if headers is None else headers
+    if route == "extract":
+        return client.post("/v1/extract", json={"url": PAGE, **given, **options}, headers=headers)
+    if route == "batch":  # a batch is a job anyway: it takes no wait_seconds
+        options.pop("wait_seconds", None)
+        return client.post("/v1/batch", json={"urls": [PAGE], **given, **options}, headers=headers)
+    return client.post(
+        "/v1/extract/file",
+        files={"file": ("page.html", ARTICLE, "text/html")},
+        data={
+            name: value if isinstance(value, str) else json.dumps(value)
+            for name, value in {**given, **options}.items()
+        },
+        headers=headers,
+    )
+
+
+def refusal(response: Any, status: int, message: str) -> None:
+    assert response.status_code == status, response.text
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert error["message"] == message
+
+
+OPTION_CASES = {
+    "llm": {"structured": LLM_STRUCTURED},
+    "learn": {"structured": {"schema": SCHEMA_ONE, "learn_selectors": True}},
+    "semantic": {"chunking": {"strategy": "semantic"}},
+}
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("case", list(OPTION_CASES))
+def test_llm_features_400_without_llm(route: str, case: str) -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, **OPTION_CASES[case])
+
+    refusal(response, 400, LLM_DISABLED)
+    assert service.fetcher.calls == []  # refused before anything was fetched
+    assert service.keys() == []  # and never a job
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_semantic_400_without_embedding_model(route: str) -> None:
+    service = Service(llm_settings(llm_embedding_model=None))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, chunking={"strategy": "semantic"})
+
+    refusal(response, 400, "Semantic chunking needs LLM_EMBEDDING_MODEL.")
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("strategy", ["llm", "auto"])
+def test_llm_work_400_without_any_key(route: str, strategy: str) -> None:
+    service = Service(llm_settings(llm_api_key=None))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, structured={**LLM_STRUCTURED, "strategy": strategy})
+
+    refusal(response, 400, LLM_KEY_MISSING)
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize(("route", "status"), [("extract", 200), ("file", 200), ("batch", 202)])
+def test_header_key_accepted_without_env_key(route: str, status: int) -> None:
+    service = Service(llm_settings(llm_api_key=None))
+    without_llm_hop(service.app)  # the answer comes at once, without an llm worker
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, structured=LLM_STRUCTURED)
+
+    assert response.status_code == status, response.text
+    assert LLM_KEY not in response.text
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("value", ["has space", "x" * 1025, "tab\there"])
+def test_bad_llm_key_header_400(route: str, value: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(
+            client, route, headers={**AUTH, "X-LLM-Api-Key": value}, structured=LLM_STRUCTURED
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert "X-LLM-Api-Key" in response.json()["error"]["message"]
+    assert value not in response.text
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_chunking_html_422(route: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(client, route, chunking={"strategy": "fixed"}, format="html")
+
+    refusal(response, 422, "Chunking needs format markdown or text.")
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize(
+    ("structured", "what"),
+    [
+        ({"schema": SCHEMA_ONE, "strategy": "metadata"}, "Strategy metadata"),
+        ({"schema": SCHEMA_ONE, "strategy": "selectors"}, "Strategy selectors"),
+        ({"tables": True}, "tables"),
+        ({"schema": SCHEMA_ONE, "strategy": "llm", "learn_selectors": True}, "learn_selectors"),
+        (
+            {"schema": SCHEMA_ONE, "strategy": "auto", "selectors": {"title": {"css": "h1"}}},
+            "selectors",
+        ),
+    ],
+    ids=["metadata", "selectors", "tables", "learn", "caller-selectors"],
+)
+def test_pii_with_dom_strategies_422(route: str, structured: dict[str, Any], what: str) -> None:
+    service = Service(llm_settings(pii_enabled=True))
+    with TestClient(service.app) as client:
+        response = post_route(client, route, structured=structured, pii="mask")
+
+    refusal(response, 422, f"{what} reads the raw page and cannot be combined with pii.")
+    assert service.fetcher.calls == []
+    assert service.keys() == []
+
+
+@pytest.mark.parametrize("route", ROUTES)
+def test_pii_with_patterns_llm_and_chunking_accepted(route: str) -> None:
+    service = Service(llm_settings(pii_enabled=True))
+    patterns = {
+        "schema": SCHEMA_ONE,
+        "strategy": "patterns",
+        "patterns": {"title": {"regex": r"\w+"}},
+    }
+    with TestClient(service.app) as client:
+        for options in (
+            {"structured": patterns},
+            {"structured": LLM_STRUCTURED},
+            {"structured": {"schema": SCHEMA_ONE}},  # auto
+            {"chunking": {"strategy": "markdown"}},
+        ):
+            # No nlp worker here: a request that goes there is a job at once.
+            response = post_route(client, route, pii="mask", wait_seconds=0, **options)
+            assert response.status_code in (200, 202), (options, response.text)
+
+
+@pytest.mark.parametrize("route", ROUTES)
+@pytest.mark.parametrize("strategy", ["metadata", "selectors", "patterns"])
+def test_learn_needs_llm_or_auto_422(route: str, strategy: str) -> None:
+    service = Service(llm_settings())
+    structured = {"schema": SCHEMA_ONE, "strategy": strategy, "learn_selectors": True}
+    with TestClient(service.app) as client:
+        response = post_route(client, route, headers=LLM_KEY_HEADERS, structured=structured)
+
+    refusal(response, 422, "learn_selectors needs strategy llm or auto.")
+    assert service.keys() == []
+
+
+def test_requests_without_structured_and_chunking_need_no_llm() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        for route in ROUTES:
+            assert post_route(client, route).status_code in (200, 202)
+
+
+@pytest.mark.parametrize("path", ["/v1/extract", "/v1/extract/file", "/v1/batch"])
+def test_the_llm_key_header_is_documented(path: str) -> None:
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        spec = client.get("/openapi.json").json()
+
+    parameters = {p["name"]: p for p in spec["paths"][path]["post"]["parameters"]}
+    assert "X-LLM-Api-Key" in parameters
+    assert parameters["X-LLM-Api-Key"]["in"] == "header"
+
+
+def wait_body(**changes: Any) -> ExtractRequest:
+    return ExtractRequest.model_validate({"url": PAGE, **changes})
+
+
+def test_default_wait_is_largest_of_transcribe_pii_llm() -> None:
+    settings = llm_settings(pii_enabled=True, pii_sync_wait_seconds=40, llm_sync_wait_seconds=50)
+    llm = {"structured": LLM_STRUCTURED}
+
+    assert request_wait_seconds(wait_body(), settings) is None
+    assert request_wait_seconds(wait_body(transcribe=True), settings) == 20
+    assert request_wait_seconds(wait_body(pii="mask"), settings) == 40
+    assert request_wait_seconds(wait_body(**llm), settings) == 50
+    assert request_wait_seconds(wait_body(pii="mask", **llm), settings) == 50
+    assert request_wait_seconds(wait_body(transcribe=True, pii="mask"), settings) == 40
+    assert request_wait_seconds(wait_body(transcribe=True, pii="mask", **llm), settings) == 50
+    assert request_wait_seconds(wait_body(transcribe=True, **llm), settings) == 50
+    assert request_wait_seconds(wait_body(chunking={"strategy": "semantic"}), settings) == 50
+    # What does not call the LLM does not wait for it.
+    assert request_wait_seconds(wait_body(structured={"tables": True}), settings) is None
+    assert request_wait_seconds(wait_body(chunking={"strategy": "fixed"}), settings) is None
+    selectors = {"schema": SCHEMA_ONE, "strategy": "selectors"}
+    assert request_wait_seconds(wait_body(structured=selectors), settings) is None
+    # An explicit wait_seconds always wins, 0 too.
+    assert request_wait_seconds(wait_body(wait_seconds=5, pii="mask", **llm), settings) == 5
+    assert request_wait_seconds(wait_body(wait_seconds=0, **llm), settings) == 0
+    # The default of the LLM is LLM_SYNC_WAIT_SECONDS (30), and the transcription's is 20.
+    plain = llm_settings(pii_enabled=True)
+    assert request_wait_seconds(wait_body(transcribe=True, **llm), plain) == 30
+    assert request_wait_seconds(wait_body(pii="mask"), plain) == 20
+    # No LLM on the service: auto has no LLM step to wait for.
+    assert (
+        request_wait_seconds(wait_body(structured={"schema": SCHEMA_ONE}), make_settings()) is None
+    )
+
+
+def test_default_wait_of_an_upload_is_the_largest_of_pii_and_llm() -> None:
+    settings = llm_settings(pii_enabled=True, pii_sync_wait_seconds=40, llm_sync_wait_seconds=50)
+    assert default_wait_seconds(settings, pii=False, llm=False) is None
+    assert default_wait_seconds(settings, pii=True, llm=False) == 40
+    assert default_wait_seconds(settings, pii=False, llm=True) == 50
+    assert default_wait_seconds(settings, pii=True, llm=True) == 50
+    assert default_wait_seconds(settings, transcribe=True, pii=False, llm=False) == 20
+
+
+def test_an_llm_request_without_wait_seconds_waits_then_becomes_a_job() -> None:
+    """The default wait applies: a request that may need the LLM and whose extraction is slower
+    than LLM_SYNC_WAIT_SECONDS answers 202 with its job."""
+    case = Handover(llm_enabled=True, llm_api_key="sk-operator-key", llm_sync_wait_seconds=1)
+    without_llm_hop(case.app)  # the P1 job is the pod's to write
+    case.release_later(4)  # a failing test must not hang
+    with TestClient(case.app) as client:
+        started = time.monotonic()
+        response = client.post(
+            "/v1/extract", json={"url": PAGE, "structured": LLM_STRUCTURED}, headers=AUTH
+        )
+        waited = time.monotonic() - started
+
+        assert response.status_code == 202, response.text
+        assert 0.9 <= waited < 5
+        case.pipeline.release.set()
+        case.wait_for_job(client, response.json()["data"]["id"])
+
+
+def test_the_llm_key_is_stored_with_the_p1_job() -> None:
+    case = Handover(llm_enabled=True, llm_api_key="sk-operator-key")
+    without_llm_hop(case.app)  # the P1 job is the pod's to write
+    with TestClient(case.app) as client, capture_logs() as logs:
+        response = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "structured": LLM_STRUCTURED, "wait_seconds": 0},
+            headers=LLM_KEY_HEADERS,
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["data"]["id"]
+        view = client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+        stored = asyncio.run(
+            JobStore(FakeAsyncRedis(server=case.server), case.settings).llm_key(job_id)
+        )
+        case.pipeline.release.set()
+        case.wait_for_job(client, job_id)
+        case.wait_for_idle()
+        # The pod wrote the job's result itself: no llm worker will read the key any more.
+        left = case.keys("job*llm_key")
+
+    assert stored == LLM_KEY
+    assert left == []
+    assert LLM_KEY not in view.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+def test_no_llm_key_is_stored_for_a_request_without_llm_work() -> None:
+    case = Handover(llm_enabled=True, llm_api_key="sk-operator-key")
+    with TestClient(case.app) as client:
+        plain = client.post(
+            "/v1/extract", json={"url": PAGE, "wait_seconds": 0}, headers=LLM_KEY_HEADERS
+        )
+        patterns = client.post(
+            "/v1/extract",
+            json={
+                "url": PAGE,
+                "wait_seconds": 0,
+                "structured": {
+                    "schema": SCHEMA_ONE,
+                    "strategy": "patterns",
+                    "patterns": {"title": {"regex": r"\w+"}},
+                },
+            },
+            headers=LLM_KEY_HEADERS,
+        )
+        assert plain.status_code == patterns.status_code == 202
+        keys = case.keys("job*llm_key")
+        case.pipeline.release.set()
+        case.wait_for_idle()
+
+    assert keys == []
+
+
+@pytest.mark.parametrize(
+    "options", [{"mode": "browser"}, {"mode": "auto"}], ids=["browser", "auto"]
+)
+def test_a_browser_job_keeps_the_callers_llm_key(options: dict[str, Any]) -> None:
+    """The browser job of a request that may need the LLM carries the caller's key, so that
+    the llm worker it moves on to can read it; a request without LLM work stores none."""
+    case = BrowserCase(
+        {PAGE: fetched(body=SHELL_WITH_WORDS)}, llm_enabled=True, llm_api_key="sk-operator-key"
+    )
+    without_llm_hop(case.app)  # the browser job is the point here, not the llm job after it
+    with TestClient(case.app) as client, case.worker() as worker, capture_logs() as logs:
+        llm = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "structured": LLM_STRUCTURED, **options},
+            headers=LLM_KEY_HEADERS,
+        )
+        plain = client.post("/v1/extract", json={"url": PAGE, **options}, headers=LLM_KEY_HEADERS)
+
+        assert llm.status_code == plain.status_code == 200
+        assert [seen.llm_key for seen in worker.seen] == [LLM_KEY, None]
+        assert LLM_KEY not in llm.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+# --- the post stage at every finish point (rulings S5, S13) ---------------------------------------
+
+PATTERNS_STRUCTURED: dict[str, Any] = {
+    "schema": {"type": "object", "properties": {"plant": {"type": "string"}}},
+    "strategy": "patterns",
+    "patterns": {"plant": {"regex": r"green (\w+)", "group": 1}},
+}
+
+
+def assert_chunked(data: dict[str, Any], size: int) -> list[dict[str, Any]]:
+    """The chunks of ``data`` cover its content in windows of at most ``size`` characters."""
+    chunks = data["chunks"]
+    assert isinstance(chunks, list)
+    assert chunks
+    for chunk in chunks:
+        assert len(chunk["text"]) <= size
+        assert data["content"][chunk["start"] : chunk["end"]] == chunk["text"]
+    return cast(list[dict[str, Any]], chunks)
+
+
+@pytest.mark.parametrize("route", ["extract", "file"])
+def test_sync_chunking_without_llm_runs_inline(route: str) -> None:
+    """Chunking and patterns need no LLM: the API pod runs the post stage itself, after the
+    DOM stage, and the answer is done (``stage: "done"``, the chunks there)."""
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        response = post_route(
+            client,
+            route,
+            structured=PATTERNS_STRUCTURED,
+            chunking={"strategy": "fixed", "size": 300, "overlap": 0},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert_chunked(data, 300)
+    structured = data["structured"]
+    assert structured["stage"] == "done"
+    assert structured["values"] == {"plant": "plants"}
+    assert structured["sources"] == {"plant": "patterns"}
+    assert structured["missing"] == []
+    assert "learn_html" not in structured or structured["learn_html"] is None
+    assert data["timings"]["llm_ms"] == 0
+    assert service.keys() == []  # no job: nothing went to another pool
+
+
+def test_sync_llm_work_without_the_llm_hop_is_partial_with_content() -> None:
+    """A pod without the llm hop (no ``llm_dispatcher``) gives a result that needs the LLM the
+    post stage without it: ``partial``/``llm_failed``, retryable, the content kept. With the hop
+    the llm worker answers (``tests/test_llm_dispatch.py``)."""
+    service = Service(llm_settings())
+    without_llm_hop(service.app)
+    with TestClient(service.app) as client:
+        response = post_route(
+            client, "extract", structured={"schema": SCHEMA_ONE, "strategy": "llm"}
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "partial"
+    assert body["error"]["code"] == "llm_failed"
+    assert body["error"]["retryable"] is True
+    assert body["error"]["message"] == "The LLM step did not run; retry later."
+    assert body["data"]["content"]
+    assert body["data"]["structured"]["stage"] == "done"
+    assert body["data"]["structured"]["missing"] == ["title"]
+
+
+def test_cache_hit_gets_fresh_post_stage() -> None:
+    """The cache keeps the DOM stage's result, never the post stage's: a second request with
+    other ``chunking`` hits the same entry and gets its own chunks."""
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        first = post_route(client, "extract", chunking={"strategy": "fixed", "size": 1000})
+        second = post_route(
+            client, "extract", chunking={"strategy": "fixed", "size": 200, "overlap": 0}
+        )
+        plain = post_route(client, "extract")
+
+    one, two = first.json()["data"], second.json()["data"]
+    assert (one["cache"], two["cache"], plain.json()["data"]["cache"]) == ("miss", "hit", "hit")
+    assert len(service.fetcher.page_calls()) == 1  # one fetch of the page behind all three
+    big, small = assert_chunked(one, 1000), assert_chunked(two, 200)
+    assert len(small) > len(big)
+    assert plain.json()["data"]["chunks"] is None  # the entry has no chunks of its own
+
+
+def test_p1_job_result_has_post_stage() -> None:
+    """A request that became a P1 job stores its result after the post stage."""
+    case = Handover(**llm_settings().model_dump(include={"llm_enabled", "llm_api_key"}))
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={
+                "url": PAGE,
+                "wait_seconds": 0,
+                "structured": PATTERNS_STRUCTURED,
+                "chunking": {"strategy": "sentence", "size": 400, "overlap": 0},
+            },
+            headers=AUTH,
+        )
+        assert response.status_code == 202, response.text
+        case.pipeline.release.set()
+        final = case.wait_for_job(client, response.json()["data"]["id"])
+        case.wait_for_idle()
+
+    result = final["data"]["items"][0]["result"]
+    assert result["status"] == "success"
+    assert_chunked(result["data"], 400)
+    assert result["data"]["structured"]["stage"] == "done"
+    assert result["data"]["structured"]["values"] == {"plant": "plants"}
+
+
+def test_stored_p1_result_gets_the_post_stage_it_lacks() -> None:
+    """``_store_result`` is a finish point: an envelope whose post stage has not run gets it
+    there, before the PII guard, and is stored done."""
+    settings = llm_settings()
+    store = JobStore(FakeAsyncRedis(), settings)
+    req = ExtractRequest.model_validate(
+        {"url": PAGE, "structured": PATTERNS_STRUCTURED, "chunking": {"strategy": "fixed"}}
+    )
+    envelope = rendered_envelope()
+    assert envelope.data is not None
+    envelope.data.content = "The green plants grow."
+    metrics = cast(Any, SimpleNamespace(duration=_NoMetric()))
+
+    async def scenario_() -> Envelope[ExtractResult] | None:
+        job_id = await store.create("extract", USER, JobOptions(compliance="enforce"), [PAGE])
+        await store.mark_running(job_id, lease_seconds=60)
+        threads = ConversionPool(1, name="post")
+        try:
+            await _store_result(
+                store,
+                metrics,
+                job_id,
+                time.monotonic(),
+                envelope,
+                structured=req.structured,
+                chunking=req.chunking,
+                settings=settings,
+                threads=threads,
+            )
+        finally:
+            threads.shutdown()
+        return (await store.items(job_id, 0, 1))[0].result
+
+    stored = asyncio.run(scenario_())
+
+    assert stored is not None
+    assert stored.data is not None
+    assert stored.data.structured is not None
+    assert stored.data.structured.stage == "done"
+    assert stored.data.structured.values == {"plant": "plants"}
+    assert stored.data.chunks is not None
+    assert [chunk.text for chunk in stored.data.chunks] == ["The green plants grow."]
+
+
+def test_store_result_refuses_settings_without_the_post_pool() -> None:
+    """With ``settings`` the guard runs on the post pool (ruling R21); without one it would be
+    skipped without a word, so that is a caller's error."""
+    settings = llm_settings()
+    store = JobStore(FakeAsyncRedis(), settings)
+    metrics = cast(Any, SimpleNamespace(duration=_NoMetric()))
+
+    async def scenario_() -> None:
+        await _store_result(
+            store, metrics, "job", time.monotonic(), rendered_envelope(), settings=settings
+        )
+
+    with pytest.raises(TypeError, match="threads"):
+        asyncio.run(scenario_())
+
+
+class _NoMetric:
+    def labels(self, **labels: str) -> "_NoMetric":
+        return self
+
+    def observe(self, value: float) -> None:
+        pass
+
+
+@pytest.mark.parametrize("pii_enabled", [False, True], ids=["pii-off", "pii-on"])
+def test_request_without_structured_unchanged(
+    registry: CollectorRegistry, pii_enabled: bool
+) -> None:
+    """On a service with an LLM, the answer of a request without ``structured`` and
+    ``chunking`` is the package-7 one (the golden recording) apart from ``structured: null``,
+    ``chunks: null`` and ``timings.llm_ms: 0``: the post stage leaves it alone, and no job or
+    llm item is made."""
+    golden = json.loads(GOLDEN.read_text())["article"]
+    settings = llm_settings(pii_enabled=pii_enabled)
+    valkey = FakeAsyncRedis()
+    app = create_public_app(settings, valkey, registry)
+    fake = FakeFetcher({PAGE: fetched()})
+    app.state.pipeline = create_pipeline(settings, valkey, cast(Fetcher, fake), registry)
+    with TestClient(app) as test_client:
+        response = test_client.post(
+            "/v1/extract", json={"url": PAGE, "links": True}, headers=LLM_KEY_HEADERS
+        )
+
+    assert response.status_code == 200
+    answer = response.json()
+    timings = answer["data"].pop("timings")
+    assert timings["llm_ms"] == 0
+    assert answer.pop("trace_id")
+    assert answer["data"]["structured"] is None
+    assert answer["data"]["chunks"] is None
+    assert json.dumps(answer, sort_keys=True) == json.dumps(golden, sort_keys=True)
+
+    async def keys(pattern: str) -> list[Any]:
+        return list(await valkey.keys(pattern))
+
+    assert asyncio.run(keys("job*")) == []
+    assert asyncio.run(keys("q:*")) == []
+
+
+def test_sync_patterns_after_pii_on_masked_content() -> None:
+    """With ``pii`` the post stage reads the masked content (D3 a): the nlp worker's result
+    comes back with values and chunks of the masked text, never the raw one."""
+    from tests.test_pii_dispatch import EMAIL, NAME, PiiService, assert_processed
+
+    service = PiiService()
+    structured = {
+        "schema": {"type": "object", "properties": {"contact": {"type": "string"}}},
+        "strategy": "patterns",
+        "patterns": {"contact": {"regex": r"write to (\S+)", "group": 1}},
+    }
+    with TestClient(service.app) as client, service.nlp():
+        response = client.post(
+            "/v1/extract",
+            json={
+                "url": PAGE,
+                "pii": "mask",
+                "structured": structured,
+                "chunking": {"strategy": "recursive", "size": 300, "overlap": 0},
+            },
+            headers=AUTH,
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert_processed(data)
+    assert data["structured"]["stage"] == "done"
+    assert data["structured"]["values"] == {"contact": "[EMAIL_ADDRESS]"}
+    texts = [chunk["text"] for chunk in assert_chunked(data, 300)]
+    assert "[PERSON]" in "".join(texts)
+    assert not any(NAME in text or EMAIL in text for text in texts)
+
+
+# --- pii with structured: no DOM-stage value (rulings R12, R13; D3 a) ----------------------------
+
+AUTHOR_SCHEMA: dict[str, Any] = {"type": "object", "properties": {"author": {"type": "string"}}}
+
+
+def author_page() -> str:
+    """The PII test page with a JSON-LD author: the ``metadata`` strategy reads it raw."""
+    from tests.test_pii_dispatch import NAME, NAMED_ARTICLE
+
+    ld = f'<script type="application/ld+json">{{"@type": "Article", "author": "{NAME}"}}</script>'
+    return NAMED_ARTICLE.replace("</head>", f"{ld}</head>")
+
+
+def pii_author_service() -> Any:
+    from tests.test_pii_dispatch import PiiService
+
+    return PiiService({PAGE: fetched(body=author_page())})
+
+
+def assert_no_author(body: dict[str, Any]) -> None:
+    from tests.test_pii_dispatch import NAME
+
+    assert body["status"] == "success", body["error"]
+    assert NAME not in json.dumps(body)
+    assert "Schmidt" not in json.dumps(body)
+    structured = body["data"]["structured"]
+    assert structured["stage"] == "done"
+    assert structured["values"] == {"author": None}  # neither metadata nor the masked text
+    assert structured["sources"] == {}
+
+
+def test_auto_with_pii_answers_no_dom_value() -> None:
+    """``auto`` with ``pii`` runs ``patterns`` and ``llm`` only: the JSON-LD author never
+    reaches the answer, though the page states it."""
+    service = pii_author_service()
+    with TestClient(service.app) as client, service.nlp():
+        plain = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "structured": {"schema": AUTHOR_SCHEMA}, "cache": False},
+            headers=AUTH,
+        )
+        masked = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "pii": "mask", "structured": {"schema": AUTHOR_SCHEMA}},
+            headers=AUTH,
+        )
+
+    from tests.test_pii_dispatch import NAME
+
+    assert plain.json()["data"]["structured"]["values"] == {"author": NAME}  # the page has it
+    assert masked.json()["data"]["cache"] == "miss"
+    assert_no_author(masked.json())
+
+
+def test_auto_with_pii_after_a_cached_auto_request_answers_no_dom_value() -> None:
+    """A non-``pii`` ``auto`` request caches its DOM-stage result; a ``pii`` request for the
+    same page does not get it (another key) and answers no DOM value."""
+    service = pii_author_service()
+    with TestClient(service.app) as client, service.nlp():
+        first = client.post(
+            "/v1/extract", json={"url": PAGE, "structured": {"schema": AUTHOR_SCHEMA}}, headers=AUTH
+        )
+        masked = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "pii": "mask", "structured": {"schema": AUTHOR_SCHEMA}},
+            headers=AUTH,
+        )
+
+    assert first.json()["data"]["structured"]["sources"] == {"author": "metadata"}
+    assert_no_author(masked.json())
+
+
+def test_a_cache_hit_of_a_pii_request_drops_dom_values() -> None:
+    """Defence in depth (R12 b): a cache entry that holds a DOM-stage result under the key of
+    a ``pii`` request (planted here) is served without its ``structured``."""
+    from text_extraction.result_cache import ResultCache
+
+    service = pii_author_service()
+    with TestClient(service.app) as client, service.nlp():
+        client.post("/v1/extract", json={"url": PAGE}, headers=AUTH)
+
+        async def plant() -> None:
+            valkey = FakeAsyncRedis(server=service.server)
+            cache = ResultCache(valkey, service.settings)
+            keys = [key async for key in valkey.scan_iter("res:*")]
+            assert len(keys) == 1
+            key = keys[0].decode()
+            found = await cache.get(key)
+            assert found is not None
+            entry, _fresh = found
+            entry.result["structured"] = {
+                "values": {"author": "Anna Schmidt"},
+                "sources": {"author": "metadata"},
+                "stage": "dom",
+            }
+            await cache.put(key, entry)
+
+        asyncio.run(plant())
+        masked = client.post(
+            "/v1/extract",
+            json={"url": PAGE, "pii": "mask", "structured": {"schema": AUTHOR_SCHEMA}},
+            headers=AUTH,
+        )
+
+    assert masked.json()["data"]["cache"] == "hit"
+    assert_no_author(masked.json())

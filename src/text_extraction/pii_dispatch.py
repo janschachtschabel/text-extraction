@@ -4,11 +4,17 @@ to the nlp workers (rulings N11, N12, N13), and the contract of the nlp worker.
 PII is the last step of every result that asked for it (``pii`` in the request or the job's
 options). Whoever produces the result does not answer or store it: it stores the result as the
 item's draft and queues the item on pool ``nlp``. ``PiiDispatcher`` and ``PiiHandoff`` serve the
-sync requests of the API pods, on the generic ``pool_dispatch.PoolDispatcher`` and
-``pool_dispatch.Handover``; ``PiiMove`` serves ``Worker._finish`` of every other pool (batch items
-and every job a pool worker finishes). The last section is the contract of the nlp worker.
+sync requests of the API pods, on the generic ``pool_dispatch.PoolDispatcher``,
+``pool_dispatch.Handover`` and ``pool_dispatch.LastHopHandoff``; ``PiiMove``
+(``pool_dispatch.LastHopMove``) serves ``Worker._finish`` of every other pool (batch items and
+every job a pool worker finishes). ``nlp`` is a last hop: what the generic classes do is in the
+``pool_dispatch`` module docstring; this one has what is PII's (which envelopes go, the answer
+when the hop does not serve them: withheld). The last section is the contract of the nlp
+worker.
 
-**Which envelopes go.** One that is not processed yet (``data.pii`` is None) and has something
+**Which envelopes go.** Without a DOM stage's ``structured`` (R12 b: it read the raw page,
+which this step does not mask; a request with ``pii`` has no DOM stage anyway). One that is not
+processed yet (``data.pii`` is None) and has something
 N5 processes (``pii.fields.needs_pii``). Any other envelope answers as it is, without the hop:
 one without data (a failure of ours), and one with nothing to process (a failure without content
 and metadata), whose ``pii`` stays null because nothing was processed (issue #15).
@@ -76,10 +82,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Final, Literal
 
-import structlog
-from prometheus_client import CollectorRegistry, Counter
+from prometheus_client import CollectorRegistry
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope
@@ -88,13 +92,19 @@ from text_extraction.job_models import JobOptions
 from text_extraction.jobs import JobRecord, JobStore
 from text_extraction.pii.fields import needs_pii, withheld
 from text_extraction.pii.types import PiiLanguage, PiiLanguageOption
-from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatcher
+from text_extraction.pool_dispatch import (
+    Handover,
+    LastHopHandoff,
+    LastHopMove,
+    PoolDispatcher,
+    UnservedReason,
+)
 from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
-
-_log = structlog.get_logger(__name__)
+from text_extraction.structured.checks import wants_llm
+from text_extraction.structured.post import without_dom_stage
 
 PII_POOL: Final = "nlp"
 _PII_DOMAIN_CAP: Final = 1_000_000
@@ -170,19 +180,31 @@ class PiiDispatcher(PoolDispatcher):
         principal: Principal,
         url: str | None,
         job_id: str | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue item 0 on the ``nlp`` pool with ``envelope`` as its draft and return its job's
-        id: a new job of ``kind``, or ``job_id`` (the request's P1 job), whose lease is cleared.
-        Valkey errors propagate; a new job is deleted again first."""
-        return await self.submit_job(kind, options, principal, url, job_id=job_id, draft=envelope)
+        id: a new job of ``kind`` (with the caller's ``llm_key``, if any: the result moves on to
+        the llm worker), or ``job_id`` (the request's P1 job), whose lease is cleared. Valkey
+        errors propagate; a new job is deleted again first."""
+        return await self.submit_job(
+            kind, options, principal, url, job_id=job_id, draft=envelope, llm_key=llm_key
+        )
 
     async def wait(
-        self, job_id: str, *, extra_seconds: float = 0.0, detached: Callable[[], bool]
+        self,
+        job_id: str,
+        *,
+        extra_seconds: float = 0.0,
+        detached: Callable[[], bool],
+        llm: bool = False,
     ) -> Envelope[ExtractResult] | None:
         """The processed result of the job's item 0, or None when there is none within
-        ``PII_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not), the job is gone,
-        or ``detached()`` turned true. Valkey errors propagate."""
+        ``PII_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not; with ``llm``
+        ``LLM_SYNC_WAIT_SECONDS`` more, since the result moves on to the ``llm`` pool in the same
+        job), the job is gone, or ``detached()`` turned true. Valkey errors propagate."""
         seconds = self._settings.pii_sync_wait_seconds + extra_seconds
+        if llm:
+            seconds += self._settings.llm_sync_wait_seconds
         return await self.wait_for(
             job_id,
             answered="answered",
@@ -192,13 +214,15 @@ class PiiDispatcher(PoolDispatcher):
         )
 
 
-class PiiHandoff:
-    """The ``pii_handoff`` of one sync request (``extract_api._flow``, ``file_api._flow``; N11).
+class PiiHandoff(LastHopHandoff):
+    """The ``pii_handoff`` of one sync request (``extract_api._flow``, ``file_api._flow``; N11),
+    the generic ``pool_dispatch.LastHopHandoff`` on pool ``nlp``.
 
     ``kind`` is the job kind of the request (``extract`` for a URL, ``file`` for an upload),
-    ``options`` its stored options (with ``pii``) and ``url`` its URL (None for an upload).
-    ``wait_until`` is the ``time.monotonic()`` reading at which the route answers 202: the
-    request waits that much longer, so that the route finds the job to answer with. A call
+    ``options`` its stored options (with ``pii``) and ``url`` its URL (None for an upload);
+    ``llm_key`` is the caller's ``X-LLM-Api-Key`` of a request that may need the LLM, stored with
+    the nlp job. ``wait_until`` is the ``time.monotonic()`` reading at which the route answers
+    202: the request waits that much longer, so that the route finds the job to answer with. A call
     answers the processed envelope, a withheld one, or None once the job belongs to the nlp
     worker (the route answered 202 with it, or it is the request's P1 job)."""
 
@@ -212,118 +236,61 @@ class PiiHandoff:
         principal: Principal,
         url: str | None,
         wait_until: float | None = None,
+        llm_key: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._dispatcher = dispatcher
-        self._guard = guard
-        self._kind = kind
-        self._options = options
-        self._principal = principal
-        self._url = url
-        self._wait_until = wait_until
-        self._clock = clock
+        super().__init__(
+            dispatcher,
+            guard,
+            pool=PII_POOL,
+            kind=kind,
+            options=options,
+            principal=principal,
+            url=url,
+            wait_until=wait_until,
+            llm_key=llm_key,
+            clock=clock,
+        )
+        self._nlp = dispatcher
+        # A result that moves on to the llm worker completes later (ruling S13).
+        self._llm = wants_llm(options.structured, options.chunking, dispatcher.settings)
 
     async def __call__(
         self, envelope: Envelope[ExtractResult], handover: Handover
     ) -> Envelope[ExtractResult] | None:
-        pii = self._options.pii
-        if pii is None or not needs_pii(envelope, pii):
-            return envelope
-        dispatcher = self._dispatcher
-        if self._guard.high:
-            dispatcher.count("memory_guard")
-            return withheld(envelope, pii, message=PII_BUSY_MESSAGE)
-        claimed = handover.claim_after_release(PII_POOL)
-        if not claimed:  # the route is handing it over to a P1 job
-            await handover.settled()
-            if handover.claimed == "p1" and handover.job_id is not None:
-                return await self._on_p1_job(handover.job_id, envelope)
-            # The P1 job could not be created: the route waits for this answer.
-        extra = 0.0 if self._wait_until is None else max(self._wait_until - self._clock(), 0.0)
-        job_id: str | None = None
-        try:
-            job_id = await self._submit(envelope)
-        except BACKEND_ERRORS as error:  # JobLost: the new job vanished before its draft
-            _dispatch_failed(error)
-            return withheld(envelope, pii)
-        finally:
-            if claimed:
-                handover.settle(job_id)
-        try:
-            result = await dispatcher.wait(
-                job_id, extra_seconds=extra, detached=lambda: handover.detached
-            )
-        except asyncio.CancelledError:
-            if handover.release():
-                await asyncio.shield(dispatcher.abandon(job_id))
-            raise
-        except (RedisError, OSError) as error:
-            if not handover.release():
-                return None  # the route answered 202 with the job: the worker writes its result
-            await asyncio.shield(dispatcher.abandon(job_id))
-            _dispatch_failed(error)
-            return withheld(envelope, pii)
-        if result is None:
-            if not handover.release():
-                return None  # the route answered 202 with the job: the worker writes its result
-            await asyncio.shield(dispatcher.abandon(job_id))
-            return withheld(envelope, pii)
-        # Answered here: nobody reads the job again, unless the route answered 202 meanwhile.
-        if handover.release():
-            await asyncio.shield(dispatcher.answered(job_id, result))
-        return result
+        # Defence in depth (R12 b): no DOM-stage value of the raw page passes the PII step.
+        return await super().__call__(without_dom_stage(envelope), handover)
 
-    async def _submit(self, envelope: Envelope[ExtractResult], job_id: str | None = None) -> str:
-        return await self._dispatcher.submit(
-            envelope, self._kind, self._options, self._principal, self._url, job_id=job_id
+    def needs(self, envelope: Envelope[ExtractResult]) -> bool:
+        pii = self._options.pii
+        return pii is not None and needs_pii(envelope, pii)
+
+    def unserved(
+        self, envelope: Envelope[ExtractResult], reason: UnservedReason
+    ) -> Envelope[ExtractResult]:
+        """Withheld: ``pii_failed``, retryable, the text removed."""
+        if reason == "busy":
+            return withheld(envelope, self._options.pii, message=PII_BUSY_MESSAGE)
+        return withheld(envelope, self._options.pii)
+
+    async def _wait(
+        self, job_id: str, *, extra_seconds: float, detached: Callable[[], bool]
+    ) -> Envelope[ExtractResult] | None:
+        return await self._nlp.wait(
+            job_id, extra_seconds=extra_seconds, detached=detached, llm=self._llm
         )
 
-    async def _on_p1_job(
-        self, job_id: str, envelope: Envelope[ExtractResult]
-    ) -> Envelope[ExtractResult] | None:
-        """Put the envelope on the request's P1 job, which the route answered 202 with; the
-        withheld answer of a failure is stored in that job."""
-        try:
-            await self._submit(envelope, job_id)
-        except BACKEND_ERRORS as error:
-            _dispatch_failed(error)
-            return withheld(envelope, self._options.pii)
-        return None  # the nlp worker writes item 0 of the P1 job
 
-
-class PiiMove:
+class PiiMove(LastHopMove):
     """The move of a finished item to the ``nlp`` pool (``Worker._finish`` of every other pool;
-    N11). ``guard`` tells whether Valkey is nearly full; ``outcomes``
-    (``text_extraction_nlp_dispatch_total``) counts the refused moves."""
-
-    def __init__(
-        self,
-        store: JobStore,
-        queue: FairQueue,
-        guard: MemoryPressure | None,
-        *,
-        outcomes: Counter | None = None,
-    ) -> None:
-        self._store = store
-        self._queue = queue
-        self._guard = guard
-        self._outcomes = outcomes
+    N11), the generic ``pool_dispatch.LastHopMove`` with the ``nlp`` queue. ``guard`` tells
+    whether Valkey is nearly full; ``outcomes`` (``text_extraction_nlp_dispatch_total``) counts
+    the refused moves. The draft has no DOM-stage ``structured`` (R12 b)."""
 
     async def __call__(
         self, job: JobRecord, item: QueueItem, envelope: Envelope[ExtractResult]
     ) -> bool:
-        """Store ``envelope`` as the item's draft and queue the item on ``nlp`` with the same job,
-        index and client; True once it is queued. False while the memory guard is high: nothing
-        was stored. Valkey errors and ``JobLost`` propagate."""
-        if self._guard is not None and self._guard.high:
-            if self._outcomes is not None:
-                self._outcomes.labels(outcome="memory_guard").inc()
-            return False
-        url = await self._store.url(job.id, item.index)
-        # Draft first: the nlp worker may claim the item as soon as it is queued.
-        await self._store.put_draft(job.id, item.index, envelope)
-        await self._queue.enqueue_items(job.id, item.client, [(item.index, url or None)])
-        return True
+        return await super().__call__(job, item, without_dom_stage(envelope))
 
 
 def create_pii_move(
@@ -342,8 +309,3 @@ def create_pii_move(
         guard,
         outcomes=dispatch_counter_for(registry, PII_OUTCOMES, pool=PII_POOL),
     )
-
-
-def _dispatch_failed(error: Exception) -> None:
-    # The type only: the failed command carried the result's text.
-    _log.warning("nlp_dispatch_failed", error_type=type(error).__name__)

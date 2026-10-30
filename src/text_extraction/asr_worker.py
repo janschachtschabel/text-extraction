@@ -176,6 +176,7 @@ from text_extraction.fetch import USER_AGENT, Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, asr_lease_seconds
+from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.media.captions import Cue
 from text_extraction.media.transcript import Transcription
 from text_extraction.media.types import MediaKind
@@ -1167,6 +1168,7 @@ class AsrWorkerParts:
     fetcher: Fetcher
     conversion_pool: ConversionPool
     settings: Settings
+    post_pool: ConversionPool  # the post stage's (POST_CONCURRENCY, ruling R21)
 
     async def start(self) -> None:
         """Clean the scratch directory, start the proxy and the children, then the self-check
@@ -1184,6 +1186,7 @@ def build_asr_worker(
     guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, fetcher = create_outbound(settings, valkey)
     conversion_pool = ConversionPool(settings.convert_concurrency)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
     pipeline = create_pipeline(
         settings, valkey, fetcher, registry, conversion_pool, gate=gate, memory_guard=guard
     )
@@ -1200,6 +1203,8 @@ def build_asr_worker(
         concurrency=settings.asr_concurrency,
         give_back_on_cancel=True,  # the lease lasts hours: a cancelled item must not wait for it
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
+        post_pool=post_pool,
     )
     return AsrWorkerParts(
         worker=worker,
@@ -1209,6 +1214,7 @@ def build_asr_worker(
         fetcher=fetcher,
         conversion_pool=conversion_pool,
         settings=settings,
+        post_pool=post_pool,
     )
 
 
@@ -1244,6 +1250,7 @@ async def _run(settings: Settings) -> None:
         clean_scratch(settings)
         await parts.fetcher.aclose()
         parts.conversion_pool.shutdown()
+        parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

@@ -5,8 +5,9 @@ Markdown, with a fast HTTP mode and a browser mode.
 
 ## Status
 
-Under construction: packages 0-5 are merged (foundation, service skeleton, fast extraction,
-jobs and batch, browser worker, documents and OCR); package 6 (audio and video) is next. See
+Under construction: packages 0-8 are merged (foundation, service skeleton, fast extraction,
+jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
+chunking). See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Quick start
@@ -47,6 +48,15 @@ and spaCy; models of about 1 GB for `lg`, 115 MB for `md`, downloaded into a vol
 start). Set `PII_ENABLED=true` in `.env` (optionally `PII_MODEL_SIZE=md` and `PII_HASH_KEY`, from
 `openssl rand -hex 32`) and start the profile `nlp`:
 `docker compose --profile nlp up --build`. Without it a request with `pii` answers 400.
+
+Structured output with an LLM and semantic chunking (below) call an OpenAI-compatible endpoint
+from the LLM worker, which is off by default as well (it runs from the API image, no models). Set
+`LLM_ENABLED=true`, `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` (and `LLM_EMBEDDING_MODEL` for
+`semantic`) in `.env` and start the profile `llm`: `docker compose --profile llm up --build`.
+`docker compose run --rm llm-worker text-extraction-llm-worker --check` sends one tiny extraction to
+the endpoint. Without it, the strategy `llm`, `learn_selectors` and `semantic` chunking answer 400;
+`auto` leaves the fields it would ask the LLM for missing, and everything else works without an
+LLM.
 
 ### Documents and uploads
 
@@ -195,6 +205,65 @@ German and English uses the English model for names, with the warning `pii_langu
 `pii` cannot be combined with `screenshot`. Names are found by a statistical model, so a few are
 missed and a few words are taken for names; see "PII" in the [architecture](docs/architecture.md)
 for the limits.
+
+### Structured output and chunking
+
+`structured` takes a JSON schema and fills its fields from the page: `metadata` (JSON-LD,
+microdata, RDFa, OpenGraph and meta tags), `selectors` (your CSS rules; XPath with an admin key),
+`patterns` (your regular expressions on the content), `llm`, or `auto` (the default): per field the
+first of your selectors, the page's metadata and your patterns that finds a value, and the LLM only
+for the fields still missing. `POST /v1/structured` is `POST /v1/extract` with `structured`
+required:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"url": "https://example.org/mathe/brueche", "structured": {
+        "schema": {"type": "object", "properties": {"name": {"type": "string"},
+          "bearbeitungszeit": {"type": "integer"}, "merksatz": {"type": "string"}}},
+        "patterns": {"bearbeitungszeit": {"regex": "Bearbeitungszeit: (\\d+)", "group": 1}}}}' \
+  http://localhost:8080/v1/structured
+# {"status": "success", "data": {"content": "# Brüche addieren ...", "structured": {
+#  "values": {"name": "Brüche addieren und subtrahieren", "bearbeitungszeit": 45,
+#   "merksatz": "Brüche mit gleichem Nenner ..."},
+#  "sources": {"name": "metadata", "bearbeitungszeit": "patterns", "merksatz": "llm"},
+#  "missing": [], "tables": null, "learned": null,
+#  "llm": {"model": "gpt-6-luna", "calls": 1, ...}, "stage": "done", ...}, ...}, ...}
+```
+
+`"tables": true` adds the page's tables; `"learn_selectors": true` (with `llm` or `auto`) asks the
+LLM for CSS selectors that reproduce the values it found and keeps them for your API key and the
+site, so that the next pages of that site need no LLM for those fields (`"sources": {...:
+"learned"}`). Your own `X-LLM-Api-Key` header wins over the operator's `LLM_API_KEY`. A request
+that needs the LLM waits `LLM_SYNC_WAIT_SECONDS` (30 s), then answers 202 with a job to poll; when
+the LLM step cannot run, the answer keeps its content and is `partial` with `error.code:
+llm_failed` (retryable).
+
+`chunking` splits the content into chunks of at most `size` characters (default 1,000, `overlap`
+100): `fixed`, `recursive` (the default), `markdown` (at headings; each chunk carries its heading
+path), `sentence` or `semantic` (cut where the meaning shifts, with the endpoint's embeddings).
+`POST /v1/chunk` takes a `url` or your own `text` (Markdown, or `"text_type": "plain"`):
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"text": "# Brüche\n\nEin Bruch beschreibt einen Anteil.\n\n## Addieren\n\nGleiche Nenner bleiben.",
+       "chunking": {"strategy": "markdown", "size": 500, "overlap": 0}}' \
+  http://localhost:8080/v1/chunk
+# {"status": "success", "data": {"mode_used": "upload", "chunks": [
+#  {"index": 0, "text": "# Brüche\n\nEin Bruch beschreibt einen Anteil.", "start": 0, "end": 44,
+#   "headings": ["Brüche"]},
+#  {"index": 1, "text": "## Addieren\n\nGleiche Nenner bleiben.", "start": 46, "end": 82,
+#   "headings": ["Brüche", "Addieren"]}], ...}, ...}
+```
+
+`POST /v1/extract`, `/v1/extract/file` (as form fields with a JSON object each) and `/v1/batch`
+take `structured` and `chunking` too; every result of a batch carries its own chunks:
+
+```bash
+curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"urls": ["https://example.org/a", "https://example.org/b"],
+       "chunking": {"strategy": "sentence", "size": 800}}' \
+  http://localhost:8080/v1/batch
+```
 
 ### Browser mode
 

@@ -34,18 +34,31 @@ workers.
    cache and the fingerprints keep the unprocessed extraction (N9). Every envelope the route
    answers or stores passes ``pii.fields.fail_closed`` (N12): one that still owes the step is
    ``pii_failed`` with its text withheld.
+8. With ``structured`` or ``chunking``, the envelope the flow ends with (after the PII step, on its
+   final, possibly masked content) gets the post stage (``structured.post.post_at_finish``, ruling
+   S13) unless it had it already (a browser, Docling, nlp or llm job's result is done by its
+   worker): the patterns, on the app's post pool (``POST_CONCURRENCY`` threads, ruling R21); then an
+   envelope that needs the LLM goes to the llm workers (``llm_dispatch.LlmHandoff``, D5 a) with the
+   caller's ``X-LLM-Api-Key`` and the request waits ``LLM_SYNC_WAIT_SECONDS`` longer for it; last
+   ``finish_post``, on the post pool, as the guard. While the memory guard is high, when Valkey
+   fails or nobody answered in time, the answer is the content without the LLM work:
+   ``partial``/``llm_failed``, retryable, never a 5xx. An envelope that still owes the PII step gets
+   none: the guard withholds it. The cache keeps the DOM stage's result: a cache hit gets a post
+   stage of its own. A P1 job's write (``_store_result``) runs the post stage too, for an envelope
+   that lacks it, without the LLM, before the PII guard.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result. A request with
 ``transcribe: true`` and no ``wait_seconds`` waits 20 seconds (M9): a transcription is always a
 job, and a video with subtitles still answers at once. A request with ``pii`` and no
-``wait_seconds`` waits ``PII_SYNC_WAIT_SECONDS`` (D4 a): a slow nlp worker turns it into a job.
+``wait_seconds`` waits ``PII_SYNC_WAIT_SECONDS`` (D4 a): a slow nlp worker turns it into a job;
+one that may need the LLM waits ``LLM_SYNC_WAIT_SECONDS`` (the largest default applies).
 
 1. the flow runs as a task, and the route waits ``wait_seconds`` for it (the wait does not
    cancel it);
-2. if the flow waits for a browser, a Docling or an nlp job by then (or will, step 2 above), the
-   route answers 202 with that job and detaches the task: the pool's worker writes the job's
-   result.
+2. if the flow waits for a browser, a Docling, an nlp or an llm job by then (or will, step 2
+   above), the route answers 202 with that job and detaches the task: the pool's worker writes
+   the job's result.
    A flow that dispatched an ASR job answers None and leaves the job to the route
    (``Handover.adopt``), which answers 202 with it as soon as the flow ends, whether or not
    ``wait_seconds`` has passed;
@@ -53,9 +66,9 @@ job, and a video with subtitles still answers at once. A request with ``pii`` an
    ``EXTRACT_TIMEOUT_SECONDS + 10`` seconds, and the route answers 202;
 4. a done-callback of the task stores its envelope as item 0 of the job. A task that raised is
    stored as ``internal_error`` (a ``ServiceError`` keeps its own code). A flow whose fast result
-   escalates (or needs OCR, or owes the PII step) after the hand-over reuses the job for the
-   browser (or Docling, or nlp; its lease is cleared) and stores nothing: that pool's worker
-   writes item 0;
+   escalates (or needs OCR, owes the PII step or needs the LLM) after the hand-over reuses the
+   job for the browser (or Docling, nlp or llm; its lease is cleared) and stores nothing: that
+   pool's worker writes item 0;
 5. a pod that dies in between leaves the lease to expire; ``GET /v1/jobs/{id}`` then shows the
    item as failed (``jobs_api.py``).
 
@@ -93,7 +106,9 @@ from text_extraction.browser_dispatch import (
     job_options,
 )
 from text_extraction.browser_options import EvaluateAction
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import OutputFormat
 from text_extraction.docling_dispatch import DoclingDispatcher, DoclingHandoff
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
@@ -110,6 +125,7 @@ from text_extraction.extract_models import (
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
+from text_extraction.llm_dispatch import LlmDispatcher, LlmHandoff
 from text_extraction.pii.fields import ANNOTATE_HTML_MESSAGE, fail_closed
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, pii_available
@@ -123,6 +139,15 @@ from text_extraction.queue_metrics import JobMetrics
 from text_extraction.ratelimit import rate_limited
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import (
+    LLM_KEY_HEADER,
+    check_selector_access,
+    check_structured_request,
+    llm_key_of,
+    wants_llm,
+)
+from text_extraction.structured.post import LlmHop, post_at_finish
+from text_extraction.structured.types import StructuredOptions
 from text_extraction.tracing import current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -154,6 +179,14 @@ ASR_KEY_DESCRIPTION = (
     "Required with `transcribe: true` (and for audio and video uploads) where the service has "
     "no key of its own: without it the request is 400."
 )
+LLM_KEY_DESCRIPTION = (
+    "Your API key of the LLM endpoint, for `structured` and `chunking` work that calls the LLM "
+    "(`structured.strategy` `llm` or `auto`, `chunking.strategy` `semantic`); it wins over the "
+    "service's own key (`LLM_API_KEY`). A secret: stored only with a job whose request may need "
+    "the LLM, deleted with its outcome, never shown or logged. Required for such work where the "
+    "service has no key of its own: without it the request is 400. 1 to 1024 visible ASCII "
+    "characters, else 400."
+)
 
 
 @router.post(
@@ -173,6 +206,9 @@ async def extract(
     principal: Annotated[Principal, Depends(require_role("user"))],
     asr_key: Annotated[
         str | None, Header(alias=ASR_KEY_HEADER, description=ASR_KEY_DESCRIPTION)
+    ] = None,
+    llm_key: Annotated[
+        str | None, Header(alias=LLM_KEY_HEADER, description=LLM_KEY_DESCRIPTION)
     ] = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Fetch a URL and return its main content as Markdown, text or HTML.
@@ -208,8 +244,25 @@ async def extract(
     answers 202 with a job. A result that could not be processed answers `failed`/`pii_failed`
     (retryable) with its content, title, metadata and links withheld; one over
     `JOB_ITEM_MAX_BYTES` comes back without `content`, as from a browser.
+
+    `structured` and `chunking` that may call the LLM (`structured.strategy` `llm` or `auto`,
+    `chunking.strategy` `semantic`) wait `LLM_SYNC_WAIT_SECONDS` (30 s) by default, then answer
+    202 with a job; the largest default of `transcribe`, `pii` and the LLM applies. 400 while the
+    service has no LLM (`strategy` `llm`, `learn_selectors`, `semantic`), for `semantic` without
+    `LLM_EMBEDDING_MODEL`, for LLM work without a key (neither `X-LLM-Api-Key` nor
+    `LLM_API_KEY`) and for an `X-LLM-Api-Key` that is not 1 to 1024 visible ASCII characters; 422
+    for `chunking` with `format: html`, for `pii` with a strategy or option that reads the raw
+    page (`metadata`, `selectors`, `tables`, `learn_selectors`, `selectors`) and for
+    `learn_selectors` with a strategy but `llm` or `auto`.
     """
-    return await respond(request, body, principal, "extract", asr_key=asr_key_of(asr_key))
+    return await respond(
+        request,
+        body,
+        principal,
+        "extract",
+        asr_key=asr_key_of(asr_key),
+        llm_key=llm_key_of(llm_key),
+    )
 
 
 def renders_first(body: ExtractRequest) -> bool:
@@ -268,14 +321,36 @@ def check_pii_request(
         raise ServiceError(ErrorCode.INVALID_REQUEST, ANNOTATE_HTML_MESSAGE, 422)
 
 
+def default_wait_seconds(
+    settings: Settings, *, transcribe: bool = False, pii: bool, llm: bool
+) -> float | None:
+    """The wait of a request without ``wait_seconds``: for ``transcribe: true`` 20 (M9), with
+    ``pii`` ``PII_SYNC_WAIT_SECONDS`` (D4 a), for a request that may need the LLM
+    ``LLM_SYNC_WAIT_SECONDS`` (S13); the largest of those that apply. None when none applies: the
+    request waits for its result."""
+    waits = [
+        seconds
+        for applies, seconds in (
+            (transcribe, TRANSCRIBE_WAIT_SECONDS),
+            (pii, settings.pii_sync_wait_seconds),
+            (llm, settings.llm_sync_wait_seconds),
+        )
+        if applies
+    ]
+    return max(waits) if waits else None
+
+
 def request_wait_seconds(body: ExtractRequest, settings: Settings) -> float | None:
-    """The request's ``wait_seconds``; with ``transcribe: true`` and none set, 20 (M9); with
-    ``pii`` and none set, ``PII_SYNC_WAIT_SECONDS`` (D4 a)."""
-    if body.wait_seconds is None and body.transcribe:
-        return TRANSCRIBE_WAIT_SECONDS
-    if body.wait_seconds is None and body.pii is not None:
-        return settings.pii_sync_wait_seconds
-    return body.wait_seconds
+    """The request's ``wait_seconds``; none set, the largest default that applies
+    (``default_wait_seconds``)."""
+    if body.wait_seconds is not None:
+        return body.wait_seconds
+    return default_wait_seconds(
+        settings,
+        transcribe=body.transcribe,
+        pii=body.pii is not None,
+        llm=wants_llm(body.structured, body.chunking, settings),
+    )
 
 
 def check_browser_request(body: ExtractRequest, principal: Principal, settings: Settings) -> None:
@@ -294,23 +369,40 @@ async def respond(
     kind: BrowserJobKind,
     *,
     asr_key: str | None = None,
+    llm_key: str | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run the flow for ``body``, or hand it over to a job after ``wait_seconds`` (the module
     docstring). ``kind`` is the kind of a browser job the request creates; ``asr_key`` the
-    caller's ``X-ASR-Api-Key``, stored with an ASR job only."""
+    caller's ``X-ASR-Api-Key``, stored with an ASR job only; ``llm_key`` the caller's
+    ``X-LLM-Api-Key``, stored with every job of a request that may need the LLM."""
     state = request.app.state
     settings: Settings = state.settings
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)
     check_browser_request(body, principal, settings)
+    check_selector_access(body.structured, principal)
     check_ocr_request(body.ocr, settings)
     check_transcribe_request(body.transcribe, settings, key=asr_key)
     check_pii_request(body.pii, body.format, body.screenshot, settings)
+    check_structured_request(
+        body.structured, body.chunking, body.pii, body.format, settings, llm_key=llm_key
+    )
     wait_seconds = request_wait_seconds(body, settings)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)
+    # Only a request that may need the LLM keeps the caller's key with its jobs.
+    job_llm_key = llm_key if wants_llm(body.structured, body.chunking, settings) else None
     flow = partial(
-        _flow, state, body, principal, compliance, handover, kind, wait_until, asr_key=asr_key
+        _flow,
+        state,
+        body,
+        principal,
+        compliance,
+        handover,
+        kind,
+        wait_until,
+        asr_key=asr_key,
+        llm_key=job_llm_key,
     )
     options = job_options(body, compliance)
     return await answer_or_hand_over(
@@ -320,8 +412,18 @@ async def respond(
         wait_seconds=wait_seconds,
         kind=kind,
         renders_first=renders_first(body),
-        hand_over=partial(create_p1_job, state.job_store, settings, principal, options, body.url),
+        hand_over=partial(
+            create_p1_job,
+            state.job_store,
+            settings,
+            principal,
+            options,
+            body.url,
+            llm_key=job_llm_key,
+        ),
         pii=body.pii,
+        structured=body.structured,
+        chunking=body.chunking,
     )
 
 
@@ -348,13 +450,16 @@ async def answer_or_hand_over(
     renders_first: bool,
     hand_over: Callable[[], Awaitable[str | None]],
     pii: PiiOptions | None = None,
+    structured: StructuredOptions | None = None,
+    chunking: ChunkingOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """Run ``flow``, or answer 202 with a job after ``wait_seconds`` (the module docstring):
     the pool job the flow dispatched (of ``kind``), or a P1 job that ``hand_over`` creates (of
     kind ``file`` for an upload, else ``extract``). ``renders_first`` says that the flow goes to
     the browser at once. Every envelope answered or stored in the P1 job passes
-    ``pii.fields.fail_closed`` with the request's ``pii`` (N12). Shared with
-    ``POST /v1/extract/file`` (``file_api.py``)."""
+    ``pii.fields.fail_closed`` with the request's ``pii`` (N12); one stored in the P1 job gets
+    the post stage of the request's ``structured`` and ``chunking`` first, if it lacks it (S13).
+    Shared with ``POST /v1/extract/file`` (``file_api.py``)."""
     settings: Settings = state.settings
     if wait_seconds is None or not settings.jobs_enabled:
         return await _answer(state, await flow(), handover, kind, pii)
@@ -413,6 +518,10 @@ async def answer_or_hand_over(
             handed_over_at,
             kind=p1_kind,
             pii=pii,
+            structured=structured,
+            chunking=chunking,
+            settings=settings,
+            threads=state.post_pool,
         )
     )
     _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
@@ -469,7 +578,7 @@ async def _detach(
     pii: PiiOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """``wait_seconds`` ran out while the flow dispatches or waits for a pool job (a browser, a
-    Docling or an nlp job): answer 202 with that job and let the flow stop waiting. If the
+    Docling, an nlp or an llm job): answer 202 with that job and let the flow stop waiting. If the
     dispatch failed, wait for the flow's own answer."""
     background: _Background = state.background
     settled = asyncio.ensure_future(handover.settled())
@@ -522,30 +631,112 @@ async def _flow(
     wait_until: float | None = None,
     *,
     asr_key: str | None = None,
+    llm_key: str | None = None,
 ) -> _Answer:
     """The envelope of the request, or None when its job's result is written by a pool's
     worker (after a hand-over); see the module docstring. ``wait_until`` is when the route
     turns the request into a job (``handover_time``); ``asr_key`` the caller's key of the
-    external transcription endpoint. With ``pii`` the envelope goes through the nlp workers
-    last (step 7)."""
+    external transcription endpoint, ``llm_key`` its LLM key (None unless the request may need
+    the LLM), kept with every job the flow creates. With ``pii`` the envelope goes through the
+    nlp workers (step 7), then it gets the post stage (step 8)."""
     started = time.perf_counter()
     answer = await _extraction(
-        state, body, principal, compliance, handover, kind, wait_until, started, asr_key=asr_key
-    )
-    if answer is None or body.pii is None:
-        return answer
-    handoff = pii_handoff(
         state,
+        body,
+        principal,
+        compliance,
+        handover,
+        kind,
+        wait_until,
+        started,
+        asr_key=asr_key,
+        llm_key=llm_key,
+    )
+    if answer is None:
+        return None
+    if body.pii is not None:
+        handoff = pii_handoff(
+            state,
+            kind="extract",
+            options=job_options(body, compliance),
+            principal=principal,
+            url=body.url,
+            wait_until=wait_until,
+            llm_key=llm_key,
+        )
+        # Without PII on this pod the route's guard withholds the text.
+        if handoff is not None:
+            processed = await handoff(answer, handover)
+            if processed is None:
+                return None
+            answer = timed(processed, started)
+    return await post_stage(
+        state,
+        answer,
+        started,
+        handover,
         kind="extract",
         options=job_options(body, compliance),
         principal=principal,
         url=body.url,
         wait_until=wait_until,
+        llm_key=llm_key,
     )
-    if handoff is None:  # no PII on this pod: the route's guard withholds the text
-        return answer
-    processed = await handoff(answer, handover)
-    return None if processed is None else timed(processed, started)
+
+
+async def post_stage(
+    state: Any,
+    envelope: Envelope[ExtractResult],
+    started: float,
+    handover: Handover,
+    *,
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    wait_until: float | None,
+    llm_key: str | None,
+) -> _Answer:
+    """Step 8 of a sync flow (``_flow``, ``file_api._flow``): the post stage of the request's
+    ``structured`` and ``chunking`` (``options``) for an envelope that still owes it
+    (``structured.post.post_at_finish``), on the app's post pool (rulings R10, R21), timed into
+    ``total_ms``. An envelope that needs the LLM goes to the llm workers
+    (``llm_dispatch.LlmHandoff``, S13) with the caller's ``llm_key``: the answer is their
+    result, the content without the LLM work (``llm_failed``, retryable) when they could not
+    take it, or None once the llm job is the route's or the P1 job's. Any other envelope comes
+    back as it is."""
+    handoff = llm_handoff(
+        state,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        wait_until=wait_until,
+        llm_key=llm_key,
+    )
+
+    finished = await post_at_finish(
+        envelope,
+        options.structured,
+        options.chunking,
+        options.pii,
+        settings=state.settings,
+        threads=state.post_pool,
+        hop=_llm_hop(handoff, handover) if handoff is not None else None,
+    )
+    if finished is None or finished is envelope:
+        return finished
+    return timed(finished, started)
+
+
+def _llm_hop(handoff: LlmHandoff, handover: Handover) -> LlmHop:
+    """The handoff as the hop of ``post_at_finish``: its answer is finished already (the llm
+    worker's result, or ``finish_post`` with the reason), so no reason goes back."""
+
+    async def hop(draft: Envelope[ExtractResult]) -> tuple[Envelope[ExtractResult] | None, None]:
+        return await handoff(draft, handover), None
+
+    return hop
 
 
 async def _extraction(
@@ -559,11 +750,14 @@ async def _extraction(
     started: float,
     *,
     asr_key: str | None = None,
+    llm_key: str | None = None,
 ) -> _Answer:
     """Steps 2 to 6 of the flow: the request's envelope before the PII step, or None after a
     hand-over."""
     if renders_first(body):
-        return await _in_browser(state, body, principal, compliance, handover, kind, None, started)
+        return await _in_browser(
+            state, body, principal, compliance, handover, kind, None, started, llm_key=llm_key
+        )
     pipeline: Pipeline = state.pipeline
     options = job_options(body, compliance)
     ocr = docling_handoff(
@@ -574,6 +768,7 @@ async def _extraction(
         principal=principal,
         url=body.url,
         wait_until=wait_until,
+        llm_key=llm_key,
     )
     asr = (
         asr_handoff(
@@ -584,6 +779,7 @@ async def _extraction(
             principal=principal,
             url=body.url,
             key=asr_key,
+            llm_key=llm_key,
         )
         if body.transcribe
         else None
@@ -605,7 +801,9 @@ async def _extraction(
         or not needs_browser(fast, unblock=unblock)
     ):
         return fast
-    return await _in_browser(state, body, principal, compliance, handover, kind, fast, started)
+    return await _in_browser(
+        state, body, principal, compliance, handover, kind, fast, started, llm_key=llm_key
+    )
 
 
 def pii_handoff(
@@ -616,6 +814,7 @@ def pii_handoff(
     principal: Principal,
     url: str | None,
     wait_until: float | None,
+    llm_key: str | None = None,
 ) -> PiiHandoff | None:
     """The PII handoff of one request (N11); None while the service has no PII."""
     dispatcher: PiiDispatcher | None = state.pii_dispatcher
@@ -629,6 +828,34 @@ def pii_handoff(
         principal=principal,
         url=url,
         wait_until=wait_until,
+        llm_key=llm_key,
+    )
+
+
+def llm_handoff(
+    state: Any,
+    *,
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    wait_until: float | None,
+    llm_key: str | None = None,
+) -> LlmHandoff | None:
+    """The LLM hop of one request (S13); None while the service has no LLM."""
+    dispatcher: LlmDispatcher | None = state.llm_dispatcher
+    if dispatcher is None:
+        return None
+    return LlmHandoff(
+        dispatcher,
+        state.memory_guard,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        threads=state.post_pool,
+        wait_until=wait_until,
+        llm_key=llm_key,
     )
 
 
@@ -641,6 +868,7 @@ def docling_handoff(
     principal: Principal,
     url: str | None,
     wait_until: float | None,
+    llm_key: str | None = None,
 ) -> DoclingHandoff | None:
     """The OCR handoff of one request (F12); None while the service has no OCR."""
     dispatcher: DoclingDispatcher | None = state.docling_dispatcher
@@ -655,6 +883,7 @@ def docling_handoff(
         principal=principal,
         url=url,
         wait_until=wait_until,
+        llm_key=llm_key,
     )
 
 
@@ -668,6 +897,7 @@ def asr_handoff(
     url: str | None,
     body: bytes = b"",
     key: str | None = None,
+    llm_key: str | None = None,
 ) -> AsrHandoff | None:
     """The ASR handoff of one request (M9); None while the service has no ASR."""
     dispatcher: AsrDispatcher | None = state.asr_dispatcher
@@ -683,6 +913,7 @@ def asr_handoff(
         url=url,
         body=body,
         key=key,
+        llm_key=llm_key,
     )
 
 
@@ -695,9 +926,12 @@ async def _in_browser(
     kind: BrowserJobKind,
     draft: Envelope[ExtractResult] | None,
     started: float,
+    *,
+    llm_key: str | None = None,
 ) -> _Answer:
     """Dispatch the request to the browser workers and wait for their result. ``draft`` is the
-    fast result of an escalating ``auto`` request (None when the request renders first)."""
+    fast result of an escalating ``auto`` request (None when the request renders first);
+    ``llm_key`` the caller's LLM key, kept with a new browser job."""
     dispatcher: BrowserDispatcher = state.browser_dispatcher
     if not handover.claim_pool("browser"):  # the route is handing it over to a P1 job
         await handover.settled()
@@ -713,7 +947,9 @@ async def _in_browser(
         # The P1 job could not be created: the route waits for this answer.
     job_id: str | None = None
     try:
-        job_id = await dispatcher.submit(kind, body, principal, compliance, draft=draft)
+        job_id = await dispatcher.submit(
+            kind, body, principal, compliance, draft=draft, llm_key=llm_key
+        )
     except (RedisError, OSError) as error:
         _dispatch_failed(error)
         if draft is None:
@@ -729,6 +965,7 @@ async def _in_browser(
             unblock=unblock,
             detached=lambda: handover.detached,
             pii=body.pii is not None,
+            llm=wants_llm(body.structured, body.chunking, state.settings),
         )
     except asyncio.CancelledError:
         if handover.release():
@@ -835,9 +1072,11 @@ async def create_p1_job(
     *,
     kind: Literal["extract", "file"] = "extract",
     upload: tuple[bytes, UploadInputMeta] | None = None,
+    llm_key: str | None = None,
 ) -> str | None:
     """Create the P1 job (of ``kind``; an upload's with its bytes as the input of item 0, for
-    ``DOCLING_INPUT_TTL_SECONDS``, within ``DOCLING_INPUT_BUDGET_BYTES``) and mark it running;
+    ``DOCLING_INPUT_TTL_SECONDS``, within ``DOCLING_INPUT_BUDGET_BYTES``; with the caller's
+    ``llm_key`` for the llm worker, when the request may need the LLM) and mark it running;
     its id, or None when Valkey fails or the input budget is full (logged): the request then
     stays synchronous. A job that was created but could not be completed, or whose creator is
     cancelled, is deleted again, if that works."""
@@ -847,6 +1086,8 @@ async def create_p1_job(
         if upload is not None:
             body, meta = upload
             await store.put_input(job_id, 0, body, meta, settings.docling_input_ttl_seconds)
+        if llm_key is not None:
+            await store.put_llm_key(job_id, llm_key)
         lease = settings.extract_timeout_seconds + _LEASE_MARGIN_SECONDS
         await store.mark_running(job_id, lease_seconds=lease)
     except (RedisError, OSError, JobLost, InputBudgetExceeded) as error:
@@ -892,6 +1133,10 @@ def _store_when_done(
     *,
     kind: JobKind = "extract",
     pii: PiiOptions | None = None,
+    structured: StructuredOptions | None = None,
+    chunking: ChunkingOptions | None = None,
+    settings: Settings | None = None,
+    threads: ConversionPool | None = None,
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
     went on to a pool's worker, which writes it. The storing task is added to ``background``
@@ -900,7 +1145,19 @@ def _store_when_done(
     envelope = _envelope_of(task)
     if envelope is not None:
         storing = asyncio.create_task(
-            _store_result(store, metrics, job_id, created_at, envelope, kind=kind, pii=pii)
+            _store_result(
+                store,
+                metrics,
+                job_id,
+                created_at,
+                envelope,
+                kind=kind,
+                pii=pii,
+                structured=structured,
+                chunking=chunking,
+                settings=settings,
+                threads=threads,
+            )
         )
         background.add(storing)
         storing.add_done_callback(background.discard)
@@ -916,12 +1173,29 @@ async def _store_result(
     *,
     kind: JobKind = "extract",
     pii: PiiOptions | None = None,
+    structured: StructuredOptions | None = None,
+    chunking: ChunkingOptions | None = None,
+    settings: Settings | None = None,
+    threads: ConversionPool | None = None,
 ) -> None:
-    """Store the envelope as item 0, past the PII guard (``pii.fields.fail_closed`` with the
+    """Store the envelope as item 0, after the post stage of the request's ``structured`` and
+    ``chunking`` (with ``settings`` and ``threads``, the post pool; for an envelope that lacks it:
+    the flow's own answer has it, S13) and past the PII guard (``pii.fields.fail_closed`` with the
     request's ``pii``, N12), and observe the job's duration (``created_at`` is a
-    ``time.monotonic()`` reading from just before the job was created); an upload's input is
-    deleted then. A Valkey failure is logged and not raised: the job's lease then runs out and
-    ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its own)."""
+    ``time.monotonic()`` reading from just before the job was created); an upload's input is deleted
+    then, and so is the caller's LLM key. A Valkey failure is logged and not raised: the job's lease
+    then runs out and ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its
+    own)."""
+    if settings is not None:
+        if threads is None:  # a caller's mistake: the guard would be skipped without a word
+            raise TypeError("_store_result needs threads together with settings")
+        # The guard: LLM work an envelope still owes here (a task that raised, a pod without
+        # the hop) is ``llm_failed``; the flow's own answer has had its post stage.
+        finished = await post_at_finish(
+            envelope, structured, chunking, pii, settings=settings, threads=threads
+        )
+        if finished is not None:  # always, without a hop
+            envelope = finished
     envelope = fail_closed(envelope, pii)
     try:
         # The first and only write of a P1 job completes it ("last"); a repeat is not counted.
@@ -938,3 +1212,6 @@ async def _store_result(
             error_type=type(error).__name__,
             error=str(error),
         )
+    # The pod ran the whole request: no llm worker will read the caller's LLM key any more.
+    with contextlib.suppress(RedisError, OSError):  # else it expires with the job
+        await store.drop_llm_key(job_id)

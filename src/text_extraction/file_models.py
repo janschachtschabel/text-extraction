@@ -3,14 +3,23 @@
 import json
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, WithJsonSchema, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationInfo,
+    WithJsonSchema,
+    field_validator,
+    model_validator,
+)
 
 from text_extraction.browser_options import WaitSeconds
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
 from text_extraction.documents.types import OcrOption
 from text_extraction.job_models import JobOptions
 from text_extraction.pii.types import PiiOptions
+from text_extraction.structured.types import StructuredOptions
 
 # The form part that carries the file; the route takes it as a parameter of its own.
 FILE_PART = "file"
@@ -46,6 +55,17 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
         '`{"mode": "annotate", "entities": ["PERSON"], "score_threshold": 0.6}`; see '
         "`POST /v1/extract` for its fields.",
     )
+    structured: Annotated[StructuredOptions | None, WithJsonSchema({"type": "string"})] = Field(
+        default=None,
+        description="Extract the fields of a JSON schema from the result: a JSON object as a "
+        'string, e.g. `{"schema": {"type": "object", "properties": {"title": {"type": '
+        '"string"}}}, "strategy": "llm"}`; see `POST /v1/extract` for its fields.',
+    )
+    chunking: Annotated[ChunkingOptions | None, WithJsonSchema({"type": "string"})] = Field(
+        default=None,
+        description="Split the content into chunks: a JSON object as a string, e.g. "
+        '`{"strategy": "markdown", "size": 800}`; see `POST /v1/extract` for its fields.',
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -67,13 +87,27 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
                 raise ValueError("pii is not valid JSON") from None
         return value
 
+    @field_validator("structured", "chunking", mode="before")
+    @classmethod
+    def _options_from_their_form_string(cls, value: Any, info: ValidationInfo) -> Any:
+        """The part is text: a JSON object."""
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                raise ValueError(f"{info.field_name} is not valid JSON") from None
+        return value
+
 
 class UploadInputMeta(BaseModel):
     """What a job keeps next to an upload's bytes (``JobStore.put_input``) until its item is
-    extracted: the part's sanitised file name and its declared content type."""
+    extracted: the part's sanitised file name and its declared content type, and ``short_ok``
+    (a ``text`` of ``POST /v1/chunk``, ruling R15: the word-count gate does not apply to it, in
+    the worker that converts the item as in the request that made it)."""
 
     file_name: str | None = None
     content_type: str | None = None  # as the part declared it, parameters included
+    short_ok: bool = False
 
 
 def upload_options(form: FileForm, compliance: ComplianceMode) -> JobOptions:
@@ -88,6 +122,8 @@ def upload_options(form: FileForm, compliance: ComplianceMode) -> JobOptions:
         cache=False,
         ocr=form.ocr,
         pii=form.pii,
+        structured=form.structured,
+        chunking=form.chunking,
     )
 
 
@@ -95,5 +131,10 @@ def form_of(options: JobOptions) -> FileForm:
     """The form of an upload, rebuilt from its job's options (``wait_seconds`` does not
     matter any more)."""
     return FileForm(
-        format=options.format, metadata=options.metadata, ocr=options.ocr, pii=options.pii
+        format=options.format,
+        metadata=options.metadata,
+        ocr=options.ocr,
+        pii=options.pii,
+        structured=options.structured,
+        chunking=options.chunking,
     )

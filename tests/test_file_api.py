@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from fakeredis import FakeAsyncRedis
+from fakeredis import FakeAsyncRedis, FakeServer
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
@@ -34,6 +34,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.fetch import Fetcher
 from text_extraction.file_api import sanitize_file_name
 from text_extraction.file_models import FileForm
+from text_extraction.jobs import JobStore
 from text_extraction.pipeline import create_pipeline
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, OcrNeeded
 from text_extraction.pipeline_media import (
@@ -259,6 +260,9 @@ def asgi_post(
 
 
 BOUNDARY = b"upload-boundary"
+# What the route's body limit allows beyond the file (R18): 64 KiB for the part headers, the small
+# fields and the boundaries, and 64 KiB for each of `structured` and `chunking`.
+FORM_OVERHEAD = 192 * 1024
 MULTIPART = [(b"content-type", b"multipart/form-data; boundary=" + BOUNDARY)]
 BEARER = [(b"authorization", AUTH["Authorization"].encode())]
 PART_HEAD = (
@@ -271,7 +275,7 @@ PART_HEAD = (
 def test_upload_over_limit_413_before_parse() -> None:
     settings = make_settings(document_max_bytes=2048)
     app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
-    limit = 2048 + 64 * 1024
+    limit = 2048 + FORM_OVERHEAD
     declared = [(b"content-length", str(limit + 1).encode())]
 
     status, pulled, body = asgi_post(
@@ -284,7 +288,7 @@ def test_upload_over_limit_413_before_parse() -> None:
 
 
 def test_upload_at_the_route_limit_is_read() -> None:
-    """The route's limit is DOCUMENT_MAX_BYTES + 64 KiB, far above the JSON default."""
+    """The route's limit is DOCUMENT_MAX_BYTES + 192 KiB, far above the JSON default."""
     settings = make_settings(document_max_bytes=200_000, request_max_body_bytes=1024)
     app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
     with TestClient(app) as test_client:
@@ -302,7 +306,7 @@ def test_chunked_upload_over_limit_413_without_reading_it_all() -> None:
     status, pulled, body = asgi_post(app, chunks, [*MULTIPART, *BEARER])
 
     assert status == 413
-    assert pulled <= 3  # refused at the chunk that went over 66,560 bytes
+    assert pulled <= 5  # refused at the chunk that went over 198,656 bytes (2,048 + 192 KiB)
     assert json.loads(body)["error"]["code"] == "invalid_request"
 
 
@@ -436,6 +440,78 @@ def test_too_many_fields_refused(client: TestClient) -> None:
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_request"
     assert "Too many fields" in response.json()["error"]["message"]
+
+
+# R18: `structured` and `chunking` may be up to 64 KiB each; every other field 1 KiB.
+WIDE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        f"field_{n:02d}": {"type": "string", "description": "A field of the worksheet."}
+        for n in range(24)
+    }
+    | {"title": {"type": "string"}},
+}
+WIDE_STRUCTURED = json.dumps({"schema": WIDE_SCHEMA, "strategy": "metadata"})
+
+
+def test_structured_form_field_over_1_kib_is_accepted(client: TestClient) -> None:
+    assert len(WIDE_STRUCTURED.encode()) > 1024  # 25 fields
+
+    response = upload(
+        client,
+        ARTICLE.encode(),
+        "page.html",
+        "text/html",
+        form={"structured": WIDE_STRUCTURED, "chunking": '{"strategy": "fixed"}'},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["structured"]["values"]["title"] == "Photosynthesis explained"
+    assert len(data["structured"]["values"]) == 25
+    assert data["chunks"]
+
+
+def test_option_form_field_over_64_kib_is_422(client: TestClient) -> None:
+    padded = WIDE_STRUCTURED + " " * (65 * 1024)  # still valid JSON, but over 64 KiB
+
+    for name in ("structured", "chunking"):
+        response = upload(client, ARTICLE.encode(), "page.html", "text/html", form={name: padded})
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert response.json()["error"]["message"] == "Part exceeded maximum size of 64KB."
+
+
+@pytest.mark.parametrize("name", ["pii", "format", "ocr", "wait_seconds", "metadata"])
+def test_other_form_field_over_1_kib_is_422(client: TestClient, name: str) -> None:
+    value = '{"mode": "mask"}' + " " * 1024 if name == "pii" else "x" * 1025
+
+    response = upload(client, GIF, "a.gif", "image/gif", form={name: value})
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["message"] == "Part exceeded maximum size of 1KB."
+
+
+def test_body_limit_holds_a_full_file_and_both_option_fields_at_their_limit() -> None:
+    settings = make_settings(document_max_bytes=2048)
+    app = create_public_app(settings, FakeAsyncRedis(), CollectorRegistry())
+    structured = WIDE_STRUCTURED.ljust(64 * 1024 - 16)
+    chunking = '{"strategy": "fixed"}'.ljust(64 * 1024 - 16)
+    page = (b"<html><body><p>" + b"word " * 400)[:2048]  # the file at DOCUMENT_MAX_BYTES
+
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            page,
+            "page.html",
+            "text/html",
+            form={"structured": structured, "chunking": chunking},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["chunks"]
 
 
 @pytest.mark.parametrize(
@@ -702,9 +778,18 @@ def test_openapi_documents_multipart(client: TestClient) -> None:
     assert body["properties"]["file"]["format"] == "binary"
     assert body["required"] == ["file"]
     form = schemas[body["allOf"][0]["$ref"].rsplit("/", 1)[-1]]
-    assert set(form["properties"]) == {"format", "metadata", "ocr", "wait_seconds", "pii"}
+    assert set(form["properties"]) == {
+        "format",
+        "metadata",
+        "ocr",
+        "wait_seconds",
+        "pii",
+        "structured",
+        "chunking",
+    }
     assert form["properties"]["wait_seconds"]["default"] == 25
-    assert form["properties"]["pii"]["type"] == "string"
+    for name in ("pii", "structured", "chunking"):
+        assert form["properties"][name]["type"] == "string"
     assert "202" in operation["responses"]
 
 
@@ -979,7 +1064,7 @@ def test_body_limit_is_max_of_both() -> None:
     assert response.json()["error"]["code"] == "too_large"
     assert "4096" in response.json()["error"]["message"]
 
-    over = [(b"content-length", str(1_000_000 + 64 * 1024 + 1).encode())]
+    over = [(b"content-length", str(1_000_000 + FORM_OVERHEAD + 1).encode())]
     status, pulled, _ = asgi_post(app, [PART_HEAD, b"x" * 2048], [*MULTIPART, *BEARER, *over])
     assert (status, pulled) == (413, 0)
 
@@ -1318,3 +1403,173 @@ def test_a_large_upload_keeps_its_answer_without_hashing_the_body(
     assert answer["data"]["mode_used"] == "upload"
     if asr:
         assert pool.calls == []
+
+
+def test_xpath_selectors_need_an_admin_key(client: TestClient) -> None:
+    """Ruling R4, on the upload route."""
+    structured = {
+        "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+        "strategy": "selectors",
+        "selectors": {"title": {"xpath": "//h1"}},
+    }
+    response = upload(
+        client,
+        b"<html><body><h1>Title</h1></body></html>",
+        "page.html",
+        "text/html",
+        form={"structured": json.dumps(structured)},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["message"] == "XPath selectors need an admin key; use CSS."
+
+
+# --- the caller's LLM key and the LLM wait (rulings S9, S12, S13) ------------------------------
+
+LLM_KEY = "sk-llm-caller-key-9c2b"
+LLM_STRUCTURED = {
+    "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+    "strategy": "llm",
+}
+
+
+def llm_app(**overrides: Any) -> tuple[FastAPI, FakeServer]:
+    server = FakeServer()
+    settings = make_settings(llm_enabled=True, **overrides)
+    return create_public_app(settings, FakeAsyncRedis(server=server), CollectorRegistry()), server
+
+
+def stored_keys(server: FakeServer, pattern: str) -> list[str]:
+    async def scan() -> list[str]:
+        valkey = FakeAsyncRedis(server=server)
+        return sorted(
+            key.decode() if isinstance(key, bytes) else key for key in await valkey.keys(pattern)
+        )
+
+    return asyncio.run(scan())
+
+
+def test_the_llm_key_is_stored_with_the_uploads_job_and_never_shown() -> None:
+    """``wait_seconds=0`` turns the upload into a P1 job at once: it carries the caller's key
+    for the llm worker."""
+    app, server = llm_app()
+    with TestClient(app) as test_client, capture_logs() as logs:
+        response = upload(
+            test_client,
+            b"<html><body><h1>Title</h1></body></html>",
+            "page.html",
+            "text/html",
+            headers={**AUTH, "X-LLM-Api-Key": LLM_KEY},
+            form={"structured": json.dumps(LLM_STRUCTURED), "wait_seconds": "0"},
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["data"]["id"]
+        view = test_client.get(f"/v1/jobs/{job_id}", headers=AUTH)
+
+        async def stored() -> str | None:
+            return await JobStore(FakeAsyncRedis(server=server), make_settings()).llm_key(job_id)
+
+        assert asyncio.run(stored()) == LLM_KEY
+        assert LLM_KEY not in view.text
+    assert not any(LLM_KEY in repr(event) for event in logs)
+
+
+def test_an_upload_without_llm_work_stores_no_llm_key() -> None:
+    app, server = llm_app()
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            b"<html><body><h1>Title</h1></body></html>",
+            "page.html",
+            "text/html",
+            headers={**AUTH, "X-LLM-Api-Key": LLM_KEY},
+            form={"wait_seconds": "0"},
+        )
+        assert response.status_code == 202, response.text
+
+    assert stored_keys(server, "job:*:llm_key") == []
+
+
+def test_llm_key_checks_on_the_upload_route() -> None:
+    app, server = llm_app()  # no LLM_API_KEY
+    with TestClient(app) as test_client:
+        body = b"<html><body><h1>Title</h1></body></html>"
+        form = {"structured": json.dumps(LLM_STRUCTURED)}
+        missing = upload(test_client, body, "page.html", "text/html", form=form)
+        bad = upload(
+            test_client,
+            body,
+            "page.html",
+            "text/html",
+            headers={**AUTH, "X-LLM-Api-Key": "has space"},
+            form=form,
+        )
+
+    assert missing.status_code == 400
+    assert missing.json()["error"]["message"] == "No LLM key: send X-LLM-Api-Key."
+    assert bad.status_code == 400
+    assert "X-LLM-Api-Key" in bad.json()["error"]["message"]
+    assert "has space" not in bad.text
+    assert stored_keys(server, "job:*") == []
+
+
+# --- the post stage (rulings S5, S13) ------------------------------------------------------------
+
+NOTES = (
+    "# Notes\n\n## Plants\n\n" + PARAGRAPH * 2 + "\n\n## Tables\n\n"
+    "| Plant | Height |\n| --- | --- |\n| Oak | 30 m |\n"
+)
+
+
+def test_upload_post_stage_runs_inline() -> None:
+    """An upload gets the post stage in the API pod: Markdown chunks with their headings, and
+    the tables of a result without a DOM stage from its Markdown."""
+    app = create_public_app(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            NOTES.encode(),
+            "notes.md",
+            "text/markdown",
+            form={
+                "structured": json.dumps({"tables": True}),
+                "chunking": json.dumps({"strategy": "markdown", "size": 400, "overlap": 0}),
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    data = body["data"]
+    assert data["structured"]["stage"] == "done"
+    assert data["structured"]["tables"]
+    chunks = data["chunks"]
+    assert chunks
+    assert ["Notes", "Plants"] in [chunk["headings"] for chunk in chunks]
+    for chunk in chunks:
+        assert data["content"][chunk["start"] : chunk["end"]] == chunk["text"]
+
+
+def test_upload_p1_job_result_has_post_stage() -> None:
+    """An upload that became a P1 job stores its result after the post stage."""
+    app, _server = llm_app()
+    with TestClient(app) as test_client:
+        response = upload(
+            test_client,
+            NOTES.encode(),
+            "notes.md",
+            "text/markdown",
+            form={"chunking": json.dumps({"strategy": "fixed", "size": 200}), "wait_seconds": "0"},
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["data"]["id"]
+        deadline = time.monotonic() + 10
+        while True:
+            view = test_client.get(f"/v1/jobs/{job_id}", headers=AUTH).json()
+            if view["data"]["state"] == "completed" or time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+
+    result = view["data"]["items"][0]["result"]
+    assert result["status"] == "success"
+    assert result["data"]["chunks"]

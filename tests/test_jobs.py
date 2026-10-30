@@ -11,12 +11,14 @@ from pydantic import BaseModel
 
 from text_extraction.auth import Principal
 from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
+from text_extraction.chunking.types import Chunk
 from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions, JobProgress
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore, browser_lease_seconds
 from text_extraction.settings import Settings
+from text_extraction.structured.types import StructuredResult, Table
 
 START = 1_000_000.0
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -285,6 +287,79 @@ async def test_oversized_result_is_stored_without_content() -> None:
     assert big.data is not None
     assert big.data.content is not None  # the caller's envelope is not changed
     assert big.data.warnings == []
+
+
+def chunked(content: str, *, chunks: int, tables: int = 0) -> Envelope[ExtractResult]:
+    """A success whose chunks repeat its content ``chunks`` times, with ``tables`` tables of
+    the same size (as overlapping chunks and big tables do)."""
+    envelope = success(content=content)
+    assert envelope.data is not None
+    data = envelope.data.model_copy(
+        update={
+            "chunks": [
+                Chunk(index=index, text=content, start=0, end=len(content), headings=[])
+                for index in range(chunks)
+            ],
+            "structured": StructuredResult(
+                values={"title": "T"},
+                sources={"title": "metadata"},
+                stage="done",
+                tables=[
+                    Table(index=index, caption=None, headers=[], rows=[[content]])
+                    for index in range(tables)
+                ],
+            ),
+        }
+    )
+    return envelope.model_copy(update={"data": data})
+
+
+@scenario
+async def test_oversized_result_drops_chunks_and_tables_after_the_content() -> None:
+    """I1 (ruling R20): JOB_ITEM_MAX_BYTES bounds what is stored. Chunks repeat the content
+    (with overlap many times over), so a result still over the limit without its content loses
+    its chunks and its tables too, each with a warning of its own."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_item_max_bytes=10_000)
+    job_id = await create_job(store)
+    big = chunked("a" * 3_000, chunks=4, tables=2)
+
+    await store.write_result(job_id, 0, big)
+
+    [item] = await store.items(job_id, 0, 1)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content is None
+    assert data.chunks is None
+    assert data.structured is not None
+    assert data.structured.tables is None
+    assert data.structured.values == {"title": "T"}  # the values stay
+    assert data.warnings == [
+        "content_not_stored_too_large",
+        "chunks_not_stored_too_large",
+        "tables_not_stored_too_large",
+    ]
+    raw = await valkey.hget(f"job:{{{job_id}}}:results", "0")
+    assert raw is not None
+    assert len(raw) <= 10_000
+
+
+@scenario
+async def test_oversized_result_keeps_its_chunks_when_the_content_was_enough() -> None:
+    store = make_store(FakeAsyncRedis(), job_item_max_bytes=10_000)
+    job_id = await create_job(store)
+
+    await store.write_result(job_id, 0, chunked("a" * 6_000, chunks=1))
+
+    [item] = await store.items(job_id, 0, 1)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content is None
+    assert data.chunks is not None
+    assert len(data.chunks) == 1
+    assert data.warnings == ["content_not_stored_too_large"]
 
 
 @scenario
@@ -668,6 +743,84 @@ async def _secrets_flag() -> None:
 
 def test_has_secrets_is_recorded_and_outlives_the_secrets() -> None:
     asyncio.run(_secrets_flag())
+
+
+# --- the caller's LLM key (ruling S9) ----------------------------------------------------------
+
+
+@scenario
+async def test_llm_key_round_trip_and_ttl() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400)
+    job_id = await create_job(store, kind="extract")
+
+    assert await store.llm_key(job_id) is None
+    await store.put_llm_key(job_id, "sk-caller")
+    assert await store.llm_key(job_id) == "sk-caller"
+    ttl = await valkey.ttl(f"job:{{{job_id}}}:llm_key")
+    assert 86400 - 5 <= ttl <= 86400  # the draft it belongs to lives as long as the job
+
+    await store.drop_llm_key(job_id)
+
+    assert await store.llm_key(job_id) is None
+    assert await valkey.exists(f"job:{{{job_id}}}:llm_key") == 0
+    await store.drop_llm_key(job_id)  # nothing to drop is not an error
+    assert await store.llm_key("f" * 32) is None  # an unknown job has none
+
+
+@scenario
+async def test_llm_key_never_outlives_the_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=600)
+    job_id = await create_job(store, kind="extract")
+    await valkey.expire(f"job:{{{job_id}}}:meta", 100)
+
+    await store.put_llm_key(job_id, "sk-caller")
+
+    assert await valkey.ttl(f"job:{{{job_id}}}:llm_key") <= 100
+
+
+@scenario
+async def test_llm_key_of_a_gone_job_is_not_stored() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+
+    with pytest.raises(JobLost):
+        await store.put_llm_key("f" * 32, "sk-caller")
+
+    assert await valkey.keys("job:*") == []
+
+
+@scenario
+async def test_drop_secrets_keeps_llm_key() -> None:
+    """The browser worker drops its secrets and the ASR key when it has finished its item; the
+    LLM key is for the llm worker, which comes later (ruling S13)."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("extract", OWNER, BROWSER_OPTIONS, URLS[:1], secrets=SECRETS)
+    await store.put_asr_key(job_id, "sk-asr")
+    await store.put_llm_key(job_id, "sk-llm")
+
+    await store.drop_secrets(job_id)
+
+    assert await store.secrets(job_id) == BrowserSecrets()
+    assert await store.asr_key(job_id) is None
+    assert await store.llm_key(job_id) == "sk-llm"
+
+
+@scenario
+async def test_delete_and_shorten_remove_the_llm_key() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    deleted = await create_job(store, kind="extract")
+    shortened = await create_job(store, kind="extract")
+    for job_id in (deleted, shortened):
+        await store.put_llm_key(job_id, "sk-llm")
+
+    await store.delete(deleted)
+    await store.shorten(shortened, 30)
+
+    assert await valkey.keys("job:*:llm_key") == []
 
 
 # --- inputs and URL-less items (ruling F12) ---------------------------------------------------

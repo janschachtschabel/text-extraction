@@ -63,6 +63,7 @@ from text_extraction.pipeline_documents import (
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
+from text_extraction.structured.selector_pool import SELECTOR_TARGET
 
 CORPUS = Path(__file__).parent / "documents" / "corpus"
 GOLDEN = Path(__file__).parent / "documents" / "golden" / "package4_answers.json"
@@ -1155,10 +1156,10 @@ def test_app_starts_the_document_pool_before_it_serves(monkeypatch: pytest.Monke
     events: list[str] = []
 
     async def start(self: DocumentPool) -> None:
-        events.append("start")
+        events.append(f"start {_pool_kind(self)}")
 
     async def shutdown(self: DocumentPool) -> None:
-        events.append("shutdown")
+        events.append(f"shutdown {_pool_kind(self)}")
 
     monkeypatch.setattr(DocumentPool, "start", start)
     monkeypatch.setattr(DocumentPool, "shutdown", shutdown)
@@ -1171,15 +1172,20 @@ def test_app_starts_the_document_pool_before_it_serves(monkeypatch: pytest.Monke
     )
 
     with TestClient(app):
-        assert events == ["start"]
-    assert events == ["start", "shutdown"]
+        assert sorted(events) == ["start documents", "start selectors"]
+    assert sorted(events[2:]) == ["shutdown documents", "shutdown selectors"]
+
+
+def _pool_kind(pool: DocumentPool) -> str:
+    """The document children, or the selector children (ruling R19), which are a pool too."""
+    return "selectors" if pool._target == SELECTOR_TARGET else "documents"
 
 
 def test_workers_wire_and_start_their_document_pools(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
 
     async def start(self: DocumentPool) -> None:
-        events.append("start")
+        events.append(f"start {_pool_kind(self)}")
 
     async def nothing() -> None:
         pass
@@ -1193,9 +1199,10 @@ def test_workers_wire_and_start_their_document_pools(monkeypatch: pytest.MonkeyP
         assert isinstance(runner, worker.ExtractRunner)
         assert runner._pipeline._documents.pool is parts.document_pool
         asyncio.run(worker.start_up(parts))
-        assert events == ["start"]
+        assert sorted(events) == ["start documents", "start selectors"]
     finally:
         parts.pool.shutdown()
+        parts.post_pool.shutdown()
 
     browser = browser_worker.build_browser_worker(settings, FakeAsyncRedis(), CollectorRegistry())
     try:
@@ -1204,6 +1211,7 @@ def test_workers_wire_and_start_their_document_pools(monkeypatch: pytest.MonkeyP
         assert runner._pipeline._documents.pool is browser.document_pool
     finally:
         browser.conversion_pool.shutdown()
+        browser.post_pool.shutdown()
 
 
 def test_default_ocr_leaves_the_cache_key_of_package_4() -> None:

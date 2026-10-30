@@ -81,6 +81,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, docling_lease_seconds
+from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
@@ -356,6 +357,7 @@ class DoclingWorkerParts:
     fetcher: Fetcher
     conversion_pool: ConversionPool
     settings: Settings
+    post_pool: ConversionPool  # the post stage's (POST_CONCURRENCY, ruling R21)
 
     async def start(self) -> None:
         """Start the children, then the self-check in each (before ``/ready``)."""
@@ -372,6 +374,7 @@ def build_docling_worker(
     guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
     gate, fetcher = create_outbound(settings, valkey)
     conversion_pool = ConversionPool(settings.convert_concurrency)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
     pipeline = create_pipeline(
         settings, valkey, fetcher, registry, conversion_pool, gate=gate, memory_guard=guard
     )
@@ -388,6 +391,8 @@ def build_docling_worker(
         registry,
         concurrency=settings.docling_concurrency,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
+        post_pool=post_pool,
     )
     return DoclingWorkerParts(
         worker=worker,
@@ -396,6 +401,7 @@ def build_docling_worker(
         fetcher=fetcher,
         conversion_pool=conversion_pool,
         settings=settings,
+        post_pool=post_pool,
     )
 
 
@@ -429,6 +435,7 @@ async def _run(settings: Settings) -> None:
         await parts.docling_pool.shutdown()  # after the loops: their items are given back
         await parts.fetcher.aclose()
         parts.conversion_pool.shutdown()
+        parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

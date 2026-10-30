@@ -144,3 +144,9 @@ def test_error_codes_match_architecture() -> None:
     assert api_only == {"invalid_request", "unauthorized", "forbidden", "not_found"}
     assert not outcomes & api_only
     assert outcomes | api_only == {code.value for code in ErrorCode}
+
+
+def test_llm_failed_is_an_error_code() -> None:
+    """The LLM client's ``LlmError`` carries this code; the architecture documents it (the test
+    above) and the live classifier knows it."""
+    assert ErrorCode("llm_failed") is ErrorCode.LLM_FAILED

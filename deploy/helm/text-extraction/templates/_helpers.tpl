@@ -51,7 +51,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Worker pools, in the order their objects are rendered. Each has a `workers.<pool>` block. */}}
 {{- define "text-extraction.workerPools" -}}
-extract browser docling asr nlp
+extract browser docling asr nlp llm
 {{- end -}}
 
 {{/* Names and labels of the worker objects of a pool; call with (list $ "<pool>"). The pod name
@@ -80,7 +80,7 @@ app.kubernetes.io/managed-by: {{ $root.Release.Service }}
 
 {{/* Image of a pool's workers; call with (list $ "<pool>"). Extract workers run the API image;
 browser, Docling, ASR and NLP workers their own, with image.tag and then the appVersion as the
-default tag. */}}
+default tag. The llm workers run the API image too (they hold no model and no browser). */}}
 {{- define "text-extraction.workerImage" -}}
 {{- $root := index . 0 -}}
 {{- $pool := index . 1 -}}
@@ -99,6 +99,7 @@ reaps orphaned children) stays PID 1. */}}
 {{- else if eq . "docling" -}}text-extraction-docling-worker
 {{- else if eq . "asr" -}}text-extraction-asr-worker
 {{- else if eq . "nlp" -}}text-extraction-nlp-worker
+{{- else if eq . "llm" -}}text-extraction-llm-worker
 {{- else -}}text-extraction-worker{{- end -}}
 {{- end -}}
 
@@ -108,6 +109,7 @@ reaps orphaned children) stays PID 1. */}}
 {{- else if eq . "docling" -}}DOCLING_CONCURRENCY
 {{- else if eq . "asr" -}}ASR_CONCURRENCY
 {{- else if eq . "nlp" -}}PII_CONCURRENCY
+{{- else if eq . "llm" -}}LLM_CONCURRENCY
 {{- else -}}WORKER_CONCURRENCY{{- end -}}
 {{- end -}}
 
@@ -136,9 +138,32 @@ worker toggles. */}}
 {{- ternary "true" "false" (.Values.workers.nlp.enabled | default false) -}}
 {{- end -}}
 
-{{/* The browser, Docling, ASR and PII switches as env entries, with the ASR settings every pod reads:
-the backend (the API answers 400 for the external one without a key) and the upload limit (the
-API's body limit). They come after envFrom, so they override config.*. */}}
+{{/* LLM_ENABLED ("true"/"false") of every pod, from the llm worker toggle. */}}
+{{- define "text-extraction.llmEnabled" -}}
+{{- ternary "true" "false" (.Values.workers.llm.enabled | default false) -}}
+{{- end -}}
+
+{{/* The llm settings every pod reads while the llm workers run: the API pods check requests with
+them (`semantic` needs the embedding model), the workers call the endpoint. The key is not here:
+see text-extraction.llmKeyEnv. */}}
+{{- define "text-extraction.llmEnv" -}}
+{{- $llm := .Values.workers.llm -}}
+{{- if $llm.enabled }}
+- name: LLM_BASE_URL
+  value: {{ $llm.baseUrl | quote }}
+- name: LLM_MODEL
+  value: {{ $llm.model | quote }}
+{{- with $llm.embeddingModel }}
+- name: LLM_EMBEDDING_MODEL
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* The browser, Docling, ASR, PII and LLM switches as env entries, with the ASR settings every pod
+reads: the backend (the API answers 400 for the external one without a key) and the upload limit
+(the API's body limit), and the LLM endpoint settings while the llm workers run. They come after
+envFrom, so they override config.*. */}}
 {{- define "text-extraction.switchEnv" -}}
 - name: BROWSER_ENABLED
   value: {{ include "text-extraction.browserEnabled" . | quote }}
@@ -150,10 +175,15 @@ API's body limit). They come after envFrom, so they override config.*. */}}
   value: {{ include "text-extraction.asrEnabled" . | quote }}
 - name: PII_ENABLED
   value: {{ include "text-extraction.nlpEnabled" . | quote }}
+- name: LLM_ENABLED
+  value: {{ include "text-extraction.llmEnabled" . | quote }}
 - name: ASR_BACKEND
   value: {{ .Values.workers.asr.backend | quote }}
 - name: MEDIA_UPLOAD_MAX_BYTES
   value: {{ .Values.workers.asr.uploadMaxBytes | int64 | toString | quote }}
+{{- with include "text-extraction.llmEnv" . | trim }}
+{{ . }}
+{{- end }}
 {{- end -}}
 
 {{/* The models volume of the Docling workers: the existing claim, or the chart-managed one. The
@@ -251,10 +281,24 @@ the NLP worker container gets it (not its models init container, no other pod). 
 {{- end }}
 {{- end -}}
 
+{{/* LLM_API_KEY from the operator's Secret, while the llm workers run and a Secret is named. The
+API pods (they only check that there is a key) and the llm worker container get it, no other pod. */}}
+{{- define "text-extraction.llmKeyEnv" -}}
+{{- $llm := .Values.workers.llm -}}
+{{- if and $llm.enabled $llm.apiKey.existingSecret }}
+- name: LLM_API_KEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ $llm.apiKey.existingSecret | quote }}
+      key: {{ $llm.apiKey.existingSecretKey | quote }}
+{{- end }}
+{{- end -}}
+
 {{/* The env entries of a pool's workers; call with (list $ "<pool>"). They come after envFrom,
 so they override config.*. The Docling workers read the models from /models; the ASR workers
 too (local backend), keep downloaded media on /scratch and get the backend's settings; the NLP
-workers read the models from /models and get the model size; the extract and browser workers get
+workers read the models from /models and get the model size; the llm workers need nothing but
+their slots (the endpoint settings are in the switches); the extract and browser workers get
 DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
 {{- define "text-extraction.workerEnv" -}}
 {{- $root := index . 0 -}}
@@ -288,6 +332,7 @@ DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
   value: /models
 - name: PII_MODEL_SIZE
   value: {{ $root.Values.workers.nlp.modelSize | quote }}
+{{- else if eq $pool "llm" }}
 {{- else }}
 {{- $worker := index $root.Values.workers $pool }}
 {{- with include "text-extraction.documentMemoryEnv" (list $root $worker.resources $worker.documentParentReserveMiB (printf "workers.%s.resources" $pool)) | trim }}
@@ -407,6 +452,10 @@ mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. Docling worker: a fix
 
 {{/* NLP worker: a fixed 30 s (nlp_worker.GRACEFUL_SECONDS). */}}
 {{- define "text-extraction.nlpGracefulSeconds" -}}30{{- end -}}
+
+{{/* llm worker: a fixed 30 s (llm_worker.GRACEFUL_SECONDS), then the items still running are given
+back to the queue at once. */}}
+{{- define "text-extraction.llmGracefulSeconds" -}}30{{- end -}}
 
 {{- define "text-extraction.browserGracefulSeconds" -}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
@@ -563,6 +612,21 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- fail "workers.nlp.models.download=false needs workers.nlp.models.persistence.existingClaim: a volume that already holds the models. A new volume stays empty without the download." -}}
 {{- end -}}
 {{- end -}}
+{{- $llm := .Values.workers.llm -}}
+{{- if $llm.enabled -}}
+{{- if not $jobs -}}
+{{- fail "workers.llm.enabled needs JOBS_ENABLED=true on the API pods: LLM work runs as a job of the pool llm. Do not set jobs.enabled=false with llm workers." -}}
+{{- end -}}
+{{- if not $llm.baseUrl -}}
+{{- fail "workers.llm.baseUrl is required with workers.llm.enabled: the pods exit with code 2 without an endpoint." -}}
+{{- end -}}
+{{- if not $llm.model -}}
+{{- fail "workers.llm.model is required with workers.llm.enabled: the pods exit with code 2 without a model." -}}
+{{- end -}}
+{{- if and (not (hasPrefix "https://" (toString $llm.baseUrl))) (ne (toString (get .Values.config "LLM_ALLOW_HTTP" | default "false")) "true") -}}
+{{- fail "workers.llm.baseUrl must start with https:// (the pods exit with code 2 otherwise); set config.LLM_ALLOW_HTTP=true only for a local model server in development." -}}
+{{- end -}}
+{{- end -}}
 {{- $asr := .Values.workers.asr -}}
 {{- if $asr.enabled -}}
 {{- if not $jobs -}}
@@ -633,6 +697,10 @@ validation requires a key while AUTH_MODE is api_key. */}}
 {{- $nlpGraceful := include "text-extraction.nlpGracefulSeconds" . | float64 -}}
 {{- if and $nlp.enabled (gt $nlpGraceful (subf (float64 $nlp.terminationGracePeriodSeconds) 10.0)) -}}
 {{- fail (printf "workers.nlp.terminationGracePeriodSeconds (%v) is too short: the NLP workers give analyses in flight %v s + a 10 s margin must fit." $nlp.terminationGracePeriodSeconds $nlpGraceful) -}}
+{{- end -}}
+{{- $llmGraceful := include "text-extraction.llmGracefulSeconds" . | float64 -}}
+{{- if and $llm.enabled (gt $llmGraceful (subf (float64 $llm.terminationGracePeriodSeconds) 10.0)) -}}
+{{- fail (printf "workers.llm.terminationGracePeriodSeconds (%v) is too short: the llm workers give calls in flight %v s before they hand the items back to the queue, + a 10 s margin must fit." $llm.terminationGracePeriodSeconds $llmGraceful) -}}
 {{- end -}}
 {{- end -}}
 

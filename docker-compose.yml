@@ -17,7 +17,10 @@
 # `nlp-models` first downloads the German and English spaCy models of PII_MODEL_SIZE (default lg,
 # about 1 GB; `md` about 115 MB) into the volume `nlp-models`, then `nlp-worker` reads them
 # read-only. A PII_HASH_KEY in .env (at least 32 bytes) makes `mode: hash` consistent across
-# results. All three profiles can run together.
+# results. The LLM (structured output with an LLM, semantic chunking) is off by default too: set
+# LLM_ENABLED=true, LLM_BASE_URL, LLM_MODEL and LLM_API_KEY (and LLM_EMBEDDING_MODEL for `semantic`
+# chunking) in .env and start with `docker compose --profile llm up -d --wait`. The service
+# `llm-worker` runs from the API image (no model, no volume). All four profiles can run together.
 
 # Shared by the API and the workers: same settings, same hardening. The API and the extract worker
 # use the default image (no browser); the browser worker builds the target `browser`.
@@ -47,6 +50,10 @@ x-app: &app
     # with the profile `nlp` (which starts the NLP worker). Default off. The other PII settings
     # (PII_MODEL_SIZE, PII_HASH_KEY, ...) come from .env (env_file).
     PII_ENABLED: ${PII_ENABLED:-false}
+    # LLM: on for every service only with LLM_ENABLED=true in .env or the shell, together with the
+    # profile `llm` (which starts the llm worker). Default off. The other LLM settings
+    # (LLM_BASE_URL, LLM_MODEL, LLM_API_KEY, ...) come from .env (env_file): the API needs them too.
+    LLM_ENABLED: ${LLM_ENABLED:-false}
   read_only: true
   tmpfs:
     - /tmp
@@ -286,6 +293,28 @@ services:
       start_period: 120s
     # SIGTERM stops claiming and gives analyses in flight 30 s, then kills the children; their
     # items run again once their lease expires.
+    stop_grace_period: 45s
+
+  # LLM worker: runs the last hop of requests with `structured` (strategy llm or auto) or `chunking`
+  # (semantic): the items of the pool `llm`, against LLM_BASE_URL. It uses the API image and needs
+  # no model or volume. Only the internal port 9090, not published. `docker compose run --rm
+  # llm-worker text-extraction-llm-worker --check` sends one tiny extraction to the endpoint.
+  llm-worker:
+    <<: *app
+    profiles: ["llm"]
+    command: ["text-extraction-llm-worker"]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9090/ready', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    # SIGTERM stops claiming and gives items in flight 30 s, then hands the ones still running back
+    # to the queue.
     stop_grace_period: 45s
 
   valkey:

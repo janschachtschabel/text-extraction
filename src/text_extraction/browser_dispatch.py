@@ -107,12 +107,14 @@ class BrowserDispatcher(PoolDispatcher):
         *,
         job_id: str | None = None,
         draft: Envelope[ExtractResult] | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue ``req`` on the ``browser`` pool and return its job's id. Without ``job_id`` a
         new job is created with the request's secrets; with it, that job (the P1 job of the
         request) is reused and its lease cleared. A reused job gets no secrets: only an ``auto``
         request without them has a fast phase (R8). ``draft`` is the fast result to compare the
-        render with. Valkey errors propagate; a new job is deleted again first."""
+        render with, ``llm_key`` the caller's LLM key for a new job. Valkey errors propagate; a
+        new job is deleted again first."""
         return await self.submit_job(
             kind,
             job_options(req, compliance),
@@ -121,16 +123,24 @@ class BrowserDispatcher(PoolDispatcher):
             job_id=job_id,
             draft=draft,
             secrets=req.secrets(),
+            llm_key=llm_key,
         )
 
     async def wait(
-        self, job_id: str, *, unblock: bool, detached: Callable[[], bool], pii: bool = False
+        self,
+        job_id: str,
+        *,
+        unblock: bool,
+        detached: Callable[[], bool],
+        pii: bool = False,
+        llm: bool = False,
     ) -> Envelope[ExtractResult] | None:
         """The result of the job's item 0, or None when no worker claimed it within
         ``BROWSER_QUEUE_WAIT_SECONDS``, it had no result within the render deadline + 5 s after
         the claim (+ ``PII_SYNC_WAIT_SECONDS`` with ``pii``: the render moves on to the ``nlp``
-        pool in the same job), the job is gone, or ``detached()`` turned true. Valkey errors
-        propagate. Each call counts its outcome once."""
+        pool in the same job; + ``LLM_SYNC_WAIT_SECONDS`` with ``llm``: and on to the ``llm``
+        pool), the job is gone, or ``detached()`` turned true. Valkey errors propagate. Each call
+        counts its outcome once."""
         settings = self._settings
         render_seconds = (
             settings.browser_unblock_timeout_seconds
@@ -138,10 +148,11 @@ class BrowserDispatcher(PoolDispatcher):
             else settings.browser_timeout_seconds
         )
         pii_seconds = settings.pii_sync_wait_seconds if pii else 0.0
+        llm_seconds = settings.llm_sync_wait_seconds if llm else 0.0
         return await self.wait_for(
             job_id,
             answered="rendered",
             claim_within=settings.browser_queue_wait_seconds,
-            result_within=render_seconds + _RESULT_MARGIN_SECONDS + pii_seconds,
+            result_within=render_seconds + _RESULT_MARGIN_SECONDS + pii_seconds + llm_seconds,
             detached=detached,
         )

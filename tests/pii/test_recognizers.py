@@ -7,6 +7,10 @@ import time
 
 import pytest
 
+# Generous for shared CI runners: the quadratic backtracking these tests guard against
+# took about 4 s.
+_LINEAR_SECONDS = 1.0
+
 pytestmark = [
     pytest.mark.nlp,
     pytest.mark.skipif(
@@ -198,7 +202,7 @@ def test_a_long_title_chain_takes_linear_time(text: str) -> None:
     started = time.perf_counter()
     found = names(text, "de")
 
-    assert time.perf_counter() - started < 0.1
+    assert time.perf_counter() - started < _LINEAR_SECONDS
     assert found == []
 
 
@@ -210,7 +214,7 @@ def test_long_name_like_text_takes_linear_time(text: str) -> None:
     started = time.perf_counter()
     names(text, "de")
 
-    assert time.perf_counter() - started < 0.1
+    assert time.perf_counter() - started < _LINEAR_SECONDS
 
 
 def test_a_name_does_not_run_over_a_line_break() -> None:

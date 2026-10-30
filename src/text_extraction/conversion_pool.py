@@ -23,10 +23,11 @@ from typing import Any
 class ConversionPool:
     """At most ``workers`` CPU-heavy calls at a time. Create once per app, ``shutdown`` last."""
 
-    def __init__(self, workers: int) -> None:
+    def __init__(self, workers: int, *, name: str = "convert") -> None:
+        """``name`` prefixes the threads' names (``post`` for the post stage's pool)."""
         if workers < 1:
             raise ValueError("workers must be at least 1")
-        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="convert")
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=name)
         self._slots = asyncio.Semaphore(workers)
 
     async def run[T](self, function: Callable[..., T], *args: Any) -> T:

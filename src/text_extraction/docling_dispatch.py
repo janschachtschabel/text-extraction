@@ -93,6 +93,7 @@ from text_extraction.pool_dispatch import BACKEND_ERRORS, Handover, PoolDispatch
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
+from text_extraction.structured.checks import wants_llm
 
 _log = structlog.get_logger(__name__)
 
@@ -189,9 +190,11 @@ class DoclingDispatcher(PoolDispatcher):
         needed: OcrNeeded,
         *,
         job_id: str | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue the document on the ``docling`` pool and return its job's id: a new job of
-        ``kind``, or ``job_id`` (the request's P1 job), whose lease is cleared. The job counts
+        ``kind`` (with the caller's ``llm_key``, if any), or ``job_id`` (the request's P1 job),
+        whose lease is cleared. The job counts
         as one of the caller's Docling jobs before its input is stored; over
         ``DOCLING_MAX_OPEN_PER_CLIENT`` this raises ``OpenLimitReached``, over
         ``DOCLING_INPUT_BUDGET_BYTES`` ``InputBudgetExceeded``, and a new job is deleted again.
@@ -217,7 +220,14 @@ class DoclingDispatcher(PoolDispatcher):
             if await self._open_jobs(owner) >= limit:
                 raise OpenLimitReached
             return await self.submit_job(
-                kind, options, principal, url, job_id=job_id, draft=needed.draft, prepare=prepare
+                kind,
+                options,
+                principal,
+                url,
+                job_id=job_id,
+                draft=needed.draft,
+                prepare=prepare,
+                llm_key=llm_key,
             )
         except OpenLimitReached:
             self.count("open_limit")
@@ -248,19 +258,21 @@ class DoclingDispatcher(PoolDispatcher):
         extra_seconds: float = 0.0,
         detached: Callable[[], bool],
         pii: bool = False,
+        llm: bool = False,
     ) -> Envelope[ExtractResult] | None:
         """The OCR result of the job's item 0, or None when there is none within
         ``DOCLING_SYNC_WAIT_SECONDS`` + ``extra_seconds`` in all (claimed or not; with ``pii``
         ``PII_SYNC_WAIT_SECONDS`` more in all, since the OCR result moves on to the ``nlp`` pool
-        in the same job), the job is gone, or ``detached()`` turned true. Valkey errors
-        propagate."""
+        in the same job, and with ``llm`` ``LLM_SYNC_WAIT_SECONDS`` more for the llm pool), the
+        job is gone, or ``detached()`` turned true. Valkey errors propagate."""
         seconds = self._settings.docling_sync_wait_seconds + extra_seconds
         pii_seconds = self._settings.pii_sync_wait_seconds if pii else 0.0
+        llm_seconds = self._settings.llm_sync_wait_seconds if llm else 0.0
         return await self.wait_for(
             job_id,
             answered="answered",
             claim_within=seconds,
-            total_within=seconds + pii_seconds,
+            total_within=seconds + pii_seconds + llm_seconds,
             detached=detached,
         )
 
@@ -286,6 +298,7 @@ class DoclingHandoff:
         principal: Principal,
         url: str | None,
         wait_until: float | None = None,
+        llm_key: str | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._dispatcher = dispatcher
@@ -296,6 +309,7 @@ class DoclingHandoff:
         self._principal = principal
         self._url = url
         self._wait_until = wait_until
+        self._llm_key = llm_key
         self._clock = clock
         self.handed_over = False
 
@@ -330,6 +344,9 @@ class DoclingHandoff:
                 extra_seconds=extra,
                 detached=lambda: handover.detached,
                 pii=self._options.pii is not None,
+                llm=wants_llm(
+                    self._options.structured, self._options.chunking, dispatcher.settings
+                ),
             )
         except asyncio.CancelledError:
             if handover.release():
@@ -354,7 +371,13 @@ class DoclingHandoff:
 
     async def _submit(self, needed: OcrNeeded, job_id: str | None = None) -> str:
         return await self._dispatcher.submit(
-            self._kind, self._options, self._principal, self._url, needed, job_id=job_id
+            self._kind,
+            self._options,
+            self._principal,
+            self._url,
+            needed,
+            job_id=job_id,
+            llm_key=self._llm_key,
         )
 
     async def _on_p1_job(

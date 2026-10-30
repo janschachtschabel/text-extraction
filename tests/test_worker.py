@@ -3,6 +3,7 @@ pipeline, with fakeredis (Lua), a fake fetcher, an injected clock and an injecte
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import socket
@@ -17,14 +18,17 @@ import pytest
 import structlog
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
+from pytest_httpserver import HTTPServer
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from tests.fakes import PARAGRAPH, Answer, FakeFetcher, RefusingGate, fetched
+from tests.structured.post_helpers import answer, chat_requests, serve_chat
 from tests.test_pipeline_render import CHALLENGE_PAGE, SHELL, SHELL_WITH_WORDS
 from text_extraction import worker as worker_module
 from text_extraction.asr_dispatch import asr_queue
 from text_extraction.auth import Principal
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceChecker, ComplianceReport
 from text_extraction.docling_dispatch import docling_queue
 from text_extraction.documents.routing import ocr_available
@@ -37,6 +41,8 @@ from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import JobLost, JobRecord, JobStore, ResultWrite
+from text_extraction.llm_dispatch import create_llm_move, llm_queue
+from text_extraction.llm_worker import LlmRunner
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.nlp_worker import PiiRunner
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
@@ -49,6 +55,8 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import Claim, FairQueue, QueueItem
 from text_extraction.server import _server
 from text_extraction.settings import Settings
+from text_extraction.structured.store import SelectorStore
+from text_extraction.structured.types import StructuredOptions
 from text_extraction.worker import ExtractRunner, Worker, _serve, build_worker, main
 
 START = 1_000_000.0
@@ -171,6 +179,9 @@ class Harness:
             random=random,
             give_back_on_cancel=give_back_on_cancel,
             pii_move=create_pii_move(
+                self.settings, self.valkey, self.store, self.guard, self.registry
+            ),
+            llm_move=create_llm_move(
                 self.settings, self.valkey, self.store, self.guard, self.registry
             ),
         )
@@ -1547,10 +1558,12 @@ async def test_no_move_while_docling_is_off() -> None:
     assert (await harness.docling_queue.counts()).pending == 0
 
 
-async def submit_upload(harness: Harness, body: bytes, content_type: str) -> str:
+async def submit_upload(
+    harness: Harness, body: bytes, content_type: str, *, short_ok: bool = False
+) -> str:
     options = JobOptions(mode="fast", compliance="enforce", cache=False, format="text")
     job_id = await harness.store.create("file", OWNER, options, [None])
-    meta = UploadInputMeta(file_name="notes.txt", content_type=content_type)
+    meta = UploadInputMeta(file_name="notes.txt", content_type=content_type, short_ok=short_ok)
     await harness.store.put_input(job_id, 0, body, meta, 600)
     await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
     return job_id
@@ -1572,6 +1585,26 @@ async def test_file_item_runs_from_its_input_and_deletes_it() -> None:
     assert item.result.data.format == "text"
     assert await harness.valkey.keys("job:*:input:*") == []
     assert harness.fetcher.calls == []
+
+
+@pytest.mark.parametrize(("short_ok", "status"), [(False, "partial"), (True, "success")])
+@scenario
+async def test_file_item_of_a_short_text_honours_short_ok(short_ok: bool, status: str) -> None:
+    """R15: a ``/v1/chunk`` text is no "too short" in the worker that converts its job."""
+    harness = Harness()
+    job_id = await submit_upload(
+        harness, b"Just one short sentence.", "text/markdown", short_ok=short_ok
+    )
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == status
+    assert (item.result.error is None) == (status == "success")
+    if not short_ok:
+        assert item.result.error is not None
+        assert item.result.error.code == ErrorCode.CONTENT_TOO_SHORT
 
 
 @scenario
@@ -1960,7 +1993,7 @@ class NlpPool:
     """The nlp worker of a harness: the real ``Worker`` and ``PiiRunner`` on its store and queue
     ``nlp``, with the fake child pool of the nlp worker tests."""
 
-    def __init__(self, harness: Harness) -> None:
+    def __init__(self, harness: Harness, *, llm_move: Any = None) -> None:
         from tests.test_nlp_worker import FakePiiPool  # that module imports this one
 
         self.children = FakePiiPool()
@@ -1974,6 +2007,7 @@ class NlpPool:
             harness.store,
             self.queue,
             self.registry,
+            llm_move=llm_move,
         )
 
     async def drain(self) -> int:
@@ -2330,3 +2364,470 @@ async def test_pii_move_of_an_expired_job_drops_the_item() -> None:
     assert (await harness.queue.counts()).leased == 0
     assert (await nlp_queue(harness.valkey, harness.settings).counts()).pending == 0
     assert outcome_count(harness, "lost") == 1
+
+
+# --- the post stage at every finish point (rulings S5, S13) ---------------------------------------
+
+POST_STRUCTURED = StructuredOptions.model_validate(
+    {
+        "schema": {"type": "object", "properties": {"author": {"type": "string"}}},
+        "strategy": "patterns",
+        "patterns": {"author": {"regex": r"Written by (\[?\w+\]?(?: \w+)?)", "group": 1}},
+    }
+)
+POST_CHUNKING = ChunkingOptions(strategy="fixed", size=200, overlap=0)
+
+
+async def submit_with(harness: Harness, urls: list[str], options: JobOptions) -> str:
+    job_id = await harness.store.create("batch", OWNER, options, urls)
+    await harness.queue.enqueue(job_id, OWNER.name, urls)
+    return job_id
+
+
+def chunk_texts(data: ExtractResult) -> list[str]:
+    assert data.chunks is not None
+    assert data.chunks
+    for chunk in data.chunks:
+        assert len(chunk.text) <= 200
+        assert (data.content or "")[chunk.start : chunk.end] == chunk.text
+    return [chunk.text for chunk in data.chunks]
+
+
+@scenario
+async def test_batch_item_gets_post_stage_inline() -> None:
+    """The extract worker runs the post stage of an item it writes (no LLM needed): patterns on
+    the content and the chunks, ``stage: "done"``."""
+    url = page("example.org")
+    harness = Harness({url: fetched(url, PII_PAGE)})
+    options = JobOptions(compliance="enforce", structured=POST_STRUCTURED, chunking=POST_CHUNKING)
+    job_id = await submit_with(harness, [url], options)
+
+    await harness.run_until(lambda: harness.completed(job_id))
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "success"
+    data = item.result.data
+    assert data is not None
+    assert data.structured is not None
+    assert data.structured.stage == "done"
+    assert data.structured.values == {"author": PII_NAME}
+    assert data.structured.learn_html is None
+    assert len(chunk_texts(data)) > 1
+
+
+@scenario
+async def test_batch_item_needing_the_llm_is_partial_without_the_llm_hop() -> None:
+    """A worker without the move to ``llm`` (a pod without the hop) gives an item that needs
+    the LLM the post stage without it: ``partial``/``llm_failed``, retryable, its content
+    kept."""
+    url = page("example.org")
+    harness = Harness({url: fetched(url, PII_PAGE)}, llm_enabled=True, llm_api_key="sk-op")
+    harness.worker._llm_move = None
+    llm = StructuredOptions.model_validate(
+        {
+            "schema": {"type": "object", "properties": {"author": {"type": "string"}}},
+            "strategy": "llm",
+        }
+    )
+    job_id = await submit_with(harness, [url], JobOptions(compliance="enforce", structured=llm))
+
+    await harness.run_until(lambda: harness.completed(job_id))
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    assert item.result.error is not None
+    assert (item.result.error.code, item.result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert item.result.data is not None
+    assert item.result.data.content
+    assert item.result.data.structured is not None
+    assert item.result.data.structured.missing == ["author"]
+
+
+@scenario
+async def test_post_stage_runs_on_the_nlp_pool_on_masked_content() -> None:
+    """A result that moves to ``nlp`` gets no post stage on its pool; the nlp worker's
+    ``_finish`` runs it on the masked content (D3 a)."""
+    url = page("example.org")
+    harness = pii_harness(url)
+    options = PII_MASK.model_copy(update={"structured": POST_STRUCTURED, "chunking": POST_CHUNKING})
+    job_id = await submit_with(harness, [url], options)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.chunks is None  # not chunked on the raw content
+    assert draft.data.structured is None or draft.data.structured.stage == "dom"
+
+    assert await NlpPool(harness).drain() == 1
+    [item] = await harness.items(job_id)
+    data = processed(item)
+    assert data.structured is not None
+    assert data.structured.stage == "done"
+    assert data.structured.values == {"author": "[PERSON]"}
+    texts = chunk_texts(data)
+    assert not any(PII_NAME in text for text in texts)
+    assert "[PERSON]" in "".join(texts)
+
+
+@pytest.mark.parametrize("move", [True, False], ids=["memory-guard", "no-move"])
+def test_withheld_result_gets_no_post_stage(move: bool) -> None:
+    """A result that owes the PII step and is not masked (the move refused while the memory
+    guard is high, or a worker without the move) is withheld; the post stage never reads its
+    raw content: no chunks, no values."""
+
+    async def scenario_() -> None:
+        url = page("example.org")
+        harness = pii_harness(url)
+        harness.guard.high = move
+        if not move:
+            harness.worker._pii_move = None
+        options = PII_MASK.model_copy(
+            update={"structured": POST_STRUCTURED, "chunking": POST_CHUNKING}
+        )
+        job_id = await submit_with(harness, [url], options)
+
+        await harness.run_until(lambda: harness.completed(job_id))
+
+        [item] = await harness.items(job_id)
+        assert item.result is not None
+        assert item.result.status == "failed"
+        assert item.result.error is not None
+        assert item.result.error.code == ErrorCode.PII_FAILED
+        assert item.result.data is not None
+        assert item.result.data.chunks is None
+        assert item.result.data.structured is None
+        assert PII_NAME not in item.result.model_dump_json()
+
+    asyncio.run(scenario_())
+
+
+# --- the move to the llm pool and the LLM key (rulings S13, S14, R11) ----------------------------
+
+LLM_ENV_KEY = "sk-operator-key-5e21"
+LLM_CALLER_KEY = "sk-caller-key-a4f3"
+LLM_AUTHOR = StructuredOptions.model_validate(
+    {
+        "schema": {"type": "object", "properties": {"author": {"type": "string"}}},
+        "strategy": "llm",
+    }
+)
+LLM_JOB = JobOptions(compliance="enforce", structured=LLM_AUTHOR)
+
+
+def llm_harness(server: HTTPServer, urls: list[str], **overrides: Any) -> Harness:
+    values: dict[str, Any] = {
+        "llm_enabled": True,
+        "llm_base_url": server.url_for("/v1"),
+        "llm_allow_http": True,
+        "llm_api_key": LLM_ENV_KEY,
+    }
+    values.update(overrides)
+    return Harness({url: fetched(url, PII_PAGE) for url in urls}, **values)
+
+
+class LlmPool:
+    """The llm worker of a harness: the real ``Worker`` and ``LlmRunner`` on its store and queue
+    ``llm``; the endpoint is the test's pytest-httpserver."""
+
+    def __init__(self, harness: Harness) -> None:
+        self.queue = llm_queue(harness.valkey, harness.settings)
+        self.registry = CollectorRegistry()
+        selectors = SelectorStore(harness.valkey, harness.settings.selector_learn_ttl_seconds)
+        self.runner = LlmRunner(harness.settings, harness.store, selectors, registry=self.registry)
+        self.worker = Worker(
+            harness.settings,
+            harness.valkey,
+            self.runner,
+            harness.store,
+            self.queue,
+            self.registry,
+        )
+
+    async def claim(self) -> Claim:
+        return await self.queue.claim(self.runner.lease_seconds)
+
+    async def drain(self) -> int:
+        """Process every item queued on ``llm``; how many were claimed."""
+        claimed = 0
+        while (claim := await self.claim()).item is not None:
+            await self.worker.process(claim.item, exhausted=claim.exhausted)
+            claimed += 1
+        return claimed
+
+
+def llm_keys_sent(server: HTTPServer) -> list[str | None]:
+    return [request.headers.get("Authorization") for request, _ in server.log]
+
+
+def llm_done(item: JobItem) -> ExtractResult:
+    assert item.result is not None
+    assert item.result.status == "success", item.result.error
+    data = item.result.data
+    assert data is not None
+    assert data.structured is not None
+    assert data.structured.stage == "done"
+    assert data.structured.sources == {"author": "llm"}
+    return data
+
+
+@scenario
+async def test_worker_finish_moves_to_llm_once(httpserver: HTTPServer) -> None:
+    serve_chat(httpserver, answer({"author": PII_NAME}))
+    url = page("example.org")
+    harness = llm_harness(httpserver, [url])
+    job_id = await submit_with(harness, [url], LLM_JOB)
+    first = await harness.claim()
+    assert first.item is not None
+
+    # The first run moves the item, then dies before its completion: its lease runs out.
+    complete = harness.queue.complete
+
+    async def crash(item: QueueItem) -> bool:
+        raise RedisConnectionError("Error 111 connecting to valkey:6379. Connection refused.")
+
+    harness.queue.complete = crash  # type: ignore[method-assign]
+    with pytest.raises(RedisConnectionError):
+        await harness.worker.process(first.item)
+    harness.queue.complete = complete  # type: ignore[method-assign]
+    assert await harness.items(job_id) == [JobItem(index=0, url=url, state="pending", result=None)]
+
+    # It runs again and moves again: draft, then the queue, then the completion.
+    harness.clock.now += harness.lease_seconds + 1
+    again = await harness.claim()
+    assert again.item is not None
+    await harness.worker.process(again.item)
+    assert not await harness.completed(job_id)
+    assert outcome_count(harness, "escalated") == 1
+    assert (await harness.queue.counts()).leased == 0
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.structured is not None
+    assert draft.data.structured.stage == "dom"  # the post stage is the llm worker's
+    assert draft.data.chunks is None
+
+    llm = LlmPool(harness)
+    assert await llm.drain() == 2  # two moves, two items on llm
+    assert len(chat_requests(httpserver)) == 1  # the copy found the result and stopped
+    [item] = await harness.items(job_id)
+    data = llm_done(item)
+    assert data.structured is not None
+    assert data.structured.values == {"author": PII_NAME}
+    record = await harness.store.get(job_id)
+    assert record is not None
+    assert (record.state, record.progress.done, record.progress.success) == ("completed", 1, 1)
+    assert await harness.store.draft(job_id, 0) is None
+
+
+@scenario
+async def test_nlp_moves_on_to_llm_without_dropping_draft(httpserver: HTTPServer) -> None:
+    serve_chat(httpserver, answer({"author": "[PERSON]"}))
+    url = page("example.org")
+    harness = llm_harness(httpserver, [url], pii_enabled=True)
+    options = PII_MASK.model_copy(update={"structured": LLM_AUTHOR})
+    job_id = await submit_with(harness, [url], options)
+    await harness.store.put_llm_key(job_id, LLM_CALLER_KEY)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    llm = LlmPool(harness)
+    assert (await llm.queue.counts()).pending == 0  # PII first
+
+    move = create_llm_move(
+        harness.settings, harness.valkey, harness.store, harness.guard, harness.registry
+    )
+    nlp = NlpPool(harness, llm_move=move)
+    assert await nlp.drain() == 1
+
+    assert not await harness.completed(job_id)
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None  # the move overwrote it with the masked result: it stays
+    assert draft.data is not None
+    assert draft.data.pii is not None
+    assert "[PERSON]" in (draft.data.content or "")
+    assert PII_NAME not in draft.model_dump_json()
+    assert (await llm.queue.counts()).pending == 1
+    assert await harness.store.llm_key(job_id) == LLM_CALLER_KEY  # the llm worker needs it
+    escalated = nlp.registry.get_sample_value(
+        "text_extraction_job_items_total", {"outcome": "escalated"}
+    )
+    assert escalated == 1
+
+    assert await llm.drain() == 1
+    [item] = await harness.items(job_id)
+    data = llm_done(item)
+    assert data.pii is not None
+    assert data.structured is not None
+    assert data.structured.values == {"author": "[PERSON]"}
+    assert PII_NAME not in json.dumps(chat_requests(httpserver))
+    assert llm_keys_sent(httpserver) == [f"Bearer {LLM_CALLER_KEY}"]
+    assert await harness.store.draft(job_id, 0) is None
+    assert await harness.store.llm_key(job_id) is None  # its batch's only result
+
+
+@scenario
+async def test_batch_items_through_llm_and_key_dropped_with_last_result(
+    httpserver: HTTPServer,
+) -> None:
+    serve_chat(httpserver, answer({"author": PII_NAME}))
+    urls = [page("example.org", 0), page("example.org", 1)]
+    harness = llm_harness(httpserver, urls)
+    job_id = await submit_with(harness, urls, LLM_JOB)
+    await harness.store.put_llm_key(job_id, LLM_CALLER_KEY)
+    for _ in urls:
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    assert outcome_count(harness, "escalated") == 2
+    assert await harness.store.llm_key(job_id) == LLM_CALLER_KEY  # moved: kept for llm
+
+    llm = LlmPool(harness)
+    first = await llm.claim()
+    assert first.item is not None
+    await llm.worker.process(first.item)
+    assert await harness.store.llm_key(job_id) == LLM_CALLER_KEY  # its other item needs it
+    second = await llm.claim()
+    assert second.item is not None
+    await llm.worker.process(second.item)
+
+    assert await harness.completed(job_id)
+    for item in await harness.items(job_id):
+        llm_done(item)
+    assert await harness.store.llm_key(job_id) is None  # with the batch's last result
+    assert llm_keys_sent(httpserver) == [f"Bearer {LLM_CALLER_KEY}"] * 2
+
+
+@pytest.mark.parametrize("pool", ["extract", "nlp", "llm"])
+def test_a_sync_jobs_final_writer_drops_the_llm_key_at_once(
+    httpserver: HTTPServer, pool: str
+) -> None:
+    """R11: whichever pool writes a sync job's result drops the caller's LLM key with it; a
+    batch keeps it for its other items (above)."""
+
+    async def scenario_() -> None:
+        serve_chat(httpserver, answer({"author": PII_NAME}))
+        url = page("example.org")
+        harness = llm_harness(httpserver, [url], pii_enabled=pool == "nlp")
+        structured = LLM_AUTHOR if pool == "llm" else POST_STRUCTURED
+        options = (PII_MASK if pool == "nlp" else JobOptions(compliance="enforce")).model_copy(
+            update={"structured": structured}
+        )
+        job_id = await harness.store.create("extract", OWNER, options, [url])
+        await harness.store.put_llm_key(job_id, LLM_CALLER_KEY)
+        await harness.queue.enqueue_items(job_id, "alice#live", [(0, url)])
+
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+        if pool == "nlp":
+            assert await harness.store.llm_key(job_id) == LLM_CALLER_KEY
+            assert await NlpPool(harness).drain() == 1
+        if pool == "llm":
+            assert await harness.store.llm_key(job_id) == LLM_CALLER_KEY
+            assert await LlmPool(harness).drain() == 1
+
+        assert await harness.completed(job_id)
+        assert await harness.store.llm_key(job_id) is None
+
+    asyncio.run(scenario_())
+
+
+@pytest.mark.parametrize(
+    "draft", ["kept", "gone", "invalid"], ids=["draft", "draft-gone", "draft-invalid"]
+)
+def test_exhausted_llm_item_answers_draft_without_llm(httpserver: HTTPServer, draft: str) -> None:
+    has_draft = draft == "kept"
+
+    async def scenario_() -> None:
+        url = page("example.org")
+        harness = llm_harness(httpserver, [url])
+        job_id = await harness.store.create("batch", OWNER, LLM_JOB, [url])
+        await harness.store.put_llm_key(job_id, LLM_CALLER_KEY)
+        if has_draft:
+            await harness.store.put_draft(job_id, 0, transcript())
+        if draft == "invalid":
+            await harness.valkey.hset(f"job:{{{job_id}}}:drafts", "0", '{"status": "nope"}')
+        llm = LlmPool(harness)
+        await llm.queue.enqueue_items(job_id, "alice", [(0, url)])
+
+        claim = await llm.claim()
+        assert claim.item is not None
+        await llm.worker.process(claim.item, exhausted=True)
+
+        [item] = await harness.items(job_id)
+        assert item.result is not None
+        if has_draft:
+            assert item.result.status == "partial"
+            assert item.result.error is not None
+            assert item.result.error.code == ErrorCode.LLM_FAILED
+            assert item.result.error.retryable
+            assert item.result.data is not None
+            assert item.result.data.content == transcript().data.content  # type: ignore[union-attr]
+            assert item.result.data.structured is not None
+            assert item.result.data.structured.missing == ["author"]
+        else:
+            assert error_of(item) == (ErrorCode.INTERNAL_ERROR, True, LOST_MESSAGE)
+        assert httpserver.log == []
+        assert await harness.store.draft(job_id, 0) is None
+        assert await harness.store.llm_key(job_id) is None
+
+    asyncio.run(scenario_())
+
+
+@scenario
+async def test_llm_move_under_memory_guard_answers_without_llm(httpserver: HTTPServer) -> None:
+    url = page("example.org")
+    harness = llm_harness(httpserver, [url])
+    harness.guard.high = True
+    job_id = await submit_with(harness, [url], LLM_JOB)
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    assert item.result.error is not None
+    assert (item.result.error.code, item.result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert item.result.error.message == "The LLM step is busy; retry later."
+    assert item.result.data is not None
+    assert item.result.data.content
+    assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 0
+    dispatch = harness.sample("text_extraction_llm_dispatch_total", {"outcome": "memory_guard"})
+    assert dispatch == 1
+
+
+def test_every_pool_but_llm_moves_results_to_llm(tmp_path: Path) -> None:
+    from tests.test_asr_worker import settings_for
+    from text_extraction import (
+        asr_worker,
+        browser_worker,
+        docling_worker,
+        llm_worker,
+        nlp_worker,
+    )
+
+    settings = make_settings(
+        llm_enabled=True,
+        pii_enabled=True,
+        docling_enabled=True,
+        asr_enabled=True,
+        browser_enabled=True,
+        media_enabled=False,
+        **settings_for(tmp_path),
+    )
+    extract = build_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    browser = browser_worker.build_browser_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    docling = docling_worker.build_docling_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    asr = asr_worker.build_asr_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    nlp = nlp_worker.build_nlp_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    llm = llm_worker.build_llm_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+    plain = build_worker(make_settings(), FakeAsyncRedis(), CollectorRegistry())
+    try:
+        for parts in (extract, browser, docling, asr, nlp):
+            assert parts.worker._llm_move is not None
+        assert llm.worker._llm_move is None  # the last hop
+        assert plain.worker._llm_move is None  # the LLM is off
+    finally:
+        for pool in (extract.pool, browser.conversion_pool, docling.conversion_pool):
+            pool.shutdown()
+        asr.conversion_pool.shutdown()
+        plain.pool.shutdown()

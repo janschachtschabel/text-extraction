@@ -33,8 +33,34 @@ the hand-over for a P1 job that it could not create. A task that released its po
 fallback) and then dispatches another one (its result goes on to the ``nlp`` pool) claims the
 hand-over again (``claim_after_release``): the route may then answer 202 with the new job.
 
+**The last hop.** A pool whose worker writes the item's final result (``nlp``, PII; ``llm``, the
+LLM work of ``structured`` and ``chunking``) takes envelopes that are done otherwise: the result
+of a sync request (``LastHopHandoff``) or of an item another pool finished (``LastHopMove``). Both
+are generic in the pool, ``needs(envelope)`` (whether the envelope owes the hop) and
+``unserved(envelope, reason)`` (the answer when the hop could not serve it: ``busy`` while the
+memory guard is high, ``failed`` when Valkey failed or nobody answered in time); the pool's
+module subclasses them (``pii_dispatch.PiiHandoff``, ``pii_dispatch.PiiMove``) and documents its
+policy and its worker's contract.
+
+- ``LastHopHandoff`` (sync): while the memory guard is high nothing is stored and the request
+  answers ``unserved(..., "busy")``. Otherwise a one-item job of the request's kind is created
+  with the envelope as its draft, item 0 is queued on the pool, and the request waits for the
+  result (the pool's ``_wait``, plus whatever is left until its route hands it over). An earlier
+  pool job of the request that it gave up does not stand in the way: the hand-over is claimed
+  again for the new job (``Handover.claim_after_release``), and the route may answer 202 with
+  it. A request whose route handed it over to a P1 job puts the envelope on that job (its draft,
+  the item queued, the job's lease cleared): the pool's worker writes item 0. A wait that ends
+  without a result while nobody took the job over, and Valkey failing, answer
+  ``unserved(..., "failed")``, never the envelope that owes the hop. The handoff answers None
+  once the job belongs to the pool's worker (the route answered 202 with it, or it is the P1
+  job).
+- ``LastHopMove`` (``Worker._finish`` of the pools before): stores the envelope as the item's
+  draft and queues the item on the pool with the same job, index and client; the worker then
+  completes the item without a result. Draft first: the pool's worker may claim the item as soon
+  as it is queued. While the memory guard is high nothing is stored and the move declines.
+
 The ``docling`` pool's policy (OCR) and the contract of its worker are in ``docling_dispatch.py``,
-the ``asr`` pool's in ``asr_dispatch.py``.
+the ``asr`` pool's in ``asr_dispatch.py``, the ``nlp`` pool's in ``pii_dispatch.py``.
 
 Logs carry job ids only, never a URL, header, cookie, action or document byte.
 """
@@ -43,11 +69,12 @@ import asyncio
 import contextlib
 import math
 import time
+from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import structlog
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, Counter
 from redis.exceptions import RedisError
 
 from text_extraction.auth import Principal
@@ -56,9 +83,10 @@ from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.job_models import JobKind, JobOptions
-from text_extraction.jobs import JobLost, JobStore
+from text_extraction.jobs import JobLost, JobRecord, JobStore
 from text_extraction.queue_metrics import dispatch_counter_for
-from text_extraction.scheduler import FairQueue
+from text_extraction.result_cache import MemoryPressure
+from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
 from text_extraction.tracing import current_trace_id
 
@@ -95,6 +123,8 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         transcribe=req.transcribe,
         languages=req.languages,
         pii=req.pii,
+        structured=req.structured,
+        chunking=req.chunking,
     )
 
 
@@ -224,6 +254,10 @@ class PoolDispatcher:
             registry if registry is not None else CollectorRegistry(), outcomes, pool=pool
         )
 
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
     def count(self, outcome: str) -> None:
         self._outcomes.labels(outcome=outcome).inc()
 
@@ -238,11 +272,14 @@ class PoolDispatcher:
         draft: Envelope[ExtractResult] | None = None,
         secrets: BrowserSecrets | None = None,
         prepare: Callable[[str], Awaitable[None]] | None = None,
+        llm_key: str | None = None,
     ) -> str:
         """Queue item 0 of a new job (or of ``job_id``, the request's P1 job) on the pool and
         return the job's id. ``prepare`` runs before the draft is stored (a Docling job's input);
-        ``draft`` is the result the worker compares its own with. Valkey errors propagate, and so
-        does whatever ``prepare`` raises; a new job is deleted again first."""
+        ``draft`` is the result the worker compares its own with. ``llm_key`` is the caller's
+        ``X-LLM-Api-Key`` of a request that may need the LLM: a new job keeps it for the llm
+        worker (the request's P1 job has it already). Valkey errors propagate, and so does
+        whatever ``prepare`` raises; a new job is deleted again first."""
         created = job_id is None
         if job_id is None:
             try:
@@ -260,6 +297,8 @@ class PoolDispatcher:
         elif secrets is not None and not secrets.empty():
             raise ValueError("a reused job cannot take secrets")
         try:
+            if created and llm_key is not None:
+                await self._store.put_llm_key(job_id, llm_key)
             if prepare is not None:
                 await prepare(job_id)
             # Draft first: a worker may claim the item as soon as it is queued.
@@ -367,3 +406,178 @@ class PoolDispatcher:
         """Delete the job; a Valkey failure leaves it to expire."""
         with contextlib.suppress(RedisError, OSError):
             await self._store.delete(job_id)
+
+
+# --- the last hop -------------------------------------------------------------------------------
+
+type UnservedReason = Literal["busy", "failed"]
+
+
+class LastHopHandoff(ABC):
+    """The hand-over of one sync request's envelope to a last-hop pool (``pool``; the module
+    docstring). ``kind`` is the job kind of the request (``extract`` for a URL, ``file`` for an
+    upload), ``options`` its stored options and ``url`` its URL (None for an upload);
+    ``llm_key`` is the caller's ``X-LLM-Api-Key`` of a request that may need the LLM, stored
+    with a new job. ``wait_until`` is the ``time.monotonic()`` reading at which the route answers
+    202: the request waits that much longer, so that the route finds the job to answer with. A
+    call answers the envelope the pool's worker produced, ``unserved(...)``, or None once the job
+    belongs to the pool's worker (the route answered 202 with it, or it is the request's P1
+    job). An envelope that does not ``need`` the hop comes back as it is."""
+
+    def __init__(
+        self,
+        dispatcher: PoolDispatcher,
+        guard: MemoryPressure,
+        *,
+        pool: str,
+        kind: Literal["extract", "file"],
+        options: JobOptions,
+        principal: Principal,
+        url: str | None,
+        wait_until: float | None = None,
+        llm_key: str | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._dispatcher = dispatcher
+        self._guard = guard
+        self._pool = pool
+        self._kind = kind
+        self._options = options
+        self._principal = principal
+        self._url = url
+        self._wait_until = wait_until
+        self._llm_key = llm_key
+        self._clock = clock
+
+    @abstractmethod
+    def needs(self, envelope: Envelope[ExtractResult]) -> bool:
+        """Whether the envelope owes this hop."""
+
+    @abstractmethod
+    def unserved(
+        self, envelope: Envelope[ExtractResult], reason: UnservedReason
+    ) -> Envelope[ExtractResult]:
+        """The answer for an envelope that owes the hop and did not get it: ``busy`` while the
+        memory guard is high, ``failed`` otherwise."""
+
+    @abstractmethod
+    async def _wait(
+        self, job_id: str, *, extra_seconds: float, detached: Callable[[], bool]
+    ) -> Envelope[ExtractResult] | None:
+        """The pool's result of the job's item 0, or None (the pool's dispatcher's wait, longer
+        by ``extra_seconds``). Valkey errors propagate."""
+
+    async def __call__(
+        self, envelope: Envelope[ExtractResult], handover: Handover
+    ) -> Envelope[ExtractResult] | None:
+        if not self.needs(envelope):
+            return envelope
+        dispatcher = self._dispatcher
+        if self._guard.high:
+            dispatcher.count("memory_guard")
+            return self.unserved(envelope, "busy")
+        claimed = handover.claim_after_release(self._pool)
+        if not claimed:  # the route is handing it over to a P1 job
+            await handover.settled()
+            if handover.claimed == "p1" and handover.job_id is not None:
+                return await self._on_p1_job(handover.job_id, envelope)
+            # The P1 job could not be created: the route waits for this answer.
+        extra = 0.0 if self._wait_until is None else max(self._wait_until - self._clock(), 0.0)
+        job_id: str | None = None
+        try:
+            job_id = await self._submit(envelope)
+        except BACKEND_ERRORS as error:  # JobLost: the new job vanished before its draft
+            self._dispatch_failed(error)
+            return self.unserved(envelope, "failed")
+        finally:
+            if claimed:
+                handover.settle(job_id)
+        try:
+            result = await self._wait(
+                job_id, extra_seconds=extra, detached=lambda: handover.detached
+            )
+        except asyncio.CancelledError:
+            if handover.release():
+                await asyncio.shield(dispatcher.abandon(job_id))
+            raise
+        except (RedisError, OSError) as error:
+            if not handover.release():
+                return None  # the route answered 202 with the job: the worker writes its result
+            await asyncio.shield(dispatcher.abandon(job_id))
+            self._dispatch_failed(error)
+            return self.unserved(envelope, "failed")
+        if result is None:
+            if not handover.release():
+                return None  # the route answered 202 with the job: the worker writes its result
+            await asyncio.shield(dispatcher.abandon(job_id))
+            return self.unserved(envelope, "failed")
+        # Answered here: nobody reads the job again, unless the route answered 202 meanwhile.
+        if handover.release():
+            await asyncio.shield(dispatcher.answered(job_id, result))
+        return result
+
+    async def _submit(self, envelope: Envelope[ExtractResult], job_id: str | None = None) -> str:
+        """Queue item 0 on the pool with ``envelope`` as its draft: of a new job (with the
+        caller's LLM key, if any) or of ``job_id`` (the request's P1 job, whose lease is
+        cleared). Valkey errors propagate; a new job is deleted again first."""
+        return await self._dispatcher.submit_job(
+            self._kind,
+            self._options,
+            self._principal,
+            self._url,
+            job_id=job_id,
+            draft=envelope,
+            llm_key=self._llm_key,
+        )
+
+    async def _on_p1_job(
+        self, job_id: str, envelope: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult] | None:
+        """Put the envelope on the request's P1 job, which the route answered 202 with; the
+        unserved answer of a failure is stored in that job."""
+        try:
+            await self._submit(envelope, job_id)
+        except BACKEND_ERRORS as error:
+            self._dispatch_failed(error)
+            return self.unserved(envelope, "failed")
+        return None  # the pool's worker writes item 0 of the P1 job
+
+    def _dispatch_failed(self, error: Exception) -> None:
+        # The type only: the failed command carried the result's text.
+        _log.warning(f"{self._pool}_dispatch_failed", error_type=type(error).__name__)
+
+
+class LastHopMove:
+    """The move of a finished item to a last-hop pool (``Worker._finish`` of the pools before;
+    the module docstring): ``queue`` is that pool's. ``guard`` tells whether Valkey is nearly
+    full; ``outcomes`` (the pool's ``text_extraction_<pool>_dispatch_total``) counts the refused
+    moves."""
+
+    def __init__(
+        self,
+        store: JobStore,
+        queue: FairQueue,
+        guard: MemoryPressure | None,
+        *,
+        outcomes: Counter | None = None,
+    ) -> None:
+        self._store = store
+        self._queue = queue
+        self._guard = guard
+        self._outcomes = outcomes
+
+    async def __call__(
+        self, job: JobRecord, item: QueueItem, envelope: Envelope[ExtractResult]
+    ) -> bool:
+        """Store ``envelope`` as the item's draft and queue the item on the pool with the same
+        job, index and client; True once it is queued. False while the memory guard is high:
+        nothing was stored. Valkey errors and ``JobLost`` propagate."""
+        if self._guard is not None and self._guard.high:
+            if self._outcomes is not None:
+                self._outcomes.labels(outcome="memory_guard").inc()
+            return False
+        url = await self._store.url(job.id, item.index)
+        # Draft first: the pool's worker may claim the item as soon as it is queued.
+        await self._store.put_draft(job.id, item.index, envelope)
+        await self._queue.enqueue_items(job.id, item.client, [(item.index, url or None)])
+        return True
