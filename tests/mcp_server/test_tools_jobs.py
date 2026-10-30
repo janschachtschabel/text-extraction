@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import hashlib
+import json
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -17,7 +18,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
 from tests.fakes import ORIGIN, PAGE
-from tests.mcp_server.rpc import call_tool, rpc
+from tests.mcp_server.rpc import ACCEPT, call_tool, rpc
 from tests.mcp_server.test_tools_extract import (
     AUTH,
     PNG,
@@ -30,7 +31,8 @@ from tests.test_jobs import success
 from text_extraction.app import create_public_app
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
-from text_extraction.mcp_server.results import TRUNCATED_WARNING
+from text_extraction.mcp_server.calls import outcome_of
+from text_extraction.mcp_server.results import TRUNCATED_WARNING, payload_result
 from text_extraction.mcp_server.server import TOOL_ROUTES
 from text_extraction.settings import Settings
 
@@ -242,6 +244,149 @@ def test_get_job_wait_cut_to_the_setting() -> None:
 
     assert result["isError"] is False
     assert 1 <= elapsed < 2
+
+
+def counting_reads(client: TestClient) -> list[float]:
+    """The times of the job store's record reads from now on (each poll of a wait is one)."""
+    store = store_of(client)
+    reads: list[float] = []
+    get = store.get
+
+    async def counted(job_id: str) -> Any:
+        reads.append(time.monotonic())
+        return await get(job_id)
+
+    store.get = counted  # type: ignore[method-assign]
+    return reads
+
+
+async def asgi_call(
+    app: Any, message: dict[str, Any], *, disconnect_after: float | None
+) -> list[dict[str, Any]]:
+    """Drive one POST /mcp through the ASGI app; the client disconnects ``disconnect_after``
+    seconds after it sent the body (None: never). Returns what the app sent."""
+    body = json.dumps(message).encode()
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"accept", ACCEPT.encode()),
+            (b"authorization", AUTH["Authorization"].encode()),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+    sent_body = False
+    sent: list[dict[str, Any]] = []
+    # As a server, the disconnect is there from its time on: a receive cancelled before (as
+    # ``Request.is_disconnected`` does) finds it later all the same.
+    gone_at = None if disconnect_after is None else time.monotonic() + disconnect_after
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent_body
+        if not sent_body:
+            sent_body = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        if gone_at is None:
+            await asyncio.Event().wait()
+        elif time.monotonic() < gone_at:  # once gone, answered without a checkpoint
+            await asyncio.sleep(gone_at - time.monotonic())
+        return {"type": "http.disconnect"}
+
+    async def send(event: dict[str, Any]) -> None:
+        sent.append(event)
+
+    await app(scope, receive, send)
+    return sent
+
+
+def get_job_message(job_id: str, wait_seconds: float) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "get_job",
+            "arguments": {"job_id": job_id, "wait_seconds": wait_seconds},
+        },
+    }
+
+
+def test_get_job_wait_stops_when_the_client_disconnects() -> None:
+    """Review of Task 6: an abandoned wait polls no more once the client is gone."""
+    with running(mcp_wait_seconds=10) as client:
+        job_id = start_batch(client)
+        reads = counting_reads(client)
+        started = time.monotonic()
+        message = get_job_message(job_id, 10)
+        sent = portal(client).call(lambda: asgi_call(client.app, message, disconnect_after=0.5))
+        ended = time.monotonic()
+        portal(client).call(asyncio.sleep, 1.5)
+
+    assert ended - started < 3  # not the 10 s asked for
+    assert reads, "the wait polled the job"
+    assert all(read <= ended for read in reads)  # no read after the call returned
+    assert len(reads) <= 3
+    assert sent[0]["type"] == "http.response.start"
+
+
+def test_get_job_wait_stops_when_cancelled() -> None:
+    """A cancelled call (the server cancels its handler) polls no more."""
+    with running(mcp_wait_seconds=10) as client:
+        job_id = start_batch(client)
+        reads = counting_reads(client)
+        message = get_job_message(job_id, 10)
+
+        async def cancelled_after(seconds: float) -> float:
+            task = asyncio.ensure_future(asgi_call(client.app, message, disconnect_after=None))
+            await asyncio.sleep(seconds)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return time.monotonic()
+
+        cancelled_at = portal(client).call(cancelled_after, 1.5)
+        portal(client).call(asyncio.sleep, 1.5)
+
+    assert len(reads) >= 2  # it was polling
+    assert all(read <= cancelled_at for read in reads)
+
+
+def test_get_job_wait_on_a_foreign_job_is_not_found_at_once(client: TestClient) -> None:
+    result = call_tool(client, "batch_extract", {"urls": URLS}, headers=OTHER)
+    job_id = envelope_of(result)["data"]["id"]
+
+    started = time.monotonic()
+    error = refusal(
+        call_tool(client, "get_job", {"job_id": job_id, "wait_seconds": 5}, headers=AUTH)
+    )
+
+    assert error["code"] == "not_found"
+    assert time.monotonic() - started < 1
+
+
+def test_job_ids_of_get_job_and_cancel_job_are_logged() -> None:
+    """P10-S4: the log line of a call that answered a job carries its id."""
+    view = {"id": "j1", "kind": "batch", "state": "running", "items": []}
+    deleted = {"id": "j2", "kind": "site"}
+    shot = {"url": "/v1/jobs/j3/artifacts/screenshot.png", "bytes": 1, "content_type": "image/png"}
+    for data, expected in ((view, ("success", "j1")), (deleted, ("success", "j2"))):
+        result = payload_result({"status": "success", "data": data}, is_error=False)
+        assert outcome_of(result) == expected
+    assert outcome_of(payload_result({"status": "success", "data": shot}, is_error=False)) == (
+        "success",
+        None,
+    )
 
 
 def test_get_job_slices_each_item(client: TestClient) -> None:

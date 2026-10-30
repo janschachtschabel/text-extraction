@@ -153,18 +153,21 @@ class ToolMetrics:
 
 
 def outcome_of(result: ToolResult) -> tuple[str, str | None]:
-    """The ``outcome`` label of a result and the id of the job it answered, if any."""
+    """The ``outcome`` label of a result and the id of the job it answered, if any: a job it
+    started, read or deleted."""
     envelope: Mapping[str, Any] = result.structured_content or {}
     if result.is_error:
         error = envelope.get("error")
         code = error.get("code") if isinstance(error, Mapping) else None
         return (code if code in set(ErrorCode) else ErrorCode.INTERNAL_ERROR.value), None
     data = envelope.get("data")
+    # A job's answer (accepted, its view, its deletion) has its ``id`` and ``kind``.
+    job_id = data.get("id") if isinstance(data, Mapping) and "kind" in data else None
+    job_id = job_id if isinstance(job_id, str) else None
     if isinstance(data, Mapping) and isinstance(data.get("status_url"), str):
-        job_id = data.get("id")
-        return "job", job_id if isinstance(job_id, str) else None
+        return "job", job_id
     status = envelope.get("status")
-    return (status if status in _OUTCOMES else "success"), None
+    return (status if status in _OUTCOMES else "success"), job_id
 
 
 class CallGuard(Middleware):

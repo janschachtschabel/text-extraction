@@ -14,15 +14,18 @@ items share ``max_chars`` of content.
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
 
+import structlog
+from fastmcp.server.dependencies import get_http_request
 from mcp_types import ImageContent, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import State
 
 from text_extraction.auth import Principal
 from text_extraction.envelope import Envelope
-from text_extraction.job_models import BatchRequest
+from text_extraction.job_models import BatchRequest, JobView
 from text_extraction.jobs import SCREENSHOT_ARTIFACT
 from text_extraction.jobs_api import (
     batch_body_limit,
@@ -49,6 +52,8 @@ from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
 from text_extraction.site_api import start_site
 from text_extraction.tracing import current_trace_id
+
+_log = structlog.get_logger(__name__)
 
 # The most items of one ``get_job`` page, and its default: each item's result shares
 # ``max_chars``, so a page stays readable.
@@ -168,16 +173,28 @@ def _read_only() -> ToolAnnotations:
 
 
 async def _wait_until_completed(
-    state: State, principal: Principal, job_id: str, seconds: float
-) -> None:
+    state: State,
+    principal: Principal,
+    job_id: str,
+    seconds: float,
+    client_gone: Callable[[], Awaitable[bool]],
+) -> Envelope[JobView] | None:
     """Read the job's progress (no items) once a second until it is completed or ``seconds``
-    are up. A job the caller may not see is 404 at once (``read_job``)."""
+    are up. A job the caller may not see is 404 at once (``read_job``).
+
+    After each read that finds the job unfinished, ``client_gone`` tells whether the client
+    disconnected; then the wait stops at once and the last read is returned, so an abandoned
+    call reads nothing more. Returns None when the wait ended otherwise. A cancelled call stops
+    in its sleep or read (nothing here catches the cancellation)."""
     deadline = time.monotonic() + seconds
     while (left := deadline - time.monotonic()) > 0:
         progress = await read_job(state, principal, job_id, _NO_ITEMS, 1)
         if progress.data is not None and progress.data.state == "completed":
-            return
+            return None
+        if await client_gone():
+            return progress
         await asyncio.sleep(min(_POLL_SECONDS, left))
+    return None
 
 
 class GetJobTool(ModelTool):
@@ -199,7 +216,13 @@ class GetJobTool(ModelTool):
         settings: Settings = state.settings
         check_jobs_enabled(settings)
         wait = min(args.wait_seconds, settings.mcp_wait_seconds)
-        await _wait_until_completed(state, principal, args.job_id, wait)
+        request = get_http_request()  # the call guard has read the caller from it
+        gone = await _wait_until_completed(
+            state, principal, args.job_id, wait, request.is_disconnected
+        )
+        if gone is not None:
+            _log.info("mcp_client_disconnected", tool=self.name, job_id=args.job_id)
+            return payload_result(gone.model_dump(mode="json"), is_error=False)
         envelope = await read_job(state, principal, args.job_id, args.offset, args.limit)
         payload = envelope.model_dump(mode="json")
         max_chars = args.max_chars or settings.mcp_max_content_chars
