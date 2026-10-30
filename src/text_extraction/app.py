@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any
 
 import structlog
@@ -11,6 +11,10 @@ from prometheus_client import REGISTRY, CollectorRegistry
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.routing import Route
 
 from text_extraction import __version__
 from text_extraction.asr_dispatch import AsrDispatcher, asr_queue
@@ -32,6 +36,9 @@ from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
 from text_extraction.llm_dispatch import LlmDispatcher, llm_queue
+from text_extraction.mcp_server.gate import McpGate
+from text_extraction.mcp_server.server import PATH as MCP_PATH
+from text_extraction.mcp_server.server import McpMount, build_mcp, mcp_body_limit
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
@@ -130,7 +137,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     the queue gauges; wait for extractions handed over to a job; stop the guard and the gauges
     (their tasks read Valkey, whose client the server closes after the lifespan); close the
     fetcher's connections, the conversion pool, the document pool, the selector children, the
-    media fetcher and, last, the post pool."""
+    media fetcher and, last, the post pool. With ``MCP_ENABLED`` it runs the MCP app's lifespan
+    (its session manager) while the app serves."""
     documents: DocumentPool = app.state.document_pool
     selectors: SelectorRunner = app.state.selector_runner
     media: MediaFetcher | None = app.state.media_fetcher
@@ -146,8 +154,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     guard.start()
     if app.state.settings.jobs_enabled:
         gauges.start()
+    mcp: McpMount | None = app.state.mcp
     try:
-        yield
+        # The MCP session manager stops first, so no tool call starts while the rest shuts down.
+        async with AsyncExitStack() as stack:
+            if mcp is not None:
+                await stack.enter_async_context(mcp.lifespan())
+            yield
     finally:
         try:
             await _finish_background(app)
@@ -164,6 +177,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await media.stop()
         post_pool: ConversionPool = app.state.post_pool
         post_pool.shutdown()
+
+
+async def _not_found(request: Request) -> Response:
+    raise StarletteHTTPException(404)
+
+
+def _add_mcp(app: FastAPI, settings: Settings, registry: CollectorRegistry) -> McpMount:
+    """Serve the MCP endpoint at exactly ``/mcp`` behind its gate (rulings P10-S2, P10-S3), left
+    out of the OpenAPI spec. ``/mcp/`` is 404 rather than a redirect. ``GET /mcp`` reaches the
+    stateless MCP app, which answers 405 (it has no stream)."""
+    mount = build_mcp(app.state, settings, registry)
+    gate = McpGate(mount.app, settings)
+    app.router.routes.append(
+        Route(MCP_PATH, gate, methods=["GET", "POST", "DELETE"], include_in_schema=False)
+    )
+    app.router.add_route(
+        f"{MCP_PATH}/", _not_found, methods=["GET", "POST", "DELETE"], include_in_schema=False
+    )
+    return mount
 
 
 def create_public_app(
@@ -300,15 +332,21 @@ def create_public_app(
         """Name and version of the service, and who the caller is."""
         return service_info(principal)
 
+    path_limits = {
+        "/v1/batch": batch_body_limit(settings),
+        UPLOAD_PATH: upload_body_limit(settings),
+        CHUNK_PATH: text_body_limit(settings),  # a text is chunked as an upload
+    }
+    app.state.mcp = None
+    if settings.mcp_enabled:
+        app.state.mcp = _add_mcp(app, settings, registry)
+        path_limits[MCP_PATH] = mcp_body_limit(settings)
+
     # Inside the metrics middleware, so refused bodies are counted like any other answer.
     app.add_middleware(
         BodyLimitMiddleware,
         default_limit=settings.request_max_body_bytes,
-        path_limits={
-            "/v1/batch": batch_body_limit(settings),
-            UPLOAD_PATH: upload_body_limit(settings),
-            CHUNK_PATH: text_body_limit(settings),  # a text is chunked as an upload
-        },
+        path_limits=path_limits,
     )
     Instrumentator(registry=registry).instrument(app)
     # Added last, so it is the outermost middleware and sees every request.

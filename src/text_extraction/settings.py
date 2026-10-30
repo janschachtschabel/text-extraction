@@ -326,6 +326,15 @@ class Settings(BaseSettings):
     # One sitemap file: the fetch cap and the cap of its gzip inflate (the protocol's 50 MiB).
     site_sitemap_max_bytes: int = Field(default=52_428_800, ge=1024, le=209_715_200)
     site_max_links_per_page: int = Field(default=1000, ge=10, le=50_000)  # more: links_truncated
+    # MCP endpoint (package 10, ruling P10-S9): FastMCP at /mcp on the public port, off by
+    # default. Browser origins that may call it, as a comma list of ``scheme://host[:port]``
+    # (empty: none; a client without a browser sends no Origin).
+    mcp_enabled: bool = False
+    mcp_allowed_origins: Annotated[list[str], NoDecode] = []
+    # What a tool that may become a job waits for its result, unless the caller gives a time.
+    mcp_wait_seconds: int = Field(default=25, ge=0, le=60)
+    mcp_max_content_chars: int = Field(default=50_000, ge=1_000, le=10_000_000)  # one answer
+    mcp_image_max_bytes: int = Field(default=5_000_000, ge=0, le=20_000_000)  # 0: never attached
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -371,6 +380,40 @@ class Settings(BaseSettings):
         `semantic` chunking is refused without an embedding model, and image descriptions use
         `llm_model` without a vision model."""
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("mcp_allowed_origins", mode="before")
+    @classmethod
+    def _origin_list(cls, value: object) -> object:
+        """A comma-separated list in the env var (blank entries dropped); a list from code
+        passes."""
+        if isinstance(value, str):
+            return [item for item in (part.strip() for part in value.split(",")) if item]
+        return value
+
+    @field_validator("mcp_allowed_origins")
+    @classmethod
+    def _origins_are_scheme_and_host(cls, value: list[str]) -> list[str]:
+        """Each entry is ``http(s)://host[:port]`` (a trailing slash is dropped), stored in lower
+        case as a browser sends it in ``Origin``."""
+        origins: list[str] = []
+        for entry in value:
+            origin = entry.strip().rstrip("/").lower()
+            try:
+                parts = urlsplit(origin)
+                parts.port  # noqa: B018 - raises on a port that is not a number
+            except ValueError:
+                raise ValueError("expected http(s)://host[:port] entries") from None
+            if (
+                parts.scheme not in ("http", "https")
+                or not parts.hostname
+                or parts.path
+                or parts.query
+                or parts.fragment
+                or "@" in parts.netloc
+            ):
+                raise ValueError("expected http(s)://host[:port] entries")
+            origins.append(origin)
+        return list(dict.fromkeys(origins))
 
     @field_validator("pii_default_entities", mode="before")
     @classmethod

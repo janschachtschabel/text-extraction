@@ -25,7 +25,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB) and `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
+| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB), `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB) and `/mcp` (see MCP). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
 | `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` and `POST /v1/site-structure` answer 503 `internal_error` (retryable), a running site job appends no further pages or sitemaps (warning `site_memory_guard`), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
@@ -644,6 +644,42 @@ Deployments at once, so send site jobs only once every pod runs the new release.
   SIGTERM it is cancelled and runs again on another worker after its lease, without duplicate
   items.
 
+## MCP
+
+`MCP_ENABLED=true` serves an MCP server (FastMCP, streamable HTTP, stateless, JSON answers) at
+exactly `/mcp` on the public port 8080; `/mcp/` is 404, `GET /mcp` 405 (a stateless server has no
+event stream), and neither appears in the OpenAPI spec. Off, there is no route and `fastmcp` is not
+imported. An MCP client posts JSON-RPC with `Accept: application/json, text/event-stream`.
+
+Every request to `/mcp` passes the same checks as a REST request, in this order:
+
+1. The body limit: `ceil(DOCUMENT_MAX_BYTES / 3) × 4 + 64 KiB` (a file of the upload limit as
+   base64, or of `MEDIA_UPLOAD_MAX_BYTES` where uploaded media are transcribed); a larger body
+   answers 413 `invalid_request` before it is read whole or authenticated.
+2. A request with an `Origin` header that is not in `MCP_ALLOWED_ORIGINS` answers 403 `forbidden`
+   ("This origin may not call the MCP endpoint."). A client without a browser sends no `Origin`.
+3. The API key (`Authorization: Bearer <key>`, as for REST): without a valid one the answer is the
+   REST 401 envelope with `WWW-Authenticate: Bearer`. Under `AUTH_MODE=none` every caller is the
+   anonymous admin, as for REST.
+
+Each `tools/call` counts once against the caller's rate limit, the bucket REST calls share;
+`initialize`, `tools/list` and notifications are free. A refused or failed call is a tool result
+with `isError: true` whose `structuredContent` is the REST error envelope (`rate_limited` with
+`retryable`, `invalid_request` with the validation `details`, `internal_error` for our own faults,
+without a traceback); a target's `failed` is a normal result, as it is a 200 in REST. Each call
+logs one line `mcp_tool_call` with `tool`, `outcome`, `duration_ms` (and `job_id` when it answered
+a job), the principal and the request's trace fields (`x-client-trace-id`, B3), which the
+envelope's `trace_id` carries too. Tool arguments are never logged; FastMCP's and the MCP SDK's
+own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MCP_ENABLED` | `false` | Serve the MCP endpoint at `/mcp`. |
+| `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash is dropped). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
+| `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of `get_job`. 0 to 60. |
+| `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
+| `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |
+
 ## Headers
 
 Read from the request:
@@ -882,6 +918,8 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`, `unknown` for an item without a crawl record), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
 | `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
 | `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
+| `text_extraction_mcp_tool_calls_total` | counter | `tool`, `outcome` (`success`, `partial`, `failed`, `job` or the error code of a refusal or error result) | API pods (with `MCP_ENABLED`) | MCP tool calls. `tool` is the tool's name, or `unknown` for a name the server has no tool of (a caller's text is never a label). Every tool is exported with `success` at 0 from the start. Use `sum()` over pods. |
+| `text_extraction_mcp_tool_seconds` | histogram | `tool` | API pods (with `MCP_ENABLED`) | Seconds of one MCP tool call, the rate limit check included. Buckets 0.05 s to 120 s. |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |
 | `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |

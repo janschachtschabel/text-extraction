@@ -136,6 +136,11 @@ SETTING_ENV_VARS = (
     "SITE_MAX_SITEMAP_URLS",
     "SITE_SITEMAP_MAX_BYTES",
     "SITE_MAX_LINKS_PER_PAGE",
+    "MCP_ENABLED",
+    "MCP_ALLOWED_ORIGINS",
+    "MCP_WAIT_SECONDS",
+    "MCP_MAX_CONTENT_CHARS",
+    "MCP_IMAGE_MAX_BYTES",
 )
 
 
@@ -1511,3 +1516,43 @@ def test_site_settings_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("SITE_MAX_DEPTH", "11")
     with pytest.raises(ConfigError, match="site_max_depth"):
         load_settings()
+
+
+# P10-S9: (variable, default, lowest, highest).
+MCP_SETTINGS = (
+    ("MCP_WAIT_SECONDS", 25, 0, 60),
+    ("MCP_MAX_CONTENT_CHARS", 50_000, 1_000, 10_000_000),
+    ("MCP_IMAGE_MAX_BYTES", 5_000_000, 0, 20_000_000),
+)
+
+
+def test_mcp_settings_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    settings = load_settings()
+    assert settings.mcp_enabled is False
+    assert settings.mcp_allowed_origins == []
+    for name, default, _, _ in MCP_SETTINGS:
+        assert getattr(settings, name.lower()) == default
+
+    for name, _, lowest, highest in MCP_SETTINGS:
+        for accepted in (lowest, highest):
+            monkeypatch.setenv(name, str(accepted))
+            assert getattr(load_settings(), name.lower()) == accepted
+        for refused in (lowest - 1, highest + 1):
+            monkeypatch.setenv(name, str(refused))
+            with pytest.raises(ConfigError, match=name.lower()):
+                load_settings()
+        monkeypatch.delenv(name)
+
+    monkeypatch.setenv("MCP_ENABLED", "true")
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", " https://App.Example.org , http://localhost:3000/,,")
+    settings = load_settings()
+    assert settings.mcp_enabled is True
+    assert settings.mcp_allowed_origins == ["https://app.example.org", "http://localhost:3000"]
+
+    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "")
+    assert load_settings().mcp_allowed_origins == []
+    for wrong in ("app.example.org", "ftp://app.example.org", "https://a.example/path", "*"):
+        monkeypatch.setenv("MCP_ALLOWED_ORIGINS", wrong)
+        with pytest.raises(ConfigError, match="mcp_allowed_origins"):
+            load_settings()
