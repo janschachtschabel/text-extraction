@@ -144,9 +144,9 @@ def named_text_type(body: bytes, declared: str | None, name: str | None) -> str 
     A part named ``*.md`` or ``*.markdown`` (any case), declared ``application/octet-stream``
     or not at all, whose bytes look like text, is ``text/markdown``: ``curl -F file=@notes.md``
     and many browsers send such a file without its type. One named ``*.txt`` is
-    ``text/plain`` by the same rule. A declared real type is never
-    overridden; the caller asks only once ``sniff`` found no kind, so a document's signature
-    and an HTML start still win.
+    ``text/plain`` by the same rule. A declared real type is never overridden. The caller then
+    sniffs the part as that type (review I1): a document's signature counts at the start only,
+    and a body that starts like an HTML page is text, as for a part that declares the type.
     """
     media = (declared or "").split(";", 1)[0].strip().lower()
     if media not in _UNTYPED:

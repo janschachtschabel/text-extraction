@@ -786,6 +786,32 @@ def test_a_markdown_name_does_not_make_binary_or_declared_types_markdown(
     assert declared.json()["data"]["content_type"] == "application/pdf"
 
 
+@pytest.mark.parametrize(
+    ("name", "content_type"), [("notes.md", "text/markdown"), ("notes.txt", "text/plain")]
+)
+@pytest.mark.parametrize("declared", ["application/octet-stream", None])
+def test_an_untyped_text_name_is_sniffed_like_a_declared_text_type(
+    client: TestClient, name: str, content_type: str, declared: str | None
+) -> None:
+    """Review I1: an untyped ``.md`` or ``.txt`` part is sniffed as its declared type would be:
+    ``%PDF-`` quoted in its prose does not make it a PDF, and a body that starts like an HTML
+    page is read as text too. A real PDF signature at the start still wins."""
+    quoting = (
+        "# Notes on PDF\n\nEvery PDF file starts with the bytes `%PDF-1.7`.\n\n" + PARAGRAPH * 3
+    ).encode()
+    html = f"<!doctype html>\n\n{PARAGRAPH * 3}".encode()
+
+    for body in (quoting, html):
+        answer = upload_part(client, body, name, declared).json()
+        assert answer["status"] == "success", answer["error"]
+        assert answer["data"]["content_type"] == content_type
+        assert answer["data"]["document"] is None
+
+    pdf = upload_part(client, corpus("text.pdf"), name, declared).json()
+    assert pdf["status"] == "success", pdf["error"]
+    assert pdf["data"]["content_type"] == "application/pdf"
+
+
 @pytest.mark.parametrize("declared", ["text/markdown", "text/x-markdown; charset=utf-8"])
 def test_markdown_upload_is_converted_as_markdown(client: TestClient, declared: str) -> None:
     """Issue #15: a Markdown upload is read as Markdown, for every output format."""

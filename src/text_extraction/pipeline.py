@@ -54,9 +54,9 @@ a transcription as its stand-in (never stored), as a document is handed to ``ocr
 
 An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on the bytes in hand:
 no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor stored
-(ruling F17). A part that sniffs as no kind, named ``*.md`` or ``*.markdown``, declared
-``application/octet-stream`` or not at all, with bytes that look like text, is read as
-``text/markdown`` (``named_text_type``, issue #17), one named ``*.txt`` as ``text/plain``. With
+(ruling F17). A part named ``*.md`` or ``*.markdown``, declared ``application/octet-stream``
+or not at all, with bytes that look like text, is an upload of ``text/markdown``
+(``named_text_type``, issue #17), one named ``*.txt`` of ``text/plain``. With
 ``MEDIA_ENABLED``, bytes that sniff as audio or video (``sniff_media``, before the document kinds;
 the part's declared type never decides) are transcribed (M14): while the service has no ASR
 (``ASR_ENABLED`` and ``JOBS_ENABLED``) the upload is ``unsupported_content_type`` ("Transcription
@@ -1820,9 +1820,10 @@ class Pipeline:
         # The sniff reads bounded parts only (the head, a ZIP's central directory, OLE2
         # directory sectors), so a body over its limit is refused with its own type before the
         # whole of it is hashed.
+        # A `.md` or `.txt` part sent untyped is sniffed as its text type would be (issue #17):
+        # a document signature counts at the start only, and the rest is that text.
+        declared = named_text_type(body, declared, run.file_name) or declared
         kind = await self._pool.run(sniff, body, declared, run.file_name)
-        if kind is None and (named := named_text_type(body, declared, run.file_name)):
-            declared, kind = named, "text"  # a `.md` or `.txt` part sent untyped (issue #17)
         run.kind = kind
         if kind is None:
             run.content_type = declared
