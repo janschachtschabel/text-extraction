@@ -71,6 +71,8 @@ MAX_JOBS_SHOWN: Final = 20
 PREVIEW_URLS: Final = 50
 PROBLEMS_SHOWN: Final = 20
 FILE_PART: Final = "file"
+# Fields of a batch form besides its URLs (format, mode, metadata, options and a few more).
+FORM_OPTION_FIELDS: Final = 64
 
 NO_URLS: Final = "Give at least one URL."
 NOT_USED: Final = "These rows are not http(s) URLs; nothing was sent."
@@ -355,8 +357,10 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
     split into ``ceil(n / BATCH_MAX_URLS)`` batches. More batches than
     ``BATCH_MAX_OPEN_PER_CLIENT`` sends nothing; otherwise each batch is forwarded to
     ``POST /v1/batch`` in turn. A refused part stops the rest and is shown beside the jobs
-    already started, which keep running."""
-    form = await request.form()
+    already started, which keep running. The form may have a field per URL (the tree's checked
+    boxes), so it may have as many fields as URLs are listed, besides the batch options; its
+    bytes are bounded by the route's body limit."""
+    form = await request.form(max_fields=_max_listed(settings) + FORM_OPTION_FIELDS)
     try:
         lines = _lines(form)
         fields = text_fields(form)

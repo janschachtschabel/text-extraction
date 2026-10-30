@@ -657,3 +657,17 @@ def test_single_job_answer_links_its_progress() -> None:
     assert button.get("hx-get") == f"/ui/run/progress?id={'a' * 32}&mode=auto"
     assert button.get("hx-target") == "closest .result-view"
     assert button.get("hx-swap") == "outerHTML"
+
+
+def test_batch_urls_takes_many_checked_boxes(batch_calls: list[int]) -> None:
+    """The tree posts one ``url`` field per checked box: more than Starlette's default 1,000
+    fields of a form."""
+    selected = urls(1500)
+    with running(batch_max_urls=1000) as client:
+        response = client.post(
+            "/ui/run/batch-urls", data={"url": selected, "metadata": "on"}, headers=HEADERS
+        )
+
+        assert batch_calls == [1000, 500]
+        jobs = jobs_of(response.text)
+        assert [url for job_id in jobs for url in job_items(client, job_id)] == selected
