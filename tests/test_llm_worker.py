@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -203,8 +204,12 @@ def test_runner_deadline_answers_without_the_llm(httpserver: HTTPServer) -> None
     """The overall deadline (``3 * LLM_TIMEOUT_SECONDS``) ends a slow item: its content
     without the LLM work, ``llm_failed``, retryable."""
 
+    release = threading.Event()
+    answered = threading.Event()
+
     def slow(_request: Request) -> Response:
-        time.sleep(1.5)
+        release.wait(1.5)
+        answered.set()
         return Response(json.dumps(answer({"price": 1})), content_type="application/json")
 
     httpserver.expect_request("/v1/chat/completions").respond_with_handler(slow)
@@ -213,8 +218,13 @@ def test_runner_deadline_answers_without_the_llm(httpserver: HTTPServer) -> None
 
     started = time.monotonic()
     result = asyncio.run(case.run(draft=envelope(CONTENT)))
+    elapsed = time.monotonic() - started
+    # The server answers one request at a time: let the slow handler end here, or a later
+    # test's request waits behind it and lands in that test's request log.
+    release.set()
+    assert answered.wait(5)
 
-    assert time.monotonic() - started < 1.4
+    assert elapsed < 1.4
     assert result.status == "partial"
     assert result.error is not None
     assert (result.error.code, result.error.retryable) == (ErrorCode.LLM_FAILED, True)
