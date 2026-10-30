@@ -34,18 +34,18 @@ workers.
    cache and the fingerprints keep the unprocessed extraction (N9). Every envelope the route
    answers or stores passes ``pii.fields.fail_closed`` (N12): one that still owes the step is
    ``pii_failed`` with its text withheld.
-8. With ``structured`` or ``chunking``, the envelope the flow ends with (after the PII step, on
-   its final, possibly masked content) gets the post stage (``structured.post.post_at_finish``,
-   ruling S13) unless it had it already (a browser, Docling, nlp or llm job's result is done by
-   its worker): the patterns, off the event loop; then an envelope that needs the LLM goes to
-   the llm workers (``llm_dispatch.LlmHandoff``, D5 a) with the caller's ``X-LLM-Api-Key`` and
-   the request waits ``LLM_SYNC_WAIT_SECONDS`` longer for it; last ``finish_post``, off the
-   event loop, as the guard. While the memory guard is high, when Valkey fails or nobody
-   answered in time, the answer is the content without the LLM work: ``partial``/``llm_failed``,
-   retryable, never a 5xx. An envelope that still owes the PII step gets none: the guard
-   withholds it. The cache keeps the DOM stage's result: a cache hit gets a post stage of its
-   own. A P1 job's write (``_store_result``) runs the post stage too, for an envelope that lacks
-   it, without the LLM, before the PII guard.
+8. With ``structured`` or ``chunking``, the envelope the flow ends with (after the PII step, on its
+   final, possibly masked content) gets the post stage (``structured.post.post_at_finish``, ruling
+   S13) unless it had it already (a browser, Docling, nlp or llm job's result is done by its
+   worker): the patterns, on the app's post pool (``POST_CONCURRENCY`` threads, ruling R21); then an
+   envelope that needs the LLM goes to the llm workers (``llm_dispatch.LlmHandoff``, D5 a) with the
+   caller's ``X-LLM-Api-Key`` and the request waits ``LLM_SYNC_WAIT_SECONDS`` longer for it; last
+   ``finish_post``, on the post pool, as the guard. While the memory guard is high, when Valkey
+   fails or nobody answered in time, the answer is the content without the LLM work:
+   ``partial``/``llm_failed``, retryable, never a 5xx. An envelope that still owes the PII step gets
+   none: the guard withholds it. The cache keeps the DOM stage's result: a cache hit gets a post
+   stage of its own. A P1 job's write (``_store_result``) runs the post stage too, for an envelope
+   that lacks it, without the LLM, before the PII guard.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result. A request with
@@ -108,6 +108,7 @@ from text_extraction.browser_dispatch import (
 from text_extraction.browser_options import EvaluateAction
 from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceMode, ComplianceReport, resolve_mode
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.convert import OutputFormat
 from text_extraction.docling_dispatch import DoclingDispatcher, DoclingHandoff
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
@@ -520,6 +521,7 @@ async def answer_or_hand_over(
             structured=structured,
             chunking=chunking,
             settings=settings,
+            threads=state.post_pool,
         )
     )
     _log.info("extract_job_accepted", job_id=job_id, kind=p1_kind)
@@ -697,7 +699,7 @@ async def post_stage(
 ) -> _Answer:
     """Step 8 of a sync flow (``_flow``, ``file_api._flow``): the post stage of the request's
     ``structured`` and ``chunking`` (``options``) for an envelope that still owes it
-    (``structured.post.post_at_finish``), off the event loop (ruling R10), timed into
+    (``structured.post.post_at_finish``), on the app's post pool (rulings R10, R21), timed into
     ``total_ms``. An envelope that needs the LLM goes to the llm workers
     (``llm_dispatch.LlmHandoff``, S13) with the caller's ``llm_key``: the answer is their
     result, the content without the LLM work (``llm_failed``, retryable) when they could not
@@ -719,6 +721,7 @@ async def post_stage(
         options.chunking,
         options.pii,
         settings=state.settings,
+        threads=state.post_pool,
         hop=_llm_hop(handoff, handover) if handoff is not None else None,
     )
     if finished is None or finished is envelope:
@@ -850,6 +853,7 @@ def llm_handoff(
         options=options,
         principal=principal,
         url=url,
+        threads=state.post_pool,
         wait_until=wait_until,
         llm_key=llm_key,
     )
@@ -1132,6 +1136,7 @@ def _store_when_done(
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
     settings: Settings | None = None,
+    threads: ConversionPool | None = None,
 ) -> None:
     """Done-callback of a handed-over extraction: store its envelope in the job, unless the job
     went on to a pool's worker, which writes it. The storing task is added to ``background``
@@ -1151,6 +1156,7 @@ def _store_when_done(
                 structured=structured,
                 chunking=chunking,
                 settings=settings,
+                threads=threads,
             )
         )
         background.add(storing)
@@ -1170,18 +1176,24 @@ async def _store_result(
     structured: StructuredOptions | None = None,
     chunking: ChunkingOptions | None = None,
     settings: Settings | None = None,
+    threads: ConversionPool | None = None,
 ) -> None:
     """Store the envelope as item 0, after the post stage of the request's ``structured`` and
-    ``chunking`` (with ``settings``; for an envelope that lacks it: the flow's own answer has
-    it, S13) and past the PII guard (``pii.fields.fail_closed`` with the request's ``pii``,
-    N12), and observe the job's duration (``created_at`` is a ``time.monotonic()`` reading from
-    just before the job was created); an upload's input is deleted then, and so is the caller's
-    LLM key. A Valkey failure is logged and not raised: the job's lease then runs out and
-    ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its own)."""
+    ``chunking`` (with ``settings`` and ``threads``, the post pool; for an envelope that lacks it:
+    the flow's own answer has it, S13) and past the PII guard (``pii.fields.fail_closed`` with the
+    request's ``pii``, N12), and observe the job's duration (``created_at`` is a
+    ``time.monotonic()`` reading from just before the job was created); an upload's input is deleted
+    then, and so is the caller's LLM key. A Valkey failure is logged and not raised: the job's lease
+    then runs out and ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its
+    own)."""
     if settings is not None:
+        if threads is None:  # a caller's mistake: the guard would be skipped without a word
+            raise TypeError("_store_result needs threads together with settings")
         # The guard: LLM work an envelope still owes here (a task that raised, a pod without
         # the hop) is ``llm_failed``; the flow's own answer has had its post stage.
-        finished = await post_at_finish(envelope, structured, chunking, pii, settings=settings)
+        finished = await post_at_finish(
+            envelope, structured, chunking, pii, settings=settings, threads=threads
+        )
         if finished is not None:  # always, without a hop
             envelope = finished
     envelope = fail_closed(envelope, pii)

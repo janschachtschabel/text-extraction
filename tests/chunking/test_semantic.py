@@ -1,26 +1,45 @@
 """The ``semantic`` chunker of ``chunking/semantic.py`` (rulings S10 and D1): cuts where the cosine
-distance of neighbouring sentence embeddings peaks, with a fake `embed` in place of the endpoint."""
+distance of neighbouring sentence embeddings peaks, with a fake `embed` in place of the endpoint.
+The embeddings come in batches of float32 arrays, and only the distances are kept (ruling R22);
+the CPU work runs on the post pool (R21)."""
 
 import asyncio
 import hashlib
 import random
-from collections.abc import Sequence
+import threading
+import tracemalloc
+from collections.abc import AsyncGenerator, Sequence
+from typing import Any
 
+import numpy as np
+import numpy.typing as npt
 import pytest
 
 from tests.chunking.test_split import assert_invariants, documents
-from text_extraction.chunking.semantic import MAX_SEMANTIC_SENTENCES, semantic_chunks
+from text_extraction.chunking import semantic as semantic_module
+from text_extraction.chunking.semantic import MAX_SEMANTIC_SENTENCES, Embed, semantic_chunks
 from text_extraction.chunking.split import chunk
 from text_extraction.chunking.types import Chunk, ChunkingOptions
+from text_extraction.conversion_pool import ConversionPool
+
+BATCH = 64  # the LLM client's batch
+
+
+def batches(vectors: list[list[float]]) -> list[npt.NDArray[np.float32]]:
+    return [
+        np.asarray(vectors[start : start + BATCH], dtype=np.float32)
+        for start in range(0, len(vectors), BATCH)
+    ]
 
 
 class FakeEmbed:
-    """Cats are [1, 0, 0], dogs [0, 1, 0], birds [0, 0, 1]; anything else a hash-seeded vector."""
+    """Cats are [1, 0, 0], dogs [0, 1, 0], birds [0, 0, 1]; anything else a hash-seeded vector.
+    The vectors come in float32 batches of 64, as from the LLM client."""
 
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
 
-    async def __call__(self, texts: Sequence[str]) -> list[list[float]]:
+    async def __call__(self, texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
         self.calls.append(list(texts))
         vectors: list[list[float]] = []
         for text in texts:
@@ -34,12 +53,26 @@ class FakeEmbed:
                 seed = int.from_bytes(hashlib.sha256(text.encode()).digest()[:8])
                 rng = random.Random(seed)  # noqa: S311
                 vectors.append([rng.random() for _ in range(4)])
-        return vectors
+        for batch in batches(vectors):
+            yield batch
+
+
+async def chunked(
+    content: str, options: ChunkingOptions, embed: Embed, *, markdown: bool, max_chunks: int
+) -> tuple[list[Chunk], list[str]]:
+    """``semantic_chunks`` with a post pool of its own."""
+    threads = ConversionPool(2, name="post")
+    try:
+        return await semantic_chunks(
+            content, options, embed, markdown=markdown, max_chunks=max_chunks, threads=threads.run
+        )
+    finally:
+        threads.shutdown()
 
 
 def run(
     content: str,
-    embed: FakeEmbed,
+    embed: Embed,
     *,
     size: int = 1000,
     overlap: int = 0,
@@ -50,9 +83,7 @@ def run(
     options = ChunkingOptions(
         strategy="semantic", size=size, overlap=overlap, breakpoint_percentile=percentile
     )
-    return asyncio.run(
-        semantic_chunks(content, options, embed, markdown=markdown, max_chunks=max_chunks)
-    )
+    return asyncio.run(chunked(content, options, embed, markdown=markdown, max_chunks=max_chunks))
 
 
 TWO_TOPICS = "Cats purr. Cats sleep. Cats hunt. Dogs bark. Dogs run. Dogs fetch."
@@ -113,7 +144,7 @@ def test_semantic_over_5000_sentences_falls_back() -> None:
     embed = FakeEmbed()
     options = ChunkingOptions(strategy="semantic", size=1000, overlap=100)
     chunks, warnings = asyncio.run(
-        semantic_chunks(content, options, embed, markdown=False, max_chunks=2000)
+        chunked(content, options, embed, markdown=False, max_chunks=2000)
     )
     assert warnings == ["chunking_fallback_recursive"]
     assert embed.calls == []
@@ -159,23 +190,96 @@ def test_semantic_max_chunks_truncates_with_warning() -> None:
 
 
 def test_semantic_rejects_a_wrong_number_of_embeddings() -> None:
-    async def short(texts: Sequence[str]) -> list[list[float]]:
-        return [[1.0, 0.0]] * (len(texts) - 1)
+    async def short(texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
+        for batch in batches([[1.0, 0.0]] * (len(texts) - 1)):
+            yield batch
 
     options = ChunkingOptions(strategy="semantic")
     with pytest.raises(ValueError, match="embeddings"):
-        asyncio.run(semantic_chunks(TWO_TOPICS, options, short, markdown=False, max_chunks=10))
+        asyncio.run(chunked(TWO_TOPICS, options, short, markdown=False, max_chunks=10))
+
+
+def test_semantic_rejects_embeddings_of_different_lengths() -> None:
+    async def ragged(texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
+        yield np.zeros((3, 2), dtype=np.float32)
+        yield np.zeros((len(texts) - 3, 4), dtype=np.float32)
+
+    options = ChunkingOptions(strategy="semantic")
+    with pytest.raises(ValueError, match="embeddings"):
+        asyncio.run(chunked(TWO_TOPICS, options, ragged, markdown=False, max_chunks=10))
 
 
 def test_semantic_zero_vectors_do_not_break_the_cosine() -> None:
-    async def zeros(texts: Sequence[str]) -> list[list[float]]:
-        return [[0.0, 0.0] for _ in texts]
+    async def zeros(texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
+        for batch in batches([[0.0, 0.0] for _ in texts]):
+            yield batch
 
     options = ChunkingOptions(strategy="semantic")
-    chunks, _ = asyncio.run(
-        semantic_chunks(TWO_TOPICS, options, zeros, markdown=False, max_chunks=10)
-    )
+    chunks, _ = asyncio.run(chunked(TWO_TOPICS, options, zeros, markdown=False, max_chunks=10))
     assert [item.text for item in chunks] == [TWO_TOPICS]
+
+
+def test_semantic_distances_across_batch_borders() -> None:
+    """The distance from the last sentence of a batch to the first of the next is kept: a shift
+    in meaning right at a border is cut there."""
+    content = " ".join(f"Cats item {number} done." for number in range(BATCH)) + (
+        " " + " ".join(f"Dogs item {number} done." for number in range(BATCH))
+    )
+    chunks, _ = run(content, FakeEmbed(), size=20_000, percentile=95)
+    assert len(chunks) == 2
+    assert chunks[1].text.startswith("Dogs item 0 done.")
+
+
+def test_semantic_memory_stays_bounded_for_5000_sentences() -> None:
+    """I3 (ruling R22): 5,000 sentences at 3,072 dimensions (a large embedding model) would be
+    15 million floats; only one float32 batch and the distances are ever held."""
+    dims = 3072
+    content = " ".join(f"Sentence number {number} is here." for number in range(5000))
+
+    async def large(texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
+        rng = np.random.default_rng(7)
+        for start in range(0, len(texts), BATCH):
+            count = min(BATCH, len(texts) - start)
+            yield rng.random((count, dims), dtype=np.float32)
+
+    options = ChunkingOptions(strategy="semantic", size=2000, overlap=0)
+    tracemalloc.start()
+    try:
+        chunks, warnings = asyncio.run(
+            chunked(content, options, large, markdown=False, max_chunks=10_000)
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert chunks
+    assert warnings == []
+    assert peak < 30 * 1024 * 1024, f"peak {peak / 1e6:.1f} MB"
+
+
+def test_semantic_cpu_work_runs_on_the_given_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R21: splitting, the distances and the chunks run on the post pool, not on the event
+    loop."""
+    where: list[tuple[str, str]] = []
+    for name in ("split_sentences", "build_chunks", "recursive_spans", "batch_distances"):
+        real = getattr(semantic_module, name)
+
+        def spied(*args: Any, _real: Any = real, _name: str = name, **kwargs: Any) -> Any:
+            where.append((_name, threading.current_thread().name))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(semantic_module, name, spied)
+    cats = " ".join(f"Cats sentence number {number} is here." for number in range(30))
+
+    run(f"{cats} Dogs bark.", FakeEmbed(), size=300, overlap=50)
+
+    assert {name for name, _ in where} == {
+        "split_sentences",
+        "build_chunks",
+        "recursive_spans",
+        "batch_distances",
+    }
+    assert all(thread.startswith("post") for _, thread in where), where
 
 
 @pytest.mark.parametrize("size", [200, 1000])

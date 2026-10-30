@@ -94,6 +94,7 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from text_extraction import model_store
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.documents.pool import (
     ConversionCrashed,
     ConversionError,
@@ -450,13 +451,15 @@ def models_missing(settings: Settings) -> bool:
 
 @dataclass(frozen=True)
 class NlpWorkerParts:
-    """What one nlp worker process runs on: the worker, its children, the settings, and the
-    memory guard of its moves to the ``llm`` pool."""
+    """What one nlp worker process runs on: the worker, its children, the settings, the
+    memory guard of its moves to the ``llm`` pool and the post stage's pool (None: the worker's
+    own)."""
 
     worker: Worker
     pool: PiiChildrenPool
     settings: Settings
     guard: MemoryGuard | None = None
+    post_pool: ConversionPool | None = None
 
     async def start(self) -> None:
         """Start the children, load the models in each and run the self-check (before
@@ -472,6 +475,7 @@ def build_nlp_worker(
     pool = create_nlp_pool(settings)
     store = JobStore(valkey, settings)
     guard = MemoryGuard(valkey, settings.valkey_memory_guard_ratio, registry)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
     worker = Worker(
         settings,
         valkey,
@@ -481,8 +485,11 @@ def build_nlp_worker(
         registry,
         concurrency=settings.pii_concurrency,
         llm_move=create_llm_move(settings, valkey, store, guard, registry),
+        post_pool=post_pool,
     )
-    return NlpWorkerParts(worker=worker, pool=pool, settings=settings, guard=guard)
+    return NlpWorkerParts(
+        worker=worker, pool=pool, settings=settings, guard=guard, post_pool=post_pool
+    )
 
 
 async def serve(parts: NlpWorkerParts, internal: _Server, readiness: Readiness) -> None:
@@ -513,6 +520,8 @@ async def _run(settings: Settings) -> None:
         await serve(parts, internal, readiness)
     finally:
         await parts.pool.shutdown()  # after the loops: their items are given back
+        if parts.post_pool is not None:
+            parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

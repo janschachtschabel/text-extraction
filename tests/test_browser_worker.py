@@ -673,7 +673,8 @@ async def test_document_pool_starts_before_ready_and_stops_after(
     browsers = FakeBrowsers(monkeypatch)
 
     async def start(pool: DocumentPool) -> None:
-        browsers.events.append("start documents")
+        # The selector children (ruling R19) are a DocumentPool of their own.
+        browsers.events.append("start documents" if pool is parts.document_pool else "start other")
 
     monkeypatch.setattr(DocumentPool, "start", start)
     # Without media: the media fetcher's children are a DocumentPool too (see the next test).
@@ -689,8 +690,11 @@ async def test_document_pool_starts_before_ready_and_stops_after(
     async with asyncio.timeout(20):
         await serving
     assert browsers.events.count("start documents") == 1
+    assert browsers.events.count("start other") == 1  # the selector children
     await parts.document_pool.shutdown()
+    await parts.selectors.shutdown()
     parts.conversion_pool.shutdown()
+    parts.post_pool.shutdown()
 
 
 @scenario

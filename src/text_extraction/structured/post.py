@@ -50,38 +50,50 @@ stage of its own (other ``chunking``, other chunks).
 
 An envelope without data, or ``failed`` without content, gets no post stage (``structured`` and
 ``chunks`` stay null). Empty content gives ``chunks: []`` and every field missing, without an
-LLM call. Patterns, chunking, the fallback and the check of learned selectors run in a thread
-in ``apply_post`` (CPU-bound); the sync ``run_post_patterns``, ``needs_llm`` (cheap) and
-``finish_post`` run where they are called, so callers on an event loop call
-``run_post_patterns`` and ``finish_post`` via ``asyncio.to_thread``. The LLM's time is added
-to ``timings.llm_ms``. Nothing here logs the content, a value, a pattern, a selector or a key.
+LLM call.
+
+**Threads** (ruling R21). Patterns, chunking (``semantic`` too, but for its embeddings), the
+fallback and the learning check's CPU work run on ``threads``, the post pool of the process
+(``POST_CONCURRENCY`` threads, a ``ConversionPool`` of its own), never on the event loop and
+never on asyncio's default executor, which also resolves host names. The proposals of
+``learn_selectors`` run in a selector child (``selectors``, ruling R19). The sync
+``run_post_patterns``, ``needs_llm`` (cheap) and ``finish_post`` run where they are called, so
+callers on an event loop run ``run_post_patterns`` and ``finish_post`` on the post pool. The
+LLM's time is added to ``timings.llm_ms``. Nothing here logs the content, a value, a pattern, a
+selector or a key.
 """
 
-import asyncio
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Final, Literal
 
+import numpy as np
+import numpy.typing as npt
 import structlog
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 
-from text_extraction.chunking.semantic import semantic_chunks
+from text_extraction.chunking.semantic import Embed, semantic_chunks
 from text_extraction.chunking.split import WARNING_FALLBACK_RECURSIVE, chunk
 from text_extraction.chunking.types import Chunk, ChunkingOptions
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorInfo
 from text_extraction.extract_models import ExtractResult
+from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
 from text_extraction.llm.basics import LlmError, truncate_input
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.pii.fields import needs_pii
 from text_extraction.pii.types import PiiOptions
 from text_extraction.settings import Settings, llm_available
 from text_extraction.structured.dom import SELECTORS_SKIPPED_WARNING, TABLES_TRUNCATED_WARNING
-from text_extraction.structured.learn import LearnPageTooLargeError, learn
+from text_extraction.structured.learn import LearnCheckFailedError, LearnPageTooLargeError, learn
 from text_extraction.structured.patterns import VALUE_INVALID_WARNING, markdown_tables, run_patterns
 from text_extraction.structured.prompts import document_message, extraction_system
 from text_extraction.structured.schema import CompiledSchema
+from text_extraction.structured.selector_pool import SelectorRunner
 from text_extraction.structured.store import (
     LEARNED_SELECTORS_UNAVAILABLE_WARNING,
     SelectorStore,
@@ -104,10 +116,12 @@ __all__ = [
     "NOTHING_TO_LEARN_WARNING",
     "NOT_RUN_MESSAGE",
     "SELECTOR_LEARNING_FAILED_WARNING",
+    "TOO_LARGE_FOR_LLM_MESSAGE",
     "LlmHop",
     "LlmHopReason",
     "apply_post",
     "finish_post",
+    "finish_too_large",
     "llm_extract",
     "needs_llm",
     "patterns_ran",
@@ -115,6 +129,7 @@ __all__ = [
     "post_done",
     "post_pending",
     "run_post_patterns",
+    "too_large_for_llm",
     "without_dom_stage",
 ]
 
@@ -122,6 +137,7 @@ _log = structlog.get_logger(__name__)
 
 BUSY_MESSAGE: Final = "The LLM step is busy; retry later."
 NOT_RUN_MESSAGE: Final = "The LLM step did not run; retry later."
+TOO_LARGE_FOR_LLM_MESSAGE: Final = "The document is too large for the LLM step."
 LLM_UNAVAILABLE_WARNING: Final = "llm_unavailable"
 LLM_INPUT_TRUNCATED_WARNING: Final = "llm_input_truncated"
 NOTHING_TO_LEARN_WARNING: Final = "nothing_to_learn"
@@ -252,6 +268,14 @@ def needs_llm(
     content = data.content or ""
     if not content.strip():
         return False
+    return _owes_llm(data, structured, chunking)
+
+
+def _owes_llm(
+    data: ExtractResult, structured: StructuredOptions | None, chunking: ChunkingOptions | None
+) -> bool:
+    """Whether the options ask LLM work of this result, whatever its content: ``semantic``
+    chunks not made yet, strategy ``llm``, or ``auto`` with fields missing."""
     if chunking is not None and chunking.strategy == "semantic" and data.chunks is None:
         return True
     compiled = structured.compiled if structured is not None else None
@@ -260,6 +284,38 @@ def needs_llm(
     if structured.strategy == "llm":
         return True
     return structured.strategy == "auto" and bool(_missing(data, compiled))
+
+
+def too_large_for_llm(
+    envelope: Envelope[ExtractResult],
+    structured: StructuredOptions | None,
+    chunking: ChunkingOptions | None,
+) -> bool:
+    """Whether a draft lost its content to ``JOB_ITEM_MAX_BYTES`` (``content_not_stored_too_large``)
+    and owes LLM work or ``semantic`` chunking, which it cannot get any more (ruling R20)."""
+    data = envelope.data
+    if data is None or post_done(envelope, structured, chunking):
+        return False
+    return CONTENT_NOT_STORED_WARNING in data.warnings and _owes_llm(data, structured, chunking)
+
+
+def finish_too_large(
+    envelope: Envelope[ExtractResult],
+    structured: StructuredOptions | None,
+    chunking: ChunkingOptions | None,
+    *,
+    settings: Settings,
+) -> Envelope[ExtractResult]:
+    """The post stage of a draft that is ``too_large_for_llm``: ``finish_post``, then
+    ``llm_failed`` with ``TOO_LARGE_FOR_LLM_MESSAGE``, not retryable (the same draft would be
+    stored without its content again). A result that already is ``partial`` or ``failed`` keeps
+    its status and error."""
+    finished = finish_post(envelope, structured, chunking, settings=settings)
+    if finished.status != "success":
+        return finished
+    failure = LlmError(TOO_LARGE_FOR_LLM_MESSAGE, retryable=False)
+    error = ErrorInfo(code=failure.code, message=failure.message, retryable=failure.retryable)
+    return finished.model_copy(update={"status": "partial", "error": error})
 
 
 def patterns_ran(envelope: Envelope[ExtractResult]) -> bool:
@@ -610,28 +666,30 @@ async def post_at_finish(
     pii: PiiOptions | None,
     *,
     settings: Settings,
+    threads: ConversionPool,
     hop: LlmHop | None = None,
 ) -> Envelope[ExtractResult] | None:
     """The post stage at a finish point (ruling S13), the one sequence that the sync flows
     (``extract_api.post_stage``), the P1 job's write (``extract_api._store_result``) and
     ``Worker._finish`` run. An envelope that does not owe it (``post_pending``) comes back as
-    it is. Otherwise the patterns run (``run_post_patterns``, off the event loop: R10); an
-    envelope that then ``needs_llm`` goes to ``hop`` (a sync request's ``LlmHandoff``, a
-    worker's ``LlmMove``), and None comes back once the llm worker has it (the request handed
-    it over, the item moved). Last, ``finish_post`` (off the event loop) is the guard: LLM work
-    that did not run, with or without a hop, is ``llm_failed`` with the hop's reason. Whatever
-    ``hop`` raises propagates."""
+    it is. Otherwise the patterns run (``run_post_patterns`` on ``threads``, the post pool:
+    R10, R21); an envelope that then ``needs_llm`` goes to ``hop`` (a sync request's
+    ``LlmHandoff``, a worker's ``LlmMove``), and None comes back once the llm worker has it (the
+    request handed it over, the item moved). Last, ``finish_post`` (on the post pool) is the
+    guard: LLM work that did not run, with or without a hop, is ``llm_failed`` with the hop's
+    reason. Whatever ``hop`` raises propagates."""
     if not post_pending(envelope, structured, chunking, pii):
         return envelope
-    envelope = await asyncio.to_thread(run_post_patterns, envelope, structured, settings=settings)
+    patterns = partial(run_post_patterns, settings=settings)
+    envelope = await threads.run(patterns, envelope, structured)
     reason: LlmHopReason | None = None
     if hop is not None and needs_llm(envelope, structured, chunking, settings):
         hopped, reason = await hop(envelope)
         if hopped is None:
             return None
         envelope = hopped
-    return await asyncio.to_thread(
-        finish_post, envelope, structured, chunking, settings=settings, reason=reason
+    return await threads.run(
+        partial(finish_post, settings=settings, reason=reason), envelope, structured, chunking
     )
 
 
@@ -647,29 +705,32 @@ async def apply_post(
     llm: "LlmClient | None",
     store: SelectorStore | None,
     owner: str,
+    threads: ConversionPool,
+    selectors: SelectorRunner,
 ) -> Envelope[ExtractResult]:
     """The post stage with the LLM client ``llm`` (see the module docstring); without one it is
     ``finish_post``. ``store`` and ``owner`` (the API key's name) keep the learned selectors;
-    without them nothing is stored. An envelope that has had its post stage, or gets none,
+    without them nothing is stored. ``threads`` is the post pool, ``selectors`` runs the
+    proposals of ``learn_selectors``. An envelope that has had its post stage, or gets none,
     comes back as it is. LLM failures become ``llm_failed`` in the answer, never an
     exception."""
     data = envelope.data
     if data is None or post_done(envelope, structured, chunking):
         return envelope
     if llm is None:
-        return await asyncio.to_thread(
-            finish_post, envelope, structured, chunking, settings=settings
+        return await threads.run(
+            partial(finish_post, settings=settings), envelope, structured, chunking
         )
     work = _Post.start(envelope, data, structured, chunking, settings)
     if work.result is not None and structured is not None:
-        await asyncio.to_thread(work.run_patterns)
+        await threads.run(work.run_patterns)
         await _extract(work, llm, structured)
         if structured.learn_selectors:
-            await _learn(work, llm, store, owner)
-        work.tables()
+            await _learn(work, llm, store, owner, threads=threads, selectors=selectors)
+        await threads.run(work.tables)
     if work.wants_chunks():
-        await _chunk(work, llm)
-    return work.finished()
+        await _chunk(work, llm, threads)
+    return await threads.run(work.finished)
 
 
 async def _extract(work: _Post, llm: "LlmClient", structured: StructuredOptions) -> None:
@@ -696,7 +757,15 @@ async def _extract(work: _Post, llm: "LlmClient", structured: StructuredOptions)
     work.found(values, "llm")
 
 
-async def _learn(work: _Post, llm: "LlmClient", store: SelectorStore | None, owner: str) -> None:
+async def _learn(
+    work: _Post,
+    llm: "LlmClient",
+    store: SelectorStore | None,
+    owner: str,
+    *,
+    threads: ConversionPool,
+    selectors: SelectorRunner,
+) -> None:
     result = work.result
     if result is None:
         return
@@ -710,15 +779,30 @@ async def _learn(work: _Post, llm: "LlmClient", store: SelectorStore | None, own
         if work.failure is None:  # no field went to the LLM, or it found none of them (R8)
             work.note(NOTHING_TO_LEARN_WARNING)
         return
-    if compiled is None or not html or store is None or not owner or host is None:
+    if host is None or not html:
+        # No page to learn from (M-g): an upload or a text has no host, a document no HTML.
+        work.note(NOTHING_TO_LEARN_WARNING)
+        return
+    if compiled is None or store is None or not owner:
         return
     started = time.perf_counter()
     try:
         rules, report, usage = await learn(
-            llm, html, compiled, values, base_url=work.data.final_url or work.data.url
+            llm,
+            html,
+            compiled,
+            values,
+            base_url=work.data.final_url or work.data.url,
+            selectors=selectors,
+            threads=threads,
         )
     except LearnPageTooLargeError:
         work.note(SELECTORS_SKIPPED_WARNING)
+        result.learned = LearnReport(stored=[], rejected=list(values))
+        return
+    except LearnCheckFailedError as failed:  # the proposals' run timed out or failed (R19)
+        work.used(failed.usage, started)
+        work.note(SELECTOR_LEARNING_FAILED_WARNING)
         result.learned = LearnReport(stored=[], rejected=list(values))
         return
     except LlmError:  # learning is a side effect: the values stand (R9)
@@ -737,43 +821,47 @@ async def _learn(work: _Post, llm: "LlmClient", store: SelectorStore | None, own
     result.learned = report
 
 
-async def _chunk(work: _Post, llm: "LlmClient") -> None:
+async def _chunk(work: _Post, llm: "LlmClient", threads: ConversionPool) -> None:
     options = work.chunking
     if options is None:
         return
     if options.strategy != "semantic" or not work.content.strip():
-        await asyncio.to_thread(work.chunk, options)
+        await threads.run(work.chunk, options)
         return
     try:
         chunks, warnings = await semantic_chunks(
             work.content,
             options,
-            _timed(llm.embed, work),
+            _timed(llm.embed_batches, work),
             markdown=work.data.format == "markdown",
             max_chunks=work.settings.chunk_max_chunks,
+            threads=threads.run,
         )
     except LlmError as error:
         work.fail(error)
-        await asyncio.to_thread(work.chunk_without_embeddings)
+        await threads.run(work.chunk_without_embeddings)
         return
     except ValueError:  # embeddings of another count or length than the sentences
         work.fail(LlmError(_EMBEDDINGS_MISMATCH, retryable=False))
-        await asyncio.to_thread(work.chunk_without_embeddings)
+        await threads.run(work.chunk_without_embeddings)
         return
     work.chunks = chunks
     work.note(*warnings)
 
 
-def _timed(
-    embed: Callable[[Sequence[str]], Awaitable[list[list[float]]]], work: _Post
-) -> Callable[[Sequence[str]], Awaitable[list[list[float]]]]:
-    """``embed`` with its time added to the LLM's."""
+def _timed(embed: Embed, work: _Post) -> Embed:
+    """``embed`` with the time of its requests added to the LLM's."""
 
-    async def timed(texts: Sequence[str]) -> list[list[float]]:
-        started = time.perf_counter()
-        try:
-            return await embed(texts)
-        finally:
-            work.llm_ms += round((time.perf_counter() - started) * 1000)
+    async def timed(texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
+        async with aclosing(embed(texts)) as batches:
+            while True:
+                started = time.perf_counter()
+                try:
+                    batch = await anext(batches)
+                except StopAsyncIteration:
+                    return
+                finally:
+                    work.llm_ms += round((time.perf_counter() - started) * 1000)
+                yield batch
 
     return timed

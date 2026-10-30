@@ -24,6 +24,7 @@ from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import Handover as BrowserHandover
 from text_extraction.browser_options import ArtifactRef, BrowserSecrets, EvaluateAction
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
@@ -2332,16 +2333,21 @@ def test_stored_p1_result_gets_the_post_stage_it_lacks() -> None:
     async def scenario_() -> Envelope[ExtractResult] | None:
         job_id = await store.create("extract", USER, JobOptions(compliance="enforce"), [PAGE])
         await store.mark_running(job_id, lease_seconds=60)
-        await _store_result(
-            store,
-            metrics,
-            job_id,
-            time.monotonic(),
-            envelope,
-            structured=req.structured,
-            chunking=req.chunking,
-            settings=settings,
-        )
+        threads = ConversionPool(1, name="post")
+        try:
+            await _store_result(
+                store,
+                metrics,
+                job_id,
+                time.monotonic(),
+                envelope,
+                structured=req.structured,
+                chunking=req.chunking,
+                settings=settings,
+                threads=threads,
+            )
+        finally:
+            threads.shutdown()
         return (await store.items(job_id, 0, 1))[0].result
 
     stored = asyncio.run(scenario_())
@@ -2353,6 +2359,22 @@ def test_stored_p1_result_gets_the_post_stage_it_lacks() -> None:
     assert stored.data.structured.values == {"plant": "plants"}
     assert stored.data.chunks is not None
     assert [chunk.text for chunk in stored.data.chunks] == ["The green plants grow."]
+
+
+def test_store_result_refuses_settings_without_the_post_pool() -> None:
+    """With ``settings`` the guard runs on the post pool (ruling R21); without one it would be
+    skipped without a word, so that is a caller's error."""
+    settings = llm_settings()
+    store = JobStore(FakeAsyncRedis(), settings)
+    metrics = cast(Any, SimpleNamespace(duration=_NoMetric()))
+
+    async def scenario_() -> None:
+        await _store_result(
+            store, metrics, "job", time.monotonic(), rendered_envelope(), settings=settings
+        )
+
+    with pytest.raises(TypeError, match="threads"):
+        asyncio.run(scenario_())
 
 
 class _NoMetric:

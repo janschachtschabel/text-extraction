@@ -85,8 +85,9 @@ request's caller secrets, once its result is written.
 
 **The post stage (S5, S13).** A result of a job with ``structured`` or ``chunking`` that
 ``_finish`` writes gets the post stage first (``structured.post.post_at_finish``:
-``run_post_patterns``, then ``finish_post``, off the event loop), on its final content: after the
-PII step, before the guard ``fail_closed``. A result that moves to the ``nlp`` pool gets it
+``run_post_patterns``, then ``finish_post``, on the worker's post pool, ``POST_CONCURRENCY``
+threads: ruling R21), on its final content: after the PII step, before the guard
+``fail_closed``. A result that moves to the ``nlp`` pool gets it
 there, on the masked content; one that still owes the PII step and did not move gets none (it is
 withheld).
 
@@ -136,6 +137,7 @@ import random
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Literal, Protocol
 from weakref import WeakKeyDictionary
 
@@ -198,6 +200,7 @@ from text_extraction.server import (
 )
 from text_extraction.settings import Settings
 from text_extraction.structured.post import LlmHop, finish_post, post_at_finish
+from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.valkey import create_valkey
 
 _log = structlog.get_logger(__name__)
@@ -447,7 +450,9 @@ class Worker:
     the queue at once, instead of when its lease expires. ``pii_move`` moves a result that owes
     the PII step to the ``nlp`` pool (every pool but ``nlp``; None while the service has no
     PII); ``llm_move`` one that needs the LLM to the ``llm`` pool (every pool but ``llm``; None
-    while the service has no LLM).
+    while the service has no LLM). ``post_pool`` runs the post stage's CPU work (ruling R21:
+    the process's pool of ``POST_CONCURRENCY`` threads, which its owner shuts down); without one
+    the worker makes its own.
     """
 
     def __init__(
@@ -466,6 +471,7 @@ class Worker:
         give_back_on_cancel: bool = False,
         pii_move: PiiMove | None = None,
         llm_move: LlmMove | None = None,
+        post_pool: ConversionPool | None = None,
     ) -> None:
         self._settings = settings
         self._valkey = valkey
@@ -481,6 +487,11 @@ class Worker:
         self._give_back_on_cancel = give_back_on_cancel
         self._pii_move = pii_move
         self._llm_move = llm_move
+        self._post_pool = (
+            post_pool
+            if post_pool is not None
+            else ConversionPool(settings.post_concurrency, name="post")
+        )
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the slot loops until ``stop`` is set and the items in flight have finished."""
@@ -656,13 +667,11 @@ class Worker:
                 draft = None
             if draft is not None:
                 structured, chunking = job.options.structured, job.options.chunking
-                envelope = await asyncio.to_thread(
-                    finish_post,
+                envelope = await self._post_pool.run(
+                    partial(finish_post, settings=self._settings, reason="failed"),
                     draft,
                     structured,
                     chunking,
-                    settings=self._settings,
-                    reason="failed",
                 )
         outcome = await self._finish(item, job, envelope)
         # The item never runs again: its caller secrets (a browser job's, B6; an ASR key, M11)
@@ -710,6 +719,7 @@ class Worker:
                 job.options.chunking,
                 pii,
                 settings=self._settings,
+                threads=self._post_pool,
                 hop=self._llm_hop(job, item),
             )
         except JobLost:
@@ -870,22 +880,26 @@ async def _load_language_model() -> None:
 @dataclass(frozen=True)
 class WorkerParts:
     """What one worker process runs on: the worker, its memory guard, and the fetcher,
-    conversion pool, document pool and media fetcher (None without ``MEDIA_ENABLED``) to close
-    at the end."""
+    conversion pool, document pool, selector children, media fetcher (None without
+    ``MEDIA_ENABLED``) and post pool to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
     fetcher: Fetcher
     pool: ConversionPool
     document_pool: DocumentPool
+    selectors: SelectorRunner
+    post_pool: ConversionPool
     media: MediaFetcher | None = None
 
 
 async def start_up(parts: WorkerParts) -> None:
     """The start-up of a worker process, before ``/ready``: the language model, and meanwhile
-    the document pool's children and the media fetcher."""
+    the document pool's and the selector pool's children and the media fetcher."""
     media = [parts.media.start()] if parts.media is not None else []
-    await asyncio.gather(_load_language_model(), parts.document_pool.start(), *media)
+    await asyncio.gather(
+        _load_language_model(), parts.document_pool.start(), parts.selectors.start(), *media
+    )
 
 
 def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry) -> WorkerParts:
@@ -896,6 +910,8 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     gate, fetcher = create_outbound(settings, valkey)
     pool = ConversionPool(settings.convert_concurrency)
     document_pool = create_document_pool(settings)
+    selectors = create_selector_runner(settings)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
     media = create_media_fetcher(settings, registry) if settings.media_enabled else None
     pipeline = create_pipeline(
         settings,
@@ -907,6 +923,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         memory_guard=guard,
         document_pool=document_pool,
         media_fetcher=media,
+        selector_runner=selectors,
     )
     store = JobStore(valkey, settings)
     browser_queue = FairQueue(valkey, settings, "browser") if settings.browser_enabled else None
@@ -930,6 +947,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         registry,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
         llm_move=create_llm_move(settings, valkey, store, guard, registry),
+        post_pool=post_pool,
     )
     return WorkerParts(
         worker=worker,
@@ -937,6 +955,8 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         fetcher=fetcher,
         pool=pool,
         document_pool=document_pool,
+        selectors=selectors,
+        post_pool=post_pool,
         media=media,
     )
 
@@ -966,8 +986,10 @@ async def _run(settings: Settings) -> None:
         await parts.fetcher.aclose()
         parts.pool.shutdown()
         await parts.document_pool.shutdown()
+        await parts.selectors.shutdown()
         if parts.media is not None:
             await parts.media.stop()
+        parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

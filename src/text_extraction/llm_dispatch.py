@@ -86,12 +86,14 @@ Logs carry job ids, kinds and error types only: never a text, a value, a selecto
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from functools import partial
 from typing import Final, Literal
 
 from prometheus_client import CollectorRegistry
 from redis.asyncio import Redis
 
 from text_extraction.auth import Principal
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
@@ -177,10 +179,11 @@ class LlmHandoff(LastHopHandoff):
     ``kind`` is the job kind of the request (``extract`` for a URL, ``file`` for an upload),
     ``options`` its stored options (with ``structured`` and ``chunking``) and ``url`` its URL
     (None for an upload); ``llm_key`` is the caller's ``X-LLM-Api-Key``, stored with the llm
-    job. ``wait_until`` is the ``time.monotonic()`` reading at which the route answers 202. A
-    call answers the llm worker's result, the envelope finished without the LLM
-    (``finish_post`` with the reason, run off the event loop), or None once the job belongs to
-    the llm worker (the route answered 202 with it, or it is the request's P1 job)."""
+    job. ``wait_until`` is the ``time.monotonic()`` reading at which the route answers 202;
+    ``threads`` is the app's post pool (ruling R21). A call answers the llm worker's result, the
+    envelope finished without the LLM (``finish_post`` with the reason, on ``threads``), or None
+    once the job belongs to the llm worker (the route answered 202 with it, or it is the
+    request's P1 job)."""
 
     def __init__(
         self,
@@ -191,6 +194,7 @@ class LlmHandoff(LastHopHandoff):
         options: JobOptions,
         principal: Principal,
         url: str | None,
+        threads: ConversionPool,
         wait_until: float | None = None,
         llm_key: str | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -208,6 +212,7 @@ class LlmHandoff(LastHopHandoff):
             clock=clock,
         )
         self._llm = dispatcher
+        self._threads = threads
         self._unserved: UnservedReason | None = None
 
     async def __call__(
@@ -217,15 +222,13 @@ class LlmHandoff(LastHopHandoff):
         result = await super().__call__(envelope, handover)
         if result is None or self._unserved is None:
             return result
-        # The guard of an unserved envelope, off the event loop (R10): chunking is CPU work.
+        # The guard of an unserved envelope, on the post pool (R10, R21): chunking is CPU work.
         options = self._options
-        return await asyncio.to_thread(
-            finish_post,
+        return await self._threads.run(
+            partial(finish_post, settings=self._llm.settings, reason=self._unserved),
             result,
             options.structured,
             options.chunking,
-            settings=self._llm.settings,
-            reason=self._unserved,
         )
 
     def needs(self, envelope: Envelope[ExtractResult]) -> bool:
@@ -236,7 +239,7 @@ class LlmHandoff(LastHopHandoff):
         self, envelope: Envelope[ExtractResult], reason: UnservedReason
     ) -> Envelope[ExtractResult]:
         """The envelope as it is, its reason kept: ``__call__`` finishes it without the LLM
-        (``finish_post``: ``llm_failed``, retryable, the content kept) off the event loop."""
+        (``finish_post``: ``llm_failed``, retryable, the content kept) on the post pool."""
         self._unserved = reason
         return envelope
 

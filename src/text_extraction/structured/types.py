@@ -39,8 +39,8 @@ class SelectorRule(BaseModel, extra="forbid", hide_input_in_errors=True):
     css: str | None = Field(
         default=None,
         max_length=MAX_RULE_LENGTH,
-        description="A CSS selector; without an admin key it may use `:has()` at most once. "
-        "Exactly one of `css` and `xpath`.",
+        description="A CSS selector; without an admin key it may use `:has()` at most once and "
+        "no backslash escape. Exactly one of `css` and `xpath`.",
     )
     xpath: str | None = Field(
         default=None,
@@ -162,7 +162,9 @@ with warnings.catch_warnings():
             description="Selector rules by field name; the names must be properties of `schema`. "
             "They run on pages of at most 50,000 elements (else they are skipped with the warning "
             "`selectors_skipped_large_page`); a field takes at most 1,000 values and 100,000 "
-            "characters (else `structured_truncated`).",
+            "characters (else `structured_truncated`). All rules of a result run together within "
+            "a time limit (`STRUCTURED_SELECTOR_TIMEOUT_SECONDS`, 5 s by default); after it their "
+            "fields are missing with the warning `selectors_timed_out`.",
         )
         patterns: dict[str, PatternRule] = Field(
             default={},

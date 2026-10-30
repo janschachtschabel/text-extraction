@@ -1,16 +1,20 @@
 """Shared fakes of the post-stage tests: results and envelopes, settings with an LLM endpoint
 (pytest-httpserver, OpenAI-compatible) and the replies it gives."""
 
+import contextlib
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 from pytest_httpserver import HTTPServer
 from werkzeug import Request, Response
 
 from text_extraction.compliance import ComplianceReport
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.settings import Settings
+from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured.types import StructuredResult
 
 CHAT = "/v1/chat/completions"
@@ -162,3 +166,18 @@ def error_response(status: int) -> Response:
     return Response(
         '{"error": {"message": "nope"}}', status=status, content_type="application/json"
     )
+
+
+@contextlib.asynccontextmanager
+async def post_pools(
+    settings: Settings | None = None,
+) -> AsyncIterator[tuple[ConversionPool, SelectorRunner]]:
+    """The post pool (threads named ``post``) and the selector children of one test, on the
+    running event loop; shut down after it."""
+    threads = ConversionPool(2, name="post")
+    selectors = create_selector_runner(settings or llm_settings())
+    try:
+        yield threads, selectors
+    finally:
+        await selectors.shutdown()
+        threads.shutdown()

@@ -97,6 +97,7 @@ from text_extraction.server import (
     extraction_graceful_seconds,
 )
 from text_extraction.settings import Settings
+from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.valkey import create_valkey
 from text_extraction.worker import (
     Worker,
@@ -318,8 +319,8 @@ def browser_graceful_seconds(settings: Settings) -> int:
 @dataclass(frozen=True)
 class BrowserWorkerParts:
     """What one browser worker process runs on: the worker, its memory guard, the browsers, and
-    the fetcher, conversion pool, document pool and media fetcher (None without
-    ``MEDIA_ENABLED``) to close at the end."""
+    the fetcher, conversion pool, document pool, selector children, media fetcher (None without
+    ``MEDIA_ENABLED``) and post pool to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
@@ -328,6 +329,8 @@ class BrowserWorkerParts:
     conversion_pool: ConversionPool
     document_pool: DocumentPool
     graceful_seconds: int
+    selectors: SelectorRunner
+    post_pool: ConversionPool
     media: MediaFetcher | None = None
 
     async def start(self) -> None:
@@ -347,6 +350,8 @@ def build_browser_worker(
     gate, fetcher = create_outbound(settings, valkey)
     conversion_pool = ConversionPool(settings.convert_concurrency)
     document_pool = create_document_pool(settings)
+    selectors = create_selector_runner(settings)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
     media = (
         create_media_fetcher(settings, registry, call_seconds=browser_deadline_seconds(settings))
         if settings.media_enabled
@@ -368,6 +373,7 @@ def build_browser_worker(
         timeout_seconds=settings.browser_timeout_seconds,
         document_pool=document_pool,
         media_fetcher=media,
+        selector_runner=selectors,
     )
     store = JobStore(valkey, settings)
     worker = Worker(
@@ -380,6 +386,7 @@ def build_browser_worker(
         concurrency=settings.browser_concurrency,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
         llm_move=create_llm_move(settings, valkey, store, guard, registry),
+        post_pool=post_pool,
     )
     return BrowserWorkerParts(
         worker=worker,
@@ -389,6 +396,8 @@ def build_browser_worker(
         conversion_pool=conversion_pool,
         document_pool=document_pool,
         graceful_seconds=browser_graceful_seconds(settings),
+        selectors=selectors,
+        post_pool=post_pool,
         media=media,
     )
 
@@ -402,15 +411,17 @@ async def serve(
     start_documents: bool = False,
 ) -> None:
     """Start the browsers, run the worker until a signal, then stop the browsers (see the
-    module docstring). With ``start_documents`` (the process's choice) the document pool's
-    children and the media fetcher start with the language model; otherwise the first document
-    or video starts them. The caller closes the fetcher, the conversion pool, the document pool,
-    the media fetcher and Valkey."""
+    module docstring). With ``start_documents`` (the process's choice) the document pool's and
+    the selector pool's children and the media fetcher start with the language model; otherwise
+    the first document, selector rule or video starts them. The caller closes the fetcher, the
+    conversion pool, the document pool, the selector children, the media fetcher, the post pool
+    and Valkey."""
 
     async def startup() -> None:
         starts: list[Awaitable[None]] = []
         if start_documents:
             starts.append(parts.document_pool.start())
+            starts.append(parts.selectors.start())
             if parts.media is not None:
                 starts.append(parts.media.start())
         await asyncio.gather(_load_language_model(), *starts)
@@ -452,8 +463,10 @@ async def _run(settings: Settings) -> None:
         await parts.fetcher.aclose()
         parts.conversion_pool.shutdown()
         await parts.document_pool.shutdown()
+        await parts.selectors.shutdown()
         if parts.media is not None:
             await parts.media.stop()
+        parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

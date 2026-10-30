@@ -1,6 +1,6 @@
 """The client of the operator's OpenAI-compatible LLM endpoint (ruling S9): JSON answers that
-fit a schema (``chat_json``) and embeddings (``embed``). It is generic: the extraction prompt is
-built on top of it (``structured/post.py``, ``structured/learn.py``).
+fit a schema (``chat_json``) and embeddings (``embed_batches``, float32 batches). It is generic:
+the extraction prompt is built on top of it (``structured/post.py``, ``structured/learn.py``).
 
 **The endpoint** is operator configuration (``LLM_BASE_URL``, https unless ``LLM_ALLOW_HTTP``),
 not a caller's target, so the SSRF guard does not apply. As for the external ASR endpoint it is
@@ -31,13 +31,15 @@ count calls (``text_extraction_llm_calls_total{kind, outcome}``) and tokens
 """
 
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Final
 from weakref import WeakKeyDictionary
 
 import httpx2
+import numpy as np
+import numpy.typing as npt
 import openai
 from openai.types import CreateEmbeddingResponse
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
@@ -62,7 +64,7 @@ __all__ = [
 # The SDK's retries of 429, 5xx, timeouts and connection errors (tests set it to 0).
 MAX_RETRIES: Final = 2
 EMBED_BATCH: Final = 64  # texts of one embeddings request
-EMBED_TEXT_CHARS: Final = 2000  # a text of ``embed`` is cut to this
+EMBED_TEXT_CHARS: Final = 2000  # a text of ``embed_batches`` is cut to this
 _RETRYABLE: Final = frozenset({408, 409, 425, 429})
 _REPAIR_ERROR_CHARS: Final = 1000  # of the error text that goes back to the model
 _NO_ANSWER: Final = "Your previous answer was empty."
@@ -192,15 +194,17 @@ class LlmClient:
             return value, usage
         raise LlmError("The LLM answer did not match the schema.", retryable=False)
 
-    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        """The embedding of each text (cut to ``EMBED_TEXT_CHARS`` characters), in order, with
-        ``LLM_EMBEDDING_MODEL``, ``EMBED_BATCH`` texts to a request."""
+    async def embed_batches(self, texts: Sequence[str]) -> AsyncGenerator[npt.NDArray[np.float32]]:
+        """The embeddings of the texts (each cut to ``EMBED_TEXT_CHARS`` characters), in order,
+        with ``LLM_EMBEDDING_MODEL``: one request of ``EMBED_BATCH`` texts at a time, each
+        answer yielded as a float32 array of one row per text (ruling R22: the caller keeps
+        what it needs of a batch, never all vectors). Vectors of different lengths in one answer
+        are a ``ValueError``."""
         if not texts:
-            return []
+            return
         if not self._embedding_model:
             raise LlmError("No LLM embedding model is configured.", retryable=False)
         model = self._embedding_model
-        vectors: list[list[float]] = []
         for start in range(0, len(texts), EMBED_BATCH):
             batch = [text[:EMBED_TEXT_CHARS] for text in texts[start : start + EMBED_BATCH]]
             reply = await self._call(
@@ -219,8 +223,9 @@ class LlmClient:
                 self._metrics.calls.labels("embeddings", "invalid").inc()
                 raise LlmError("The LLM embeddings did not match the request.", retryable=False)
             self._metrics.calls.labels("embeddings", "ok").inc()
-            vectors.extend([float(number) for number in item.embedding] for item in found)
-        return vectors
+            vectors = np.asarray([item.embedding for item in found], dtype=np.float32)
+            del reply, found  # the SDK's Python floats go before the next request
+            yield vectors
 
     async def _call[R](
         self, make: Callable[[], Awaitable[R]], expected: type[R], *, kind: str

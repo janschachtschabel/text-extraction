@@ -2,8 +2,12 @@
 Markdown, chunking on the final content, and the guard ``finish_post`` that answers without the
 LLM. The LLM endpoint is pytest-httpserver (Review Focus 1, 3 and 4)."""
 
+import ast
 import asyncio
+import inspect
 import json
+import sys
+import threading
 import time
 from typing import Any
 
@@ -12,12 +16,18 @@ from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from werkzeug import Request, Response
 
+from text_extraction import llm_dispatch, llm_worker
+from text_extraction import worker as worker_module
+from text_extraction.chunking import semantic as semantic_module
+from text_extraction.chunking import split as split_module
 from text_extraction.chunking.types import ChunkingOptions
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.llm import client as client_module
 from text_extraction.llm.client import LlmClient
 from text_extraction.settings import Settings
+from text_extraction.structured import learn as learn_module
 from text_extraction.structured import patterns as patterns_module
 from text_extraction.structured import post as post_module
 from text_extraction.structured.post import (
@@ -29,6 +39,7 @@ from text_extraction.structured.post import (
     post_done,
     run_post_patterns,
 )
+from text_extraction.structured.selector_pool import create_selector_runner
 from text_extraction.structured.types import LearnReport, StructuredOptions, Table
 
 from .post_helpers import (
@@ -42,6 +53,7 @@ from .post_helpers import (
     envelope,
     error_response,
     llm_settings,
+    post_pools,
     schema,
     serve_chat,
     serve_embeddings,
@@ -68,15 +80,18 @@ def post(
             LlmClient(settings, None, registry=CollectorRegistry()) if server is not None else None
         )
         try:
-            return await apply_post(
-                draft,
-                options,
-                chunking,
-                settings=settings,
-                llm=client,
-                store=None,
-                owner="alice",
-            )
+            async with post_pools(settings) as (threads, selectors):
+                return await apply_post(
+                    draft,
+                    options,
+                    chunking,
+                    settings=settings,
+                    llm=client,
+                    store=None,
+                    owner="alice",
+                    threads=threads,
+                    selectors=selectors,
+                )
         finally:
             if client is not None:
                 await client.aclose()
@@ -665,9 +680,7 @@ def test_patterns_run_once_per_result(monkeypatch: pytest.MonkeyPatch) -> None:
     assert run_post_patterns(patterned, options, settings=settings) == patterned
     needs_llm(patterned, options, None, llm_settings(None))
     done = finish_post(patterned, options, None, settings=settings)
-    asyncio.run(
-        apply_post(patterned, options, None, settings=settings, llm=None, store=None, owner="a")
-    )
+    post(None, patterned, options, settings=settings)
 
     assert calls == [["sku", "price"]]  # once
     result = data_of(done)
@@ -693,3 +706,111 @@ def test_needs_llm_runs_no_regex(monkeypatch: pytest.MonkeyPatch, httpserver: HT
     )
 
     assert needs_llm(draft, options, None, llm_settings(httpserver))
+
+
+# --- where the work runs (ruling R21) ----------------------------------------------------------
+
+
+def _to_thread_calls(module: Any) -> list[str]:
+    """The functions of ``module`` that use ``asyncio.to_thread`` (by name, `<module>` for the
+    top level)."""
+    tree = ast.parse(inspect.getsource(module))
+    found: list[str] = []
+
+    def visit(node: ast.AST, owner: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            name = owner
+            if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                name = child.name
+            if isinstance(child, ast.Attribute) and child.attr == "to_thread":
+                found.append(name)
+            visit(child, name)
+
+    visit(tree, "<module>")
+    return found
+
+
+def test_post_stage_modules_never_use_the_default_executor() -> None:
+    """I2: the post stage's CPU work runs on the bounded post pool (POST_CONCURRENCY), never on
+    asyncio's default executor, which also resolves host names."""
+    for module in (post_module, learn_module, semantic_module, split_module, llm_dispatch):
+        assert _to_thread_calls(module) == [], module.__name__
+    assert _to_thread_calls(llm_worker) == []
+    # The worker's only one loads the language model at start-up, before any item.
+    assert _to_thread_calls(worker_module) == ["_load_language_model"]
+
+
+def test_post_stage_work_runs_on_the_post_pool(
+    monkeypatch: pytest.MonkeyPatch, httpserver: HTTPServer
+) -> None:
+    real_to_thread = asyncio.to_thread
+
+    def guarded(function: Any, *args: Any, **kwargs: Any) -> Any:
+        # Our code may not use it; the OpenAI SDK reads the platform once with it.
+        if sys._getframe(1).f_globals.get("__name__", "").startswith("text_extraction"):
+            raise AssertionError("the post stage used asyncio.to_thread")
+        return real_to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", guarded)
+    where: list[tuple[str, str]] = []
+
+    def spy(module: Any, name: str) -> None:
+        real = getattr(module, name)
+
+        def spied(*args: Any, **kwargs: Any) -> Any:
+            where.append((name, threading.current_thread().name))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(module, name, spied)
+
+    spy(post_module, "run_patterns")
+    spy(post_module, "chunk")
+    spy(semantic_module, "split_sentences")
+    spy(semantic_module, "build_chunks")
+    options = structured(
+        schema=SHOP, patterns={"sku": {"regex": r"Article no\. ([A-Z]+-\d+)", "group": 1}}
+    )
+    recursive = ChunkingOptions(strategy="recursive", size=200, overlap=0)
+    serve_embeddings(httpserver, lambda text: [1.0, 0.0] if "Cats" in text else [0.0, 1.0])
+    settings = llm_settings(httpserver)
+
+    async def scenario() -> None:
+        threads = ConversionPool(1, name="post")
+        selectors = create_selector_runner(settings)
+        client = LlmClient(settings, None, registry=CollectorRegistry())
+        try:
+            await post_module.post_at_finish(
+                envelope(SHOP_TEXT), options, recursive, None, settings=settings, threads=threads
+            )
+            await apply_post(
+                envelope(SHOP_TEXT),
+                options,
+                recursive,
+                settings=settings,
+                llm=None,
+                store=None,
+                owner="a",
+                threads=threads,
+                selectors=selectors,
+            )
+            await apply_post(
+                envelope(TOPICS, format="text"),
+                None,
+                ChunkingOptions(strategy="semantic", size=200, overlap=0),
+                settings=settings,
+                llm=client,
+                store=None,
+                owner="a",
+                threads=threads,
+                selectors=selectors,
+            )
+        finally:
+            await client.aclose()
+            await selectors.shutdown()
+            threads.shutdown()
+
+    asyncio.run(scenario())
+
+    names = {name for name, _ in where}
+    assert names == {"run_patterns", "chunk", "split_sentences", "build_chunks"}
+    assert all(thread.startswith("post") for _, thread in where), where

@@ -132,6 +132,8 @@ _WRITES: dict[int, ResultWrite] = {0: "repeat", 1: "first", 2: "last"}
 
 # Set in ``data.warnings`` of a result that was stored without its content.
 CONTENT_NOT_STORED_WARNING = "content_not_stored_too_large"
+CHUNKS_NOT_STORED_WARNING = "chunks_not_stored_too_large"
+TABLES_NOT_STORED_WARNING = "tables_not_stored_too_large"
 
 # URLs are pushed in chunks, so one command never carries a whole large batch.
 _URL_CHUNK = 1000
@@ -842,7 +844,9 @@ class JobStore:
 
         Only the first write of an index counts and is kept: a repeat (an item that ran again
         after a lost lease) changes nothing. A result over ``JOB_ITEM_MAX_BYTES`` as UTF-8 JSON is
-        stored without its content and with the warning ``content_not_stored_too_large``. Raises
+        stored without its content and with the warning ``content_not_stored_too_large``; still
+        over it, without its chunks and tables too (``chunks_not_stored_too_large``,
+        ``tables_not_stored_too_large``; ``_encode``). Raises
         ``JobLost`` when the job's keys are gone and ``ValueError`` when the index is outside the
         job.
         """
@@ -883,14 +887,28 @@ class JobStore:
         await self.mark_running(job_id, lease_seconds=None)
 
     def _encode(self, envelope: Envelope[ExtractResult]) -> str:
-        """The envelope as JSON; over the size limit, without the content."""
+        """The envelope as JSON; over the size limit, without the content, and when that is
+        not enough, without the chunks and the tables either (ruling R20), each with its
+        warning. What is left (the structured values, metadata, links) is stored as it is."""
         payload = envelope.model_dump_json()
         if len(payload.encode()) <= self._item_max_bytes or envelope.data is None:
             return payload
-        data = envelope.data.model_copy(
-            update={
-                "content": None,
-                "warnings": [*envelope.data.warnings, CONTENT_NOT_STORED_WARNING],
-            }
+        data = envelope.data
+        data = data.model_copy(
+            update={"content": None, "warnings": [*data.warnings, CONTENT_NOT_STORED_WARNING]}
         )
+        payload = envelope.model_copy(update={"data": data}).model_dump_json()
+        if len(payload.encode()) <= self._item_max_bytes:
+            return payload
+        warnings = list(data.warnings)
+        update: dict[str, Any] = {}
+        if data.chunks:
+            update["chunks"] = None
+            warnings.append(CHUNKS_NOT_STORED_WARNING)
+        if data.structured is not None and data.structured.tables:
+            update["structured"] = data.structured.model_copy(update={"tables": None})
+            warnings.append(TABLES_NOT_STORED_WARNING)
+        if not update:
+            return payload
+        data = data.model_copy(update={**update, "warnings": warnings})
         return envelope.model_copy(update={"data": data}).model_dump_json()

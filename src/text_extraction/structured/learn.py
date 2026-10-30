@@ -4,44 +4,61 @@ values it found, kept only when they reproduce those values.
 One LLM call shows the model the values (``<values>``) and the cleaned page (``learn_html``,
 ``<document>``) and asks for one ``{"css": str, "attr": str | null}`` per field, nullable
 (strict schema). Each proposal must be a valid ``SelectorRule`` (CSS only: learned rules are
-never XPath), keep to the limits of a non-admin key (``checks.css_within_limits``), and, run on
-``learn_html`` exactly as the DOM stage runs rules (``dom.RulePage``), give a value equal to the
-LLM's: strings compared with whitespace collapsed and case folded, arrays element by element,
-objects field by field. A selector such as ``*`` that a page talks the model into selects the
-whole page, which is not the value: it is rejected. Nothing from the answer is fetched or
-executed; a proposal that fails a check is rejected without a repair call. Storing the kept
-rules (for the caller's own key, S8) is the post stage's part. Selectors and values are never
-logged.
+never XPath), keep to the limits of a non-admin key (``checks.css_within_limits``), not be
+positional, and, run on ``learn_html`` exactly as the DOM stage runs rules (``rules.run_rules``,
+read with ``dom.rule_value``), give a value equal to the LLM's: strings compared with whitespace
+collapsed and case folded, arrays element by element, objects field by field. A selector such as
+``*`` that a page talks the model into selects the whole page, which is not the value: it is
+rejected. Nothing from the answer is fetched or executed; a proposal that fails a check is rejected
+without a repair call. Storing the kept rules (for the caller's own key, S8) is the post stage's
+part. Selectors and values are never logged.
 
-Parsing ``learn_html`` and running the proposals is CPU work on HTML a page shaped and with
-selectors the LLM chose: it runs in a thread, never on the event loop, and only on a page of at
-most ``STRUCTURED_MAX_ELEMENTS`` elements, like every other selector run. A bigger page raises
+The proposals are selectors the LLM chose, run on HTML a page shaped: they run in a selector
+child (``selector_pool``, ruling R19), all in one run, killed at
+``STRUCTURED_SELECTOR_TIMEOUT_SECONDS``; a run that does not finish (or whose child fails) keeps
+none of them (``LearnCheckFailedError``, the post stage's ``selector_learning_failed``). Counting
+``learn_html``'s elements and comparing the values is CPU work on the post pool
+(``POST_CONCURRENCY``, R21), never on the event loop; the proposals run only on a page of at most
+``STRUCTURED_MAX_ELEMENTS`` elements, like every other selector run. A bigger page raises
 ``LearnPageTooLargeError`` before the LLM call (the post stage reports
-``selectors_skipped_large_page``).
+``selectors_skipped_large_page``). Positional proposals (``checks.positional``, M-d) are
+rejected: ``learn_html`` lacks the page's scripts, styles, SVG and comments, so sibling
+positions there are not the page's.
 """
 
-import asyncio
 from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.structured.checks import css_within_limits, positional
-from text_extraction.structured.dom import RulePage
+from text_extraction.structured.dom import page_too_large, rule_requests, rule_value
 from text_extraction.structured.prompts import LEARN_SYSTEM, learn_message
+from text_extraction.structured.rules import Found
 from text_extraction.structured.schema import CompiledSchema
+from text_extraction.structured.selector_pool import SelectorRunner
 from text_extraction.structured.types import LearnReport, SelectorRule
 
 if TYPE_CHECKING:  # the OpenAI SDK only where a client is made (``llm/basics.py``)
     from text_extraction.llm.client import LlmClient
 
-__all__ = ["LearnPageTooLargeError", "learn"]
+__all__ = ["LearnCheckFailedError", "LearnPageTooLargeError", "learn"]
 
 
 class LearnPageTooLargeError(Exception):
     """``learn_html`` has more than ``STRUCTURED_MAX_ELEMENTS`` elements: nothing is learned."""
+
+
+class LearnCheckFailedError(Exception):
+    """The proposals' run did not finish in time, or its child failed: nothing is learned.
+    ``usage`` is the learning call's."""
+
+    def __init__(self, usage: LlmUsage) -> None:
+        super().__init__("the learned selectors could not be checked")
+        self.usage = usage
 
 
 class _Proposal(BaseModel, extra="ignore"):
@@ -98,25 +115,20 @@ def _rule(proposal: _Proposal | None) -> SelectorRule | None:
     return None if positional(rule) else rule
 
 
-def _open(html: str, base_url: str) -> RulePage | None:
-    """``html`` parsed for the checks; None when it is over ``STRUCTURED_MAX_ELEMENTS``."""
-    page = RulePage(html, base_url)
-    return None if page.too_large else page
-
-
 def _kept(
-    page: RulePage,
     compiled: CompiledSchema,
     asked: Mapping[str, Any],
-    proposals: Mapping[str, _Proposal | None],
+    rules: Mapping[str, SelectorRule],
+    found: Mapping[str, Found],
 ) -> tuple[dict[str, SelectorRule], list[str]]:
-    """The proposals that reproduce their value on ``page``, and the fields rejected."""
+    """The rules whose value (from what they ``found`` on the page) is the one asked, and the
+    fields rejected."""
     kept: dict[str, SelectorRule] = {}
     rejected: list[str] = []
     for name, value in asked.items():
-        rule = _rule(proposals.get(name))
-        found = page.value(compiled, name, rule) if rule is not None else None
-        if rule is not None and found is not None and _normal(found) == _normal(value):
+        rule = rules.get(name)
+        got = rule_value(compiled, name, rule, found.get(name))[0] if rule is not None else None
+        if rule is not None and got is not None and _normal(got) == _normal(value):
             kept[name] = rule
         else:
             rejected.append(name)
@@ -130,20 +142,23 @@ async def learn(
     values: Mapping[str, Any],
     *,
     base_url: str | None = None,
+    selectors: SelectorRunner,
+    threads: ConversionPool,
 ) -> tuple[dict[str, SelectorRule], LearnReport, LlmUsage]:
     """The rules that reproduce ``values`` (the LLM's, by field; None: no value) on ``html``
     (``learn_html``), the report (``stored`` names the kept fields, which the post stage still
     has to store; ``rejected`` the others) and the LLM's usage. ``base_url`` is the page's
-    final URL, against which ``href`` and ``src`` values are made absolute. No call without a
+    final URL, against which ``href`` and ``src`` values are made absolute; ``selectors`` runs
+    the proposals, ``threads`` (the post pool) the rest of the CPU work. No call without a
     value. Raises ``LearnPageTooLargeError`` (before any call) for a page over
-    ``STRUCTURED_MAX_ELEMENTS`` elements, ``LlmError`` when the call fails."""
+    ``STRUCTURED_MAX_ELEMENTS`` elements, ``LlmError`` when the call fails and
+    ``LearnCheckFailedError`` when the proposals' run fails."""
     fields = [name for name in compiled.fields if values.get(name) is not None]
     if not fields:
         empty = LlmUsage(model="", calls=0, prompt_tokens=0, completion_tokens=0)
         return {}, LearnReport(stored=[], rejected=[]), empty
     asked = {name: values[name] for name in fields}
-    page = await asyncio.to_thread(_open, html, base_url or "")
-    if page is None:
+    if await threads.run(page_too_large, html):
         raise LearnPageTooLargeError
     proposals, usage = await client.chat_json(
         LEARN_SYSTEM,
@@ -151,5 +166,9 @@ async def learn(
         _schema(fields),
         validate=partial(_proposals, fields),
     )
-    kept, rejected = await asyncio.to_thread(_kept, page, compiled, asked, proposals)
+    rules = {name: rule for name in fields if (rule := _rule(proposals.get(name))) is not None}
+    outcome = await selectors.run(html, base_url or "", rule_requests(compiled, rules))
+    if outcome.warning is not None:
+        raise LearnCheckFailedError(usage)
+    kept, rejected = await threads.run(_kept, compiled, asked, rules, outcome.found)
     return kept, LearnReport(stored=list(kept), rejected=rejected), usage

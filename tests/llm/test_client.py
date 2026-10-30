@@ -9,6 +9,7 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
 import pytest
 from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, ValidationError
@@ -414,16 +415,19 @@ def test_embed_batches_of_64_and_cuts_texts(httpserver: HTTPServer) -> None:
     texts = [f"{index}:" + "x" * 3000 for index in range(130)]
     registry = CollectorRegistry()
 
-    async def run() -> list[list[float]]:
+    async def run() -> list[Any]:
         client = LlmClient(settings_for(httpserver), None, registry=registry)
         try:
-            return await client.embed(texts)
+            return [batch async for batch in client.embed_batches(texts)]
         finally:
             await client.aclose()
 
-    vectors = asyncio.run(run())
+    batches = asyncio.run(run())
 
-    assert vectors == [[float(index)] for index in range(130)]  # in input order
+    # One float32 array per request (ruling R22), the vectors in input order.
+    assert [batch.shape for batch in batches] == [(64, 1), (64, 1), (2, 1)]
+    assert all(batch.dtype == np.float32 for batch in batches)
+    assert np.concatenate(batches).ravel().tolist() == [float(index) for index in range(130)]
     assert sizes == [64, 64, 2]
     bodies = [request.get_json() for request in sent(httpserver)]
     assert {body["model"] for body in bodies} == {"embed-1"}
@@ -437,10 +441,10 @@ def test_embed_batches_of_64_and_cuts_texts(httpserver: HTTPServer) -> None:
 
 
 def test_embed_without_texts_calls_nothing(httpserver: HTTPServer) -> None:
-    async def run() -> list[list[float]]:
+    async def run() -> list[Any]:
         client = LlmClient(settings_for(httpserver), None, registry=CollectorRegistry())
         try:
-            return await client.embed([])
+            return [batch async for batch in client.embed_batches([])]
         finally:
             await client.aclose()
 
@@ -454,7 +458,7 @@ def test_embed_needs_an_embedding_model(httpserver: HTTPServer) -> None:
             settings_for(httpserver, llm_embedding_model=None), None, registry=CollectorRegistry()
         )
         try:
-            await client.embed(["a"])
+            [batch async for batch in client.embed_batches(["a"])]
         finally:
             await client.aclose()
 
@@ -478,7 +482,7 @@ def test_embed_with_a_wrong_number_of_vectors_fails(httpserver: HTTPServer) -> N
     async def run() -> None:
         client = LlmClient(settings_for(httpserver), None, registry=CollectorRegistry())
         try:
-            await client.embed(["a", "b"])
+            [batch async for batch in client.embed_batches(["a", "b"])]
         finally:
             await client.aclose()
 

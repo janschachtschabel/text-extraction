@@ -13,6 +13,7 @@ import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
+from structlog.testing import capture_logs
 from werkzeug import Request, Response
 
 from tests.structured.post_helpers import (
@@ -26,15 +27,17 @@ from tests.structured.post_helpers import (
 )
 from text_extraction import llm_worker
 from text_extraction.auth import Principal
+from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobOptions
-from text_extraction.jobs import JobStore, llm_lease_seconds
+from text_extraction.jobs import CONTENT_NOT_STORED_WARNING, JobStore, llm_lease_seconds
 from text_extraction.llm_dispatch import LLM_POOL, llm_queue
 from text_extraction.llm_worker import LlmRunner, build_llm_worker
+from text_extraction.pii.types import PiiOptions
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
-from text_extraction.structured.post import NOT_RUN_MESSAGE
+from text_extraction.structured.post import NOT_RUN_MESSAGE, TOO_LARGE_FOR_LLM_MESSAGE
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import StructuredOptions, StructuredResult
 
@@ -78,9 +81,13 @@ class Case:
         *,
         draft: Envelope[ExtractResult] | None = None,
         key: str | None = None,
-        structured: StructuredOptions = PRICE,
+        structured: StructuredOptions | None = PRICE,
+        chunking: ChunkingOptions | None = None,
+        pii: PiiOptions | None = None,
     ) -> tuple[Any, QueueItem]:
-        options = JobOptions(compliance="enforce", structured=structured)
+        options = JobOptions(
+            compliance="enforce", structured=structured, chunking=chunking, pii=pii
+        )
         job_id = await self.store.create("extract", OWNER, options, [URL])
         if draft is not None:
             await self.store.put_draft(job_id, 0, draft)
@@ -98,6 +105,15 @@ class Case:
 
 def run_case(settings: Settings, **job: Any) -> Envelope[ExtractResult]:
     return asyncio.run(Case(settings).run(**job))
+
+
+def refuse_clients(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No LLM client may be made."""
+
+    def refuse(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("an LLM client was made")
+
+    monkeypatch.setattr(llm_worker, "LlmClient", refuse)
 
 
 def keys_sent(server: HTTPServer) -> list[str | None]:
@@ -216,6 +232,88 @@ def test_runner_without_any_key_answers_without_the_llm(httpserver: HTTPServer) 
     assert result.data is not None
     assert result.data.content == CONTENT
     assert httpserver.log == []
+
+
+def test_runner_draft_without_its_content_is_llm_failed_not_retryable(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I1 (ruling R20): a draft stored over JOB_ITEM_MAX_BYTES lost its content; LLM work or
+    semantic chunking it owes cannot be done, and the answer says so (never a silent success).
+    Retrying would store the same draft again: not retryable."""
+    refuse_clients(monkeypatch)
+    lost = envelope(None)
+    assert lost.data is not None
+    lost = lost.model_copy(
+        update={"data": lost.data.model_copy(update={"warnings": [CONTENT_NOT_STORED_WARNING]})}
+    )
+    semantic = ChunkingOptions(strategy="semantic")
+    cases: list[dict[str, Any]] = [
+        {"structured": PRICE},
+        {"structured": None, "chunking": semantic},
+        {
+            "structured": StructuredOptions.model_validate(
+                {"schema": {"type": "object", "properties": {"a": {"type": "string"}}}}
+            )
+        },  # auto: a field still missing
+    ]
+    for case in cases:
+        result = run_case(
+            settings_for(httpserver, llm_embedding_model="embed-1"), draft=lost, **case
+        )
+
+        assert result.status == "partial", case
+        assert result.error is not None
+        assert result.error.code == ErrorCode.LLM_FAILED
+        assert result.error.retryable is False
+        assert result.error.message == TOO_LARGE_FOR_LLM_MESSAGE
+        assert result.data is not None
+        assert CONTENT_NOT_STORED_WARNING in result.data.warnings
+    assert httpserver.log == []
+
+
+def test_runner_withholds_a_draft_that_owes_pii(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-a: the runner is the only code that sends content to a third party; a draft that still
+    owes the PII step is withheld before any client is made (D3 a)."""
+    refuse_clients(monkeypatch)
+
+    result = run_case(
+        settings_for(httpserver), draft=envelope(CONTENT), pii=PiiOptions(mode="mask")
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.code == ErrorCode.PII_FAILED
+    assert result.data is not None
+    assert result.data.content is None
+    assert result.data.structured is None
+    assert httpserver.log == []
+
+
+def test_runner_unexpected_error_keeps_the_content(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M-b: an unexpected exception in the post stage answers the draft without the LLM work:
+    ``llm_failed``, retryable, its content kept; the log has the type only."""
+
+    async def broken(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyError("a page quote that must not be logged")
+
+    monkeypatch.setattr(llm_worker, "apply_post", broken)
+
+    with capture_logs() as logs:
+        result = run_case(settings_for(httpserver), draft=envelope(CONTENT))
+
+    assert result.status == "partial"
+    assert result.error is not None
+    assert (result.error.code, result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert result.data is not None
+    assert result.data.content == CONTENT
+    [line] = [entry for entry in logs if entry["event"] == "llm_post_failed"]
+    assert line["error_type"] == "KeyError"
+    assert "page quote" not in json.dumps(logs, default=str)
+    assert "exc_info" not in line
 
 
 def test_runner_lease_covers_its_deadline(httpserver: HTTPServer) -> None:

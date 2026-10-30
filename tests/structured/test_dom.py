@@ -1,5 +1,7 @@
 """The DOM stage of structured output (ruling S3, S7's ``learn_html``): the ``metadata`` and
-``selectors`` strategies, tables, the cleaned HTML for learning, and the cache key part (S4)."""
+``selectors`` strategies, tables, the cleaned HTML for learning, and the cache key part (S4).
+The selector rules run here in-process, through ``rules.run_rules``, the code a selector child
+runs (R19); ``test_selector_pool.py`` has the children."""
 
 import json
 import re
@@ -24,12 +26,48 @@ from text_extraction.structured.dom import (
     TABLES_TRUNCATED_WARNING,
     clean_html_for_learning,
     dom_stage,
+    rule_requests,
     runs_dom_stage,
+    selector_rules,
     structured_cache_part,
 )
+from text_extraction.structured.rules import run_rules
 from text_extraction.structured.types import SelectorRule, StructuredOptions, StructuredResult
 
 URL = "https://example.org/dir/page.html"
+
+
+def full_stage(
+    html: str,
+    options: StructuredOptions,
+    metadata: Any,
+    *,
+    learned: dict[str, SelectorRule] | None = None,
+    learn: bool = False,
+    learn_max_chars: int = 128_000,
+    url: str = URL,
+    warnings: list[str] | None = None,
+) -> StructuredResult:
+    """The DOM stage as the pipeline runs it: the rules (``selector_rules``) run as a selector
+    child runs them, then ``dom_stage`` with what they found."""
+    noted = warnings if warnings is not None else []
+    items = structured_items(html, url)
+    rules = selector_rules(options, learned, items, noted)
+    found = {}
+    if rules and options.compiled is not None:
+        found = run_rules(html, url, rule_requests(options.compiled, rules))
+    return dom_stage(
+        html,
+        url,
+        options,
+        metadata,
+        items,
+        learn=learn,
+        learn_max_chars=learn_max_chars,
+        rules=rules,
+        found=found,
+        warnings=noted,
+    )
 
 
 def stage(
@@ -41,15 +79,14 @@ def stage(
     learn_max_chars: int = 128_000,
     url: str = URL,
 ) -> StructuredResult:
-    return dom_stage(
+    return full_stage(
         html,
-        url,
         StructuredOptions.model_validate(options),
         extract_metadata(html, url, {}),
-        structured_items(html, url),
+        learned=learned,
         learn=learn,
         learn_max_chars=learn_max_chars,
-        learned=learned or {},
+        url=url,
     )
 
 
@@ -359,13 +396,10 @@ def test_selectors_skipped_on_a_large_page() -> None:
     page = _many_elements(STRUCTURED_MAX_ELEMENTS + 10)
     warnings: list[str] = []
     started = time.perf_counter()
-    result = dom_stage(
+    result = full_stage(
         page,
-        URL,
         StructuredOptions.model_validate(options),
         None,
-        structured_items(page, URL),
-        learn=False,
         learn_max_chars=1000,
         learned={"learned": SelectorRule(css="h1")},
         warnings=warnings,
@@ -387,9 +421,8 @@ def test_selector_field_caps_values_and_characters() -> None:
     long = "".join(f"<p class='l'>{'x' * MAX_VALUE_CHARS}</p>" for _ in range(15))
     page = many + long + "<p class='one'>one</p></body></html>"
     warnings: list[str] = []
-    result = dom_stage(
+    result = full_stage(
         page,
-        URL,
         StructuredOptions(
             schema=schema(items=STRINGS, texts=STRINGS, xitems=STRINGS, one=STRING),
             strategy="selectors",
@@ -401,8 +434,6 @@ def test_selector_field_caps_values_and_characters() -> None:
             },
         ),
         None,
-        structured_items(page, URL),
-        learn=False,
         learn_max_chars=1000,
         warnings=warnings,
     )
@@ -417,13 +448,10 @@ def test_selector_field_caps_values_and_characters() -> None:
 
     # A field within its limits gives no warning.
     quiet: list[str] = []
-    dom_stage(
+    full_stage(
         page,
-        URL,
         StructuredOptions(schema=schema(one=STRING), selectors={"one": SelectorRule(css="li")}),
         None,
-        structured_items(page, URL),
-        learn=False,
         learn_max_chars=1000,
         warnings=quiet,
     )

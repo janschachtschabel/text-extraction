@@ -14,10 +14,10 @@ from pytest_httpserver import HTTPServer
 from redis.exceptions import RedisError
 
 from text_extraction.llm.client import LlmClient
+from text_extraction.structured import learn as learn_module
 from text_extraction.structured.dom import (
     SELECTORS_SKIPPED_WARNING,
     STRUCTURED_MAX_ELEMENTS,
-    RulePage,
     clean_html_for_learning,
 )
 from text_extraction.structured.learn import learn
@@ -40,6 +40,7 @@ from .post_helpers import (
     dom_result,
     envelope,
     llm_settings,
+    post_pools,
     schema,
     serve_chat,
 )
@@ -76,7 +77,16 @@ def run_learn(server: HTTPServer, values: dict[str, Any]) -> tuple[Any, LearnRep
         client = LlmClient(llm_settings(server), None, registry=CollectorRegistry())
         try:
             html = clean_html_for_learning(PAGE, 128_000)
-            return await learn(client, html, compiled(), values, base_url=URL)
+            async with post_pools() as (threads, selectors):
+                return await learn(
+                    client,
+                    html,
+                    compiled(),
+                    values,
+                    base_url=URL,
+                    selectors=selectors,
+                    threads=threads,
+                )
         finally:
             await client.aclose()
 
@@ -222,15 +232,18 @@ def test_learned_selector_must_reproduce_value(httpserver: HTTPServer) -> None:
     async def scenario() -> Any:
         client = LlmClient(llm_settings(httpserver), None, registry=CollectorRegistry())
         try:
-            return await apply_post(
-                draft,
-                options,
-                None,
-                settings=llm_settings(httpserver),
-                llm=client,
-                store=store,
-                owner="alice",
-            )
+            async with post_pools() as (threads, selectors):
+                return await apply_post(
+                    draft,
+                    options,
+                    None,
+                    settings=llm_settings(httpserver),
+                    llm=client,
+                    store=store,
+                    owner="alice",
+                    threads=threads,
+                    selectors=selectors,
+                )
         finally:
             await client.aclose()
 
@@ -297,15 +310,18 @@ def learning_post(
     async def scenario() -> Any:
         client = LlmClient(llm_settings(server), None, registry=CollectorRegistry())
         try:
-            return await apply_post(
-                draft,
-                options,
-                None,
-                settings=llm_settings(server),
-                llm=client,
-                store=store,
-                owner="alice",
-            )
+            async with post_pools() as (threads, selectors):
+                return await apply_post(
+                    draft,
+                    options,
+                    None,
+                    settings=llm_settings(server),
+                    llm=client,
+                    store=store,
+                    owner="alice",
+                    threads=threads,
+                    selectors=selectors,
+                )
         finally:
             await client.aclose()
 
@@ -327,6 +343,8 @@ def test_learned_rules_not_stored_when_valkey_fails(httpserver: HTTPServer) -> N
 
 
 def test_upload_learns_nothing_without_a_host(httpserver: HTTPServer) -> None:
+    """M-g: an upload or a /v1/chunk text has no host to file rules under: nothing is learned,
+    and the answer says so."""
     serve_chat(httpserver, answer({"name": "Blue Kettle"}))
 
     done = learning_post(httpserver, SelectorStore(FakeAsyncRedis(), ttl_seconds=60), url=None)
@@ -334,6 +352,7 @@ def test_upload_learns_nothing_without_a_host(httpserver: HTTPServer) -> None:
     assert done.status == "success"
     assert done.data.structured.values == {"name": "Blue Kettle"}
     assert done.data.structured.learned == LearnReport(stored=[], rejected=[])
+    assert done.data.warnings == ["nothing_to_learn"]
     assert len(chat_requests(httpserver)) == 1  # the extraction only
 
 
@@ -370,15 +389,21 @@ def test_learning_skipped_on_a_page_over_the_element_cap(httpserver: HTTPServer)
 def test_proposals_are_checked_off_the_event_loop(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """I2: parsing learn_html and running the proposed selectors happens in a thread."""
-    threads: list[bool] = []
-    real = RulePage.value
+    """I2 (R21): counting learn_html's elements and comparing the values runs on the post pool;
+    the proposals themselves run in a selector child (R19)."""
+    threads: list[str] = []
 
-    def spy(self: RulePage, *args: Any) -> Any:
-        threads.append(threading.current_thread() is threading.main_thread())
-        return real(self, *args)
+    def spy(name: str) -> None:
+        real = getattr(learn_module, name)
 
-    monkeypatch.setattr(RulePage, "value", spy)
+        def spied(*args: Any) -> Any:
+            threads.append(threading.current_thread().name)
+            return real(*args)
+
+        monkeypatch.setattr(learn_module, name, spied)
+
+    spy("page_too_large")
+    spy("_kept")
     serve_chat(
         httpserver,
         answer({"name": "Blue Kettle"}),
@@ -388,4 +413,5 @@ def test_proposals_are_checked_off_the_event_loop(
     done = learning_post(httpserver, SelectorStore(FakeAsyncRedis(), ttl_seconds=60))
 
     assert done.data.structured.learned == LearnReport(stored=["name"], rejected=[])
-    assert threads == [False]
+    assert len(threads) == 2
+    assert all(name.startswith("post") for name in threads), threads

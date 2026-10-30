@@ -11,12 +11,14 @@ from pydantic import BaseModel
 
 from text_extraction.auth import Principal
 from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
+from text_extraction.chunking.types import Chunk
 from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import JobOptions, JobProgress
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore, browser_lease_seconds
 from text_extraction.settings import Settings
+from text_extraction.structured.types import StructuredResult, Table
 
 START = 1_000_000.0
 OWNER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -285,6 +287,79 @@ async def test_oversized_result_is_stored_without_content() -> None:
     assert big.data is not None
     assert big.data.content is not None  # the caller's envelope is not changed
     assert big.data.warnings == []
+
+
+def chunked(content: str, *, chunks: int, tables: int = 0) -> Envelope[ExtractResult]:
+    """A success whose chunks repeat its content ``chunks`` times, with ``tables`` tables of
+    the same size (as overlapping chunks and big tables do)."""
+    envelope = success(content=content)
+    assert envelope.data is not None
+    data = envelope.data.model_copy(
+        update={
+            "chunks": [
+                Chunk(index=index, text=content, start=0, end=len(content), headings=[])
+                for index in range(chunks)
+            ],
+            "structured": StructuredResult(
+                values={"title": "T"},
+                sources={"title": "metadata"},
+                stage="done",
+                tables=[
+                    Table(index=index, caption=None, headers=[], rows=[[content]])
+                    for index in range(tables)
+                ],
+            ),
+        }
+    )
+    return envelope.model_copy(update={"data": data})
+
+
+@scenario
+async def test_oversized_result_drops_chunks_and_tables_after_the_content() -> None:
+    """I1 (ruling R20): JOB_ITEM_MAX_BYTES bounds what is stored. Chunks repeat the content
+    (with overlap many times over), so a result still over the limit without its content loses
+    its chunks and its tables too, each with a warning of its own."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_item_max_bytes=10_000)
+    job_id = await create_job(store)
+    big = chunked("a" * 3_000, chunks=4, tables=2)
+
+    await store.write_result(job_id, 0, big)
+
+    [item] = await store.items(job_id, 0, 1)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content is None
+    assert data.chunks is None
+    assert data.structured is not None
+    assert data.structured.tables is None
+    assert data.structured.values == {"title": "T"}  # the values stay
+    assert data.warnings == [
+        "content_not_stored_too_large",
+        "chunks_not_stored_too_large",
+        "tables_not_stored_too_large",
+    ]
+    raw = await valkey.hget(f"job:{{{job_id}}}:results", "0")
+    assert raw is not None
+    assert len(raw) <= 10_000
+
+
+@scenario
+async def test_oversized_result_keeps_its_chunks_when_the_content_was_enough() -> None:
+    store = make_store(FakeAsyncRedis(), job_item_max_bytes=10_000)
+    job_id = await create_job(store)
+
+    await store.write_result(job_id, 0, chunked("a" * 6_000, chunks=1))
+
+    [item] = await store.items(job_id, 0, 1)
+    assert item.result is not None
+    data = item.result.data
+    assert data is not None
+    assert data.content is None
+    assert data.chunks is not None
+    assert len(data.chunks) == 1
+    assert data.warnings == ["content_not_stored_too_large"]
 
 
 @scenario

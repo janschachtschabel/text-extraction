@@ -86,7 +86,9 @@ cache, since their artifact belongs to one job, and so do requests with
 
 An HTML page of a request with ``structured`` gets the DOM stage in step 8
 (``structured/dom.py``): its options and the owner's learned selectors (read before the cache
-lookup) are part of the cache key.
+lookup) are part of the cache key. Its selector rules run in the selector children
+(``structured/selector_pool.py``, ruling R19), killed at ``STRUCTURED_SELECTOR_TIMEOUT_SECONDS``
+or the deadline: their fields then stay missing with ``selectors_timed_out``.
 
 With a ``Renderer`` (the browser worker only; docs/architecture.md, "Browser worker"), ``browser``
 requests, screenshots, requests with browser options and ``auto`` items with a draft are rendered
@@ -116,7 +118,8 @@ import math
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import Any, Literal, get_args
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
@@ -192,7 +195,6 @@ from text_extraction.pipeline_documents import (
     DocumentInput,
     DocumentInputMeta,
     DocumentRequest,
-    DocumentRun,
     DocumentSteps,
     OcrNeeded,
     create_document_pool,
@@ -244,11 +246,14 @@ from text_extraction.structured.dom import (
     dom_stage,
     reads_learned,
     reads_metadata,
+    rule_requests,
     runs_dom_stage,
+    selector_rules,
     structured_cache_part,
     usable_learned,
 )
 from text_extraction.structured.post import without_dom_stage
+from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured.store import (
     LEARNED_SELECTORS_UNAVAILABLE_WARNING,
     LearnedSelectorsUnavailableError,
@@ -490,6 +495,7 @@ class _UploadRun:
     report: ComplianceReport  # decision "skipped": an upload is not checked
     file_name: str | None
     started: float = field(default_factory=time.perf_counter)
+    deadline: asyncio.Timeout | None = None
     host: str | None = None  # an upload has none
     kind: str | None = None  # what the bytes are, for the log line
     content_type: str | None = None
@@ -595,6 +601,21 @@ class _Processed:
     links: list[Link] | None
     fingerprint: Fingerprint | None  # not yet compared with the previous one
     structured: StructuredResult | None = None  # the DOM stage's (S3), for HTML only
+    dom: "_DomWork | None" = None  # the DOM stage still to run, once ``_process`` is done
+
+
+@dataclass(frozen=True)
+class _DomWork:
+    """The DOM stage of an HTML page (S3) after ``_process``: its selector ``rules`` (the
+    caller's over the learned, ``dom.selector_rules``) run in a selector child first (R19), then
+    ``dom.dom_stage`` on the conversion pool."""
+
+    html: str
+    final_url: str
+    options: StructuredOptions
+    metadata: PageMetadata | None
+    items: StructuredItems
+    rules: dict[str, SelectorRule]
 
 
 class Pipeline:
@@ -618,6 +639,7 @@ class Pipeline:
         document_pool: DocumentPool | None = None,
         media_fetcher: MediaFetcher | None = None,
         selector_store: SelectorStore | None = None,
+        selector_runner: SelectorRunner | None = None,
     ) -> None:
         """``pool`` runs the CPU-bound steps; without one the pipeline makes its own. So does
         ``document_pool``, the MarkItDown children; the pipeline starts it with the first
@@ -631,7 +653,8 @@ class Pipeline:
         ``BROWSER_UNBLOCK_TIMEOUT_SECONDS``.
 
         ``selector_store`` holds the learned selectors of ``structured`` (S8); without it no
-        request reads any."""
+        request reads any. ``selector_runner`` runs selector rules in child processes (R19);
+        without one the pipeline makes its own, whose children start with the first rule."""
         self._fetcher = fetcher
         self._gate = gate
         self._checker = checker
@@ -646,6 +669,9 @@ class Pipeline:
         self._clearance = clearance
         self._timeout_seconds = timeout_seconds
         self._selector_store = selector_store
+        self._selectors = (
+            selector_runner if selector_runner is not None else create_selector_runner(settings)
+        )
         self._blocked_resources = blocked_resources(settings)
         self._documents = DocumentSteps(
             document_pool if document_pool is not None else create_document_pool(settings),
@@ -1651,13 +1677,21 @@ class Pipeline:
         return await self._finish(run, envelope, run.validators)
 
     async def _converted(
-        self, run: DocumentRun, fetched: FetchResult, kind: Literal["html", "text"], text: str
+        self,
+        run: "_Run | _UploadRun",
+        fetched: FetchResult,
+        kind: Literal["html", "text"],
+        text: str,
     ) -> _Processed | Envelope[ExtractResult]:
-        """``_process`` on the conversion pool, or the failed envelope of a page that broke it."""
+        """``_process`` on the conversion pool, then the DOM stage of an HTML page
+        (``_dom_stage``), or the failed envelope of a page that broke them."""
         started = time.perf_counter()
         learned = run.learned if isinstance(run, _Run) else {}
         try:
-            return await self._pool.run(self._process, run.req, fetched, kind, text, learned)
+            processed = await self._pool.run(self._process, run.req, fetched, kind, text, learned)
+            if processed.dom is not None:
+                processed = await self._dom_stage(run, processed, processed.dom)
+            return processed
         except Exception as error:  # a page that breaks a converter fails alone
             # Traceback without locals (see logging.py); the host only, never the URL.
             _log.error(
@@ -1666,6 +1700,37 @@ class Pipeline:
             return run.failed(ErrorCode.CONVERSION_FAILED, "The page could not be converted.")
         finally:
             run.convert_ms += _ms(started)
+
+    async def _dom_stage(
+        self, run: "_Run | _UploadRun", processed: _Processed, work: _DomWork
+    ) -> _Processed:
+        """The DOM stage of ``work``: its selector rules in a selector child, by
+        ``STRUCTURED_SELECTOR_TIMEOUT_SECONDS`` and the request's deadline (R19: a run that
+        does not finish leaves its fields missing with ``selectors_timed_out``, one whose child
+        failed with ``selectors_failed``), then ``dom_stage`` on the conversion pool."""
+        warnings = list(processed.warnings)
+        compiled = work.options.compiled
+        found = {}
+        if work.rules and compiled is not None:
+            when = run.deadline.when() if run.deadline is not None else None
+            outcome = await self._selectors.run(
+                work.html, work.final_url, rule_requests(compiled, work.rules), deadline=when
+            )
+            found = outcome.found
+            if outcome.warning is not None:
+                warnings.append(outcome.warning)
+        stage = partial(
+            dom_stage,
+            learn=work.options.learn_selectors,
+            learn_max_chars=self._settings.llm_max_input_tokens * 4,
+            rules=work.rules,
+            found=found,
+            warnings=warnings,
+        )
+        structured = await self._pool.run(
+            stage, work.html, work.final_url, work.options, work.metadata, work.items
+        )
+        return replace(processed, structured=structured, warnings=warnings, dom=None)
 
     def _escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
         """Whether this fast result of an ``auto`` request goes on to the browser (B5)."""
@@ -1718,6 +1783,7 @@ class Pipeline:
         deadline = asyncio.timeout(self._timeout_seconds or self._settings.extract_timeout_seconds)
         try:
             async with deadline:
+                run.deadline = deadline
                 return await self._extract_upload(run, body, content_type, deadline)
         except TimeoutError:
             if not deadline.expired():
@@ -2221,14 +2287,15 @@ class Pipeline:
         text: str,
         learned: Mapping[str, SelectorRule] | None = None,
     ) -> _Processed:
-        """Convert and judge the decoded page, and run the DOM stage of ``structured`` on an
-        HTML page (S3) with the ``learned`` selectors. CPU-bound: runs on the conversion pool.
-        The page is parsed once for the metadata and the DOM stage."""
+        """Convert and judge the decoded page, and prepare the DOM stage of ``structured`` on an
+        HTML page (S3) with the ``learned`` selectors (``_DomWork``: ``_dom_stage`` runs it).
+        CPU-bound: runs on the conversion pool. The page is parsed once for the metadata and
+        the DOM stage."""
         final_url = fetched.final_url
         metadata: PageMetadata | None = None
         links: list[Link] | None = None
         html_lang: str | None = None
-        structured: StructuredResult | None = None
+        dom_work: _DomWork | None = None
         dom_warnings: list[str] = []
         if kind == "html":
             conversion = convert_html(text, final_url, req.format)
@@ -2249,17 +2316,8 @@ class Pipeline:
             if dom is not None:
                 if items is None:  # selectors, tables or learning only: the tree is enough
                     items = structured_items(text, final_url, syntaxes=False)
-                structured = dom_stage(
-                    text,
-                    final_url,
-                    dom,
-                    page_metadata,
-                    items,
-                    learn=dom.learn_selectors,
-                    learn_max_chars=self._settings.llm_max_input_tokens * 4,
-                    learned=learned,
-                    warnings=dom_warnings,
-                )
+                rules = selector_rules(dom, learned, items, dom_warnings)
+                dom_work = _DomWork(text, final_url, dom, page_metadata, items, rules)
             if req.links:
                 links = page_links(text, final_url)
         else:
@@ -2290,7 +2348,7 @@ class Pipeline:
             metadata=metadata,
             links=links,
             fingerprint=None if failed else compute_fingerprint(fetched.raw_sha256, content),
-            structured=structured,
+            dom=dom_work,
         )
 
     def _envelope(
@@ -2363,6 +2421,7 @@ def create_pipeline(
     document_pool: DocumentPool | None = None,
     media_fetcher: MediaFetcher | None = None,
     selector_store: SelectorStore | None = None,
+    selector_runner: SelectorRunner | None = None,
 ) -> Pipeline:
     """A pipeline whose gate, compliance checks, cache, fingerprints and learned selectors all
     live in ``valkey``.
@@ -2370,7 +2429,8 @@ def create_pipeline(
     ``gate`` is the one ``fetcher`` reports its sends to (``create_outbound`` makes the pair);
     without it a new gate is made, which then counts its spacing from the turn starts only.
     With ``memory_guard`` the result cache skips its writes while Valkey's memory is high.
-    The browser options, ``document_pool`` and ``media_fetcher`` go to ``Pipeline`` unchanged.
+    The browser options, ``document_pool``, ``media_fetcher`` and ``selector_runner`` go to
+    ``Pipeline`` unchanged.
     Without ``selector_store`` one is made on ``valkey`` (``SELECTOR_LEARN_TTL_SECONDS``)."""
     if gate is None:
         gate = DomainGate(valkey, settings)
@@ -2392,6 +2452,7 @@ def create_pipeline(
         document_pool=document_pool,
         media_fetcher=media_fetcher,
         selector_store=selector_store,
+        selector_runner=selector_runner,
     )
 
 

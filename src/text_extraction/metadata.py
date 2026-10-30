@@ -36,7 +36,7 @@ from extruct.rdfa import RDFaExtractor
 from extruct.utils import parse_html as parse_lxml
 from extruct.utils import parse_xmldom_html
 from extruct.w3cmicrodata import MicrodataExtractor
-from lxml.html import HtmlElement, HTMLParser, fromstring
+from lxml.html import HtmlElement
 from py3langid.langid import MODEL_FILE, LanguageIdentifier
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,7 @@ from text_extraction.licenses import (
     LicenseSource,
     link_header_licenses,
 )
+from text_extraction.structured.rules import page_base, parse_page
 
 _log = structlog.get_logger(__name__)
 
@@ -450,12 +451,9 @@ def _meta_pairs(tree: HtmlElement) -> list[tuple[str, str]]:
 
 
 def _base_url(tree: HtmlElement, url: str) -> str:
-    """The URL that relative references resolve against: ``<base href>`` when it is usable."""
-    for tag in tree.iter("base"):
-        href = (tag.get("href") or "").strip()
-        if href:
-            return absolute_url(url, href) or url
-    return url
+    """The URL that relative references resolve against: ``<base href>`` when it is usable
+    (``structured.rules.page_base``, which a selector child uses too)."""
+    return page_base(tree, url)
 
 
 def _http_url(base: str, value: str) -> str | None:
@@ -610,14 +608,9 @@ def _publishers(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _parse(html: str) -> HtmlElement:
-    """The page as an lxml tree; an empty document when it cannot be parsed. Bytes, because
-    lxml rejects a str that carries an XML encoding declaration. ``huge_tree`` lifts libxml2's
-    limit of 256 nested elements, which would cut a deeply nested page off, footer and all."""
-    try:
-        return fromstring(html.encode(), parser=HTMLParser(encoding="utf-8", huge_tree=True))
-    except Exception as error:  # an empty document, or lxml giving up
-        _log.debug("metadata_parse_failed", error=type(error).__name__)
-        return fromstring(b"<html></html>", parser=HTMLParser(encoding="utf-8"))
+    """The page as an lxml tree (``structured.rules.parse_page``, so that a selector child's
+    XPath sees the tree this module reads)."""
+    return parse_page(html)
 
 
 def page_tree(html: str) -> HtmlElement:

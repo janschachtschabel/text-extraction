@@ -24,14 +24,23 @@ each item it:
    (``structured.store.SelectorStore``), where the pipeline reads them. LLM failures are
    ``llm_failed`` in the result, with its content; the deadline, and no key at all, answer the
    draft without the LLM work (``finish_post(..., reason="failed")``: ``llm_failed``,
-   retryable).
+   retryable), and so does an unexpected error of the post stage (logged by its type only).
+
+Before any client is made, a draft that still owes the PII step is withheld
+(``pii.fields.withheld``: ``pii_failed``; no path hands one over, but the LLM never sees personal
+data, D3 a), and a draft that lost its content to ``JOB_ITEM_MAX_BYTES`` while it owes LLM work
+or ``semantic`` chunking answers ``llm_failed``, not retryable, "The document is too large for
+the LLM step." (``structured.post.finish_too_large``, ruling R20).
 
 The ``Worker`` deletes the draft once the result is written (also of an exhausted item, which
 answers its draft without the LLM work, or ``internal_error``, retryable, when the draft is
 gone), and drops the caller's LLM key (a sync job's at once, a batch's with its last result).
 
 **The process** runs ``LLM_CONCURRENCY`` slot loops and serves only the internal port;
-``/ready`` answers 200 once the loops run. Nothing is loaded at start-up. On SIGTERM the loops
+``/ready`` answers 200 once the loops run. At start-up it starts the selector children that
+check the proposals of ``learn_selectors`` (``structured.selector_pool``, ruling R19); the post
+stage's CPU work runs on its post pool (``POST_CONCURRENCY`` threads, R21). No model is
+loaded. On SIGTERM the loops
 stop claiming and the items in flight get 30 s; the ones still running are then given back to
 the queue at once (``give_back_on_cancel``: an item's lease is long), and run again elsewhere.
 
@@ -47,6 +56,7 @@ import asyncio
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from typing import Final, Literal
 
 import structlog
@@ -54,6 +64,7 @@ from prometheus_client import REGISTRY, CollectorRegistry
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
+from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult, failed_extract
 from text_extraction.internal import Readiness, create_internal_app
@@ -61,11 +72,20 @@ from text_extraction.jobs import JobRecord, JobStore, llm_lease_seconds
 from text_extraction.llm.basics import LlmError
 from text_extraction.llm.client import LlmClient
 from text_extraction.llm_dispatch import llm_queue
+from text_extraction.pii.fields import needs_pii, withheld
 from text_extraction.scheduler import QueueItem
 from text_extraction.server import _Server, _server, configured_settings
 from text_extraction.settings import Settings
-from text_extraction.structured.post import apply_post, finish_post, llm_extract, post_done
+from text_extraction.structured.post import (
+    apply_post,
+    finish_post,
+    finish_too_large,
+    llm_extract,
+    post_done,
+    too_large_for_llm,
+)
 from text_extraction.structured.schema import compile_schema
+from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured.store import SelectorStore
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.valkey import create_valkey
@@ -97,11 +117,23 @@ class LlmRunner:
         selectors: SelectorStore,
         *,
         registry: CollectorRegistry = REGISTRY,
+        post_pool: ConversionPool | None = None,
+        selector_runner: SelectorRunner | None = None,
     ) -> None:
+        """``post_pool`` runs the post stage's CPU work and ``selector_runner`` the proposals of
+        ``learn_selectors`` (rulings R21, R19); without them the runner makes its own."""
         self._settings = settings
         self._store = store
         self._selectors = selectors
         self._registry = registry
+        self._post_pool = (
+            post_pool
+            if post_pool is not None
+            else ConversionPool(settings.post_concurrency, name="post")
+        )
+        self._selector_runner = (
+            selector_runner if selector_runner is not None else create_selector_runner(settings)
+        )
         self.lease_seconds = llm_lease_seconds(settings)
         # The item's overall deadline: three requests to the endpoint (the SDK's retries).
         self.deadline_seconds = 3 * settings.llm_timeout_seconds
@@ -128,6 +160,16 @@ class LlmRunner:
         structured, chunking = job.options.structured, job.options.chunking
         if post_done(draft, structured, chunking):
             return draft  # nothing is owed: done before, or nothing to read
+        if needs_pii(draft, job.options.pii):
+            # No path hands such a draft over, but this is the only code that sends content to
+            # a third party: the LLM never sees personal data (D3 a, M-a).
+            _log.error("llm_draft_owes_pii")
+            return withheld(draft, job.options.pii)
+        if too_large_for_llm(draft, structured, chunking):
+            # Its content was not stored (JOB_ITEM_MAX_BYTES): the LLM work cannot be done (R20).
+            return await self._post_pool.run(
+                partial(finish_too_large, settings=self._settings), draft, structured, chunking
+            )
         key = await self._store.llm_key(job.id)
         try:
             client = LlmClient(self._settings, key, registry=self._registry)
@@ -144,9 +186,16 @@ class LlmRunner:
                     llm=client,
                     store=self._selectors,
                     owner=job.owner,
+                    threads=self._post_pool,
+                    selectors=self._selector_runner,
                 )
         except TimeoutError:
             _log.warning("llm_item_deadline", seconds=self.deadline_seconds)
+            return await self._without_llm(draft, structured, job)
+        except Exception as error:
+            # The draft is a finished result: it keeps its content (M-b). The type only, no
+            # traceback: a message may quote the page.
+            _log.error("llm_post_failed", error_type=type(error).__name__)
             return await self._without_llm(draft, structured, job)
         finally:
             await client.aclose()
@@ -155,13 +204,11 @@ class LlmRunner:
         self, draft: Envelope[ExtractResult], structured: StructuredOptions | None, job: JobRecord
     ) -> Envelope[ExtractResult]:
         """The draft's post stage without the LLM: ``llm_failed``, retryable, its content."""
-        return await asyncio.to_thread(
-            finish_post,
+        return await self._post_pool.run(
+            partial(finish_post, settings=self._settings, reason="failed"),
             draft,
             structured,
             job.options.chunking,
-            settings=self._settings,
-            reason="failed",
         )
 
 
@@ -170,10 +217,13 @@ class LlmRunner:
 
 @dataclass(frozen=True)
 class LlmWorkerParts:
-    """What one llm worker process runs on: the worker and the settings."""
+    """What one llm worker process runs on: the worker and the settings, and the selector
+    children and post pool to close at the end."""
 
     worker: Worker
     settings: Settings
+    selectors: SelectorRunner
+    post_pool: ConversionPool
 
 
 def build_llm_worker(
@@ -182,32 +232,41 @@ def build_llm_worker(
     """The llm worker of a process, nothing started yet."""
     store = JobStore(valkey, settings)
     selectors = SelectorStore(valkey, settings.selector_learn_ttl_seconds)
+    selector_runner = create_selector_runner(settings)
+    post_pool = ConversionPool(settings.post_concurrency, name="post")
+    runner = LlmRunner(
+        settings,
+        store,
+        selectors,
+        registry=registry,
+        post_pool=post_pool,
+        selector_runner=selector_runner,
+    )
     worker = Worker(
         settings,
         valkey,
-        LlmRunner(settings, store, selectors, registry=registry),
+        runner,
         store,
         llm_queue(valkey, settings),
         registry,
         concurrency=settings.llm_concurrency,
         give_back_on_cancel=True,  # the lease is four LLM timeouts: do not leave items waiting
+        post_pool=post_pool,
     )
-    return LlmWorkerParts(worker=worker, settings=settings)
-
-
-async def _nothing_to_start() -> None:
-    """The llm worker loads nothing before ``/ready``."""
+    return LlmWorkerParts(
+        worker=worker, settings=settings, selectors=selector_runner, post_pool=post_pool
+    )
 
 
 async def serve(parts: LlmWorkerParts, internal: _Server, readiness: Readiness) -> None:
-    """Run the worker until a signal, then let the items in flight finish for
-    ``GRACEFUL_SECONDS``. The caller closes the rest."""
+    """Start the selector children, run the worker until a signal, then let the items in
+    flight finish for ``GRACEFUL_SECONDS``. The caller closes the rest."""
     await _serve(
         parts.worker,
         internal,
         readiness,
         graceful_seconds=GRACEFUL_SECONDS,
-        startup=_nothing_to_start,
+        startup=parts.selectors.start,
     )
 
 
@@ -225,6 +284,8 @@ async def _run(settings: Settings) -> None:
     try:
         await serve(parts, internal, readiness)
     finally:
+        await parts.selectors.shutdown()
+        parts.post_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

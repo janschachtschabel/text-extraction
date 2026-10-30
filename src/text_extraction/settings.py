@@ -294,6 +294,15 @@ class Settings(BaseSettings):
     selector_learn_ttl_seconds: int = Field(default=2_592_000, ge=60)  # learned selectors, 30 days
     structured_regex_timeout_seconds: float = Field(default=0.5, ge=0.05, le=5)  # one pattern
     chunk_max_chunks: int = Field(default=2000, ge=1)  # most chunks of one result
+    # Selector rules (caller's, learned, proposed) run in child processes that are killed at a
+    # deadline (ruling R19): one run of all rules of a result, its children per process and the
+    # address space of one child.
+    structured_selector_timeout_seconds: float = Field(default=5, ge=0.1, le=60)
+    structured_selector_processes: int = Field(default=1, ge=1)
+    structured_selector_memory_mb: int = Field(default=512, ge=256)
+    # The post stage's CPU work (patterns, chunking, learning checks) at once per process, on a
+    # thread pool of its own (ruling R21).
+    post_concurrency: int = Field(default=2, ge=1)
 
     @field_validator("log_level", mode="before")
     @classmethod

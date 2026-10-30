@@ -252,6 +252,13 @@ class DocumentPool:
         self._idle.put_nowait(None)  # wakes a caller waiting for a child, who then gives up
         _live_pools.discard(self)
 
+    def abandon(self) -> None:
+        """Kill the children now, without waiting for them, and close the pool: for a pool
+        whose event loop is gone, which ``shutdown`` cannot be awaited on."""
+        with self._lock:
+            self._closed = True
+        self._kill_now()
+
     def child_pids(self) -> list[int]:
         """The process ids of the children (for tests and diagnostics)."""
         with self._lock:

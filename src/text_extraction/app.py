@@ -44,6 +44,7 @@ from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.screenshot_api import router as screenshot_router
 from text_extraction.settings import Settings, llm_available
+from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured_api import CHUNK_PATH
 from text_extraction.structured_api import router as structured_router
 from text_extraction.tracing import TraceMiddleware, current_trace_id
@@ -105,17 +106,20 @@ async def _finish_background(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Load the language model before the first request, and start the document pool's
-    children and the media fetcher (its children and its egress proxy, with ``MEDIA_ENABLED``)
-    meanwhile when asked to (``start_documents``); start the memory guard and the queue gauges;
-    wait for extractions handed over to a job; stop the guard and the gauges (their tasks read
-    Valkey, whose client the server closes after the lifespan); close the fetcher's
-    connections, the conversion pool, the document pool and the media fetcher last."""
+    """Load the language model before the first request, and start the document pool's and
+    the selector pool's children and the media fetcher (its children and its egress proxy, with
+    ``MEDIA_ENABLED``) meanwhile when asked to (``start_documents``); start the memory guard and
+    the queue gauges; wait for extractions handed over to a job; stop the guard and the gauges
+    (their tasks read Valkey, whose client the server closes after the lifespan); close the
+    fetcher's connections, the conversion pool, the document pool, the selector children, the
+    media fetcher and, last, the post pool."""
     documents: DocumentPool = app.state.document_pool
+    selectors: SelectorRunner = app.state.selector_runner
     media: MediaFetcher | None = app.state.media_fetcher
     starts: list[Awaitable[None]] = []
     if app.state.start_documents:
         starts.append(documents.start())
+        starts.append(selectors.start())
         if media is not None:
             starts.append(media.start())
     await asyncio.gather(asyncio.to_thread(load_language_model), *starts)
@@ -137,8 +141,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await fetcher.aclose()
         pool.shutdown()
         await documents.shutdown()
+        await selectors.shutdown()
         if media is not None:
             await media.stop()
+        post_pool: ConversionPool = app.state.post_pool
+        post_pool.shutdown()
 
 
 def create_public_app(
@@ -150,9 +157,11 @@ def create_public_app(
 ) -> FastAPI:
     """Build the public app. Metrics are collected in ``registry`` but not exposed here.
 
-    ``app.state.document_pool`` holds the MarkItDown children of the pipeline, and
+    ``app.state.document_pool`` holds the MarkItDown children of the pipeline,
+    ``app.state.selector_runner`` its selector children (ruling R19), ``app.state.post_pool``
+    the threads of the post stage (``POST_CONCURRENCY``, R21), and
     ``app.state.media_fetcher`` the media children with their egress proxy (None without
-    ``MEDIA_ENABLED``). With ``start_documents`` (the server's choice) the lifespan starts both,
+    ``MEDIA_ENABLED``). With ``start_documents`` (the server's choice) the lifespan starts them,
     so they are ready before the server listens and ``/ready`` answers 200; otherwise (tests)
     the first document or video starts them. The lifespan shuts them down either way.
 
@@ -188,6 +197,8 @@ def create_public_app(
     gate, app.state.fetcher = create_outbound(settings, valkey)
     app.state.conversion_pool = ConversionPool(settings.convert_concurrency)
     app.state.document_pool = create_document_pool(settings)
+    app.state.selector_runner = create_selector_runner(settings)
+    app.state.post_pool = ConversionPool(settings.post_concurrency, name="post")
     app.state.media_fetcher = (
         create_media_fetcher(settings, registry) if settings.media_enabled else None
     )
@@ -202,6 +213,7 @@ def create_public_app(
         memory_guard=app.state.memory_guard,
         document_pool=app.state.document_pool,
         media_fetcher=app.state.media_fetcher,
+        selector_runner=app.state.selector_runner,
     )
     app.state.job_store = JobStore(valkey, settings)
     app.state.job_queue = FairQueue(valkey, settings)
