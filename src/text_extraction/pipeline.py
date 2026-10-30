@@ -499,6 +499,7 @@ class _UploadRun:
     ocr_needed: OcrNeeded | None = None  # for the handoff, once the deadline's steps are done
     asr_handoff: TranscriptionHandoff | None = None
     asr_needed: AsrNeeded | None = None  # likewise
+    short_ok: bool = False  # a page of fewer words than QUALITY_MIN_WORDS is no "too short"
 
     def timings(self) -> Timings:
         return Timings(
@@ -777,6 +778,7 @@ class Pipeline:
         content_type: str | None = None,
         ocr_handoff: OcrHandoff | None = None,
         asr_handoff: TranscriptionHandoff | None = None,
+        short_ok: bool = False,
     ) -> Envelope[ExtractResult]:
         """Extract an uploaded file (ruling F17). ``name`` is its sanitised file name, reported
         as ``document.file_name`` and never logged; ``content_type`` is the part's declared
@@ -791,6 +793,10 @@ class Pipeline:
 
         Audio and video (decided by the bytes, M14) go to ``asr_handoff`` the same way, with the
         answer without a transcription as its stand-in; without a handoff that answer is final.
+
+        ``short_ok`` (``POST /v1/chunk`` with a ``text``, ruling R15): the word-count gate
+        (``QUALITY_MIN_WORDS``) does not apply to an HTML or plain-text upload, since the caller
+        sent the text; a text without any word is still ``failed``/``empty_content``.
         """
         mode = resolve_mode(None, principal, self._settings)
         run = _UploadRun(
@@ -805,6 +811,7 @@ class Pipeline:
             file_name=name,
             ocr_handoff=ocr_handoff,
             asr_handoff=asr_handoff,
+            short_ok=short_ok,
         )
         outcome = ErrorCode.INTERNAL_ERROR.value
         try:
@@ -1870,7 +1877,8 @@ class Pipeline:
                 fingerprint=processed.fingerprint,
                 warnings=processed.warnings,
                 structured=processed.structured,
-            )
+            ),
+            min_words=1 if run.short_ok else None,
         )
 
     # --- the render path (browser worker only) -------------------------------------------------
@@ -2285,9 +2293,12 @@ class Pipeline:
             structured=structured,
         )
 
-    def _envelope(self, result: ExtractResult) -> Envelope[ExtractResult]:
-        """The envelope for a finished result: the quality verdict decides the status."""
-        min_words = self._settings.quality_min_words
+    def _envelope(
+        self, result: ExtractResult, *, min_words: int | None = None
+    ) -> Envelope[ExtractResult]:
+        """The envelope for a finished result: the quality verdict decides the status.
+        ``min_words`` replaces ``QUALITY_MIN_WORDS`` (an upload with ``short_ok``)."""
+        min_words = self._settings.quality_min_words if min_words is None else min_words
         verdict = quality_error(result.quality, min_words) if result.quality else None
         if verdict is None:
             return Envelope(status="success", data=result)

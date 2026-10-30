@@ -2,6 +2,7 @@
 ``POST /v1/extract`` and ``POST /v1/extract/file``, on fakeredis with a fake fetcher; the semantic
 test runs the fake llm worker and pytest-httpserver as ``tests/test_llm_dispatch.py`` does."""
 
+import asyncio
 import json
 from typing import Any
 
@@ -25,6 +26,7 @@ from tests.test_extract_api import (
     refusal,
     without_llm_hop,
 )
+from tests.test_file_api import BEARER, asgi_call, comparable
 from tests.test_llm_dispatch import CALLER_KEY, LLM_HEADERS, LlmService, keys_sent
 
 METADATA_TITLE: dict[str, Any] = {"schema": SCHEMA_ONE, "strategy": "metadata"}
@@ -460,3 +462,168 @@ def test_the_new_routes_are_authenticated() -> None:
         )
 
     assert no_key.status_code == structured_no_key.status_code == 401
+
+
+# --- fix round 1: R14, R15, R16 ---
+
+
+def test_chunk_text_is_limited_by_document_max_bytes_even_with_media() -> None:
+    # R14: a text is never media. With ASR on, uploads may be as large as MEDIA_UPLOAD_MAX_BYTES
+    # (and the body limit follows), but a text is limited by DOCUMENT_MAX_BYTES.
+    settings = make_settings(
+        asr_enabled=True, media_upload_max_bytes=1_000_000, document_max_bytes=4096
+    )
+    service = Service(settings)
+    with TestClient(service.app) as client:
+        over = chunk(client, text="x" * 4097, chunking={"strategy": "fixed"})
+        within = chunk(client, text="word " * 800, chunking={"strategy": "fixed"})
+
+    assert over.status_code == 413, over.text
+    assert "4096" in over.json()["error"]["message"]
+    assert within.status_code == 200, within.text
+
+
+def test_chunk_empty_text_422() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        response = chunk(client, text="", chunking=CHUNKING_MARKDOWN)
+
+    assert response.status_code == 422, response.text
+
+
+def example_bodies(client: TestClient, path: str) -> dict[str, dict[str, Any]]:
+    spec = client.get("/openapi.json").json()
+    content = spec["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+    return {name: example["value"] for name, example in content["examples"].items()}
+
+
+def test_chunk_openapi_text_examples_answer_success() -> None:
+    # R15: the documented examples, as they are written, answer `success`: a short text is no
+    # "content too short" on a chunking endpoint.
+    service = Service(llm_settings())
+    with TestClient(service.app) as client:
+        examples = example_bodies(client, "/v1/chunk")
+        text = chunk(client, **examples["text"])
+        plain = chunk(client, **{**examples["text"], "text_type": "plain"})
+        url = chunk(client, **{**examples["url"], "url": PAGE})
+
+    for response in (text, plain, url):
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "success", response.json()["error"]
+        assert response.json()["error"] is None
+        assert response.json()["data"]["chunks"]
+    assert text.json()["data"]["mode_used"] == "upload"
+    assert text.json()["data"]["word_count"] < 50
+
+
+def test_chunk_openapi_semantic_example_answers_success(httpserver: HTTPServer) -> None:
+    serve_embeddings(httpserver, lambda text: [1.0, 0.0] if "Cats" in text else [0.0, 1.0])
+    service = LlmService(httpserver, llm_embedding_model="embed-1")
+    with TestClient(service.app) as client, service.workers():
+        example = example_bodies(client, "/v1/chunk")["semantic"]
+        response = chunk(client, LLM_HEADERS, **example)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body["error"]
+    assert [item["text"] for item in body["data"]["chunks"]] == [
+        "Cats purr. Cats sleep.",
+        "Dogs bark. Dogs run.",
+    ]
+
+
+def test_chunk_short_text_is_success_but_an_empty_page_is_still_failed() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        short = chunk(client, text="Just one short sentence.", chunking={"strategy": "fixed"})
+        blank = chunk(client, text=" \n ", chunking={"strategy": "fixed"})
+
+    assert short.json()["status"] == "success", short.json()["error"]
+    assert short.json()["data"]["chunks"][0]["text"] == "Just one short sentence."
+    assert blank.json()["status"] == "failed"
+    assert blank.json()["error"]["code"] == "empty_content"
+
+
+def test_the_word_count_gate_still_applies_to_the_upload_route() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        response = client.post(
+            "/v1/extract/file",
+            files={"file": ("short.txt", b"Just one short sentence.", "text/plain")},
+            headers=AUTH,
+        )
+
+    assert response.json()["status"] == "partial"
+    assert response.json()["error"]["code"] == "content_too_short"
+
+
+BODY_CHUNKS = [b'{"text": "' + b"x" * 65_526] + [b"x" * 65_536] * 400  # about 26 MB
+JSON_HEADERS = [(b"content-type", b"application/json")]
+
+
+def test_chunk_without_key_is_401_before_the_body_is_read() -> None:
+    # R16: as for the upload route, a refusal costs the pod none of the body.
+    app = Service().app
+
+    async def scenario() -> tuple[Any, Any]:
+        refused = await asgi_call(app, BODY_CHUNKS, JSON_HEADERS, "/v1/chunk")
+        extract = await asgi_call(
+            app, [b'{"url": "https://example.org/"}'], JSON_HEADERS, "/v1/extract"
+        )
+        return refused, extract
+
+    refused, extract = asyncio.run(scenario())
+
+    assert refused.status == 401
+    assert refused.pulled == 0
+    assert refused.json()["error"]["code"] == "unauthorized"
+    assert comparable(refused) == comparable(extract)
+
+
+def test_chunk_over_rate_limit_is_429_before_the_body_is_read() -> None:
+    service = Service(make_settings(rate_limit_per_minute=1))
+    app = service.app
+
+    async def scenario() -> Any:
+        await app.state.rate_limiter.hit("alice", 1)  # the minute's one request is used up
+        return await asgi_call(app, BODY_CHUNKS, [*JSON_HEADERS, *BEARER], "/v1/chunk")
+
+    refused = asyncio.run(scenario())
+
+    assert refused.status == 429
+    assert refused.pulled == 0
+    assert "retry-after" in refused.headers
+
+
+def test_chunk_counts_once_against_the_rate_limit() -> None:
+    service = Service(make_settings(rate_limit_per_minute=2))
+    with TestClient(service.app) as client:
+        statuses = [
+            chunk(client, text=MARKDOWN, chunking=CHUNKING_MARKDOWN).status_code for _ in range(3)
+        ]
+
+    assert statuses == [200, 200, 429]
+
+
+def test_chunk_authenticated_body_over_limit_is_413_without_reading_it_all() -> None:
+    service = Service(make_settings(document_max_bytes=2048))
+    app = service.app
+
+    refused = asyncio.run(asgi_call(app, BODY_CHUNKS, [*JSON_HEADERS, *BEARER], "/v1/chunk"))
+
+    assert refused.status == 413
+    assert refused.pulled <= 3  # refused at the chunk that went over 2,048 + 64 KiB
+    assert refused.json()["error"]["code"] == "invalid_request"
+
+
+def test_chunk_invalid_json_is_422() -> None:
+    service = Service()
+    with TestClient(service.app) as client:
+        broken = client.post(
+            "/v1/chunk", content=b'{"text": ', headers={**AUTH, "content-type": "application/json"}
+        )
+        wrong = chunk(client, text=MARKDOWN, chunking={"strategy": "nope"})
+
+    for response in (broken, wrong):
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "invalid_request"

@@ -13,9 +13,12 @@ structured output and for chunking.
   ``text.md`` or ``text.txt``; ``text_type``), converted by ``Pipeline.extract_upload`` through
   the upload flow of ``POST /v1/extract/file`` (``file_api.answer_upload``): ``mode_used:
   upload``, no fetch, no cache, a job of kind ``file`` when it is handed over. A ``plain`` text
-  is ``format: text``, so that its chunks have no headings. A text over the upload limit
-  (``file_api.upload_file_limit``) is 413 as a body over it would be; the route's body limit is
-  that limit + 64 KiB (``upload_body_limit``), not the small limit of the other JSON routes.
+  is ``format: text``, so that its chunks have no headings. A text over ``DOCUMENT_MAX_BYTES`` is
+  413 as a body over the limit would be (a text is never media; ruling R14), and a short text is
+  fine: the word-count gate (``QUALITY_MIN_WORDS``) does not apply to it (R15). The route
+  authenticates and rate-limits before it reads the body (R16, ``file_api.AuthFirstRoute``), and
+  its body limit is the upload's (``upload_body_limit``), not the small limit of the other JSON
+  routes.
 """
 
 from typing import Annotated, Any, Final
@@ -29,7 +32,7 @@ from text_extraction.envelope import Envelope
 from text_extraction.errors import BodyTooLarge
 from text_extraction.extract_api import ASR_KEY_DESCRIPTION, LLM_KEY_DESCRIPTION, respond
 from text_extraction.extract_models import ChunkRequest, ExtractResult, StructuredRequest
-from text_extraction.file_api import answer_upload, check_upload_request, upload_file_limit
+from text_extraction.file_api import AuthFirstRoute, answer_upload, check_upload_request
 from text_extraction.file_models import FileForm
 from text_extraction.job_models import JobAccepted
 from text_extraction.ratelimit import rate_limited
@@ -116,6 +119,8 @@ _ACCEPTED: Final[dict[int | str, dict[str, Any]]] = {
 }
 
 router = APIRouter()
+# `POST /v1/chunk` authenticates and rate-limits before its body is read (ruling R16).
+chunk_router = APIRouter(route_class=AuthFirstRoute)
 
 
 @router.post(
@@ -156,10 +161,9 @@ async def structured(
     )
 
 
-@router.post(
+@chunk_router.post(
     CHUNK_PATH,
     summary="Split a URL or a text into chunks",
-    dependencies=[Depends(rate_limited)],
     response_model=Envelope[ExtractResult],
     responses={
         **_ACCEPTED,
@@ -186,7 +190,8 @@ async def chunk(
     `POST /v1/extract` with `chunking` required, with its options. With `text` (at most
     `DOCUMENT_MAX_BYTES` as UTF-8, else 413) the text is handled as an upload of `text/markdown`
     or `text/plain` (`text_type`, default `markdown`), as by `POST /v1/extract/file`:
-    `mode_used: "upload"`, `url: null`, `cache: "bypass"`. A `plain` text is `format: text`:
+    `mode_used: "upload"`, `url: null`, `cache: "bypass"`; a short text is fine (no minimum
+    word count), an empty one 422. A `plain` text is `format: text`:
     its chunks have no headings. The chunks are `data.chunks`, each with its offsets into
     `data.content` and its heading path.
 
@@ -208,8 +213,8 @@ async def chunk(
     assert body.text is not None  # noqa: S101 - one of url and text is set; narrows the type
     settings: Settings = request.app.state.settings
     data = body.text.encode()
-    if len(data) > upload_file_limit(settings):
-        raise BodyTooLarge(upload_file_limit(settings))
+    if len(data) > settings.document_max_bytes:  # a text is never media (R14)
+        raise BodyTooLarge(settings.document_max_bytes)
     markdown = body.text_type == "markdown"
     form = FileForm(
         format=body.format if markdown else "text",
@@ -231,4 +236,8 @@ async def chunk(
         "text/markdown" if markdown else "text/plain",
         asr_key=None,
         llm_key=caller_llm_key,
+        short_ok=True,  # the caller sent the text: chunking a short one is valid (R15)
     )
+
+
+router.include_router(chunk_router)

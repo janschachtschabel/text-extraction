@@ -138,12 +138,17 @@ def sanitize_file_name(name: str | None) -> str | None:
     return base[:MAX_FILE_NAME_CHARS]
 
 
-class _UploadRoute(APIRoute):
-    """Authenticates the caller and counts the request against its rate limit, then parses the
-    form with the upload's limits, all before FastAPI reads the body (it reads the body before
-    it runs any dependency, and its own parse allows 1,000 files and fields). Both checks read
-    headers only. The parsed form is kept on the request, so FastAPI uses it, and closes it when
-    the answer is sent."""
+class AuthFirstRoute(APIRoute):
+    """Authenticates the caller and counts the request against its rate limit before FastAPI
+    reads the body (it reads and parses a body before it runs any dependency): a caller without
+    a key, or over its rate limit, gets its 401 or 429 without the pod receiving a byte of the
+    body. Both checks read headers only. The route counts the request itself: it takes no
+    ``rate_limited`` dependency. ``read_body`` is the hook for what else is done with the body's
+    start before the handler; the body limit of the path (``BodyLimitMiddleware``) applies to
+    whatever is read. Used by the upload route and by ``POST /v1/chunk``."""
+
+    async def read_body(self, request: Request) -> None:
+        """Called after the checks, before FastAPI reads the body; the default does nothing."""
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
@@ -151,21 +156,30 @@ class _UploadRoute(APIRoute):
         async def limited(request: Request) -> Response:
             principal = await require_role("user")(await authenticate(request))
             await rate_limited(request, principal)  # the route's only count of this request
-            try:
-                await request.form(
-                    max_files=MAX_FILES, max_fields=MAX_FIELDS, max_part_size=MAX_FIELD_BYTES
-                )
-            except StarletteHTTPException as error:
-                # Starlette refuses a form over the limits, or a malformed one, with a 400 whose
-                # detail names the limit, never the content. A body over its limit (413) passes.
-                if error.status_code != HTTPStatus.BAD_REQUEST:
-                    raise
-                raise ServiceError(
-                    ErrorCode.INVALID_REQUEST, error.detail, HTTPStatus.UNPROCESSABLE_ENTITY
-                ) from None
+            await self.read_body(request)
             return await handler(request)
 
         return limited
+
+
+class _UploadRoute(AuthFirstRoute):
+    """The upload route: after the checks the form is parsed with the upload's limits (FastAPI's
+    own parse allows 1,000 files and fields). The parsed form is kept on the request, so FastAPI
+    uses it, and closes it when the answer is sent."""
+
+    async def read_body(self, request: Request) -> None:
+        try:
+            await request.form(
+                max_files=MAX_FILES, max_fields=MAX_FIELDS, max_part_size=MAX_FIELD_BYTES
+            )
+        except StarletteHTTPException as error:
+            # Starlette refuses a form over the limits, or a malformed one, with a 400 whose
+            # detail names the limit, never the content. A body over its limit (413) passes.
+            if error.status_code != HTTPStatus.BAD_REQUEST:
+                raise
+            raise ServiceError(
+                ErrorCode.INVALID_REQUEST, error.detail, HTTPStatus.UNPROCESSABLE_ENTITY
+            ) from None
 
 
 router = APIRouter(route_class=_UploadRoute)
@@ -293,11 +307,13 @@ async def answer_upload(
     *,
     asr_key: str | None,
     llm_key: str | None,
+    short_ok: bool = False,
 ) -> Envelope[ExtractResult] | Response:
     """Convert the upload's ``body`` (``name`` is its sanitised file name, ``content_type`` the
     declared type) and answer, or hand it over to a job after ``form.wait_seconds`` (the module
     docstring). The request has passed ``check_upload_request``; ``asr_key`` and ``llm_key`` are
-    its keys. Shared with ``POST /v1/chunk`` for a ``text`` (``structured_api.py``)."""
+    its keys. ``short_ok`` is for a ``text`` of ``POST /v1/chunk`` (``structured_api.py``), which
+    shares this flow: no word-count gate (``Pipeline.extract_upload``)."""
     state = request.app.state
     settings: Settings = state.settings
     # Only a request that may need the LLM keeps the caller's key with its jobs.
@@ -325,6 +341,7 @@ async def answer_upload(
         handover_time(wait_seconds, settings),
         asr_key,
         job_llm_key,
+        short_ok=short_ok,
     )
     meta = UploadInputMeta(file_name=name, content_type=content_type)
     return await answer_or_hand_over(
@@ -371,6 +388,7 @@ async def _flow(
     wait_until: float | None,
     asr_key: str | None,
     llm_key: str | None = None,
+    short_ok: bool = False,
 ) -> Envelope[ExtractResult] | None:
     """The upload's envelope, or None when the Docling, the ASR, the nlp or the llm worker writes
     its job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the
@@ -401,7 +419,14 @@ async def _flow(
         llm_key=llm_key,
     )
     envelope = await pipeline.extract_upload(
-        body, name, form, principal, content_type=content_type, ocr_handoff=ocr, asr_handoff=asr
+        body,
+        name,
+        form,
+        principal,
+        content_type=content_type,
+        ocr_handoff=ocr,
+        asr_handoff=asr,
+        short_ok=short_ok,
     )
     if (ocr is not None and ocr.handed_over) or (asr is not None and asr.handed_over):
         return None
