@@ -124,7 +124,7 @@ the crawl found. The crawl is a `site` job, so the service needs an extract work
 
 ```bash
 uv run python -m tests.live.run_site --urls tests/live/urls/sites.csv --depth 1 \
-  --max-pages 25 --compliance report
+  --max-pages 25 --compliance enforce
 ```
 
 Each site is one request (`depth`, `max_pages`, `compliance` as given, `cache: false`); all sites
@@ -144,7 +144,7 @@ so far. The exit code is always 0: the run is a report.
 | `--urls` | `urls/sites.csv` | CSV with a `url` column: the start pages. |
 | `--depth` | 1 | The request's `depth`. |
 | `--max-pages` | 25 | The request's `max_pages`. |
-| `--compliance` | `report` | The request's `compliance` (`report`: nothing is blocked, the reports say what `enforce` would block). |
+| `--compliance` | `enforce` | The request's `compliance`. A crawler follows links, so it respects robots.txt and TDM opt-outs (CLAUDE.md rule 6, decision D4): what they exclude is not fetched and its link says `blocked`, counted in the crawl histogram. `report` fetches it anyway; use it only against a site you run. |
 | `--timeout` | 60 | Deadline of one HTTP request in seconds. |
 | `--job-timeout` | 1800 | Seconds to wait for a site's job to complete. |
 | `--poll-seconds` | 5 | Seconds between two reads of a job. |
@@ -195,10 +195,11 @@ and worker logs as the `live-results` artifact.
 - **Every run** also reports the media set (`media.csv`, `--mode auto --no-transcribe`; no ASR
   worker runs there), never as a gate: YouTube may refuse the runners' data-centre IPs (D1).
 - **Every run** also reports the site run (`run_site.py` on `sites.csv`, depth 1, 25 pages per
-  site, `compliance: report`), last and never as a gate: it starts an extract worker (internal
+  site, `compliance: enforce`), last and never as a gate: it starts an extract worker (internal
   port 9092; the runs before it measure the rig without one), the step may fail without failing
-  the job (`continue-on-error`, at most 20 minutes, `--job-timeout 900`), and its summary goes to
-  the job log and the job summary; the worker's log is in the artifact.
+  the job (`continue-on-error`, at most 20 minutes, `--job-timeout 900`; skipped once the run
+  is cancelled), and its summary goes to the job log and the job summary; the worker's log is in
+  the artifact.
 
 If the gate misses, do not tune a setting first: compare the buckets per domain, fast against
 browser, and debug the domains that differ. When the ok rate drops between two commits, run both

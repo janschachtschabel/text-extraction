@@ -191,12 +191,14 @@ jobs:
             --summary-out results/summary_media_auto.md
 
       # Report only, never fails the job (package 9): the site structure crawl of five WLO-type
-      # sites, one click deep, at most 25 pages each, under `compliance: report`. A crawl is a
-      # `site` job, so an extract worker starts here, after the runs above (they measure the
-      # rig without one), with its internal port on 9092. The summary goes to the job log and,
-      # with the others, to the job summary.
+      # sites, one click deep, at most 25 pages each, under `compliance: enforce` (a crawler
+      # follows links, so robots.txt and TDM opt-outs bind it: CLAUDE.md rule 6, decision D4;
+      # the summary counts the links that say `blocked`). A crawl is a `site` job, so an extract
+      # worker starts here, after the runs above (they measure the rig without one), with its
+      # internal port on 9092. The summary goes to the job log and, with the others, to the job
+      # summary. Not after a cancel: no crawl of real sites once someone stopped the run.
       - name: Run the site structure crawl (report only)
-        if: always()
+        if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 20
         env:
@@ -217,7 +219,7 @@ jobs:
             --urls tests/live/urls/sites.csv \
             --depth 1 \
             --max-pages 25 \
-            --compliance report \
+            --compliance enforce \
             --job-timeout 900 \
             --out results/site_structure.jsonl \
             --summary-out results/summary_site_structure.md || true

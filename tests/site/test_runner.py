@@ -14,7 +14,7 @@ from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pydantic import TypeAdapter
 
-from tests.fakes import PARAGRAPH, Answer, FakeFetcher, Redirect, fetched
+from tests.fakes import PARAGRAPH, Answer, FakeFetcher, Redirect, RefusingGate, fetched
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker, ComplianceMode
 from text_extraction.conversion_pool import ConversionPool
@@ -26,7 +26,7 @@ from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import JobStore, job_key
 from text_extraction.media.pool import MediaFetcher
 from text_extraction.netguard import BlockedAddressError, is_public_address, resolve_allowed
-from text_extraction.outbound import DomainGate
+from text_extraction.outbound import DomainGate, OutboundBusy
 from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import FairQueue, QueueItem
@@ -117,6 +117,7 @@ class Crawl:
         *,
         fetcher: FakeFetcher | None = None,
         media_fetcher: Any = None,
+        gate: Any = None,
         **overrides: Any,
     ) -> None:
         values: dict[str, Any] = {"auth_mode": "none", "outbound_min_delay_ms": 0}
@@ -131,7 +132,7 @@ class Crawl:
         _POOLS.append(self.pool)
         self.pipeline = Pipeline(
             used,
-            DomainGate(self.valkey, self.settings),
+            gate if gate is not None else DomainGate(self.valkey, self.settings),
             ComplianceChecker(used, self.valkey, self.settings),
             ResultCache(self.valkey, self.settings),
             FingerprintStore(self.valkey, self.settings),
@@ -316,6 +317,36 @@ async def test_targets_and_seen_marks() -> None:
     assert (link_to(b, f"{SITE}/a").crawl, link_to(b, f"{SITE}/a").target) == ("seen", a.index)
     pages = [item.url for item in items if site(item).role == "page"]
     assert len(pages) == len(set(pages)) == 3
+
+
+@scenario
+async def test_path_scope_follows_only_the_start_directory() -> None:
+    start = f"{SITE}/mathe/index.html"
+    crawl = Crawl(
+        {
+            start: page(start, "/physik/", "/mathe/b", "b2", "/", "/mathematik"),
+            f"{SITE}/mathe/b": page(f"{SITE}/mathe/b"),
+            f"{SITE}/mathe/b2": page(f"{SITE}/mathe/b2"),
+        }
+    )
+    job_id = await crawl.start(start, depth=1, scope="path", sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [start, f"{SITE}/mathe/b", f"{SITE}/mathe/b2"]
+    context = await crawl.sites.context(job_id, 1)
+    assert context.scope == SiteScope(host="lernen.example.org", path_prefix="/mathe/")
+    decisions = {link.url: (link.crawl, link.target) for link in links(items[0])}
+    assert decisions == {
+        f"{SITE}/physik/": ("out_of_scope", None),
+        f"{SITE}/mathe/b": ("queued", 1),
+        f"{SITE}/mathe/b2": ("queued", 2),
+        ROOT: ("out_of_scope", None),
+        f"{SITE}/mathematik": ("out_of_scope", None),  # a prefix of the path, not the directory
+    }
+    assert [url for url, _ in crawl.fetcher.calls if "physik" in url or url == ROOT] == []
 
 
 @scenario
@@ -864,6 +895,29 @@ async def test_cycle_and_alias_are_one_item() -> None:
 
 
 # --- the memory guard and lost leases (Review Focus 4) -----------------------------------------
+
+
+@scenario
+async def test_gate_refusal_defers_the_start_page_before_any_extend() -> None:
+    crawl = Crawl({ROOT: page(ROOT, "/a")}, gate=RefusingGate(OutboundBusy(3.0)))
+    job_id = await crawl.start(depth=1)
+
+    item = await crawl.step()
+
+    assert item is not None
+    assert await crawl.queued() == [f"{job_id}:0:1"]  # back in the queue, one attempt more
+    [start] = await crawl.items(job_id)  # nothing appended: no robots item, no links
+    assert start.state == "pending"
+    record = await crawl.store.get(job_id)
+    assert record is not None
+    assert (record.progress.total, record.progress.done) == (1, 0)
+    assert await crawl.valkey.hlen(job_key(job_id, "children")) == 0
+    assert await crawl.valkey.hkeys(job_key(job_id, "nodes")) == [b"0"]
+    assert crawl.fetcher.calls == []
+    assert (
+        crawl.sample("text_extraction_site_items_total", {"role": "page", "outcome": "success"})
+        == 0
+    )
 
 
 @scenario

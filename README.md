@@ -365,7 +365,9 @@ others are not followed: `depth` (deeper than asked), `listed` (head links and i
 `blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages` and
 `memory_guard`. A sitemap's entries are in
 `sitemap.entries`; a large one continues in `sitemap_part` items with the same URL (`part` of
-`parts`), and an index lists its sitemaps in `children`, each with the item it became.
+`parts`), and an index lists its sitemaps in `children`, each with the item it became. An item
+whose `final_url` is another item's URL is a redirect to that page (its links repeat the page's):
+dedupe the graph by `final_url`.
 
 Pages are fetched in fast mode only, with the service's user agent, the per-host limits and the
 checks of `compliance`; the items keep title, status, metadata and quality but no text

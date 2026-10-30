@@ -17,8 +17,8 @@ Each link gets a preliminary ``crawl``, first rule that matches:
 ``blocked`` and ``depth`` links are still looked up (a candidate with ``add`` False): a page that
 has an item gets its ``target``, and the candidate keys of a page do not depend on the
 compliance cache, which fills while the crawl runs (their ``add`` does). A rerun of the page
-sends the same keys in the same order, which the store's positional answers need (ruling
-R-P9-1).
+sends the same keys in the same order (when the page is unchanged; see ``runner._extend`` for a
+changed one), which the store's positional answers need (ruling R-P9-1).
 """
 
 from collections.abc import Iterable, Mapping, Sequence

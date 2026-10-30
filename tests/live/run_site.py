@@ -1,7 +1,7 @@
 """Live site run: map real sites with ``POST /v1/site-structure`` and report what the crawl found.
 
     uv run python -m tests.live.run_site --urls tests/live/urls/sites.csv --depth 1 \
-        --max-pages 25 --compliance report
+        --max-pages 25 --compliance enforce
 
 Needs a started service with an extract worker (the crawl runs as a ``site`` job). For each
 site it sends one request, waits for the job to complete, reads all its items from
@@ -87,7 +87,10 @@ def _seconds(job: dict[str, Any]) -> float | None:
     created, finished = job.get("created_at"), job.get("finished_at")
     if not isinstance(created, str) or not isinstance(finished, str):
         return None
-    delta = datetime.fromisoformat(finished) - datetime.fromisoformat(created)
+    try:
+        delta = datetime.fromisoformat(finished) - datetime.fromisoformat(created)
+    except ValueError:
+        return None
     return round(delta.total_seconds(), 1)
 
 
@@ -209,15 +212,16 @@ async def crawl(
                 break
             await asyncio.sleep(poll_seconds)
         job, items = await _items(client, status_url, page_size)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as failure:
+        elapsed = round(time.monotonic() - started, 1)
+        # Counted here, so an answer of an unexpected shape is this site's error only.
+        return tally(url, job, items, error=error, elapsed=elapsed)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as failure:
         return SiteReport(
             url=url,
             state="error",
             error=f"client {type(failure).__name__}",
             seconds=round(time.monotonic() - started, 1),
         )
-    elapsed = round(time.monotonic() - started, 1)
-    return tally(url, job, items, error=error, elapsed=elapsed)
 
 
 async def run(
@@ -333,7 +337,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--urls", type=Path, default=DEFAULT_URLS, help="CSV with a `url` column")
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
-    parser.add_argument("--compliance", choices=["enforce", "report", "ignore"], default="report")
+    parser.add_argument(
+        "--compliance",
+        choices=["enforce", "report", "ignore"],
+        default="enforce",
+        help="the request's compliance mode (default enforce: a crawl respects robots.txt and TDM)",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_CLIENT_TIMEOUT_SECONDS)
     parser.add_argument(
         "--job-timeout",

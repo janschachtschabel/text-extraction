@@ -600,7 +600,7 @@ one crawl. All are service defaults; the Helm chart sets them under `config` wit
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SITE_MAX_DEPTH` | `5` | Deepest link distance from the start page that a request's `depth` may ask for; more answers 422 `invalid_request`. 0 to 10. |
-| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). 1 to 100000. |
+| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). A crawl must finish within `JOB_TTL_SECONDS`: nothing renews the job's TTL while it runs, and a job that expires mid-crawl is gone (404). One host's pages and sitemap files are spaced by `OUTBOUND_MIN_DELAY_MS` or its `Crawl-delay` (up to `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`), so (pages + sitemap files) × spacing must stay well under it: 100,000 pages at 1 s take about 28 h, more than the default 24 h; 1,000 pages and 500 sitemaps at 10 s take about 4 h. 1 to 100000. |
 | `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
 | `SITE_MAX_SITEMAP_URLS` | `200000` | Most sitemap entries one crawl keeps, over all its sitemaps; a sitemap that reaches it keeps its first entries and answers `partial` (warning `sitemap_urls_truncated`). 1 to 5000000. |
 | `SITE_SITEMAP_MAX_BYTES` | `52428800` | Largest sitemap file in bytes (the protocol's 50 MiB): the fetch stops there, and a gzip sitemap is inflated to at most this many bytes. A cut sitemap keeps the entries before the cut and answers `partial` (warning `sitemap_truncated`). 1024 to 209715200. |
@@ -610,11 +610,23 @@ A crawl's items live in Valkey with its job, until `JOB_TTL_SECONDS`. Size Valke
 open at once: each page item holds up to `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about
 100 bytes. A crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` like a batch.
 
-**Upgrading to package 9: extract workers before API pods.** An extract worker of an older
-release cannot read a `site` job (its options carry the new field `site`), so the items it claims
-fail. Roll out the extract workers first and the API pods after them. `helm upgrade` rolls both
-Deployments at once, so a crawl started while old workers still run may get failed items: send
-site jobs only once the rollout is complete. Other jobs are not affected.
+**Upgrading to package 9: extract workers first, then API pods, then site jobs.** Pods of an
+older release cannot parse a `site` job's options (the new field `site`; the options forbid
+unknown fields), and that breaks them in two ways:
+
+- An older extract worker that claims a site item fails before it runs it (its slot logs
+  `worker_slot_error`). It writes no result and the item stays leased, so it comes back after
+  each lease (2 × `EXTRACT_TIMEOUT_SECONDS` + 10 s, 60 s). It runs normally once a new worker
+  claims it; after `JOB_ITEM_MAX_ATTEMPTS` (5) leases a new worker fails it instead
+  (`internal_error`, "The item was lost by a worker too often."). With only older workers the
+  item cycles until the job expires: the job never completes and keeps one of the owner's
+  `BATCH_MAX_OPEN_PER_CLIENT` slots.
+- An older API pod answers 500 to `GET /v1/jobs/{id}` of a site job. It also answers 500 to
+  `POST /v1/batch` from an owner whose open set holds a site job, completed or not, until a new
+  pod has removed the finished ids.
+
+Roll out the extract workers first and the API pods after them. `helm upgrade` rolls both
+Deployments at once, so send site jobs only once every pod runs the new release.
 
 **Capacity of the extract workers.**
 
@@ -841,7 +853,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_document_conversions_total` | counter | `converter` (`markitdown`, `docling`), `kind` (`pdf`, `docx`, ...), `outcome` (`success` or the error code) | API pods, workers (extract, browser, docling) | Document conversions, where they run: MarkItDown in API pods (URLs and uploads) and in the extract and browser workers, Docling in the Docling workers. |
 | `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
 | `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |
-| `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
+| `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`, `unknown` for an item without a crawl record), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
 | `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
 | `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |

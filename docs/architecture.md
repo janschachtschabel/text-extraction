@@ -2151,7 +2151,7 @@ a PDF, an iframe and an external link; every sitemap entry arrives, every page t
 item, the disallowed page is never requested, and every followed link points at the right item.
 Site B has no robots.txt; its `/sitemap.xml` is found by the guess and its 300 entries arrive in
 parts (`JOB_ITEM_MAX_BYTES` at its minimum). The live site run (`tests/live/run_site.py`, five
-WLO-type sites, depth 1, 25 pages each, `compliance: report`) is reported by the live workflow,
+WLO-type sites, depth 1, 25 pages each, `compliance: enforce`) is reported by the live workflow,
 never a gate (R-P9-3): the build sandbox reaches none of the sites.
 
 **Decisions of Jan (2026-10-30; Jan confirmed the recommended options).**
@@ -2274,11 +2274,16 @@ a report-only step of the live workflow.
 
 **Operations.**
 
-- **Upgrade the extract workers before the API pods.** A worker of an older release cannot read a
-  `site` job's options (`JobOptions.site` is new and the options forbid unknown fields), so the
-  items it claims fail. Roll out the workers first, then the API; `helm upgrade` rolls both at
-  once, so send site jobs only once the rollout is complete (configuration.md, "Site
-  structure").
+- **Upgrade the extract workers, then the API pods, then send site jobs.** Pods of an older
+  release cannot parse a `site` job's options (`JobOptions.site` is new and the options forbid
+  unknown fields). An older worker that claims a site item raises in `Worker.process`
+  (`store.get`) before it runs it. The slot logs `worker_slot_error`, nothing is written and the
+  item stays leased. It comes back after each lease until a new worker runs it, or a new worker
+  fails it `internal_error` ("lost too often") after `JOB_ITEM_MAX_ATTEMPTS` leases. With only
+  older workers it cycles until the job's TTL, so the job never completes. An older API pod
+  answers 500 to `GET /v1/jobs/{id}` of a site job, and to `POST /v1/batch` from an owner whose
+  open set holds one. `helm upgrade` rolls all Deployments at once, so send site jobs only once
+  every pod runs the new release (configuration.md, "Site structure").
 - **One sitemap parse at a time per pod.** Sitemap items of all crawls queue behind each other for
   the pod's one sitemap thread while they hold a worker slot (of `WORKER_CONCURRENCY`). An item
   that waits longer than its budget (`EXTRACT_TIMEOUT_SECONDS` × 2, 50 s) plus 5 s fails `timeout`,
@@ -2291,6 +2296,11 @@ a report-only step of the live workflow.
 - **Shutdown.** A sitemap item's budget (50 s) outlasts the workers' shutdown grace (30 s by
   default): on SIGTERM such an item is cancelled and runs again on another worker after its lease,
   without duplicates (P9-S12).
+- **Reruns can fetch a page twice.** A child that a rerun queues again (`<job>:<i>:0`) is
+  another queue member than the same item reclaimed after a lost lease (`<job>:<i>:1`), so two
+  workers may fetch that page at once. The results stay correct (a result is written once), and
+  the site sees one extra request within its per-host limits. It needs a lost lease, so it is
+  rare.
 - **Valkey.** A crawl's state lives with its job until `JOB_TTL_SECONDS`: each page item holds up to
   `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes. The memory guard stops a
   crawl from appending (`site_memory_guard`) and refuses new ones (503).
@@ -2303,8 +2313,12 @@ a report-only step of the live workflow.
   lists it, but its entries are not crawled.
 - **Sitemap entries are listed, not crawled.** A page reached only through a sitemap is an entry,
   not a page item; send it to `POST /v1/batch` for its text.
-- **A redirect target seen first is its own item.** A page's `final_url` becomes an alias of its
-  item only once that item ran; a link to the target found earlier makes an item of its own.
+- **A redirect target seen first is its own item, and so is a redirect to an existing item.** A
+  page's `final_url` becomes an alias of its item only once that item ran, and only when no item
+  has that URL yet. A link to the target found earlier makes an item of its own, and a link that
+  redirects to a page that already is an item (`/old` to `/a`) is an item too, with `/a`'s
+  `final_url` and links. An item whose `final_url` is another item's URL is a redirect to it:
+  dedupe the graph by `final_url`.
 - **Not in this package:** browser rendering, page content, sitemap extensions (`image:`,
   `video:`, `news:`, `xhtml:link` alternates), an MCP tool (package 10).
 

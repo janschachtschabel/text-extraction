@@ -99,8 +99,21 @@ every fetch, sitemaps included, within the start page's host (a leading `www.` i
 path` for one directory). Page items carry their typed links (`kind`, `source`, `rel`, `hreflang`,
 `region`, `crawl`, `target`) and no content; sitemap items their entries, split into
 `sitemap_part` items when large. A crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` with the
-batches. Upgrade the extract workers before the API pods: older workers cannot read a site job.
+batches. Upgrade the extract workers, then the API pods, and send site jobs only after that:
+older pods cannot parse a site job (their workers re-lease its items, their API answers 500 to
+its reads).
 The done-when evidence is `uv run pytest tests/site/test_done_when.py`; the live site run
 (`tests/live/run_site.py`) could not run in the build sandbox (no egress to the sites) and is a
 report-only step of the live workflow. Details in [architecture.md](architecture.md), "Site
 structure".
+
+Package 11 load-test items from package 9 (final review): the event-loop time of packing a large
+sitemap into parts and encoding the part results at `SITE_MAX_SITEMAP_URLS` (200,000 entries,
+about 20 MB of JSON, done on the event loop after the parse), with the ~3 s lease margin left
+after a sitemap item that got its slot late; the duration of a crawl at `SITE_MAX_PAGES` against
+`JOB_TTL_SECONDS` (nothing renews the TTL mid-crawl); the Valkey size per open crawl (worst case
+at default caps: 1,000 page items of up to `JOB_ITEM_MAX_BYTES` each); the extract worker's memory
+with several 50 MiB sitemaps in flight; the split of `site/runner.py` into `runner.py` (dispatch,
+pages, extend, metrics) and `sitemap_items.py` (robots, sitemaps, parsing), a pure move; and,
+if the measurements call for it, a setting `SITE_PARSE_CONCURRENCY` for the sitemap thread pool
+(one per pod today).

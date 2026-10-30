@@ -210,6 +210,7 @@ class ExtractWorker:
         assert self._stop is not None
         self._loop.call_soon_threadsafe(self._stop.set)
         self._thread.join(10)
+        assert not self._thread.is_alive(), "the extract worker did not stop"
 
 
 class Service:
@@ -394,7 +395,10 @@ def test_site_a_links_sitemaps_and_compliance(service: Service, httpserver: HTTP
     assert (back["/"]["crawl"], back["/"]["target"]) == ("seen", 0)  # too deep, but known
     assert back["/mathe/level3.html"]["crawl"] == "depth"
     assert back["/mathe/level3.html"]["target"] is None
-    # The redirect: /neu.html is the item of /alt.html, found by its alias.
+    # The redirect: /neu.html is the item of /alt.html, found by its alias. This needs /alt.html
+    # (depth 1) to run before /mathe/brueche.html (depth 2) links /neu.html: true here, with one
+    # worker slot and the queue's FIFO per host. A link to /neu.html seen before /alt.html ran
+    # would make an item of its own (architecture.md, "Site structure", known limits).
     alt = next(i for i in pages(items) if i["url"] == f"{origin}/alt.html")
     assert alt["result"]["data"]["final_url"] == f"{origin}/neu.html"
     assert back["/neu.html"]["target"] == alt["index"]

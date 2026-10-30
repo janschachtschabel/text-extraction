@@ -202,7 +202,7 @@ def crawl_with(transport: httpx.MockTransport, **options: Any) -> SiteReport:
                 START,
                 depth=options.get("depth", 1),
                 max_pages=options.get("max_pages", 25),
-                compliance=options.get("compliance", "report"),
+                compliance=options.get("compliance", "enforce"),
                 poll_seconds=0,
                 job_timeout=options.get("job_timeout", 5),
                 page_size=options.get("page_size", 2),
@@ -222,7 +222,7 @@ def test_crawl_sends_the_documented_request_and_pages_the_items() -> None:
         "url": START,
         "depth": 1,
         "max_pages": 25,
-        "compliance": "report",
+        "compliance": "enforce",
         "cache": False,
     }
     assert report == tally(START, JOB, ITEMS)
@@ -252,12 +252,42 @@ def test_a_job_that_does_not_complete_in_time_is_reported_with_its_items() -> No
     assert report.items == 2  # what it had so far
 
 
+def test_a_malformed_time_falls_back_to_the_clients_wait() -> None:
+    report = tally(START, {**JOB, "finished_at": "not a time"}, ITEMS, elapsed=12.5)
+
+    assert (report.seconds, report.pages) == (12.5, 3)
+
+
+def test_a_malformed_answer_is_reported_for_its_site_only() -> None:
+    broken = [{"index": 0, "url": START, "state": "done", "result": ["not", "an", "envelope"]}]
+    transport, _ = fake_service(broken)
+
+    async def scenario() -> list[SiteReport]:
+        async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+            return await run_site.run(
+                [START, START],
+                client,
+                depth=1,
+                max_pages=25,
+                compliance="enforce",
+                poll_seconds=0,
+                job_timeout=5,
+            )
+
+    reports = asyncio.run(scenario())
+
+    assert [(report.state, report.error) for report in reports] == [
+        ("error", "client AttributeError"),
+        ("error", "client AttributeError"),
+    ]
+
+
 def test_main_writes_the_summary_and_never_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     urls = tmp_path / "sites.csv"
     urls.write_text(f"url\n{START}\n")
-    transport, _ = fake_service(ITEMS)
+    transport, seen = fake_service(ITEMS)
     monkeypatch.setattr(run_site, "_transport", lambda: transport)
     summary_out = tmp_path / "summary.md"
     out = tmp_path / "sites.jsonl"
@@ -276,6 +306,9 @@ def test_main_writes_the_summary_and_never_fails(
     )
 
     assert code == 0
+    # The defaults: one click deep, 25 pages, and robots.txt and TDM opt-outs respected.
+    sent = json.loads(seen[0].content)
+    assert (sent["depth"], sent["max_pages"], sent["compliance"]) == (1, 25, "enforce")
     printed = capsys.readouterr().out
     assert summary_out.read_text(encoding="utf-8") in printed
     assert summary_out.read_text(encoding="utf-8").startswith("## Site structure: 1 site, depth 1,")
