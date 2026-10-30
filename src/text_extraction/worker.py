@@ -923,8 +923,9 @@ async def _load_language_model() -> None:
 @dataclass(frozen=True)
 class WorkerParts:
     """What one worker process runs on: the worker, its memory guard, and the fetcher,
-    conversion pool, document pool, selector children, media fetcher (None without
-    ``MEDIA_ENABLED``) and post pool to close at the end."""
+    conversion pool, document pool, selector children, post pool, sitemap pool (one thread for
+    the site crawl's sitemap parses, so they never hold the pages' conversion threads) and media
+    fetcher (None without ``MEDIA_ENABLED``) to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
@@ -933,6 +934,7 @@ class WorkerParts:
     document_pool: DocumentPool
     selectors: SelectorRunner
     post_pool: ConversionPool
+    sitemap_pool: ConversionPool
     media: MediaFetcher | None = None
 
 
@@ -955,6 +957,8 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     document_pool = create_document_pool(settings)
     selectors = create_selector_runner(settings)
     post_pool = ConversionPool(settings.post_concurrency, name="post")
+    # One sitemap parse at a time per pod (seconds of CPU each): the pages keep their threads.
+    sitemap_pool = ConversionPool(1, name="sitemap")
     media = create_media_fetcher(settings, registry) if settings.media_enabled else None
     pipeline = create_pipeline(
         settings,
@@ -991,7 +995,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
                 SiteStore(valkey, store, settings),
                 queue,
                 settings,
-                pool,
+                sitemap_pool,
                 guard=guard,
                 registry=registry,
             ),
@@ -1011,6 +1015,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         document_pool=document_pool,
         selectors=selectors,
         post_pool=post_pool,
+        sitemap_pool=sitemap_pool,
         media=media,
     )
 
@@ -1044,6 +1049,7 @@ async def _run(settings: Settings) -> None:
         if parts.media is not None:
             await parts.media.stop()
         parts.post_pool.shutdown()
+        parts.sitemap_pool.shutdown()
         await valkey.aclose()
         _log.info("valkey_closed")
 

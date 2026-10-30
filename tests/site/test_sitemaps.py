@@ -566,3 +566,35 @@ def test_parse_within_its_deadline_is_whole() -> None:
     assert not parsed.timed_out
     assert not parsed.truncated
     assert len(parsed.entries) == 5000
+
+
+# --- a crawl whose entry budget is used up (no entries to keep: stop at the first one) --------
+
+
+@pytest.mark.parametrize("text", [False, True])
+def test_stop_at_cap_ends_the_parse_at_the_first_entry_over_it(text: bool) -> None:
+    body = (
+        "\n".join(f"https://lernen.example.org/p{i}" for i in range(5000)).encode()
+        if text
+        else urlset(5000)
+    )
+
+    parsed = parse_sitemap(body, BASE, max_entries=0, stop_at_cap=True)
+
+    assert parsed.entries == []
+    assert parsed.entry_count == 1  # what was read by then
+    assert parsed.truncated
+    assert parsed.error is None
+
+
+def test_stop_at_cap_still_reads_an_index() -> None:
+    maps = "".join(
+        f"<sitemap><loc>https://lernen.example.org/s{i}.xml</loc></sitemap>" for i in range(3)
+    )
+    body = f"<sitemapindex {NS}>{maps}</sitemapindex>".encode()
+
+    parsed = parse_sitemap(body, BASE, max_entries=0, stop_at_cap=True)
+
+    assert parsed.format == "index"
+    assert len(parsed.children) == 3
+    assert not parsed.truncated

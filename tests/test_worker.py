@@ -1189,12 +1189,17 @@ def test_worker_process_wires_one_guard_into_cache_and_registry() -> None:
         site = runner.site
         assert site is not None
         assert site._pipeline is runner._pipeline
-        assert site._pool is parts.pool
+        # Sitemap parses run on a pool of their own, so they never take the pages' threads.
+        assert site._pool is parts.sitemap_pool
+        assert site._pool is not parts.pool
+        assert site._pool._executor._thread_name_prefix == "sitemap"
+        assert site._pool._slots._value == 1
         assert site._queue is parts.worker._queue
         assert site._guard is parts.guard
         assert "text_extraction_site_items_total" in registry._names_to_collectors
     finally:
         parts.pool.shutdown()
+        parts.sitemap_pool.shutdown()
 
 
 @scenario

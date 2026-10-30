@@ -398,6 +398,26 @@ async def test_reserve_entries_idempotent_and_capped() -> None:
 
 
 @scenario
+async def test_entries_left_reads_the_grant_or_what_is_left() -> None:
+    valkey = FakeAsyncRedis()
+    _, sites, job_id = await start(valkey, site_max_sitemap_urls=100)
+    await sites.extend(
+        job_id,
+        0,
+        [sitemap(f"https://example.org/s{n}.xml", parent=0) for n in range(3)],
+        max_pages=10,
+    )
+
+    assert await sites.entries_left(job_id, 1) == 100  # nothing granted yet
+    await sites.reserve_entries(job_id, 1, 70)
+    assert await sites.entries_left(job_id, 1) == 70  # its own grant, as a rerun cuts
+    assert await sites.entries_left(job_id, 2) == 30
+    await sites.reserve_entries(job_id, 2, 30)
+    assert await sites.entries_left(job_id, 3) == 0
+    assert await sites.entries_left("f" * 32, 1) == 100  # a job that is gone: no grant read
+
+
+@scenario
 async def test_scope_set_once() -> None:
     _, sites, job_id = await start(FakeAsyncRedis())
 

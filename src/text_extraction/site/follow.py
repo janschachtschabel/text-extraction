@@ -15,9 +15,10 @@ Each link gets a preliminary ``crawl``, first rule that matches:
   ``memory_guard`` while Valkey is nearly full).
 
 ``blocked`` and ``depth`` links are still looked up (a candidate with ``add`` False): a page that
-has an item gets its ``target``, and the candidates of a page do not depend on the compliance
-cache, which fills while the crawl runs. A rerun of the page sends the same candidates in the
-same order, which the store's positional answers need (ruling R-P9-1).
+has an item gets its ``target``, and the candidate keys of a page do not depend on the
+compliance cache, which fills while the crawl runs (their ``add`` does). A rerun of the page
+sends the same keys in the same order, which the store's positional answers need (ruling
+R-P9-1).
 """
 
 from collections.abc import Iterable, Mapping, Sequence

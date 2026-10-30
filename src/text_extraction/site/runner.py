@@ -24,30 +24,39 @@ only with its last item. ``ExtractRunner`` hands every item of a ``site`` job to
   depth 0, on any host (the fetch checks the address); none listed means one guess,
   ``<origin>/sitemap.xml``. ``unavailable`` fails ``target_http_error``, retryable, no guess.
 - **sitemap**: ``Pipeline.fetch_raw`` (at most ``SITE_SITEMAP_MAX_BYTES``, cut there), then the
-  inflate and the parse on the worker's conversion pool. The parse has a deadline (the item's
-  budget, ``EXTRACT_TIMEOUT_SECONDS * 2`` from its start, inside the lease of
-  ``EXTRACT_TIMEOUT_SECONDS * 2 + 10``): a parse cut by it answers what it read, ``partial``
-  with ``sitemap_truncated`` and the code ``timeout``. The parse may keep up to
-  ``SITE_MAX_SITEMAP_URLS`` entries; the item then reserves as many of the crawl's entries as it
-  holds (``SiteStore.reserve_entries``, the same grant on a rerun) and keeps that many
-  (``sitemap_urls_truncated`` for the rest). Its entries are packed into parts of at most half
-  of ``JOB_ITEM_MAX_BYTES``: part 1 is its own result, parts 2 and up are finished
-  ``sitemap_part`` items appended with its children. An index's children become sitemap items
-  one level deeper when that is at most 3 and they are on the index's host or the crawl's;
-  otherwise they say ``depth`` (looked up) or ``out_of_scope``. A children list that does not
-  fit the item is cut (``sitemap_truncated``), and only the kept ones are followed. A child
-  refused by ``SITE_MAX_SITEMAP_FILES`` says ``max_pages`` (the crawl's cap), with
-  ``sitemap_files_truncated``.
+  inflate and the parse on the runner's own pool (one thread per pod, so sitemap parses never
+  hold the threads that convert pages). The parse has a deadline (the item's budget,
+  ``EXTRACT_TIMEOUT_SECONDS * 2`` from its start, inside the lease of
+  ``EXTRACT_TIMEOUT_SECONDS * 2 + 10``) that it checks itself: a parse cut by it answers what it
+  read, ``partial`` with ``sitemap_truncated`` and the code ``timeout``; only a wait for the
+  pool's thread that outlasts the deadline by 5 s fails ``timeout``, retryable. Before the
+  parse the item reads how many entries it may keep (``SiteStore.entries_left``: its grant on
+  a rerun, else what is left of ``SITE_MAX_SITEMAP_URLS``), and the parse keeps at most that
+  many; with none left a file is read only to its first entry (an index is read whole for its
+  children). The item then reserves as many as it holds (``SiteStore.reserve_entries``, the
+  same grant on a rerun) and keeps that many (``sitemap_urls_truncated`` for the rest). Its
+  entries are packed into parts of at most half of ``JOB_ITEM_MAX_BYTES``: part 1 is its own
+  result, parts 2 and up are finished ``sitemap_part`` items appended with its children. A
+  rerun whose parse was cut at another point than the first run's (the deadline) may answer a
+  part 1 that does not match the parts stored by the first run; the grant keeps the total
+  bounded. An index's children become sitemap items one level deeper when that is at most 3
+  and they are on the index's host or the crawl's; otherwise they say ``depth`` (looked up) or
+  ``out_of_scope``. A children list that does not fit the item is cut (``sitemap_truncated``),
+  and only the kept ones are followed. A child refused by ``SITE_MAX_SITEMAP_FILES`` says
+  ``max_files``, with ``sitemap_files_truncated``.
 
 Results of robots and sitemap items are built by ``site_result``: ``mode_used`` fast, ``format``
 text, ``content`` null. ``extend`` takes at most ``EXTEND_BATCH`` candidates a call: an item
-sends batches 0, 1, ... in order, each the same on a rerun (the candidates depend on the page,
-the scope and the depth only, never on the compliance cache or the memory guard), and queues
-each batch's new items as it is answered. A rerun of an item (a lost lease) gets the stored
-answers, appends nothing and queues those items again (a copy of a finished one is skipped by
-the worker). ``requeue_children`` queues them again for an exhausted item before it fails.
-While the memory guard is high an item appends nothing to crawl (its candidates are looked up
-only): its links (or children) say ``memory_guard`` and it has the warning
+sends batches 0, 1, ... in order, each with the same keys in the same order on a rerun (the keys
+depend on the page, the scope and the depth only; whether a candidate may be appended also
+depends on the memory guard, which the stored answers make moot), and queues each batch's new
+items as it is answered. A rerun of an item (a lost lease) gets the stored answers, appends
+nothing and queues those items again (a copy of a finished one is skipped by the worker), the
+items of stored batches it no longer sends included. A batch whose stored answer has another
+length than the batch (the page changed) leaves its links with their preliminary ``crawl`` and
+no ``target``. ``requeue_children`` queues the children again for an exhausted item before it
+fails. While the memory guard is high an item appends nothing to crawl (its candidates are
+looked up only): its links (or children) say ``memory_guard`` and it has the warning
 ``site_memory_guard``. A sitemap's further parts are results, which are stored as every result
 is (the job store's writes are not guarded, so accepted jobs complete).
 
@@ -127,10 +136,13 @@ _ROBOTS_UNAVAILABLE_MESSAGE = "robots.txt could not be retrieved."
 _ROBOTS_TIMEOUT_MESSAGE = "robots.txt could not be retrieved in time."
 _SITEMAP_INVALID_MESSAGE = "The sitemap could not be read."
 _SITEMAP_UNSUPPORTED_MESSAGE = "The file is no sitemap (an HTML page, for example)."
-_SITEMAP_SLOT_MESSAGE = "The sitemap could not be read in time."
+_SITEMAP_SLOT_MESSAGE = "The sitemap could not be read in time: the worker was busy."
+_SITEMAP_NO_ROOT_MESSAGE = "The sitemap was read until its time limit without reaching a sitemap."
 _SITEMAP_TIMEOUT_MESSAGE = "The sitemap was read until its time limit: the entries before it."
 _SITEMAP_CUT_MESSAGE = "The sitemap was cut: the entries before the cut."
 
+# How long past the item's deadline the runner waits for a parse that stops itself at it.
+_PARSE_GRACE_SECONDS = 5.0
 # Room in an item's JSON for the warnings and error the runner adds after it sized the item.
 _SIZE_MARGIN = 512
 # The widest ``crawl`` and ``target`` a link or a child can get, for sizing before they are set.
@@ -219,11 +231,17 @@ def site_result(
 
 @dataclass(frozen=True)
 class _Extended:
-    """What the batches of one item's ``extend`` answered, by candidate in order."""
+    """What the batches of one item's ``extend`` answered, by candidate in order: its index,
+    and whether the answer is known (False for a batch whose stored answer belongs to other
+    candidates: a rerun of a page that changed)."""
 
     indexes: list[int | None]
+    known: list[bool]
     new: set[int]
     capped: bool
+
+    def answer(self, position: int) -> tuple[int | None, bool]:
+        return self.indexes[position], self.known[position]
 
 
 @dataclass
@@ -268,12 +286,23 @@ def _robots_url(url: str) -> str:
     return normalize_url(robots) or robots
 
 
-def _decided(preliminary: Crawl, index: int | None, new: set[int], capped: bool) -> Crawl:
-    """A followed link's (or child's) final ``crawl`` from its ``extend`` answer."""
+def _decided(
+    preliminary: Crawl,
+    answer: tuple[int | None, bool],
+    extended: _Extended,
+    cap: Literal["max_pages", "max_files"],
+) -> Crawl:
+    """A followed link's (or child's) final ``crawl`` from its ``extend`` answer; ``cap`` is
+    what a refusal by the cap says (``max_pages`` for pages, ``max_files`` for sitemaps). An
+    unknown answer keeps the preliminary ``crawl``."""
+    index, known = answer
+    if not known:
+        return preliminary
     if preliminary == "queued":
         if index is None:
             # Not appended and not seen: over the cap, or nothing was appended (memory guard).
-            return "max_pages" if capped else "memory_guard"
+            return cap if extended.capped else "memory_guard"
+        new = extended.new
         return "queued" if index in new else "seen"
     if preliminary == "depth" and index is not None:
         return "seen"
@@ -287,9 +316,9 @@ def _with_warnings(result: ExtractResult, warnings: Sequence[str]) -> list[str]:
 
 
 class SiteRunner:
-    """Runs the items of ``site`` jobs (see the module docstring). ``pool`` is the worker's
-    conversion pool (the sitemap parse); ``guard`` tells whether Valkey is nearly full;
-    ``registry`` gets the site metrics."""
+    """Runs the items of ``site`` jobs (see the module docstring). ``pool`` runs the sitemap
+    parses (``build_worker`` gives it a pool of one thread of its own); ``guard`` tells whether
+    Valkey is nearly full; ``registry`` gets the site metrics."""
 
     def __init__(
         self,
@@ -472,23 +501,22 @@ class SiteRunner:
             )
             appended = len(extended.new)
             robots_kept = 1 if item.index == 0 and options.sitemaps else 0
-            if robots_kept and extended.indexes[0] is None and guard_high:
+            if robots_kept and extended.answer(0) == (None, True) and guard_high:
                 warnings.append(SITE_MEMORY_GUARD_WARNING)
                 caps.add("memory")
             by_key = {
-                candidate.key: index
-                for candidate, index in zip(
-                    candidates[robots_kept:], extended.indexes[robots_kept:], strict=True
-                )
+                candidate.key: extended.answer(position)
+                for position, candidate in enumerate(candidates)
+                if position >= robots_kept
             }
             decided: list[SiteLink] = []
             for link, candidate in judged:
                 if candidate is None:
                     decided.append(link)
                     continue
-                index = by_key.get(candidate.key)
-                crawl = _decided(link.crawl, index, extended.new, extended.capped)
-                decided.append(link.model_copy(update={"crawl": crawl, "target": index}))
+                answer = by_key[candidate.key]
+                crawl = _decided(link.crawl, answer, extended, "max_pages")
+                decided.append(link.model_copy(update={"crawl": crawl, "target": answer[0]}))
             if any(link.crawl == "max_pages" for link in decided):
                 warnings.append(MAX_PAGES_REACHED_WARNING)
                 caps.add("pages")
@@ -568,10 +596,15 @@ class SiteRunner:
         extended = await self._extend(job, item, candidates, max_pages=0)
         listed = [
             candidate.url
-            for candidate, index in zip(candidates, extended.indexes, strict=True)
-            if index is not None
+            for position, candidate in enumerate(candidates)
+            if extended.indexes[position] is not None
         ]
-        if len(listed) < len(candidates):
+        refused = [
+            position
+            for position in range(len(candidates))
+            if extended.answer(position) == (None, True)
+        ]
+        if refused:
             if extended.capped:
                 warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
                 caps.add("files")
@@ -635,16 +668,21 @@ class SiteRunner:
                 links=[]
             )
 
+        # What this item may keep: its grant on a rerun, else what is left of the crawl's. With
+        # nothing left a file is read only to its first entry (an index is read whole).
+        left = await self._sites.entries_left(job.id, item.index)
         deadline = started + self._item_budget
         try:
-            # The parse stops itself at the deadline; the wait for a pool slot stops here.
-            async with asyncio.timeout(max(deadline - time.monotonic(), 0.0)):
+            # The parse stops itself at the deadline and answers what it read; this timeout,
+            # later by a grace, ends only a wait for the pool's thread that outlasts it.
+            seconds = max(deadline - time.monotonic(), 0.0) + _PARSE_GRACE_SECONDS
+            async with asyncio.timeout(seconds):
                 parsed, inflate_cut = await self._pool.run(
                     _read_sitemap,
                     fetched.content,
                     fetched.final_url,
                     settings.site_sitemap_max_bytes,
-                    settings.site_max_sitemap_urls,
+                    left,
                     deadline,
                 )
         except TimeoutError:
@@ -652,7 +690,7 @@ class SiteRunner:
                 links=[]
             )
         if parsed.timed_out and parsed.format is None:
-            return failed(ErrorCode.TIMEOUT, _SITEMAP_SLOT_MESSAGE, retryable=False), _Outcome(
+            return failed(ErrorCode.TIMEOUT, _SITEMAP_NO_ROOT_MESSAGE, retryable=False), _Outcome(
                 links=[]
             )
         if parsed.error == "invalid" or (parsed.format is None and parsed.error is None):
@@ -738,16 +776,19 @@ class SiteRunner:
         judged = self._judge_children(children, url, node, item.index, context.scope)
         candidates = unique_candidates(candidate for _, candidate in judged)
         extended = await self._extend(job, item, candidates, finished=finished, max_pages=0)
-        by_key = dict(zip((c.key for c in candidates), extended.indexes, strict=True))
+        by_key = {
+            candidate.key: extended.answer(position)
+            for position, candidate in enumerate(candidates)
+        }
         decided: list[SitemapChild] = []
         for child, candidate in judged:
             if candidate is None:
                 decided.append(child)
                 continue
-            index = by_key.get(candidate.key)
-            crawl = _decided(child.crawl, index, extended.new, extended.capped)
-            decided.append(child.model_copy(update={"crawl": crawl, "target": index}))
-        if any(child.crawl == "max_pages" for child in decided):
+            answer = by_key[candidate.key]
+            crawl = _decided(child.crawl, answer, extended, "max_files")
+            decided.append(child.model_copy(update={"crawl": crawl, "target": answer[0]}))
+        if any(child.crawl == "max_files" for child in decided):
             warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
             caps.add("files")
         if any(child.crawl == "memory_guard" for child in decided):
@@ -779,10 +820,16 @@ class SiteRunner:
     ) -> _Extended:
         """``SiteStore.extend`` in batches of at most ``EXTEND_BATCH`` candidates, in order,
         ``finished``, ``aliases`` and ``scope`` with batch 0; each batch's new items are queued
-        as soon as it is answered (again on a rerun, whose answers are the stored ones)."""
+        as soon as it is answered (again on a rerun, whose answers are the stored ones).
+
+        A rerun (batch 0's answer is a repeat) may send fewer batches than the first run did
+        (the page changed, or a cut moved): the items of the stored batches it did not send are
+        queued again too (``SiteStore.stored_children``), so none is left unqueued."""
         indexes: list[int | None] = []
+        known: list[bool] = []
         new: set[int] = set()
         capped = False
+        repeat = False
         batches = [
             candidates[start : start + EXTEND_BATCH]
             for start in range(0, len(candidates), EXTEND_BATCH)
@@ -799,8 +846,10 @@ class SiteRunner:
                 scope=scope if first else None,
                 batch=number,
             )
+            repeat = repeat or (first and answer.repeat)
             batch_indexes = answer.indexes
-            if len(batch_indexes) != len(batch):
+            batch_known = len(batch_indexes) == len(batch)
+            if not batch_known:
                 # A rerun whose page changed since its first run: the stored answer belongs to
                 # other candidates. Its new items are still queued; no target is claimed.
                 _log.warning(
@@ -811,11 +860,17 @@ class SiteRunner:
                 )
                 batch_indexes = [None] * len(batch)
             indexes += batch_indexes
+            known += [batch_known] * len(batch)
             capped = capped or answer.capped
             if answer.new:
                 await self._queue.enqueue_items(job.id, item.client, answer.new)
                 new.update(index for index, _ in answer.new)
-        return _Extended(indexes=indexes, new=new, capped=capped)
+        if repeat:
+            stored = await self._sites.stored_children(job.id, item.index)
+            missing = [(index, url) for index, url in stored if index not in new]
+            if missing:
+                await self._queue.enqueue_items(job.id, item.client, missing)
+        return _Extended(indexes=indexes, known=known, new=new, capped=capped)
 
     async def _scope(
         self,
@@ -970,6 +1025,14 @@ def _with_site(
 def _read_sitemap(
     body: bytes, base_url: str, max_bytes: int, max_entries: int, deadline: float
 ) -> tuple[ParsedSitemap, bool]:
-    """Inflate (a gzip body) and parse one sitemap file, on a pool thread."""
+    """Inflate (a gzip body) and parse one sitemap file, on a pool thread: at most
+    ``max_entries`` kept, and none left stops the parse at its first entry."""
     inflated, cut = inflate_bounded(body, max_bytes)
-    return parse_sitemap(inflated, base_url, max_entries=max_entries, deadline=deadline), cut
+    parsed = parse_sitemap(
+        inflated,
+        base_url,
+        max_entries=max_entries,
+        deadline=deadline,
+        stop_at_cap=max_entries <= 0,
+    )
+    return parsed, cut

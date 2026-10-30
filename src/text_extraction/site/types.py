@@ -54,7 +54,8 @@ LinkRegion = Literal["nav", "header", "footer", "aside", "main", "breadcrumb", "
 # What the crawl did with a link (P9-S6): ``listed`` (a head ``link`` or an ``iframe``: never
 # followed), ``file``, ``out_of_scope``, ``nofollow``, ``blocked`` (robots.txt or TDM under
 # ``enforce``), ``depth`` (deeper than asked), ``queued`` (a new item), ``seen`` (an existing
-# item), ``max_pages`` (the page cap was reached), ``memory_guard`` (Valkey was nearly full).
+# item), ``max_pages`` (the page cap was reached), ``max_files`` (a sitemap index's child: the
+# crawl's ``SITE_MAX_SITEMAP_FILES`` was reached), ``memory_guard`` (Valkey was nearly full).
 Crawl = Literal[
     "listed",
     "file",
@@ -65,6 +66,7 @@ Crawl = Literal[
     "queued",
     "seen",
     "max_pages",
+    "max_files",
     "memory_guard",
 ]
 SitemapFormat = Literal["urlset", "index", "text", "rss", "atom", "absent"]
@@ -175,7 +177,8 @@ class SiteLink(BaseModel):
     )
     crawl: Crawl = Field(
         description="What the crawl did with it: `listed`, `file`, `out_of_scope`, `nofollow`, "
-        "`blocked`, `depth`, `queued`, `seen`, `max_pages` or `memory_guard`."
+        "`blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files` (a sitemap index's "
+        "child over `SITE_MAX_SITEMAP_FILES`) or `memory_guard`."
     )
     target: int | None = Field(
         default=None, description="The index of the item of the linked page, when it has one."

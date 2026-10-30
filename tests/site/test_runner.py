@@ -4,7 +4,7 @@ with a fake fetcher serving a small site, the queue read back after each item.""
 
 import asyncio
 import os
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from functools import wraps
 from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
@@ -31,6 +31,7 @@ from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import ResultCache
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
+from text_extraction.site import runner as runner_module
 from text_extraction.site.runner import SiteRunner
 from text_extraction.site.store import SiteStore
 from text_extraction.site.types import SiteInfo, SiteLink, SitemapEntry, SiteOptions, SiteScope
@@ -95,6 +96,17 @@ async def no_sleep(_seconds: float) -> None:
     await asyncio.sleep(0)
 
 
+_POOLS: list[ConversionPool] = []
+
+
+@pytest.fixture(autouse=True)
+def _shut_pools_down() -> Iterator[None]:
+    """Each test's conversion pools are shut down after it."""
+    yield
+    while _POOLS:
+        _POOLS.pop().shutdown()
+
+
 class Crawl:
     """A worker with the extract and site runners over the real pipeline, job store, crawl
     store and queue on fakeredis, and a fake fetcher."""
@@ -116,6 +128,7 @@ class Crawl:
         self.fetcher = fetcher if fetcher is not None else FakeFetcher(answers or {})
         used = cast(Fetcher, self.fetcher)
         self.pool = ConversionPool(2)
+        _POOLS.append(self.pool)
         self.pipeline = Pipeline(
             used,
             DomainGate(self.valkey, self.settings),
@@ -658,7 +671,9 @@ async def test_sitemap_urls_cap_partial() -> None:
     await crawl.crawl()
 
     items = await crawl.items(job_id)
-    for item, kept in zip(items[2:], (50, 0), strict=True):
+    # The second sitemap finds the crawl's budget used up: its parse stops at its first entry,
+    # so its count is what was read by then.
+    for item, kept, counted in zip(items[2:], (50, 0), (80, 1), strict=True):
         assert item.result is not None
         assert item.result.status == "partial"
         assert item.result.error is not None
@@ -666,7 +681,7 @@ async def test_sitemap_urls_cap_partial() -> None:
         sitemap = site(item).sitemap
         assert sitemap is not None
         assert len(sitemap.entries) == kept
-        assert sitemap.entry_count == 80
+        assert sitemap.entry_count == counted
         assert "sitemap_urls_truncated" in data(item).warnings
     assert crawl.sample("text_extraction_site_caps_total", {"cap": "urls"}) == 2
 
@@ -716,8 +731,8 @@ async def test_large_index_children_cut_to_fit() -> None:
     kept = site(item).sitemap.children  # type: ignore[union-attr]
     assert 0 < len(kept) < 400
     assert await crawl.stored_size(job_id, item.index) <= 20_000
-    # The file cap (one sitemap: the index) refuses every child: they say max_pages.
-    assert {child.crawl for child in kept} == {"max_pages"}
+    # The file cap (one sitemap: the index) refuses every child: they say max_files.
+    assert {child.crawl for child in kept} == {"max_files"}
     assert "sitemap_files_truncated" in data(item).warnings
     assert len(items) == 3
 
@@ -746,12 +761,16 @@ class GuardedFetcher(FakeFetcher):
 
 @scenario
 async def test_private_sitemap_and_redirect_blocked() -> None:
-    robots = f"Sitemap: http://169.254.169.254/latest\nSitemap: {SITE}/index.xml\n"
+    robots = (
+        f"Sitemap: http://169.254.169.254/latest\nSitemap: {SITE}/index.xml\n"
+        f"Sitemap: {SITE}/moved.xml\n"
+    )
     fetcher = GuardedFetcher(
         {
             ROOT: page(ROOT, "/go"),
             ROBOTS: text(ROBOTS, robots, "text/plain"),
             f"{SITE}/go": Redirect("http://10.0.0.7/admin"),
+            f"{SITE}/moved.xml": Redirect("http://10.0.0.9/sitemap.xml"),
             f"{SITE}/index.xml": text(f"{SITE}/index.xml", index("http://127.0.0.1:6379/")),
         }
     )
@@ -762,12 +781,13 @@ async def test_private_sitemap_and_redirect_blocked() -> None:
 
     items = await crawl.items(job_id)
     assert await crawl.state(job_id) == "completed"
-    for url in ("http://169.254.169.254/latest", f"{SITE}/go"):
+    for url in ("http://169.254.169.254/latest", f"{SITE}/go", f"{SITE}/moved.xml"):
         result = by_url(items, url).result
         assert result is not None
         assert result.status == "failed"
         assert result.error is not None
         assert result.error.code == ErrorCode.BLOCKED_URL
+    assert site(by_url(items, f"{SITE}/moved.xml")).role == "sitemap"
     [child] = site(by_url(items, f"{SITE}/index.xml")).sitemap.children  # type: ignore[union-attr]
     assert child.crawl == "out_of_scope"
     assert set(fetcher.reached) == {"lernen.example.org"}
@@ -865,13 +885,20 @@ async def test_memory_guard_appends_nothing() -> None:
 
 
 class FailingEnqueue:
-    """Makes the site runner's queueing fail, as a worker killed after ``extend``."""
+    """Makes the site runner's queueing fail from its ``fail_on``-th call (1-based), as a worker
+    killed after an ``extend``; the calls before it queue as usual."""
 
-    def __init__(self, crawl: Crawl) -> None:
+    def __init__(self, crawl: Crawl, fail_on: int = 1) -> None:
         self.queue = crawl.queue  # the site runner's queue
         self.original = self.queue.enqueue_items
+        self.fail_on = fail_on
+        self.calls = 0
 
     async def fail(self, *args: Any) -> None:
+        self.calls += 1
+        if self.calls < self.fail_on:
+            await self.original(*args)
+            return
         raise RuntimeError("killed")
 
     def __enter__(self) -> None:
@@ -881,13 +908,14 @@ class FailingEnqueue:
         self.queue.enqueue_items = self.original  # type: ignore[method-assign]
 
 
-async def die_after_extend(crawl: Crawl, url: str) -> None:
-    """A worker claims the next item, extends and dies before queueing; its lease expires."""
+async def die_after_extend(crawl: Crawl, url: str, *, fail_on: int = 1) -> None:
+    """A worker claims the next item, extends and dies before queueing (its ``fail_on``-th
+    queueing); its lease expires."""
     item = await crawl.claim()
     assert item is not None
     job = await crawl.store.get(item.job_id)
     assert job is not None
-    with FailingEnqueue(crawl), pytest.raises(RuntimeError):
+    with FailingEnqueue(crawl, fail_on), pytest.raises(RuntimeError):
         await crawl.site.run(job, item, url, gate_refusals="raise")
     crawl.clock.now += crawl.lease_seconds + 1
 
@@ -986,3 +1014,126 @@ async def test_metrics_count_items_and_links() -> None:
     assert crawl.sample("text_extraction_site_items_total", items) == 1
     assert crawl.sample("text_extraction_site_links_total", {"crawl": "depth"}) == 1
     assert crawl.sample("text_extraction_site_links_total", {"crawl": "out_of_scope"}) == 1
+
+
+# --- fix round 1 ---------------------------------------------------------------------------------
+
+
+@scenario
+async def test_parse_deadline_answers_what_it_read() -> None:
+    locs = [f"{SITE}/kurs/{n}/lektion.html" for n in range(150_000)]
+    big = f"{SITE}/big.xml"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {big}\n", "text/plain"),
+            big: text(big, urlset(*locs)),
+        }
+    )
+    crawl.site._item_budget = 0.3  # the parse of 150,000 entries takes seconds
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    item = by_url(await crawl.items(job_id), big)
+    assert item.result is not None
+    assert item.result.status == "partial"
+    assert item.result.error is not None
+    assert (item.result.error.code, item.result.error.retryable) == (ErrorCode.TIMEOUT, False)
+    assert "sitemap_truncated" in data(item).warnings
+    sitemap = site(item).sitemap
+    assert sitemap is not None
+    assert 0 < len(sitemap.entries) < 150_000
+    assert await crawl.state(job_id) == "completed"
+
+
+@pytest.mark.parametrize("rerun_links", [2, 3])
+@scenario
+async def test_rerun_with_fewer_batches_requeues_the_missing_ones(
+    rerun_links: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_module, "EXTEND_BATCH", 2)
+    hrefs = [f"/p{n}" for n in range(6)]
+    crawl = Crawl({ROOT: page(ROOT, *hrefs)})
+    job_id = await crawl.start(depth=1, sitemaps=False, cache=False)
+    # Batches [p0 p1] [p2 p3] [p4 p5]: queued, extended, then the worker dies.
+    await die_after_extend(crawl, ROOT, fail_on=2)
+    assert [item.url for item in await crawl.items(job_id)][1:] == [
+        f"{SITE}/p{n}" for n in range(4)
+    ]
+    # The page changed: the rerun sends fewer batches than the first run.
+    crawl.fetcher.answers[ROOT] = page(ROOT, *hrefs[:rerun_links])
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items] == [ROOT] + [f"{SITE}/p{n}" for n in range(4)]
+    assert all(item.state == "done" for item in items)
+    root = items[0]
+    if rerun_links == 3:
+        # Batch 1's stored answer is for two candidates: p2 keeps its own crawl, no target.
+        assert (link_to(root, f"{SITE}/p2").crawl, link_to(root, f"{SITE}/p2").target) == (
+            "queued",
+            None,
+        )
+    assert "site_memory_guard" not in data(root).warnings
+    assert "max_pages_reached" not in data(root).warnings
+
+
+@scenario
+async def test_multi_batch_extend_keeps_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runner_module, "EXTEND_BATCH", 2)
+    hrefs = [f"/p{n}" for n in range(5)]
+    crawl = Crawl({ROOT: page(ROOT, *hrefs, "/")})
+    job_id = await crawl.start(depth=1)
+
+    await crawl.step()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, ROBOTS] + [f"{SITE}{href}" for href in hrefs]
+    assert [(link.crawl, link.target) for link in links(items[0])] == [
+        *(("queued", n) for n in range(2, 7)),
+        ("seen", 0),
+    ]
+    assert await crawl.queued() == [f"{job_id}:{n}:0" for n in range(1, 7)]
+    context = await crawl.sites.context(job_id, 3)
+    assert context.scope == SiteScope(host="lernen.example.org", path_prefix=None)
+
+
+@scenario
+async def test_blocked_link_is_neither_queued_nor_fetched() -> None:
+    robots = "User-agent: *\nDisallow: /intern/\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, "/intern/geheim.html", "/ok"),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/ok": page(f"{SITE}/ok"),
+        }
+    )
+    job_id = await crawl.start(depth=1, sitemaps=False)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [item.url for item in items] == [ROOT, f"{SITE}/ok"]
+    blocked = link_to(items[0], f"{SITE}/intern/geheim.html")
+    assert (blocked.crawl, blocked.target) == ("blocked", None)
+    assert f"{SITE}/intern/geheim.html" not in [url for url, _ in crawl.fetcher.calls]
+
+
+@scenario
+async def test_disallowed_sitemap_is_blocked_by_robots_under_enforce() -> None:
+    robots = f"User-agent: *\nDisallow: /intern/\nSitemap: {SITE}/intern/map.xml\n"
+    crawl = Crawl({ROOT: page(ROOT), ROBOTS: text(ROBOTS, robots, "text/plain")})
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    item = by_url(await crawl.items(job_id), f"{SITE}/intern/map.xml")
+    assert item.result is not None
+    assert item.result.status == "failed"
+    assert item.result.error is not None
+    assert item.result.error.code == ErrorCode.BLOCKED_BY_ROBOTS
+    assert site(item).role == "sitemap"
+    assert f"{SITE}/intern/map.xml" not in [url for url, _ in crawl.fetcher.calls]

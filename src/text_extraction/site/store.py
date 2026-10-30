@@ -436,6 +436,15 @@ class SiteStore:
             raise JobLost(job_id)
         return granted
 
+    async def entries_left(self, job_id: str, index: int) -> int:
+        """How many sitemap entries item ``index`` may keep, read without a grant: its own grant
+        once it has one (a rerun keeps what it was granted), else what is left of
+        ``SITE_MAX_SITEMAP_URLS``. ``reserve_entries`` makes the grant."""
+        granted, used = await self._valkey.hmget(job_key(job_id, "site"), [f"e:{index}", "entries"])
+        if granted is not None:
+            return int(granted)
+        return max(self._max_entries - int(used or 0), 0)
+
     async def stored_children(self, job_id: str, parent: int) -> list[tuple[int, str]]:
         """The items that the stored answers of ``parent`` appended, as ``(index, url)``, its
         batches in order; empty when it has none (it never extended, or the job is gone)."""

@@ -73,6 +73,10 @@ class _DeadlineError(Exception):
     """The parse ran into its deadline: what was read by then is the answer."""
 
 
+class _CapReachedError(Exception):
+    """``stop_at_cap``: an entry over ``max_entries`` was read, so the parse ends there."""
+
+
 @dataclass(frozen=True)
 class _Layout:
     """Where a format keeps its records: the root's local name, the record's local name and
@@ -182,10 +186,13 @@ def _resolve(loc: str | None, base_url: str) -> str | None:
 class _Collector:
     """Counts and keeps the records of one file within the caps."""
 
-    def __init__(self, max_entries: int, deadline: float | None = None) -> None:
+    def __init__(
+        self, max_entries: int, deadline: float | None = None, *, stop_at_cap: bool = False
+    ) -> None:
         self.max_entries = max_entries
         self.parsed = ParsedSitemap(format=None)
         self._deadline = deadline
+        self._stop_at_cap = stop_at_cap
         self._ticks = 0
 
     def tick(self) -> None:
@@ -206,6 +213,8 @@ class _Collector:
         parsed.entry_count += 1
         if len(parsed.entries) >= self.max_entries:
             parsed.truncated = True
+            if self._stop_at_cap:
+                raise _CapReachedError
             return
         parsed.entries.append(SitemapEntry.model_validate({**values, "loc": loc}))
 
@@ -237,6 +246,8 @@ def _parse_text(body: bytes, start: int, collector: _Collector) -> ParsedSitemap
                 collector.entry(url, {})
     except _DeadlineError:
         collector.parsed.truncated = collector.parsed.timed_out = True
+    except _CapReachedError:
+        pass  # ``truncated`` is set
     return collector.parsed
 
 
@@ -306,6 +317,8 @@ def _parse_xml(
                     root_closed = True
         except _DeadlineError:
             parsed.truncated = parsed.timed_out = True
+        except _CapReachedError:
+            pass  # ``truncated`` is set
         except DTDForbidden as exc:
             if (exc.name or "").lower() == "html":
                 return ParsedSitemap(format=None, error="unsupported")  # an HTML page
@@ -331,7 +344,12 @@ def _parse_xml(
 
 
 def parse_sitemap(
-    body: bytes, base_url: str, *, max_entries: int, deadline: float | None = None
+    body: bytes,
+    base_url: str,
+    *,
+    max_entries: int,
+    deadline: float | None = None,
+    stop_at_cap: bool = False,
 ) -> ParsedSitemap:
     """Read a sitemap file (already inflated): its format, at most ``max_entries`` entries (or an
     index's children), and how many entries it held. Each ``loc`` is resolved against
@@ -341,17 +359,25 @@ def parse_sitemap(
     ``deadline`` (``time.monotonic``) bounds the parse's time, which grows with the file (about
     0.35 s per MB of an ordinary sitemap, up to 2.7 s per MB of a tag-dense one): at it the
     parse stops with what it has read (``timed_out``). A thread cannot be stopped from outside,
-    so the runner gives the deadline here, where the work is."""
+    so the runner gives the deadline here, where the work is.
+
+    ``stop_at_cap`` ends the parse at the first entry over ``max_entries`` (``truncated``;
+    ``entry_count`` counts what was read by then): for a crawl whose entry budget is used up,
+    which would only count the rest. An index is read whole: its children are no entries."""
     if body.startswith(_UTF16_BOMS):
         return ParsedSitemap(format=None, error="invalid")  # not read: no empty text sitemap
     start = len(_UTF8_BOM) if body.startswith(_UTF8_BOM) else 0
     match = _LEADING_BLANKS.match(body, start)
     start = match.end() if match else start
     if not body.startswith(b"<", start):
-        return _parse_text(body, start, _Collector(max_entries, deadline))
+        return _parse_text(body, start, _Collector(max_entries, deadline, stop_at_cap=stop_at_cap))
     try:
         return _parse_xml(
-            body, start, base_url, _Collector(max_entries, deadline), retry_prefixes=True
+            body,
+            start,
+            base_url,
+            _Collector(max_entries, deadline, stop_at_cap=stop_at_cap),
+            retry_prefixes=True,
         )
     except _UnboundPrefixError:
         pass
@@ -363,7 +389,7 @@ def parse_sitemap(
         _PREFIXED_TAG.sub(rb"\1", memoryview(body)[start:]),
         0,
         base_url,
-        _Collector(max_entries, deadline),
+        _Collector(max_entries, deadline, stop_at_cap=stop_at_cap),
         retry_prefixes=False,
     )
 
