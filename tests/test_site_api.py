@@ -4,16 +4,19 @@ pass with the site runner on a fake fetcher."""
 
 import asyncio
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from fastapi import Request
 from prometheus_client import CollectorRegistry
 
 from tests.fakes import PARAGRAPH, FakeFetcher, fetched
 from tests.test_jobs_api import ALICE, BOB, ROOT, Api
 from tests.test_jobs_api import make_api as make_api  # the fixture
 from tests.test_memory_guard import StubGuard
+from text_extraction.auth import Principal
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.fetch import Fetcher
 from text_extraction.jobs import JobStore, job_key
@@ -21,7 +24,8 @@ from text_extraction.pipeline import create_pipeline
 from text_extraction.scheduler import FairQueue
 from text_extraction.site.runner import SiteRunner
 from text_extraction.site.store import SiteStore
-from text_extraction.site.types import SiteNode, SiteOptions
+from text_extraction.site.types import SiteNode, SiteOptions, SiteStructureRequest
+from text_extraction.site_api import create_site_structure
 from text_extraction.worker import ExtractRunner, Worker
 
 PATH = "/v1/site-structure"
@@ -300,7 +304,12 @@ def test_openapi_lists_route_with_example(api: Api) -> None:
 
     assert operation["summary"]
     assert "202" in operation["responses"]
-    assert "site" in operation["description"]
+    description = operation["description"]
+    # The claims a caller needs: it is a job, polled at the job route, and the items' roles.
+    assert "202" in description
+    assert "`GET /v1/jobs/{id}`" in description
+    assert "`role`" in description
+    assert "grows" in description
     content = operation["requestBody"]["content"]["application/json"]
     examples = content["examples"]
     assert examples
@@ -310,7 +319,9 @@ def test_openapi_lists_route_with_example(api: Api) -> None:
     properties = spec["components"]["schemas"][name]["properties"]
     assert {"url", "depth", "max_pages", "sitemaps", "scope", "compliance"} <= set(properties)
     # The job route says that a site job grows.
-    assert "site" in spec["paths"]["/v1/jobs/{job_id}"]["get"]["description"]
+    jobs_description = spec["paths"]["/v1/jobs/{job_id}"]["get"]["description"]
+    assert "`site`" in jobs_description
+    assert "grows" in jobs_description
 
 
 def test_body_limit_is_the_default_request_limit(make_api: Callable[..., Api]) -> None:
@@ -328,12 +339,6 @@ def test_body_limit_is_the_default_request_limit(make_api: Callable[..., Api]) -
 
 def test_concurrent_cancel_gives_the_site_job_back(api: Api) -> None:
     """Cancelled while it enqueues: the job, its crawl keys and the open-set entry go."""
-    from fastapi import Request
-
-    from text_extraction.auth import Principal
-    from text_extraction.site.types import SiteStructureRequest
-    from text_extraction.site_api import create_site_structure
-
     started = asyncio.Event()
 
     class HangingQueue:
@@ -342,8 +347,6 @@ def test_concurrent_cancel_gives_the_site_job_back(api: Api) -> None:
             await asyncio.sleep(60)
 
     async def scenario(valkey: FakeAsyncRedis) -> list[str]:
-        from types import SimpleNamespace
-
         store = JobStore(valkey, api.settings)
         state = SimpleNamespace(
             settings=api.settings,
