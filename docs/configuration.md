@@ -735,6 +735,21 @@ it; it is deleted with the job, and by whoever writes the item's result: the wor
 (a sync request's job at once, a batch with its last result) and the pod that ran the whole
 request. A worker that moves the item on to the llm worker keeps it.
 
+A `site` job (`POST /v1/site-structure`) grows while it runs: its items append the pages, the
+robots.txt item and the sitemaps they find to `urls`, and `total` grows with them. Its crawl lives
+in four more hashes of the job's slot, each with the remaining TTL of `meta` when written, and
+deleted with the job:
+
+| Key | Content |
+| --- | --- |
+| `job:{<id>}:nodes` | Hash of item index to the item's role (`page`, `robots`, `sitemap`, `sitemap_part`), depth, parent, whether a sitemap was guessed, and a part's number (JSON). |
+| `job:{<id>}:seen` | Hash of a URL's seen key to its item index. The key is the normal URL without its scheme and without a leading `www.`, so the http, https and `www.` spellings are one page; sitemap and robots.txt items are kept under `s:<key>`. A redirected page's final URL points to its item too. |
+| `job:{<id>}:children` | Hash of an item's index to what its links or sitemap entries appended. An item that runs a second time (after a lost lease) gets that answer back and appends nothing. |
+| `job:{<id>}:site` | Hash: the crawl's scope, the counters `pages` (against the request's `max_pages`), `files` (against `SITE_MAX_SITEMAP_FILES`) and `entries` (against `SITE_MAX_SITEMAP_URLS`), and `e:<index>` (the entries granted to one sitemap item). |
+
+One script appends an item's finds, its sitemap parts with their results included, and stores its
+answer, so a worker that dies halfway leaves either all of it or nothing.
+
 ## Queue keys
 
 Batch items wait in a fair queue per worker pool (`extract` for the fast workers). The pool name is

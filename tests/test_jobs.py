@@ -1151,3 +1151,25 @@ async def test_site_job_round_trip() -> None:
     assert job is not None
     assert job.kind == "site"
     assert job.options.site == SiteOptions()
+
+
+@scenario
+async def test_delete_and_shorten_cover_the_crawl_keys() -> None:
+    """P9-S3: a ``site`` job's crawl keys go with the job."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400)
+    options = JobOptions(mode="fast", compliance="enforce", ocr="never", site=SiteOptions())
+    deleted = await store.create("site", OWNER, options, ["https://a.example/"])
+    shortened = await store.create("site", OWNER, options, ["https://a.example/"])
+    crawl_keys = ("nodes", "seen", "children", "site")
+    for job_id in (deleted, shortened):
+        for kind in crawl_keys:
+            await valkey.hset(f"job:{{{job_id}}}:{kind}", "0", "x")
+            await valkey.expire(f"job:{{{job_id}}}:{kind}", 86400)
+
+    await store.delete(deleted)
+    await store.shorten(shortened, 600)
+
+    assert [key async for key in valkey.scan_iter(match=f"job:{{{deleted}}}:*")] == []
+    for kind in crawl_keys:
+        assert 595 <= await valkey.ttl(f"job:{{{shortened}}}:{kind}") <= 600, kind
