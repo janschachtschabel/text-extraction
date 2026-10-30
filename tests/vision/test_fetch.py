@@ -535,3 +535,33 @@ def test_endless_chunked_body_stops_at_the_cap(httpserver: HTTPServer) -> None:
 
     assert image == ImageSkipped(reason="too_large")
     assert time.monotonic() - started < 5
+
+
+def test_image_fetcher_max_bytes_keyword(httpserver: HTTPServer) -> None:
+    """``max_bytes`` caps one call (the UI's previews, ``UI_IMAGE_MAX_BYTES``); without it the
+    cap stays ``LLM_VISION_MAX_IMAGE_BYTES`` (the vision step's behaviour)."""
+    no_robots(httpserver)
+    big = PNG + b"\x00" * 50_000
+    httpserver.expect_request("/big.png").respond_with_data(big, content_type="image/png")
+    url = httpserver.url_for("/big.png")
+    settings = make_settings(llm_vision_max_image_bytes=100_000)
+
+    async def scenario() -> list[ImageBytes | ImageSkipped]:
+        images, _ = make_fetcher(settings)
+        try:
+            return [
+                await images.get(url, "enforce", timeout=TIMEOUT),
+                await images.get(url, "enforce", timeout=TIMEOUT, max_bytes=None),
+                await images.get(url, "enforce", timeout=TIMEOUT, max_bytes=10_000),
+                await images.get(url, "enforce", timeout=TIMEOUT, max_bytes=len(big)),
+            ]
+        finally:
+            await images.aclose()
+
+    default, none, capped, exact = run(scenario)
+
+    assert default == none == exact == ImageBytes(data=big, media_type="image/png")
+    assert capped == ImageSkipped(reason="too_large")
+    assert get(url, settings=make_settings(llm_vision_max_image_bytes=10_000)) == ImageSkipped(
+        reason="too_large"
+    )
