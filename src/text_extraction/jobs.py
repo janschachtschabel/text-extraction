@@ -19,11 +19,12 @@ All keys expire ``JOB_TTL_SECONDS`` after creation and again after completion. `
 Items that workers claim (D8, ruling P10-S11) have one more key:
 
 - ``job:{<id>}:runs``     hash: item index -> ``<claim number>|<pool>|<epoch ms>``, the item's
-                          last claim by a worker (``record_claim``, one script per claim). Each
-                          write takes the remaining TTL of ``meta``; completion does not renew
-                          it, so on a long job it may expire before the job (the items then
-                          show no ``run``). ``delete`` removes it, ``shorten`` cuts it. A P1
-                          job's item, which runs in the API pod, has no entry.
+                          last claim by a worker (``record_claim``, one script per claim). It
+                          lives as long as the job (ruling R-P10-1): each write takes the
+                          remaining TTL of ``meta``, and the scripts that renew or align the
+                          job's TTL (the completing result write, ``SiteStore.extend``) renew
+                          it too. ``delete`` removes it, ``shorten`` cuts it. A P1 job's item,
+                          which runs in the API pod, has no entry.
 
 Browser jobs (package 4) may have these as well:
 
@@ -101,7 +102,7 @@ where the job's shorter life cuts the input's: it then counts a little longer, n
 A ``site`` job (package 9, ruling P9-S3) grows while it runs: its items append new items to
 ``urls`` (``total`` grows with them). Its crawl lives in four more hashes, written by
 ``site.store.SiteStore``, each with the remaining TTL of ``meta`` when written (completion renews
-only the four keys above; nothing reads the crawl keys of a completed job):
+only the four keys above and the item runs; nothing reads the crawl keys of a completed job):
 
 - ``job:{<id>}:nodes``    hash: item index -> ``SiteNode`` JSON (role, depth, parent, guessed,
                           part)
@@ -195,11 +196,12 @@ _ARTIFACT_NAME = re.compile(r"[a-z0-9_.-]{1,64}", re.ASCII)
 _NOT_FOUND = -1
 _OUT_OF_RANGE = -2
 
-# KEYS = meta, results, done, urls; ARGV = index, result JSON, envelope status, now, ttl_ms.
+# KEYS = meta, results, done, urls, runs; ARGV = index, result JSON, envelope status, now, ttl_ms.
 # Returns 1 when this call finished the index, 2 when it also finished the job, 0 when the index
 # was finished already (nothing changes), -1 when the job is gone and -2 when the index is outside
-# the job. The first write also counts
-# the item and, if it was the last, completes the job and renews the TTL of all four keys.
+# the job. The first write also counts the item and, if it was the last, completes the job and
+# renews the TTL of all four keys and of the item runs (ruling R-P10-1; a job without ``runs``
+# gets none: PEXPIRE of a missing key does nothing).
 # Epoch seconds go in and out as strings: Redis would cut a Lua number to an integer.
 _STORE_RESULT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
@@ -228,6 +230,7 @@ if done >= total then
 end
 redis.call('PEXPIRE', KEYS[2], remaining)
 redis.call('PEXPIRE', KEYS[3], remaining)
+redis.call('PEXPIRE', KEYS[5], remaining)
 if done >= total then
   return 2
 end
@@ -253,24 +256,9 @@ return 1
 """
 
 
-# KEYS = meta, drafts; ARGV = index, envelope JSON. Stores the draft with the remaining TTL of
-# the job; returns 1, or -1 when the job is gone (nothing is written).
-_PUT_DRAFT = """
-local remaining = redis.call('PTTL', KEYS[1])
-if remaining == -2 then
-  return -1
-end
-redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-if remaining > 0 then
-  redis.call('PEXPIRE', KEYS[2], remaining)
-end
-return 1
-"""
-
-# KEYS = meta, runs; ARGV = index, run ("<claim number>|<pool>|<epoch ms>"). Records the item's
-# claim with the remaining TTL of the job; returns 1, or -1 when the job is gone (nothing is
-# written).
-_RECORD_CLAIM = """
+# KEYS = meta, a hash of the job (``drafts``, ``runs``); ARGV = field, value. Stores the field
+# with the remaining TTL of the job; returns 1, or -1 when the job is gone (nothing is written).
+_PUT_FIELD = """
 local remaining = redis.call('PTTL', KEYS[1])
 if remaining == -2 then
   return -1
@@ -536,7 +524,7 @@ def _item_run(raw: Any) -> ItemRun | None:
             attempts=int(attempts),
             claimed_at=datetime.fromtimestamp(int(millis) / 1000, tz=UTC),
         )
-    except ValueError:
+    except (ValueError, OverflowError, OSError):  # fromtimestamp: OverflowError, OSError
         return None
 
 
@@ -570,10 +558,9 @@ class JobStore:
         )
         self._store_result = valkey.register_script(_STORE_RESULT)
         self._mark_running = valkey.register_script(_MARK_RUNNING)
-        self._put_draft = valkey.register_script(_PUT_DRAFT)
+        self._put_field = valkey.register_script(_PUT_FIELD)
         self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
         self._put_input = valkey.register_script(_PUT_INPUT)
-        self._record_claim = valkey.register_script(_RECORD_CLAIM)
         self._put_with_job = valkey.register_script(_PUT_WITH_JOB)
         self._reserve_input = valkey.register_script(_RESERVE_INPUT)
         self._release_inputs = valkey.register_script(_RELEASE_INPUTS)
@@ -730,7 +717,7 @@ class JobStore:
         """Keep the fast result of item ``index`` while the browser renders it (B5); a later
         draft of the item replaces it. Over ``JOB_ITEM_MAX_BYTES`` it is kept without its
         content, as a result would be. Raises ``JobLost`` when the job is gone."""
-        outcome = await self._put_draft(
+        outcome = await self._put_field(
             keys=[_key(job_id, "meta"), _key(job_id, "drafts")],
             args=[index, self._encode(envelope)],
         )
@@ -935,7 +922,7 @@ class JobStore:
         One script on the job's slot; the entry takes the remaining TTL of the job. Nothing is
         written when the job is gone."""
         millis = int(self._clock() * 1000)
-        await self._record_claim(
+        await self._put_field(
             keys=[_key(job_id, "meta"), _key(job_id, "runs")],
             args=[index, f"{attempts}|{pool}|{millis}"],
         )
@@ -966,6 +953,7 @@ class JobStore:
                 _key(job_id, "results"),
                 _key(job_id, "done"),
                 _key(job_id, "urls"),
+                _key(job_id, "runs"),
             ],
             args=[
                 index,

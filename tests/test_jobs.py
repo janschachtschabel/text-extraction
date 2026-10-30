@@ -1191,8 +1191,69 @@ async def test_record_claim_sets_run_with_job_ttl() -> None:
 
     raw = await valkey.hgetall(f"job:{{{job_id}}}:runs")
     assert raw == {b"1": f"2|browser|{int((START + 0.25) * 1000)}".encode()}
-    runs_ttl = await valkey.pttl(f"job:{{{job_id}}}:runs")
-    assert 0 < runs_ttl <= await valkey.pttl(f"job:{{{job_id}}}:meta")
+    runs_ttl, meta_ttl = await job_pttls(valkey, job_id, "runs", "meta")
+    # The two TTLs are read on the real clock, a millisecond or two apart.
+    assert 590_000 < runs_ttl <= meta_ttl + 50
+
+
+async def job_pttls(valkey: FakeAsyncRedis, job_id: str, *kinds: str) -> list[int]:
+    """The PTTLs of the job's keys, read in one pipeline."""
+    async with valkey.pipeline(transaction=False) as pipe:
+        for kind in kinds:
+            pipe.pttl(f"job:{{{job_id}}}:{kind}")
+        return list(await pipe.execute())
+
+
+@scenario
+async def test_completion_renews_runs_with_the_job() -> None:
+    """Ruling R-P10-1: the runs live as long as the job, so the completing write renews them."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=600)
+    job_id = await create_job(store, URLS[:2])
+    await valkey.pexpire(f"job:{{{job_id}}}:meta", 100_000)  # the job ran for 500 s
+    await store.record_claim(job_id, 0, "extract", 1)
+    await store.write_result(job_id, 0, success())
+    assert (await job_pttls(valkey, job_id, "runs"))[0] <= 100_000
+
+    assert await store.write_result(job_id, 1, success(URLS[1])) == "last"
+
+    runs_ttl, meta_ttl, results_ttl = await job_pttls(valkey, job_id, "runs", "meta", "results")
+    assert 590_000 < meta_ttl <= 600_000
+    assert abs(runs_ttl - meta_ttl) <= 50
+    assert abs(results_ttl - meta_ttl) <= 50
+
+
+@scenario
+async def test_completion_without_runs_creates_none() -> None:
+    """A job no worker claimed (a P1 job) completes without a ``runs`` key."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await create_job(store, URLS[:1], kind="extract")
+
+    await store.write_result(job_id, 0, success())
+
+    assert await valkey.exists(f"job:{{{job_id}}}:runs") == 0
+
+
+@scenario
+async def test_items_ignore_a_run_they_cannot_read() -> None:
+    """An entry of ``runs`` this release cannot read (a newer format, a broken value) shows as
+    no run; it never fails the job view."""
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await create_job(store, URLS)
+    await valkey.hset(
+        f"job:{{{job_id}}}:runs",
+        mapping={
+            "0": "garbage",
+            "1": "1|extract|10000000000000000000000000",  # OverflowError
+            "2": "1|extract|100000000000000000",  # year out of range
+            "3": "x|extract|1000",
+            "4": "1|extract|1000|more",
+        },
+    )
+
+    assert [item.run for item in await store.items(job_id, 0, 5)] == [None] * 5
 
 
 @scenario

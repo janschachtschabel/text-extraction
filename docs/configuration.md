@@ -742,9 +742,9 @@ shows where an item runs and how often it was claimed: the claim number is 1 on 
 and grows after a lost lease or a deferral. The worker writes it with one script per claim
 before the item runs (one Valkey round trip; a failed write is logged as
 `job_item_claim_not_recorded` and the item runs anyway); nothing is written for a job that is
-gone. Each write takes the remaining TTL of `meta`; completion does not renew it, so on a job that
-ran long it may expire before the job, and the items then show `run` as null. An item of a sync
-request that ran in the API pod has none.
+gone. It lives as long as the job: each write takes the remaining TTL of `meta`, and the
+completing result write renews it with the job's other keys (as does a site job's growth). An item
+of a sync request that ran in the API pod has none.
 
 Per API key (the job's owner) one more key lists the unfinished batches and site jobs:
 `jobs:{owner:<name>}:open` is a set of job ids with a TTL of `JOB_TTL_SECONDS`, renewed on each
@@ -758,10 +758,10 @@ touches this key together with a job key or a queue key.
 state. It deletes every key of the job under `job:{<id>}:` that the job store knows by name:
 `meta`, `urls`, `results`, `done`, `runs`, the browser secrets, the drafts, the caller's ASR and
 LLM keys, the crawl keys of a site job (below), its files (`job:{<id>}:artifact:screenshot.png`)
-and the input of item 0 (an upload, whose bytes leave the input budget). Then it removes the id from the
-owner's `jobs:{owner:<name>}:open`, so an admin's delete frees the owner's slot. Items still in a
-queue stay there until a worker claims them; the worker drops them as items of an expired job
-(`job_item_dropped`, reason `job_gone`, counted as `lost`). An item that is running, and a
+and the input of item 0 (an upload, whose bytes leave the input budget). Then it removes the id
+from the owner's `jobs:{owner:<name>}:open`, so an admin's delete frees the owner's slot. Items
+still in a queue stay there until a worker claims them; the worker drops them as items of an
+expired job (`job_item_dropped`, reason `job_gone`, counted as `lost`). An item that is running, and a
 handed-over request still running in an API pod, finish without storing anything: every write
 checks for `meta` first, so nothing of the job comes back. The input of an item past index 0
 that a batch queued for OCR or transcription (`job:{<id>}:input:<index>`) is deleted, and leaves
