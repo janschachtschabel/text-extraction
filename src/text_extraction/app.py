@@ -77,7 +77,10 @@ class InfoData(BaseModel):
 
 def service_info(principal: Principal) -> Envelope[InfoData]:
     """The core of ``GET /v1/info`` (ruling P10-S1): name and version of the service, and who
-    the caller is."""
+    the caller is.
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     data = InfoData(
         name=SERVICE_NAME,
         version=__version__,

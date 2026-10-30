@@ -124,7 +124,10 @@ async def create_site_structure(
 async def start_site(
     state: State, principal: Principal, body: SiteStructureRequest
 ) -> Envelope[JobAccepted]:
-    """The core of ``POST /v1/site-structure`` (ruling P10-S1)."""
+    """The core of ``POST /v1/site-structure`` (ruling P10-S1).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     sites: SiteStore = state.site_store
     queue: FairQueue = state.job_queue

@@ -323,7 +323,15 @@ async def run_upload(
     (``check_upload_request``), the size check of ``upload_file_limit``, the ASR key check of a
     file that is transcribed, then ``answer_upload``. ``name`` is the file name as a result may
     show it (``sanitize_file_name``); ``asr_header`` and ``llm_header`` are the raw values of the
-    ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them)."""
+    ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Callers bound their read of the file to ``upload_file_limit`` + 1 bytes (the route reads no
+    more; MCP refuses a larger file before decoding it): ``data`` over the limit is cut to that
+    and ends as ``failed``/``too_large``, but a caller that holds a larger buffer has already
+    paid for it.
+
+    Caller's checks (this core runs neither, it repeats ``check_upload_request`` only):
+    ``principal_for`` (the user role, which every key has), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     key, caller_llm_key = check_upload_request(
         form, principal, settings, asr_header=asr_header, llm_header=llm_header
@@ -392,7 +400,7 @@ async def answer_upload(
     docstring). The request has passed ``check_upload_request``; ``asr_key`` and ``llm_key`` are
     its keys. ``short_ok`` is for a ``text`` of ``POST /v1/chunk`` (``structured_api.py``), which
     shares this flow: no word-count gate (``Pipeline.extract_upload``). ``state`` is the public
-    app's state."""
+    app's state. The caller has run ``principal_for`` and ``check_rate`` (``run_upload``)."""
     settings: Settings = state.settings
     # Only a request that may need the LLM keeps the caller's key with its jobs.
     llm = wants_llm(form.structured, form.chunking, settings, describe=form.describe_images)

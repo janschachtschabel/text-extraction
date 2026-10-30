@@ -72,7 +72,11 @@ def _record_principal(request: Request, principal: Principal) -> None:
 def principal_for(settings: Settings, authorization: str | None) -> Principal:
     """The caller of a request whose ``Authorization`` header is ``authorization`` (None
     without one), or a 401 `ServiceError`. Under ``AUTH_MODE=none`` every caller is the
-    anonymous admin."""
+    anonymous admin.
+
+    It checks the key only: the caller checks the role a door needs (every key has ``user``;
+    ``admin`` routes need ``principal.role == "admin"``), counts the call with ``check_rate``,
+    and binds the name to the log context and the access line (as ``authenticate`` does)."""
     if settings.auth_mode == "none":
         # Behind the B-API gateway, which authorises the caller.
         return _ANONYMOUS

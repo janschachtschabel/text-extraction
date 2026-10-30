@@ -1,6 +1,8 @@
 """The route cores (ruling P10-S1): each public route's body as a function of the app state, so
 that MCP tools and the UI's reading views run exactly the route's checks and answers."""
 
+import asyncio
+import contextlib
 import hashlib
 import json
 from collections.abc import Awaitable, Callable, Iterator
@@ -19,6 +21,7 @@ import text_extraction.pipeline as pipeline_module
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from text_extraction.app import create_public_app, service_info
 from text_extraction.auth import Principal, principal_for
+from text_extraction.browser_models import ScreenshotRequest
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import respond
@@ -26,10 +29,12 @@ from text_extraction.extract_models import ChunkRequest, ExtractRequest, Structu
 from text_extraction.fetch import Fetcher
 from text_extraction.file_api import run_upload, upload_file_limit
 from text_extraction.file_models import FileForm
-from text_extraction.job_models import BatchRequest
+from text_extraction.job_models import BatchRequest, JobOptions
+from text_extraction.jobs import SCREENSHOT_ARTIFACT
 from text_extraction.jobs_api import check_jobs_enabled, read_job, start_batch
 from text_extraction.pipeline import create_pipeline
 from text_extraction.ratelimit import RateLimiter, check_rate
+from text_extraction.screenshot_api import read_artifact, run_screenshot
 from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
 from text_extraction.site_api import start_site
@@ -72,14 +77,28 @@ def make_settings(**overrides: Any) -> Settings:
     return Settings(**values)
 
 
-@pytest.fixture
-def client() -> Iterator[TestClient]:
-    settings = make_settings()
+class SlowFetcher(FakeFetcher):
+    """Answers like `FakeFetcher`, after a pause: long enough to outlast a short wait."""
+
+    async def fetch(self, url: str, **options: Any) -> Any:
+        await asyncio.sleep(0.3)
+        return await super().fetch(url, **options)
+
+
+@contextlib.contextmanager
+def running_app(fetcher: FakeFetcher | None = None, **overrides: Any) -> Iterator[TestClient]:
+    settings = make_settings(**overrides)
     registry = CollectorRegistry()
     app = create_public_app(settings, FakeAsyncRedis(), registry)
-    fake = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+    fake = fetcher or FakeFetcher({PAGE: fetched(body=ARTICLE)})
     app.state.pipeline = create_pipeline(settings, app.state.valkey, cast(Fetcher, fake), registry)
     with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def client() -> Iterator[TestClient]:
+    with running_app() as test_client:
         yield test_client
 
 
@@ -319,3 +338,82 @@ def test_run_upload_refuses_large_before_converting(
     assert body["error"]["code"] == "too_large"
     # The pipeline gets what the route's bounded read would give it: the limit and one byte.
     assert seen == [limit + 1]
+
+
+def test_jsonresponse_handover_answers_like_route() -> None:
+    """The 202 hand-over of a slow extraction: the core's `JSONResponse` is the route's."""
+    with running_app(SlowFetcher({PAGE: fetched(body=ARTICLE)})) as client:
+        state = state_of(client)
+        body = {"url": PAGE, "cache": False, "wait_seconds": 0.05}
+        route = client.post("/v1/extract", json=body, headers=AUTH)
+        core = call(
+            client, respond, state, ExtractRequest.model_validate(body), alice(client), "extract"
+        )
+
+        assert route.status_code == 202
+        assert isinstance(core, Response)
+        assert core.status_code == 202
+        assert stable(as_json(core)) == stable(route.json())
+        assert stable(route.json())["data"] == {"kind": "extract", "state": "running", "total": 1}
+
+
+def test_run_screenshot_answers_like_route() -> None:
+    """Browser mode on but no browser worker: both answer `failed`/`timeout` at once."""
+    with running_app(browser_enabled=True, browser_queue_wait_seconds=0) as client:
+        state = state_of(client)
+        body = {"url": PAGE}
+        route = client.post("/v1/screenshot", json=body, headers=AUTH)
+        core = call(
+            client, run_screenshot, state, alice(client), ScreenshotRequest.model_validate(body)
+        )
+
+        assert route.status_code == 200
+        expected = stable(route.json())
+        assert expected["status"] == "failed"
+        assert stable(as_json(core)) == expected
+
+
+def test_run_screenshot_refused_like_route(client: TestClient) -> None:
+    """Browser mode off: the route's 400 is the core's `ServiceError`."""
+    route = client.post("/v1/screenshot", json={"url": PAGE}, headers=AUTH)
+    with pytest.raises(ServiceError) as caught:
+        call(
+            client,
+            run_screenshot,
+            state_of(client),
+            alice(client),
+            ScreenshotRequest(url=PAGE),
+        )
+
+    assert route.status_code == caught.value.http_status == 400
+    error = route.json()["error"]
+    assert (error["code"], error["message"]) == (caught.value.code, caught.value.message)
+
+
+def test_read_artifact_answers_like_route(client: TestClient) -> None:
+    state = state_of(client)
+    principal = alice(client)
+    png = b"\x89PNG\r\n\x1a\n-a-small-picture"
+
+    async def stored() -> str:
+        job_id: str = await state.job_store.create(
+            "screenshot", principal, JobOptions(compliance="enforce"), [PAGE]
+        )
+        await state.job_store.put_artifact(job_id, SCREENSHOT_ARTIFACT, png)
+        return job_id
+
+    job_id = call(client, stored)
+    path = f"/v1/jobs/{job_id}/artifacts/{SCREENSHOT_ARTIFACT}"
+    route = client.get(path, headers=AUTH)
+
+    assert route.status_code == 200
+    assert route.content == call(
+        client, read_artifact, state, principal, job_id, SCREENSHOT_ARTIFACT
+    )
+    assert route.content == png
+
+    missing = client.get(f"/v1/jobs/{job_id}/artifacts/other.png", headers=AUTH)
+    with pytest.raises(ServiceError) as caught:
+        call(client, read_artifact, state, principal, job_id, "other.png")
+    assert missing.status_code == caught.value.http_status == 404
+    assert missing.json()["error"]["message"] == caught.value.message

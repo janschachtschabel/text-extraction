@@ -381,7 +381,10 @@ async def respond(
     caller's ``X-ASR-Api-Key``, stored with an ASR job only; ``llm_key`` the caller's
     ``X-LLM-Api-Key``, stored with every job of a request that may need the LLM. ``state`` is
     the public app's state: the core of ``POST /v1/extract`` and the routes that share its flow
-    (ruling P10-S1)."""
+    (ruling P10-S1).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)

@@ -84,7 +84,10 @@ async def rate_limited(
 async def check_rate(state: State, principal: Principal) -> None:
     """Count one call of ``principal`` against its bucket (the one every door shares: REST, MCP
     and the UI), or raise 429 with ``Retry-After``, or 503 while Valkey is unavailable.
-    ``state`` is the public app's state."""
+    ``state`` is the public app's state.
+
+    The caller has authenticated ``principal`` (``principal_for``) and checks its role; one call
+    of a door (a request, an MCP tool call, a UI view) counts exactly once."""
     settings: Settings = state.settings
     if not settings.rate_limit_enabled:
         return

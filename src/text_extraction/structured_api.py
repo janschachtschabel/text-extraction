@@ -167,7 +167,10 @@ async def run_structured(
     llm_key: str | None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """The core of ``POST /v1/structured`` (ruling P10-S1). ``asr_key`` and ``llm_key`` are the
-    raw values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them)."""
+    raw values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     return await respond(
         state,
         body,
@@ -230,7 +233,10 @@ async def run_chunk(
     llm_key: str | None,
 ) -> Envelope[ExtractResult] | Response:
     """The core of ``POST /v1/chunk`` (ruling P10-S1). ``asr_key`` and ``llm_key`` are the raw
-    values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them)."""
+    values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     if body.url is not None:
         return await respond(
             state,

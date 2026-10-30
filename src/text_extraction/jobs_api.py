@@ -200,7 +200,8 @@ async def open_job(
     keeps the limit under concurrent requests, and a job beyond it is given back. A job whose
     add fails is given back as well. The caller stores what else the job needs and enqueues it,
     and gives the job back with ``discard_job`` when that fails. Valkey errors propagate.
-    ``state`` is the public app's state."""
+    ``state`` is the public app's state. The caller has run ``principal_for``,
+    ``check_jobs_enabled`` and ``check_rate`` (``start_batch``, ``start_site``)."""
     settings: Settings = state.settings
     valkey: Redis = state.valkey
     store: JobStore = state.job_store
@@ -290,7 +291,10 @@ async def start_batch(
     llm_key: str | None,
 ) -> Envelope[JobAccepted]:
     """The core of ``POST /v1/batch`` (ruling P10-S1). ``asr_key`` and ``llm_key`` are the raw
-    values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them)."""
+    values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     store: JobStore = state.job_store
     queue: FairQueue = state.job_queue
@@ -483,7 +487,10 @@ async def read_job(
 ) -> Envelope[JobView]:
     """The core of ``GET /v1/jobs/{id}`` (ruling P10-S1): the job's status and progress with
     the page of ``limit`` items from ``offset`` (1 to ``MAX_PAGE_SIZE``; the route's query
-    checks them)."""
+    checks them, other callers bound them themselves).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
     store: JobStore = state.job_store
     try:
         record = await visible_job(store, job_id, principal)

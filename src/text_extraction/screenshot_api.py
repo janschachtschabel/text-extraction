@@ -64,7 +64,10 @@ async def run_screenshot(
     state: State, principal: Principal, body: ScreenshotRequest
 ) -> Envelope[ScreenshotResult] | JSONResponse:
     """The core of ``POST /v1/screenshot`` (ruling P10-S1): the extraction flow
-    (``extract_api.respond``) for a browser capture, its result without the text."""
+    (``extract_api.respond``) for a browser capture, its result without the text.
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     req = ExtractRequest(
         url=body.url,
         mode="browser",
@@ -129,7 +132,10 @@ async def artifact(
 async def read_artifact(state: State, principal: Principal, job_id: str, name: str) -> bytes:
     """The core of ``GET /v1/jobs/{id}/artifacts/{name}`` (ruling P10-S1): the file's bytes, or
     404 for an invalid name, a job the caller may not see and a missing file; 503 while Valkey
-    is unavailable."""
+    is unavailable. Artifacts belong to jobs, so ``check_jobs_enabled`` applies here too.
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
     store: JobStore = state.job_store
     if not valid_artifact_name(name):
         raise _no_file()
