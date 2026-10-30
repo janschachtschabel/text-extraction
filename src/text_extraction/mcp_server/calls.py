@@ -100,7 +100,10 @@ class ModelTool(Tool):
         try:
             if self._state is None:
                 raise _internal()
-            args = self.args_model.model_validate(arguments)
+            # The settings bound some arguments (``max_chars`` by ``MCP_MAX_CONTENT_CHARS``).
+            args = self.args_model.model_validate(
+                arguments, context={"settings": self._state.settings}
+            )
             return as_result(await self.call(self._state, call_principal(), args))
         except Exception as error:
             raise ToolCallError(error) from error

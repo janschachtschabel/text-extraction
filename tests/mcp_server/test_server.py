@@ -288,6 +288,7 @@ def test_arguments_never_logged_at_debug(capsys: pytest.CaptureFixture[str]) -> 
 def test_tools_do_not_import_the_app() -> None:
     script = (
         "import sys\n"
+        "import text_extraction.mcp_server.tools_extract\n"
         "import text_extraction.mcp_server.tools_info\n"
         "print('text_extraction.app' in sys.modules)\n"
     )

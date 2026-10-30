@@ -73,6 +73,7 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
         ToolMetrics,
         register,
     )
+    from text_extraction.mcp_server.tools_extract import extraction_tools
     from text_extraction.mcp_server.tools_info import ServiceInfoTool
 
     _log_through_root()
@@ -84,7 +85,7 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
         mask_error_details=True,
         middleware=[CallGuard(state, metrics)],
     )
-    tools: list[ModelTool] = [ServiceInfoTool()]
+    tools: list[ModelTool] = [*extraction_tools(), ServiceInfoTool()]
     for tool in tools:
         register(server, state, tool)
     metrics.export(tool.name for tool in tools)
