@@ -4,6 +4,7 @@ test runs the fake llm worker and pytest-httpserver as ``tests/test_llm_dispatch
 
 import asyncio
 import json
+import time
 from typing import Any
 
 import pytest
@@ -28,6 +29,7 @@ from tests.test_extract_api import (
 )
 from tests.test_file_api import BEARER, asgi_call, comparable
 from tests.test_llm_dispatch import CALLER_KEY, LLM_HEADERS, LlmService, keys_sent
+from text_extraction.jobs import JobStore
 
 METADATA_TITLE: dict[str, Any] = {"schema": SCHEMA_ONE, "strategy": "metadata"}
 # At least 50 words, or the upload is judged too short (partial/content_too_short).
@@ -627,3 +629,65 @@ def test_chunk_invalid_json_is_422() -> None:
     for response in (broken, wrong):
         assert response.status_code == 422, response.text
         assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_chunk_short_text_as_a_job_keeps_short_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R15 on the job path: the flag is stored with the upload's input, so a worker that converts
+    # the item (tests/test_worker.py) skips the word-count gate as the request does; the
+    # request's own task stores `success`.
+    stored: list[Any] = []
+    put_input = JobStore.put_input
+
+    async def recording(
+        self: JobStore, job_id: str, index: int, body: bytes, meta: Any, ttl: Any
+    ) -> None:
+        stored.append(meta)
+        return await put_input(self, job_id, index, body, meta, ttl)
+
+    monkeypatch.setattr(JobStore, "put_input", recording)
+    service = Service()
+    with TestClient(service.app) as client:
+        response = chunk(
+            client,
+            text="Just one short sentence.",
+            chunking={"strategy": "fixed"},
+            wait_seconds=0,
+        )
+        assert response.status_code == 202, response.text
+        accepted = response.json()["data"]
+        assert accepted["kind"] == "file"
+        job = client.get(accepted["status_url"], headers=AUTH).json()
+        for _ in range(200):
+            if job["data"]["state"] == "completed":
+                break
+            time.sleep(0.02)
+            job = client.get(accepted["status_url"], headers=AUTH).json()
+
+    assert [meta.short_ok for meta in stored] == [True]
+    result = job["data"]["items"][0]["result"]
+    assert result["status"] == "success", result["error"]
+    assert result["data"]["chunks"][0]["text"] == "Just one short sentence."
+
+
+def test_upload_input_of_the_file_route_keeps_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    stored: list[Any] = []
+    put_input = JobStore.put_input
+
+    async def recording(
+        self: JobStore, job_id: str, index: int, body: bytes, meta: Any, ttl: Any
+    ) -> None:
+        stored.append(meta)
+        return await put_input(self, job_id, index, body, meta, ttl)
+
+    monkeypatch.setattr(JobStore, "put_input", recording)
+    service = Service()
+    with TestClient(service.app) as client:
+        response = client.post(
+            "/v1/extract/file",
+            files={"file": ("short.txt", b"Just one short sentence.", "text/plain")},
+            data={"wait_seconds": "0"},
+            headers=AUTH,
+        )
+
+    assert response.status_code == 202, response.text
+    assert [meta.short_ok for meta in stored] == [False]

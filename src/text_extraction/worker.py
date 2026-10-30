@@ -425,6 +425,7 @@ class ExtractRunner:
             content_type=meta.content_type,
             ocr_handoff=move,
             asr_handoff=transcription,
+            short_ok=meta.short_ok,
         )
         if (move is not None and move.moved) or (transcription is not None and transcription.moved):
             return None

@@ -1558,10 +1558,12 @@ async def test_no_move_while_docling_is_off() -> None:
     assert (await harness.docling_queue.counts()).pending == 0
 
 
-async def submit_upload(harness: Harness, body: bytes, content_type: str) -> str:
+async def submit_upload(
+    harness: Harness, body: bytes, content_type: str, *, short_ok: bool = False
+) -> str:
     options = JobOptions(mode="fast", compliance="enforce", cache=False, format="text")
     job_id = await harness.store.create("file", OWNER, options, [None])
-    meta = UploadInputMeta(file_name="notes.txt", content_type=content_type)
+    meta = UploadInputMeta(file_name="notes.txt", content_type=content_type, short_ok=short_ok)
     await harness.store.put_input(job_id, 0, body, meta, 600)
     await harness.queue.enqueue_items(job_id, OWNER.name, [(0, None)])
     return job_id
@@ -1583,6 +1585,26 @@ async def test_file_item_runs_from_its_input_and_deletes_it() -> None:
     assert item.result.data.format == "text"
     assert await harness.valkey.keys("job:*:input:*") == []
     assert harness.fetcher.calls == []
+
+
+@pytest.mark.parametrize(("short_ok", "status"), [(False, "partial"), (True, "success")])
+@scenario
+async def test_file_item_of_a_short_text_honours_short_ok(short_ok: bool, status: str) -> None:
+    """R15: a ``/v1/chunk`` text is no "too short" in the worker that converts its job."""
+    harness = Harness()
+    job_id = await submit_upload(
+        harness, b"Just one short sentence.", "text/markdown", short_ok=short_ok
+    )
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    (item,) = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.status == status
+    assert (item.result.error is None) == (status == "success")
+    if not short_ok:
+        assert item.result.error is not None
+        assert item.result.error.code == ErrorCode.CONTENT_TOO_SHORT
 
 
 @scenario

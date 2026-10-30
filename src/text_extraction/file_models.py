@@ -101,10 +101,13 @@ class FileForm(BaseModel, extra="forbid", hide_input_in_errors=True):
 
 class UploadInputMeta(BaseModel):
     """What a job keeps next to an upload's bytes (``JobStore.put_input``) until its item is
-    extracted: the part's sanitised file name and its declared content type."""
+    extracted: the part's sanitised file name and its declared content type, and ``short_ok``
+    (a ``text`` of ``POST /v1/chunk``, ruling R15: the word-count gate does not apply to it, in
+    the worker that converts the item as in the request that made it)."""
 
     file_name: str | None = None
     content_type: str | None = None  # as the part declared it, parameters included
+    short_ok: bool = False
 
 
 def upload_options(form: FileForm, compliance: ComplianceMode) -> JobOptions:

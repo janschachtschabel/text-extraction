@@ -343,7 +343,7 @@ async def answer_upload(
         job_llm_key,
         short_ok=short_ok,
     )
-    meta = UploadInputMeta(file_name=name, content_type=content_type)
+    meta = UploadInputMeta(file_name=name, content_type=content_type, short_ok=short_ok)
     return await answer_or_hand_over(
         state,
         flow,
