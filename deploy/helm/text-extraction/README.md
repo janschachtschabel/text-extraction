@@ -156,6 +156,10 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.RATE_LIMIT_ENABLED` | `"true"` | Inbound rate limit per API key. |
 | `config.RATE_LIMIT_PER_MINUTE` | `"60"` | Default limit per key. |
 | `config.CONVERT_CONCURRENCY` | `"2"` | Conversions at once per pod. The memory limit is sized for it. |
+| `config.POST_CONCURRENCY` | `"2"` | Threads of the post stage (patterns, chunking) per process, in every pod. |
+| `config.STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `"5"` | Time all selector rules of one result may take in their child process, which is then killed (`selectors_timed_out`). |
+| `config.STRUCTURED_SELECTOR_PROCESSES` | `"1"` | Selector child processes per pod (API, extract, browser and llm workers), about 40 MB each when idle. |
+| `config.STRUCTURED_SELECTOR_MEMORY_MB` | `"512"` | Address space of one selector child; it comes out of `documentParentReserveMiB`. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.*` | | Any further non-secret setting is added here. |

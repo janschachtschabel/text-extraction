@@ -163,18 +163,26 @@ add a note of its own):
   `pii_entities_truncated` (`annotate` lists at most `PII_MAX_ENTITIES` items; the counts stay
   complete).
 - Structured output and chunking: `selectors_skipped_large_page` (a page of more than 50,000
-  elements runs no selector rules, R4), `structured_truncated` (a field's values were cut at 1,000
+  elements runs no selector rules, R4), `selectors_timed_out` (the selector rules of the result
+  did not finish within `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`; their fields are missing, R19),
+  `selectors_failed` (their child process crashed or ran out of memory; likewise),
+  `structured_truncated` (a field's values were cut at 1,000
   values or 100,000 characters, R5), `tables_truncated` (the tables stopped at their bounds, R5),
   `structured_value_invalid` (a value found did not fit the schema and was dropped),
   `pattern_timeout` (a pattern ran out of its time; its field is missing), `llm_unavailable`
   (`auto` on a service without the LLM: the fields left for it stay missing),
   `llm_input_truncated` (the LLM got the content cut to `LLM_MAX_INPUT_TOKENS` × 4 characters),
   `learned_selectors_unavailable` (Valkey could not read the learned selectors),
-  `nothing_to_learn` (`learn_selectors` without a field for the LLM, R8),
-  `selector_learning_failed` (the learning call failed; the values stay, R9), `chunks_truncated`
+  `nothing_to_learn` (`learn_selectors` without a field for the LLM, R8, or without a page to
+  learn from: an upload or a text has no host, a document no HTML), `selector_learning_failed`
+  (the learning call failed, or the check of its proposals did not finish; the values stay, R9,
+  R19), `chunks_truncated`
   (more than `CHUNK_MAX_CHUNKS` chunks), `chunking_fallback_recursive` (`markdown` on
   `format: text`, `semantic` on more than 5,000 sentences or without the LLM step).
-- Jobs: `content_not_stored_too_large` (an item stored without its content).
+- Jobs: `content_not_stored_too_large` (an item stored without its content),
+  `chunks_not_stored_too_large` and `tables_not_stored_too_large` (still over
+  `JOB_ITEM_MAX_BYTES` without its content, the item was stored without its chunks or its
+  `structured.tables` too, R20).
 
 A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
 `meta`, `opengraph`, `text`, `xmp` (a PDF's XMP packet, F8), or `platform` (the licence a video
@@ -307,8 +315,9 @@ optional rate limit.
   per API key and host, for LLM-free reuse. Chunks `fixed`, `recursive`, `markdown`, `sentence`
   or `semantic` (embeddings). The LLM calls run in the llm worker. Env: `LLM_*` (`LLM_MODEL`
   default `gpt-6-luna`, `LLM_API_KEY` a secret), `SELECTOR_LEARN_TTL_SECONDS`,
-  `STRUCTURED_REGEX_TIMEOUT_SECONDS`, `CHUNK_MAX_CHUNKS`. Details in "Structured output and
-  chunking".
+  `STRUCTURED_REGEX_TIMEOUT_SECONDS`, `CHUNK_MAX_CHUNKS`, `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`,
+  `STRUCTURED_SELECTOR_PROCESSES`, `STRUCTURED_SELECTOR_MEMORY_MB`, `POST_CONCURRENCY`. Details in
+  "Structured output and chunking".
 - **Batch:** one sub-queue per client and domain, round-robin over clients, then over the
   client's domains with free capacity; see "Jobs and the fair queue".
 - **Sync-to-job (P1):** `POST /v1/extract` without `wait_seconds` always answers when the
@@ -389,7 +398,11 @@ pollers stop; the stored record stays as it is until its TTL. A pod keeps at mos
 
 **Results (P6).** An item result whose JSON exceeds `JOB_ITEM_MAX_BYTES` is stored without
 `content`, with the warning `content_not_stored_too_large`; a later `POST /v1/extract` of the URL
-is a cache hit for `RESULT_CACHE_TTL_SECONDS`.
+is a cache hit for `RESULT_CACHE_TTL_SECONDS`. Still over the limit without its content, it is
+stored without its `chunks` (null) and its `structured.tables` (null) too, with
+`chunks_not_stored_too_large` and `tables_not_stored_too_large` (R20): chunks repeat the content,
+with overlap many times over. What is left (structured values, metadata, links) is stored as it
+is, so an item can still be somewhat over the limit; values are bounded by their own caps (R5).
 
 **Valkey memory (P5, R18).** Valkey runs with `--maxmemory 768mb --maxmemory-policy noeviction`:
 eviction would drop gate, lease or job keys silently, while noeviction fails writes loudly (503).
@@ -1666,11 +1679,24 @@ its DOM fields stay missing. Per field, in this order (R3, the order of `auto` t
   `name`, `href`, `src`, `content` and `datetime`, cut at an element border to
   `LLM_MAX_INPUT_TOKENS` × 4 characters. It travels in the draft and is cleared before any answer.
 
-Cost bounds (rule 5, R4): caller XPath needs an admin key (422 "XPath selectors need an admin key;
-use CSS.": XPath 1.0 has no cost limit lxml can enforce, and `//*//*//*` runs for minutes on a
-large page); a non-admin CSS rule may use `:has(` at most once; learned rules are CSS only; caller
-and learned rules run only on pages of at most 50,000 elements (`STRUCTURED_MAX_ELEMENTS`), else
-they are skipped with `selectors_skipped_large_page`.
+Cost bounds (rule 5, R4, R19). What bounds a selector rule is a kill, not its grammar: soupsieve
+backtracks without a budget (on ten chains of 60 nested `<div>`, `span div div div div` takes about
+two minutes, each further `div` ten times more), lxml cannot stop an XPath, and Python cannot stop a
+thread. So every caller rule, every learned rule and every proposal of `learn_selectors` runs in a
+selector child (`structured/selector_pool.py`, a `DocumentPool` of
+`STRUCTURED_SELECTOR_PROCESSES` children with target `structured/selector_child.py`, an address
+space of `STRUCTURED_SELECTOR_MEMORY_MB` each, no settings and no keys): one run takes all rules of
+a result on the page, by `STRUCTURED_SELECTOR_TIMEOUT_SECONDS` (5 s) or the request's own deadline,
+whichever comes first; waiting for a free child counts against it. A run that does not finish is
+killed with its child, which a fresh one replaces: its fields stay missing with
+`selectors_timed_out` (`selectors_failed` for a child that crashed or ran out of memory), and the
+result is not failed. The rules themselves (`structured/rules.py`) parse the page as `metadata`
+does. The grammar limits stay as policy: caller XPath needs an admin key (422 "XPath selectors need
+an admin key; use CSS."); a non-admin CSS rule may use `:has(` at most once and no backslash (422:
+an escape could spell `:has(` past the count); learned rules are CSS only; caller and learned rules
+run only on pages of at most 50,000 elements (`STRUCTURED_MAX_ELEMENTS`), else they are skipped
+with `selectors_skipped_large_page`. The children start with the API pod and the extract, browser
+and llm workers (or with the first rule).
 
 **S4, cache and learned selectors.** The learned selectors of the principal, the request URL's host
 and the `schema_id` are read before the cache lookup. A request whose options touch the DOM
@@ -1689,7 +1715,10 @@ stage, chunking, then `stage: "done"` with every value checked by the compiled m
 fails is dropped with `structured_value_invalid`). An envelope without data, or `failed` without
 content, gets none (`structured` and `chunks` stay null); empty content gives `chunks: []` and
 every field missing. It runs at every finish point (the sync flows, the P1 job's write,
-`Worker._finish` of every pool) after the PII step and before `fail_closed`. `finish_post` is the
+`Worker._finish` of every pool) after the PII step and before `fail_closed`. Its CPU work
+(patterns, chunking, the semantic distances, the learning check's parsing and comparison) runs on
+the process's post pool (R21), a `ConversionPool` of `POST_CONCURRENCY` (2) threads of its own,
+never on the event loop or on asyncio's default executor, which also resolves host names. `finish_post` is the
 guard: a result whose post stage has not run gets it without the LLM; LLM work that was asked and
 not done turns `success` into `partial`/`llm_failed`, retryable ("The LLM step is busy; retry
 later." under the memory guard, "The LLM step did not run; retry later." otherwise), with its
@@ -1706,14 +1735,20 @@ the GIL and runs in a thread.
 
 **S7, `learn_selectors`** (`structured/learn.py`). Once the LLM has values, one more call shows it
 the values and `learn_html` and asks for one `{"css", "attr"}` per field (strict schema). A proposal
-is kept only when it is a valid CSS rule within the non-admin limits and, run on `learn_html`
-exactly as the DOM stage runs rules, gives the LLM's value (whitespace collapsed, case folded,
-arrays element by element): `*` selects the whole page, which is not the value. Nothing from the
-answer is fetched or executed. `learned: {stored, rejected}` names the fields. With no field for the
-LLM there is nothing to learn: no hop, no call, `nothing_to_learn` (R8). A failed learning call
-keeps the status, with `selector_learning_failed` and every field in `rejected` (R9).
+is kept only when it is a valid CSS rule within the non-admin limits, not positional (no
+`:nth-*`, `:first-*`, `:last-*`, `:only-*`, no `+` or `~`: `learn_html` lacks the page's scripts,
+styles, SVG and comments, so sibling positions there are not the page's; M-d) and, run on
+`learn_html` in a selector child exactly as the DOM stage runs rules, gives the LLM's value
+(whitespace collapsed, case folded, arrays element by element): `*` selects the whole page, which
+is not the value. Nothing from the answer is fetched or executed. `learned: {stored, rejected}`
+names the fields. With no field for the LLM, or no page to learn from (an upload or a `/v1/chunk`
+text has no host, a document no HTML), there is nothing to learn: `nothing_to_learn` (R8; no hop
+and no call for the former). A failed learning call keeps the status, with
+`selector_learning_failed` and every field in `rejected` (R9); so does a check of the proposals
+that did not finish within `STRUCTURED_SELECTOR_TIMEOUT_SECONDS` or whose child failed (R19).
 
-**S8, the selector store** (`structured/store.py`). `sel:{<owner>}:<host>:<schema_id>` in Valkey:
+**S8, the selector store** (`structured/store.py`). `sel:{<owner>}:<host>:<schema_id>` in Valkey
+(the owner's `%`, `{` and `}` percent-escaped, as in the job keys):
 a JSON object of rules by field, merged per field on each write, TTL `SELECTOR_LEARN_TTL_SECONDS`
 (30 days) renewed on writes, not on reads. The owner is the API key's name (D2), the host the
 request URL's, lower-cased. A Valkey failure on a read is no rules with
@@ -1733,8 +1768,8 @@ tags (a `<document>` tag inside it is neutralised), cut at a paragraph border to
 JSON, does not validate or was cut off (`finish_reason: length`) gets one repair call with the
 answer and the error, then `llm_failed`, not retryable. The SDK retries 429, 5xx, timeouts and
 connection errors twice; then they are retryable, 400, 401, 403, 404 and 422 are not; the message
-names the HTTP status only. `embed` batches 64 texts of at most 2,000 characters each with
-`LLM_EMBEDDING_MODEL`. `structured.llm` reports `model`, `calls`, `prompt_tokens`,
+names the HTTP status only. `embed_batches` sends 64 texts of at most 2,000 characters each to
+`LLM_EMBEDDING_MODEL` at a time and yields each answer as a float32 array (R22). `structured.llm` reports `model`, `calls`, `prompt_tokens`,
 `completion_tokens`; `timings.llm_ms` the time of the calls.
 
 **S10, chunking** (`chunking/split.py`, `chunking/semantic.py`). Every chunk is
@@ -1751,7 +1786,9 @@ by `recursive`, a heading never ends a chunk. `sentence`: our splitter cuts afte
 (`3. Oktober`); sentences are packed up to `size`. `semantic` (D1): the sentences are embedded, and
 the text is cut where the cosine distance of neighbours is above the `breakpoint_percentile` of all
 distances; a group over `size` is split by `recursive`; more than 5,000 sentences fall back to
-`recursive`. `headings` is the Markdown heading path at the chunk's start (`[]` for `format:
+`recursive`. Only the distances are kept: each batch of embeddings (float32) gives its own, with
+the last vector of the batch before, and is dropped (R22), so 5,000 sentences at 3,072 dimensions
+need a few MB, not the 500 MB of all vectors as Python floats. `headings` is the Markdown heading path at the chunk's start (`[]` for `format:
 text`). At most `CHUNK_MAX_CHUNKS` (2,000), then `chunks_truncated`. Every step but the embeddings
 is linear in the content.
 
@@ -1803,8 +1840,13 @@ patterns, or `semantic`); any other gets its post stage where it is.
 (4) slot loops. Per item: read the draft (gone with its job: `internal_error`, retryable, there is
 nothing to post-process), the job's `structured` and `chunking` and the caller's key, then
 `apply_post` with an `LlmClient` under an overall deadline of `3 × LLM_TIMEOUT_SECONDS` (past it the
-draft answers without the LLM work, `llm_failed`, retryable). Learned rules are stored for the
-job's owner and the page's host. An exhausted item answers its draft without the LLM work. `/ready`
+draft answers without the LLM work, `llm_failed`, retryable; so does an unexpected error of the
+post stage, logged by its type only). Before any client is made, a draft that still owes the PII
+step is withheld (`pii_failed`; no path hands one over, but the LLM never sees personal data), and
+a draft stored without its content (over `JOB_ITEM_MAX_BYTES`) that owes LLM work or `semantic`
+chunking answers `llm_failed`, not retryable, "The document is too large for the LLM step." (R20).
+Learned rules are stored for the job's owner and the page's host; the selector children start
+with the worker. An exhausted item answers its draft without the LLM work. `/ready`
 once the loops run; `--check` sends one tiny extraction to the configured endpoint and exits 1 when
 it fails (an operator's smoke test, not in CI). On SIGTERM the items in flight get 30 s, then the
 ones still running go back to the queue at once (an item's lease is long). Logs carry job ids,
@@ -1822,8 +1864,10 @@ rate-limits before it reads the body (R16). The header `X-LLM-Api-Key` is on all
 **S16, settings and switches.** `LLM_ENABLED` (false), `LLM_BASE_URL`, `LLM_ALLOW_HTTP`, `LLM_MODEL`
 (`gpt-6-luna`), `LLM_API_KEY` (secret), `LLM_EMBEDDING_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`,
 `LLM_TIMEOUT_SECONDS`, `LLM_MAX_INPUT_TOKENS`, `LLM_CONCURRENCY`, `LLM_SYNC_WAIT_SECONDS`,
-`SELECTOR_LEARN_TTL_SECONDS`, `STRUCTURED_REGEX_TIMEOUT_SECONDS`, `CHUNK_MAX_CHUNKS`. Start-up
-refuses `LLM_ENABLED` without `JOBS_ENABLED`. Helm: `workers.llm.enabled` (false) renders
+`SELECTOR_LEARN_TTL_SECONDS`, `STRUCTURED_REGEX_TIMEOUT_SECONDS`, `CHUNK_MAX_CHUNKS`,
+`STRUCTURED_SELECTOR_TIMEOUT_SECONDS` (5), `STRUCTURED_SELECTOR_PROCESSES` (1),
+`STRUCTURED_SELECTOR_MEMORY_MB` (512), `POST_CONCURRENCY` (2). Start-up refuses `LLM_ENABLED` without
+`JOBS_ENABLED`. Helm: `workers.llm.enabled` (false) renders
 `LLM_ENABLED` into every pod and deploys the llm worker (API image, no volume), `LLM_API_KEY` from
 `workers.llm.apiKey.existingSecret`; compose: the profile `llm`. The settings and Helm values are in
 [configuration.md](configuration.md#llm).
@@ -1841,15 +1885,30 @@ the PII step. R13: a withheld PII answer (`pii_failed`) drops `structured` and `
 R16: the `text` of `/v1/chunk` (limit, word gate, auth before the body). R17: the llm worker's
 grace period is 40 s in the chart (30 s plus the chart's 10 s margin). R18: on `/v1/extract/file`
 the form fields `structured` and `chunking` may have 64 KiB each (every other field keeps 1 KiB),
-and the route's body limit grows to the file limit + 192 KiB to hold them.
+and the route's body limit grows to the file limit + 192 KiB to hold them. R19: caller rules,
+learned rules and the learning check run in selector children killed at
+`STRUCTURED_SELECTOR_TIMEOUT_SECONDS` (`selectors_timed_out`, `selectors_failed`); a non-admin CSS
+rule has no backslash. R20: `JOB_ITEM_MAX_BYTES` drops chunks and tables after the content; a draft
+without its content that owes the LLM is `llm_failed`, not retryable. R21: the post stage's CPU
+work runs on a post pool of `POST_CONCURRENCY` threads per process. R22: `semantic` keeps one
+float32 batch of embeddings and the distances, never all vectors. R23: the llm runner withholds a
+draft that owes PII and keeps the content on an unexpected error; learned rules are never
+positional; `selector_key` escapes the owner; `learn_selectors` without a page says
+`nothing_to_learn`.
 
 **Known limits.**
 
-- **Learned selectors are checked on `learn_html`.** A positional selector (`div:nth-child(3)`) that
-  reproduced the value on the cleaned HTML may select something else on the full page; then the
-  field gets another value, or none and `auto` asks the LLM. Uploads have no host and learn nothing
-  (`learned: {stored: [], rejected: []}`). Under `AUTH_MODE=none` every caller is `anonymous` and
+- **Learned selectors are checked on `learn_html`.** Positional proposals are rejected (M-d), but a
+  selector that reproduced the value on the cleaned HTML may still select something else on the
+  full page (another element with the same class, say); then the field gets another value, or none
+  and `auto` asks the LLM. Uploads have no host and learn nothing (`learned: {stored: [],
+  rejected: []}`, `nothing_to_learn`). Under `AUTH_MODE=none` every caller is `anonymous` and
   shares the learned selectors.
+- **One selector child per process by default.** Requests with selector rules wait for it in turn,
+  and the wait counts against their `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`: a burst of slow rules
+  makes later ones answer `selectors_timed_out` (raise `STRUCTURED_SELECTOR_PROCESSES` for more at
+  once). A page whose BeautifulSoup tree needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB
+  page needs about 310 MB of address space) answers `selectors_failed`.
 - **`metadata` matches by name.** A field is filled only where the page uses its name (`author`
   matches `author`, not `creator`); `<meta name>` lists are split at commas, so an author `Doe,
   John` in a meta tag becomes two values.

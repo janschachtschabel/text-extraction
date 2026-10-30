@@ -38,6 +38,15 @@ config:
   RATE_LIMIT_PER_MINUTE: "60"
   # Conversions at once per pod; the memory limit below is sized for it.
   CONVERT_CONCURRENCY: "2"
+  # Threads of the post stage (patterns, chunking, semantic distances) per process, in every pod.
+  POST_CONCURRENCY: "2"
+  # Selector rules (structured output) run in child processes that are killed after this many
+  # seconds (selectors_timed_out). One child per pod (API, extract, browser and llm workers), about
+  # 40 MB resident when idle, with this address space in MiB; it comes out of the pod's
+  # documentParentReserveMiB, beside the server and its page conversions.
+  STRUCTURED_SELECTOR_TIMEOUT_SECONDS: "5"
+  STRUCTURED_SELECTOR_PROCESSES: "1"
+  STRUCTURED_SELECTOR_MEMORY_MB: "512"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both
