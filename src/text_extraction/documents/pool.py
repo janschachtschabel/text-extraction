@@ -253,11 +253,15 @@ class DocumentPool:
         _live_pools.discard(self)
 
     def abandon(self) -> None:
-        """Kill the children now, without waiting for them, and close the pool: for a pool
-        whose event loop is gone, which ``shutdown`` cannot be awaited on."""
+        """Kill the children now and close the pool: for a pool whose event loop is gone, which
+        ``shutdown`` cannot be awaited on. They are reaped on a thread of their own, so this
+        does not wait for them and leaves no zombie."""
         with self._lock:
             self._closed = True
+            children = list(self._children)
         self._kill_now()
+        _start_thread(partial(self._reap_all, children))
+        _live_pools.discard(self)
 
     @property
     def closed(self) -> bool:

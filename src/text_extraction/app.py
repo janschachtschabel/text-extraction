@@ -39,6 +39,7 @@ from text_extraction.pii_dispatch import PiiDispatcher, nlp_queue, pii_available
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.pipeline_media import asr_available
+from text_extraction.pool_dispatch import GracefulShutdown
 from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
@@ -182,7 +183,9 @@ def create_public_app(
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
     ``app.state.background`` holds the tasks of extractions handed over to a job, which
-    the shutdown waits for.
+    the shutdown waits for; ``app.state.graceful_shutdown`` is begun by the server when its
+    graceful phase starts, and ends the routes' waits for a last-hop pool (``nlp``, ``llm``) with
+    a 202 (``pool_dispatch``, issue #19).
     """
     app = FastAPI(
         title="Text Extraction API",
@@ -261,6 +264,7 @@ def create_public_app(
     app.state.job_metrics = job_metrics_for(registry)
     app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()
+    app.state.graceful_shutdown = GracefulShutdown()
     install_error_handlers(app)
     app.include_router(extract_router)
     app.include_router(file_router)

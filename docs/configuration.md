@@ -254,6 +254,14 @@ its start and runs while the graceful phase does, so normally the whole sequence
 pods' `terminationGracePeriodSeconds`; its worst case does not, and then the pod is killed
 and the job's lease expires (the job then reports a lost extraction).
 
+A sync request that waits for the nlp or llm workers (`pii`, or `structured` and `chunking` work
+that needs the LLM; with a long `wait_seconds` this wait may outlast the graceful phase) answers
+202 with its nlp or llm job as soon as the graceful phase begins, as it would when its wait runs
+out; the worker completes the job, and the caller polls `GET /v1/jobs/{id}` (issue #19). A
+request that waits for a browser or Docling job (also one whose item moves on to the nlp or llm
+workers) is not answered early: it ends within the graceful phase only while that phase is at
+least its wait, which with Docling workers only (50 s) a `wait_seconds` of 60 can exceed.
+
 While `BROWSER_ENABLED`, the graceful phase is at least
 `EXTRACT_TIMEOUT_SECONDS + BROWSER_QUEUE_WAIT_SECONDS + render deadline + 10` seconds (75 s by
 default, 105 s with unblock mode; the render deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock
@@ -272,7 +280,7 @@ The grace periods in the Helm chart, each with a 10 s margin:
 | Docling workers | `workers.docling.terminationGracePeriodSeconds` | 60 | 30 s for the conversions in flight |
 | ASR workers | `workers.asr.terminationGracePeriodSeconds` | 60 | 30 s for the transcriptions in flight (then their items go back to the queue at once and start again elsewhere) |
 | NLP workers | `workers.nlp.terminationGracePeriodSeconds` | 60 | 30 s for the analyses in flight (then their items run again elsewhere once their lease expires, `2 × PII_TIMEOUT_SECONDS + 10`) |
-| llm workers | `workers.llm.terminationGracePeriodSeconds` | 40 | 30 s for the items in flight (then the ones still running go back to the queue at once) |
+| llm workers | `workers.llm.terminationGracePeriodSeconds` | 40 | `workers.llm.gracefulSeconds` (`LLM_GRACEFUL_SECONDS`, 30 s) for the items in flight (then the ones still running go back to the queue at once and pay their LLM calls again elsewhere) |
 
 The chart reads the settings from `config.*`, else their defaults, and fails to render when a grace
 period is too short. Raise a value you set whenever you raise one of the timeouts, or leave the API
@@ -392,7 +400,7 @@ is always a job. ASR is off by default: the API image has neither Whisper nor mo
 | `MEDIA_UPLOAD_MAX_BYTES` | `25000000` | Largest audio or video file that can be uploaded for transcription, in bytes (about 25 minutes of MP3 at 128 kbit/s). The bytes travel through Valkey and count in the input budget (`DOCLING_INPUT_BUDGET_BYTES`, which holds the inputs of all kinds), so with `ASR_ENABLED=true` it must not exceed it, or the service exits with code 2 at start-up. At least 1000000. Larger media: send the URL. The Helm chart sets it from `workers.asr.uploadMaxBytes`. |
 | `MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Time budget of one media download by the ASR worker, in seconds (a platform video's info and its download together), within the item's `ASR_TIMEOUT_SECONDS`: the download gets this or what is left of the item's budget, whichever is less. A download that runs out of it fails with `timeout`, retryable (out of the item's budget: not retryable). A media file's download holds its host's turn at the outbound gate, so with `ASR_ENABLED` a turn's lease lasts at least this long plus 30 s. 30 to 3600. |
 | `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request`. The Helm chart sets it from `workers.asr.enabled` on every pod. |
-| `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`, called directly, not through the egress proxy); the worker then needs no models (no model check, `--download-models` downloads nothing, the start-up self-check and `--check` encode the built-in clip as Opus instead of transcribing it, and still check FFmpeg's licence and the programs on `PATH`). The worker decodes the media itself, encodes it as 16 kHz mono Opus at 32 kbit/s in Ogg and posts it in chunks of at most 20 minutes, cut in pauses. The key is the caller's `X-ASR-Api-Key` (on `POST /v1/extract`, `POST /v1/extract/file` and `POST /v1/batch`; stored with the job, never shown or logged), else `ASR_EXTERNAL_API_KEY`; without either, `transcribe: true` and audio or video uploads answer 400 `invalid_request`. Set it on the API pods too. With `openai` and no `ASR_EXTERNAL_BASE_URL` the ASR worker exits with code 2. |
+| `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`, called directly, not through the egress proxy); the worker then needs no models (no model check, `--download-models` downloads nothing, the start-up self-check and `--check` encode the built-in clip as Opus instead of transcribing it, and still check FFmpeg's licence and the programs on `PATH`). The worker decodes the media itself, encodes it as 16 kHz mono Opus at 32 kbit/s in Ogg and posts it in chunks of at most 20 minutes, cut in pauses. The key is the caller's `X-ASR-Api-Key` (on `POST /v1/extract`, `POST /v1/extract/file` and `POST /v1/batch`; stored with the job, never shown or logged), else `ASR_EXTERNAL_API_KEY`; without either, `transcribe: true` and audio or video uploads answer 400 `invalid_request`. Set it on the API pods too. With `openai` and no `ASR_EXTERNAL_BASE_URL` the ASR worker exits with code 2. The client is the OpenAI SDK, as for the LLM: it never sends the headers of `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID`, and with `ASR_ENABLED=true` and `openai` start-up refuses `OPENAI_CUSTOM_HEADERS` and `OPENAI_LOG` when set and not empty (exit code 2; see LLM). |
 | `ASR_MODEL` | `large-v3-turbo` | Whisper model of the local backend: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, faster on CPU, more errors). Any other value makes the service exit with code 2. |
 | `ASR_MODELS_PATH` | `/models` | Volume with the Whisper models, one folder per model. The image holds no models; the ASR worker mounts the volume read-only. |
 | `ASR_COMPUTE_TYPE` | `int8` | CTranslate2 compute type of the local backend (`int8` is the fast and small choice on CPU). |
@@ -518,9 +526,18 @@ connection errors are (after the SDK's two retries). An answer that is no valid 
 schema, or is cut off (`finish_reason: length`), gets one repair call with the error appended, then
 fails with `llm_failed`, not retryable.
 
+The OpenAI SDK reads some `OPENAI_*` variables from the environment on its own (issue #19). The
+service passes the key, `LLM_BASE_URL`, the timeout and the retries itself, and never sends the
+headers of `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` to the endpoint. `OPENAI_CUSTOM_HEADERS` (extra
+headers for every call; an `Authorization` line would replace the caller's key) and `OPENAI_LOG`
+(the SDK's own plain-text log) it reads whatever the service passes: while `LLM_ENABLED` is true,
+start-up refuses either of them when it is set and not empty, naming them (exit code 2), in every
+process; so it does while `ASR_ENABLED` is true with `ASR_BACKEND=openai` (the external
+transcription client is the same SDK). Neither the chart nor docker compose sets them.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `LLM_ENABLED` | `false` | Switch the LLM on. Needs `JOBS_ENABLED=true`; start-up refuses `LLM_ENABLED=true` without it (exit code 2). |
+| `LLM_ENABLED` | `false` | Switch the LLM on. Needs `JOBS_ENABLED=true`; start-up refuses `LLM_ENABLED=true` without it, and with `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG` set (exit code 2). |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible endpoint (`<base>/chat/completions`, `<base>/embeddings`). https only unless `LLM_ALLOW_HTTP=true`; anything else makes the service exit with code 2 (the URL is not echoed, it may carry credentials). |
 | `LLM_ALLOW_HTTP` | `false` | Also accept an `http` URL: a local model server in development, tests. Never in production. |
 | `LLM_MODEL` | `gpt-6-luna` | Model name sent with every chat request. Chosen by the operator, never per request. |
@@ -530,6 +547,7 @@ fails with `llm_failed`, not retryable.
 | `LLM_MAX_TOKENS` | `4096` | Most tokens of one answer (`max_tokens`). A longer answer is cut off and counts as invalid. Minimum 1. |
 | `LLM_TIMEOUT_SECONDS` | `120` | Timeout of one request to the endpoint, in seconds (the SDK's, per phase of the request). Timeouts are retried twice by the SDK, so a call may take about three times this before it fails, retryable. The llm worker gives one item at most 3 × this in all (then the item answers its content without the LLM work: `llm_failed`, retryable) and leases it for 4 × this + 10 s, so an item whose worker died runs again elsewhere after that. 5 to 600. |
 | `LLM_MAX_INPUT_TOKENS` | `32000` | Most input the LLM gets of one document, in tokens estimated as 4 characters each. Longer content is cut at a paragraph border with the warning `llm_input_truncated`; the cleaned HTML that `learn_selectors` shows the LLM is cut to the same size at an element border. 1000 to 1000000. |
+| `LLM_GRACEFUL_SECONDS` | `30` | How long the llm worker's items in flight may finish after SIGTERM, in seconds; then the ones still running go back to the queue at once and run again on another worker, which pays their LLM calls again. One call may take `LLM_TIMEOUT_SECONDS` (120 s by default), so with the defaults every rollout cancels the long calls in flight. To avoid that, raise this and `workers.llm.terminationGracePeriodSeconds` together, e.g. to `LLM_TIMEOUT_SECONDS + 10` and that + 10 s (the chart sets it from `workers.llm.gracefulSeconds` and refuses a grace period below it + 10 s; docker compose: raise the llm worker's `stop_grace_period`, 45 s, to at least this + 10 s). Every pod validates it at start, the llm worker reads it. 10 to 900. |
 | `LLM_CONCURRENCY` | `4` | LLM items one llm worker (`text-extraction-llm-worker`, pool `llm`) runs at once: its slot loops, each with one item and its calls to the endpoint at a time. Minimum 1. |
 | `LLM_SYNC_WAIT_SECONDS` | `30` | How long a sync request that needs the LLM waits for the llm worker before it answers 202 with its job (without `wait_seconds`; the largest default of `transcribe`, `pii` and the LLM wins). Its waits for a browser, Docling or nlp worker get this much more, because their result moves on to the llm worker. 1 to 60. |
 | `SELECTOR_LEARN_TTL_SECONDS` | `2592000` | How long learned selectors stay in Valkey (30 days), per API key, host and schema (`sel:{<key name>}:<host>:<schema id>`, the key name's `%`, `{` and `}` percent-escaped); renewed on each write, not on reads. Minimum 60. |
@@ -549,7 +567,8 @@ entries of the same name. The other `LLM_*` settings and `SELECTOR_LEARN_TTL_SEC
 `STRUCTURED_SELECTOR_PROCESSES`, `STRUCTURED_SELECTOR_MEMORY_MB` and `POST_CONCURRENCY` are service
 defaults (the chart sets the last four under `config` with these values): set them under
 `config` (for example `config.LLM_TIMEOUT_SECONDS`, and `config.LLM_ALLOW_HTTP` for an `http` URL).
-docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`.
+docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm worker's
+`stop_grace_period` (45 s) must stay at least `LLM_GRACEFUL_SECONDS` + 10 s: raise both together.
 
 | Key | Default | Variable or effect |
 | --- | --- | --- |
@@ -560,7 +579,8 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`.
 | `workers.llm.apiKey.existingSecret`, `.existingSecretKey` | `""`, `LLM_API_KEY` | Your own Secret with `LLM_API_KEY` (API pods and the llm worker container only). Empty: callers send `X-LLM-Api-Key`. |
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY` on the llm workers. |
 | `workers.llm.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a sync request waits only `LLM_SYNC_WAIT_SECONDS`. |
-| `workers.llm.terminationGracePeriodSeconds` | `40` | See Response times. |
+| `workers.llm.gracefulSeconds` | `30` | `LLM_GRACEFUL_SECONDS` on the llm workers; the render fails outside 10 to 900 (a `config.LLM_GRACEFUL_SECONDS` entry is overridden on the llm workers, but every pod validates it at start (10 to 900, else exit code 2), so leave it out). Raise it with the grace period, e.g. to `LLM_TIMEOUT_SECONDS + 10`, so that a rollout does not pay calls in flight twice. |
+| `workers.llm.terminationGracePeriodSeconds` | `40` | See Response times. At least `workers.llm.gracefulSeconds` + 10, or the render fails. |
 | `workers.llm.resources` | 100m / 256Mi to 1 / 1Gi | Placeholder until package 11 measures real consumption; 512 MiB of it are the selector child. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global one. |
 | `workers.llm.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `llm` queue or on CPU. |

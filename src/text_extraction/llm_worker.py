@@ -98,8 +98,6 @@ DRAFT_EXPIRED_MESSAGE: Final = (
 DRAFT_INVALID_MESSAGE: Final = (
     "The result to post-process could not be read for the LLM step. Send the request again."
 )
-# What the items in flight get after SIGTERM before they are given back.
-GRACEFUL_SECONDS: Final = 30
 # The tiny extraction of ``--check``.
 _CHECK_SCHEMA: Final = {"type": "object", "properties": {"title": {"type": "string"}}}
 _CHECK_DOCUMENT: Final = "# Check\n\nThis short page is titled Check."
@@ -259,12 +257,12 @@ def build_llm_worker(
 
 async def serve(parts: LlmWorkerParts, internal: _Server, readiness: Readiness) -> None:
     """Start the selector children, run the worker until a signal, then let the items in
-    flight finish for ``GRACEFUL_SECONDS``. The caller closes the rest."""
+    flight finish for ``LLM_GRACEFUL_SECONDS``. The caller closes the rest."""
     await _serve(
         parts.worker,
         internal,
         readiness,
-        graceful_seconds=GRACEFUL_SECONDS,
+        graceful_seconds=parts.settings.llm_graceful_seconds,
         startup=parts.selectors.start,
     )
 
@@ -278,7 +276,7 @@ async def _run(settings: Settings) -> None:
         create_internal_app(settings, valkey, registry, readiness=readiness),
         settings.internal_host,
         settings.internal_port,
-        GRACEFUL_SECONDS,
+        settings.llm_graceful_seconds,
     )
     try:
         await serve(parts, internal, readiness)

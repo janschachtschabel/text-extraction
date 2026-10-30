@@ -162,6 +162,25 @@ def test_env_key_used_without_header(httpserver: HTTPServer) -> None:
     assert request.headers["Authorization"] == f"Bearer {ENV_KEY}"
 
 
+def test_openai_environment_does_not_reach_the_endpoint(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #19: the SDK's organization and project from the environment are never sent, and
+    an Authorization line of OPENAI_CUSTOM_HEADERS (refused at start-up anyway) does not replace
+    the key."""
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-from-env")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-from-env")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer sk-from-env")
+    serve_chat(httpserver, completion('{"title": null}'))
+
+    chat(settings_for(httpserver), key=HEADER_KEY)
+
+    (request,) = sent(httpserver)
+    assert request.headers["Authorization"] == f"Bearer {HEADER_KEY}"
+    assert "OpenAI-Organization" not in request.headers
+    assert "OpenAI-Project" not in request.headers
+
+
 def test_no_key_at_all_is_refused_before_any_request(httpserver: HTTPServer) -> None:
     settings = settings_for(httpserver, llm_api_key=None)
 

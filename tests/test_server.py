@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
 
 from text_extraction.internal import Readiness, create_internal_app
+from text_extraction.pool_dispatch import GracefulShutdown
 from text_extraction.server import (
     _serve,
     _server,
@@ -146,6 +147,59 @@ def test_ready_follows_the_public_listener_and_drains_on_sigterm() -> None:
     assert seen["draining_ready"] == 503  # out of the load balancer first ...
     assert seen["draining_ping"] == 200  # ... while requests are still served
     assert seen["after_ping"] is None
+
+
+def test_graceful_shutdown_begins_when_the_public_server_stops() -> None:
+    """Issue #19: once the drain ends, the shutdown the routes watch has begun, so a request
+    that waits for a last-hop pool answers inside the grace period instead of being cut off.
+    Not before: while draining, requests are still served as usual."""
+    public_port, internal_port = free_port(), free_port()
+    readiness = Readiness()
+    shutdown = GracefulShutdown()
+    app = FastAPI()
+
+    @app.get("/wait")
+    async def wait() -> dict[str, bool]:
+        await shutdown.wait()  # a route in a last-hop wait answers once the shutdown begins
+        return {"begun": shutdown.begun}
+
+    public = _server(app, "127.0.0.1", public_port, readiness=readiness)
+    internal = _server(
+        create_internal_app(SETTINGS, FakeAsyncRedis(), CollectorRegistry(), readiness=readiness),
+        "127.0.0.1",
+        internal_port,
+    )
+    ready_url = f"http://127.0.0.1:{internal_port}/ready"
+
+    async def scenario() -> tuple[bool, int, float]:
+        serving = asyncio.create_task(
+            _serve(public, internal, readiness, drain_seconds=60.0, shutdown=shutdown)
+        )
+        async with httpx.AsyncClient(trust_env=False) as client:
+            deadline = time.monotonic() + 20
+            while await status_of(client, ready_url) != 200:
+                assert time.monotonic() < deadline, "the service never became ready"
+                await asyncio.sleep(0.05)
+            waiting = asyncio.create_task(
+                client.get(f"http://127.0.0.1:{public_port}/wait", timeout=60)
+            )
+            await asyncio.sleep(0.2)
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(0.3)
+            begun_while_draining = shutdown.begun
+            ended_drain = time.monotonic()
+            os.kill(os.getpid(), signal.SIGTERM)  # ends the drain: the graceful phase begins
+            response = await waiting
+            took = time.monotonic() - ended_drain
+            async with asyncio.timeout(30):
+                await serving
+        return begun_while_draining, response.status_code, took
+
+    begun_while_draining, status, took = asyncio.run(scenario())
+
+    assert begun_while_draining is False
+    assert status == 200
+    assert took < 5  # far inside the 30 s grace period
 
 
 @pytest.fixture(autouse=True)

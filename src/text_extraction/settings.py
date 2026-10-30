@@ -1,6 +1,7 @@
 """Environment-driven settings. Every setting is an env var with a documented default."""
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -20,6 +21,13 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError
 
 from text_extraction.pii.types import ENTITY_TYPES, EntityType
+
+# Environment the OpenAI SDK reads whatever ``llm/client.py`` passes it (issue #19): extra
+# headers (an ``Authorization`` line would replace the caller's key) and its plain-text log.
+# Start-up refuses them while LLM_ENABLED is true, and while ASR runs on the external backend
+# (``media/asr_external.py``, the same SDK). ``OPENAI_ORG_ID`` and ``OPENAI_PROJECT_ID`` are read
+# too, but neither client sends them.
+OPENAI_ENV_REFUSED = ("OPENAI_CUSTOM_HEADERS", "OPENAI_LOG")
 
 # Playwright's resource types (``Request.resource_type``). A blocked type is not loaded.
 _RESOURCE_TYPES = (
@@ -289,6 +297,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=120, ge=5, le=600)  # one request to the endpoint
     llm_max_input_tokens: int = Field(default=32_000, ge=1000, le=1_000_000)  # 4 characters each
     llm_concurrency: int = Field(default=4, ge=1)  # LLM items at once per llm worker
+    # After SIGTERM the llm worker's items in flight get this long, then they go back to the
+    # queue and their LLM calls run again elsewhere (issue #19).
+    llm_graceful_seconds: int = Field(default=30, ge=10, le=900)
     # How long a sync request that needs the LLM waits for the llm worker before it becomes a job.
     llm_sync_wait_seconds: float = Field(default=30, ge=1, le=60)
     selector_learn_ttl_seconds: int = Field(default=2_592_000, ge=60)  # learned selectors, 30 days
@@ -399,6 +410,23 @@ class Settings(BaseSettings):
         # The LLM hop is a job of pool llm (D5): without jobs nothing could be processed.
         if self.llm_enabled and not self.jobs_enabled:
             raise ValueError("LLM_ENABLED needs JOBS_ENABLED=true")
+        return self
+
+    @model_validator(mode="after")
+    def _no_openai_environment_with_sdk_clients(self) -> Self:
+        """Issue #19: the names of the refused variables, never their values."""
+        clients = []
+        if self.llm_enabled:
+            clients.append("LLM_ENABLED is true")
+        if self.asr_enabled and self.asr_backend == "openai":
+            clients.append("ASR_BACKEND=openai")
+        if clients:
+            found = [name for name in OPENAI_ENV_REFUSED if os.environ.get(name, "").strip()]
+            if found:
+                raise ValueError(
+                    f"{' and '.join(found)} must not be set while {' and '.join(clients)} "
+                    "(the OpenAI SDK would read them)"
+                )
         return self
 
     @model_validator(mode="after")

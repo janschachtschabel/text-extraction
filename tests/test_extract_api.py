@@ -31,6 +31,7 @@ from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
 from text_extraction.extract_api import (
     _in_browser,
     _store_result,
+    answer_or_hand_over,
     default_wait_seconds,
     extract,
     request_wait_seconds,
@@ -40,6 +41,8 @@ from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobRecord, JobStore
 from text_extraction.pipeline import Pipeline, create_pipeline
+from text_extraction.pool_dispatch import GracefulShutdown
+from text_extraction.pool_dispatch import Handover as PoolHandover
 from text_extraction.scheduler import FairQueue
 from text_extraction.settings import Settings
 
@@ -2561,3 +2564,65 @@ def test_a_cache_hit_of_a_pii_request_drops_dom_values() -> None:
 
     assert masked.json()["data"]["cache"] == "hit"
     assert_no_author(masked.json())
+
+
+class ReleasedBeforeDetach(PoolHandover):
+    """A handover whose task releases its last-hop job just as the route, woken by the
+    shutdown, comes to detach it: the release wins."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.released = asyncio.Event()
+
+    def detach(self) -> bool:
+        self.release()  # the task gave the job up a moment earlier
+        self.released.set()
+        return super().detach()
+
+
+def test_a_shutdown_cut_that_loses_to_a_release_answers_the_flow_once() -> None:
+    """Review M4: the shutdown cut wakes the route while the flow waits for its nlp job, but the
+    flow releases that job (it answers on its own) before the route detaches it. The route then
+    answers the flow's envelope, once, and no 202."""
+    settings = Settings(auth_mode="none")
+    shutdown = GracefulShutdown()
+    handover = ReleasedBeforeDetach()
+    envelope = Envelope[ExtractResult](status="success", data=None, trace_id="flow")
+    calls: list[str] = []
+
+    async def flow() -> Envelope[ExtractResult]:
+        assert handover.claim_after_release("nlp")
+        handover.settle("nlp-job", last_hop=True)
+        await handover.released.wait()
+        calls.append("flow")
+        return envelope
+
+    async def hand_over() -> str | None:  # pragma: no cover - the flow's pool job is claimed
+        raise AssertionError("no P1 job: the flow claimed the hand-over")
+
+    async def scenario() -> Any:
+        state = SimpleNamespace(settings=settings, background=set(), graceful_shutdown=shutdown)
+        route = asyncio.ensure_future(
+            answer_or_hand_over(
+                state,
+                flow,
+                handover,
+                wait_seconds=60,
+                kind="extract",
+                renders_first=False,
+                hand_over=hand_over,
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not route.done()
+        shutdown.begin()
+        async with asyncio.timeout(3):
+            answer = await route
+        return answer, state.background
+
+    answer, background = asyncio.run(scenario())
+
+    assert answer is envelope  # the flow's own answer, not a JSONResponse with 202
+    assert calls == ["flow"]
+    assert not handover.detached
+    assert background == set()

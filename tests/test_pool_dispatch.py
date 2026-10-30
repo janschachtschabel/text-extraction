@@ -27,7 +27,13 @@ from text_extraction.jobs import JobStore
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, PiiMove, nlp_queue
 from text_extraction.pipeline_documents import DocumentInput, DocumentInputMeta, OcrNeeded
-from text_extraction.pool_dispatch import Handover, LastHopHandoff, LastHopMove, PoolDispatcher
+from text_extraction.pool_dispatch import (
+    GracefulShutdown,
+    Handover,
+    LastHopHandoff,
+    LastHopMove,
+    PoolDispatcher,
+)
 from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
@@ -528,6 +534,60 @@ async def test_last_hop_handoff_puts_the_envelope_on_the_p1_job() -> None:
     assert handoff.waited == []
     assert await toy.store.draft(p1, 0) is not None
     assert (await toy.queue.counts()).pending == 1
+
+
+@scenario
+async def test_graceful_shutdown_wakes_its_waiters_once_begun() -> None:
+    """Issue #19: ``wait`` returns once ``begin`` is called, and at once after it."""
+    shutdown = GracefulShutdown()
+    waiting = asyncio.ensure_future(shutdown.wait())
+    await asyncio.sleep(0.01)
+    assert not waiting.done()
+    assert not shutdown.begun
+
+    shutdown.begin()
+    await asyncio.wait_for(waiting, 1)
+
+    assert shutdown.begun
+    await asyncio.wait_for(shutdown.wait(), 1)
+
+
+@scenario
+async def test_a_last_hop_wait_is_known_to_the_handover() -> None:
+    """Issue #19: the handover tells when the task waits for a last-hop pool job, and stops
+    telling once the task released that job."""
+    toy = Toy()
+    handover = Handover()
+    handoff = ToyHandoff(toy.dispatcher, LowGuard(), result=None)
+    in_hop = asyncio.ensure_future(handover.in_last_hop())
+    blocked = asyncio.Event()
+
+    async def wait(job_id: str, **_: Any) -> Envelope[ExtractResult] | None:
+        blocked.set()
+        await asyncio.sleep(0.2)
+        return None
+
+    handoff._wait = wait  # type: ignore[method-assign]
+    hop = asyncio.ensure_future(handoff(OWING, handover))
+    await asyncio.wait_for(blocked.wait(), 1)
+    await asyncio.wait_for(in_hop, 1)  # the task waits for the toy job now
+    await hop  # it gave the job up
+
+    later = asyncio.ensure_future(handover.in_last_hop())
+    await asyncio.sleep(0.01)
+    assert not later.done()
+    later.cancel()
+
+
+@scenario
+async def test_a_browser_wait_is_no_last_hop_wait() -> None:
+    handover = Handover()
+    assert handover.claim_pool("browser")
+    handover.settle("browser-job")
+    in_hop = asyncio.ensure_future(handover.in_last_hop())
+    await asyncio.sleep(0.01)
+    assert not in_hop.done()
+    in_hop.cancel()
 
 
 @scenario

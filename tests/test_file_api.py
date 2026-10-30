@@ -714,6 +714,104 @@ MARKDOWN = (
 )
 
 
+def upload_part(client: TestClient, body: bytes, name: str, content_type: str | None) -> Any:
+    """An upload whose part has exactly these headers: no ``Content-Type`` line when
+    ``content_type`` is None (a test client would guess one from the name)."""
+    head = f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+    if content_type is not None:
+        head += f"Content-Type: {content_type}\r\n"
+    raw = (
+        b"--"
+        + BOUNDARY
+        + b"\r\n"
+        + head.encode()
+        + b"\r\n"
+        + body
+        + b"\r\n--"
+        + BOUNDARY
+        + b"--\r\n"
+    )
+    return client.post(
+        "/v1/extract/file",
+        content=raw,
+        headers={**AUTH, "Content-Type": "multipart/form-data; boundary=" + BOUNDARY.decode()},
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "declared"),
+    [
+        ("notes.md", "application/octet-stream"),
+        ("notes.md", None),
+        ("notes.markdown", "application/octet-stream"),
+        ("NOTES.MD", None),
+    ],
+)
+def test_an_untyped_markdown_name_is_converted_as_markdown(
+    client: TestClient, name: str, declared: str | None
+) -> None:
+    """Issue #17: ``curl -F file=@notes.md`` sends ``application/octet-stream`` (or no type);
+    such a part is read as Markdown, as a declared ``text/markdown`` one is."""
+    body = upload_part(client, MARKDOWN.encode(), name, declared).json()
+
+    assert body["status"] == "success", body["error"]
+    assert body["data"]["content_type"] == "text/markdown"
+    assert body["data"]["title"] == "Photosynthesis notes"
+    assert body["data"]["content"] == MARKDOWN.strip()
+
+
+@pytest.mark.parametrize("declared", ["application/octet-stream", None])
+def test_an_untyped_txt_name_is_converted_as_plain_text(
+    client: TestClient, declared: str | None
+) -> None:
+    """Issue #17: a ``.txt`` part sent untyped is read as plain text."""
+    body = upload_part(client, (PARAGRAPH * 3).encode(), "notes.txt", declared).json()
+
+    assert body["status"] == "success", body["error"]
+    assert body["data"]["content_type"] == "text/plain"
+    assert body["data"]["content"].startswith("Photosynthesis is the process")
+
+
+def test_a_markdown_name_does_not_make_binary_or_declared_types_markdown(
+    client: TestClient,
+) -> None:
+    """Binary bytes named ``.md`` stay unsupported, and a declared real type is never
+    overridden by the name."""
+    binary = upload_part(client, b"\x00\x01\x02\x03" * 100, "x.md", "application/octet-stream")
+    declared = upload_part(client, MARKDOWN.encode(), "x.md", "application/pdf")
+
+    for answer in (binary.json(), declared.json()):
+        assert answer["status"] == "failed"
+        assert answer["error"]["code"] == "unsupported_content_type"
+    assert declared.json()["data"]["content_type"] == "application/pdf"
+
+
+@pytest.mark.parametrize(
+    ("name", "content_type"), [("notes.md", "text/markdown"), ("notes.txt", "text/plain")]
+)
+@pytest.mark.parametrize("declared", ["application/octet-stream", None])
+def test_an_untyped_text_name_is_sniffed_like_a_declared_text_type(
+    client: TestClient, name: str, content_type: str, declared: str | None
+) -> None:
+    """Review I1: an untyped ``.md`` or ``.txt`` part is sniffed as its declared type would be:
+    ``%PDF-`` quoted in its prose does not make it a PDF, and a body that starts like an HTML
+    page is read as text too. A real PDF signature at the start still wins."""
+    quoting = (
+        "# Notes on PDF\n\nEvery PDF file starts with the bytes `%PDF-1.7`.\n\n" + PARAGRAPH * 3
+    ).encode()
+    html = f"<!doctype html>\n\n{PARAGRAPH * 3}".encode()
+
+    for body in (quoting, html):
+        answer = upload_part(client, body, name, declared).json()
+        assert answer["status"] == "success", answer["error"]
+        assert answer["data"]["content_type"] == content_type
+        assert answer["data"]["document"] is None
+
+    pdf = upload_part(client, corpus("text.pdf"), name, declared).json()
+    assert pdf["status"] == "success", pdf["error"]
+    assert pdf["data"]["content_type"] == "application/pdf"
+
+
 @pytest.mark.parametrize("declared", ["text/markdown", "text/x-markdown; charset=utf-8"])
 def test_markdown_upload_is_converted_as_markdown(client: TestClient, declared: str) -> None:
     """Issue #15: a Markdown upload is read as Markdown, for every output format."""

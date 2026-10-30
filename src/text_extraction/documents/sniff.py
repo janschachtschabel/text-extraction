@@ -1,8 +1,9 @@
 """Decide what a body is, by its bytes, and refuse container bombs before conversion.
 
 Magic bytes win; the declared type decides only where the bytes do not; the name (URL path
-or upload name) only breaks the CSV tie. Nothing here decompresses a ZIP entry beyond the few
-hundred bytes it needs to name the format, and nothing imports a converter.
+or upload name) only breaks the CSV tie, and for an upload without a real declared type it
+names a text body's type (``named_text_type``, issue #17). Nothing here decompresses a ZIP
+entry beyond the few hundred bytes it needs to name the format, and nothing imports a converter.
 """
 
 import io
@@ -13,7 +14,14 @@ from typing import Final, Literal
 
 from text_extraction.documents.types import DocumentKind
 
-__all__ = ["TEXT_TYPES", "DocumentTooLarge", "check_container", "media_type", "sniff"]
+__all__ = [
+    "TEXT_TYPES",
+    "DocumentTooLarge",
+    "check_container",
+    "media_type",
+    "named_text_type",
+    "sniff",
+]
 
 MAX_ZIP_ENTRIES: Final = 10_000
 MAX_RATIO: Final = 100
@@ -29,6 +37,13 @@ _TEXT_PREFIX_LIMIT: Final = 1024  # whitespace before a text/plain body's signat
 # Plain text and Markdown (issue #15): read as text, the Markdown by the pipeline as Markdown.
 TEXT_TYPES: Final = frozenset({"text/plain", "text/markdown", "text/x-markdown"})
 _CSV_SAMPLE: Final = 8192
+# Upload names that make a text body of no real declared type a text type (issue #17).
+_NAMED_TEXT_TYPES: Final = (
+    (".md", "text/markdown"),
+    (".markdown", "text/markdown"),
+    (".txt", "text/plain"),
+)
+_UNTYPED: Final = frozenset({"", "application/octet-stream"})
 _CONTENT_TYPES_LIMIT: Final = 256 * 1024
 _MIMETYPE_LIMIT: Final = 128
 
@@ -120,6 +135,26 @@ def sniff(
         return "csv"
     if media in TEXT_TYPES:
         return "text"
+    return None
+
+
+def named_text_type(body: bytes, declared: str | None, name: str | None) -> str | None:
+    """The text type an upload is read as by its name, or None (issue #17).
+
+    A part named ``*.md`` or ``*.markdown`` (any case), declared ``application/octet-stream``
+    or not at all, whose bytes look like text, is ``text/markdown``: ``curl -F file=@notes.md``
+    and many browsers send such a file without its type. One named ``*.txt`` is
+    ``text/plain`` by the same rule. A declared real type is never overridden. The caller then
+    sniffs the part as that type (review I1): a document's signature counts at the start only,
+    and a body that starts like an HTML page is text, as for a part that declares the type.
+    """
+    media = (declared or "").split(";", 1)[0].strip().lower()
+    if media not in _UNTYPED:
+        return None
+    lowered = (name or "").lower()
+    for suffix, text_type in _NAMED_TEXT_TYPES:
+        if lowered.endswith(suffix):
+            return text_type if _looks_like_text(body) else None
     return None
 
 

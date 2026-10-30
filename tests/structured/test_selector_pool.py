@@ -9,6 +9,7 @@ at ``STRUCTURED_SELECTOR_TIMEOUT_SECONDS`` (0.5 s here): the fields stay missing
 import asyncio
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -162,11 +163,18 @@ def test_a_runner_follows_the_event_loop() -> None:
     first, first_pids = asyncio.run(once())
     try:
         second, second_pids = asyncio.run(once())
+        until = time.monotonic() + 5
+        while any(Path(f"/proc/{pid}").exists() for pid in first_pids):
+            if time.monotonic() > until:
+                break
+            time.sleep(0.05)
     finally:
         asyncio.run(runner.shutdown())
 
     assert first.found == second.found == {"title": (["A"], False)}
     assert first_pids != second_pids
+    # Issue #19 (N-m2): the earlier children are reaped, not left as zombies.
+    assert [pid for pid in first_pids if Path(f"/proc/{pid}").exists()] == []
 
 
 def test_a_failed_start_is_retried_with_a_fresh_pool() -> None:

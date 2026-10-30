@@ -1338,6 +1338,76 @@ def test_llm_enabled_needs_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     assert load_settings().llm_enabled is True
 
 
+@pytest.mark.parametrize("name", ["OPENAI_CUSTOM_HEADERS", "OPENAI_LOG"])
+def test_llm_enabled_refuses_openai_environment_the_sdk_reads(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Issue #19: the OpenAI SDK reads these from the environment whatever the client is given
+    (an Authorization line would replace the caller's key; the log is plain text). Start-up
+    refuses them while LLM_ENABLED is true, naming the variable."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv(name, "debug" if name == "OPENAI_LOG" else "Authorization: Bearer x")
+
+    with pytest.raises(ConfigError, match=name) as info:
+        load_settings()
+
+    assert "Bearer x" not in str(info.value)  # the value is not echoed
+    monkeypatch.setenv(name, " ")  # empty means unset
+    assert load_settings().llm_enabled is True
+    monkeypatch.setenv(name, "debug")
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    assert load_settings().llm_enabled is False  # no LLM client is built
+
+
+@pytest.mark.parametrize("name", ["OPENAI_CUSTOM_HEADERS", "OPENAI_LOG"])
+def test_external_asr_refuses_openai_environment_the_sdk_reads(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Issue #19: the external ASR client is the same SDK, so start-up refuses these while ASR
+    runs on the external backend (ASR_ENABLED and ASR_BACKEND=openai), naming the variable."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("ASR_ENABLED", "true")
+    monkeypatch.setenv("ASR_BACKEND", "openai")
+    monkeypatch.setenv("ASR_EXTERNAL_BASE_URL", "https://asr.example.org/v1")
+    monkeypatch.setenv(name, "debug" if name == "OPENAI_LOG" else "Authorization: Bearer x")
+
+    with pytest.raises(ConfigError, match=name) as info:
+        load_settings()
+
+    assert "ASR_BACKEND=openai" in str(info.value)
+    assert "Bearer x" not in str(info.value)
+    monkeypatch.setenv("ASR_BACKEND", "local")  # the local backend calls no SDK
+    assert load_settings().asr_backend == "local"
+    monkeypatch.setenv("ASR_BACKEND", "openai")
+    monkeypatch.setenv("ASR_ENABLED", "false")
+    assert load_settings().asr_enabled is False
+
+
+def test_llm_enabled_names_every_refused_openai_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-A: b")
+    monkeypatch.setenv("OPENAI_LOG", "info")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-1")  # never sent (llm/client.py), so allowed
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-1")
+
+    with pytest.raises(ConfigError) as info:
+        load_settings()
+
+    message = str(info.value)
+    assert "OPENAI_CUSTOM_HEADERS" in message
+    assert "OPENAI_LOG" in message
+    assert "OPENAI_ORG_ID" not in message
+    assert "OPENAI_PROJECT_ID" not in message
+
+
+def test_llm_graceful_seconds_defaults_to_30(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #19: the llm worker's grace for items in flight, 30 s as before."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().llm_graceful_seconds == 30
+
+
 def test_llm_available_is_enabled_and_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
     assert llm_available(load_settings()) is False
@@ -1354,6 +1424,7 @@ def test_llm_available_is_enabled_and_jobs(monkeypatch: pytest.MonkeyPatch) -> N
         ("LLM_MAX_INPUT_TOKENS", ["1000", "1000000"], ["999", "1000001"]),
         ("LLM_CONCURRENCY", ["1", "16"], ["0"]),
         ("LLM_SYNC_WAIT_SECONDS", ["1", "60"], ["0.5", "61"]),
+        ("LLM_GRACEFUL_SECONDS", ["10", "900"], ["9", "901"]),
         ("SELECTOR_LEARN_TTL_SECONDS", ["60", "2592000"], ["59"]),
         ("STRUCTURED_REGEX_TIMEOUT_SECONDS", ["0.05", "5"], ["0.04", "5.1"]),
         ("CHUNK_MAX_CHUNKS", ["1", "2000"], ["0"]),

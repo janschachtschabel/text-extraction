@@ -7,7 +7,8 @@ On SIGTERM or SIGINT the shutdown runs in this order:
 1. ``/ready`` turns 503 at once, so Kubernetes takes the pod out of the Service, while both
    servers keep serving for ``SHUTDOWN_DRAIN_SECONDS`` (a second signal ends this wait early);
 2. the public server stops accepting connections and gives requests in flight
-   ``graceful_shutdown_seconds`` to finish;
+   ``graceful_shutdown_seconds`` to finish. A request that waits for a last-hop pool (``nlp``,
+   ``llm``) answers 202 with its job at once (the public app's ``GracefulShutdown``, issue #19);
 3. the public app's lifespan ends: it waits for extractions that became a job
    (``wait_seconds``), at most ``EXTRACT_TIMEOUT_SECONDS`` + 7 s (5 s to end, then cancelled; 2 s
    for the writes of the cancelled ones). Such an extraction ends within
@@ -41,6 +42,7 @@ from fastapi import FastAPI
 from text_extraction.app import create_public_app
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.logging import configure_logging
+from text_extraction.pool_dispatch import GracefulShutdown
 from text_extraction.settings import ConfigError, Settings, load_settings
 from text_extraction.valkey import create_valkey
 
@@ -154,9 +156,15 @@ def _server(
 
 
 async def _serve(
-    public: _Server, internal: _Server, readiness: Readiness, *, drain_seconds: float
+    public: _Server,
+    internal: _Server,
+    readiness: Readiness,
+    *,
+    drain_seconds: float,
+    shutdown: GracefulShutdown | None = None,
 ) -> None:
-    """Run both servers until a signal, then shut down in the order the module describes."""
+    """Run both servers until a signal, then shut down in the order the module describes;
+    ``shutdown`` (the public app's) is begun when the graceful phase starts."""
     loop = asyncio.get_running_loop()
     asked = asyncio.Event()  # first signal: begin the shutdown
     hurry = asyncio.Event()  # second signal: end the drain early
@@ -181,6 +189,8 @@ async def _serve(
             with contextlib.suppress(TimeoutError):
                 async with asyncio.timeout(drain_seconds):
                     await hurry.wait()
+        if shutdown is not None:
+            shutdown.begin()  # requests waiting for a last-hop pool answer 202 now
         public.should_exit = True
         await public_task  # raises a failure of the server itself
         internal.should_exit = True
@@ -195,8 +205,9 @@ async def _run(settings: Settings) -> None:
     valkey = create_valkey(settings.valkey_url)
     graceful = graceful_shutdown_seconds(settings)
     readiness = Readiness()
+    app = create_public_app(settings, valkey, start_documents=True)
     public = _server(
-        create_public_app(settings, valkey, start_documents=True),
+        app,
         settings.public_host,
         settings.public_port,
         graceful,
@@ -209,7 +220,13 @@ async def _run(settings: Settings) -> None:
         graceful,
     )
     try:
-        await _serve(public, internal, readiness, drain_seconds=settings.shutdown_drain_seconds)
+        await _serve(
+            public,
+            internal,
+            readiness,
+            drain_seconds=settings.shutdown_drain_seconds,
+            shutdown=app.state.graceful_shutdown,
+        )
     finally:
         await valkey.aclose()
         _log.info("valkey_closed")

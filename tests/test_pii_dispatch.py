@@ -351,6 +351,114 @@ def test_sync_slow_pii_answers_202_after_wait() -> None:
     assert service.outcomes() == {"handed_over": 1}  # the task saw the route take the job
 
 
+def answer_in_thread(call: Callable[[], Any]) -> Callable[[float], Any]:
+    """Run ``call`` (a request) on a thread; the result is a getter that waits for its answer
+    at most that many seconds (None when it has none by then)."""
+    answers: list[Any] = []
+    thread = threading.Thread(target=lambda: answers.append(call()), daemon=True)
+    thread.start()
+
+    def answer(seconds: float) -> Any:
+        thread.join(seconds)
+        return answers[0] if answers else None
+
+    return answer
+
+
+def begin_shutdown(client: TestClient) -> None:
+    """Begin the app's graceful shutdown on its event loop, as ``server._serve`` does."""
+    assert client.portal is not None
+    app = cast(Any, client.app)
+    client.portal.call(app.state.graceful_shutdown.begin)
+
+
+def test_graceful_shutdown_answers_a_pii_wait_with_its_job_at_once() -> None:
+    """Issue #19 (M11.4): a request whose long ``wait_seconds`` waits for the nlp worker
+    answers 202 with the nlp job as soon as the pod's graceful shutdown begins, well inside the
+    grace period, as it does when its wait runs out; the nlp worker writes the result."""
+    service = PiiService()
+    with TestClient(service.app) as client:
+        response = answer_in_thread(lambda: extract(client, pii="mask", wait_seconds=60))
+        deadline = time.monotonic() + 10
+        while not service.stored("job:*") and time.monotonic() < deadline:
+            time.sleep(0.02)  # the request now waits for its nlp job
+        assert response(0.3) is None  # still waiting: no nlp worker runs
+        began = time.monotonic()
+        begin_shutdown(client)
+        answered = response(10)
+        took = time.monotonic() - began
+
+        assert answered is not None
+        assert answered.status_code == 202, answered.text
+        assert took < 3
+        accepted = answered.json()["data"]
+        assert (accepted["kind"], accepted["total"]) == ("extract", 1)
+        with service.nlp():
+            final = service.wait_for_job(client, accepted["id"])
+        assert final["data"]["state"] == "completed"
+        assert_processed(final["data"]["items"][0]["result"]["data"])
+        service.wait_for_idle()
+    assert service.outcomes() == {"handed_over": 1}
+
+
+def test_graceful_shutdown_answers_an_upload_pii_wait_with_its_job_at_once() -> None:
+    """Review M4: the cut on ``POST /v1/extract/file``, which shares the route's wait: an upload
+    waiting for its nlp job answers 202 (kind ``file``) once the graceful shutdown begins."""
+    service = PiiService()
+    text = f"{PARAGRAPH * 3}\n\nWritten by {NAME}, write to {EMAIL} with questions.\n"
+    with TestClient(service.app) as client:
+        response = answer_in_thread(
+            lambda: client.post(
+                "/v1/extract/file",
+                files={"file": ("notes.txt", text.encode(), "text/plain")},
+                data={"pii": "mask", "wait_seconds": "60"},
+                headers=AUTH,
+            )
+        )
+        deadline = time.monotonic() + 10
+        while not service.stored("job:*") and time.monotonic() < deadline:
+            time.sleep(0.02)  # the upload now waits for its nlp job
+        assert response(0.3) is None
+        began = time.monotonic()
+        begin_shutdown(client)
+        answered = response(10)
+        took = time.monotonic() - began
+
+        assert answered is not None
+        assert answered.status_code == 202, answered.text
+        assert took < 3
+        accepted = answered.json()["data"]
+        assert (accepted["kind"], accepted["total"]) == ("file", 1)
+        with service.nlp():
+            final = service.wait_for_job(client, accepted["id"])
+        assert final["data"]["state"] == "completed"
+        assert_processed(final["data"]["items"][0]["result"]["data"])
+        service.wait_for_idle()
+    assert service.outcomes() == {"handed_over": 1}
+
+
+def test_graceful_shutdown_leaves_a_request_without_a_pool_wait_alone() -> None:
+    """Before the PII step nothing changes: a request whose fast phase is still running when the
+    shutdown begins answers 202 once its PII wait starts (then at once)."""
+    service = PiiService()
+    gated = GatedPipeline(service.real)
+    service.app.state.pipeline = gated
+    with TestClient(service.app) as client:
+        response = answer_in_thread(lambda: extract(client, pii="mask", wait_seconds=60))
+        assert gated.started.wait(10)
+        begin_shutdown(client)
+        assert response(0.5) is None  # the fast phase is no pool wait: it keeps going
+        gated.release.set()
+        answered = response(10)
+
+        assert answered is not None
+        assert answered.status_code == 202, answered.text
+        with service.nlp():
+            final = service.wait_for_job(client, answered.json()["data"]["id"])
+        assert final["data"]["state"] == "completed"
+        service.wait_for_idle()
+
+
 @pytest.mark.usefixtures("high_memory")
 def test_sync_memory_guard_is_pii_failed_without_content() -> None:
     service = PiiService()

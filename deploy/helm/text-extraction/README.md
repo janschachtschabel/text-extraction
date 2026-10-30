@@ -221,7 +221,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.docling.models.persistence.storageClass` | `""` | Cluster default when empty. |
 | `workers.docling.models.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
 | `workers.asr.enabled` | `false` | Deploy the ASR workers (transcription). Also renders `ASR_ENABLED` into every pod: false makes `transcribe: true` answer 400 and audio or video uploads `unsupported_content_type`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
-| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `local`: faster-whisper with the model from the volume. `openai`: the external endpoint below; no models volume, no download. |
+| `workers.asr.backend` | `local` | `ASR_BACKEND` on every pod. `local`: faster-whisper with the model from the volume. `openai`: the external endpoint below; no models volume, no download. With `openai` and `workers.asr.enabled`, do not set `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG`: every pod refuses to start (exit code 2), as with the LLM. |
 | `workers.asr.model` | `large-v3-turbo` | `ASR_MODEL`: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, about twice as fast on CPU). Only this one is downloaded. Anything else fails the render. |
 | `workers.asr.image.repository` | `ghcr.io/janschachtschabel/text-extraction-asr` | ASR worker image (faster-whisper, PyAV on an LGPL FFmpeg, yt-dlp with Deno; no models, no `ffmpeg` program; linux/amd64). |
 | `workers.asr.image.tag` | `""` | Defaults to `image.tag`, then the chart `appVersion`. The pull policy is `image.pullPolicy`. |
@@ -257,7 +257,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.llm.apiKey.existingSecretKey` | `LLM_API_KEY` | Key inside that Secret. |
 | `workers.llm.replicaCount` | `1` | Ignored with KEDA or HPA. Keep one: a sync request that needs the LLM waits only `LLM_SYNC_WAIT_SECONDS` (30) for a worker. |
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY`: items per pod at once, each with one call to the endpoint at a time. |
-| `workers.llm.terminationGracePeriodSeconds` | `40` | Items in flight get 30 s after SIGTERM, then the ones still running go back to the queue at once and run again elsewhere. The render fails below 40 (30 s + a 10 s margin, so the hand-back happens before the kill). |
+| `workers.llm.gracefulSeconds` | `30` | `LLM_GRACEFUL_SECONDS` on the llm workers; the render fails outside 10 to 900 (a `config.LLM_GRACEFUL_SECONDS` entry is overridden on the llm workers, but every pod validates it at start (10 to 900, else exit code 2), so leave it out). Items in flight get this long after SIGTERM, then the ones still running go back to the queue at once, run again elsewhere and pay their LLM calls again. One call may take `LLM_TIMEOUT_SECONDS` (120 s by default), so with the defaults a rollout cancels the long calls in flight; raise this and `terminationGracePeriodSeconds` together, e.g. to `LLM_TIMEOUT_SECONDS + 10` (130) and 140. 10 to 900. |
+| `workers.llm.terminationGracePeriodSeconds` | `40` | The render fails below `workers.llm.gracefulSeconds` + 10 (40 by default), so the hand-back happens before the kill. |
 | `workers.llm.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption: the worker waits for the endpoint and holds no model; 512 MiB are its selector child, which checks the proposals of `learn_selectors`. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The workers run the API image. |
 | `workers.llm.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (`concurrency`), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="llm"})`. The API pods export it while `JOBS_ENABLED` and `LLM_ENABLED` are true. Keep one replica. |
@@ -491,8 +492,15 @@ caller's schema), and every pod gets `LLM_ENABLED=true`; without the workers suc
   own Secret: after rotating the key, restart the API and llm worker pods (`kubectl rollout
   restart`).
 - A worker leases an item for `4 x LLM_TIMEOUT_SECONDS + 10` s (490 s by default). On SIGTERM it
-  stops claiming and gives items in flight 30 s, then hands the ones still running back to the
-  queue at once. Calls to the endpoint may be billed again when an item runs twice.
+  stops claiming and gives items in flight `workers.llm.gracefulSeconds` (30 s), then hands the
+  ones still running back to the queue at once. Calls to the endpoint are billed again when an
+  item runs twice; with the default 120 s `LLM_TIMEOUT_SECONDS` every rollout can do that.
+  Raise `workers.llm.gracefulSeconds` and `workers.llm.terminationGracePeriodSeconds` together
+  (e.g. 130 and 140) to let calls in flight end.
+- Do not set `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG` (under `config` or otherwise): the OpenAI
+  SDK would read them, so with `workers.llm.enabled` (or `workers.asr.enabled` with `workers.asr.backend: openai`) every pod
+  refuses to start (exit code 2). `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are never sent to the
+  endpoint.
 - `kubectl exec <llm worker pod> -- text-extraction-llm-worker --check` sends one tiny extraction
   to the endpoint and exits 0 when its answer fits the schema (an operator's smoke test).
 - A prompt, a page text, an extracted value or a key never reaches a log, a metric label or the
