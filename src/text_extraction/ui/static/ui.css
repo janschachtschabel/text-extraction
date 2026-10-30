@@ -1,0 +1,172 @@
+/* The UI's styles. No inline styles anywhere (CSP style-src 'self'). */
+:root {
+  --ink: #1d2433;
+  --muted: #5b6475;
+  --line: #d5dae3;
+  --paper: #ffffff;
+  --wash: #f4f6f9;
+  --accent: #1f5fbf;
+  --accent-ink: #ffffff;
+  --warn: #8a5a00;
+  --warn-wash: #fff4dc;
+  --error: #a3222b;
+  --error-wash: #fde8ea;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--ink);
+  background: var(--wash);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+code,
+pre,
+textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.masthead {
+  padding: 1rem 1.5rem;
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+.masthead p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+}
+
+main {
+  max-width: 72rem;
+  margin: 1.5rem auto;
+  padding: 0 1rem;
+}
+
+.login,
+.shell {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+}
+
+.login {
+  max-width: 30rem;
+  margin: 0 auto;
+}
+
+label {
+  display: block;
+  margin: 0.75rem 0 0.25rem;
+  font-weight: 600;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
+details {
+  margin: 0.75rem 0;
+}
+
+summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+button {
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+button.secondary {
+  margin-top: 0;
+  background: var(--paper);
+  color: var(--accent);
+}
+
+.error {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--error-wash);
+  color: var(--error);
+}
+
+.banner {
+  margin: 0 0 1rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--warn-wash);
+  color: var(--warn);
+}
+
+.who {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.keys button {
+  margin-top: 0.75rem;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 1.25rem 0 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.tabs button {
+  margin: 0;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.tabs button[aria-selected="true"] {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.panel {
+  padding: 1rem 0;
+}
+
+.result:empty {
+  display: none;
+}

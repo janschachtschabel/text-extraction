@@ -363,6 +363,14 @@ class Settings(BaseSettings):
     mcp_wait_seconds: int = Field(default=25, ge=0, le=60)
     mcp_max_content_chars: int = Field(default=50_000, ge=1_000, le=10_000_000)  # one answer
     mcp_image_max_bytes: int = Field(default=5_000_000, ge=0, le=20_000_000)  # 0: never attached
+    # The UI (package 10, rulings P10-S9, P10-S12): the playground at /ui on the public port, off
+    # by default. Its caps: URLs of one site tree, the size and the rows of one batch file, and
+    # the bytes of one preview image.
+    ui_enabled: bool = False
+    ui_tree_max_urls: int = Field(default=5_000, ge=100, le=50_000)
+    ui_batch_file_max_bytes: int = Field(default=10_485_760, ge=1_024, le=104_857_600)
+    ui_batch_file_max_rows: int = Field(default=100_000, ge=10, le=1_000_000)
+    ui_image_max_bytes: int = Field(default=1_000_000, ge=10_000, le=20_000_000)
 
     @field_validator("log_level", mode="before")
     @classmethod

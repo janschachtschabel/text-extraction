@@ -175,6 +175,35 @@ def _add_mcp(app: FastAPI, settings: Settings, registry: CollectorRegistry) -> M
     return mount
 
 
+def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
+    """Serve the UI at ``/ui`` (rulings P10-S12 to P10-S14): its routes (left out of the OpenAPI
+    spec), its static files at ``/ui/static`` and the plain-text 403 of the ``/ui/run`` guard.
+    Returns the body limits of its ``/ui/run`` routes. The UI's modules are imported only here
+    and in `_add_ui_headers`, so ``jinja2`` is not imported while the UI is off."""
+    from fastapi.staticfiles import StaticFiles  # only with UI_ENABLED
+
+    from text_extraction.ui.routes import STATIC_DIR, create_ui_router
+    from text_extraction.ui.security import (
+        STATIC_PREFIX,
+        UiRefused,
+        run_body_limits,
+        ui_refused_response,
+    )
+
+    app.include_router(create_ui_router(settings))
+    app.mount(STATIC_PREFIX, StaticFiles(directory=STATIC_DIR), name="ui-static")
+    app.add_exception_handler(UiRefused, ui_refused_response)
+    return run_body_limits(settings)
+
+
+def _add_ui_headers(app: FastAPI) -> None:
+    """The security headers of every ``/ui`` answer (P10-S12); added after the body limit, so
+    it wraps it and a 413 under ``/ui`` carries them too."""
+    from text_extraction.ui.security import UiHeadersMiddleware  # only with UI_ENABLED
+
+    app.add_middleware(UiHeadersMiddleware)
+
+
 def create_public_app(
     settings: Settings,
     valkey: Redis,
@@ -318,6 +347,8 @@ def create_public_app(
     if settings.mcp_enabled:
         app.state.mcp = _add_mcp(app, settings, registry)
         path_limits[MCP_PATH] = mcp_body_limit(settings)
+    if settings.ui_enabled:
+        path_limits.update(_add_ui(app, settings))
 
     # Inside the metrics middleware, so refused bodies are counted like any other answer.
     app.add_middleware(
@@ -325,6 +356,8 @@ def create_public_app(
         default_limit=settings.request_max_body_bytes,
         path_limits=path_limits,
     )
+    if settings.ui_enabled:
+        _add_ui_headers(app)
     Instrumentator(registry=registry).instrument(app)
     # Added last, so it is the outermost middleware and sees every request.
     app.add_middleware(TraceMiddleware)

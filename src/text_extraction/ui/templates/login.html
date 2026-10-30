@@ -1,0 +1,17 @@
+<section class="login" aria-labelledby="login-title">
+  <form id="login-form" autocomplete="off">
+    <h2 id="login-title">Log in</h2>
+    <p>Log in with an API key of this service. The key stays in this tab and is sent as a header with each request.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <label for="login-api-key">API key</label>
+    <input id="login-api-key" type="password" autocomplete="off" spellcheck="false" required>
+    <details>
+      <summary>Optional keys</summary>
+      <label for="login-llm-key">LLM key (<code>X-LLM-Api-Key</code>)</label>
+      <input id="login-llm-key" type="password" autocomplete="off" spellcheck="false">
+      <label for="login-asr-key">ASR key (<code>X-ASR-Api-Key</code>)</label>
+      <input id="login-asr-key" type="password" autocomplete="off" spellcheck="false">
+    </details>
+    <button type="submit">Log in</button>
+  </form>
+</section>

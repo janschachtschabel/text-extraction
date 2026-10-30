@@ -25,7 +25,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB), `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB) and `/mcp` (see MCP). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
+| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB), `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB), `/mcp` (see MCP) and some `/ui/run` routes (see UI). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
 | `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` and `POST /v1/site-structure` answer 503 `internal_error` (retryable), a running site job appends no further pages or sitemaps (warning `site_memory_guard`), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
@@ -679,6 +679,65 @@ own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
 | `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of these tools and of `get_job` (a larger `wait_seconds` is cut to it). 0 to 60. |
 | `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
 | `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |
+
+## UI
+
+`UI_ENABLED=true` serves a playground at `/ui` on the public port 8080: server-rendered pages
+(Jinja2) with htmx 2.0.11 served from `/ui/static` (no CDN, no Node build). Off, `/ui` is 404 and
+`jinja2` is not imported. No `/ui` route appears in the OpenAPI spec, and none is on the internal
+port.
+
+Access (the UI has no password of its own: its password is an API key of the service):
+
+- The page `GET /ui` and its static files need no key; they hold nothing but forms.
+- Under `AUTH_MODE=api_key` the page shows only a login box: the API key, and optionally the LLM
+  key (`X-LLM-Api-Key`) and the ASR key (`X-ASR-Api-Key`). The page's script keeps them in the
+  tab's `sessionStorage` (`te.apiKey`, `te.llmKey`, `te.asrKey`): they survive a reload and go
+  away with the tab. It sends them only as request headers to `/ui/run/*`, never as a cookie, a
+  form field or part of a URL, and the service never renders them into a page. The login
+  forwards `GET /v1/info` with the key: a valid key shows the application with the key's name
+  and role and a "Log out" button (which clears the stored keys); a refused key shows "This key
+  is not valid." and nothing else. A reload logs in again with the stored key. The login is
+  only a convenience: every request the UI forwards carries the key and is checked as any REST
+  request.
+- Under `AUTH_MODE=none` the application shows at once, under the banner "This service runs
+  without authentication: anyone who can reach it can use the API and this UI." An open UI goes
+  with an open API. For a shared deployment, keep `UI_ENABLED=false` (Helm `ui.enabled=false`)
+  or use `AUTH_MODE=api_key`.
+
+Every form posts to `/ui/run/<op>`, which forwards it in-process (no network) to the matching
+`/v1` route with the browser's `Authorization`, `X-LLM-Api-Key`, `X-ASR-Api-Key` and B3 headers
+only (no cookie, no other header) and with `x-client-trace-id` set to the outer request's trace
+id, so both access lines carry one id. The REST route runs every check (body limit, validation,
+auth, roles, rate limit, the hand-over to a job), and each forwarded call counts once against the
+caller's rate limit. Views that combine several reads count one hit per view.
+
+Requests to `/ui/run/*` answer 403 (plain text) without `HX-Request: true`, and when their
+`Origin` names another host or port than the `Host` header (a default port counts as none; the
+scheme is not compared, as TLS may end at the ingress). The service has no CORS middleware, so a
+page of another origin cannot send `HX-Request`. The UI never sets a cookie.
+
+Every answer under `/ui` carries `Content-Security-Policy: default-src 'none'; script-src 'self';
+style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none';
+frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Resource-Policy: same-origin`, `Permissions-Policy: camera=(), microphone=(),
+geolocation=()` and `Cache-Control: no-store` (`public, max-age=3600` for a static file). The
+templates have no inline script, style or event handler, and htmx runs with `allowEval`,
+`allowScriptTags` and its history off and `selfRequestsOnly` on.
+
+Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/file`,
+`/ui/run/chunk` that of `POST /v1/chunk`, `/ui/run/batch-file` `UI_BATCH_FILE_MAX_BYTES` + 64 KiB,
+`/ui/run/batch-urls` `BATCH_MAX_OPEN_PER_CLIENT` times that of `POST /v1/batch`, every other route
+`REQUEST_MAX_BODY_BYTES`. A larger body answers 413 `invalid_request` before it is read whole.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `UI_ENABLED` | `false` | Serve the playground at `/ui`. |
+| `UI_TREE_MAX_URLS` | `5000` | Most URLs the site tree of one site job shows; the rest are counted ("<n> more URLs not shown"). 100 to 50000. |
+| `UI_BATCH_FILE_MAX_BYTES` | `10485760` | Largest CSV or JSON file of URLs the batch-file form takes, in bytes. 1024 to 104857600. |
+| `UI_BATCH_FILE_MAX_ROWS` | `100000` | Most rows of one batch file; a file with more is refused. 10 to 1000000. |
+| `UI_IMAGE_MAX_BYTES` | `1000000` | Largest image the UI fetches for a preview, in bytes; a larger one is skipped (`too_large`). 10000 to 20000000. |
 
 ## Headers
 
