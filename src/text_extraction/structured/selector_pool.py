@@ -17,7 +17,8 @@ fails the result; ``learn_selectors`` rejects the proposals of such a run
 one ``:has(``, no backslash) stay as policy.
 
 The pool starts with its owner (the API, the extract, browser and llm workers) or on its first
-run. A runner serves the event loop it runs on: on another one (tests that run each request on
+run; a start that fails is ``selectors_failed`` for that run, and the next run starts a fresh
+pool. A runner serves the event loop it runs on: on another one (tests that run each request on
 an event loop of their own) it starts fresh children, as a pool's queue and tasks belong to one
 loop. Nothing here logs a selector, a value or the page.
 """
@@ -126,9 +127,11 @@ class SelectorRunner:
 
     def _current(self) -> DocumentPool:
         loop = asyncio.get_running_loop()
-        if self._pool is None or self._loop is not loop:
-            if self._pool is not None:
+        if self._pool is None or self._loop is not loop or self._pool.closed:
+            if self._pool is not None and not self._pool.closed:
                 self._pool.abandon()  # its event loop is not this one: it cannot be awaited
+            # A closed pool (a start that failed shuts its pool down) is replaced, so the next
+            # run tries a fresh start instead of failing on it for good.
             self._pool, self._loop = self._factory(), loop
         return self._pool
 

@@ -311,7 +311,7 @@ The Helm keys, with the variables they render (the full table is in the
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY` on the browser workers. |
 | `workers.browser.replicaCount` | `2` | Replicas, unless KEDA or HPA scale them. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | See Response times. |
-| `workers.browser.resources`, `workers.browser.tmpSizeLimit` | 1 / 2Gi to 2 / 4Gi, `2Gi` | Sized for four pages. |
+| `workers.browser.resources`, `workers.browser.tmpSizeLimit` | 1 / 2Gi to 2 / 4608Mi, `2Gi` | Sized for four pages and the selector child. |
 | `workers.browser.nodeSelector` | `kubernetes.io/arch: amd64` | The image exists for linux/amd64 only. |
 | `workers.browser.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `browser` queue or on CPU. |
 | `workers.browser.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-browser`, chart version | The browser image. |
@@ -535,9 +535,9 @@ fails with `llm_failed`, not retryable.
 | `SELECTOR_LEARN_TTL_SECONDS` | `2592000` | How long learned selectors stay in Valkey (30 days), per API key, host and schema (`sel:{<key name>}:<host>:<schema id>`, the key name's `%`, `{` and `}` percent-escaped); renewed on each write, not on reads. Minimum 60. |
 | `STRUCTURED_REGEX_TIMEOUT_SECONDS` | `0.5` | Time one caller-supplied pattern may take on a text (all its matches), in seconds; then its field stays missing with the warning `pattern_timeout`. All patterns of one result share a fixed total of 2 s on top of it. 0.05 to 5. |
 | `CHUNK_MAX_CHUNKS` | `2000` | Most chunks of one result; more are cut with the warning `chunks_truncated`. Minimum 1. |
-| `STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `5` | Time all selector rules of one result (the caller's CSS and XPath, the learned ones, or the proposals that `learn_selectors` checks) may take together, in seconds, also capped by the request's own deadline; waiting for a free selector child counts against it. Then the child is killed and replaced: the rules' fields stay missing with the warning `selectors_timed_out` (for `learn_selectors`: nothing is learned, `selector_learning_failed`), and the result is not failed. A CSS selector's cost has no other bound: soupsieve backtracks, and a few descendant combinators on a deeply nested page run for hours. 0.1 to 60. |
+| `STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `5` | Time all selector rules of one result (the caller's CSS and XPath, the learned ones, or the proposals that `learn_selectors` checks) may take together, in seconds, also capped by the request's own deadline; waiting for a free selector child counts against it. Then the child is killed and replaced: the rules' fields stay missing with the warning `selectors_timed_out` (for `learn_selectors`: nothing is learned, `selector_learning_failed`), and the result is not failed, nor written to the result cache (the next identical request runs the rules again). A CSS selector's cost has no other bound: soupsieve backtracks, and a few descendant combinators on a deeply nested page run for hours. 0.1 to 60. |
 | `STRUCTURED_SELECTOR_PROCESSES` | `1` | Selector child processes per pod (API, extract, browser and llm workers): selector rules run there, one result's rules at a time per child, never in the server process. Each idle child takes about 40 MB. Minimum 1. |
-| `STRUCTURED_SELECTOR_MEMORY_MB` | `512` | Address space limit (`RLIMIT_AS`) of one selector child, in MiB, as `DOCUMENT_MEMORY_LIMIT_MB` is for the document children. A run that reaches it ends with the warning `selectors_failed` (its fields missing) and the child is replaced; a 5 MB page needs about 310 MB. Minimum 256. Count `STRUCTURED_SELECTOR_PROCESSES` x this into the pod's memory beside the document children (the Helm chart's `documentParentReserveMiB`). |
+| `STRUCTURED_SELECTOR_MEMORY_MB` | `512` | Address space limit (`RLIMIT_AS`) of one selector child, in MiB, as `DOCUMENT_MEMORY_LIMIT_MB` is for the document children. A run that reaches it ends with the warning `selectors_failed` (its fields missing) and the child is replaced; a 5 MB page needs about 310 MB. Minimum 256. Count `STRUCTURED_SELECTOR_PROCESSES` x this into the pod's memory beside the document children: the Helm chart's default limits and `documentParentReserveMiB` values hold 512 MiB for it. |
 | `POST_CONCURRENCY` | `2` | Threads of the post stage per process (API pods and every worker): patterns, chunking, the `semantic` distances and the learning check's parsing run on a pool of their own, never on asyncio's default executor, which resolves host names. A finish point waits for a free thread. Minimum 1. |
 
 The Helm keys (the full table is in the chart README). The chart renders `LLM_ENABLED` into every
@@ -561,7 +561,7 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`.
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY` on the llm workers. |
 | `workers.llm.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a sync request waits only `LLM_SYNC_WAIT_SECONDS`. |
 | `workers.llm.terminationGracePeriodSeconds` | `40` | See Response times. |
-| `workers.llm.resources` | 100m / 256Mi to 1 / 512Mi | Placeholder until package 11 measures real consumption. |
+| `workers.llm.resources` | 100m / 256Mi to 1 / 1Gi | Placeholder until package 11 measures real consumption; 512 MiB of it are the selector child. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global one. |
 | `workers.llm.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `llm` queue or on CPU. |
 | `alerts.llmQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `llm`. |

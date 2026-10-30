@@ -253,7 +253,12 @@ from text_extraction.structured.dom import (
     usable_learned,
 )
 from text_extraction.structured.post import without_dom_stage
-from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
+from text_extraction.structured.selector_pool import (
+    SELECTORS_FAILED_WARNING,
+    SELECTORS_TIMED_OUT_WARNING,
+    SelectorRunner,
+    create_selector_runner,
+)
 from text_extraction.structured.store import (
     LEARNED_SELECTORS_UNAVAILABLE_WARNING,
     LearnedSelectorsUnavailableError,
@@ -283,6 +288,10 @@ DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
 # Kinds Docling converts without OCR: OpenDocument files have their text.
 _NO_OCR_KINDS: frozenset[DocumentKind] = frozenset({"odt", "ods", "odp"})
 # Fetch errors that say the host itself is in trouble; they count towards its circuit breaker.
+# A result with one of these is not written to the result cache (see ``_finish``).
+_UNCACHED_WARNINGS = frozenset(
+    {CONTENT_NOT_STORED_WARNING, SELECTORS_TIMED_OUT_WARNING, SELECTORS_FAILED_WARNING}
+)
 _HOST_FAILURES = frozenset({ErrorCode.DNS_ERROR, ErrorCode.CONNECTION_ERROR, ErrorCode.TIMEOUT})
 # Upstream answers worth retrying later.
 _RETRYABLE_STATUSES = frozenset({408, 425, 429})
@@ -1756,8 +1765,10 @@ class Pipeline:
             )
             result = result.model_copy(update={"fingerprint": fingerprint})
             envelope = envelope.model_copy(update={"data": result})
-        # A draft stored without its content (over JOB_ITEM_MAX_BYTES) is not served again.
-        complete = CONTENT_NOT_STORED_WARNING not in result.warnings
+        # A draft stored without its content (over JOB_ITEM_MAX_BYTES) is not served again, nor
+        # a result whose selector rules did not run (a queue wait, a respawned or failed child:
+        # transient, as ``learned_selectors_unavailable``; the next request runs them again).
+        complete = not _UNCACHED_WARNINGS.intersection(result.warnings)
         if (
             run.cacheable
             and envelope.status != "failed"

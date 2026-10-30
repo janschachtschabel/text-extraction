@@ -86,8 +86,10 @@ The API, extract and browser pods convert documents (MarkItDown) in `DOCUMENT_CO
 child processes, each with an address-space limit of `DOCUMENT_MEMORY_LIMIT_MB`. The chart
 renders that limit from the container's memory limit: `floor((limits.memory in MiB -
 documentParentReserveMiB) / DOCUMENT_CONCURRENCY)`, 768 MiB for every pod with the defaults
-(`(2048 - 512) / 2` for the API and extract pods, `(4096 - 2560) / 2` for the browser pods, whose
-reserve covers Chromium). So a child runs out of memory and answers `too_large` before the
+(`(2560 - 1024) / 2` for the API and extract pods, `(4608 - 3072) / 2` for the browser pods, whose
+reserve covers Chromium). Each reserve holds the selector child as well
+(`STRUCTURED_SELECTOR_PROCESSES` x `STRUCTURED_SELECTOR_MEMORY_MB`, 512 MiB): raise the reserve and
+the limit together when you raise either. So a child runs out of memory and answers `too_large` before the
 container's OOM killer ends the pod; the children also raise their `oom_score_adj` to 1000, so
 the kernel picks them before the server when the pod runs out anyway. A share below 256 MiB fails
 the render. `config.DOCUMENT_MEMORY_LIMIT_MB` wins when set; without a memory limit the
@@ -159,15 +161,15 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.POST_CONCURRENCY` | `"2"` | Threads of the post stage (patterns, chunking) per process, in every pod. |
 | `config.STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `"5"` | Time all selector rules of one result may take in their child process, which is then killed (`selectors_timed_out`). |
 | `config.STRUCTURED_SELECTOR_PROCESSES` | `"1"` | Selector child processes per pod (API, extract, browser and llm workers), about 40 MB each when idle. |
-| `config.STRUCTURED_SELECTOR_MEMORY_MB` | `"512"` | Address space of one selector child; it comes out of `documentParentReserveMiB`. |
+| `config.STRUCTURED_SELECTOR_MEMORY_MB` | `"512"` | Address space of one selector child. The default memory limits and `documentParentReserveMiB` values hold 512 MiB for it (the llm worker's limit too); raise them by `STRUCTURED_SELECTOR_PROCESSES` x this when you raise either. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.*` | | Any further non-secret setting is added here. |
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
 | `secrets.existingSecretKey` | `API_KEYS` | Key inside that Secret. |
-| `resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
-| `documentParentReserveMiB` | `512` | MiB of the API container's memory limit kept for everything but the document conversion children; the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
+| `resources` | requests 100m / 256Mi, limits 1 / 2560Mi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
+| `documentParentReserveMiB` | `1024` | MiB of the API container's memory limit kept for everything but the document conversion children: the server (512) and the selector child (512); the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
@@ -177,8 +179,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
 | `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
 | `workers.extract.nodeSelector` | `{}` | Merged over the global `nodeSelector` for the extract workers; a key set here wins. |
-| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2Gi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
-| `workers.extract.documentParentReserveMiB` | `512` | As `documentParentReserveMiB`, for the extract workers. |
+| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2560Mi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
+| `workers.extract.documentParentReserveMiB` | `1024` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
 | `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica (pending plus leased with `countLeased`). `null`: the pool's `concurrency`. Must be positive. |
@@ -195,8 +197,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
-| `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4Gi | Placeholder for a browser with 4 pages plus the conversions. |
-| `workers.browser.documentParentReserveMiB` | `2560` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages, so each document conversion child gets `(4096 - 2560) / 2` = 768 MiB. |
+| `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4608Mi | Placeholder for a browser with 4 pages plus the conversions and the selector child. |
+| `workers.browser.documentParentReserveMiB` | `3072` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages and the selector child, so each document conversion child gets `(4608 - 3072) / 2` = 768 MiB. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
 | `workers.browser.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector` for the browser workers; a key set here wins. The browser image is linux/amd64 only (Google Chrome stable), so the default keeps its pods off arm64 nodes. Set the key to `null` to drop it. |
 | `workers.browser.autoscaling.keda.*` | as for the extract workers, `threshold` `8` | Scales on `max(text_extraction_queue_pending_items{pool="browser"})`; the API pods export it while `JOBS_ENABLED` and `BROWSER_ENABLED` are true. Keep `minReplicaCount` at 1 or more: a sync request waits only `BROWSER_QUEUE_WAIT_SECONDS` (10) for a worker. |
@@ -256,7 +258,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.llm.replicaCount` | `1` | Ignored with KEDA or HPA. Keep one: a sync request that needs the LLM waits only `LLM_SYNC_WAIT_SECONDS` (30) for a worker. |
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY`: items per pod at once, each with one call to the endpoint at a time. |
 | `workers.llm.terminationGracePeriodSeconds` | `40` | Items in flight get 30 s after SIGTERM, then the ones still running go back to the queue at once and run again elsewhere. The render fails below 40 (30 s + a 10 s margin, so the hand-back happens before the kill). |
-| `workers.llm.resources` | requests 100m / 256Mi, limits 1 / 512Mi | Placeholder until package 11 measures real consumption: the worker waits for the endpoint and holds no model. |
+| `workers.llm.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption: the worker waits for the endpoint and holds no model; 512 MiB are its selector child, which checks the proposals of `learn_selectors`. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The workers run the API image. |
 | `workers.llm.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (`concurrency`), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="llm"})`. The API pods export it while `JOBS_ENABLED` and `LLM_ENABLED` are true. Keep one replica. |
 | `workers.llm.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |

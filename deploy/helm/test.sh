@@ -137,7 +137,7 @@ expect_contains "browser worker root filesystem is read-only" "$browser" "readOn
 expect_contains "browser worker /tmp is bounded" "$browser" "sizeLimit: 2Gi"
 expect_contains "browser worker grace period" "$browser" "terminationGracePeriodSeconds: 150"
 expect_contains "browser worker memory request" "$browser" "memory: 2Gi"
-expect_contains "browser worker memory limit" "$browser" "memory: 4Gi"
+expect_contains "browser worker memory limit" "$browser" "memory: 4608Mi"
 expect_values "browser worker" "$browser" BROWSER_CONCURRENCY "4"
 expect_absent "browser worker gets no WORKER_CONCURRENCY" "$browser" "name: WORKER_CONCURRENCY"
 expect_contains "browser worker internal Service" "$(document "$on" Service "$BROWSER-internal")" "port: 9090"
@@ -256,10 +256,12 @@ expect_contains "extract worker passes its entry point as args" "$extract" "- te
 # --- Document conversion memory -----------------------------------------------------------------
 
 # Each MarkItDown child gets floor((limit MiB - documentParentReserveMiB) / DOCUMENT_CONCURRENCY)
-# of address space: (2048 - 512) / 2 in the API and extract pods, (4096 - 2560) / 2 in the
-# browser pods.
-expect_contains "API memory limit" "$api" "memory: 2Gi"
-expect_contains "extract worker memory limit" "$extract" "memory: 2Gi"
+# of address space: (2560 - 1024) / 2 in the API and extract pods, (4608 - 3072) / 2 in the
+# browser pods. The reserves hold the selector child (STRUCTURED_SELECTOR_MEMORY_MB, 512) beside
+# the server (512) and Chromium (2048).
+expect_contains "API memory limit" "$api" "memory: 2560Mi"
+expect_contains "extract worker memory limit" "$extract" "memory: 2560Mi"
+expect_contains "selector child memory" "$(document "$on" ConfigMap "$API")" "STRUCTURED_SELECTOR_MEMORY_MB: \"512\""
 for name in "$API" "$EXTRACT" "$BROWSER"; do
   expect_values "document memory ($name)" "$(document "$on" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
 done
@@ -268,28 +270,28 @@ expect_values "config.DOCUMENT_MEMORY_LIMIT_MB wins (API)" \
 expect_values "config.DOCUMENT_MEMORY_LIMIT_MB wins (browser worker)" \
   "$(document "$(render --set-string config.DOCUMENT_MEMORY_LIMIT_MB=1000)" Deployment "$BROWSER")" DOCUMENT_MEMORY_LIMIT_MB ""
 expect_values "document memory follows the limit" \
-  "$(document "$(render --set resources.limits.memory=3Gi)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "1280"
+  "$(document "$(render --set resources.limits.memory=3Gi)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "1024"
 expect_values "document memory follows DOCUMENT_CONCURRENCY" \
-  "$(document "$(render --set resources.limits.memory=3Gi --set-string config.DOCUMENT_CONCURRENCY=4)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "640"
+  "$(document "$(render --set resources.limits.memory=3Gi --set-string config.DOCUMENT_CONCURRENCY=4)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "512"
 expect_values "document memory from Mi" \
-  "$(document "$(render --set workers.extract.resources.limits.memory=2560Mi)" Deployment "$EXTRACT")" DOCUMENT_MEMORY_LIMIT_MB "1024"
-# 2G = 1907.3 MiB: floor((1907.3 - 512) / 2)
+  "$(document "$(render --set workers.extract.resources.limits.memory=3072Mi)" Deployment "$EXTRACT")" DOCUMENT_MEMORY_LIMIT_MB "1024"
+# 2G = 1907.3 MiB: floor((1907.3 - 1024) / 2)
 expect_values "document memory from G" \
-  "$(document "$(render --set resources.limits.memory=2G)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "697"
+  "$(document "$(render --set resources.limits.memory=2G)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "441"
 expect_values "document memory from bytes" \
-  "$(document "$(render --set-string resources.limits.memory=2147483648)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "768"
+  "$(document "$(render --set-string resources.limits.memory=2147483648)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB "512"
 expect_values "document memory follows the reserve" \
-  "$(document "$(render --set workers.browser.documentParentReserveMiB=2048)" Deployment "$BROWSER")" DOCUMENT_MEMORY_LIMIT_MB "1024"
+  "$(document "$(render --set workers.browser.documentParentReserveMiB=2560)" Deployment "$BROWSER")" DOCUMENT_MEMORY_LIMIT_MB "1024"
 expect_values "no memory limit, no document memory" \
   "$(document "$(render --set resources.limits.memory=null)" Deployment "$API")" DOCUMENT_MEMORY_LIMIT_MB ""
-# (1024 - 512) / 2 = 256 is the minimum; 1000Mi leaves 244.
-expect_render_succeeds "document memory at the minimum" --set resources.limits.memory=1Gi
-expect_render_fails "document memory below the minimum (API)" "resources.limits.memory (1000Mi) leaves 244 MiB" \
-  --set resources.limits.memory=1000Mi
-expect_render_fails "document memory below the minimum (extract worker)" "workers.extract.resources.limits.memory (1000Mi) leaves 244 MiB" \
-  --set workers.extract.resources.limits.memory=1000Mi
+# (1536 - 1024) / 2 = 256 is the minimum; 1512Mi leaves 244.
+expect_render_succeeds "document memory at the minimum" --set resources.limits.memory=1536Mi
+expect_render_fails "document memory below the minimum (API)" "resources.limits.memory (1512Mi) leaves 244 MiB" \
+  --set resources.limits.memory=1512Mi
+expect_render_fails "document memory below the minimum (extract worker)" "workers.extract.resources.limits.memory (1512Mi) leaves 244 MiB" \
+  --set workers.extract.resources.limits.memory=1512Mi
 expect_render_succeeds "config.DOCUMENT_MEMORY_LIMIT_MB skips the minimum" \
-  --set resources.limits.memory=1000Mi --set-string config.DOCUMENT_MEMORY_LIMIT_MB=400
+  --set resources.limits.memory=1512Mi --set-string config.DOCUMENT_MEMORY_LIMIT_MB=400
 
 # --- Docling workers ----------------------------------------------------------------------------
 
@@ -843,7 +845,7 @@ expect_contains "llm worker serves the internal port" "$llm" "containerPort: 909
 expect_absent "llm worker has no public port" "$llm" "containerPort: 8080"
 expect_contains "llm worker grace period" "$llm" "terminationGracePeriodSeconds: 40"
 expect_contains "llm worker CPU request" "$(flat "$llm")" "requests: cpu: 100m memory: 256Mi"
-expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: \"1\" memory: 512Mi"
+expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: \"1\" memory: 1Gi"
 expect_contains "llm worker internal Service" "$(document "$llm_on" Service "$LLM-internal")" "port: 9090"
 expect_contains "llm worker replicas" "$llm" "replicas: 1"
 expect_absent "llm workers create no volume claim" "$(render --set workers.llm.enabled=true)" "kind: PersistentVolumeClaim"

@@ -191,9 +191,9 @@ def selector_rules(
     warnings: list[str],
 ) -> dict[str, SelectorRule]:
     """The selector rules the DOM stage runs on this page, by field: the caller's (strategy
-    ``selectors`` or ``auto``) over the usable ``learned`` ones. None on a page over
-    ``STRUCTURED_MAX_ELEMENTS`` elements: then ``selectors_skipped_large_page`` is appended to
-    ``warnings``."""
+    ``selectors`` or ``auto``) over the usable ``learned`` ones. Empty (``{}``) without a
+    compiled schema, and on a page over ``STRUCTURED_MAX_ELEMENTS`` elements: then
+    ``selectors_skipped_large_page`` is appended to ``warnings``."""
     compiled = options.compiled
     if compiled is None:
         return {}

@@ -165,7 +165,8 @@ add a note of its own):
 - Structured output and chunking: `selectors_skipped_large_page` (a page of more than 50,000
   elements runs no selector rules, R4), `selectors_timed_out` (the selector rules of the result
   did not finish within `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`; their fields are missing, R19),
-  `selectors_failed` (their child process crashed or ran out of memory; likewise),
+  `selectors_failed` (their child process crashed or ran out of memory; likewise; a result with
+  either is not cached),
   `structured_truncated` (a field's values were cut at 1,000
   values or 100,000 characters, R5), `tables_truncated` (the tables stopped at their bounds, R5),
   `structured_value_invalid` (a value found did not fit the schema and was dropped),
@@ -726,9 +727,9 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   (so the container's OOM killer, which counts the parent and all children, ends a child before
   the server) and sets `RLIMIT_AS` (`DOCUMENT_MEMORY_LIMIT_MB`, 2048) before its first import.
   The Helm chart renders `DOCUMENT_MEMORY_LIMIT_MB` from each pod's memory limit: floor((limit -
-  `documentParentReserveMiB`) / `DOCUMENT_CONCURRENCY`), 768 MiB with the defaults (2Gi with a
-  512 MiB reserve for the API and extract pods, 4Gi with a 2560 MiB reserve for Chromium in the
-  browser pods), so the children's address space fits the limit and a large document ends as
+  `documentParentReserveMiB`) / `DOCUMENT_CONCURRENCY`), 768 MiB with the defaults (2560Mi with a
+  1024 MiB reserve for the API and extract pods, 4608Mi with a 3072 MiB reserve for Chromium in
+  the browser pods; each reserve holds the selector child's 512 MiB, R19), so the children's address space fits the limit and a large document ends as
   `too_large` in its child rather than as an OOM kill of the pod; a share below 256 fails the
   render (measured: an idle MarkItDown child maps about 390 MB, about 500 MB after a small
   PDF). A child runs one conversion at a
@@ -1690,7 +1691,9 @@ a result on the page, by `STRUCTURED_SELECTOR_TIMEOUT_SECONDS` (5 s) or the requ
 whichever comes first; waiting for a free child counts against it. A run that does not finish is
 killed with its child, which a fresh one replaces: its fields stay missing with
 `selectors_timed_out` (`selectors_failed` for a child that crashed or ran out of memory), and the
-result is not failed. The rules themselves (`structured/rules.py`) parse the page as `metadata`
+result is not failed. Both are transient (a wait for the child, a respawn), so such a result is not
+written to the result cache, as `learned_selectors_unavailable` is not: the next identical request
+runs the rules again. The rules themselves (`structured/rules.py`) parse the page as `metadata`
 does. The grammar limits stay as policy: caller XPath needs an admin key (422 "XPath selectors need
 an admin key; use CSS."); a non-admin CSS rule may use `:has(` at most once and no backslash (422:
 an escape could spell `:has(` past the count); learned rules are CSS only; caller and learned rules
@@ -1887,8 +1890,9 @@ grace period is 40 s in the chart (30 s plus the chart's 10 s margin). R18: on `
 the form fields `structured` and `chunking` may have 64 KiB each (every other field keeps 1 KiB),
 and the route's body limit grows to the file limit + 192 KiB to hold them. R19: caller rules,
 learned rules and the learning check run in selector children killed at
-`STRUCTURED_SELECTOR_TIMEOUT_SECONDS` (`selectors_timed_out`, `selectors_failed`); a non-admin CSS
-rule has no backslash. R20: `JOB_ITEM_MAX_BYTES` drops chunks and tables after the content; a draft
+`STRUCTURED_SELECTOR_TIMEOUT_SECONDS` (`selectors_timed_out`, `selectors_failed`; such a result is
+not cached, and a failed start is retried with a fresh pool on the next run); a non-admin CSS rule
+has no backslash. R20: `JOB_ITEM_MAX_BYTES` drops chunks and tables after the content; a draft
 without its content that owes the LLM is `llm_failed`, not retryable. R21: the post stage's CPU
 work runs on a post pool of `POST_CONCURRENCY` threads per process. R22: `semantic` keeps one
 float32 batch of embeddings and the distances, never all vectors. R23: the llm runner withholds a

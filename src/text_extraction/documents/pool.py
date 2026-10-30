@@ -259,6 +259,13 @@ class DocumentPool:
             self._closed = True
         self._kill_now()
 
+    @property
+    def closed(self) -> bool:
+        """Whether the pool was shut down (also by a failed ``start``) or abandoned: it runs
+        nothing more."""
+        with self._lock:
+            return self._closed
+
     def child_pids(self) -> list[int]:
         """The process ids of the children (for tests and diagnostics)."""
         with self._lock:

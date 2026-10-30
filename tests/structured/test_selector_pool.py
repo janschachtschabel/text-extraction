@@ -8,8 +8,10 @@ at ``STRUCTURED_SELECTOR_TIMEOUT_SECONDS`` (0.5 s here): the fields stay missing
 
 import asyncio
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
+import pytest
 from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
@@ -31,6 +33,7 @@ from text_extraction.settings import Settings
 from text_extraction.structured.post import apply_post
 from text_extraction.structured.rules import RuleRequest
 from text_extraction.structured.selector_pool import (
+    SELECTOR_TARGET,
     SELECTORS_FAILED_WARNING,
     SELECTORS_TIMED_OUT_WARNING,
     SelectorRunner,
@@ -166,6 +169,34 @@ def test_a_runner_follows_the_event_loop() -> None:
     assert first_pids != second_pids
 
 
+def test_a_failed_start_is_retried_with_a_fresh_pool() -> None:
+    """A lazy start that fails (a child that cannot load its target) shuts its pool down; the
+    next run starts a fresh one instead of failing on the closed pool for good (N-m1)."""
+    made: list[DocumentPool] = []
+
+    def pools() -> DocumentPool:
+        target = "tests.structured.no_such_target" if not made else SELECTOR_TARGET
+        made.append(DocumentPool(1, 512, target=target))
+        return made[-1]
+
+    runner = SelectorRunner(pools, timeout_seconds=5)
+
+    async def scenario() -> tuple[Any, Any]:
+        try:
+            first = await runner.run("<h1>A</h1>", PAGE, [rule("title", "h1")])
+            second = await runner.run("<h1>A</h1>", PAGE, [rule("title", "h1")])
+            return first, second
+        finally:
+            await runner.shutdown()
+
+    first, second = asyncio.run(scenario())
+
+    assert first.warning == SELECTORS_FAILED_WARNING
+    assert second.warning is None
+    assert second.found == {"title": (["A"], False)}
+    assert len(made) == 2
+
+
 def test_no_rules_start_no_child() -> None:
     runner = create_selector_runner(settings_with())
 
@@ -183,11 +214,11 @@ class Service:
     """A pipeline whose selector children are the test's, with a fake fetcher of the deep
     page; all requests of a test run on one event loop."""
 
-    def __init__(self) -> None:
+    def __init__(self, runner: SelectorRunner | None = None) -> None:
         self.settings = settings_with()
         self.valkey = FakeAsyncRedis()
         self.store = SelectorStore(self.valkey, 3600)
-        self.runner = create_selector_runner(self.settings)
+        self.runner = runner if runner is not None else create_selector_runner(self.settings)
         self.pool = ConversionPool(1)
         fetcher = cast(Fetcher, FakeFetcher({PAGE: fetched(body=DEEP_PAGE)}))
         self.pipeline = Pipeline(
@@ -203,9 +234,11 @@ class Service:
             selector_runner=self.runner,
         )
 
-    async def extract(self, structured: dict[str, Any]) -> tuple[Envelope[ExtractResult], float]:
+    async def extract(
+        self, structured: dict[str, Any], *, cache: bool = False
+    ) -> tuple[Envelope[ExtractResult], float]:
         request = ExtractRequest.model_validate(
-            {"url": PAGE, "structured": structured, "cache": False}
+            {"url": PAGE, "structured": structured, "cache": cache}
         )
         started = time.perf_counter()
         envelope = await self.pipeline.run(request, USER)
@@ -259,6 +292,71 @@ def test_a_caller_rule_on_a_deeply_nested_page_times_out() -> None:
     assert SELECTORS_TIMED_OUT_WARNING not in fast.data.warnings
     assert _values(fast)["title"] == "Deep title"
     assert before != after  # the killed child was replaced
+
+
+def _crashing_runner() -> SelectorRunner:
+    return SelectorRunner(
+        lambda: DocumentPool(1, 512, target="tests.structured.selector_pool_targets"),
+        timeout_seconds=5,
+    )
+
+
+@pytest.mark.parametrize(
+    ("make_runner", "warning"),
+    [
+        (lambda: None, SELECTORS_TIMED_OUT_WARNING),
+        (_crashing_runner, SELECTORS_FAILED_WARNING),
+    ],
+    ids=["timed_out", "failed"],
+)
+def test_a_result_whose_selectors_did_not_run_is_not_cached(
+    make_runner: Callable[[], SelectorRunner | None], warning: str
+) -> None:
+    """A selector run that timed out or whose child failed is transient (a queue wait, a
+    respawn): such a result is not stored in the result cache, and the next identical request
+    runs the rules again (N-I1). A result whose rules ran is cached as before."""
+    service = Service(make_runner())
+    slow = {
+        "schema": SCHEMA,
+        "strategy": "selectors",
+        "selectors": {"slow": {"css": DEEP_SELECTOR}},
+    }
+    fast = {"schema": SCHEMA, "strategy": "selectors", "selectors": {"title": {"css": "h1"}}}
+    runs: list[int] = []
+    run = service.runner.run
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        runs.append(1)
+        return await run(*args, **kwargs)
+
+    service.runner.run = counted  # type: ignore[method-assign]
+
+    async def scenario() -> list[Envelope[ExtractResult]]:
+        try:
+            first, _ = await service.extract(slow, cache=True)
+            second, _ = await service.extract(slow, cache=True)
+            if warning == SELECTORS_FAILED_WARNING:
+                return [first, second]
+            third, _ = await service.extract(fast, cache=True)
+            fourth, _ = await service.extract(fast, cache=True)
+            return [first, second, third, fourth]
+        finally:
+            await service.close()
+
+    answers = asyncio.run(scenario())
+
+    for degraded in answers[:2]:
+        assert degraded.data is not None
+        assert warning in degraded.data.warnings
+        assert degraded.data.cache == "miss"  # never served from the cache
+    assert len(runs) >= 2  # the second request ran its rules again
+    if warning == SELECTORS_TIMED_OUT_WARNING:  # the control: a clean result is cached
+        third, fourth = answers[2:]
+        assert third.data is not None
+        assert fourth.data is not None
+        assert third.data.cache == "miss"
+        assert fourth.data.cache == "hit"
+        assert len(runs) == 3
 
 
 def test_a_learned_rule_on_a_deeply_nested_page_times_out() -> None:
