@@ -237,65 +237,70 @@ def _parse_xml(
     parsed = collector.parsed
     source = io.BytesIO(body)  # shares the bytes, no copy
     source.seek(start)
-    layout: _Layout | None = None
-    stack: list[Element] = []
-    record: dict[str, str] | None = None
-    root_closed = False
     try:
-        for event, element in iterparse(
-            source,
-            events=("start", "end"),
-            forbid_dtd=True,
-            forbid_entities=True,
-            forbid_external=True,
-        ):
-            name = _local(element.tag)
-            if event == "start":
-                if layout is None:
-                    layout = _LAYOUTS.get(name)
+        layout: _Layout | None = None
+        stack: list[Element] = []
+        record: dict[str, str] | None = None
+        root_closed = False
+        try:
+            for event, element in iterparse(
+                source,
+                events=("start", "end"),
+                forbid_dtd=True,
+                forbid_entities=True,
+                forbid_external=True,
+            ):
+                name = _local(element.tag)
+                if event == "start":
                     if layout is None:
-                        return ParsedSitemap(format=None, error="unsupported")
-                    parsed.format = layout.format
-                if len(stack) == layout.depth and name == layout.record:
-                    record = {}
-                stack.append(element)
-                if len(stack) > MAX_XML_DEPTH:
-                    raise ParseError("nested too deep")
-                continue
-            stack.pop()
-            if layout is not None and record is not None:
-                if len(stack) == layout.depth + 1:
-                    _read_field(layout, element, name, record)
-                elif len(stack) == layout.depth and name == layout.record:
-                    loc = _resolve(record.pop("loc", None), base_url)
-                    if loc is not None:
-                        if layout.format == "index":
-                            collector.child(loc, record)
-                        else:
-                            collector.entry(loc, record)
-                    record = None
-            if stack:
-                stack[-1].remove(element)  # keep only the open path in memory
-            else:
-                root_closed = True
-    except DTDForbidden as exc:
-        if (exc.name or "").lower() == "html":
-            return ParsedSitemap(format=None, error="unsupported")  # an HTML page
-        return ParsedSitemap(format=None, error="invalid")
-    except ParseError as exc:
-        if retry_prefixes and getattr(exc, "code", None) == _UNBOUND_PREFIX:
-            raise _UnboundPrefixError from None
-        if root_closed:
-            return parsed  # junk after the root: every record was read
-        if not collector.found:
-            return ParsedSitemap(format=parsed.format, error="invalid")
-        parsed.truncated = True
-    except (DefusedXmlException, LookupError, ValueError):
-        # LookupError, ValueError: an unknown or a multi-byte encoding declared
-        if not collector.found:
-            return ParsedSitemap(format=parsed.format, error="invalid")
-        parsed.truncated = True
-    return parsed
+                        layout = _LAYOUTS.get(name)
+                        if layout is None:
+                            return ParsedSitemap(format=None, error="unsupported")
+                        parsed.format = layout.format
+                    if len(stack) == layout.depth and name == layout.record:
+                        record = {}
+                    stack.append(element)
+                    if len(stack) > MAX_XML_DEPTH:
+                        raise ParseError("nested too deep")
+                    continue
+                stack.pop()
+                if layout is not None and record is not None:
+                    if len(stack) == layout.depth + 1:
+                        _read_field(layout, element, name, record)
+                    elif len(stack) == layout.depth and name == layout.record:
+                        loc = _resolve(record.pop("loc", None), base_url)
+                        if loc is not None:
+                            if layout.format == "index":
+                                collector.child(loc, record)
+                            else:
+                                collector.entry(loc, record)
+                        record = None
+                if stack:
+                    stack[-1].remove(element)  # keep only the open path in memory
+                else:
+                    root_closed = True
+        except DTDForbidden as exc:
+            if (exc.name or "").lower() == "html":
+                return ParsedSitemap(format=None, error="unsupported")  # an HTML page
+            return ParsedSitemap(format=None, error="invalid")
+        except ParseError as exc:
+            if retry_prefixes and getattr(exc, "code", None) == _UNBOUND_PREFIX:
+                raise _UnboundPrefixError from None
+            if root_closed:
+                return parsed  # junk after the root: every record was read
+            if not collector.found:
+                return ParsedSitemap(format=parsed.format, error="invalid")
+            parsed.truncated = True
+        except (DefusedXmlException, LookupError, ValueError):
+            # LookupError, ValueError: an unknown or a multi-byte encoding declared
+            if not collector.found:
+                return ParsedSitemap(format=parsed.format, error="invalid")
+            parsed.truncated = True
+        return parsed
+    finally:
+        # The parser's objects form a cycle that holds the stream; closing it drops the buffer
+        # (the retry's prefix-stripped copy) now, not at the next cyclic collection.
+        source.close()
 
 
 def parse_sitemap(body: bytes, base_url: str, *, max_entries: int) -> ParsedSitemap:
@@ -316,9 +321,15 @@ def parse_sitemap(body: bytes, base_url: str, *, max_entries: int) -> ParsedSite
         pass
     # Elements match by local name anyway, so a prefix nobody declared is dropped and the file
     # read once more from the start, with a fresh count and the same defusedxml rules. The copy
-    # lives only for the retry.
-    unprefixed = _PREFIXED_TAG.sub(rb"\1", memoryview(body)[start:])
-    return _parse_xml(unprefixed, 0, base_url, _Collector(max_entries), retry_prefixes=False)
+    # lives only for the retry: it is bound to no local here, since the first pass's error stays
+    # in the pull parser's queue (a reference cycle) and keeps this frame until a collection.
+    return _parse_xml(
+        _PREFIXED_TAG.sub(rb"\1", memoryview(body)[start:]),
+        0,
+        base_url,
+        _Collector(max_entries),
+        retry_prefixes=False,
+    )
 
 
 def pack_parts(entries: Sequence[SitemapEntry], max_bytes: int) -> list[list[SitemapEntry]]:

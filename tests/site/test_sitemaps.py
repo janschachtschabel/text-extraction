@@ -1,5 +1,6 @@
 """Sitemap parsing within bounds (rulings P9-S8, P9-S9; Review Focus 2)."""
 
+import gc
 import gzip
 import random
 import struct
@@ -457,6 +458,25 @@ def test_undeclared_prefix_retry_keeps_caps() -> None:
     parsed = parse_sitemap(body, BASE, max_entries=10)
 
     assert (len(parsed.entries), parsed.entry_count, parsed.truncated) == (10, 26, True)
+
+
+def test_undeclared_prefix_retry_frees_its_copy() -> None:
+    """The prefix-stripped copy of the retry is gone once the parse returns, even before a
+    cyclic garbage collection (the parser's objects form a cycle that holds the stream)."""
+    body = urlset(60_000).replace(b"</urlset>", IMAGE_URL.encode() + b"</urlset>")
+    assert len(body) > 3_000_000
+
+    gc.disable()
+    tracemalloc.start()
+    try:
+        parsed = parse_sitemap(body, BASE, max_entries=1)
+        del parsed
+        current, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        gc.enable()
+
+    assert current < 1_000_000
 
 
 def test_deep_nesting_is_invalid_and_bounded() -> None:

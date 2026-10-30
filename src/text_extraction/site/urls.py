@@ -51,21 +51,44 @@ def normalize_url(url: str) -> str | None:
 
 def seen_key(url: str) -> str:
     """What makes two URLs one page: the normal form without its scheme and with a leading
-    ``www.`` dropped from the host. A URL that ``normalize_url`` refuses is its own key."""
+    ``www.`` dropped from the host (its IDN and trailing-dot spellings folded as by
+    ``site_host``). A URL that ``normalize_url`` refuses is its own key."""
     normal = normalize_url(url)
     if normal is None:
         return url
-    rest = normal.split("://", 1)[1]
+    parts = urlsplit(normal)
+    host = parts.hostname or ""
+    netloc = parts.netloc
+    if ":" not in host:  # an IPv6 address has no IDN or trailing-dot form
+        port = netloc[len(host) :]  # "" or ":<port>"
+        netloc = _ascii_host(host) + port
+    rest = netloc + normal.split("://", 1)[1][len(parts.netloc) :]
     return rest.removeprefix("www.")
 
 
+def _ascii_host(host: str) -> str:
+    """One spelling per host: a trailing dot dropped and an IDN in its ASCII (punycode) form,
+    so ``Bücher.example.`` and ``xn--bcher-kva.example`` are one host. A host the ``idna``
+    codec cannot encode (a label over 63 characters, an empty label) stays as given."""
+    host = host.rstrip(".")
+    if host.isascii():
+        return host.lower()
+    try:
+        return host.encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return host
+
+
 def site_host(url: str) -> str:
-    """The URL's host, lower case, without a leading ``www.``; ``""`` when it has none."""
+    """The URL's host, lower case, without a trailing dot and a leading ``www.``, an IDN in its
+    ASCII form; ``""`` when it has none."""
     try:
         host = urlsplit(url.strip()).hostname or ""
     except ValueError:
         return ""
-    return host.removeprefix("www.")
+    if ":" in host:  # IPv6
+        return host
+    return _ascii_host(host).removeprefix("www.")
 
 
 def _path(url: str) -> str:

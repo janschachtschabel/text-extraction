@@ -65,6 +65,36 @@ def test_site_host() -> None:
     assert site_host("not a url") == ""
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://bücher.example/a",
+        "https://BÜCHER.example./a",
+        "https://xn--bcher-kva.example/a",
+        "https://www.xn--bcher-kva.example./a",
+        "https://XN--BCHER-KVA.EXAMPLE/a",
+    ],
+)
+def test_site_host_folds_idn_and_a_trailing_dot(url: str) -> None:
+    assert site_host(url) == "xn--bcher-kva.example"
+
+
+def test_site_host_trailing_dot_and_unencodable_label() -> None:
+    assert site_host("https://Example.org./") == "example.org"
+    long_label = "ü" * 70  # over 63 characters: no punycode form, kept as given
+    assert site_host(f"https://{long_label}.example/") == f"{long_label}.example"
+    assert site_host("https://[2001:db8::1]/") == "2001:db8::1"
+
+
+def test_scope_matches_idn_and_trailing_dot_forms() -> None:
+    scope = scope_for("https://bücher.example/", None, "host")
+
+    assert scope.host == "xn--bcher-kva.example"
+    assert in_scope("https://xn--bcher-kva.example/x", scope)
+    assert in_scope("https://www.BÜCHER.example./x", scope)
+    assert seen_key("https://bücher.example./x") == seen_key("https://xn--bcher-kva.example/x")
+
+
 def test_scope_host() -> None:
     scope = scope_for("https://www.a.example/mathe/index.html", None, "host")
 
