@@ -313,8 +313,8 @@ services:
       timeout: 3s
       retries: 3
       start_period: 20s
-    # SIGTERM stops claiming and gives items in flight 30 s, then hands the ones still running back
-    # to the queue.
+    # SIGTERM stops claiming and gives items in flight LLM_GRACEFUL_SECONDS (30 s), then hands the
+    # ones still running back to the queue. Raise this with it.
     stop_grace_period: 45s
 
   valkey:

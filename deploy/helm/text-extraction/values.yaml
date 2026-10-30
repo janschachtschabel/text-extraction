@@ -588,9 +588,15 @@ workers:
       existingSecret: ""
       # Key inside the existing Secret.
       existingSecretKey: LLM_API_KEY
-    # No drain wait. On SIGTERM the worker stops claiming and gives items in flight 30 s, then
-    # hands the ones still running back to the queue at once (they run again elsewhere). The
-    # render fails below 30 + a 10 s margin, so that the hand-back happens before the kill.
+    # No drain wait. On SIGTERM the worker stops claiming and gives items in flight this long
+    # (LLM_GRACEFUL_SECONDS, rendered into its pods; a config entry is ignored), then hands the
+    # ones still running back to the queue at once: they run again elsewhere and pay their LLM
+    # calls again. One call may take LLM_TIMEOUT_SECONDS (120 s by default), so a rollout with
+    # 30 s cancels long calls; raise this and terminationGracePeriodSeconds together, e.g. to
+    # LLM_TIMEOUT_SECONDS + 10 and that + 10. 10 to 900.
+    gracefulSeconds: 30
+    # The render fails below gracefulSeconds + a 10 s margin, so that the hand-back happens
+    # before the kill.
     terminationGracePeriodSeconds: 40
     # Placeholder values until package 11 measures real consumption: the worker waits for the
     # endpoint and holds no model; 512 MiB of the limit are the selector child that checks the

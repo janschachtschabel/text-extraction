@@ -296,6 +296,9 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=120, ge=5, le=600)  # one request to the endpoint
     llm_max_input_tokens: int = Field(default=32_000, ge=1000, le=1_000_000)  # 4 characters each
     llm_concurrency: int = Field(default=4, ge=1)  # LLM items at once per llm worker
+    # After SIGTERM the llm worker's items in flight get this long, then they go back to the
+    # queue and their LLM calls run again elsewhere (issue #19).
+    llm_graceful_seconds: int = Field(default=30, ge=10, le=900)
     # How long a sync request that needs the LLM waits for the llm worker before it becomes a job.
     llm_sync_wait_seconds: float = Field(default=30, ge=1, le=60)
     selector_learn_ttl_seconds: int = Field(default=2_592_000, ge=60)  # learned selectors, 30 days

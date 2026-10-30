@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
@@ -348,6 +348,24 @@ def test_build_worker_serves_the_llm_pool() -> None:
     assert parts.worker._llm_move is None  # the last hop
     assert parts.worker._pii_move is None
     assert parts.worker._give_back_on_cancel
+
+
+def test_serve_gives_items_in_flight_llm_graceful_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #19: the grace of the items in flight is LLM_GRACEFUL_SECONDS, not a constant."""
+    seen: dict[str, Any] = {}
+
+    async def fake_serve(worker: Any, internal: Any, readiness: Any, **kwargs: Any) -> None:
+        seen.update(kwargs)
+
+    monkeypatch.setattr(llm_worker, "_serve", fake_serve)
+    settings = Settings(auth_mode="none", llm_enabled=True, llm_graceful_seconds=130)
+    parts = build_llm_worker(settings, FakeAsyncRedis(), CollectorRegistry())
+
+    asyncio.run(llm_worker.serve(parts, cast(Any, None), cast(Any, None)))
+
+    assert seen["graceful_seconds"] == 130
 
 
 def test_llm_queue_ignores_the_domain_cap() -> None:

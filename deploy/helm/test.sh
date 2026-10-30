@@ -904,11 +904,22 @@ expect_render_fails "llm autoscaling needs the workers" "workers.llm.autoscaling
 
 expect_render_fails "llm needs jobs" "workers.llm.enabled needs JOBS_ENABLED=true" \
   --set workers.llm.enabled=true --set jobs.enabled=false
-# llm worker: 30 s for the items in flight (then they are given back) + 10
+# llm worker: workers.llm.gracefulSeconds (30) for the items in flight (then they are given back) + 10
 expect_render_fails "llm worker grace period too short" "workers.llm.terminationGracePeriodSeconds" \
   --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=39
 expect_render_succeeds "llm worker grace period just long enough" \
   --set workers.llm.enabled=true --set workers.llm.terminationGracePeriodSeconds=40
+# Issue #19: the grace of the items in flight is a knob, LLM_GRACEFUL_SECONDS on the llm workers.
+expect_values "llm worker graceful seconds" "$llm" LLM_GRACEFUL_SECONDS "30"
+llm_graceful="$(render --set workers.llm.enabled=true --set workers.llm.gracefulSeconds=130 \
+  --set workers.llm.terminationGracePeriodSeconds=140 --set config.LLM_GRACEFUL_SECONDS=5)"
+expect_values "llm graceful seconds follow workers.llm.gracefulSeconds" \
+  "$(document "$llm_graceful" Deployment "$LLM")" LLM_GRACEFUL_SECONDS "130"
+expect_absent "only the llm workers get LLM_GRACEFUL_SECONDS" \
+  "$(document "$llm_graceful" Deployment "$API")" "name: LLM_GRACEFUL_SECONDS"
+expect_render_fails "llm grace period must cover gracefulSeconds" "workers.llm.terminationGracePeriodSeconds" \
+  --set workers.llm.enabled=true --set workers.llm.gracefulSeconds=130 \
+  --set workers.llm.terminationGracePeriodSeconds=139
 
 llm_policies="$(render --set workers.llm.enabled=true --set networkPolicy.enabled=true)"
 expect_contains "llm worker NetworkPolicy" "$(document "$llm_policies" NetworkPolicy "$LLM")" "port: 9090"

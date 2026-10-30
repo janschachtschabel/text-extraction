@@ -1378,6 +1378,12 @@ def test_llm_enabled_names_every_refused_openai_variable(monkeypatch: pytest.Mon
     assert "OPENAI_PROJECT_ID" not in message
 
 
+def test_llm_graceful_seconds_defaults_to_30(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Issue #19: the llm worker's grace for items in flight, 30 s as before."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().llm_graceful_seconds == 30
+
+
 def test_llm_available_is_enabled_and_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
     assert llm_available(load_settings()) is False
@@ -1394,6 +1400,7 @@ def test_llm_available_is_enabled_and_jobs(monkeypatch: pytest.MonkeyPatch) -> N
         ("LLM_MAX_INPUT_TOKENS", ["1000", "1000000"], ["999", "1000001"]),
         ("LLM_CONCURRENCY", ["1", "16"], ["0"]),
         ("LLM_SYNC_WAIT_SECONDS", ["1", "60"], ["0.5", "61"]),
+        ("LLM_GRACEFUL_SECONDS", ["10", "900"], ["9", "901"]),
         ("SELECTOR_LEARN_TTL_SECONDS", ["60", "2592000"], ["59"]),
         ("STRUCTURED_REGEX_TIMEOUT_SECONDS", ["0.05", "5"], ["0.04", "5.1"]),
         ("CHUNK_MAX_CHUNKS", ["1", "2000"], ["0"]),

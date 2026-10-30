@@ -333,6 +333,8 @@ DOCUMENT_MEMORY_LIMIT_MB from their memory limit. */}}
 - name: PII_MODEL_SIZE
   value: {{ $root.Values.workers.nlp.modelSize | quote }}
 {{- else if eq $pool "llm" }}
+- name: LLM_GRACEFUL_SECONDS
+  value: {{ $root.Values.workers.llm.gracefulSeconds | toString | quote }}
 {{- else }}
 {{- $worker := index $root.Values.workers $pool }}
 {{- with include "text-extraction.documentMemoryEnv" (list $root $worker.resources $worker.documentParentReserveMiB (printf "workers.%s.resources" $pool)) | trim }}
@@ -453,9 +455,9 @@ mode the larger of it and BROWSER_UNBLOCK_TIMEOUT_SECONDS. Docling worker: a fix
 {{/* NLP worker: a fixed 30 s (nlp_worker.GRACEFUL_SECONDS). */}}
 {{- define "text-extraction.nlpGracefulSeconds" -}}30{{- end -}}
 
-{{/* llm worker: a fixed 30 s (llm_worker.GRACEFUL_SECONDS), then the items still running are given
-back to the queue at once. */}}
-{{- define "text-extraction.llmGracefulSeconds" -}}30{{- end -}}
+{{/* llm worker: workers.llm.gracefulSeconds (LLM_GRACEFUL_SECONDS, rendered into its pods), then
+the items still running are given back to the queue at once. */}}
+{{- define "text-extraction.llmGracefulSeconds" -}}{{ .Values.workers.llm.gracefulSeconds }}{{- end -}}
 
 {{- define "text-extraction.browserGracefulSeconds" -}}
 {{- $render := include "text-extraction.renderDeadlineSeconds" . | float64 -}}
