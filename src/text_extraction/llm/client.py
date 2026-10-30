@@ -13,6 +13,13 @@ call of ours. ``LLM_TIMEOUT_SECONDS`` is the SDK's timeout of one request.
 (rule 3). The environment's ``OPENAI_API_KEY`` is never consulted; without any key
 ``LlmClient`` raises ``LlmError`` before a request is made.
 
+**The SDK's environment** (issue #19): the key, the base URL, the timeout and the retries are
+passed, so the SDK does not read them. It reads ``OPENAI_ORG_ID`` and ``OPENAI_PROJECT_ID``
+whatever it is given (an empty value would go out as an empty header), so their headers are
+omitted explicitly; the ``Authorization`` header is set explicitly too, which drops one from
+``OPENAI_CUSTOM_HEADERS``. That variable and ``OPENAI_LOG`` are read in any case: start-up
+refuses them while ``LLM_ENABLED`` is true (``settings.OPENAI_ENV_REFUSED``).
+
 **Answers that do not fit:** ``chat_json`` parses the answer and hands it to ``validate``
 (which raises ``ValueError``, a pydantic ``ValidationError`` included). An answer that is no
 JSON, does not validate, has no choice, no content or ``finish_reason: length`` (cut off) is
@@ -31,10 +38,10 @@ count calls (``text_extraction_llm_calls_total{kind, outcome}``) and tokens
 """
 
 import json
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Final
+from typing import Any, Final, cast
 from weakref import WeakKeyDictionary
 
 import httpx2
@@ -128,6 +135,15 @@ class LlmClient:
             base_url=settings.llm_base_url,
             timeout=timeout,
             max_retries=MAX_RETRIES,
+            # Typed as str values, but the SDK drops an omitted header (see the docstring).
+            default_headers=cast(
+                Mapping[str, str],
+                {
+                    "Authorization": f"Bearer {api_key}",
+                    "OpenAI-Organization": openai.omit,
+                    "OpenAI-Project": openai.omit,
+                },
+            ),
             http_client=self._http,
         )
 

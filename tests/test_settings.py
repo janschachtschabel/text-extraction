@@ -1338,6 +1338,46 @@ def test_llm_enabled_needs_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     assert load_settings().llm_enabled is True
 
 
+@pytest.mark.parametrize("name", ["OPENAI_CUSTOM_HEADERS", "OPENAI_LOG"])
+def test_llm_enabled_refuses_openai_environment_the_sdk_reads(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """Issue #19: the OpenAI SDK reads these from the environment whatever the client is given
+    (an Authorization line would replace the caller's key; the log is plain text). Start-up
+    refuses them while LLM_ENABLED is true, naming the variable."""
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv(name, "debug" if name == "OPENAI_LOG" else "Authorization: Bearer x")
+
+    with pytest.raises(ConfigError, match=name) as info:
+        load_settings()
+
+    assert "Bearer x" not in str(info.value)  # the value is not echoed
+    monkeypatch.setenv(name, " ")  # empty means unset
+    assert load_settings().llm_enabled is True
+    monkeypatch.setenv(name, "debug")
+    monkeypatch.setenv("LLM_ENABLED", "false")
+    assert load_settings().llm_enabled is False  # no LLM client is built
+
+
+def test_llm_enabled_names_every_refused_openai_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-A: b")
+    monkeypatch.setenv("OPENAI_LOG", "info")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-1")  # never sent (llm/client.py), so allowed
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "proj-1")
+
+    with pytest.raises(ConfigError) as info:
+        load_settings()
+
+    message = str(info.value)
+    assert "OPENAI_CUSTOM_HEADERS" in message
+    assert "OPENAI_LOG" in message
+    assert "OPENAI_ORG_ID" not in message
+    assert "OPENAI_PROJECT_ID" not in message
+
+
 def test_llm_available_is_enabled_and_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTH_MODE", "none")
     assert llm_available(load_settings()) is False

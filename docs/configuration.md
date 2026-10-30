@@ -518,9 +518,17 @@ connection errors are (after the SDK's two retries). An answer that is no valid 
 schema, or is cut off (`finish_reason: length`), gets one repair call with the error appended, then
 fails with `llm_failed`, not retryable.
 
+The OpenAI SDK reads some `OPENAI_*` variables from the environment on its own (issue #19). The
+service passes the key, `LLM_BASE_URL`, the timeout and the retries itself, and never sends the
+headers of `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` to the endpoint. `OPENAI_CUSTOM_HEADERS` (extra
+headers for every call; an `Authorization` line would replace the caller's key) and `OPENAI_LOG`
+(the SDK's own plain-text log) it reads whatever the service passes: while `LLM_ENABLED` is true,
+start-up refuses either of them when it is set and not empty, naming them (exit code 2), in every
+process. Neither the chart nor docker compose sets them.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `LLM_ENABLED` | `false` | Switch the LLM on. Needs `JOBS_ENABLED=true`; start-up refuses `LLM_ENABLED=true` without it (exit code 2). |
+| `LLM_ENABLED` | `false` | Switch the LLM on. Needs `JOBS_ENABLED=true`; start-up refuses `LLM_ENABLED=true` without it, and with `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG` set (exit code 2). |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL of the OpenAI-compatible endpoint (`<base>/chat/completions`, `<base>/embeddings`). https only unless `LLM_ALLOW_HTTP=true`; anything else makes the service exit with code 2 (the URL is not echoed, it may carry credentials). |
 | `LLM_ALLOW_HTTP` | `false` | Also accept an `http` URL: a local model server in development, tests. Never in production. |
 | `LLM_MODEL` | `gpt-6-luna` | Model name sent with every chat request. Chosen by the operator, never per request. |

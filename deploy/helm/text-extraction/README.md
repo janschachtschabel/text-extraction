@@ -493,6 +493,9 @@ caller's schema), and every pod gets `LLM_ENABLED=true`; without the workers suc
 - A worker leases an item for `4 x LLM_TIMEOUT_SECONDS + 10` s (490 s by default). On SIGTERM it
   stops claiming and gives items in flight 30 s, then hands the ones still running back to the
   queue at once. Calls to the endpoint may be billed again when an item runs twice.
+- Do not set `OPENAI_CUSTOM_HEADERS` or `OPENAI_LOG` (under `config` or otherwise): the OpenAI
+  SDK would read them, so with `workers.llm.enabled` every pod refuses to start (exit code 2).
+  `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are never sent to the endpoint.
 - `kubectl exec <llm worker pod> -- text-extraction-llm-worker --check` sends one tiny extraction
   to the endpoint and exits 0 when its answer fits the schema (an operator's smoke test).
 - A prompt, a page text, an extracted value or a key never reaches a log, a metric label or the
