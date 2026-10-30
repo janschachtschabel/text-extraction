@@ -814,6 +814,8 @@ expect_contains "notes say PII handling is off" "$(render_notes)" "No NLP worker
 expect_absent "llm off renders nothing" "$on" "worker-llm"
 expect_absent "llm off renders no LLM_BASE_URL" "$on" "LLM_BASE_URL"
 expect_absent "llm off renders no LLM_API_KEY" "$on" "LLM_API_KEY"
+expect_absent "llm off renders no LLM_VISION_MODEL" \
+  "$(render --set workers.llm.visionModel=my-vision)" "LLM_VISION_MODEL"
 for name in "$API" "$EXTRACT" "$BROWSER"; do
   expect_values "llm off ($name)" "$(document "$on" Deployment "$name")" LLM_ENABLED "false"
 done
@@ -830,6 +832,8 @@ for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
   expect_every_value "llm on ($name)" "$(document "$llm_on" Deployment "$name")" LLM_BASE_URL "https://api.openai.com/v1"
   expect_every_value "llm on ($name)" "$(document "$llm_on" Deployment "$name")" LLM_MODEL "gpt-6-luna"
   expect_absent "llm on without embeddingModel ($name)" "$(document "$llm_on" Deployment "$name")" "LLM_EMBEDDING_MODEL"
+  expect_absent "llm on renders LLM_VISION_MODEL only when workers.llm.visionModel is set ($name)" \
+    "$(document "$llm_on" Deployment "$name")" "LLM_VISION_MODEL"
 done
 expect_contains "llm worker uses the API image" "$llm" "image: \"ghcr.io/janschachtschabel/text-extraction:$APP_VERSION\""
 expect_contains "llm worker runs its entry point" "$llm" "- text-extraction-llm-worker"
@@ -860,6 +864,12 @@ for name in "$API" "$EXTRACT" "$BROWSER" "$LLM"; do
   expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_BASE_URL "https://llm.example.org/v1"
   expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_MODEL "my-model"
   expect_every_value "llm settings ($name)" "$(document "$llm_set" Deployment "$name")" LLM_EMBEDDING_MODEL "my-embeddings"
+done
+# visionModel reaches every pod while set.
+llm_vision="$(render --set workers.llm.enabled=true --set workers.llm.visionModel=my-vision)"
+for name in "$API" "$EXTRACT" "$BROWSER" "$LLM"; do
+  expect_every_value "llm on renders LLM_VISION_MODEL only when workers.llm.visionModel is set ($name)" \
+    "$(document "$llm_vision" Deployment "$name")" LLM_VISION_MODEL "my-vision"
 done
 expect_render_fails "llm baseUrl must be https" "workers.llm.baseUrl must start with https://" \
   --set workers.llm.enabled=true --set workers.llm.baseUrl=http://llm.local/v1
@@ -952,6 +962,10 @@ expect_contains "notes describe the llm workers" "$(render_notes --set workers.l
 expect_contains "notes name the endpoint" "$(render_notes --set workers.llm.enabled=true --set workers.llm.baseUrl=https://llm.example.org/v1)" "https://llm.example.org/v1"
 expect_contains "notes warn about a missing key" "$(render_notes --set workers.llm.enabled=true)" "No LLM_API_KEY is set"
 expect_absent "no key warning with a secret" "$(render_notes --set workers.llm.enabled=true --set workers.llm.apiKey.existingSecret=llm-key)" "No LLM_API_KEY is set"
+expect_contains "notes name the vision model" \
+  "$(render_notes --set workers.llm.enabled=true --set workers.llm.visionModel=my-vision)" "the vision model my-vision"
+expect_contains "notes fall back to LLM_MODEL for images" \
+  "$(render_notes --set workers.llm.enabled=true)" "model gpt-6-luna (no workers.llm.visionModel"
 expect_contains "notes say the LLM is off" "$(render_notes)" "No llm workers are deployed"
 
 if ((failures > 0)); then

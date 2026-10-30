@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription, optional NLP workers for PII handling and optional llm workers for structured output with an LLM and semantic chunking (all off by default), and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription, optional NLP workers for PII handling and optional llm workers for structured output with an LLM, semantic chunking and image descriptions (all off by default), and an optional single-replica Valkey (with a password).
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -73,10 +73,11 @@ workers, `LLM_CONCURRENCY` (from `workers.llm.concurrency`) on the llm workers, 
 `workers.llm.enabled`) on every pod (API, extract, browser, Docling, ASR, NLP and llm workers):
 entries for them under `config` are ignored. While `workers.llm.enabled` is true, `LLM_BASE_URL`,
 `LLM_MODEL` and `LLM_EMBEDDING_MODEL` (from `workers.llm.baseUrl`, `.model` and `.embeddingModel`,
-the last only when set) go to every pod too, and `config` entries for them are ignored; the other
-`LLM_*` settings (`LLM_TEMPERATURE`, `LLM_TIMEOUT_SECONDS`, `LLM_ALLOW_HTTP`, ...) are set under
-`config`. So browser mode, OCR, transcription, PII handling and the LLM are on exactly when the
-chart deploys their workers.
+the last only when set) go to every pod too, and `config` entries for them are ignored;
+`LLM_VISION_MODEL` (from `workers.llm.visionModel`) goes the same way while it is set. The other
+`LLM_*` settings (`LLM_TEMPERATURE`, `LLM_TIMEOUT_SECONDS`, `LLM_ALLOW_HTTP`,
+`LLM_VISION_MAX_IMAGE_BYTES`, ...) are set under `config`. So browser mode, OCR, transcription,
+PII handling and the LLM are on exactly when the chart deploys their workers.
 
 `config.FETCH_MAX_BYTES` (the download limit) and `config.DOCUMENT_MAX_BYTES` (the largest
 document and upload) are both 20000000 by default: lower them together. A `DOCUMENT_MAX_BYTES`
@@ -249,10 +250,11 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.asr.external.existingSecret` | `""` | Your own Secret with the key; takes precedence over `apiKey`. |
 | `workers.asr.external.existingSecretKey` | `ASR_EXTERNAL_API_KEY` | Key inside that Secret (also used for the chart-managed one). |
 | `workers.nlp.enabled` | `false` | Deploy the NLP workers (PII handling). Also renders `PII_ENABLED` into every pod: false makes a request with `pii` answer 400 `invalid_request`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
-| `workers.llm.enabled` | `false` | Deploy the llm workers. Also renders `LLM_ENABLED` into every pod: false makes a request that needs the LLM (`structured` with strategy `llm` or `auto`, `learn_selectors`, `chunking` `semantic`) answer 400 `invalid_request`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
+| `workers.llm.enabled` | `false` | Deploy the llm workers. Also renders `LLM_ENABLED` into every pod: false makes a request that needs the LLM (`structured` with strategy `llm` or `auto`, `learn_selectors`, `chunking` `semantic`, `describe_images`) answer 400 `invalid_request`. Needs `JOBS_ENABLED=true` on the API pods, or the render fails. |
 | `workers.llm.baseUrl` | `https://api.openai.com/v1` | `LLM_BASE_URL` in every pod: the OpenAI-compatible endpoint (`/chat/completions`, `/embeddings`). Required, `https://` only (the pods exit with code 2 otherwise) unless `config.LLM_ALLOW_HTTP` is `"true"` (local model server, development). |
 | `workers.llm.model` | `gpt-6-luna` | `LLM_MODEL` in every pod, sent with every chat request. Required. |
 | `workers.llm.embeddingModel` | `""` | `LLM_EMBEDDING_MODEL` in every pod: model of the `/embeddings` route. Empty: `semantic` chunking answers 400. |
+| `workers.llm.visionModel` | `""` | `LLM_VISION_MODEL` in every pod, only when set: the model of the image descriptions (`describe_images`); it must take images. Empty: `LLM_MODEL` describes them. |
 | `workers.llm.apiKey.existingSecret` | `""` | Your own Secret with `LLM_API_KEY`. Empty: callers must send `X-LLM-Api-Key`. |
 | `workers.llm.apiKey.existingSecretKey` | `LLM_API_KEY` | Key inside that Secret. |
 | `workers.llm.replicaCount` | `1` | Ignored with KEDA or HPA. Keep one: a sync request that needs the LLM waits only `LLM_SYNC_WAIT_SECONDS` (30) for a worker. |
@@ -477,15 +479,21 @@ workers such a request answers 400. The API pods keep their grace period: a sync
 ## llm workers
 
 The LLM is off by default (`workers.llm.enabled: false`). With it on, a request with `structured`
-(strategy `llm` or `auto`, or `learn_selectors`) or `chunking` `semantic` has its last hop run in the
-pool `llm` (the page is data for the model: no tool calls, its answer is validated against the
-caller's schema), and every pod gets `LLM_ENABLED=true`; without the workers such a request answers
-400. A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
+(strategy `llm` or `auto`, or `learn_selectors`), `chunking` `semantic` or `describe_images` has its
+last hop run in the pool `llm` (the page and its images are data for the model: no tool calls, its
+answer is validated against the caller's schema or the description's), and every pod gets
+`LLM_ENABLED=true`; without the workers such a request answers 400. A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
 
 - The workers run the API image (`text-extraction-llm-worker` as its args): no model, no volume,
   no init container. They call `workers.llm.baseUrl` (`/chat/completions`, and `/embeddings` with
   `workers.llm.embeddingModel`); the endpoint is the operator's, so it is exempt from the SSRF
   guard. Egress stays open, as for the other workers.
+- For `describe_images` the workers also fetch a page's images (at most `max_images`, 5 by
+  default, each at most `config.LLM_VISION_MAX_IMAGE_BYTES`) through the SSRF guard, the
+  compliance checks of the request and the per-domain outbound limits, with the service's user
+  agent, and send them to the endpoint with `workers.llm.visionModel` (empty: `workers.llm.model`,
+  which then must take images). An image upload's bytes wait for them as the job's input, within
+  `config.DOCLING_INPUT_BUDGET_BYTES`.
 - `workers.llm.apiKey.existingSecret` names a Secret with `LLM_API_KEY`; the API pods and the llm
   worker container get it (the chart never renders it as a literal, and creates no Secret). A
   caller's `X-LLM-Api-Key` wins over it. The checksum annotation of the pods does not cover your
@@ -503,8 +511,9 @@ caller's schema), and every pod gets `LLM_ENABLED=true`; without the workers suc
   endpoint.
 - `kubectl exec <llm worker pod> -- text-extraction-llm-worker --check` sends one tiny extraction
   to the endpoint and exits 0 when its answer fits the schema (an operator's smoke test).
-- A prompt, a page text, an extracted value or a key never reaches a log, a metric label or the
-  ConfigMap; the workers count calls and tokens by outcome only.
+- A prompt, a page text, an extracted value, an image, its URL or description, or a key never
+  reaches a log, a metric label or the ConfigMap; the workers count calls and tokens by outcome
+  only, images by outcome (`text_extraction_vision_images_total`).
 
 ## Local checks
 

@@ -157,6 +157,10 @@ see text-extraction.llmKeyEnv. */}}
 - name: LLM_EMBEDDING_MODEL
   value: {{ . | quote }}
 {{- end }}
+{{- with $llm.visionModel }}
+- name: LLM_VISION_MODEL
+  value: {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- end -}}
 
