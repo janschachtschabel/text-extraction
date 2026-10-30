@@ -21,6 +21,7 @@ from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
 from text_extraction.ui.markdown import is_http, render_markdown
+from text_extraction.ui.security import RUN_PREFIX
 from text_extraction.ui.templating import templates
 from text_extraction.ui.texts import warning_text
 from text_extraction.ui.timeline import RequestedMode, TimelineStep, timeline
@@ -315,7 +316,7 @@ def result_context(
         query = [("id", str(data.get("id")))] + (
             [("mode", requested_mode)] if requested_mode else []
         )
-        context["progress_url"] = f"/ui/run/progress?{urlencode(query)}"
+        context["progress_url"] = f"{RUN_PREFIX}/progress?{urlencode(query)}"
         return context
     if op in ("info", "login"):
         context["info"] = data

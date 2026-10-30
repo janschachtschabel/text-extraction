@@ -1,6 +1,7 @@
+{% set chosen_mode = chosen["mode"] if chosen and chosen["mode"] in ("auto", "fast", "browser") else "auto" %}
 <label for="{{ prefix }}-mode">Mode</label>
 <select id="{{ prefix }}-mode" name="mode">
-  <option value="auto" selected>auto: HTTP first, a browser when the page needs one</option>
-  <option value="fast">fast: HTTP only</option>
-  <option value="browser">browser: always render</option>
+  <option value="auto"{% if chosen_mode == "auto" %} selected{% endif %}>auto: HTTP first, a browser when the page needs one</option>
+  <option value="fast"{% if chosen_mode == "fast" %} selected{% endif %}>fast: HTTP only</option>
+  <option value="browser"{% if chosen_mode == "browser" %} selected{% endif %}>browser: always render</option>
 </select>

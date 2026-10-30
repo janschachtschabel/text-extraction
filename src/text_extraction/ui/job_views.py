@@ -16,6 +16,7 @@ Every outcome is answered with HTTP 200 and a fragment, so htmx swaps it."""
 
 import asyncio
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -25,11 +26,12 @@ from urllib.parse import urlencode
 import structlog
 from fastapi import APIRouter
 from starlette.datastructures import FormData, State, UploadFile
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 
 from text_extraction import jobs_api
-from text_extraction.auth import Principal
+from text_extraction.auth import Principal, authenticate
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobAccepted, JobItem, JobView
 from text_extraction.settings import Settings
@@ -51,6 +53,7 @@ from text_extraction.ui.site_tree import NodeKind, SiteTree, TreeBuilder
 from text_extraction.ui.templating import templates
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.ui.url_lists import (
+    UrlList,
     UrlListError,
     parse_url_file,
     parse_url_lines,
@@ -63,6 +66,11 @@ _log = structlog.get_logger(__name__)
 
 # Items per page of the progress view and per read of the site tree.
 PAGE_ITEMS: Final = 20
+# One progress view reads at most this many items in all (at least MIN_PAGE_ITEMS per job), and
+# at most READS_AT_ONCE jobs at a time: an item may be up to JOB_ITEM_MAX_BYTES.
+ITEMS_PER_VIEW: Final = 100
+MIN_PAGE_ITEMS: Final = 5
+READS_AT_ONCE: Final = 2
 # The progress view refreshes itself after this many seconds while a job runs.
 REFRESH_SECONDS: Final = 3
 # The most jobs one progress view shows (at least BATCH_MAX_OPEN_PER_CLIENT).
@@ -75,7 +83,10 @@ FILE_PART: Final = "file"
 FORM_OPTION_FIELDS: Final = 64
 
 NO_URLS: Final = "Give at least one URL."
-NOT_USED: Final = "These rows are not http(s) URLs; nothing was sent."
+TOO_MANY_FIELDS: Final = "The form has too many fields."
+NOT_A_JOB: Final = "This is not a job id."
+# A job's id, as `jobs_api.visible_job` checks it: anything else is never forwarded.
+JOB_ID: Final = re.compile(r"[0-9a-f]{32}", re.ASCII)
 NO_JOB: Final = "Give a job id."
 NOT_A_SITE: Final = "This job is not a site structure job."
 NO_FILE: Final = "Choose a CSV or JSON file."
@@ -140,6 +151,7 @@ class _Shown:
     ids: list[str]
     offsets: list[int]
     mode: RequestedMode | None
+    limit: int = PAGE_ITEMS  # items per job and page
 
     def url(self, *, offsets: Sequence[int] | None = None) -> str:
         """The live view's URL (with ``offsets`` instead of the view's own)."""
@@ -208,7 +220,7 @@ def _panel(view: JobView, shown: _Shown, position: int) -> JobPanel:
         items=[_row(view.id, item, shown.mode) for item in view.items],
     )
     if offset > 0:
-        panel.prev_url = shown.moved(position, max(0, offset - PAGE_ITEMS))
+        panel.prev_url = shown.moved(position, max(0, offset - shown.limit))
     if view.next_offset is not None:
         panel.next_url = shown.moved(position, view.next_offset)
     if view.kind == "site":
@@ -226,16 +238,20 @@ def _accepted_panel(job: JobAccepted) -> JobPanel:
     return panel
 
 
-async def _read_panel(state: State, principal: Principal, shown: _Shown, position: int) -> JobPanel:
+async def _read_panel(
+    state: State, principal: Principal, shown: _Shown, position: int, gate: asyncio.Semaphore
+) -> JobPanel:
+    """One job of the view, read under ``gate``; only the panel's fields outlive the read."""
     job_id = shown.ids[position]
     try:
-        envelope = await jobs_api.read_job(
-            state, principal, job_id, shown.offsets[position], PAGE_ITEMS
-        )
+        async with gate:
+            envelope = await jobs_api.read_job(
+                state, principal, job_id, shown.offsets[position], shown.limit
+            )
+            assert envelope.data is not None  # noqa: S101 - read_job always answers its view
+            return _panel(envelope.data, shown, position)
     except ServiceError as error:
         return JobPanel(id=job_id, error=error.message, retryable=error.retryable)
-    assert envelope.data is not None  # noqa: S101 - read_job always answers its view
-    return _panel(envelope.data, shown, position)
 
 
 def _live_context(
@@ -247,7 +263,7 @@ def _live_context(
         "refresh_url": shown.url() if running else None,
         "delay": max(delay, REFRESH_SECONDS),
         "refusal": refusal_text,
-        "page_items": PAGE_ITEMS,
+        "page_items": shown.limit,
     }
 
 
@@ -282,14 +298,23 @@ def _progress_fragment(
 
 async def progress_view(request: Request, settings: Settings) -> Response:
     """``GET /ui/run/progress?id=…[&id=…][&offset=…][&mode=…][&live=1]`` (P10-S18): the jobs
-    with a page of 20 items each, read through ``read_job`` after one rate-limit hit, however
-    many jobs it shows. ``live=1`` answers the refreshing part only (the refresh and the
+    (each once) with a page of 20 items each, read through ``read_job`` after one rate-limit
+    hit, however many jobs it shows. One view reads at most ``ITEMS_PER_VIEW`` items (fewer per
+    job when it shows more than five), ``READS_AT_ONCE`` jobs at a time, and keeps only the
+    panels' fields of each. ``live=1`` answers the refreshing part only (the refresh and the
     pager); without it the whole view."""
     params = request.query_params
-    ids = params.getlist("id")
+    given = params.getlist("id")
     offsets = [_offset(value) for value in params.getlist("offset")]
-    offsets = (offsets + [0] * len(ids))[: len(ids)]
-    shown = _Shown(ids=ids, offsets=offsets, mode=_mode(params.get("mode")))
+    offsets = (offsets + [0] * len(given))[: len(given)]
+    first: dict[str, int] = {}
+    for job_id, offset in zip(given, offsets, strict=True):
+        first.setdefault(job_id, offset)  # a job given twice is shown once
+    ids = list(first)
+    limit = min(PAGE_ITEMS, max(MIN_PAGE_ITEMS, ITEMS_PER_VIEW // max(1, len(ids))))
+    shown = _Shown(
+        ids=ids, offsets=list(first.values()), mode=_mode(params.get("mode")), limit=limit
+    )
     live = params.get("live") == "1"
     if not ids:
         return templates.TemplateResponse(request, "form_error.html", {"message": NO_JOB})
@@ -307,8 +332,9 @@ async def progress_view(request: Request, settings: Settings) -> Response:
             return templates.TemplateResponse(request, "progress_live.html", context)
         return refusal(error)
     state: State = request.app.state
+    gate = asyncio.Semaphore(READS_AT_ONCE)
     panels = await asyncio.gather(
-        *(_read_panel(state, principal, shown, position) for position in range(len(ids)))
+        *(_read_panel(state, principal, shown, position, gate) for position in range(len(ids)))
     )
     return _progress_fragment(request, panels, shown, live=live)
 
@@ -338,10 +364,20 @@ def _lines(form: FormData) -> list[str]:
 
 
 def _max_listed(settings: Settings) -> int:
+    """The most lines a batch form may list: a batch file's rows or every URL of the batches a
+    caller may have open (more is refused by the split anyway)."""
     return max(
         settings.ui_batch_file_max_rows,
         settings.batch_max_open_per_client * settings.batch_max_urls,
     )
+
+
+def _max_fields(settings: Settings) -> int:
+    """The most fields of a batch form: one ``url`` field per checked box of a tree (at most
+    ``UI_TREE_MAX_URLS``), or the URLs of the batches a caller may have open, besides the batch
+    options. Typed lines and a preview's list are one ``urls`` field."""
+    open_urls = settings.batch_max_open_per_client * settings.batch_max_urls
+    return max(settings.ui_tree_max_urls, open_urls) + FORM_OPTION_FIELDS
 
 
 @dataclass(frozen=True)
@@ -357,10 +393,21 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
     split into ``ceil(n / BATCH_MAX_URLS)`` batches. More batches than
     ``BATCH_MAX_OPEN_PER_CLIENT`` sends nothing; otherwise each batch is forwarded to
     ``POST /v1/batch`` in turn. A refused part stops the rest and is shown beside the jobs
-    already started, which keep running. The form may have a field per URL (the tree's checked
-    boxes), so it may have as many fields as URLs are listed, besides the batch options; its
-    bytes are bounded by the route's body limit."""
-    form = await request.form(max_fields=_max_listed(settings) + FORM_OPTION_FIELDS)
+    already started, which keep running. A list with rows that are not URLs is answered with the
+    batch preview of its valid URLs instead, and nothing is sent.
+
+    The key is checked first (no rate-limit hit: each forwarded batch counts), so no form of a
+    caller without a valid key is parsed. The form may have a field per URL (the tree's checked
+    boxes), at most `_max_fields`; a larger one is answered with a message. Its bytes are bounded
+    by the route's body limit."""
+    try:
+        await authenticate(request)
+    except ServiceError as error:
+        return refusal(error)
+    try:
+        form = await request.form(max_fields=_max_fields(settings))
+    except HTTPException:  # more fields than allowed
+        return _form_error(request, TOO_MANY_FIELDS)
     try:
         lines = _lines(form)
         fields = text_fields(form)
@@ -368,11 +415,11 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
         await form.close()
     try:
         listed = parse_url_lines(lines, max_rows=_max_listed(settings))
+        body = build_body("batch", fields)
         if listed.invalid:
-            return _form_error(request, NOT_USED, **_problems(listed.invalid))
+            return _preview(request, listed, settings, source="list", chosen=fields)
         if not listed.urls:
             return _form_error(request, NO_URLS)
-        body = build_body("batch", fields)
         parts = split_batches(
             listed.urls,
             per_batch=settings.batch_max_urls,
@@ -430,6 +477,39 @@ def _started(
     return _progress_fragment(request, panels, shown, live=False, refused=refused_context)
 
 
+def _preview(
+    request: Request,
+    listed: UrlList,
+    settings: Settings,
+    *,
+    source: str,
+    chosen: Mapping[str, str] | None = None,
+) -> Response:
+    """The batch preview of a parsed list (P10-S19): the counts, the first URLs and problems,
+    and the valid URLs in a read-only box with the batch options (``chosen``: the fields the
+    user had set) and "Start batch", unless there are none or too many."""
+    parts = math.ceil(len(listed.urls) / settings.batch_max_urls)
+    most = settings.batch_max_open_per_client * settings.batch_max_urls
+    context: dict[str, Any] = {
+        "source": source,
+        "rows": listed.rows,
+        "urls": len(listed.urls),
+        "invalid": len(listed.invalid),
+        "duplicates": listed.duplicates,
+        "parts": parts,
+        "first": listed.urls[:PREVIEW_URLS],
+        "text": "\n".join(listed.urls),
+        "too_many": (
+            f"Select at most {most} URLs at once."
+            if parts > settings.batch_max_open_per_client
+            else None
+        ),
+        "chosen": chosen,
+        **_problems(listed.invalid),
+    }
+    return templates.TemplateResponse(request, "batch_preview.html", context)
+
+
 async def batch_file_view(request: Request, settings: Settings) -> Response:
     """``POST /ui/run/batch-file`` (P10-S19): one rate-limit hit, then the file (at most
     ``UI_BATCH_FILE_MAX_BYTES``) is parsed on the server and shown as a preview whose "Start
@@ -464,29 +544,16 @@ async def batch_file_view(request: Request, settings: Settings) -> Response:
         invalid=len(listed.invalid),
         duplicates=listed.duplicates,
     )
-    parts = math.ceil(len(listed.urls) / settings.batch_max_urls)
-    most = settings.batch_max_open_per_client * settings.batch_max_urls
-    context: dict[str, Any] = {
-        "rows": listed.rows,
-        "urls": len(listed.urls),
-        "invalid": len(listed.invalid),
-        "duplicates": listed.duplicates,
-        "parts": parts,
-        "first": listed.urls[:PREVIEW_URLS],
-        "text": "\n".join(listed.urls),
-        "too_many": (
-            f"Select at most {most} URLs at once."
-            if parts > settings.batch_max_open_per_client
-            else None
-        ),
-        **_problems(listed.invalid),
-    }
-    return templates.TemplateResponse(request, "batch_preview.html", context)
+    return _preview(request, listed, settings, source="file")
 
 
 async def site_structure_view(request: Request) -> Response:
     """``POST /ui/run/site-structure``: forwards the form to ``POST /v1/site-structure``; a 202
     shows the job's progress, anything else the REST answer."""
+    try:
+        await authenticate(request)  # before the form is parsed; the forward checks it again
+    except ServiceError as error:
+        return refusal(error)
     form = await request.form()
     try:
         fields = text_fields(form)
@@ -603,12 +670,14 @@ async def job_item_view(request: Request) -> Response:
     index = _index(params.get("index"))
     if not job_id or index is None:
         return _form_error(request, "Give a job id and an item index.")
+    if not JOB_ID.fullmatch(job_id):
+        return _form_error(request, NOT_A_JOB)
     path = OPERATIONS["job"].path.format(job_id=job_id)
     query = {"offset": index, "limit": 1}
     try:
         answer = await forward(request, "GET", path, params=query)
     except ValueError:  # not a plain path under /v1/
-        return _form_error(request, "This is not a job id.")
+        return _form_error(request, NOT_A_JOB)
     curl = curl_line(
         str(request.base_url), "GET", f"{path}?{urlencode(query)}", headers=sent_keys(request)
     )
@@ -649,7 +718,7 @@ async def artifact_view(request: Request) -> Response:
     job_id, name = params.get("id") or "", params.get("name") or ""
     url = OPERATIONS["artifact"].path.format(job_id=job_id, name=name)
     found = artifact_of({"data": {"screenshot": {"url": url}}})
-    if found is None:
+    if found is None or not JOB_ID.fullmatch(job_id):
         return _form_error(request, "This is not an artifact of a job.")
     screenshot, note = await read_screenshot(request, *found)
     context = {"screenshot": screenshot, "note": note}
@@ -658,16 +727,22 @@ async def artifact_view(request: Request) -> Response:
 
 async def cancel_view(request: Request) -> Response:
     """``POST /ui/run/cancel`` (D4 a): forwards ``DELETE /v1/jobs/{id}`` for the posted ``id``."""
+    try:
+        await authenticate(request)  # before the form is parsed; the forward checks it again
+    except ServiceError as error:
+        return refusal(error)
     form = await request.form()
     try:
         job_id = text_fields(form).get("id", "")
     finally:
         await form.close()
+    if not JOB_ID.fullmatch(job_id):
+        return _form_error(request, NOT_A_JOB)
     path = OPERATIONS["cancel"].path.format(job_id=job_id)
     try:
         answer = await forward(request, "DELETE", path)
     except ValueError:  # not a plain path under /v1/
-        return _form_error(request, "This is not a job id.")
+        return _form_error(request, NOT_A_JOB)
     data = (answer.body or {}).get("data")
     if answer.status == 200 and isinstance(data, dict):
         context = {"job_id": data.get("id"), "kind": data.get("kind")}

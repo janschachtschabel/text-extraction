@@ -769,8 +769,11 @@ progress:
 
 - **Batch**: URLs, one per line, with the format, mode, metadata and Options of `POST /v1/batch`.
   The lines are checked on the server: each must be a plain http(s) URL of at most 2048
-  characters without blanks (else nothing is sent and the rows are listed); exact duplicates are
-  dropped. The URLs are split into batches of `BATCH_MAX_URLS`; more batches than
+  characters without blanks; exact duplicates are dropped. A list with other rows is answered
+  with the batch preview (below): the rows that are not used, and "Start batch" for the valid
+  URLs with the options chosen. The key is checked before the form is read; the form takes at
+  most `max(UI_TREE_MAX_URLS, BATCH_MAX_OPEN_PER_CLIENT × BATCH_MAX_URLS)` + 64 fields (one per
+  checked box of the tree), else "The form has too many fields.". The URLs are split into batches of `BATCH_MAX_URLS`; more batches than
   `BATCH_MAX_OPEN_PER_CLIENT` is refused ("Select at most <n> URLs at once.") and nothing is
   sent. Otherwise the batches are sent one after another; a refused part (such as the 429 while
   other jobs are open) stops the rest and is shown beside the jobs already started, which keep
@@ -779,8 +782,10 @@ progress:
   `UI_BATCH_FILE_MAX_ROWS` rows, parsed on the server (one rate-limit hit, nothing sent yet). It
   must be UTF-8 (a BOM is dropped). A JSON file is an array of URLs or of objects with `url`
   (nested too deep or broken: "The file is not valid JSON."). A CSV is delimited by commas,
-  semicolons or tabs; a `url` column (any case) is used, else the first column, and a first row
-  that is not an http(s) URL is a header. A field over 2049 characters refuses the file. The
+  semicolons or tabs (one that splits every one of the first 50 rows alike; else each line is one
+  value); a `url` column (any case) is used, else the first column, and a first row that is not
+  an http(s) URL is a header. A field over 2049 characters, or a row of more than 1000 fields,
+  refuses the file. The
   preview shows the counts (rows, URLs, rows that are not URLs, duplicates, batches), the first
   50 URLs, the first 20 problems by row, and the URLs in a read-only box with the batch options
   and "Start batch". Values such as `=HYPERLINK(...)` or `@cmd` are no URLs and are only
@@ -794,7 +799,9 @@ progress:
   "running in <pool>, claim <n>" (its last claim, from `items[].run`) or its status and error
   code, and "Show" opens its result with the timeline. "Cancel" deletes the job
   (`DELETE /v1/jobs/{id}`). While any job shown runs, the view refreshes itself every 3 s; each
-  refresh reads all its jobs through the job core with one rate-limit hit, and refreshing stops
+  refresh reads all its jobs (each once, at most 20 per view, two at a time and 100 items in
+  all, so fewer per page when it shows more than five) through the job core with one rate-limit
+  hit, and refreshing stops
   once all are completed (after a 429 it tries again after `Retry-After`). A single operation
   that continues as a job (202) has a "Show progress" button for it.
 - **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree

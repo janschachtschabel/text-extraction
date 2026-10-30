@@ -2,6 +2,7 @@
 site tree and its selection, an item's result, the cancel button, and the operations of every
 public route."""
 
+import asyncio
 import gc
 import weakref
 from collections.abc import Callable
@@ -13,6 +14,7 @@ import pytest
 from anyio.from_thread import BlockingPortal
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 from structlog.testing import capture_logs
 
 from tests.fakes import PAGE
@@ -223,7 +225,7 @@ def test_progress_refusals(hits: list[str]) -> None:
         assert texts(whole, "//*[@class='http-status']") == ["HTTP 429"]
         no_key = client.get("/ui/run/progress", params={"id": job_id}, headers=HX)
         assert texts(tree(no_key.text), "//*[@class='http-status']") == ["HTTP 401"]
-        many = progress(client, *(["0" * 32] * 21))
+        many = progress(client, *(f"{n:032x}" for n in range(21)))
         assert "Show at most 20 jobs at once." in many
 
 
@@ -237,6 +239,8 @@ def test_cancel_button(client: TestClient) -> None:
         ("id", job_id)
     ]
 
+    no_key = tree(run(client, "cancel", auth=False, id=job_id).text)
+    assert texts(no_key, "//*[@class='http-status']") == ["HTTP 401"]
     cancelled = run(client, "cancel", id=job_id).text
 
     assert job_id in texts(tree(cancelled), "//p[@class='cancelled']")[0]
@@ -355,12 +359,77 @@ def test_batch_split_and_refusal(batch_calls: list[int]) -> None:
         assert "At most 5 batches and site jobs may be unfinished at a time." in refused
 
 
-def test_batch_urls_refusals(client: TestClient, batch_calls: list[int]) -> None:
-    html = run(client, "batch-urls", urls=f"{PAGE}\nftp://example.org/x\n@cmd").text
-    assert texts(tree(html), "//ul[@class='problems']/li") == [
+def test_batch_urls_with_bad_lines_previews_the_good_ones(
+    client: TestClient, batch_calls: list[int]
+) -> None:
+    """Bad rows of a typed list (or a selection) are reported in the batch preview, and its
+    "Start batch" sends the valid URLs with the options chosen."""
+    good = [f"{ORIGIN}/a", f"{ORIGIN}/b"]
+    lines = [good[0], "ftp://example.org/x", "@cmd", good[1], good[0]]
+    html = run(
+        client,
+        "batch-urls",
+        urls="\n".join(lines),
+        format="text",
+        mode="fast",
+        metadata="on",
+        options='{"links": true}',
+    ).text
+
+    assert batch_calls == []
+    preview = tree(html)
+    assert texts(preview, "//ul[@class='problems']/li") == [
         "Row 2: URL scheme must be http or https",
         "Row 3: URL scheme must be http or https",
     ]
+    assert texts(preview, "//dd[@class='urls']") == ["2"]
+    assert texts(preview, "//dd[@class='duplicates']") == ["1"]
+    form = preview.xpath("//form")[0]
+    area = form.xpath(".//textarea[@name='urls']")[0]
+    assert area.text_content().split() == good
+    assert form.xpath(".//input[@name='format'][@checked]")[0].get("value") == "text"
+    assert form.xpath(".//select[@name='mode']/option[@selected]")[0].get("value") == "fast"
+    assert form.xpath(".//textarea[@name='options']")[0].text_content() == '{"links": true}'
+
+    started = run(client, "batch-urls", urls=area.text_content(), format="text", metadata="on").text
+    (job_id,) = jobs_of(started)
+    assert job_items(client, job_id) == good
+    assert batch_calls == [2]
+    # More than 20 bad rows: the first 20 and how many more.
+    many = tree(run(client, "batch-urls", urls="\n".join([PAGE] + ["x"] * 25)).text)
+    assert len(texts(many, "//ul[@class='problems']/li")) == 20
+    assert "5 more rows are not used." in texts(many, "//p[@class='hint']")
+    # Only bad rows: the preview has nothing to start.
+    none = tree(run(client, "batch-urls", urls="x\ny").text)
+    assert not none.xpath("//form")
+
+
+def test_batch_urls_checks_the_key_then_caps_the_fields(
+    monkeypatch: pytest.MonkeyPatch, batch_calls: list[int]
+) -> None:
+    parsed: list[str] = []
+    real = Request.form
+
+    def counting(self: Request, **kwargs: Any) -> Any:
+        parsed.append(self.url.path)
+        return real(self, **kwargs)
+
+    monkeypatch.setattr(Request, "form", counting)
+    with running(ui_tree_max_urls=100, batch_max_urls=10, batch_max_open_per_client=2) as client:
+        # Without a key nothing is parsed.
+        no_key = run(client, "batch-urls", auth=False, url=urls(3))
+        assert texts(tree(no_key.text), "//*[@class='http-status']") == ["HTTP 401"]
+        assert parsed == []
+        # The cap is max(UI_TREE_MAX_URLS, open x BATCH_MAX_URLS) + 64 fields: 164.
+        within = run(client, "batch-urls", url=urls(20), metadata="on")
+        assert len(jobs_of(within.text)) == 2
+        over = run(client, "batch-urls", url=urls(165))
+        assert over.status_code == 200
+        assert texts(tree(over.text), "//p") == ["The form has too many fields."]
+    assert batch_calls == [10, 10]
+
+
+def test_batch_urls_refusals(client: TestClient, batch_calls: list[int]) -> None:
     assert texts(tree(run(client, "batch-urls", urls=" \n").text), "//p") == [
         "Give at least one URL."
     ]
@@ -671,3 +740,68 @@ def test_batch_urls_takes_many_checked_boxes(batch_calls: list[int]) -> None:
         assert batch_calls == [1000, 500]
         jobs = jobs_of(response.text)
         assert [url for job_id in jobs for url in job_items(client, job_id)] == selected
+
+
+@pytest.fixture
+def job_reads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
+    """The (job id, limit) of each read of the progress view, and at most 2 at a time."""
+    reads: list[tuple[str, int]] = []
+    running_now = [0]
+    real = jobs_api.read_job
+
+    async def read_job(state: Any, principal: Any, job_id: str, offset: int, limit: int) -> Any:
+        running_now[0] += 1
+        assert running_now[0] <= 2, "more than 2 reads at once"
+        try:
+            await asyncio.sleep(0.01)
+            reads.append((job_id, limit))
+            return await real(state, principal, job_id, offset, limit)
+        finally:
+            running_now[0] -= 1
+
+    monkeypatch.setattr(jobs_api, "read_job", read_job)
+    return reads
+
+
+def test_progress_dedupes_and_bounds_its_reads(
+    client: TestClient, hits: list[str], job_reads: list[tuple[str, int]]
+) -> None:
+    first, second = start_batch(client, urls(1)), start_batch(client, urls(30, "https://e.org/x"))
+
+    shown = progress(client, first, second, first)
+
+    assert list(jobs_of(shown)) == [first, second]
+    assert sorted(job_reads) == sorted([(first, 20), (second, 20)])
+    job_reads.clear()
+    unknown = [f"{n:032x}" for n in range(9)]
+    many = progress(client, second, *unknown)
+    # Ten jobs share 100 items: 10 each, and the pager steps by 10.
+    assert {limit for _, limit in job_reads} == {10}
+    section = jobs_of(many)[second]
+    assert len(rows(section)) == 10
+    assert "offset=10" in section.xpath(".//button[contains(@class, 'next')]")[0].get("hx-get")
+    assert hits == ["alice", "alice"]
+
+
+def test_job_ids_are_checked_before_the_forward(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forwarded: list[str] = []
+
+    async def no_forward(request: Any, method: str, path: str, **kwargs: Any) -> Any:
+        forwarded.append(path)
+        raise AssertionError("forwarded")
+
+    monkeypatch.setattr("text_extraction.ui.job_views.forward", no_forward)
+    bad = "abc/artifacts/screenshot.png"
+
+    cancel = run(client, "cancel", id=bad).text
+    item = client.get("/ui/run/job", params={"id": bad, "index": 0}, headers=HEADERS).text
+    shot = client.get(
+        "/ui/run/artifact", params={"id": "ABC", "name": "screenshot.png"}, headers=HEADERS
+    ).text
+
+    assert "This is not a job id." in cancel
+    assert "This is not a job id." in item
+    assert "This is not an artifact of a job." in shot
+    assert forwarded == []

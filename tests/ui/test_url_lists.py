@@ -91,6 +91,17 @@ def test_parse_url_file_bounds_and_errors() -> None:
     # A CSV field over MAX_URL_LENGTH + 1 characters, also a quoted one over the csv limit.
     refused(f"url,title\n{A},{'t' * 10_000}\n", "A field is too long.")
     refused(f'url\n"{"q" * 200_000}"\n', "A field is too long.")
+    # A file of one column whose URLs hold commas or semicolons (not in every row alike) keeps
+    # them whole.
+    commas = "https://en.example.org/wiki/Washington,_D.C."
+    maps = "https://maps.example.org/@52.5,13.4,15z"
+    assert parse(f"{commas}\n{maps}\n{A};x=1\n").urls == [commas, maps, f"{A};x=1"]
+    # Columns per row are bounded, also in a line the sniffing reads.
+    refused(f"url\n{A}" + "\t" * 5000 + "\n", "A row has too many columns.")
+    refused(f"url,title\n{A},x\n" + "," * 5000 + "\n", "A row has too many columns.")
+    # A 10 KB JSON string is a row that is not a URL, not a refusal of the file.
+    found = parse(json.dumps([A, "https://example.org/" + "x" * 10_000]))
+    assert (found.urls, found.invalid) == ([A], [(2, "URL is longer than 2048 characters")])
     # An empty file has no URLs.
     assert parse("") == UrlList(urls=[], invalid=[], duplicates=0, rows=0)
 

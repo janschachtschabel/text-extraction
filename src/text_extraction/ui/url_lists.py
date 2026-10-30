@@ -24,11 +24,16 @@ FIELD_MAX_CHARS: Final = MAX_URL_LENGTH + 1
 # The delimiters a CSV may use, in the order they are tried, and the lines that decide.
 DELIMITERS: Final = ("\t", ";", ",")
 SNIFF_LINES: Final = 50
+# A row of a CSV has at most this many fields; more refuses the file before the row is split.
+MAX_COLUMNS: Final = 1000
+# The delimiter of a file of one column: a control character it does not hold (one of these).
+NO_DELIMITER: Final = ("\x1f", "\x1e", "\x1d", "\x1c", "\x00")
 
 NOT_UTF8: Final = "The file is not UTF-8."
 NOT_JSON: Final = "The file is not valid JSON."
 NOT_URL_ARRAY: Final = "Expected a JSON array of URLs or of objects with url."
 FIELD_TOO_LONG: Final = "A field is too long."
+TOO_MANY_COLUMNS: Final = "A row has too many columns."
 BLANK_OR_CONTROL: Final = "URL contains a blank or a control character"
 NO_URL: Final = "no URL"
 
@@ -145,23 +150,41 @@ def _parse_json(text: str, max_rows: int) -> UrlList:
     return collector.found
 
 
-def _delimiter(lines: Sequence[str]) -> str:
+def _delimiter(lines: Sequence[str]) -> str | None:
     """The first of ``DELIMITERS`` that splits every one of ``lines`` into the same number (more
-    than one) of fields; ``,`` when none does (a file of one column)."""
+    than one) of fields; None when none does (a file of one column: each line is one value)."""
     for delimiter in DELIMITERS:
         counts = {len(row) for row in csv.reader(lines, delimiter=delimiter)}
         if len(counts) == 1 and counts.pop() > 1:
             return delimiter
-    return ","
+    return None
+
+
+def _no_delimiter(text: str) -> str:
+    """A delimiter that ``text`` does not hold (an ASCII separator), so each line is one field
+    and quotes still work."""
+    return next((char for char in NO_DELIMITER if char not in text), NO_DELIMITER[0])
+
+
+def _bounded(lines: Iterable[str], delimiters: Sequence[str]) -> Iterator[str]:
+    """``lines``, refusing one with more than ``MAX_COLUMNS`` fields by any of ``delimiters``
+    before the csv module splits it."""
+    for line in lines:
+        if any(line.count(delimiter) >= MAX_COLUMNS for delimiter in delimiters):
+            raise UrlListError(TOO_MANY_COLUMNS)
+        yield line
 
 
 def _csv_rows(text: str) -> Iterator[tuple[int, list[str]]]:
     """The rows of ``text`` that are not blank, with their numbers (from 1). Raises
-    `UrlListError` for a field over ``FIELD_MAX_CHARS``."""
+    `UrlListError` for a field over ``FIELD_MAX_CHARS`` or a row of more than ``MAX_COLUMNS``
+    fields."""
     lines = text.splitlines()
     sample = [line for line in lines[: SNIFF_LINES * 4] if line.strip()][:SNIFF_LINES]
+    sample = list(_bounded(sample, DELIMITERS))
     try:
-        reader = csv.reader(lines, delimiter=_delimiter(sample))
+        delimiter = _delimiter(sample) or _no_delimiter(text)
+        reader = csv.reader(_bounded(lines, (delimiter,)), delimiter=delimiter)
         for cells in reader:
             if any(len(cell) > FIELD_MAX_CHARS for cell in cells):
                 raise UrlListError(FIELD_TOO_LONG)
