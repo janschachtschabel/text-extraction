@@ -253,7 +253,12 @@ class PiiHandoff(LastHopHandoff):
         )
         self._nlp = dispatcher
         # A result that moves on to the llm worker completes later (ruling S13).
-        self._llm = wants_llm(options.structured, options.chunking, dispatcher.settings)
+        self._llm = wants_llm(
+            options.structured,
+            options.chunking,
+            dispatcher.settings,
+            describe=options.describe_images,
+        )
 
     async def __call__(
         self, envelope: Envelope[ExtractResult], handover: Handover

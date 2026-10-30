@@ -14,8 +14,9 @@ stored bytes (``upload``; their type from the magic bytes, at most
 ``LLM_VISION_MAX_IMAGE_BYTES``). Then one vision call (``LlmClient.describe_image``, plus its
 repair call) with ``VISION_SYSTEM`` and ``vision_text``: the alt text and the image are data.
 
-* not fetched, refused, not an allowed type, too large, an input that is gone, a Valkey error
-  of the fetcher: ``skipped``, warning ``image_not_described``; the others go on;
+* not fetched, refused, not an allowed type, too large, an input that is gone, any error the
+  fetcher raises (Valkey, or one it should never raise): ``skipped``, warning
+  ``image_not_described``; the others go on;
 * refused by the endpoint (HTTP 400, 413, 422) or an answer that does not fit after the repair
   call (``LlmError.invalid_answer``, ruling R-V1), or ``description: null`` (nothing worth
   describing): ``failed``, the same warning; the others go on;
@@ -37,7 +38,9 @@ message, retryable; a TIFF or BMP upload is ``skipped`` as above.
 
 Image bytes live only in this step's memory. Nothing here logs or counts by value an image byte,
 URL, alt text, description or prompt: the counter ``text_extraction_vision_images_total`` has the
-outcome as its only label, and logs carry error types.
+outcome as its only label, and logs carry error types. It counts the report of the answer
+that is written (``count_images``, from ``structured.post``), once: a step whose answer is
+replaced by the one without the LLM (a later step raised, the item's deadline) is not counted.
 """
 
 import asyncio
@@ -48,7 +51,6 @@ from weakref import WeakKeyDictionary
 
 import structlog
 from prometheus_client import REGISTRY, CollectorRegistry, Counter
-from redis.exceptions import RedisError
 
 from text_extraction.compliance import ComplianceMode
 from text_extraction.extract_models import ExtractResult
@@ -75,6 +77,7 @@ __all__ = [
     "DESCRIBE_TIMEOUT_MESSAGE",
     "DescribeOutcome",
     "ImageTarget",
+    "count_images",
     "describe_owed",
     "describe_result",
     "needs_vision",
@@ -174,6 +177,20 @@ def _counter_for(registry: CollectorRegistry) -> Counter:
     return counter
 
 
+def count_images(report: ImageDescriptionReport, registry: CollectorRegistry | None) -> None:
+    """Count the images of ``report`` by outcome in ``registry`` (default: the global one).
+    Called once per answer, when it is built (``structured.post``): a step whose answer is
+    replaced (a later step raised, the item's deadline) is not counted twice."""
+    counter = _counter_for(registry if registry is not None else REGISTRY)
+    for outcome, count in (
+        ("described", report.described),
+        ("skipped", report.skipped),
+        ("failed", report.failed),
+    ):
+        if count:
+            counter.labels(outcome).inc(count)
+
+
 # --- the step ----------------------------------------------------------------------------------
 
 
@@ -227,7 +244,8 @@ class _Step:
             return ImageSkipped("error")
         try:
             return await self.images.get(target.url, self.mode, timeout=timeout)
-        except RedisError as error:  # the gate or the robots cache: this image only
+        except Exception as error:
+            # only. The type only: a message may quote the URL.
             _log.warning("image_fetch_failed", error=type(error).__name__)
             return ImageSkipped("error")
 
@@ -270,7 +288,7 @@ class _Step:
                 return _Done("failed")
             finally:
                 del image  # the bytes go with this image
-            self.usage = usage if self.usage is None else _sum(self.usage, usage)
+            self.usage = usage if self.usage is None else self.usage.plus(usage)
             if description is None:
                 return _Done("failed")
             return _Done("described", description)
@@ -286,11 +304,11 @@ async def describe_result(
     mode: ComplianceMode,
     settings: Settings,
     seconds: float,
-    registry: CollectorRegistry | None = None,
 ) -> DescribeOutcome:
     """The step with the vision model (see the module docstring): ``images`` fetches a page's
     images in the compliance ``mode`` of the job, ``upload`` is an image upload's bytes (None:
-    gone), ``seconds`` the step's budget. LLM failures are in the outcome, never raised."""
+    gone), ``seconds`` the step's budget. LLM failures are in the outcome, never raised. Nothing
+    is counted here: ``count_images`` counts the report of the answer that is written."""
     started = time.monotonic()
     targets = vision_targets(data, describe)
     step = _Step(data, llm, images, upload, mode, settings, deadline=started + seconds)
@@ -311,7 +329,7 @@ async def describe_result(
             step.failure = LlmError(DESCRIBE_TIMEOUT_MESSAGE, retryable=True)
     outcomes = [item if item is not None else _Done("failed") for item in done]
     llm_ms = round((time.monotonic() - started) * 1000)
-    return _outcome(data, targets, outcomes, step.failure, step.usage, llm_ms, registry)
+    return _outcome(data, targets, outcomes, step.failure, step.usage, llm_ms)
 
 
 def without_vision(
@@ -324,7 +342,7 @@ def without_vision(
     sent = _sent(data)
     outcomes = [_Done("failed" if sent else "skipped") for _ in targets]
     failure = LlmError(message, retryable=True) if targets and sent else None
-    return _outcome(data, targets, outcomes, failure, None, 0, None)
+    return _outcome(data, targets, outcomes, failure, None, 0)
 
 
 def _outcome(
@@ -334,16 +352,10 @@ def _outcome(
     failure: LlmError | None,
     usage: LlmUsage | None,
     llm_ms: int,
-    registry: CollectorRegistry | None,
 ) -> DescribeOutcome:
     counts = {"described": 0, "skipped": 0, "failed": 0}
     for item in outcomes:
         counts[item.outcome] += 1
-    if targets:
-        counter = _counter_for(registry if registry is not None else REGISTRY)
-        for outcome, count in counts.items():
-            if count:
-                counter.labels(outcome).inc(count)
     report = ImageDescriptionReport(
         asked=len(targets),
         described=counts["described"],
@@ -389,12 +401,3 @@ def _with_descriptions(
         base = metadata if metadata is not None else PageMetadata()
         update["metadata"] = base.model_copy(update={"images": images})
     return data.model_copy(update=update)
-
-
-def _sum(first: LlmUsage, second: LlmUsage) -> LlmUsage:
-    return LlmUsage(
-        model=first.model,
-        calls=first.calls + second.calls,
-        prompt_tokens=first.prompt_tokens + second.prompt_tokens,
-        completion_tokens=first.completion_tokens + second.completion_tokens,
-    )

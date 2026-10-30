@@ -116,13 +116,14 @@ from text_extraction.structured.types import (
 )
 from text_extraction.vision.describe import (
     DescribeOutcome,
+    count_images,
     describe_owed,
     describe_result,
     needs_vision,
     without_vision,
 )
 from text_extraction.vision.fetch import ImageSource
-from text_extraction.vision.types import DescribeImagesOptions
+from text_extraction.vision.types import DescribeImagesOptions, ImageDescriptionReport
 
 if TYPE_CHECKING:  # the OpenAI SDK only where a client is made (``llm/basics.py``)
     from text_extraction.llm.client import LlmClient
@@ -347,13 +348,16 @@ def finish_too_large(
     *,
     settings: Settings,
     describe: DescribeImagesOptions | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> Envelope[ExtractResult]:
     """The post stage of a draft that is ``too_large_for_llm``: ``finish_post`` (image
     descriptions it owes count ``failed``), then ``llm_failed`` with
     ``TOO_LARGE_FOR_LLM_MESSAGE``, not retryable (the same draft would be stored without its
     content again). A result that already was ``partial`` or ``failed`` keeps its status and
     error."""
-    finished = finish_post(envelope, structured, chunking, settings=settings, describe=describe)
+    finished = finish_post(
+        envelope, structured, chunking, settings=settings, describe=describe, registry=registry
+    )
     if envelope.status != "success":
         return finished
     failure = LlmError(TOO_LARGE_FOR_LLM_MESSAGE, retryable=False)
@@ -410,12 +414,14 @@ class _Post:
     chunking: ChunkingOptions | None
     settings: Settings
     describe: DescribeImagesOptions | None = None
+    registry: CollectorRegistry | None = None  # of the images' counter (None: the global one)
     result: StructuredResult | None = None
     chunks: list[Chunk] | None = None
     warnings: list[str] = field(default_factory=list)
     failure: LlmError | None = None
     usage: LlmUsage | None = None
     llm_ms: int = 0
+    images: ImageDescriptionReport | None = None  # step 0's report, counted by ``finished``
 
     @classmethod
     def start(
@@ -426,9 +432,10 @@ class _Post:
         chunking: ChunkingOptions | None,
         settings: Settings,
         describe: DescribeImagesOptions | None = None,
+        registry: CollectorRegistry | None = None,
     ) -> "_Post":
         """The work on ``data``, the envelope's data."""
-        work = cls(envelope, data, options, chunking, settings, describe)
+        work = cls(envelope, data, options, chunking, settings, describe, registry)
         if options is not None and not _structured_done(data, options):
             work.result = _starting_result(data.structured, options)
         return work
@@ -473,6 +480,7 @@ class _Post:
         """Step 0's outcome: the data with the descriptions (an upload's in its content), which
         the later steps read."""
         self.data = outcome.data
+        self.images = outcome.report
         self.note(*outcome.warnings)
         if outcome.failure is not None:
             self.fail(outcome.failure)
@@ -529,7 +537,7 @@ class _Post:
     def used(self, usage: LlmUsage, started: float) -> None:
         self.llm_ms += round((time.perf_counter() - started) * 1000)
         if usage.calls:
-            self.usage = usage if self.usage is None else _sum(self.usage, usage)
+            self.usage = usage if self.usage is None else self.usage.plus(usage)
 
     # 3. learning
     def learnable(self) -> dict[str, Any]:
@@ -577,6 +585,10 @@ class _Post:
 
     # 6. the answer
     def finished(self) -> Envelope[ExtractResult]:
+        """The answer; called once per work. Step 0's images are counted here, with the answer
+        that is written, so a work given up after step 0 (a later step raised) counts none."""
+        if self.images is not None and self.images.asked:
+            count_images(self.images, self.registry)
         update: dict[str, Any] = {}
         if self.result is not None:
             update["structured"] = self._checked_result(self.result)
@@ -617,7 +629,7 @@ class _Post:
         }
         llm = result.llm
         if self.usage is not None:
-            llm = self.usage if llm is None else _sum(llm, self.usage)
+            llm = self.usage if llm is None else llm.plus(self.usage)
         return result.model_copy(
             update={
                 "values": values,
@@ -657,15 +669,6 @@ def _checked(compiled: CompiledSchema, name: str, value: Any) -> Any | None:
     return model.model_dump(mode="json", by_alias=True).get(name)
 
 
-def _sum(first: LlmUsage, second: LlmUsage) -> LlmUsage:
-    return LlmUsage(
-        model=first.model,
-        calls=first.calls + second.calls,
-        prompt_tokens=first.prompt_tokens + second.prompt_tokens,
-        completion_tokens=first.completion_tokens + second.completion_tokens,
-    )
-
-
 # --- the guard without the LLM -----------------------------------------------------------------
 
 
@@ -677,16 +680,18 @@ def finish_post(
     settings: Settings,
     reason: Literal["busy", "failed"] | None = None,
     describe: DescribeImagesOptions | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> Envelope[ExtractResult]:
     """The post stage without the LLM, for an envelope whose post stage has not run (see the
     module docstring); an envelope that has it, or gets none, comes back as it is. ``reason``
     says why the LLM work did not run (``busy``: the memory guard; ``failed`` or None:
     anything else). Owed image descriptions get their report: a result without images an empty
-    one, else every image that would be sent counts ``failed`` (``without_vision``)."""
+    one, else every image that would be sent counts ``failed`` (``without_vision``), in
+    ``registry``'s counter (default: the global one)."""
     data = envelope.data
     if data is None or post_done(envelope, structured, chunking, describe=describe):
         return envelope
-    work = _Post.start(envelope, data, structured, chunking, settings, describe)
+    work = _Post.start(envelope, data, structured, chunking, settings, describe, registry)
     message = BUSY_MESSAGE if reason == "busy" else NOT_RUN_MESSAGE
     if describe is not None and work.owes_descriptions():
         work.described(without_vision(data, describe, message=message))
@@ -731,6 +736,7 @@ async def post_at_finish(
     threads: ConversionPool,
     hop: LlmHop | None = None,
     describe: DescribeImagesOptions | None = None,
+    registry: CollectorRegistry | None = None,
 ) -> Envelope[ExtractResult] | None:
     """The post stage at a finish point (ruling S13), the one sequence that the sync flows
     (``extract_api.post_stage``), the P1 job's write (``extract_api._store_result``) and
@@ -741,8 +747,8 @@ async def post_at_finish(
     request handed it over, the item moved). Last, ``finish_post`` (on the post pool) is the
     guard: LLM work that did not run, with or without a hop, is ``llm_failed`` with the hop's
     reason. ``describe`` is the request's ``describe_images``: owed descriptions with an image
-    to send need the LLM too; without images their empty report is written here. Whatever
-    ``hop`` raises propagates."""
+    to send need the LLM too; without images their empty report is written here (``registry``
+    gets the images' counter). Whatever ``hop`` raises propagates."""
     if not post_pending(envelope, structured, chunking, pii, describe=describe):
         return envelope
     patterns = partial(run_post_patterns, settings=settings)
@@ -754,7 +760,9 @@ async def post_at_finish(
             return None
         envelope = hopped
     return await threads.run(
-        partial(finish_post, settings=settings, reason=reason, describe=describe),
+        partial(
+            finish_post, settings=settings, reason=reason, describe=describe, registry=registry
+        ),
         envelope,
         structured,
         chunking,
@@ -798,12 +806,12 @@ async def apply_post(
         return envelope
     if llm is None:
         return await threads.run(
-            partial(finish_post, settings=settings, describe=describe),
+            partial(finish_post, settings=settings, describe=describe, registry=registry),
             envelope,
             structured,
             chunking,
         )
-    work = _Post.start(envelope, data, structured, chunking, settings, describe)
+    work = _Post.start(envelope, data, structured, chunking, settings, describe, registry)
     if describe is not None and work.owes_descriptions():
         seconds = describe_seconds
         if seconds is None:
@@ -817,7 +825,6 @@ async def apply_post(
             mode=mode,
             settings=settings,
             seconds=seconds,
-            registry=registry,
         )
         work.described(outcome)
     if work.result is not None and structured is not None:

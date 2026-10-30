@@ -492,6 +492,20 @@ class _UploadOptions:
     links: bool = False  # the form has no `links`: without a URL, links stay relative
     structured: StructuredOptions | None = None
     pii: PiiOptions | None = None
+    # ``describe_images`` of an image upload: never failed for lacking text (ruling V-S8).
+    describe_upload: bool = False
+
+
+def _upload_options(form: FileForm) -> _UploadOptions:
+    """The options of an upload's form as the conversion steps read them."""
+    return _UploadOptions(
+        format=form.format,
+        metadata=form.metadata,
+        ocr=form.ocr,
+        structured=form.structured,
+        pii=form.pii,
+        describe_upload=form.describe_images is not None,
+    )
 
 
 @dataclass
@@ -798,13 +812,7 @@ class Pipeline:
         """
         mode = resolve_mode(None, principal, self._settings)
         run = _UploadRun(
-            req=_UploadOptions(
-                format=form.format,
-                metadata=form.metadata,
-                ocr=form.ocr,
-                structured=form.structured,
-                pii=form.pii,
-            ),
+            req=_upload_options(form),
             report=ComplianceReport(mode=mode, decision="skipped"),
             file_name=name,
             ocr_handoff=ocr_handoff,
@@ -857,13 +865,7 @@ class Pipeline:
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
-                req=_UploadOptions(
-                    format=req.format,
-                    metadata=req.metadata,
-                    ocr=req.ocr,
-                    structured=req.structured,
-                    pii=req.pii,
-                ),
+                req=_upload_options(req),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
                 ),
@@ -972,13 +974,7 @@ class Pipeline:
         run: _Run | _UploadRun
         if isinstance(req, FileForm):
             run = _UploadRun(
-                req=_UploadOptions(
-                    format=req.format,
-                    metadata=req.metadata,
-                    ocr=req.ocr,
-                    structured=req.structured,
-                    pii=req.pii,
-                ),
+                req=_upload_options(req),
                 report=ComplianceReport(
                     mode=resolve_mode(None, principal, self._settings), decision="skipped"
                 ),

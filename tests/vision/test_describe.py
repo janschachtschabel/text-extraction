@@ -241,6 +241,26 @@ def test_valkey_error_during_a_fetch_skips_that_image(httpserver: HTTPServer) ->
     assert image_url(0) not in json.dumps(logs, default=str)
 
 
+def test_unexpected_fetch_error_costs_only_that_image(httpserver: HTTPServer) -> None:
+    """Whatever else the fetcher raises (a bug, a library error) skips that image only: the
+    other images keep their descriptions, the log has the error's type only."""
+    serve_llm(httpserver, lambda _body, _n: described(DIAGRAM))
+    failure = RuntimeError(f"parser broke on {image_url(0)}")
+    images = FakeImages({image_url(0): failure})
+
+    with capture_logs() as logs:
+        done = describe_post(httpserver, page_envelope(2), images=images)
+
+    assert done.status == "success"
+    assert report_of(done) == (2, 1, 1, 0)
+    assert descriptions(done) == [None, DIAGRAM]
+    assert IMAGE_NOT_DESCRIBED_WARNING in data_of(done).warnings
+    [line] = [entry for entry in logs if entry["event"] == "image_fetch_failed"]
+    assert line["error"] == "RuntimeError"
+    assert "parser broke" not in json.dumps(logs, default=str)
+    assert image_url(0) not in json.dumps(logs, default=str)
+
+
 def test_rejected_image_costs_only_itself(httpserver: HTTPServer) -> None:
     serve_llm(
         httpserver,

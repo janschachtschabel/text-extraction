@@ -184,7 +184,12 @@ class LlmRunner:
         if too_large_for_llm(draft, structured, chunking, describe=describe):
             # Its content was not stored (JOB_ITEM_MAX_BYTES): the LLM work cannot be done (R20).
             return await self._post_pool.run(
-                partial(finish_too_large, settings=self._settings, describe=describe),
+                partial(
+                    finish_too_large,
+                    settings=self._settings,
+                    describe=describe,
+                    registry=self._registry,
+                ),
                 draft,
                 structured,
                 chunking,
@@ -258,6 +263,7 @@ class LlmRunner:
                 settings=self._settings,
                 reason="failed",
                 describe=job.options.describe_images,
+                registry=self._registry,
             ),
             draft,
             structured,

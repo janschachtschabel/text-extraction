@@ -50,6 +50,7 @@ from text_extraction.llm_worker import LlmRunner, build_llm_worker
 from text_extraction.pii.types import PiiOptions
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
+from text_extraction.structured import post as post_module
 from text_extraction.structured.post import (
     NOT_RUN_MESSAGE,
     TOO_LARGE_FOR_LLM_MESSAGE,
@@ -475,6 +476,48 @@ def test_runner_without_any_key_marks_descriptions_failed(httpserver: HTTPServer
     assert httpserver.log == []
 
 
+def vision_counts(registry: CollectorRegistry) -> tuple[float, float, float]:
+    def count(outcome: str) -> float:
+        value = registry.get_sample_value(
+            "text_extraction_vision_images_total", {"outcome": outcome}
+        )
+        return value or 0.0
+
+    return count("described"), count("skipped"), count("failed")
+
+
+def test_runner_without_llm_counts_images_in_its_registry(httpserver: HTTPServer) -> None:
+    """The step without the LLM counts into the runner's registry, as the step with it."""
+    case = Case(settings_for(httpserver, llm_api_key=None))
+
+    asyncio.run(case.run(draft=page_envelope(2), structured=None, describe=DESCRIBE))
+
+    assert vision_counts(case.registry) == (0, 0, 2)
+
+
+def test_images_counted_once_when_a_later_step_raises(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The descriptions ran, then the structured step raised: the answer is the draft without
+    the LLM work, and its images count once, as that answer reports them."""
+
+    async def broken(*_args: Any, **_kwargs: Any) -> None:
+        raise KeyError("a page quote")
+
+    monkeypatch.setattr(post_module, "_extract", broken)
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    case = Case(settings_for(httpserver), images=FakeImages())
+
+    result = asyncio.run(case.run(draft=page_envelope(2), describe=DESCRIBE))
+
+    assert result.status == "partial"
+    assert result.data is not None
+    assert result.data.image_descriptions is not None
+    assert result.data.image_descriptions.failed == 2
+    assert len(vision_requests(httpserver)) == 2
+    assert vision_counts(case.registry) == (0, 0, 2)
+
+
 def test_runner_answers_a_described_draft_as_it_is(httpserver: HTTPServer) -> None:
     case = Case(settings_for(httpserver))
     # No images: the empty report, without a call.
@@ -517,6 +560,7 @@ def test_exhausted_item_answers_draft_with_descriptions_failed(
     report = result.data.image_descriptions
     assert (report.asked, report.described, report.failed) == (3, 0, 3)
     assert httpserver.log == []
+    assert vision_counts(case.registry) == (0, 0, 3)  # the worker's registry
 
 
 # --- the process ---

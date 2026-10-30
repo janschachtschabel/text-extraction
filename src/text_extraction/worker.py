@@ -83,25 +83,28 @@ the move) is ``pii_failed`` without its text. The ``pii_dispatch`` module docstr
 nlp worker reads; a worker of pool ``nlp`` deletes an item's draft and input, and a sync
 request's caller secrets, once its result is written.
 
-**The post stage (S5, S13).** A result of a job with ``structured`` or ``chunking`` that
-``_finish`` writes gets the post stage first (``structured.post.post_at_finish``:
-``run_post_patterns``, then ``finish_post``, on the worker's post pool, ``POST_CONCURRENCY``
-threads: ruling R21), on its final content: after the PII step, before the guard
-``fail_closed``. A result that moves to the ``nlp`` pool gets it
-there, on the masked content; one that still owes the PII step and did not move gets none (it is
-withheld).
+**The post stage (S5, S13).** A result of a job with ``structured``, ``chunking`` or
+``describe_images`` that ``_finish`` writes gets the post stage first
+(``structured.post.post_at_finish``: ``run_post_patterns``, then ``finish_post``, on the worker's
+post pool, ``POST_CONCURRENCY`` threads: ruling R21), on its final content: after the PII step,
+before the guard ``fail_closed``. A result that moves to the ``nlp`` pool gets it there, on the
+masked content; one that still owes the PII step and did not move gets none (it is withheld).
 
 **The LLM (S13, S14).** While the service has the LLM (``LLM_ENABLED`` and ``JOBS_ENABLED``), a
-result whose post stage needs it (``structured.post.needs_llm``, after the patterns) is not
-written by ``_finish`` of any pool but ``llm``: it moves to the ``llm`` pool
-(``llm_dispatch.LlmMove``) as results move to ``nlp``, after the PII move (so ``nlp`` moves its
-masked results on), and is completed without a result (outcome ``escalated``). The pool that
-moves it keeps the caller's LLM key; ``nlp`` keeps the draft, which the move overwrote. While the
-memory guard is high nothing is stored: the result is written without the LLM work
-(``partial``/``llm_failed``, retryable, "The LLM step is busy; retry later.", its content kept);
-so is a result of a worker without the move. The ``llm_dispatch`` module docstring has what the
-llm worker reads. Whichever pool writes an item's result drops the caller's LLM key of the job
-(R11): a sync request's job at once, a batch with its last result.
+result whose post stage needs it (``structured.post.needs_llm``, after the patterns) is not written
+by ``_finish`` of any pool but ``llm``: it moves to the ``llm`` pool (``llm_dispatch.LlmMove``) as
+results move to ``nlp``, after the PII move (so ``nlp`` moves its masked results on), and is
+completed without a result (outcome ``escalated``). The pool that moves it keeps the caller's LLM
+key; ``nlp`` keeps the draft, which the move overwrote. While the memory guard is high nothing is
+stored: the result is written without the LLM work (``partial``/``llm_failed``, retryable, "The LLM
+step is busy; retry later.", its content kept); so is a result of a worker without the move. The
+image descriptions of ``describe_images`` are LLM work too (issue #20): a result with images to
+describe moves, one without gets its empty report here; without the move its images count
+``failed``, ``llm_failed``. An upload's job with ``describe_images`` keeps the item's input when it
+moves on (an image upload's bytes, which the llm worker describes and deletes with the result). The
+``llm_dispatch`` module docstring has what the llm worker reads. Whichever pool writes an item's
+result drops the caller's LLM key of the job (R11): a sync request's job at once, a batch with its
+last result.
 
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
@@ -478,6 +481,7 @@ class Worker:
         self._runner = runner
         self._store = store
         self._queue = queue
+        self._registry = registry
         self._metrics = _metrics_for(registry)
         self._clock = clock
         self._sleep = sleep
@@ -673,6 +677,7 @@ class Worker:
                         settings=self._settings,
                         reason="failed",
                         describe=job.options.describe_images,
+                        registry=self._registry,
                     ),
                     draft,
                     structured,
@@ -726,6 +731,8 @@ class Worker:
                 settings=self._settings,
                 threads=self._post_pool,
                 hop=self._llm_hop(job, item),
+                describe=job.options.describe_images,
+                registry=self._registry,
             )
         except JobLost:
             return await self._drop(item)
@@ -771,13 +778,16 @@ class Worker:
         for the draft, which is the last hop's now (``nlp`` moving on to ``llm`` overwrote its
         own), and the caller's LLM key, which the llm worker needs. Otherwise a last hop that is
         down would keep the inputs of ``docling`` and ``asr`` filling their budget and
-        Valkey."""
+        Valkey. An upload's job with ``describe_images`` keeps its input too (ruling V-S7): an
+        image upload's bytes are what the llm worker describes, and it deletes them with the
+        result (``_drop_input``; such a job has no ``pii``, so no nlp hop in between)."""
         outcome = await self._moved(item)
         if outcome is None:
             return None  # the lease was lost: the current holder may need them
         pool = self._queue.pool
         pooled = pool in (DOCLING_POOL, ASR_POOL)
-        if job.kind == "file" or pooled or pool == PII_POOL:
+        described = job.kind == "file" and job.options.describe_images is not None
+        if (job.kind == "file" or pooled or pool == PII_POOL) and not described:
             await self._store.delete_input(item.job_id, item.index)
         if pool in (ASR_POOL, PII_POOL) and job.kind != "batch":
             await self._store.drop_secrets(item.job_id)

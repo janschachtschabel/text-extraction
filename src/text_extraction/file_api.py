@@ -90,6 +90,7 @@ from text_extraction.extract_api import (
 from text_extraction.extract_models import ExtractResult
 from text_extraction.file_models import FILE_PART, FileForm, UploadInputMeta, upload_options
 from text_extraction.job_models import JobAccepted, JobOptions
+from text_extraction.llm_dispatch import UploadInput
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, sniff_media
 from text_extraction.pipeline import Pipeline
 from text_extraction.pipeline_media import asr_available
@@ -402,6 +403,7 @@ async def answer_upload(
         pii=form.pii,
         structured=form.structured,
         chunking=form.chunking,
+        describe=form.describe_images,
     )
 
 
@@ -431,7 +433,9 @@ async def _flow(
     its job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the
     LLM), kept with every job the flow creates. With ``pii`` the envelope goes through the nlp
     workers (``pii_dispatch.PiiHandoff``), then it gets the post stage (``extract_api.post_stage``),
-    whose LLM work goes to the llm workers (``llm_dispatch.LlmHandoff``)."""
+    whose LLM work goes to the llm workers (``llm_dispatch.LlmHandoff``); with
+    ``describe_images`` the hop gets the upload's bytes, which a new llm job keeps as its input
+    when they are an image the llm worker can describe (ruling V-S7)."""
     started = time.perf_counter()
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
@@ -493,4 +497,9 @@ async def _flow(
         url=None,
         wait_until=wait_until,
         llm_key=llm_key,
+        upload=(
+            UploadInput(body, UploadInputMeta(file_name=name, content_type=content_type))
+            if form.describe_images is not None
+            else None
+        ),
     )

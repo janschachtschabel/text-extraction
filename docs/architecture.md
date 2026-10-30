@@ -1848,7 +1848,8 @@ patterns, or `semantic`); any other gets its post stage where it is.
   `finish_post(reason="failed")`: the content without the LLM work, never a 5xx. Without an llm
   worker, sync requests answer 202 after their wait and the job waits (the backlog alert's case).
 - `text_extraction_llm_dispatch_total{outcome}`: `answered`, `not_claimed`, `no_result`,
-  `handed_over`, `backend_error`, `memory_guard`.
+  `handed_over`, `backend_error`, `memory_guard`, `input_budget` (an image upload's bytes for its
+  description did not fit the input budget, issue #20).
 
 **S14, the llm worker** (`llm_worker.py`, entry `text-extraction-llm-worker`, the API image, pool
 `llm`, internal port only). The extract worker's `Worker` with an `LlmRunner`, `LLM_CONCURRENCY`

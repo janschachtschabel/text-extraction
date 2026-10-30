@@ -51,8 +51,11 @@ from text_extraction.extract_models import ExtractRequest
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import docling_lease_seconds
+from text_extraction.llm_dispatch import LlmMove, create_llm_move, llm_queue
 from text_extraction.pipeline import DOCUMENT_FETCHED_DIRECTLY_WARNING
 from text_extraction.pipeline_documents import OCR_UNAVAILABLE_WARNING, DocumentInputMeta
+from text_extraction.structured.types import StructuredOptions
+from text_extraction.vision.types import DescribeImagesOptions, StoredInputMeta
 from text_extraction.worker import Worker
 
 OCR_TEXT = " ".join(
@@ -104,7 +107,9 @@ class Docling:
     """A Docling worker next to a harness: its runner on the harness's store, queue ``docling``
     and pipeline, converting with ``pool``."""
 
-    def __init__(self, harness: Harness, pool: FakeDoclingPool) -> None:
+    def __init__(
+        self, harness: Harness, pool: FakeDoclingPool, *, llm_move: LlmMove | None = None
+    ) -> None:
         self.harness = harness
         self.pool = pool
         self.converter = DoclingConverter(pool, harness.settings, harness.registry)
@@ -120,6 +125,7 @@ class Docling:
             harness.registry,
             clock=harness.clock,
             concurrency=1,
+            llm_move=llm_move,
         )
 
     async def process_next(self) -> None:
@@ -509,9 +515,10 @@ async def test_an_expired_input_answers_the_draft() -> None:
     assert await harness.valkey.keys("fp:*") == []
 
 
-async def moved_image(harness: Harness) -> str:
+async def moved_image(harness: Harness, options: JobOptions | None = None) -> str:
     """An image upload's job the extract worker moved to ``docling`` (no draft)."""
-    options = JobOptions(mode="fast", compliance="enforce", cache=False)
+    if options is None:
+        options = JobOptions(mode="fast", compliance="enforce", cache=False)
     job_id = await harness.store.create("file", OWNER, options, [None])
     image = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
     meta = UploadInputMeta(file_name="scan.png", content_type="image/png")
@@ -521,6 +528,85 @@ async def moved_image(harness: Harness) -> str:
     assert claim.item is not None
     await harness.worker.process(claim.item)
     return job_id
+
+
+IMAGE = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64  # what ``moved_image`` stores
+PLAIN_IMAGE_JOB = JobOptions(mode="fast", compliance="enforce", cache=False, metadata=True)
+DESCRIBED_IMAGE_JOB = PLAIN_IMAGE_JOB.model_copy(
+    update={"describe_images": DescribeImagesOptions()}
+)
+LLM_IMAGE_JOB = PLAIN_IMAGE_JOB.model_copy(
+    update={
+        "structured": StructuredOptions.model_validate(
+            {
+                "schema": {"type": "object", "properties": {"x": {"type": "string"}}},
+                "strategy": "llm",
+            }
+        )
+    }
+)
+
+
+def llm_docling(answer: dict[str, Any]) -> tuple[Harness, Docling]:
+    """A harness with OCR and the LLM, and a Docling worker that moves results to ``llm``."""
+    harness = Harness(
+        document_pool=OcrPool(),
+        docling_enabled=True,
+        llm_enabled=True,
+        llm_api_key="sk-operator",
+    )
+    move = create_llm_move(harness.settings, harness.valkey, harness.store, None, harness.registry)
+    return harness, Docling(harness, FakeDoclingPool(answer), llm_move=move)
+
+
+@pytest.mark.parametrize("describe", [True, False], ids=["describe", "plain"])
+@scenario
+async def test_image_upload_empty_ocr_text_is_success_with_describe(describe: bool) -> None:
+    """V-S8: an image upload of ``describe_images`` whose OCR reads no word is no
+    ``empty_content``: it goes on to its description. Without the option: unchanged."""
+    harness, docling = llm_docling(reply(content=""))
+    job_id = await moved_image(harness, DESCRIBED_IMAGE_JOB if describe else PLAIN_IMAGE_JOB)
+
+    await docling.process_next()
+
+    if not describe:
+        code, _retryable, _message = error_of(await only_item(harness, job_id))
+        assert code == ErrorCode.EMPTY_CONTENT
+        return
+    draft = await harness.store.draft(job_id, 0)  # the llm worker's now
+    assert draft is not None
+    assert (draft.status, draft.error) == ("success", None)
+    assert draft.data is not None
+    assert (draft.data.content, draft.data.word_count) == ("", 0)
+    assert draft.data.document is not None
+    assert draft.data.document.converter == "docling"
+    assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 1
+
+
+@pytest.mark.parametrize(
+    ("options", "kept"),
+    [(DESCRIBED_IMAGE_JOB, True), (LLM_IMAGE_JOB, False)],
+    ids=["describe", "structured-only"],
+)
+@scenario
+async def test_docling_image_upload_keeps_input_for_llm(options: JobOptions, kept: bool) -> None:
+    """V-S7: an image upload's job with ``describe_images`` that moves on to ``llm`` keeps its
+    input for the description (the llm worker deletes it with the result); without the option
+    it goes with the move, as before."""
+    harness, docling = llm_docling(reply())
+    job_id = await moved_image(harness, options)
+
+    await docling.process_next()
+
+    assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 1
+    stored = await harness.store.get_input(job_id, 0, StoredInputMeta)
+    if not kept:
+        assert stored is None
+        return
+    assert stored is not None
+    body, meta = stored
+    assert body == IMAGE
+    assert meta.content_type == "image/png"
 
 
 @scenario

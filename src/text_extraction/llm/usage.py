@@ -12,3 +12,12 @@ class LlmUsage(BaseModel):
     calls: int
     prompt_tokens: int
     completion_tokens: int
+
+    def plus(self, other: "LlmUsage") -> "LlmUsage":
+        """The usage of both steps: their calls and tokens added, this step's model."""
+        return LlmUsage(
+            model=self.model,
+            calls=self.calls + other.calls,
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+        )

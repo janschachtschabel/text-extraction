@@ -769,3 +769,12 @@ def test_truncate_input_leaves_a_text_that_fits() -> None:
     assert truncate_input("short text", 10) == ("short text", False)
     assert truncate_input("short text", 100) == ("short text", False)
     assert truncate_input("", 5) == ("", False)
+
+
+def test_usage_plus_adds_calls_and_tokens_and_keeps_the_first_model() -> None:
+    first = LlmUsage(model="gpt-6-luna", calls=1, prompt_tokens=11, completion_tokens=5)
+    second = LlmUsage(model="other", calls=2, prompt_tokens=20, completion_tokens=3)
+
+    assert first.plus(second) == LlmUsage(
+        model="gpt-6-luna", calls=3, prompt_tokens=31, completion_tokens=8
+    )
