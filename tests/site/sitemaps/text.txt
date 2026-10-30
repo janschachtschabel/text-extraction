@@ -1,0 +1,6 @@
+https://lernen.example.org/a
+
+  https://lernen.example.org/b
+not a url
+mailto:info@lernen.example.org
+HTTPS://Lernen.Example.ORG:443/c#top

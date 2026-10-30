@@ -1,0 +1,6 @@
+﻿
+<?xml version="1.0" encoding="UTF-8"?>
+<sm:urlset xmlns:sm="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sm:url><sm:loc>https://lernen.example.org/</sm:loc><sm:lastmod>2026-10-01</sm:lastmod></sm:url>
+  <sm:url><sm:loc>https://lernen.example.org/b</sm:loc></sm:url>
+</sm:urlset>

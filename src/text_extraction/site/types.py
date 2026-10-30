@@ -72,6 +72,14 @@ ChangeFreq = Literal["always", "hourly", "daily", "weekly", "monthly", "yearly",
 _CHANGEFREQS: frozenset[str] = frozenset(get_args(ChangeFreq))
 
 
+def _bounded_lastmod(value: object) -> object:
+    """A sitemap's ``lastmod`` as given, stripped; blank or over 64 characters is None."""
+    if isinstance(value, str):
+        value = value.strip()
+        return value if 0 < len(value) <= LASTMOD_MAX_CHARS else None
+    return value
+
+
 class SiteOptions(BaseModel):
     """The crawl options of a ``site`` job, stored as ``JobOptions.site``: the request without
     its URL and its compliance mode (the job's own ``compliance`` holds the resolved mode)."""
@@ -187,10 +195,7 @@ class SitemapEntry(BaseModel):
     @field_validator("lastmod", mode="before")
     @classmethod
     def _bounded_lastmod(cls, value: object) -> object:
-        if isinstance(value, str):
-            value = value.strip()
-            return value if 0 < len(value) <= LASTMOD_MAX_CHARS else None
-        return value
+        return _bounded_lastmod(value)
 
     @field_validator("changefreq", mode="before")
     @classmethod
@@ -207,7 +212,7 @@ class SitemapEntry(BaseModel):
             return None
         try:
             number = float(value)  # float() takes the blanks around a number
-        except ValueError:
+        except (ValueError, OverflowError):  # OverflowError: an int too large for a float
             return None
         return number if math.isfinite(number) and 0 <= number <= 1 else None
 
@@ -225,9 +230,14 @@ class SitemapChild(BaseModel):
     """One sitemap that a sitemap index lists."""
 
     url: str
-    lastmod: str | None = None
+    lastmod: str | None = None  # as given, at most 64 characters (as ``SitemapEntry.lastmod``)
     crawl: Crawl
     target: int | None = None  # the item of the child sitemap, when it has one
+
+    @field_validator("lastmod", mode="before")
+    @classmethod
+    def _bounded_lastmod(cls, value: object) -> object:
+        return _bounded_lastmod(value)
 
 
 class SitemapInfo(BaseModel):

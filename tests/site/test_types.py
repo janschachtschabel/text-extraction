@@ -143,6 +143,21 @@ def test_lastmod_over_64_characters_is_none() -> None:
     assert SitemapEntry.model_validate({"loc": URL, "lastmod": "  "}).lastmod is None
 
 
+def test_huge_int_priority_is_none() -> None:
+    """An int too large for a float raises OverflowError, which pydantic would not catch."""
+    assert SitemapEntry.model_validate({"loc": URL, "priority": 10**400}).priority is None
+
+
+def test_child_lastmod_bounded_like_entry_lastmod() -> None:
+    def child(lastmod: str) -> SitemapChild:
+        return SitemapChild.model_validate({"url": URL, "lastmod": lastmod, "crawl": "listed"})
+
+    assert child("x" * 65).lastmod is None
+    assert child("x" * 64).lastmod == "x" * 64
+    assert child(" 2026-10-30 ").lastmod == "2026-10-30"
+    assert child("  ").lastmod is None
+
+
 def test_node_defaults_and_round_trip() -> None:
     node = SiteNode(role="page", depth=0, parent=None)
 
