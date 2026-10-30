@@ -12,8 +12,8 @@ never the caller's cookies or headers). An image upload's bytes are read from th
 input (``input:{index}``), which the ``Worker`` deletes with the result. It runs from the API
 image: it imports the OpenAI SDK, and no model, NLP or browser library.
 
-**The runner** (``LlmRunner``) leases an item for ``4 * LLM_TIMEOUT_SECONDS + 10`` seconds. For
-each item it:
+**The runner** (``LlmRunner``) leases an item for ``5.5 * LLM_TIMEOUT_SECONDS + 10`` seconds
+(``jobs.llm_lease_seconds``: the longest deadline below plus one timeout). For each item it:
 
 1. reads the item's draft (``JobStore.draft``): the envelope after the DOM stage, the patterns
    and PII. A draft that expired with its job answers ``internal_error``, retryable, without
@@ -27,11 +27,13 @@ each item it:
    deadline of ``3 * LLM_TIMEOUT_SECONDS`` (the SDK retries a call twice, ``LLM_TIMEOUT_SECONDS``
    each). Learned selectors are stored for the job's owner and the page's host
    (``structured.store.SelectorStore``), where the pipeline reads them. The image descriptions
-   (step 0) get half the deadline (``describe_seconds``), so the structured and semantic work
-   keep theirs; the images are fetched in the job's compliance mode. LLM failures are
-   ``llm_failed`` in the result, with its content; the deadline, and no key at all, answer the
-   draft without the LLM work (``finish_post(..., reason="failed")``: ``llm_failed``,
-   retryable), and so does an unexpected error of the post stage (logged by its type only).
+   (step 0) get half that deadline (``describe_seconds``) on top of it, for an item with an image
+   to send, so the structured and semantic work keep the whole deadline (ruling R-V2); the images
+   are fetched in the job's compliance mode. LLM failures are ``llm_failed`` in the result, with
+   its content. The deadline, and an unexpected error of a later step, answer the envelope after
+   step 0 without the rest of the LLM work (``finish_post(..., reason="failed")``:
+   ``llm_failed``, retryable): the descriptions made stay (R-V2). No key at all, and an
+   unexpected error before that, answer the draft so (logged by the error's type only).
 
 Before any client is made, a draft that still owes the PII step is withheld
 (``pii.fields.withheld``: ``pii_failed``; no path hands one over, but the LLM never sees personal
@@ -145,12 +147,14 @@ class LlmRunner:
             selector_runner if selector_runner is not None else create_selector_runner(settings)
         )
         self.lease_seconds = llm_lease_seconds(settings)
-        # The item's overall deadline: three requests to the endpoint (the SDK's retries).
+        # The item's overall deadline: three requests to the endpoint (the SDK's retries); an
+        # item that owes image descriptions gets ``describe_seconds`` on top (ruling R-V2).
         self.deadline_seconds = 3 * settings.llm_timeout_seconds
 
     @property
     def describe_seconds(self) -> float:
-        """The image descriptions' budget: half the item's deadline (ruling V-S12)."""
+        """The image descriptions' budget: half the item's deadline (ruling V-S12), given on
+        top of it (R-V2)."""
         return self.deadline_seconds / 2
 
     async def run(
@@ -205,28 +209,28 @@ class LlmRunner:
         except BaseException:
             await client.aclose()
             raise
+        seconds = self.deadline_seconds
+        if draft.data is not None and needs_vision(draft.data, describe):
+            seconds += self.describe_seconds  # the structured and semantic work keep theirs
         try:
-            async with asyncio.timeout(self.deadline_seconds):
-                return await apply_post(
-                    draft,
-                    structured,
-                    chunking,
-                    settings=self._settings,
-                    llm=client,
-                    store=self._selectors,
-                    owner=job.owner,
-                    threads=self._post_pool,
-                    selectors=self._selector_runner,
-                    describe=describe,
-                    images=self._images,
-                    upload=upload,
-                    mode=job.options.compliance,
-                    describe_seconds=self.describe_seconds,
-                    registry=self._registry,
-                )
-        except TimeoutError:
-            _log.warning("llm_item_deadline", seconds=self.deadline_seconds)
-            return await self._without_llm(draft, structured, job)
+            return await apply_post(
+                draft,
+                structured,
+                chunking,
+                settings=self._settings,
+                llm=client,
+                store=self._selectors,
+                owner=job.owner,
+                threads=self._post_pool,
+                selectors=self._selector_runner,
+                describe=describe,
+                images=self._images,
+                upload=upload,
+                mode=job.options.compliance,
+                describe_seconds=self.describe_seconds,
+                registry=self._registry,
+                deadline=asyncio.get_running_loop().time() + seconds,
+            )
         except Exception as error:
             # The draft is a finished result: it keeps its content (M-b). The type only, no
             # traceback: a message may quote the page.

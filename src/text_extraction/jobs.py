@@ -386,9 +386,11 @@ def pii_lease_seconds(settings: Settings) -> float:
 
 
 def llm_lease_seconds(settings: Settings) -> float:
-    """How long the llm worker holds an item: its overall deadline (three times
-    ``LLM_TIMEOUT_SECONDS``, ruling S14) plus one more timeout and 10 s (ruling S13)."""
-    return 4 * settings.llm_timeout_seconds + 10
+    """How long the llm worker holds an item: its longest overall deadline (three times
+    ``LLM_TIMEOUT_SECONDS``, ruling S14, plus half that for the image descriptions of an item
+    that owes them, R-V2) plus one more timeout and 10 s (ruling S13). The lease is fixed at
+    the claim, so it covers the longest case."""
+    return 5.5 * settings.llm_timeout_seconds + 10
 
 
 def escape_owner(owner: str) -> str:

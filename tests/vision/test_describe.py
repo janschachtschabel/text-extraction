@@ -334,6 +334,53 @@ def test_describe_budget_ends_with_llm_failed(httpserver: HTTPServer) -> None:
     assert report_of(done) == (3, 0, 0, 3)
 
 
+def test_describe_budget_ends_while_fetching_skips_the_rest(httpserver: HTTPServer) -> None:
+    """Ruling R-V5 (final review m3): the budget ends while images are still being fetched (a
+    crawl delay) and no LLM call is outstanding. The LLM did not fail: those images count
+    ``skipped``, with ``image_not_described``, and the status stays ``success``."""
+    serve_llm(httpserver, lambda _body, _n: described(DIAGRAM))
+    images = FakeImages(slow={image_url(1): 5.0, image_url(2): 5.0})
+
+    started = time.monotonic()
+    done = describe_post(httpserver, page_envelope(3), images=images, seconds=0.5)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.5
+    assert done.status == "success", done.error
+    assert done.error is None
+    assert report_of(done) == (3, 1, 2, 0)
+    assert descriptions(done) == [DIAGRAM, None, None]
+    assert IMAGE_NOT_DESCRIBED_WARNING in data_of(done).warnings
+
+
+def test_describe_budget_ends_with_a_call_outstanding_is_llm_failed(
+    httpserver: HTTPServer,
+) -> None:
+    """Ruling R-V5: one image's vision call is still outstanding when the budget ends, another
+    image is still being fetched: V-S11 holds, the images not done count ``failed`` and the
+    step is ``llm_failed``, retryable."""
+    release = threading.Event()
+    answered = threading.Event()
+
+    def slow(_request: Request) -> Response:
+        release.wait(3)
+        answered.set()
+        return Response(json.dumps(described(DIAGRAM)), content_type="application/json")
+
+    httpserver.expect_request("/v1/chat/completions").respond_with_handler(slow)
+    images = FakeImages(slow={image_url(1): 5.0})
+
+    done = describe_post(httpserver, page_envelope(2), images=images, seconds=0.5)
+    release.set()
+    assert answered.wait(5)
+
+    assert done.status == "partial"
+    assert done.error is not None
+    assert (done.error.code, done.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert done.error.message == DESCRIBE_TIMEOUT_MESSAGE
+    assert report_of(done) == (2, 0, 0, 2)
+
+
 def test_null_description_counts_failed(httpserver: HTTPServer) -> None:
     serve_llm(httpserver, lambda _body, n: described(None if n == 0 else "   "))
 

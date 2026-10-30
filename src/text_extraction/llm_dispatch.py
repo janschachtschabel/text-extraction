@@ -73,8 +73,9 @@ did not fit the input budget: nothing was dispatched).
 **The ``llm`` pool's items (the contract of the llm worker, ``llm_worker.py``).**
 
 - Queue: ``llm_queue(valkey, settings)``, pool ``llm``, without the per-domain lease cap (nothing
-  is fetched). Claims are leased for ``jobs.llm_lease_seconds`` (``4 * LLM_TIMEOUT_SECONDS +
-  10``): the item's overall deadline is ``3 * LLM_TIMEOUT_SECONDS``.
+  is fetched). Claims are leased for ``jobs.llm_lease_seconds`` (``5.5 * LLM_TIMEOUT_SECONDS +
+  10``): the item's overall deadline is ``3 * LLM_TIMEOUT_SECONDS``, plus half that for an item
+  that owes image descriptions (ruling R-V2).
 - Job: ``JobStore.get``: its ``options.structured`` and ``options.chunking`` say what to do; its
   owner is the key the learned selectors are stored for.
 - Key: ``JobStore.llm_key``, the caller's ``X-LLM-Api-Key``; without one, ``LLM_API_KEY``.

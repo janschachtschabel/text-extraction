@@ -23,9 +23,12 @@ repair call) with ``VISION_SYSTEM`` and ``vision_text``: the alt text and the im
 * any other ``LlmError`` (401, 403, 404, 429, 5xx, a timeout, no connection) stops the step:
   no image is fetched or sent after it, the images not done count ``failed``, and the post
   stage gets that error (``success`` becomes ``partial``/``llm_failed``);
-* the step's budget (``seconds``, half the llm item's deadline) running out does the same with
-  ``DESCRIBE_TIMEOUT_MESSAGE``, retryable. Each fetch gets ``min(FETCH_TIMEOUT_SECONDS, what is
-  left)``.
+* the step's budget (``seconds``, ``describe_seconds``: half the llm item's deadline, given on
+  top of it) running out while a vision call is outstanding does the same with
+  ``DESCRIBE_TIMEOUT_MESSAGE``, retryable. When it runs out with no vision call outstanding (only
+  fetches, e.g. waiting for a host's ``Crawl-delay``), the images not done count ``skipped``, with
+  the warning, and the step does not fail: the LLM did not (ruling R-V5). Each fetch gets
+  ``min(FETCH_TIMEOUT_SECONDS, what is left)``.
 
 ``DESCRIBE_CONCURRENCY`` images run at once; the results keep the targets' order. A page image's
 description goes on its entry (``metadata.images[i].description``); an upload's is appended to
@@ -39,13 +42,14 @@ message, retryable; a TIFF or BMP upload is ``skipped`` as above.
 Image bytes live only in this step's memory. Nothing here logs or counts by value an image byte,
 URL, alt text, description or prompt: the counter ``text_extraction_vision_images_total`` has the
 outcome as its only label, and logs carry error types. It counts the report of the answer
-that is written (``count_images``, from ``structured.post``), once: a step whose answer is
-replaced by the one without the LLM (a later step raised, the item's deadline) is not counted.
+that is written (``count_images``, from ``structured.post``), once: also when a later step of
+the post stage raised or ran past the item's deadline, whose answer keeps the descriptions
+(ruling R-V2).
 """
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Literal
 from weakref import WeakKeyDictionary
 
@@ -179,8 +183,8 @@ def _counter_for(registry: CollectorRegistry) -> Counter:
 
 def count_images(report: ImageDescriptionReport, registry: CollectorRegistry | None) -> None:
     """Count the images of ``report`` by outcome in ``registry`` (default: the global one).
-    Called once per answer, when it is built (``structured.post``): a step whose answer is
-    replaced (a later step raised, the item's deadline) is not counted twice."""
+    Called once per answer, when it is built (``structured.post``): an answer that a later
+    step's failure or the item's deadline rebuilt counts its images once too."""
     counter = _counter_for(registry if registry is not None else REGISTRY)
     for outcome, count in (
         ("described", report.described),
@@ -229,6 +233,9 @@ class _Step:
     deadline: float
     failure: LlmError | None = None
     usage: LlmUsage | None = None
+    # The targets (by position) whose vision call has started; with no outcome yet, at the
+    # budget's end, a call is outstanding (R-V5).
+    calling: set[int] = field(default_factory=set)
 
     def left(self) -> float:
         return self.deadline - time.monotonic()
@@ -262,7 +269,7 @@ class _Step:
             return ImageSkipped("unsupported")
         return ImageBytes(data=body, media_type=media_type)
 
-    async def describe(self, target: ImageTarget, gate: asyncio.Semaphore) -> _Done:
+    async def describe(self, position: int, target: ImageTarget, gate: asyncio.Semaphore) -> _Done:
         async with gate:
             if self.failure is not None:
                 return _Done("failed")
@@ -271,6 +278,7 @@ class _Step:
                 return _Done("skipped")
             if self.failure is not None:
                 return _Done("failed")
+            self.calling.add(position)
             try:
                 description, usage = await self.llm.describe_image(
                     VISION_SYSTEM,
@@ -316,8 +324,9 @@ async def describe_result(
     gate = asyncio.Semaphore(DESCRIBE_CONCURRENCY)
 
     async def one(position: int, target: ImageTarget) -> None:
-        done[position] = await step.describe(target, gate)
+        done[position] = await step.describe(position, target, gate)
 
+    unfinished: _Outcome = "failed"
     try:
         async with asyncio.timeout(seconds):
             async with asyncio.TaskGroup() as group:
@@ -325,9 +334,12 @@ async def describe_result(
                     group.create_task(one(position, target))
     except TimeoutError:
         _log.warning("image_descriptions_timed_out", seconds=seconds)
-        if step.failure is None:
+        outstanding = any(done[position] is None for position in step.calling)
+        if step.failure is None and outstanding:
             step.failure = LlmError(DESCRIBE_TIMEOUT_MESSAGE, retryable=True)
-    outcomes = [item if item is not None else _Done("failed") for item in done]
+        if step.failure is None:  # only fetches were cut: the LLM did not fail (R-V5)
+            unfinished = "skipped"
+    outcomes = [item if item is not None else _Done(unfinished) for item in done]
     llm_ms = round((time.monotonic() - started) * 1000)
     return _outcome(data, targets, outcomes, step.failure, step.usage, llm_ms)
 

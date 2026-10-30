@@ -353,11 +353,16 @@ def test_runner_unexpected_error_keeps_the_content(
 
 
 def test_runner_lease_covers_its_deadline(httpserver: HTTPServer) -> None:
+    """Ruling R-V2: an item that owes descriptions gets ``describe_seconds`` on top of its
+    deadline; the lease (fixed at the claim) covers that longest case plus one more timeout."""
     settings = settings_for(httpserver, llm_timeout_seconds=100)
     runner = Case(settings).runner
 
-    assert runner.lease_seconds == llm_lease_seconds(settings) == 410
+    assert runner.lease_seconds == llm_lease_seconds(settings) == 560
     assert runner.deadline_seconds == 300
+    assert runner.describe_seconds == 150
+    longest = runner.deadline_seconds + runner.describe_seconds
+    assert runner.lease_seconds >= longest + settings.llm_timeout_seconds + 10
 
 
 # --- image descriptions ---
@@ -495,11 +500,13 @@ def test_runner_without_llm_counts_images_in_its_registry(httpserver: HTTPServer
     assert vision_counts(case.registry) == (0, 0, 2)
 
 
-def test_images_counted_once_when_a_later_step_raises(
+def test_descriptions_survive_a_later_step_that_raises(
     httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The descriptions ran, then the structured step raised: the answer is the draft without
-    the LLM work, and its images count once, as that answer reports them."""
+    """Ruling R-V2: the descriptions ran, then the structured step raised. The answer is built
+    from the envelope after the descriptions: they stay, the structured work is ``llm_failed``,
+    retryable, and the images count once, as that answer reports them. The log has the type
+    only."""
 
     async def broken(*_args: Any, **_kwargs: Any) -> None:
         raise KeyError("a page quote")
@@ -508,14 +515,84 @@ def test_images_counted_once_when_a_later_step_raises(
     serve_llm(httpserver, lambda _body, _n: described(PICTURE))
     case = Case(settings_for(httpserver), images=FakeImages())
 
-    result = asyncio.run(case.run(draft=page_envelope(2), describe=DESCRIBE))
+    with capture_logs() as logs:
+        result = asyncio.run(case.run(draft=page_envelope(2), describe=DESCRIBE))
 
     assert result.status == "partial"
+    assert result.error is not None
+    assert (result.error.code, result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert result.error.message == NOT_RUN_MESSAGE
     assert result.data is not None
     assert result.data.image_descriptions is not None
-    assert result.data.image_descriptions.failed == 2
+    assert result.data.image_descriptions.described == 2
+    assert result.data.metadata is not None
+    assert [image.description for image in result.data.metadata.images] == [PICTURE, PICTURE]
+    assert result.data.structured is not None
+    assert result.data.structured.missing == ["price"]
     assert len(vision_requests(httpserver)) == 2
-    assert vision_counts(case.registry) == (0, 0, 2)
+    assert vision_counts(case.registry) == (2, 0, 0)
+    [line] = [entry for entry in logs if entry["event"] == "llm_post_failed"]
+    assert line["error_type"] == "KeyError"
+    assert "page quote" not in json.dumps(logs, default=str)
+
+
+def test_descriptions_survive_the_deadline_of_a_later_step(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R-V2 (final review I1): the descriptions are done, then the structured call hangs
+    past the item's deadline. The answer keeps the descriptions; only the structured work is
+    ``llm_failed``, retryable."""
+
+    async def hangs(*_args: Any, **_kwargs: Any) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(post_module, "_extract", hangs)
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE))
+    case = Case(settings_for(httpserver), images=FakeImages())
+    case.runner.deadline_seconds = 0.4
+
+    started = time.monotonic()
+    result = asyncio.run(case.run(draft=page_envelope(2), describe=DESCRIBE))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 3
+    assert result.status == "partial"
+    assert result.error is not None
+    assert (result.error.code, result.error.retryable) == (ErrorCode.LLM_FAILED, True)
+    assert result.error.message == NOT_RUN_MESSAGE
+    assert result.data is not None
+    assert result.data.image_descriptions is not None
+    assert result.data.image_descriptions.described == 2
+    assert result.data.metadata is not None
+    assert [image.description for image in result.data.metadata.images] == [PICTURE, PICTURE]
+    assert vision_counts(case.registry) == (2, 0, 0)
+
+
+def test_structured_keeps_its_whole_deadline_after_descriptions(
+    httpserver: HTTPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R-V2: an item that owes descriptions gets ``describe_seconds`` on top of its
+    deadline, so slow descriptions do not eat the structured work's time."""
+    original = post_module._extract
+
+    async def slow(*args: Any, **kwargs: Any) -> None:
+        await asyncio.sleep(0.7)
+        await original(*args, **kwargs)
+
+    monkeypatch.setattr(post_module, "_extract", slow)
+    serve_llm(httpserver, lambda _body, _n: described(PICTURE), extraction=answer({"price": 19.99}))
+    images = FakeImages(slow={image_url(0): 0.4})
+    case = Case(settings_for(httpserver), images=images)
+    case.runner.deadline_seconds = 1.0  # describe_seconds 0.5: 1.5 s in all
+
+    result = asyncio.run(case.run(draft=page_envelope(1), describe=DESCRIBE))
+
+    assert result.status == "success", result.error
+    assert result.data is not None
+    assert result.data.image_descriptions is not None
+    assert result.data.image_descriptions.described == 1
+    assert result.data.structured is not None
+    assert result.data.structured.values == {"price": 19.99}
 
 
 def test_runner_answers_a_described_draft_as_it_is(httpserver: HTTPServer) -> None:

@@ -70,6 +70,7 @@ LLM's time is added to ``timings.llm_ms``. Nothing here logs the content, a valu
 selector, a key, an image, its URL or its description.
 """
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import aclosing
@@ -585,10 +586,13 @@ class _Post:
 
     # 6. the answer
     def finished(self) -> Envelope[ExtractResult]:
-        """The answer; called once per work. Step 0's images are counted here, with the answer
-        that is written, so a work given up after step 0 (a later step raised) counts none."""
+        """The answer, with step 0's images counted (once: call it once per work)."""
         if self.images is not None and self.images.asked:
             count_images(self.images, self.registry)
+        return self.answer()
+
+    def answer(self) -> Envelope[ExtractResult]:
+        """The answer, nothing counted."""
         update: dict[str, Any] = {}
         if self.result is not None:
             update["structured"] = self._checked_result(self.result)
@@ -789,6 +793,7 @@ async def apply_post(
     mode: ComplianceMode = "enforce",
     describe_seconds: float | None = None,
     registry: CollectorRegistry | None = None,
+    deadline: float | None = None,
 ) -> Envelope[ExtractResult]:
     """The post stage with the LLM client ``llm`` (see the module docstring); without one it is
     ``finish_post``. ``store`` and ``owner`` (the API key's name) keep the learned selectors;
@@ -800,7 +805,12 @@ async def apply_post(
     Step 0, with ``describe``: ``images`` fetches the page images in the job's compliance
     ``mode``, ``upload`` holds an image upload's bytes (None: gone), ``describe_seconds`` is the
     step's budget (default: ``1.5 * LLM_TIMEOUT_SECONDS``, half the llm item's deadline) and
-    ``registry`` gets its counter (default: the global one)."""
+    ``registry`` gets its counter (default: the global one).
+
+    Steps 1-6 run until ``deadline`` (``loop.time()``; None: no limit). When it passes, or one
+    of them raises, the answer is ``finish_post(..., reason="failed")`` of the envelope after
+    step 0: the descriptions made stay, the rest of the LLM work is ``llm_failed``, retryable
+    (ruling R-V2). Logged by the error's type only."""
     data = envelope.data
     if data is None or post_done(envelope, structured, chunking, describe=describe):
         return envelope
@@ -811,13 +821,13 @@ async def apply_post(
             structured,
             chunking,
         )
-    work = _Post.start(envelope, data, structured, chunking, settings, describe, registry)
-    if describe is not None and work.owes_descriptions():
+    report: ImageDescriptionReport | None = None
+    if describe is not None and describe_owed(data, describe):
         seconds = describe_seconds
         if seconds is None:
             seconds = 1.5 * settings.llm_timeout_seconds
         outcome = await describe_result(
-            work.data,
+            data,
             describe,
             llm=llm,
             images=images,
@@ -826,7 +836,40 @@ async def apply_post(
             settings=settings,
             seconds=seconds,
         )
-        work.described(outcome)
+        step = _Post.start(envelope, data, None, None, settings)
+        step.described(outcome)
+        # What the later steps start from, and their fallback (R-V2).
+        envelope, report = step.answer(), outcome.report
+        data = envelope.data if envelope.data is not None else outcome.data
+    work = _Post.start(envelope, data, structured, chunking, settings, describe, registry)
+    try:
+        async with asyncio.timeout_at(deadline):
+            answer = await _later_steps(
+                work, llm, store, owner, threads=threads, selectors=selectors
+            )
+    except TimeoutError:
+        _log.warning("llm_item_deadline")
+        answer = await _without_later_steps(work, envelope, threads)
+    except Exception as error:
+        # The type only, no traceback: a message may quote the page.
+        _log.error("llm_post_failed", error_type=type(error).__name__)
+        answer = await _without_later_steps(work, envelope, threads)
+    if report is not None and report.asked:
+        count_images(report, registry)  # once, with the answer that is written
+    return answer
+
+
+async def _later_steps(
+    work: _Post,
+    llm: "LlmClient",
+    store: SelectorStore | None,
+    owner: str,
+    *,
+    threads: ConversionPool,
+    selectors: SelectorRunner,
+) -> Envelope[ExtractResult]:
+    """Steps 1-6 of ``apply_post``: its answer, nothing counted."""
+    structured = work.options
     if work.result is not None and structured is not None:
         await threads.run(work.run_patterns)
         await _extract(work, llm, structured)
@@ -835,7 +878,26 @@ async def apply_post(
         await threads.run(work.tables)
     if work.wants_chunks():
         await _chunk(work, llm, threads)
-    return await threads.run(work.finished)
+    return await threads.run(work.answer)
+
+
+async def _without_later_steps(
+    work: _Post, envelope: Envelope[ExtractResult], threads: ConversionPool
+) -> Envelope[ExtractResult]:
+    """The answer of ``apply_post`` when steps 1-6 of ``work`` did not finish: ``envelope``
+    (after step 0) without the LLM work, ``llm_failed``, retryable."""
+    return await threads.run(
+        partial(
+            finish_post,
+            settings=work.settings,
+            reason="failed",
+            describe=work.describe,
+            registry=work.registry,
+        ),
+        envelope,
+        work.options,
+        work.chunking,
+    )
 
 
 async def _extract(work: _Post, llm: "LlmClient", structured: StructuredOptions) -> None:
