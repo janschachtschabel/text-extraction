@@ -28,7 +28,7 @@
 - `POST /v1/site-structure` always answers 202 with a job (or 4xx/503); it never crawls inline.
 - Not in this package: browser rendering of crawl pages (D3), page content (D5), registrable-domain scope (D6), sitemap extensions (`image:`, `video:`, `news:`, `xhtml:link` alternates), an MCP tool (package 10).
 
-## Decisions of Jan (2026-10-30: cards posted; until answered the recommended options apply)
+## Decisions of Jan (2026-10-30: recommended options confirmed)
 
 Plan approved by Jan on 2026-10-30 at 11:29 UTC ("ich gebe es frei"). On 2026-10-30 at 12:07 UTC Jan confirmed the recommended options for D1-D6 ("ja weiter wie empfohlen"), so option (a) is decided for each.
 
