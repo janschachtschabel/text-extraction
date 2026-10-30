@@ -401,6 +401,42 @@ def test_graceful_shutdown_answers_a_pii_wait_with_its_job_at_once() -> None:
     assert service.outcomes() == {"handed_over": 1}
 
 
+def test_graceful_shutdown_answers_an_upload_pii_wait_with_its_job_at_once() -> None:
+    """Review M4: the cut on ``POST /v1/extract/file``, which shares the route's wait: an upload
+    waiting for its nlp job answers 202 (kind ``file``) once the graceful shutdown begins."""
+    service = PiiService()
+    text = f"{PARAGRAPH * 3}\n\nWritten by {NAME}, write to {EMAIL} with questions.\n"
+    with TestClient(service.app) as client:
+        response = answer_in_thread(
+            lambda: client.post(
+                "/v1/extract/file",
+                files={"file": ("notes.txt", text.encode(), "text/plain")},
+                data={"pii": "mask", "wait_seconds": "60"},
+                headers=AUTH,
+            )
+        )
+        deadline = time.monotonic() + 10
+        while not service.stored("job:*") and time.monotonic() < deadline:
+            time.sleep(0.02)  # the upload now waits for its nlp job
+        assert response(0.3) is None
+        began = time.monotonic()
+        begin_shutdown(client)
+        answered = response(10)
+        took = time.monotonic() - began
+
+        assert answered is not None
+        assert answered.status_code == 202, answered.text
+        assert took < 3
+        accepted = answered.json()["data"]
+        assert (accepted["kind"], accepted["total"]) == ("file", 1)
+        with service.nlp():
+            final = service.wait_for_job(client, accepted["id"])
+        assert final["data"]["state"] == "completed"
+        assert_processed(final["data"]["items"][0]["result"]["data"])
+        service.wait_for_idle()
+    assert service.outcomes() == {"handed_over": 1}
+
+
 def test_graceful_shutdown_leaves_a_request_without_a_pool_wait_alone() -> None:
     """Before the PII step nothing changes: a request whose fast phase is still running when the
     shutdown begins answers 202 once its PII wait starts (then at once)."""
