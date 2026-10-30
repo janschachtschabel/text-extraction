@@ -7,8 +7,13 @@ the caller is checked where the request is handled, by the extract, file and bat
   expression such as ``//*//*//*`` runs for minutes on a large page (rule 5: no evaluation of
   caller code unless the caller is admin). Other keys use CSS.
 * A CSS rule of a non-admin key may use ``:has(`` at most once, which bounds the nesting of
-  relational selectors. A selector the LLM proposes for ``learn_selectors`` keeps to the same
-  limit (``css_within_limits``), since a learned rule later runs for that key.
+  relational selectors, and no backslash: a CSS escape could spell ``:has(`` past the count
+  (``:h\\61 s(``). A selector the LLM proposes for ``learn_selectors`` keeps to the same limits
+  (``css_within_limits``), since a learned rule later runs for that key.
+
+These are policy: what bounds a rule's cost is the selector pool's per-run deadline
+(``selector_pool``, ruling R19), since soupsieve has no budget of its own. ``positional`` tells a
+rule whose match depends on sibling positions (``learn_selectors`` rejects those, M-d).
 
 The messages never repeat a selector.
 
@@ -33,12 +38,21 @@ from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.pii.types import PiiOptions
 from text_extraction.settings import Settings, llm_available
-from text_extraction.structured.types import StructuredOptions
+from text_extraction.structured.types import SelectorRule, StructuredOptions
 
 XPATH_NEEDS_ADMIN_MESSAGE = "XPath selectors need an admin key; use CSS."
 HAS_LIMIT_MESSAGE = "A CSS selector may use :has() at most once without an admin key."
+BACKSLASH_MESSAGE = "A CSS selector may not use backslash escapes without an admin key."
 MAX_HAS = 1
 _HAS = re.compile(r":has\s*\(", re.IGNORECASE)
+# Positional rules (M-d): CSS pseudo-classes by sibling position and the sibling combinators,
+# looked for outside attribute selectors and strings; XPath position predicates and sibling axes.
+_CSS_QUOTED = re.compile(r"\[[^\]]*\]|\"[^\"]*\"|'[^']*'")
+_CSS_POSITIONAL = re.compile(r":(?:nth-|first-|last-|only-)|[+~]", re.IGNORECASE)
+_XPATH_QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")
+_XPATH_POSITIONAL = re.compile(
+    r"\b(?:position|last)\s*\(|\[\s*\d+\s*\]|\b(?:following|preceding)-sibling\s*::"
+)
 
 LLM_KEY_HEADER: Final = "X-LLM-Api-Key"
 _LLM_KEY: Final = re.compile(r"[\x21-\x7e]{1,1024}", re.ASCII)
@@ -54,19 +68,31 @@ _PII_RAW_MESSAGE: Final = "{what} reads the raw page and cannot be combined with
 
 
 def css_within_limits(css: str) -> bool:
-    """Whether a CSS selector keeps to the limits of a non-admin key: ``:has(`` at most
-    ``MAX_HAS`` times."""
-    return len(_HAS.findall(css)) <= MAX_HAS
+    """Whether a CSS selector keeps to the limits of a non-admin key: no backslash, and
+    ``:has(`` at most ``MAX_HAS`` times."""
+    return "\\" not in css and len(_HAS.findall(css)) <= MAX_HAS
+
+
+def positional(rule: SelectorRule) -> bool:
+    """Whether the rule's match depends on sibling positions: ``:nth-*``, ``:first-*``,
+    ``:last-*``, ``:only-*`` or a sibling combinator (``+``, ``~``) in CSS; ``position()``,
+    ``last()``, a number predicate (``[2]``) or a sibling axis in XPath."""
+    if rule.css is not None:
+        return _CSS_POSITIONAL.search(_CSS_QUOTED.sub("", rule.css)) is not None
+    xpath = _XPATH_QUOTED.sub("", rule.xpath or "")
+    return _XPATH_POSITIONAL.search(xpath) is not None
 
 
 def check_selector_access(structured: StructuredOptions | None, principal: Principal) -> None:
-    """422 ``invalid_request`` for a non-admin key's XPath rule or a CSS rule with more than
-    one ``:has(``."""
+    """422 ``invalid_request`` for a non-admin key's XPath rule, or a CSS rule with a backslash
+    or more than one ``:has(``."""
     if structured is None or principal.role == "admin":
         return
     for rule in structured.selectors.values():
         if rule.xpath is not None:
             raise ServiceError(ErrorCode.INVALID_REQUEST, XPATH_NEEDS_ADMIN_MESSAGE, 422)
+        if rule.css is not None and "\\" in rule.css:
+            raise ServiceError(ErrorCode.INVALID_REQUEST, BACKSLASH_MESSAGE, 422)
         if rule.css is not None and not css_within_limits(rule.css):
             raise ServiceError(ErrorCode.INVALID_REQUEST, HAS_LIMIT_MESSAGE, 422)
 

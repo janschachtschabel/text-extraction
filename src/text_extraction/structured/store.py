@@ -26,6 +26,7 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, WatchError
 
+from text_extraction.jobs import escape_owner
 from text_extraction.structured.types import SelectorRule
 
 _log = structlog.get_logger(__name__)
@@ -39,7 +40,9 @@ class LearnedSelectorsUnavailableError(Exception):
 
 
 def selector_key(owner: str, host: str, schema_id: str) -> str:
-    return f"sel:{{{owner}}}:{host.lower()}:{schema_id}"
+    """``sel:{<owner>}:<host>:<schema_id>``; the owner is escaped as in the job keys
+    (``jobs.escape_owner``), so a name cannot break the hash tag."""
+    return f"sel:{{{escape_owner(owner)}}}:{host.lower()}:{schema_id}"
 
 
 def selector_host(url: str) -> str | None:

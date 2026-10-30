@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Final
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from text_extraction.llm.usage import LlmUsage
-from text_extraction.structured.checks import css_within_limits
+from text_extraction.structured.checks import css_within_limits, positional
 from text_extraction.structured.dom import RulePage
 from text_extraction.structured.prompts import LEARN_SYSTEM, learn_message
 from text_extraction.structured.schema import CompiledSchema
@@ -86,12 +86,16 @@ def _normal(value: Any) -> Any:
 
 
 def _rule(proposal: _Proposal | None) -> SelectorRule | None:
+    """The proposal as a rule; None for one that is invalid, over a non-admin key's limits or
+    positional (M-d: ``learn_html`` lacks the scripts, styles, SVG and comments of the page,
+    so sibling positions there are not the page's)."""
     if proposal is None or not css_within_limits(proposal.css):
         return None
     try:
-        return SelectorRule(css=proposal.css, attr=proposal.attr)
+        rule = SelectorRule(css=proposal.css, attr=proposal.attr)
     except ValidationError:
         return None
+    return None if positional(rule) else rule
 
 
 def _open(html: str, base_url: str) -> RulePage | None:

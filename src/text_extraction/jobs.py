@@ -389,12 +389,18 @@ def llm_lease_seconds(settings: Settings) -> float:
     return 4 * settings.llm_timeout_seconds + 10
 
 
-def owner_key(owner: str, name: str) -> str:
-    """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
-    escaped, so a name cannot break the hash tag."""
+def escape_owner(owner: str) -> str:
+    """An owner's name for a key's hash tag: ``%``, ``{`` and ``}`` percent-escaped, so a name
+    cannot break the hash tag or look like another name."""
     for char, code in _OWNER_ESCAPES.items():
         owner = owner.replace(char, code)
-    return f"jobs:{{owner:{owner}}}:{name}"
+    return owner
+
+
+def owner_key(owner: str, name: str) -> str:
+    """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the owner is escaped
+    (``escape_owner``), so a name cannot break the hash tag."""
+    return f"jobs:{{owner:{escape_owner(owner)}}}:{name}"
 
 
 def _key(job_id: str, kind: str) -> str:

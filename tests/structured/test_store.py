@@ -25,6 +25,7 @@ from text_extraction.structured.store import (
     LearnedSelectorsUnavailableError,
     SelectorStore,
     selector_host,
+    selector_key,
 )
 from text_extraction.structured.types import SelectorRule, StructuredOptions
 
@@ -143,3 +144,11 @@ def test_store_error_on_get_is_warning() -> None:
     plain = asyncio.run(pipeline.run(ExtractRequest(url=PAGE, cache=False), user))
     assert plain.data is not None
     assert LEARNED_SELECTORS_UNAVAILABLE_WARNING not in plain.data.warnings
+
+
+def test_selector_key_escapes_the_owner_like_job_owner_keys() -> None:
+    """M-f: the owner's braces (and the escape character) are escaped as in
+    ``jobs.owner_key``, so an owner name cannot break the cluster hash tag."""
+    assert selector_key("alice", "Example.org", "abc") == "sel:{alice}:example.org:abc"
+    assert selector_key("a}b{c%", "example.org", "abc") == "sel:{a%7Db%7Bc%25}:example.org:abc"
+    assert selector_key("a}x", "h", "s") != selector_key("a", "x}h", "s")

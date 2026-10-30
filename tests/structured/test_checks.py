@@ -11,6 +11,7 @@ from text_extraction.errors import ServiceError
 from text_extraction.pii.types import PiiOptions
 from text_extraction.settings import Settings
 from text_extraction.structured.checks import (
+    BACKSLASH_MESSAGE,
     HAS_LIMIT_MESSAGE,
     LLM_DISABLED_MESSAGE,
     LLM_KEY_HEADER,
@@ -20,9 +21,10 @@ from text_extraction.structured.checks import (
     check_selector_access,
     check_structured_request,
     llm_key_of,
+    positional,
     wants_llm,
 )
-from text_extraction.structured.types import StructuredOptions
+from text_extraction.structured.types import SelectorRule, StructuredOptions
 
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 ADMIN = Principal(name="root", role="admin", rate_limit_per_minute=None)
@@ -39,6 +41,9 @@ def options(rule: dict[str, Any]) -> StructuredOptions:
         ({"xpath": "//h1"}, XPATH_NEEDS_ADMIN_MESSAGE),
         ({"css": "div:has(p):has(a)"}, HAS_LIMIT_MESSAGE),
         ({"css": "div:HAS(p) span:has(a)"}, HAS_LIMIT_MESSAGE),
+        # N4.1: an escape spells `:has(` past the count, so a user's CSS has no backslash.
+        ({"css": r"div:h\61 s(a):has(b)"}, BACKSLASH_MESSAGE),
+        ({"css": r"h\31"}, BACKSLASH_MESSAGE),
     ],
 )
 def test_selector_access_refused_for_users(rule: dict[str, Any], message: str) -> None:
@@ -48,6 +53,7 @@ def test_selector_access_refused_for_users(rule: dict[str, Any], message: str) -
     assert raised.value.code == ErrorCode.INVALID_REQUEST
     assert str(raised.value) == message
     assert "h1" not in str(raised.value)  # never the selector
+    assert "61" not in str(raised.value)
 
     check_selector_access(options(rule), ADMIN)  # admins may
 
@@ -283,3 +289,48 @@ def test_wants_llm() -> None:
     assert not wants_llm(None, None, on)
     for options in (structured(strategy="llm"), structured(), None):
         assert not wants_llm(options, semantic, off)
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"css": "ul li:nth-child(2)"},
+        {"css": "ul li:NTH-OF-TYPE(1)"},
+        {"css": "li:nth-last-child(1)"},
+        {"css": "li:nth-last-of-type(1)"},
+        {"css": "li:first-child"},
+        {"css": "li:first-of-type"},
+        {"css": "li:last-child"},
+        {"css": "li:last-of-type"},
+        {"css": "li:only-child"},
+        {"css": "li:only-of-type"},
+        {"css": "h1 + span"},
+        {"css": "h1~span"},
+        {"xpath": "//li[position() = 2]"},
+        {"xpath": "//li[2]"},
+        {"xpath": "(//li)[ 1 ]"},
+        {"xpath": "//li[last()]"},
+        {"xpath": "//h1/following-sibling::span"},
+        {"xpath": "//h1/preceding-sibling::span"},
+    ],
+)
+def test_positional_rules(rule: dict[str, Any]) -> None:
+    """M-d: rules whose match depends on sibling positions, which the cleaned learn_html shifts
+    (scripts, styles, SVG and comments removed)."""
+    assert positional(SelectorRule.model_validate(rule))
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"css": "h1.title"},
+        {"css": "a[href~='x'] span"},  # `~=` is an attribute operator, not a combinator
+        {"css": "a[title='a + b']"},
+        {"css": "div > p span"},
+        {"css": "div:has(> p)"},
+        {"xpath": "//h1[@class='title']"},
+        {"xpath": "//a[contains(@title, '[2]')]"},
+    ],
+)
+def test_not_positional_rules(rule: dict[str, Any]) -> None:
+    assert not positional(SelectorRule.model_validate(rule))

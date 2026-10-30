@@ -152,6 +152,36 @@ def test_learn_rejects_bad_proposals_without_a_repair_call(httpserver: HTTPServe
     assert len(chat_requests(httpserver)) == 1
 
 
+def test_learn_rejects_positional_proposals(httpserver: HTTPServer) -> None:
+    """M-d: learned rules are checked on the cleaned HTML, where sibling positions differ from
+    the real page (scripts, styles, SVG and comments are gone): positional pseudo-classes and
+    sibling combinators are rejected even when they reproduce the value."""
+    serve_chat(
+        httpserver,
+        answer(
+            {
+                "name": {"css": "body > h1:first-child", "attr": None},
+                "price": {"css": "p.intro + span", "attr": "content"},
+                "colors": {"css": "ul.colors li:nth-child(1)", "attr": None},
+                "details": {"css": "span.other ~ a", "attr": "href"},
+            }
+        ),
+    )
+
+    rules, report, _ = run_learn(
+        httpserver,
+        {
+            "name": "Blue Kettle",
+            "price": 19.99,
+            "colors": ["Blue"],
+            "details": "https://shop.example.org/item/1/details",
+        },
+    )
+
+    assert rules == {}
+    assert report == LearnReport(stored=[], rejected=["name", "price", "colors", "details"])
+
+
 def test_learn_without_values_makes_no_call(httpserver: HTTPServer) -> None:
     rules, report, usage = run_learn(httpserver, {"name": None})
 
