@@ -16,6 +16,7 @@ most 200 characters (read no further than that), at most 8 ``rel`` tokens, and a
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from typing import cast
 from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -73,13 +74,14 @@ def site_links(
     links: list[SiteLink] = []
     truncated = False
     for tag in _link_elements(soup):
-        source: LinkSource = tag.name  # type: ignore[assignment]  # one of _URL_ATTRIBUTES
+        source = cast(LinkSource, tag.name)  # one of _URL_ATTRIBUTES
         href = attr(tag, _URL_ATTRIBUTES[source]).strip()
         if not href or href.startswith("#"):
             continue
-        rel = _rel_tokens(tag)
-        if source == "link" and (not _LINK_RELS.intersection(rel) or "stylesheet" in rel):
+        tokens = _rel_tokens(tag)
+        if source == "link" and (not _LINK_RELS.intersection(tokens) or "stylesheet" in tokens):
             continue
+        rel = _bounded_rel(tokens)
         url = _absolute(base, href)
         if url is None or (url, source) in seen:
             continue
@@ -123,14 +125,20 @@ def _kind(url: str, page_host: str) -> LinkKind:
 
 
 def _rel_tokens(tag: Tag) -> list[str]:
-    """``rel`` in lower case, each token once, in order; at most ``MAX_REL_TOKENS``."""
-    tokens: list[str] = []
-    for token in attr(tag, "rel").lower().split():
-        if len(token) <= _TOKEN_MAX_CHARS and token not in tokens:
-            tokens.append(token)
-            if len(tokens) == MAX_REL_TOKENS:
+    """All of ``rel`` in lower case (the ``<link>`` filter reads every token)."""
+    return attr(tag, "rel").lower().split()
+
+
+def _bounded_rel(tokens: list[str]) -> list[str]:
+    """Each token once, in order, tokens over 64 characters dropped; at most
+    ``MAX_REL_TOKENS``."""
+    kept: list[str] = []
+    for token in tokens:
+        if len(token) <= _TOKEN_MAX_CHARS and token not in kept:
+            kept.append(token)
+            if len(kept) == MAX_REL_TOKENS:
                 break
-    return tokens
+    return kept
 
 
 def _hreflang(tag: Tag) -> str | None:
@@ -228,9 +236,14 @@ def _link_region(tag: Tag, rel: list[str], contexts: dict[int, _Context]) -> Lin
 
 def _nofollow(soup: BeautifulSoup, headers: Mapping[str, str]) -> bool:
     """``nofollow`` or ``none`` in a ``<meta name="robots">`` or ``<meta name="text-extraction">``
-    or in an ``X-Robots-Tag`` for everyone or this service."""
+    of the head (as compliance reads metas: one in the body may be a visitor's content) or in an
+    ``X-Robots-Tag`` for everyone or this service."""
     for name, value in headers.items():
         if name.lower() == "x-robots-tag" and x_robots_tag_says(value, _NOFOLLOW):
             return True
-    metas = ((attr(meta, "name").strip().lower(), attr(meta, "content")) for meta in soup("meta"))
+    if soup.head is None:
+        return False
+    metas = (
+        (attr(meta, "name").strip().lower(), attr(meta, "content")) for meta in soup.head("meta")
+    )
     return robots_metas_say(metas, _NOFOLLOW)

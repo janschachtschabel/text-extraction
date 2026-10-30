@@ -2,6 +2,7 @@
 
 import pytest
 
+from text_extraction.site import urls as urls_module
 from text_extraction.site.types import SiteScope
 from text_extraction.site.urls import in_scope, normalize_url, scope_for, seen_key, site_host
 
@@ -84,6 +85,25 @@ def test_site_host_trailing_dot_and_unencodable_label() -> None:
     long_label = "ü" * 70  # over 63 characters: no punycode form, kept as given
     assert site_host(f"https://{long_label}.example/") == f"{long_label}.example"
     assert site_host("https://[2001:db8::1]/") == "2001:db8::1"
+
+
+def test_site_host_skips_the_encode_of_hosts_without_an_ascii_form(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def idna(host: str) -> str:
+        calls.append(host)
+        return host
+
+    monkeypatch.setattr(urls_module, "_idna", idna)
+    long_label = "ü" * 64
+    long_host = ".".join(["ü" * 50] * 6)  # 305 characters, every label short
+
+    assert site_host(f"https://{long_label}.example/") == f"{long_label}.example"
+    assert site_host(f"https://{long_host}/") == long_host
+    assert seen_key(f"https://{long_label}.example/a") == f"{long_label}.example/a"
+    assert calls == []
 
 
 def test_scope_matches_idn_and_trailing_dot_forms() -> None:

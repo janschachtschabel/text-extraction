@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 
 from text_extraction.convert.links import page_links
+from text_extraction.site import links as links_module
+from text_extraction.site import urls as urls_module
 from text_extraction.site.links import PageLinks, site_links
 from text_extraction.site.types import SiteLink
 
@@ -143,6 +145,17 @@ def test_rel_tokens_lowercase_max_8() -> None:
     assert by_url(fixture_links().links)[f"{ORIGIN}/impressum"].rel == []
 
 
+def test_link_rel_filter_reads_every_token() -> None:
+    head = (
+        '<link rel="a b c d e f g h canonical" href="/canon">'
+        '<link rel="alternate a b c d e f g stylesheet" href="/dark.css">'
+    )
+    html = f"<html><head>{head}</head><body></body></html>"
+
+    (link,) = site_links(html, BASE, {}, max_links=10).links
+    assert (link.url, link.rel) == (f"{ORIGIN}/canon", ["a", "b", "c", "d", "e", "f", "g", "h"])
+
+
 def test_rel_and_hreflang_are_bounded() -> None:
     long = "x" * 65
     (link,) = links_of(f'<a href="/x" rel="{long} next" hreflang="{long}">x</a>')
@@ -159,6 +172,7 @@ def test_rel_and_hreflang_are_bounded() -> None:
         ('<meta name="text-extraction" content="nofollow">', {}, True),
         ('<meta name="googlebot" content="nofollow">', {}, False),
         ('<meta name="robots" content="noindex">', {}, False),
+        ('</head><body><p>x</p><meta name="robots" content="nofollow">', {}, False),
         ("", {"x-robots-tag": "text-extraction: none"}, True),
         ("", {"X-Robots-Tag": "noindex, nofollow"}, True),
         ("", {"x-robots-tag": "otherbot: nofollow"}, False),
@@ -173,8 +187,23 @@ def test_meta_and_header_nofollow(head: str, headers: dict[str, str], nofollow: 
     assert site_links(html, BASE, headers, max_links=10).nofollow is nofollow
 
 
-def test_link_caps_and_cuts() -> None:
-    """Review Focus 5: a huge page stays bounded and fast."""
+def counting(monkeypatch: pytest.MonkeyPatch, module: object, name: str) -> list[int]:
+    """Count the calls of ``module.name`` (a work measure, not a clock)."""
+    calls = [0]
+    original = getattr(module, name)
+
+    def wrapper(*args: object, **kwargs: object) -> object:
+        calls[0] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, name, wrapper)
+    return calls
+
+
+def test_link_caps_and_cuts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review Focus 5: a huge page is read no further than the cap, its texts no further than
+    the cut."""
+    resolved = counting(monkeypatch, links_module, "_absolute")
     many = "".join(f'<a href="/p{i}">Seite {i}</a>' for i in range(50_000))
     huge_text = "Lernen " * 150_000  # 1 MB
     long_href = "/" + "a" * 10_000
@@ -185,7 +214,7 @@ def test_link_caps_and_cuts() -> None:
 
     started = time.perf_counter()
     result = site_links(html, BASE, {}, max_links=1000)
-    elapsed = time.perf_counter() - started
+    assert time.perf_counter() - started < 30  # a hang guard only
 
     assert len(result.links) == 1000
     assert result.truncated is True
@@ -193,7 +222,32 @@ def test_link_caps_and_cuts() -> None:
     assert len(result.links[0].text) == 200
     assert result.links[0].text == ("Lernen " * 30)[:200]  # cut inside a word
     assert result.links[-1].url == f"{ORIGIN}/p998"
-    assert elapsed < 2.0
+    # The long href, /big, /p0../p998 and /p999 (which finds the cap): nothing after it is read.
+    assert resolved[0] == 1002
+
+
+def test_iframes_share_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    resolved = counting(monkeypatch, links_module, "_absolute")
+    frames = "".join(f'<iframe src="https://h5p.example.net/e/{i}"></iframe>' for i in range(3000))
+
+    result = site_links(f"<html><body>{frames}</body></html>", BASE, {}, max_links=1000)
+
+    assert (len(result.links), result.truncated) == (1000, True)
+    assert {link.source for link in result.links} == {"iframe"}
+    assert resolved[0] == 1001
+
+
+def test_overlong_idn_hosts_are_not_encoded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host label over 63 characters has no ASCII form: the costly idna encode is skipped."""
+    encoded = counting(monkeypatch, urls_module, "_idna")
+    label = "ü" * 1400
+    anchors = "".join(f'<a href="https://{label}{i}.example/">x</a>' for i in range(1000))
+
+    result = site_links(f"<html><body>{anchors}</body></html>", BASE, {}, max_links=1000)
+
+    assert len(result.links) == 1000
+    assert {link.kind for link in result.links} == {"external"}
+    assert encoded[0] == 0
 
 
 def test_exactly_max_links_is_not_truncated() -> None:

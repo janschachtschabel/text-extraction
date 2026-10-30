@@ -15,6 +15,9 @@ from text_extraction.site.types import SiteScope
 __all__ = ["in_scope", "normalize_url", "scope_for", "seen_key", "site_host"]
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+# DNS limits (RFC 1035); a Unicode host over them cannot have an ASCII form within them.
+_MAX_HOST_CHARS = 253
+_MAX_LABEL_CHARS = 63
 
 
 def normalize_url(url: str) -> str | None:
@@ -69,14 +72,25 @@ def seen_key(url: str) -> str:
 def _ascii_host(host: str) -> str:
     """One spelling per host: a trailing dot dropped and an IDN in its ASCII (punycode) form,
     so ``Bücher.example.`` and ``xn--bcher-kva.example`` are one host. A host the ``idna``
-    codec cannot encode (a label over 63 characters, an empty label) stays as given."""
+    codec cannot encode (a label over 63 characters, a host over 253, an empty label) stays as
+    given. The lengths are checked first: the codec punycodes a whole label before it checks
+    its length, so a page could otherwise spend milliseconds per link on hosts that have no
+    ASCII form."""
     host = host.rstrip(".")
     if host.isascii():
         return host.lower()
+    if len(host) > _MAX_HOST_CHARS or any(
+        len(label) > _MAX_LABEL_CHARS for label in host.split(".")
+    ):
+        return host
     try:
-        return host.encode("idna").decode("ascii").lower()
+        return _idna(host)
     except UnicodeError:
         return host
+
+
+def _idna(host: str) -> str:
+    return host.encode("idna").decode("ascii").lower()
 
 
 def site_host(url: str) -> str:
