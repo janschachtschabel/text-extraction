@@ -16,6 +16,7 @@
   {% endif %}
   {% if job %}
   <p class="job">Continues as job {{ job["id"] }} ({{ job["kind"] }}): {{ job["status_url"] }}</p>
+  <button type="button" class="secondary progress-button" hx-get="{{ progress_url }}" hx-target="closest .result-view" hx-swap="outerHTML">Show progress</button>
   {% endif %}
   {% if info %}
   <dl class="info">

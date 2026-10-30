@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
+from urllib.parse import urlencode
 
 from pydantic import ValidationError
 
@@ -311,6 +312,10 @@ def result_context(
         return context
     if http_status == 202 and "status_url" in data:
         context["job"] = data
+        query = [("id", str(data.get("id")))] + (
+            [("mode", requested_mode)] if requested_mode else []
+        )
+        context["progress_url"] = f"/ui/run/progress?{urlencode(query)}"
         return context
     if op in ("info", "login"):
         context["info"] = data

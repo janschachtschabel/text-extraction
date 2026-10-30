@@ -20,6 +20,8 @@ from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
 
 DEFAULT_WAIT_SECONDS: Final = 25
 DEFAULT_MAX_IMAGES: Final = 5
+DEFAULT_SITE_DEPTH: Final = 2
+DEFAULT_SITE_PAGES: Final = 100
 CHECKED: Final = "on"
 
 
@@ -219,6 +221,27 @@ def _no_fields(form: Mapping[str, str]) -> Fields:
     return {}
 
 
+def _batch_fields(form: Mapping[str, str]) -> Fields:
+    """The options of a batch; its ``urls`` are the route's (`batch_body` leaves them empty), so
+    Options cannot give them."""
+    fields: Fields = {"urls": _Field([], set_by_user=True)}
+    _choice(fields, form, "format", "markdown")
+    _choice(fields, form, "mode", "auto")
+    _box(fields, form, "metadata", default=True)
+    return fields
+
+
+def _site_fields(form: Mapping[str, str]) -> Fields:
+    fields: Fields = {}
+    _typed(fields, form, "url")
+    for name, default in (("depth", DEFAULT_SITE_DEPTH), ("max_pages", DEFAULT_SITE_PAGES)):
+        value = _whole_number(form, name, default)
+        fields[name] = _Field(value, set_by_user=value != default)
+    _choice(fields, form, "scope", "host")
+    _box(fields, form, "sitemaps", default=True)
+    return fields
+
+
 _FORMS: Final[Mapping[str, Callable[[Mapping[str, str]], Fields]]] = MappingProxyType(
     {
         "info": _no_fields,
@@ -227,13 +250,17 @@ _FORMS: Final[Mapping[str, Callable[[Mapping[str, str]], Fields]]] = MappingProx
         "screenshot": _screenshot_fields,
         "structured": _structured_fields,
         "chunk": _chunk_fields,
+        "batch": _batch_fields,
+        "site-structure": _site_fields,
     }
 )
-SINGLE_OPERATIONS: Final = tuple(_FORMS)
+# The operations whose form is one REST call shown as a result (``POST /ui/run/<op>``).
+SINGLE_OPERATIONS: Final = ("info", "extract", "file", "screenshot", "structured", "chunk")
 
 
 def build_body(op: str, form: Mapping[str, str]) -> dict[str, Any]:
-    """The REST body of the form of ``op`` (one of ``SINGLE_OPERATIONS``): its fields, with
+    """The REST body of the form of ``op`` (one of ``SINGLE_OPERATIONS``, ``batch`` with empty
+    ``urls`` or ``site-structure``): its fields, with
     the "Options (JSON)" textarea (``options``) merged under them. Raises `OptionsError` for
     invalid JSON, an Options value that is not an object, a key given twice or a malformed
     number."""

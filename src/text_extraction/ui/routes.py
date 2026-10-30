@@ -1,11 +1,10 @@
-"""The UI's routes (rulings P10-S12 to P10-S17): the page ``GET /ui``, the login
+"""The UI's routes (rulings P10-S12 to P10-S20): the page ``GET /ui``, the login
 ``POST /ui/run/login``, the single operations ``POST /ui/run/<op>`` (each forwards one REST
-call and shows its answer), the previews ``POST /ui/run/images`` and the guard of every
-``/ui/run`` route. None is in the OpenAPI spec."""
+call and shows its answer), the previews ``POST /ui/run/images``, the job views
+(``job_views.py``) and the guard of every ``/ui/run`` route. None is in the OpenAPI spec."""
 
 import asyncio
-import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, cast, get_args
@@ -21,6 +20,14 @@ from text_extraction.compliance import ComplianceMode, resolve_mode
 from text_extraction.errors import ServiceError
 from text_extraction.file_models import FILE_PART
 from text_extraction.settings import Settings
+from text_extraction.ui.answers import (
+    envelope_message,
+    raw_text,
+    refusal,
+    screenshot_of,
+    sent_keys,
+    text_fields,
+)
 from text_extraction.ui.forms import (
     OPERATIONS,
     SINGLE_OPERATIONS,
@@ -29,13 +36,13 @@ from text_extraction.ui.forms import (
     multipart_fields,
 )
 from text_extraction.ui.forward import Forwarded, forward
+from text_extraction.ui.job_views import add_job_routes
 from text_extraction.ui.previews import SHOWN, load_previews
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import PREFIX, RUN_PREFIX, require_htmx, ui_principal
 from text_extraction.ui.templating import templates
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.vision.fetch import ImageFetcher
-from text_extraction.vision.images import data_url, sniff_image
 
 STATIC_DIR: Final = Path(__file__).parent / "static"
 
@@ -56,24 +63,19 @@ class Tab:
     template: str
 
 
-# The application's tabs, in order; the job forms (Task 9) add theirs.
+# The application's tabs, in order.
 TABS: Final[tuple[Tab, ...]] = (
     Tab("extract", "Extract", OPERATIONS["extract"].form),
     Tab("file", "File", OPERATIONS["file"].form),
     Tab("screenshot", "Screenshot", OPERATIONS["screenshot"].form),
     Tab("structured", "Structured", OPERATIONS["structured"].form),
     Tab("chunk", "Chunk", OPERATIONS["chunk"].form),
+    Tab("batch", "Batch", OPERATIONS["batch"].form),
+    Tab("batch-file", "Batch file", "forms/batch_file.html"),
+    Tab("site-structure", "Site structure", OPERATIONS["site-structure"].form),
     Tab("info", "Info", OPERATIONS["info"].form),
 )
-# The key headers a curl line names (with a shell variable, never the value).
-KEY_HEADERS: Final = ("authorization", "x-llm-api-key", "x-asr-api-key")
 NO_FILE: Final = "Choose a file to upload."
-# A body that is not JSON is shown up to this many characters.
-RAW_MAX_CHARS: Final = 10_000
-# An artifact name never starts with a dot (so never "." or "..").
-_ARTIFACT_URL: Final = re.compile(
-    r"/v1/jobs/([A-Za-z0-9_-]+)/artifacts/([A-Za-z0-9_-][A-Za-z0-9_.-]*)"
-)
 _MODES: Final = frozenset(get_args(RequestedMode))
 _COMPLIANCE_MODES: Final = frozenset(get_args(ComplianceMode))
 
@@ -88,53 +90,13 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
     }
 
 
-def _envelope_message(body: dict[str, Any] | None, status: int) -> str:
-    error = (body or {}).get("error")
-    message = error.get("message") if isinstance(error, dict) else None
-    return message if isinstance(message, str) else f"The service answered HTTP {status}."
-
-
-def _text_fields(form: FormData) -> dict[str, str]:
-    """The text fields of a form (its last value of each name); files are left out."""
-    return {name: value for name, value in form.items() if isinstance(value, str)}
-
-
-def _raw(answer: Forwarded) -> str:
-    return answer.content[: RAW_MAX_CHARS * 4].decode("utf-8", "replace")[:RAW_MAX_CHARS]
-
-
-async def _screenshot(
-    request: Request, envelope: Mapping[str, Any] | None
-) -> tuple[str | None, str | None]:
-    """The ``data:`` URI of the PNG that an answer's ``data.screenshot`` references, read from
-    the artifact route (a REST call with the browser's key), or the note why it could not be
-    read; (None, None) when the answer references none."""
-    data = (envelope or {}).get("data")
-    shot = data.get("screenshot") if isinstance(data, Mapping) else None
-    url = shot.get("url") if isinstance(shot, Mapping) else None
-    found = _ARTIFACT_URL.fullmatch(url) if isinstance(url, str) else None
-    if found is None:
-        return None, None
-    path = OPERATIONS["artifact"].path.format(job_id=found[1], name=found[2])
-    try:
-        answer = await forward(request, "GET", path)
-    except ValueError:  # not a plain path under /v1/
-        return None, None
-    if answer.status != 200:
-        message = _envelope_message(answer.body, answer.status)
-        return None, f"The screenshot could not be read: HTTP {answer.status} {message}"
-    if sniff_image(answer.content) != "image/png":
-        return None, "The screenshot could not be read: it is not a PNG."
-    return data_url(answer.content, "image/png"), None
-
-
 async def _forward_single(
     request: Request, op: str, body: dict[str, Any], form: FormData
 ) -> tuple[Forwarded, str] | str:
     """Forward the body of ``op`` and return the answer with its curl line, or the message of a
     form that cannot be sent."""
     operation = OPERATIONS[op]
-    keys = [name for name in KEY_HEADERS if request.headers.get(name)]
+    keys = sent_keys(request)
     base = str(request.base_url)
     if op == "file":
         upload = form.get(FILE_PART)
@@ -161,7 +123,7 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
         is forwarded."""
         form = await request.form()
         try:
-            body = build_body(op, _text_fields(form))
+            body = build_body(op, text_fields(form))
         except OptionsError as error:
             await form.close()
             return templates.TemplateResponse(request, "form_error.html", {"message": str(error)})
@@ -173,14 +135,14 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
             return templates.TemplateResponse(request, "form_error.html", {"message": forwarded})
         answer, curl = forwarded
         mode = body.get("mode")
-        screenshot, screenshot_note = await _screenshot(request, answer.body)
+        screenshot, screenshot_note = await screenshot_of(request, answer.body)
         # In a thread: a long content's Markdown takes a while to render.
         html = await asyncio.to_thread(
             render_result,
             op=op,
             http_status=answer.status,
             envelope=answer.body,
-            raw=_raw(answer),
+            raw=raw_text(answer),
             curl=curl,
             requested_mode=mode if mode in _MODES else None,
             screenshot=screenshot,
@@ -190,19 +152,6 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
 
     view.__name__ = f"run_{op}"
     return view
-
-
-def _refusal(error: ServiceError) -> Response:
-    """A refusal of a view that calls the cores (401, 403, 429, 503) as a fragment, HTTP 200."""
-    envelope = {
-        "status": "failed",
-        "error": {"code": str(error.code), "message": error.message, "retryable": error.retryable},
-    }
-    retry_after = (error.headers or {}).get("Retry-After")
-    html = render_result(
-        op="view", http_status=error.http_status, envelope=envelope, retry_after=retry_after
-    )
-    return HTMLResponse(html)
 
 
 async def _preview_view(request: Request, settings: Settings) -> Response:
@@ -216,7 +165,7 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
         chosen = cast(ComplianceMode, requested) if requested in _COMPLIANCE_MODES else None
         mode = resolve_mode(chosen, principal, settings)
     except ServiceError as error:
-        return _refusal(error)
+        return refusal(error)
     urls = [value for value in form.getlist("url") if isinstance(value, str)]
     alts = [value for value in form.getlist("alt") if isinstance(value, str)]
     alt_of: dict[str, str] = {}
@@ -275,7 +224,7 @@ def create_ui_router(settings: Settings) -> APIRouter:
                 {"error": NOT_VALID},
                 headers={"HX-Trigger": LOGIN_FAILED_EVENT},
             )
-        message = _envelope_message(answer.body, answer.status)
+        message = envelope_message(answer.body, answer.status)
         return templates.TemplateResponse(request, "login.html", {"error": message})
 
     for op in SINGLE_OPERATIONS:
@@ -285,6 +234,8 @@ def create_ui_router(settings: Settings) -> APIRouter:
     async def images(request: Request) -> Response:
         """Previews of a result's images (P10-S16, D7 a)."""
         return await _preview_view(request, settings)
+
+    add_job_routes(run, settings)
 
     router.include_router(run)
     return router

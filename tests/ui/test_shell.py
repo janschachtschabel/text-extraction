@@ -453,9 +453,9 @@ def test_run_body_limits() -> None:
     assert over_default.status_code == 413
     # Within its limit the upload route reads the form (here not one: "Choose a file").
     assert file_route.status_code == 200
-    # The batch file route does not exist before Task 9: within its limit it reaches the router.
+    # Within its limit the batch file route answers (here without a key: the 401 fragment).
     assert over_batch_file.status_code == 413
-    assert batch_file.status_code == 404
+    assert batch_file.status_code == 200
 
 
 def test_refused_before_the_body_is_read() -> None:
