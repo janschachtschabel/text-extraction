@@ -17,7 +17,6 @@ API pods ──fetch (SSRF guard)──▶ target websites and files
 API pods, workers ──▶ document children (MarkItDown: PDF text layers, Office, EPUB, CSV)
 API pods, workers ──▶ media children (youtube-transcript-api, yt-dlp: subtitles, metadata)
                       ──egress proxy (SSRF guard)──▶ video platforms
-API pods ──▶ LLM endpoint (OpenAI-compatible, default model gpt-6-luna)
 API pods ──jobs──▶ Valkey (queues, results, cache, rate limits, fingerprints)
 Valkey ◀──▶ extract-worker  (fast pipeline: batch items from the fair queue)
 Valkey ◀──▶ browser-worker  (Chromium behind an egress proxy: auto fallback, actions,
@@ -28,6 +27,8 @@ Valkey ◀──▶ nlp-worker      (Presidio and spaCy: names and contact or pa
                              results of requests with `pii`)
 Valkey ◀──▶ asr-worker      (faster-whisper on CPU, or an external OpenAI-compatible
                              endpoint; downloads media through its egress proxy)
+Valkey ◀──▶ llm-worker      (OpenAI-compatible endpoint: structured llm, learned selectors,
+                             semantic chunking; default model gpt-6-luna)
 workers ──▶ model volumes (one PVC per worker type, read-only: Docling and Tesseract,
             Whisper models; spaCy for the nlp-worker)
 optional: S3-compatible store for screenshots and large results
@@ -38,7 +39,8 @@ shell, Google Chrome stable, Xvfb), `docling-worker` (image `text-extraction-doc
 CPU torch, the Tesseract CLI, no models), `nlp-worker` (image `text-extraction-nlp`: Presidio,
 spaCy, no models), `asr-worker` (image
 `text-extraction-asr`: faster-whisper, CTranslate2, PyAV built against an LGPL FFmpeg, Deno, no
-models). Each worker is a Helm toggle and scales on queue length (KEDA or HPA). The API image
+models); the `llm-worker` runs from the `api` image (the OpenAI SDK, no model, no volume). Each
+worker is a Helm toggle and scales on queue length (KEDA or HPA). The API image
 holds no browser and no Playwright or Patchright, no Docling, torch or Tesseract, and no
 faster-whisper, CTranslate2, PyAV or Deno; the API image and the other workers' images hold no
 Presidio, spaCy or spaCy models either. The details are in "Browser worker", "Documents and
@@ -49,7 +51,10 @@ MarkItDown runs where the bytes are (package 5, D1): in child processes of the A
 extract workers and the browser worker, never in their parent processes. So do
 youtube-transcript-api and yt-dlp for subtitles (package 6), behind the pod's egress proxy.
 Presidio and spaCy (package 7) run in child processes of the nlp worker and nowhere else; the
-result of a request with `pii` makes a last hop through that worker (see "PII").
+result of a request with `pii` makes a last hop through that worker (see "PII"). Calls to the LLM
+endpoint (package 8) run in the llm worker only: a result whose `structured` or `chunking` needs the
+LLM makes its last hop through that worker, after the nlp worker when it has `pii` (see
+"Structured output and chunking").
 
 ## Extraction pipeline
 
@@ -95,20 +100,28 @@ result of a request with `pii` makes a last hop through that worker (see "PII").
    CSV → MarkItDown, in a child process of the pod that holds the bytes. Scans, broken text
    layers, images and OpenDocument files (and every PDF with `ocr: always`) → Docling with
    Tesseract OCR, in the Docling worker. A document never escalates to the browser. See
-   "Documents and OCR". Vision LLM opt-in (package 8). Video and audio (package 6): a URL of a
+   "Documents and OCR". Vision LLM: later (not in package 8). Video and audio (package 6): a URL of a
    supported platform (YouTube, Vimeo, ARD, ZDF, arte, 3sat) is recognised before step 3,
    passes step 2 under its canonical URL and is not fetched: the media children read its
    subtitles and details in the host's turn. A body that sniffs as audio or video is a media
    file (transcribed with `transcribe: true`), and an HTML page's `<track>` text is appended
    after its conversion. Speech recognition is a job of the ASR worker. See "Audio and video".
-6. **Post-process (optional):** DOM metadata, links, structured output, chunking, screenshot, and
-   PII as the last step of the result. A request with `pii` does not answer or store its result
+6. **Post-process (optional):** DOM metadata, links, screenshot; the DOM stage of `structured`
+   (`metadata`, `selectors`, `tables`, and the cleaned HTML for `learn_selectors`) on an HTML
+   page's HTML, cached with the extraction; then PII; then the post stage of `structured` and
+   `chunking` on the final content (`patterns`, the LLM, `learn_selectors`, the tables of
+   Markdown, the chunks), last. A request with `pii` does not answer or store its result
    itself: the result goes to the nlp worker as a draft (a one-item job on the pool `nlp`), which
    masks, redacts, hashes or lists the personal data in the content and in the result's free-text
    fields, and the processed result is what the caller gets, from a sync request, a job or a
    batch. The cache and the fingerprint keep the extraction as it was. Nothing unprocessed leaves
    the service: when the hop cannot run, the answer is `failed`/`pii_failed` without text. See
-   "PII".
+   "PII". A result whose post stage needs the LLM (strategy `llm`, `auto` with fields still
+   missing, chunking `semantic`) makes the same kind of hop to the llm worker
+   (pool `llm`), after the nlp worker; the LLM thus only sees masked content. Any other result
+   gets its post stage where it finishes, without a hop. When the LLM hop cannot run, the answer
+   keeps its content and is `partial`/`llm_failed`, retryable. See "Structured output and
+   chunking".
 7. **Fingerprint and classify:** see change detection; return the result envelope.
 
 ## Result envelope and errors
@@ -122,7 +135,9 @@ reference), for documents `document` (`kind`, `converter`, `pages`, `pages_conve
 `ocr`, `file_name`; F7), for requests with `pii` `pii` (the report: `mode`, `language`,
 `entities`, `items`, `hash_scope`; N3) with `timings.pii_ms`, and for audio and video `media` (`platform`, `transcript_source`,
 `transcript_language`, `available_languages`, `duration_seconds`, `uploader`, `asr_model`,
-`embeds`; M6). For a browser result `attempts` counts the main-frame document
+`embeds`; M6), and for requests with `structured` or `chunking` `structured` (`values`, `sources`,
+`missing`, `tables`, `learned`, `llm`, `stage`; S11) and `chunks` (`index`, `text`, `start`,
+`end`, `headings`; S10) with `timings.llm_ms`. For a browser result `attempts` counts the main-frame document
 responses of the render, redirect hops included.
 
 `warnings` names what did not go as asked while the result still answers (the HTML converter may
@@ -147,6 +162,18 @@ add a note of its own):
   `PII_FALLBACK_LANGUAGE` found the names; the patterns work in any language, N8),
   `pii_entities_truncated` (`annotate` lists at most `PII_MAX_ENTITIES` items; the counts stay
   complete).
+- Structured output and chunking: `selectors_skipped_large_page` (a page of more than 50,000
+  elements runs no selector rules, R4), `structured_truncated` (a field's values were cut at 1,000
+  values or 100,000 characters, R5), `tables_truncated` (the tables stopped at their bounds, R5),
+  `structured_value_invalid` (a value found did not fit the schema and was dropped),
+  `pattern_timeout` (a pattern ran out of its time; its field is missing), `llm_unavailable`
+  (`auto` on a service without the LLM: the fields left for it stay missing),
+  `llm_input_truncated` (the LLM got the content cut to `LLM_MAX_INPUT_TOKENS` × 4 characters),
+  `learned_selectors_unavailable` (Valkey could not read the learned selectors),
+  `nothing_to_learn` (`learn_selectors` without a field for the LLM, R8),
+  `selector_learning_failed` (the learning call failed; the values stay, R9), `chunks_truncated`
+  (more than `CHUNK_MAX_CHUNKS` chunks), `chunking_fallback_recursive` (`markdown` on
+  `format: text`, `semantic` on more than 5,000 sentences or without the LLM step).
 - Jobs: `content_not_stored_too_large` (an item stored without its content).
 
 A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
@@ -167,6 +194,15 @@ of the text (N12). A result with more than `PII_MAX_CHARS` characters in the fie
 worker as a draft in a job item, and a draft whose JSON is over `JOB_ITEM_MAX_BYTES` (2 MB) is
 stored without its content, so it answers `success` with `data.content` null and the warning
 `content_not_stored_too_large` (its other fields processed), not `too_large`.
+
+`llm_failed` says that LLM work the request asked for (strategy `llm`, `auto` for its missing
+fields, `semantic` chunking) did not run or failed. It turns a `success` into `partial` and keeps
+the content and every value the other strategies found; the fields left for the LLM are in
+`structured.missing`, and `semantic` is chunked `recursive` instead. It is retryable when the step
+was busy or did not run (Valkey's memory guard, Valkey failing, the item's deadline) or the endpoint
+failed for a while (429, 5xx, timeouts, connection errors), and not retryable for an answer that
+still did not fit the schema after one repair call, or a 400, 401, 403, 404 or 422 of the endpoint.
+The message names the HTTP status at most, never the endpoint's text.
 
 Codes of the API's own 4xx answers (never an extraction outcome): `invalid_request`,
 `unauthorized`, `forbidden`, `not_found`. `tests/test_errors.py` keeps both lists in step
@@ -198,11 +234,11 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
-| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii` (`mask`, `redact`, `hash` or `annotate`, with `entities`, `language` and `score_threshold`: see "PII"; 400 `invalid_request` while the service has no PII, 422 with `screenshot` and for `annotate` with `format: html`, and without `wait_seconds` it waits `PII_SYNC_WAIT_SECONDS`, 20 s), `links`, `metadata`, `screenshot`, `full_page`, `chunking`, `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The header `X-LLM-Api-Key` (the caller's key of the LLM endpoint, a secret; on the same three routes) goes with `structured` and `chunking` work that calls the LLM; without `wait_seconds` such a request waits `LLM_SYNC_WAIT_SECONDS`, 30 s (the largest default of `transcribe`, `pii` and the LLM wins). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9); a result with `pii` goes through the pool `nlp` and waits up to `PII_SYNC_WAIT_SECONDS` (D4) |
-| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `pii` (a bare mode or a JSON object as a string), `wait_seconds` (default 25); at most one file and 8 fields, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii` (`mask`, `redact`, `hash` or `annotate`, with `entities`, `language` and `score_threshold`: see "PII"; 400 `invalid_request` while the service has no PII, 422 with `screenshot` and for `annotate` with `format: html`, and without `wait_seconds` it waits `PII_SYNC_WAIT_SECONDS`, 20 s), `links`, `metadata`, `screenshot`, `full_page`, `structured` and `chunking` (see "Structured output and chunking"; 400 `invalid_request` for LLM work while the service has no LLM, 422 for chunking with `format: html`, for `pii` with what reads the raw page, and for an XPath rule of a non-admin key), `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The header `X-LLM-Api-Key` (the caller's key of the LLM endpoint, a secret; on the same three routes) goes with `structured` and `chunking` work that calls the LLM; without `wait_seconds` such a request waits `LLM_SYNC_WAIT_SECONDS`, 30 s (the largest default of `transcribe`, `pii` and the LLM wins). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9); a result with `pii` goes through the pool `nlp` and waits up to `PII_SYNC_WAIT_SECONDS` (D4) |
+| `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `pii` (a bare mode or a JSON object as a string), `structured` and `chunking` (JSON objects as strings), `wait_seconds` (default 25); at most one file and 8 fields of at most 1 KiB each, unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 64 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | `POST /v1/extract` with `structured` required (422 without; S15): strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`, and every option, check, header (`X-ASR-Api-Key`, `X-LLM-Api-Key`) and answer of `/v1/extract` | sync, job fallback (`wait_seconds`; 202 for a browser, nlp or llm job) |
-| `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is `DOCUMENT_MAX_BYTES` + 64 KiB (S15) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
+| `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's (`DOCUMENT_MAX_BYTES` + 64 KiB, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth | job |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured` and `chunking` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
@@ -262,11 +298,15 @@ optional rate limit.
   `similarity_to_previous`, `changed`; the MinHash is a small numpy implementation compatible
   with datasketch 2.x (`affine32`, seed 1), which would give optional LSH for near-duplicates
   without pulling scipy into the image by default.
-- **Structured output:** LLM-free `metadata`, `selectors` (CSS/XPath schema),
-  `patterns` (regex, tables); `llm` with JSON schema output validated by Pydantic;
-  `learn_selectors` stores an LLM-written CSS schema per domain for LLM-free reuse.
-  Env: `LLM_BASE_URL`, `LLM_MODEL` (default `gpt-6-luna`), `LLM_API_KEY` (secret),
-  `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`, `LLM_TIMEOUT_SECONDS`, `LLM_MAX_INPUT_TOKENS`.
+- **Structured output and chunking:** the fields of a JSON schema from LLM-free `metadata`,
+  `selectors` (CSS; XPath for admin keys) and `patterns` (regex), `llm` (strict JSON schema output,
+  validated by Pydantic) or `auto` (the cheapest strategy that finds a field, the LLM only for the
+  rest); `tables`; `learn_selectors` keeps LLM-proposed CSS selectors that reproduce the values,
+  per API key and host, for LLM-free reuse. Chunks `fixed`, `recursive`, `markdown`, `sentence`
+  or `semantic` (embeddings). The LLM calls run in the llm worker. Env: `LLM_*` (`LLM_MODEL`
+  default `gpt-6-luna`, `LLM_API_KEY` a secret), `SELECTOR_LEARN_TTL_SECONDS`,
+  `STRUCTURED_REGEX_TIMEOUT_SECONDS`, `CHUNK_MAX_CHUNKS`. Details in "Structured output and
+  chunking".
 - **Batch:** one sub-queue per client and domain, round-robin over clients, then over the
   client's domains with free capacity; see "Jobs and the fair queue".
 - **Sync-to-job (P1):** `POST /v1/extract` without `wait_seconds` always answers when the
@@ -1527,15 +1567,296 @@ dropped at once. R15: nlp pods get a termination grace period of 60 s (30 s grac
   in `Calvin cycle` as a person. With `PERSON` asked for, a teaching text with historic names
   loses a few words to `[PERSON]` (the corpus test lists the known cases per model size). The
   NER also labels the occasional user name, URL or Markdown marker as `PERSON`.
-- **Other scripts on a German or English page.** The `de`/`en` NER guesses on words in a script
-  it was not trained on: on a multilingual page, Arabic or Cyrillic phrases may come back as
-  `[PERSON]` (issue #14).
+- **Other scripts on a German or English page.** The NER drops every span without a Latin letter
+  (N6; issue #14, fixed in PR #16), because the `de`/`en` models only guess on Arabic, Cyrillic,
+  Greek or CJK words: such phrases no longer come back as `[PERSON]`. The trade-off is recall: a
+  name in another script after a salutation is still found by the honorific rule (`Frau Петрова`),
+  one without a salutation is not (`Петрова` alone stays), and neither is a place in such a script.
 - **Patterns are strict.** A phone number must be valid for `libphonenumber` (fictional ranges
   such as the UK `07700 900xxx` are not found), and a number without a context word scores only
   0.4, which is why `PII_SCORE_THRESHOLD` must not be raised above 0.4. An e-mail address needs a
   known public suffix.
-- **Not in this package:** `/v1/structured` and `/v1/chunk` (package 8 calls the same hop),
-  custom entity lists or deny lists per caller, S3.
+- **Not in this package:** custom entity lists or deny lists per caller, S3. (`/v1/structured`
+  and `/v1/chunk` came with package 8: with `pii`, their LLM work and chunks run after this hop,
+  on the masked content; see "Structured output and chunking", D3.)
+
+## Structured output and chunking
+
+A request with `structured` gets the fields of a JSON schema from the result (`data.structured`),
+and one with `chunking` gets the content split into chunks (`data.chunks`), on `POST /v1/extract`,
+`/v1/extract/file`, `/v1/batch` and the two routes made for them, `POST /v1/structured` and
+`POST /v1/chunk`. What reads the page's HTML runs in the pipeline (the DOM stage); what reads the
+final content runs last (the post stage), and whatever needs the LLM runs in the llm worker, as the
+last hop after PII. The evidence is `tests/structured/test_done_when.py`, the package's done-when
+test in the default suite: every strategy, `tables`, `learn_selectors` and its reuse, each chunker,
+both new routes and a batch, end to end through the API on a German teaching page written for the
+purpose (`tests/structured/pages/brueche.html`), with the real llm worker loop and pytest-httpserver
+as the OpenAI-compatible endpoint (`/chat/completions`, `/embeddings`).
+
+**Decisions of Jan (2026-10-29, the recommended options).**
+
+- **D1, embeddings for `semantic`.** The `/embeddings` route of the same OpenAI-compatible endpoint,
+  with `LLM_EMBEDDING_MODEL`; without it `semantic` answers 400. No local embedding model, no torch.
+- **D2, scope of learned selectors.** Per API key: a key's learned selectors fill only that key's
+  results, so no key can change another's.
+- **D3, `pii` with `structured` or `chunking`.** Mask first: with `pii`, chunking, `patterns` and
+  the LLM run on the masked content (the LLM never sees personal data). `metadata`, `selectors`,
+  `tables` and `learn_selectors` read the raw HTML and are 422 with `pii`; `auto` with `pii` runs
+  `patterns` and the LLM only.
+- **D4, vision LLM.** Later, not in package 8: images get no LLM description.
+- **D5, where LLM calls run.** In an llm worker on the pool `llm`, the last hop after `nlp` (built
+  like `PiiHandoff` and `PiiMove`). A sync request waits `LLM_SYNC_WAIT_SECONDS` (30), then answers
+  202 with its job. The API pods and the other workers never call the endpoint.
+
+**S1, the options** (`structured/types.py`, `chunking/types.py`). `ExtractRequest`, `BatchRequest`,
+`JobOptions` and the form of `/v1/extract/file` (a JSON object as a string each) have
+`structured: StructuredOptions | None` and `chunking: ChunkingOptions | None`, stored in a job only
+when set. A broken option is 422 at validation, with a message that names the field and never
+repeats a selector or a pattern.
+
+- `structured`: `schema` (S2; required unless the request asks for `tables` only), `strategy`
+  (`metadata`, `selectors`, `patterns`, `llm`, `auto`; default `auto`), `selectors` and `patterns`
+  (rules by field name; the names must be properties of the schema), `tables` (false),
+  `learn_selectors` (false), `instructions` (at most 2,000 characters, `llm` and `auto` only).
+- A selector rule has exactly one of `css` and `xpath` (at most 500 characters, compiled by
+  soupsieve or `lxml.etree.XPath` at validation), `attr` (none: the element's text, whitespace
+  collapsed) and `all` (default: every match for an array field, else the first).
+- A pattern rule has `regex` (at most 500 characters, compiled with `regex` at validation),
+  `group` (number or name; 0 the whole match), `all` (as above) and `flags` (`i`, `m`, `s`).
+- `chunking`: `strategy` (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`; default
+  `recursive`), `size` (characters, 200 to 20,000, default 1,000), `overlap` (0 to `size // 2`,
+  default 100), `breakpoint_percentile` (50 to 99, default 90, `semantic` only).
+
+**S2, the schema subset** (`structured/schema.py`). The root is an `object` with `properties`; a
+property is a `string`, `number`, `integer`, `boolean`, an `array` (with `items` of any of those or
+an object) or an `object` (with `properties`); `enum` on strings, numbers and integers;
+`description` anywhere; `required` is accepted and ignored (every field may be missing). At most
+3 levels of objects (the root is 1), 50 properties in all, names `[A-Za-z_][A-Za-z0-9_]{0,63}`.
+`$ref`, `oneOf`, `pattern`, formats, `additionalProperties: true` and the like are 422 naming the
+path. `compile_schema` builds a Pydantic model (every field nullable, unknown keys ignored), the
+OpenAI strict JSON schema for the fields the LLM is asked for, a `schema_id` (12 hex digits of the
+SHA-256 of the canonical JSON) and the field names; the last 256 compiled schemas are kept, since
+options are validated again on every read of a job. A found raw value is coerced to the field's
+type: a list joined with `", "` for a string, a number parsed from `1.234,5` and `1,234.5`, a
+boolean from `true/false/yes/no/ja/nein`; a value that does not fit is no value.
+
+**S3, the DOM stage** (`structured/dom.py`, pure, in `Pipeline._process` on the conversion pool).
+HTML pages only (fetched, rendered or uploaded); a document, a text or a media result skips it and
+its DOM fields stay missing. Per field, in this order (R3, the order of `auto` too):
+
+- `selectors`: the caller's rules, merged over the learned ones (S8; the caller's rule wins per
+  field). CSS with soupsieve on BeautifulSoup, XPath with lxml; a string result of an XPath
+  (`.../@href`, `string(...)`) is taken as it is, an XPath that fails at evaluation leaves its field
+  missing. `href` and `src` values are made absolute against the final URL. A value is cut to
+  10,000 characters, a field to 1,000 values and 100,000 characters (`structured_truncated`, R5).
+- `metadata`: the first value whose name matches the field's normalised name (lower case, `_` and
+  `-` removed) in JSON-LD (the items about the page first, `@graph` included), microdata
+  `itemprop`, RDFa `property`, OpenGraph `og:<name>`, `<meta name>` (a comma list for an array
+  field), then `PageMetadata` (`title`, `description`, `authors`, `keywords`, `published`,
+  `modified`, `language`, `license`, `site_name`). A nested item gives its `name` for a string.
+- `tables`: every `<table>` with at least two rows (`index`, `caption`, `headers` from the `<th>`
+  of the first row, `rows` of collapsed cell text, `colspan` repeated): at most 50 tables of 1,000
+  rows of 100 cells, `colspan` 1 to 20, all cell text together at most 1,000,000 characters, then
+  `tables_truncated` (R5).
+- `learn_html`, for `learn_selectors`: the page without scripts, styles, comments, SVG and the
+  `<head>` but its `<title>`, and without attributes but `id`, `class`, `itemprop`, `property`,
+  `name`, `href`, `src`, `content` and `datetime`, cut at an element border to
+  `LLM_MAX_INPUT_TOKENS` × 4 characters. It travels in the draft and is cleared before any answer.
+
+Cost bounds (rule 5, R4): caller XPath needs an admin key (422 "XPath selectors need an admin key;
+use CSS.": XPath 1.0 has no cost limit lxml can enforce, and `//*//*//*` runs for minutes on a
+large page); a non-admin CSS rule may use `:has(` at most once; learned rules are CSS only; caller
+and learned rules run only on pages of at most 50,000 elements (`STRUCTURED_MAX_ELEMENTS`), else
+they are skipped with `selectors_skipped_large_page`.
+
+**S4, cache and learned selectors.** The learned selectors of the principal, the request URL's host
+and the `schema_id` are read before the cache lookup. A request whose options touch the DOM
+(`metadata`, `selectors`, `auto`, `tables`) adds `structured: {dom, schema, selectors, tables}` to
+its cache key, and `learned` (a digest of the learned rules it uses) when there are some; any other
+request keeps the key it had before package 8, so a deploy keeps the cache. The cache stores the DOM
+stage's result, never the post stage's: a hit gets a post stage of its own (other `chunking`, other
+chunks), and `chunking` and the post-stage options are never part of the key. A request with
+`learn_selectors` neither reads nor writes the cache (R6): it needs the page for its `learn_html`.
+
+**S5, the post stage** (`structured/post.py`), on `data.content` as it is after PII, in this order:
+`patterns` (strategy `patterns`, or `auto` for the fields still missing), the LLM (strategy `llm`
+for every field, `auto` for the fields still missing: the request carries only those fields'
+strict schema), `learn_selectors`, the tables of Markdown pipe tables for results without a DOM
+stage, chunking, then `stage: "done"` with every value checked by the compiled model (one that
+fails is dropped with `structured_value_invalid`). An envelope without data, or `failed` without
+content, gets none (`structured` and `chunks` stay null); empty content gives `chunks: []` and
+every field missing. It runs at every finish point (the sync flows, the P1 job's write,
+`Worker._finish` of every pool) after the PII step and before `fail_closed`. `finish_post` is the
+guard: a result whose post stage has not run gets it without the LLM; LLM work that was asked and
+not done turns `success` into `partial`/`llm_failed`, retryable ("The LLM step is busy; retry
+later." under the memory guard, "The LLM step did not run; retry later." otherwise), with its
+fields in `missing` and `semantic` chunked `recursive` (`chunking_fallback_recursive`). `auto` on a
+service without the LLM is no failure: its fields stay missing with `llm_unavailable`.
+
+**S6, patterns** (`structured/patterns.py`). `regex` with a time limit,
+`STRUCTURED_REGEX_TIMEOUT_SECONDS` (0.5 s) per pattern for all its matches, and all patterns of a
+result share 2 s (`PATTERNS_TOTAL_BUDGET_SECONDS`, R10): a pattern out of time leaves its field
+missing with `pattern_timeout` (no field name in it), so `(a+)+$` costs at most that. At most 1,000
+matches and 100,000 characters per field, blank matches skipped. The patterns run once per result
+and their outcome stays on it (R10), so routing and the later steps reuse it; the search releases
+the GIL and runs in a thread.
+
+**S7, `learn_selectors`** (`structured/learn.py`). Once the LLM has values, one more call shows it
+the values and `learn_html` and asks for one `{"css", "attr"}` per field (strict schema). A proposal
+is kept only when it is a valid CSS rule within the non-admin limits and, run on `learn_html`
+exactly as the DOM stage runs rules, gives the LLM's value (whitespace collapsed, case folded,
+arrays element by element): `*` selects the whole page, which is not the value. Nothing from the
+answer is fetched or executed. `learned: {stored, rejected}` names the fields. With no field for the
+LLM there is nothing to learn: no hop, no call, `nothing_to_learn` (R8). A failed learning call
+keeps the status, with `selector_learning_failed` and every field in `rejected` (R9).
+
+**S8, the selector store** (`structured/store.py`). `sel:{<owner>}:<host>:<schema_id>` in Valkey:
+a JSON object of rules by field, merged per field on each write, TTL `SELECTOR_LEARN_TTL_SECONDS`
+(30 days) renewed on writes, not on reads. The owner is the API key's name (D2), the host the
+request URL's, lower-cased. A Valkey failure on a read is no rules with
+`learned_selectors_unavailable`; on a write `learned.stored: []` with the same warning. A learned
+rule that later matches nothing leaves its field missing, and `auto` asks the LLM for it.
+
+**S9, the LLM client** (`llm/client.py`). `openai.AsyncOpenAI` on `LLM_BASE_URL` (https unless
+`LLM_ALLOW_HTTP`), called directly: no proxy or `.netrc` from the environment, no redirects, no SSRF
+guard (it is the operator's endpoint, not a caller's target). The key is the caller's
+`X-LLM-Api-Key` (1 to 1,024 visible ASCII characters, kept with the job like the ASR key), else
+`LLM_API_KEY` (rule 3); `OPENAI_API_KEY` is never read. The system message is fixed text (the
+document is data, never instructions; null for what it does not state; never invent), the caller's
+`instructions` follow under "Caller notes"; the content is the user message between `<document>`
+tags (a `<document>` tag inside it is neutralised), cut at a paragraph border to
+`LLM_MAX_INPUT_TOKENS` × 4 characters (`llm_input_truncated`). `response_format` is a strict
+`json_schema`, `temperature` `LLM_TEMPERATURE`, `max_tokens` `LLM_MAX_TOKENS`. An answer that is no
+JSON, does not validate or was cut off (`finish_reason: length`) gets one repair call with the
+answer and the error, then `llm_failed`, not retryable. The SDK retries 429, 5xx, timeouts and
+connection errors twice; then they are retryable, 400, 401, 403, 404 and 422 are not; the message
+names the HTTP status only. `embed` batches 64 texts of at most 2,000 characters each with
+`LLM_EMBEDDING_MODEL`. `structured.llm` reports `model`, `calls`, `prompt_tokens`,
+`completion_tokens`; `timings.llm_ms` the time of the calls.
+
+**S10, chunking** (`chunking/split.py`, `chunking/semantic.py`). Every chunk is
+`content[start:end]` (code points), in order, never empty or over `size`; neighbours share at most
+`overlap` characters, and only whitespace between chunks is left out. `fixed`: windows of `size`,
+step `size - overlap`. `recursive`: split at blank lines, then lines, sentence ends, spaces, and
+pack the pieces up to `size`, each next chunk starting up to `overlap` back at a separator.
+`markdown` (with `format: markdown`; `text` falls back to `recursive` with
+`chunking_fallback_recursive`): sections at ATX headings outside fenced code, a long section split
+by `recursive`, a heading never ends a chunk. `sentence`: our splitter cuts after `.`, `!`, `?`, `…`
+(and closing quotes or brackets) followed by whitespace, but not after `z. B.`, `bzw.`, `ca.`,
+`d. h.`, `u. a.`, `usw.`, `vgl.`, `Nr.`, `S.`, `Abs.`, `Jh.`, `Dr.`, `Prof.`, `Hr.`, `Fr.`, `St.`,
+`e.g.`, `i.e.`, `etc.`, `vs.`, `Mr.`, `Mrs.`, `Ms.`, `No.`, `Fig.`, a single capital letter or digits
+(`3. Oktober`); sentences are packed up to `size`. `semantic` (D1): the sentences are embedded, and
+the text is cut where the cosine distance of neighbours is above the `breakpoint_percentile` of all
+distances; a group over `size` is split by `recursive`; more than 5,000 sentences fall back to
+`recursive`. `headings` is the Markdown heading path at the chunk's start (`[]` for `format:
+text`). At most `CHUNK_MAX_CHUNKS` (2,000), then `chunks_truncated`. Every step but the embeddings
+is linear in the content.
+
+**S11, the result.** `data.structured`: `values` (every top-level field, null when missing),
+`sources` (`metadata`, `selectors`, `learned`, `patterns`, `llm` per found field), `missing`,
+`tables` (with `tables` only), `learned` (with `learn_selectors` only), `llm` (null without LLM
+calls) and `stage` (`done` in every answer). `data.chunks` (null without `chunking`).
+`timings.llm_ms`. `status`, `quality`, `word_count` and `fingerprint` stay those of the extraction:
+only an LLM failure turns `success` into `partial`. A result without `structured` and `chunking`
+gains `structured: null`, `chunks: null` and `timings.llm_ms: 0` and is otherwise unchanged by a
+byte.
+
+**S12, request checks** (`structured/checks.py`, on every route). 400 `invalid_request` for LLM work
+(strategy `llm`, `learn_selectors`, chunking `semantic`) while the service has no LLM
+(`LLM_ENABLED` and `JOBS_ENABLED`: "LLM features are not enabled on this service."), for `semantic`
+without `LLM_EMBEDDING_MODEL`, and for work that may call the LLM (`llm`, `auto` with a schema,
+`semantic`) without any key ("No LLM key: send X-LLM-Api-Key."). `auto` is not refused on a service
+without the LLM: its fields left for the LLM stay missing (`llm_unavailable`). 422 for chunking with `format: html`
+("Chunking needs format markdown or text."), for `pii` with strategy `metadata` or `selectors`,
+`tables`, `learn_selectors` or caller `selectors` ("… reads the raw page and cannot be combined
+with pii.", D3), for `learn_selectors` with a strategy other than `llm` and `auto`, and for the
+XPath and `:has(` limits of S3.
+
+**S13, the hop** (`llm_dispatch.py`, on the generic `pool_dispatch.LastHopHandoff` and
+`LastHopMove` that `PiiHandoff` and `PiiMove` now share). Pool `llm` without the per-domain lease
+cap, lease `4 × LLM_TIMEOUT_SECONDS + 10`; the draft is the envelope after the DOM stage, the
+patterns and PII. A result goes when its post stage needs the LLM (`needs_llm`: the service has the
+LLM, there is content, and strategy `llm`, `auto` with fields missing after the DOM stage and the
+patterns, or `semantic`); any other gets its post stage where it is.
+
+- *Sync* (`LlmHandoff`, after the PII handoff): a one-item job of kind `extract` or `file` (or the
+  request's P1 job) with the envelope as its draft and the caller's key as its secret. Without
+  `wait_seconds` the request waits `LLM_SYNC_WAIT_SECONDS`, then answers 202 with the job (the
+  largest default of `transcribe`, `pii` and the LLM wins); its waits for the browser, Docling or
+  nlp workers get `LLM_SYNC_WAIT_SECONDS` more, because their result moves on to `llm`.
+- *Moves* (`LlmMove`, in `Worker._finish` of every pool but `llm`, after the PII move): draft, queue,
+  then the item completes without a result (`escalated`). The pool that moves keeps the caller's
+  key; the writer of the item's result drops it (a sync job's at once, a batch's with its last
+  result, R11).
+- *Failures:* under Valkey's memory guard nothing is stored and the answer is
+  `finish_post(reason="busy")`; Valkey failing, or a wait that ends while nobody took the job over,
+  `finish_post(reason="failed")`: the content without the LLM work, never a 5xx. Without an llm
+  worker, sync requests answer 202 after their wait and the job waits (the backlog alert's case).
+- `text_extraction_llm_dispatch_total{outcome}`: `answered`, `not_claimed`, `no_result`,
+  `handed_over`, `backend_error`, `memory_guard`.
+
+**S14, the llm worker** (`llm_worker.py`, entry `text-extraction-llm-worker`, the API image, pool
+`llm`, internal port only). The extract worker's `Worker` with an `LlmRunner`, `LLM_CONCURRENCY`
+(4) slot loops. Per item: read the draft (gone with its job: `internal_error`, retryable, there is
+nothing to post-process), the job's `structured` and `chunking` and the caller's key, then
+`apply_post` with an `LlmClient` under an overall deadline of `3 × LLM_TIMEOUT_SECONDS` (past it the
+draft answers without the LLM work, `llm_failed`, retryable). Learned rules are stored for the
+job's owner and the page's host. An exhausted item answers its draft without the LLM work. `/ready`
+once the loops run; `--check` sends one tiny extraction to the configured endpoint and exits 1 when
+it fails (an operator's smoke test, not in CI). On SIGTERM the items in flight get 30 s, then the
+ones still running go back to the queue at once (an item's lease is long). Logs carry job ids,
+error types and codes, never a text, value, selector or key.
+
+**S15, routes** (`structured_api.py`). `POST /v1/structured` is `POST /v1/extract` with `structured`
+required: the same flow, checks, headers and answers. `POST /v1/chunk` takes exactly one of `url`
+(then `POST /v1/extract` with `chunking` required) or `text` (`text_type` `markdown` or `plain`),
+with `chunking`, `format` (`markdown` or `text`), `pii`, `structured` and `wait_seconds`. A `text`
+is an upload of `text/markdown` or `text/plain` (`mode_used: upload`, no cache, a `file` job when
+handed over); a `plain` text is `format: text`. It is limited by `DOCUMENT_MAX_BYTES` (413, R14),
+skips the word-count gate (a short text is `success`, R15) and the route authenticates and
+rate-limits before it reads the body (R16). The header `X-LLM-Api-Key` is on all five routes.
+
+**S16, settings and switches.** `LLM_ENABLED` (false), `LLM_BASE_URL`, `LLM_ALLOW_HTTP`, `LLM_MODEL`
+(`gpt-6-luna`), `LLM_API_KEY` (secret), `LLM_EMBEDDING_MODEL`, `LLM_TEMPERATURE`, `LLM_MAX_TOKENS`,
+`LLM_TIMEOUT_SECONDS`, `LLM_MAX_INPUT_TOKENS`, `LLM_CONCURRENCY`, `LLM_SYNC_WAIT_SECONDS`,
+`SELECTOR_LEARN_TTL_SECONDS`, `STRUCTURED_REGEX_TIMEOUT_SECONDS`, `CHUNK_MAX_CHUNKS`. Start-up
+refuses `LLM_ENABLED` without `JOBS_ENABLED`. Helm: `workers.llm.enabled` (false) renders
+`LLM_ENABLED` into every pod and deploys the llm worker (API image, no volume), `LLM_API_KEY` from
+`workers.llm.apiKey.existingSecret`; compose: the profile `llm`. The settings and Helm values are in
+[configuration.md](configuration.md#llm).
+
+**Rulings made while building it** (they override the plan where they differ). R3: `auto` looks
+fields up in the order selectors (the caller's, else learned), `metadata`, `patterns`, LLM. R4:
+XPath for admin keys only, `:has(` at most once for others, no selector rules on pages over 50,000
+elements. R5: the table and selector budgets above. R6: `learn_selectors` bypasses the cache read
+too. R8: `learn_selectors` without a field for the LLM makes no hop (`nothing_to_learn`). R9: a
+failed learning call keeps the status (`selector_learning_failed`). R10: patterns run once per
+result within a total budget of 2 s. R11: the caller's LLM key lives as long as the job, and the
+item's final writer drops it. R12: a request with `pii` has no DOM stage (no metadata, selectors,
+learned rules, tables or `learn_html`), and any DOM-stage value (a cache hit's too) is reset before
+the PII step. R13: a withheld PII answer (`pii_failed`) drops `structured` and `chunks` too. R14 to
+R16: the `text` of `/v1/chunk` (limit, word gate, auth before the body). R17: the llm worker's
+grace period is 40 s in the chart (30 s plus the chart's 10 s margin).
+
+**Known limits.**
+
+- **Form fields of `/v1/extract/file` are at most 1 KiB each.** `structured` as a form field over
+  1,024 bytes (a schema of more than a handful of fields, rules) is 422 ("Part exceeded maximum
+  size of 1KB."). A larger schema goes with a URL (`/v1/structured`) or a text (`/v1/chunk`).
+- **Learned selectors are checked on `learn_html`.** A positional selector (`div:nth-child(3)`) that
+  reproduced the value on the cleaned HTML may select something else on the full page; then the
+  field gets another value, or none and `auto` asks the LLM. Uploads have no host and learn nothing
+  (`learned: {stored: [], rejected: []}`). Under `AUTH_MODE=none` every caller is `anonymous` and
+  shares the learned selectors.
+- **`metadata` matches by name.** A field is filled only where the page uses its name (`author`
+  matches `author`, not `creator`); `<meta name>` lists are split at commas, so an author `Doe,
+  John` in a meta tag becomes two values.
+- **Sizes are characters.** No tokeniser: chunk sizes are code points, and the LLM's input budget is
+  estimated as 4 characters per token.
+- **`semantic` needs the LLM hop.** It is never answered inline: without an llm worker the request
+  answers 202 and waits; under the memory guard it is chunked `recursive` with `llm_failed`.
+- **Not in this package:** vision-LLM image descriptions (D4), MCP tools (package 10), a model per
+  request, tokenisers, S3.
 
 ## Observability
 
@@ -1545,10 +1866,12 @@ outcome, render seconds, launches, proxy refusals), sync browser dispatches by o
 rendered, not claimed, no result, handed over, backend error), document conversions by converter,
 kind and outcome with their seconds and pages, sync Docling dispatches by outcome, media
 extractions by platform, transcript source and outcome with their seconds, ASR dispatches by
-outcome, transcriptions by backend and outcome with their seconds and audio seconds, LLM calls,
-tokens and failures, sync NLP dispatches by outcome (answered, not claimed, no result, handed
-over, backend error, memory guard), entities found by PII handling by type (never by value),
-rate-limit rejections. Alert rules ship in the Helm chart
+outcome, transcriptions by backend and outcome with their seconds and audio seconds, LLM calls
+by kind (chat, embeddings) and outcome (ok, invalid, error) and tokens by kind (prompt,
+completion), never by prompt, value, selector or key, sync NLP and LLM dispatches by outcome
+(answered, not claimed, no result, handed over, backend error, memory guard), entities found by PII
+handling by type (never by value), rate-limit rejections. The queue gauges, the backlog alert and
+the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship in the Helm chart
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.
 
