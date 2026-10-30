@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from functools import wraps
 from typing import Any
 
@@ -15,7 +16,7 @@ from text_extraction.chunking.types import Chunk
 from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
-from text_extraction.job_models import JobOptions, JobProgress
+from text_extraction.job_models import ItemRun, JobOptions, JobProgress
 from text_extraction.jobs import (
     InputBudgetExceeded,
     JobLost,
@@ -1173,3 +1174,71 @@ async def test_delete_and_shorten_cover_the_crawl_keys() -> None:
     assert [key async for key in valkey.scan_iter(match=f"job:{{{deleted}}}:*")] == []
     for kind in crawl_keys:
         assert 595 <= await valkey.ttl(f"job:{{{shortened}}}:{kind}") <= 600, kind
+
+
+# --- item runs (D8, ruling P10-S11) ------------------------------------------------------------
+
+
+@scenario
+async def test_record_claim_sets_run_with_job_ttl() -> None:
+    valkey = FakeAsyncRedis()
+    clock = Clock()
+    store = make_store(valkey, clock, job_ttl_seconds=600)
+    job_id = await create_job(store)
+    clock.now += 0.25
+
+    await store.record_claim(job_id, 1, "browser", 2)
+
+    raw = await valkey.hgetall(f"job:{{{job_id}}}:runs")
+    assert raw == {b"1": f"2|browser|{int((START + 0.25) * 1000)}".encode()}
+    runs_ttl = await valkey.pttl(f"job:{{{job_id}}}:runs")
+    assert 0 < runs_ttl <= await valkey.pttl(f"job:{{{job_id}}}:meta")
+
+
+@scenario
+async def test_record_claim_on_gone_job_creates_nothing() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    deleted = await create_job(store)
+    await store.delete(deleted)
+
+    await store.record_claim(deleted, 0, "extract", 1)
+    await store.record_claim("f" * 32, 0, "extract", 1)
+
+    assert await valkey.keys("job:*") == []
+
+
+@scenario
+async def test_delete_and_shorten_cover_runs() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400)
+    deleted = await create_job(store)
+    shortened = await create_job(store)
+    for job_id in (deleted, shortened):
+        await store.record_claim(job_id, 0, "extract", 1)
+
+    await store.delete(deleted)
+    await store.shorten(shortened, 600)
+
+    assert [key async for key in valkey.scan_iter(match=f"job:{{{deleted}}}:*")] == []
+    assert 595 <= await valkey.ttl(f"job:{{{shortened}}}:runs") <= 600
+
+
+@scenario
+async def test_items_show_run() -> None:
+    clock = Clock()
+    store = make_store(FakeAsyncRedis(), clock)
+    job_id = await create_job(store)
+    await store.record_claim(job_id, 1, "extract", 1)
+    clock.now += 30.5
+    await store.record_claim(job_id, 1, "browser", 2)  # the last claim wins
+
+    first, second, third = await store.items(job_id, 0, 3)
+
+    assert second.run == ItemRun(
+        pool="browser", attempts=2, claimed_at=datetime.fromtimestamp(START + 30.5, tz=UTC)
+    )
+    assert first.run is None
+    assert third.run is None
+    [only] = await store.items(job_id, 1, 1)
+    assert only.run == second.run

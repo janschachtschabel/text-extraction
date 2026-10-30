@@ -735,6 +735,17 @@ slot.
 A result is written once: storing the same index again changes nothing, so an item that is run a
 second time after a lost lease counts once. Times are epoch seconds from the pod's clock.
 
+Each claim of an item by a worker is recorded in one more hash, `job:{<id>}:runs`: item index to
+`<claim number>|<pool>|<epoch ms>`, the item's last claim (about 40 bytes per item).
+`GET /v1/jobs/{id}` shows it as the item's `run` (pool, claim number, `claimed_at`), so a job
+shows where an item runs and how often it was claimed: the claim number is 1 on the first claim
+and grows after a lost lease or a deferral. The worker writes it with one script per claim
+before the item runs (one Valkey round trip; a failed write is logged as
+`job_item_claim_not_recorded` and the item runs anyway); nothing is written for a job that is
+gone. Each write takes the remaining TTL of `meta`; completion does not renew it, so on a job that
+ran long it may expire before the job, and the items then show `run` as null. An item of a sync
+request that ran in the API pod has none.
+
 Per API key (the job's owner) one more key lists the unfinished batches and site jobs:
 `jobs:{owner:<name>}:open` is a set of job ids with a TTL of `JOB_TTL_SECONDS`, renewed on each
 batch or site job. `POST /v1/batch` and `POST /v1/site-structure` remove the ids of finished or
@@ -745,9 +756,9 @@ touches this key together with a job key or a queue key.
 
 `DELETE /v1/jobs/{id}` (the owner or an admin; 404 for anyone else) cancels a job of any kind and
 state. It deletes every key of the job under `job:{<id>}:` that the job store knows by name:
-`meta`, `urls`, `results`, `done`, the browser secrets, the drafts, the caller's ASR and LLM keys,
-the crawl keys of a site job (below), its files (`job:{<id>}:artifact:screenshot.png`) and the
-input of item 0 (an upload, whose bytes leave the input budget). Then it removes the id from the
+`meta`, `urls`, `results`, `done`, `runs`, the browser secrets, the drafts, the caller's ASR and
+LLM keys, the crawl keys of a site job (below), its files (`job:{<id>}:artifact:screenshot.png`)
+and the input of item 0 (an upload, whose bytes leave the input budget). Then it removes the id from the
 owner's `jobs:{owner:<name>}:open`, so an admin's delete frees the owner's slot. Items still in a
 queue stay there until a worker claims them; the worker drops them as items of an expired job
 (`job_item_dropped`, reason `job_gone`, counted as `lost`). An item that is running, and a

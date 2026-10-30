@@ -1330,3 +1330,26 @@ def test_openapi_lists_delete_jobs(api: Api) -> None:
         spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
     )
     assert set(spec["components"]["schemas"]["JobDeleted"]["properties"]) == {"id", "kind"}
+
+
+def test_job_json_has_run_field(api: Api) -> None:
+    """D8: each item shows its last claim (`run`), null until a worker claims it."""
+    job_id = api.batch([PAGE, OTHER_PAGE]).json()["data"]["id"]
+
+    queued = api.job(job_id).json()["data"]["items"]
+    assert [item["run"] for item in queued] == [None, None]
+
+    assert api.work({PAGE: fetched(body=ARTICLE)}, items=1) == 1
+    first, second = api.job(job_id).json()["data"]["items"]
+    assert set(first["run"]) == {"pool", "attempts", "claimed_at"}
+    assert (first["run"]["pool"], first["run"]["attempts"]) == ("extract", 1)
+    assert first["run"]["claimed_at"].startswith(time.strftime("%Y-%m-%d", time.gmtime()))
+    assert second["run"] is None
+
+    spec = api.client.get("/openapi.json").json()
+    assert set(spec["components"]["schemas"]["ItemRun"]["properties"]) == {
+        "pool",
+        "attempts",
+        "claimed_at",
+    }
+    assert "run" in spec["components"]["schemas"]["JobItem"]["properties"]

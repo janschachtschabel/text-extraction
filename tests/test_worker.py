@@ -9,6 +9,7 @@ import signal
 import socket
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -41,7 +42,7 @@ from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.internal import Readiness, create_internal_app
-from text_extraction.job_models import JobItem, JobOptions
+from text_extraction.job_models import ItemRun, JobItem, JobOptions
 from text_extraction.jobs import JobLost, JobRecord, JobStore, ResultWrite
 from text_extraction.jobs_api import delete_job
 from text_extraction.llm_dispatch import create_llm_move, llm_queue
@@ -102,6 +103,11 @@ class Sleeps:
 
 def page(host: str, n: int = 0) -> str:
     return f"https://{host}/page-{n}"
+
+
+def at(epoch: float) -> datetime:
+    """An epoch time of the injected clock as the job store hands it out."""
+    return datetime.fromtimestamp(epoch, tz=UTC)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -2279,7 +2285,10 @@ async def test_worker_finish_moves_to_nlp_once() -> None:
     with pytest.raises(RedisConnectionError):
         await harness.worker.process(first.item)
     harness.queue.complete = complete  # type: ignore[method-assign]
-    assert await harness.items(job_id) == [JobItem(index=0, url=url, state="pending", result=None)]
+    run = ItemRun(pool="extract", attempts=1, claimed_at=at(START))
+    assert await harness.items(job_id) == [
+        JobItem(index=0, url=url, state="pending", result=None, run=run)
+    ]
 
     # It runs again and moves again: draft, then the queue, then the completion.
     harness.clock.now += harness.lease_seconds + 1
@@ -2823,7 +2832,10 @@ async def test_worker_finish_moves_to_llm_once(httpserver: HTTPServer) -> None:
     with pytest.raises(RedisConnectionError):
         await harness.worker.process(first.item)
     harness.queue.complete = complete  # type: ignore[method-assign]
-    assert await harness.items(job_id) == [JobItem(index=0, url=url, state="pending", result=None)]
+    run = ItemRun(pool="extract", attempts=1, claimed_at=at(START))
+    assert await harness.items(job_id) == [
+        JobItem(index=0, url=url, state="pending", result=None, run=run)
+    ]
 
     # It runs again and moves again: draft, then the queue, then the completion.
     harness.clock.now += harness.lease_seconds + 1
@@ -3221,3 +3233,117 @@ async def test_non_image_upload_moving_to_llm_drops_its_input(httpserver: HTTPSe
     assert outcome_count(harness, "escalated") == 1
     assert (await llm_queue(harness.valkey, harness.settings).counts()).pending == 1
     assert await harness.store.get_input(job_id, 0, StoredInputMeta) is None
+
+
+# --- item runs (D8, ruling P10-S11) ------------------------------------------------------------
+
+
+class RunSeeing:
+    """A browser runner that records the item's ``run`` as the job shows it while it runs."""
+
+    lease_seconds = 60.0
+
+    def __init__(self, harness: Harness) -> None:
+        self.harness = harness
+        self.seen: list[ItemRun | None] = []
+
+    async def run(self, job: JobRecord, item: QueueItem, url: str, **kwargs: Any) -> Any:
+        [shown] = await self.harness.store.items(job.id, item.index, 1)
+        self.seen.append(shown.run)
+        return Envelope[ExtractResult](status="failed")
+
+
+@scenario
+async def test_worker_records_each_claim() -> None:
+    """The extract worker records its claim before the item runs; the item escalates to the
+    browser, whose first claim is lost (its worker died), and the second records claim 2 in
+    pool ``browser``."""
+    shell = page("example.org", 1)
+    harness = Harness({shell: fetched(shell, SHELL)}, browser_enabled=True)
+    job_id = await harness.submit([shell])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.state == "pending"
+    assert item.run == ItemRun(pool="extract", attempts=1, claimed_at=at(START))
+
+    runner = RunSeeing(harness)
+    browser = Worker(
+        harness.settings,
+        harness.valkey,
+        runner,
+        harness.store,
+        harness.browser_queue,
+        harness.registry,
+        clock=harness.clock,
+    )
+    assert (await harness.browser_queue.claim(runner.lease_seconds)).item is not None  # dies
+    harness.clock.now += runner.lease_seconds + 1
+    claim = await harness.browser_queue.claim(runner.lease_seconds)
+    assert claim.item is not None
+    await browser.process(claim.item)
+
+    second = ItemRun(pool="browser", attempts=2, claimed_at=at(harness.clock.now))
+    assert runner.seen == [second]  # recorded before the item ran
+    [item] = await harness.items(job_id)
+    assert (item.state, item.run) == ("done", second)
+
+
+@pytest.mark.parametrize("raised", [RedisConnectionError("down"), TimeoutError("slow")])
+@scenario
+async def test_worker_runs_item_when_record_fails(raised: Exception) -> None:
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    job_id = await harness.submit([url])
+
+    async def broken(*args: Any) -> None:
+        raise raised
+
+    harness.store.record_claim = broken  # type: ignore[method-assign, assignment]
+    with capture_logs() as logs:
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert (item.result.status, item.run) == ("success", None)
+    assert await harness.completed(job_id)
+    failed = [log for log in logs if log["event"] == "job_item_claim_not_recorded"]
+    assert [log["error_type"] for log in failed] == [type(raised).__name__]
+    assert failed[0]["log_level"] == "warning"
+
+
+@scenario
+async def test_exhausted_item_records_its_last_claim() -> None:
+    harness = Harness(job_item_max_attempts=1)
+    claim = await exhausted_claim(harness)
+    job_id = claim.item.job_id  # type: ignore[union-attr]
+
+    await harness.worker.process(claim.item, exhausted=True)  # type: ignore[arg-type]
+
+    [item] = await harness.items(job_id)
+    assert error_of(item) == (ErrorCode.INTERNAL_ERROR, True, LOST_MESSAGE)
+    assert item.run == ItemRun(pool="extract", attempts=3, claimed_at=at(harness.clock.now))
+
+
+@scenario
+async def test_skipped_or_dropped_items_record_no_claim() -> None:
+    """A copy of an item that has its result, or an item whose job is gone, does not run: its
+    claim is not recorded (the job keeps the claim that produced the result)."""
+    url = page("example.org")
+    harness = Harness({url: fetched(url)})
+    job_id = await harness.submit([url])
+    stale = (await harness.claim()).item
+    assert stale is not None
+    await harness.worker.process(stale)
+    [done] = await harness.items(job_id)
+    await harness.queue.enqueue_items(job_id, OWNER.name, [(0, url)])  # a copy of the item
+
+    harness.clock.now += 5
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert await harness.items(job_id) == [done]
+    gone = await harness.submit([url])
+    await harness.store.delete(gone)
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    assert await job_keys(harness, gone) == []

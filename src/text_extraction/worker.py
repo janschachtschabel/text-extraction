@@ -21,12 +21,17 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
    1 s while claims keep answering that their scan budget ran out; every idle sleep has ±50 %
    jitter, so the loops of many pods do not claim in step;
-3. hands the item to the runner, which rebuilds the request from the job (its options and its
-   owner as the principal) and runs the pipeline. When the outbound gate refuses the host (busy
-   or paused), the item is deferred to the gate's retry time, which frees the slot for other
-   domains. An item at ``JOB_ITEM_MAX_ATTEMPTS`` is not deferred again: it runs once more with
-   the refusal answered as the pipeline's ``rate_limited`` or ``connection_error`` envelope,
-   which is stored;
+3. records the claim with the job (``JobStore.record_claim``: the pool, the claim number, which
+   is ``attempts + 1``, and the time; D8), so the job shows where the item runs and how often it
+   was claimed; a Valkey error there is logged (``job_item_claim_not_recorded``) and the item
+   runs anyway. A copy of an item that has its result, and an item whose job is gone, record
+   nothing; an exhausted item records its last claim before it fails. Then it hands the item
+   to the runner, which rebuilds the request from the job (its options and its owner as the
+   principal) and runs the pipeline. When the outbound gate refuses the host (busy or paused),
+   the item is deferred to the gate's retry time, which frees the slot for other domains. An
+   item at ``JOB_ITEM_MAX_ATTEMPTS`` is not deferred again: it runs once more with the refusal
+   answered as the pipeline's ``rate_limited`` or ``connection_error`` envelope, which is
+   stored;
 4. stores the result (only the first result of an item counts), then completes the item. An item
    whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
    it) still stores its result, but its repeat write or deferral is not counted in the metrics.
@@ -608,6 +613,7 @@ class Worker:
                 await self._store.mark_running(item.job_id)
             except JobLost:
                 return await self._drop(item)
+        await self._record_claim(item)
         # At the limit, a refusal of the gate is the result: the pipeline answers it.
         at_limit = item.attempts >= self._settings.job_item_max_attempts
         gate_refusals: Literal["fail", "raise"] = "fail" if at_limit else "raise"
@@ -635,6 +641,17 @@ class Worker:
         if envelope is None:
             return await self._moved(item)
         return await self._finish(item, job, envelope)
+
+    async def _record_claim(self, item: QueueItem) -> None:
+        """Record the claim with the job (D8, ruling P10-S11: its pool, claim number and time),
+        before the item runs: one Valkey round trip. A Valkey error is logged and ignored, so
+        the item still runs."""
+        try:
+            await self._store.record_claim(
+                item.job_id, item.index, self._queue.pool, item.attempts + 1
+            )
+        except (RedisError, OSError) as error:  # a builtin TimeoutError too
+            _log.warning("job_item_claim_not_recorded", error_type=type(error).__name__)
 
     async def _give_back(self, item: QueueItem) -> None:
         """Give a cancelled item back to its queue, claimable now. Shielded from the
@@ -664,6 +681,7 @@ class Worker:
         _log.warning("job_item_exhausted", attempts=item.attempts)
         if job is None:
             return await self._drop(item)
+        await self._record_claim(item)
         site = self._runner.site if isinstance(self._runner, ExtractRunner) else None
         if job.kind == "site" and site is not None:
             # A crash after its extend and before its queueing: its children still run (P9-S12).

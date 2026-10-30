@@ -484,8 +484,12 @@ async def get_job(
     every item failed; `error` then has the most frequent error code among the first items and
     the message "All N items failed.". `next_offset` is set while more items follow. A `site`
     job (`POST /v1/site-structure`) grows while it runs: each page, robots.txt and sitemap it
-    finds becomes an item, so its `total` rises until it is completed. A job that does not
-    exist, has expired or belongs to another caller (admins see all) answers 404.
+    finds becomes an item, so its `total` rises until it is completed. Each item's `run` is its
+    last claim by a worker: the pool (`extract`, `browser`, `docling`, `asr`, `nlp`, `llm`), the
+    claim number (more than 1 after a lost lease or a deferral) and the time; it is null before
+    the first claim and for an item that ran in the API pod, and a result's `attempts` counts
+    the fetches within one run. A job that does not exist, has expired or belongs to another
+    caller (admins see all) answers 404.
     """
     return await read_job(request.app.state, principal, job_id, offset, limit)
 

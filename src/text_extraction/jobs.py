@@ -16,6 +16,15 @@ literal cluster hash tag, so one job's keys share a slot and a Lua script can to
 All keys expire ``JOB_TTL_SECONDS`` after creation and again after completion. ``results`` and
 ``done`` do not exist before the first result; they take the remaining TTL of ``meta`` then.
 
+Items that workers claim (D8, ruling P10-S11) have one more key:
+
+- ``job:{<id>}:runs``     hash: item index -> ``<claim number>|<pool>|<epoch ms>``, the item's
+                          last claim by a worker (``record_claim``, one script per claim). Each
+                          write takes the remaining TTL of ``meta``; completion does not renew
+                          it, so on a long job it may expire before the job (the items then
+                          show no ``run``). ``delete`` removes it, ``shorten`` cuts it. A P1
+                          job's item, which runs in the API pod, has no entry.
+
 Browser jobs (package 4) may have these as well:
 
 - ``job:{<id>}:secrets``  string: the caller's ``BrowserSecrets`` as JSON (actions, cookies,
@@ -132,6 +141,7 @@ from text_extraction.browser_options import BrowserSecrets
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
+    ItemRun,
     JobItem,
     JobKind,
     JobOptions,
@@ -156,13 +166,14 @@ _URL_CHUNK = 1000
 
 # The crawl keys of a site job (P9-S3), which ``delete`` removes and ``shorten`` cuts.
 _CRAWL_KINDS = ("nodes", "seen", "children", "site")
-# The keys of a job: the four of every job, those of browser jobs, the caller's ASR and LLM keys
-# and the crawl keys of a site job.
+# The keys of a job: the four of every job, the item runs, those of browser jobs, the caller's
+# ASR and LLM keys and the crawl keys of a site job.
 _KINDS = (
     "meta",
     "urls",
     "results",
     "done",
+    "runs",
     "secrets",
     "drafts",
     "asr_key",
@@ -245,6 +256,21 @@ return 1
 # KEYS = meta, drafts; ARGV = index, envelope JSON. Stores the draft with the remaining TTL of
 # the job; returns 1, or -1 when the job is gone (nothing is written).
 _PUT_DRAFT = """
+local remaining = redis.call('PTTL', KEYS[1])
+if remaining == -2 then
+  return -1
+end
+redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+if remaining > 0 then
+  redis.call('PEXPIRE', KEYS[2], remaining)
+end
+return 1
+"""
+
+# KEYS = meta, runs; ARGV = index, run ("<claim number>|<pool>|<epoch ms>"). Records the item's
+# claim with the remaining TTL of the job; returns 1, or -1 when the job is gone (nothing is
+# written).
+_RECORD_CLAIM = """
 local remaining = redis.call('PTTL', KEYS[1])
 if remaining == -2 then
   return -1
@@ -498,6 +524,22 @@ def _utc(epoch: str) -> datetime:
     return datetime.fromtimestamp(float(epoch), tz=UTC)
 
 
+def _item_run(raw: Any) -> ItemRun | None:
+    """An entry of ``runs`` as the item's ``ItemRun``; None for none (or one this release cannot
+    read)."""
+    if raw is None:
+        return None
+    try:
+        attempts, pool, millis = reply_text(raw).split("|")
+        return ItemRun(
+            pool=pool,
+            attempts=int(attempts),
+            claimed_at=datetime.fromtimestamp(int(millis) / 1000, tz=UTC),
+        )
+    except ValueError:
+        return None
+
+
 class JobStore:
     """Creates and reads job records and stores item results, for all pods through Valkey."""
 
@@ -531,6 +573,7 @@ class JobStore:
         self._put_draft = valkey.register_script(_PUT_DRAFT)
         self._put_artifact = valkey.register_script(_PUT_ARTIFACT)
         self._put_input = valkey.register_script(_PUT_INPUT)
+        self._record_claim = valkey.register_script(_RECORD_CLAIM)
         self._put_with_job = valkey.register_script(_PUT_WITH_JOB)
         self._reserve_input = valkey.register_script(_RESERVE_INPUT)
         self._release_inputs = valkey.register_script(_RELEASE_INPUTS)
@@ -589,9 +632,9 @@ class JobStore:
         return job_id
 
     async def delete(self, job_id: str) -> None:
-        """Remove all keys of the job, its secrets, drafts, crawl keys, files and the input of
-        item 0 too (its bytes leave the input budget). A job that is gone already is not an
-        error."""
+        """Remove all keys of the job, its item runs, secrets, drafts, crawl keys, files and the
+        input of item 0 too (its bytes leave the input budget). A job that is gone already is
+        not an error."""
         await self._valkey.delete(
             *(_key(job_id, kind) for kind in _KINDS),
             *(_artifact_key(job_id, name) for name in ARTIFACT_NAMES),
@@ -600,12 +643,12 @@ class JobStore:
         await self._release(job_id, 0)
 
     async def shorten(self, job_id: str, seconds: int) -> None:
-        """Let the job (its crawl keys too) and its files expire within ``seconds`` (never later
-        than they would) and delete its secrets (the ASR and LLM keys too), drafts and the input
-        of item 0: a sync answer's screenshot job, which only the artifact route still reads. A
-        job that is gone already is not an error."""
+        """Let the job (its item runs and crawl keys too) and its files expire within
+        ``seconds`` (never later than they would) and delete its secrets (the ASR and LLM keys
+        too), drafts and the input of item 0: a sync answer's screenshot job, which only the
+        artifact route still reads. A job that is gone already is not an error."""
         async with self._valkey.pipeline(transaction=True) as pipe:
-            for kind in ("meta", "urls", "results", "done", *_CRAWL_KINDS):
+            for kind in ("meta", "urls", "results", "done", "runs", *_CRAWL_KINDS):
                 pipe.expire(_key(job_id, kind), seconds, lt=True)
             for name in ARTIFACT_NAMES:
                 pipe.expire(_artifact_key(job_id, name), seconds, lt=True)
@@ -859,15 +902,18 @@ class JobStore:
         return reply_text(raw) if raw is not None else None
 
     async def items(self, job_id: str, offset: int, limit: int) -> list[JobItem]:
-        """Up to ``limit`` items from ``offset`` in index order. Indexes past the end are absent."""
+        """Up to ``limit`` items from ``offset`` in index order, each with its last claim
+        (``run``). Indexes past the end are absent."""
         if offset < 0:
             raise ValueError("offset must not be negative")
         if limit <= 0:
             return []
+        fields = [str(n) for n in range(offset, offset + limit)]
         async with self._valkey.pipeline(transaction=False) as pipe:
             pipe.lrange(_key(job_id, "urls"), offset, offset + limit - 1)
-            pipe.hmget(_key(job_id, "results"), [str(n) for n in range(offset, offset + limit)])
-            urls, results = await pipe.execute()
+            pipe.hmget(_key(job_id, "results"), fields)
+            pipe.hmget(_key(job_id, "runs"), fields)
+            urls, results, runs = await pipe.execute()
         return [
             JobItem(
                 index=offset + position,
@@ -878,9 +924,21 @@ class JobStore:
                     if results[position] is not None
                     else None
                 ),
+                run=_item_run(runs[position]),
             )
             for position, url in enumerate(urls)
         ]
+
+    async def record_claim(self, job_id: str, index: int, pool: str, attempts: int) -> None:
+        """Record that a worker of ``pool`` claimed item ``index`` (D8, ruling P10-S11):
+        ``attempts`` is the claim number (1 on the first claim), the time is the store's clock.
+        One script on the job's slot; the entry takes the remaining TTL of the job. Nothing is
+        written when the job is gone."""
+        millis = int(self._clock() * 1000)
+        await self._record_claim(
+            keys=[_key(job_id, "meta"), _key(job_id, "runs")],
+            args=[index, f"{attempts}|{pool}|{millis}"],
+        )
 
     async def has_result(self, job_id: str, index: int) -> bool:
         """Whether item ``index`` has its result already (its ``done`` bit is set)."""
