@@ -54,6 +54,7 @@ import math
 import re
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
@@ -666,8 +667,9 @@ def _first_content(metas: list[tuple[str, str]], name: str) -> str | None:
     return next((content for meta_name, content in metas if meta_name == name), None)
 
 
-def _x_robots_noai(value: str) -> bool:
-    """``noai``/``noml`` in an ``X-Robots-Tag`` that addresses everyone or this service.
+def x_robots_tag_says(value: str, directives: frozenset[str]) -> bool:
+    """One of ``directives`` (lower case) in an ``X-Robots-Tag`` that addresses everyone or this
+    service.
 
     A directive list may be introduced by a bot name (``googlebot: noindex, noai``); it then
     holds for that bot until the next name.
@@ -679,17 +681,24 @@ def _x_robots_noai(value: str) -> bool:
         head = head.strip()
         if separator and _BOT_NAME.fullmatch(head) and head not in _VALUE_DIRECTIVES:
             scope, part = head, rest.strip()
-        if scope in (None, "*", "robots", PRODUCT_TOKEN) and part in _NOAI_DIRECTIVES:
+        if scope in (None, "*", "robots", PRODUCT_TOKEN) and part in directives:
             return True
     return False
 
 
-def _has_noai(x_robots_tag: str | None, metas: list[tuple[str, str]]) -> bool:
-    if x_robots_tag and _x_robots_noai(x_robots_tag):
-        return True
+def robots_metas_say(metas: Iterable[tuple[str, str]], directives: frozenset[str]) -> bool:
+    """One of ``directives`` (lower case) in a ``<meta name="robots">`` or
+    ``<meta name="text-extraction">``; ``metas`` are ``(name, content)`` with lower-case
+    names."""
     return any(
-        directive.strip().lower() in _NOAI_DIRECTIVES
+        directive.strip().lower() in directives
         for name, content in metas
         if name in ("robots", PRODUCT_TOKEN)
         for directive in content.split(",")
     )
+
+
+def _has_noai(x_robots_tag: str | None, metas: list[tuple[str, str]]) -> bool:
+    if x_robots_tag and x_robots_tag_says(x_robots_tag, _NOAI_DIRECTIVES):
+        return True
+    return robots_metas_say(metas, _NOAI_DIRECTIVES)
