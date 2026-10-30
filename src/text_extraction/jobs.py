@@ -46,10 +46,12 @@ Jobs that need LLM work (package 8, ruling S9) may have:
 - ``job:{<id>}:llm_key``  string: the caller's key of the LLM endpoint (the request header
                           ``X-LLM-Api-Key``). Kept as long as the job, since the draft the llm
                           worker reads lives that long and the item may wait for the worker
-                          until then. Deleted with the job, by ``shorten``, by the llm worker
-                          once a sync request's item has its outcome and with a batch's last
-                          result (``drop_llm_key``); ``drop_secrets`` leaves it, because the
-                          browser, Docling and nlp workers that call it run before the llm
+                          until then. Deleted with the job, by ``shorten``, and by whoever
+                          writes the item's result (``drop_llm_key``): the worker of any pool
+                          (a sync request's job at once, a batch with its last result) and the
+                          pod that ran the whole request; a worker that moves the item on to
+                          the llm worker keeps it. ``drop_secrets`` leaves it, because the
+                          browser, ASR and nlp workers that call it may run before the llm
                           worker. No read of the job shows it, and it is never logged.
 
 Jobs whose items carry bytes (ruling F12: an upload, a document queued for OCR; M9: media queued
@@ -381,6 +383,12 @@ def pii_lease_seconds(settings: Settings) -> float:
     return 2 * settings.pii_timeout_seconds + 10
 
 
+def llm_lease_seconds(settings: Settings) -> float:
+    """How long the llm worker holds an item: its overall deadline (three times
+    ``LLM_TIMEOUT_SECONDS``, ruling S14) plus one more timeout and 10 s (ruling S13)."""
+    return 4 * settings.llm_timeout_seconds + 10
+
+
 def owner_key(owner: str, name: str) -> str:
     """``jobs:{owner:<owner>}:<name>``, a key of one owner's jobs; the braces of a name are
     escaped, so a name cannot break the hash tag."""
@@ -593,10 +601,12 @@ class JobStore:
         TTL, whatever the job is (a sync request's, a pool job's, a batch's). Unlike the ASR key
         there is no shorter bound: the draft the llm worker reads lives as long as the job, a
         202 job may wait for the worker until then, and a batch's items move to pool ``llm`` at
-        any time. The key is not left to expire: the item's writer drops it (``drop_llm_key``:
-        the llm worker once a sync job's item has its outcome, a batch's last result, and
-        ``_store_result`` when the API pod ran the whole request); ``delete`` and ``shorten``
-        remove it too. Raises ``JobLost`` when the job is gone; nothing is stored then."""
+        any time. The key is not left to expire: whoever writes the item's result drops it
+        (``drop_llm_key``: ``Worker._finish`` of any pool, a sync job's at once and a batch's with
+        its last result, and ``extract_api._store_result`` when the API pod ran the whole
+        request); a worker that moves the item on to the llm worker keeps it. ``delete`` and
+        ``shorten`` remove it too. Raises ``JobLost`` when the job is gone; nothing is stored
+        then."""
         outcome = await self._put_with_job(
             keys=[_key(job_id, "meta"), _key(job_id, "llm_key")],
             args=[key, self._ttl_seconds * 1000],
@@ -605,8 +615,8 @@ class JobStore:
             raise JobLost(job_id)
 
     async def drop_llm_key(self, job_id: str) -> None:
-        """Delete the caller's key of the LLM endpoint only (the llm worker has finished the
-        item, or a hand-over failed after storing it)."""
+        """Delete the caller's key of the LLM endpoint only (the item's result is written, or a
+        hand-over failed after storing it)."""
         await self._valkey.delete(_key(job_id, "llm_key"))
 
     async def llm_key(self, job_id: str) -> str | None:

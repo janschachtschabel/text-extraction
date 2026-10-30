@@ -35,26 +35,30 @@ workers.
    answers or stores passes ``pii.fields.fail_closed`` (N12): one that still owes the step is
    ``pii_failed`` with its text withheld.
 8. With ``structured`` or ``chunking``, the envelope the flow ends with (after the PII step, on
-   its final, possibly masked content) gets the post stage (``structured.post``, ruling S13)
-   unless it had it already (a browser, Docling or nlp job's result is done by its worker):
-   ``run_post_patterns`` and ``finish_post``, off the event loop. LLM work it asks for is not
-   done here: the answer is ``partial``/``llm_failed``, retryable, with its content. An envelope
-   that still owes the PII step gets none: the guard withholds it. The cache keeps the DOM
-   stage's result: a cache hit gets a post stage of its own. A P1 job's write
-   (``_store_result``) runs the post stage too, for an envelope that lacks it, before the PII
-   guard.
+   its final, possibly masked content) gets the post stage (``structured.post.post_at_finish``,
+   ruling S13) unless it had it already (a browser, Docling, nlp or llm job's result is done by
+   its worker): the patterns, off the event loop; then an envelope that needs the LLM goes to
+   the llm workers (``llm_dispatch.LlmHandoff``, D5 a) with the caller's ``X-LLM-Api-Key`` and
+   the request waits ``LLM_SYNC_WAIT_SECONDS`` longer for it; last ``finish_post``, off the
+   event loop, as the guard. While the memory guard is high, when Valkey fails or nobody
+   answered in time, the answer is the content without the LLM work: ``partial``/``llm_failed``,
+   retryable, never a 5xx. An envelope that still owes the PII step gets none: the guard
+   withholds it. The cache keeps the DOM stage's result: a cache hit gets a post stage of its
+   own. A P1 job's write (``_store_result``) runs the post stage too, for an envelope that lacks
+   it, without the LLM, before the PII guard.
 
 With ``wait_seconds`` the route can hand a slow request over to a job (ruling P1). The flow keeps
 running in this pod, as the same task, and the job only stores its result. A request with
 ``transcribe: true`` and no ``wait_seconds`` waits 20 seconds (M9): a transcription is always a
 job, and a video with subtitles still answers at once. A request with ``pii`` and no
-``wait_seconds`` waits ``PII_SYNC_WAIT_SECONDS`` (D4 a): a slow nlp worker turns it into a job.
+``wait_seconds`` waits ``PII_SYNC_WAIT_SECONDS`` (D4 a): a slow nlp worker turns it into a job;
+one that may need the LLM waits ``LLM_SYNC_WAIT_SECONDS`` (the largest default applies).
 
 1. the flow runs as a task, and the route waits ``wait_seconds`` for it (the wait does not
    cancel it);
-2. if the flow waits for a browser, a Docling or an nlp job by then (or will, step 2 above), the
-   route answers 202 with that job and detaches the task: the pool's worker writes the job's
-   result.
+2. if the flow waits for a browser, a Docling, an nlp or an llm job by then (or will, step 2
+   above), the route answers 202 with that job and detaches the task: the pool's worker writes
+   the job's result.
    A flow that dispatched an ASR job answers None and leaves the job to the route
    (``Handover.adopt``), which answers 202 with it as soon as the flow ends, whether or not
    ``wait_seconds`` has passed;
@@ -62,9 +66,9 @@ job, and a video with subtitles still answers at once. A request with ``pii`` an
    ``EXTRACT_TIMEOUT_SECONDS + 10`` seconds, and the route answers 202;
 4. a done-callback of the task stores its envelope as item 0 of the job. A task that raised is
    stored as ``internal_error`` (a ``ServiceError`` keeps its own code). A flow whose fast result
-   escalates (or needs OCR, or owes the PII step) after the hand-over reuses the job for the
-   browser (or Docling, or nlp; its lease is cleared) and stores nothing: that pool's worker
-   writes item 0;
+   escalates (or needs OCR, owes the PII step or needs the LLM) after the hand-over reuses the
+   job for the browser (or Docling, nlp or llm; its lease is cleared) and stores nothing: that
+   pool's worker writes item 0;
 5. a pod that dies in between leaves the lease to expire; ``GET /v1/jobs/{id}`` then shows the
    item as failed (``jobs_api.py``).
 
@@ -120,6 +124,7 @@ from text_extraction.extract_models import (
 from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
+from text_extraction.llm_dispatch import LlmDispatcher, LlmHandoff
 from text_extraction.pii.fields import ANNOTATE_HTML_MESSAGE, fail_closed
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, pii_available
@@ -140,7 +145,7 @@ from text_extraction.structured.checks import (
     llm_key_of,
     wants_llm,
 )
-from text_extraction.structured.post import finish_post, post_pending, run_post_patterns
+from text_extraction.structured.post import LlmHop, post_at_finish
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.tracing import current_trace_id
 
@@ -571,7 +576,7 @@ async def _detach(
     pii: PiiOptions | None = None,
 ) -> Envelope[ExtractResult] | JSONResponse:
     """``wait_seconds`` ran out while the flow dispatches or waits for a pool job (a browser, a
-    Docling or an nlp job): answer 202 with that job and let the flow stop waiting. If the
+    Docling, an nlp or an llm job): answer 202 with that job and let the flow stop waiting. If the
     dispatch failed, wait for the flow's own answer."""
     background: _Background = state.background
     settled = asyncio.ensure_future(handover.settled())
@@ -664,36 +669,71 @@ async def _flow(
                 return None
             answer = timed(processed, started)
     return await post_stage(
-        state.settings,
+        state,
         answer,
         started,
-        pii=body.pii,
-        structured=body.structured,
-        chunking=body.chunking,
+        handover,
+        kind="extract",
+        options=job_options(body, compliance),
+        principal=principal,
+        url=body.url,
+        wait_until=wait_until,
+        llm_key=llm_key,
     )
 
 
 async def post_stage(
-    settings: Settings,
+    state: Any,
     envelope: Envelope[ExtractResult],
     started: float,
+    handover: Handover,
     *,
-    pii: PiiOptions | None,
-    structured: StructuredOptions | None,
-    chunking: ChunkingOptions | None,
-) -> Envelope[ExtractResult]:
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    wait_until: float | None,
+    llm_key: str | None,
+) -> _Answer:
     """Step 8 of a sync flow (``_flow``, ``file_api._flow``): the post stage of the request's
-    ``structured`` and ``chunking`` for an envelope that still owes it (``post_pending``), off
-    the event loop (ruling R10), timed into ``total_ms``. Any other envelope comes back as it
-    is."""
-    if not post_pending(envelope, structured, chunking, pii):
-        return envelope
-    envelope = await asyncio.to_thread(run_post_patterns, envelope, structured, settings=settings)
-    # LLM work (``needs_llm``) is not done here: ``finish_post`` makes it ``llm_failed``.
-    envelope = await asyncio.to_thread(
-        finish_post, envelope, structured, chunking, settings=settings
+    ``structured`` and ``chunking`` (``options``) for an envelope that still owes it
+    (``structured.post.post_at_finish``), off the event loop (ruling R10), timed into
+    ``total_ms``. An envelope that needs the LLM goes to the llm workers
+    (``llm_dispatch.LlmHandoff``, S13) with the caller's ``llm_key``: the answer is their
+    result, the content without the LLM work (``llm_failed``, retryable) when they could not
+    take it, or None once the llm job is the route's or the P1 job's. Any other envelope comes
+    back as it is."""
+    handoff = llm_handoff(
+        state,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        wait_until=wait_until,
+        llm_key=llm_key,
     )
-    return timed(envelope, started)
+
+    finished = await post_at_finish(
+        envelope,
+        options.structured,
+        options.chunking,
+        options.pii,
+        settings=state.settings,
+        hop=_llm_hop(handoff, handover) if handoff is not None else None,
+    )
+    if finished is None or finished is envelope:
+        return finished
+    return timed(finished, started)
+
+
+def _llm_hop(handoff: LlmHandoff, handover: Handover) -> LlmHop:
+    """The handoff as the hop of ``post_at_finish``: its answer is finished already (the llm
+    worker's result, or ``finish_post`` with the reason), so no reason goes back."""
+
+    async def hop(draft: Envelope[ExtractResult]) -> tuple[Envelope[ExtractResult] | None, None]:
+        return await handoff(draft, handover), None
+
+    return hop
 
 
 async def _extraction(
@@ -778,6 +818,32 @@ def pii_handoff(
     if dispatcher is None:
         return None
     return PiiHandoff(
+        dispatcher,
+        state.memory_guard,
+        kind=kind,
+        options=options,
+        principal=principal,
+        url=url,
+        wait_until=wait_until,
+        llm_key=llm_key,
+    )
+
+
+def llm_handoff(
+    state: Any,
+    *,
+    kind: Literal["extract", "file"],
+    options: JobOptions,
+    principal: Principal,
+    url: str | None,
+    wait_until: float | None,
+    llm_key: str | None = None,
+) -> LlmHandoff | None:
+    """The LLM hop of one request (S13); None while the service has no LLM."""
+    dispatcher: LlmDispatcher | None = state.llm_dispatcher
+    if dispatcher is None:
+        return None
+    return LlmHandoff(
         dispatcher,
         state.memory_guard,
         kind=kind,
@@ -1112,11 +1178,12 @@ async def _store_result(
     just before the job was created); an upload's input is deleted then, and so is the caller's
     LLM key. A Valkey failure is logged and not raised: the job's lease then runs out and
     ``GET /v1/jobs/{id}`` reports the item as lost (an input expires on its own)."""
-    if settings is not None and post_pending(envelope, structured, chunking, pii):
-        # LLM work (``needs_llm``) is not done here: ``finish_post`` makes it ``llm_failed``.
-        envelope = await asyncio.to_thread(
-            finish_post, envelope, structured, chunking, settings=settings
-        )
+    if settings is not None:
+        # The guard: LLM work an envelope still owes here (a task that raised, a pod without
+        # the hop) is ``llm_failed``; the flow's own answer has had its post stage.
+        finished = await post_at_finish(envelope, structured, chunking, pii, settings=settings)
+        if finished is not None:  # always, without a hop
+            envelope = finished
     envelope = fail_closed(envelope, pii)
     try:
         # The first and only write of a P1 job completes it ("last"); a repeat is not counted.

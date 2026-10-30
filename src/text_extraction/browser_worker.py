@@ -80,6 +80,7 @@ from text_extraction.jobs import (
     JobStore,
     browser_lease_seconds,
 )
+from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.outbound import CircuitOpen, OutboundBusy
@@ -378,6 +379,7 @@ def build_browser_worker(
         registry,
         concurrency=settings.browser_concurrency,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
     )
     return BrowserWorkerParts(
         worker=worker,

@@ -527,9 +527,9 @@ fails with `llm_failed`, not retryable.
 | `LLM_EMBEDDING_MODEL` | unset | Model of the endpoint's `/embeddings` route, for `semantic` chunking. Without it `semantic` answers 400. Empty counts as unset. |
 | `LLM_TEMPERATURE` | `0` | Sampling temperature, 0 to 2. 0 keeps extractions repeatable. |
 | `LLM_MAX_TOKENS` | `4096` | Most tokens of one answer (`max_tokens`). A longer answer is cut off and counts as invalid. Minimum 1. |
-| `LLM_TIMEOUT_SECONDS` | `120` | Timeout of one request to the endpoint, in seconds (the SDK's, per phase of the request). Timeouts are retried twice by the SDK, so a call may take about three times this before it fails, retryable. 5 to 600. |
+| `LLM_TIMEOUT_SECONDS` | `120` | Timeout of one request to the endpoint, in seconds (the SDK's, per phase of the request). Timeouts are retried twice by the SDK, so a call may take about three times this before it fails, retryable. The llm worker gives one item at most 3 × this in all (then the item answers its content without the LLM work: `llm_failed`, retryable) and leases it for 4 × this + 10 s, so an item whose worker died runs again elsewhere after that. 5 to 600. |
 | `LLM_MAX_INPUT_TOKENS` | `32000` | Most input the LLM gets of one document, in tokens estimated as 4 characters each. Longer content is cut at a paragraph border with the warning `llm_input_truncated`. 1000 to 1000000. |
-| `LLM_CONCURRENCY` | `4` | LLM items one llm worker runs at once. Minimum 1. |
+| `LLM_CONCURRENCY` | `4` | LLM items one llm worker (`text-extraction-llm-worker`, pool `llm`) runs at once: its slot loops, each with one item and its calls to the endpoint at a time. Minimum 1. |
 | `LLM_SYNC_WAIT_SECONDS` | `30` | How long a sync request that needs the LLM waits for the llm worker before it answers 202 with its job. 1 to 60. |
 | `SELECTOR_LEARN_TTL_SECONDS` | `2592000` | How long learned selectors stay in Valkey (30 days), per API key. Minimum 60. |
 | `STRUCTURED_REGEX_TIMEOUT_SECONDS` | `0.5` | Time one caller-supplied pattern may take on a text, in seconds; then it is skipped with the warning `pattern_timeout`. 0.05 to 5. |
@@ -653,9 +653,10 @@ A job whose request may need the LLM (`structured` with strategy `llm` or `auto`
 `semantic`, while the service has the LLM) may keep the caller's `X-LLM-Api-Key` header in
 `job:{<id>}:llm_key` (a string), as long as the job: the draft the llm worker reads lives that long,
 and the item may wait for the worker until then. Every job such a request creates has it (the
-request's own job, a browser, Docling, ASR or nlp job, a batch's job). No read of the job shows it;
-it is deleted with the job, when the pod that ran the whole request stores its result, and by the
-llm worker once the item is done. The browser, Docling and nlp workers leave it alone.
+request's own job, a browser, Docling, ASR, nlp or llm job, a batch's job). No read of the job shows
+it; it is deleted with the job, and by whoever writes the item's result: the worker of any pool
+(a sync request's job at once, a batch with its last result) and the pod that ran the whole
+request. A worker that moves the item on to the llm worker keeps it.
 
 ## Queue keys
 

@@ -22,6 +22,9 @@
 - ``text_extraction_nlp_dispatch_total{outcome}``: how the dispatch of this pod's results that
   need PII handling ended (``pii_dispatch.PII_OUTCOMES``). The queue gauges have pool ``nlp``
   while the service has PII handling (``PII_ENABLED``).
+- ``text_extraction_llm_dispatch_total{outcome}``: how the dispatch of this pod's results whose
+  post stage needs the LLM ended (``llm_dispatch.LLM_OUTCOMES``). The queue gauges have pool
+  ``llm`` while the service has the LLM (``LLM_ENABLED``).
 
 A background task reads ``FairQueue.counts()`` (three size reads in Valkey) every ``interval``
 seconds, not once per scrape, since collectors are synchronous; the collector only reports the
@@ -128,6 +131,9 @@ _DISPATCH_HELP: Final = {
     "(nothing dispatched; batch items count memory_guard and input_budget).",
     "nlp": "Results of this pod that needed PII handling, by how their dispatch to the nlp "
     "workers ended: answered, not_claimed, no_result, handed_over, backend_error (sync "
+    "requests) or memory_guard (nothing dispatched).",
+    "llm": "Results of this pod whose post stage needed the LLM, by how their dispatch to the "
+    "llm workers ended: answered, not_claimed, no_result, handed_over, backend_error (sync "
     "requests) or memory_guard (nothing dispatched).",
 }
 

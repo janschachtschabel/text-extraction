@@ -1825,6 +1825,12 @@ LLM_DISABLED = "LLM features are not enabled on this service."
 LLM_KEY_MISSING = "No LLM key: send X-LLM-Api-Key."
 
 
+def without_llm_hop(app: Any) -> None:
+    """A pod without the hop to the llm workers: LLM work is answered ``llm_failed`` at once,
+    for the tests whose point is elsewhere (the hop is ``tests/test_llm_dispatch.py``'s)."""
+    app.state.llm_dispatcher = None
+
+
 def llm_settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "llm_enabled": True,
@@ -1944,6 +1950,7 @@ def test_llm_work_400_without_any_key(route: str, strategy: str) -> None:
 @pytest.mark.parametrize(("route", "status"), [("extract", 200), ("file", 200), ("batch", 202)])
 def test_header_key_accepted_without_env_key(route: str, status: int) -> None:
     service = Service(llm_settings(llm_api_key=None))
+    without_llm_hop(service.app)  # the answer comes at once, without an llm worker
     with TestClient(service.app) as client:
         response = post_route(client, route, headers=LLM_KEY_HEADERS, structured=LLM_STRUCTURED)
 
@@ -2101,6 +2108,7 @@ def test_an_llm_request_without_wait_seconds_waits_then_becomes_a_job() -> None:
     """The default wait applies: a request that may need the LLM and whose extraction is slower
     than LLM_SYNC_WAIT_SECONDS answers 202 with its job."""
     case = Handover(llm_enabled=True, llm_api_key="sk-operator-key", llm_sync_wait_seconds=1)
+    without_llm_hop(case.app)  # the P1 job is the pod's to write
     case.release_later(4)  # a failing test must not hang
     with TestClient(case.app) as client:
         started = time.monotonic()
@@ -2117,6 +2125,7 @@ def test_an_llm_request_without_wait_seconds_waits_then_becomes_a_job() -> None:
 
 def test_the_llm_key_is_stored_with_the_p1_job() -> None:
     case = Handover(llm_enabled=True, llm_api_key="sk-operator-key")
+    without_llm_hop(case.app)  # the P1 job is the pod's to write
     with TestClient(case.app) as client, capture_logs() as logs:
         response = client.post(
             "/v1/extract",
@@ -2177,6 +2186,7 @@ def test_a_browser_job_keeps_the_callers_llm_key(options: dict[str, Any]) -> Non
     case = BrowserCase(
         {PAGE: fetched(body=SHELL_WITH_WORDS)}, llm_enabled=True, llm_api_key="sk-operator-key"
     )
+    without_llm_hop(case.app)  # the browser job is the point here, not the llm job after it
     with TestClient(case.app) as client, case.worker() as worker, capture_logs() as logs:
         llm = client.post(
             "/v1/extract",
@@ -2240,9 +2250,11 @@ def test_sync_chunking_without_llm_runs_inline(route: str) -> None:
 
 
 def test_sync_llm_work_without_the_llm_hop_is_partial_with_content() -> None:
-    """Until the llm worker takes LLM work (the next task), a result that needs the LLM gets the
-    post stage without it: ``partial``/``llm_failed``, retryable, the content kept."""
+    """A pod without the llm hop (no ``llm_dispatcher``) gives a result that needs the LLM the
+    post stage without it: ``partial``/``llm_failed``, retryable, the content kept. With the hop
+    the llm worker answers (``tests/test_llm_dispatch.py``)."""
     service = Service(llm_settings())
+    without_llm_hop(service.app)
     with TestClient(service.app) as client:
         response = post_route(
             client, "extract", structured={"schema": SCHEMA_ONE, "strategy": "llm"}

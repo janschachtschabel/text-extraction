@@ -11,6 +11,12 @@ The subset: the root is an ``object`` with ``properties``; a property is a ``str
 ``required`` is accepted and ignored (every field may be missing). At most 3 levels of objects
 (the root is 1), at most 50 properties in all, names ``[A-Za-z_][A-Za-z0-9_]{0,63}``. Anything
 else is refused with the path of the node.
+
+Compiling builds Pydantic models (about 4 ms for 50 properties), and options are validated again
+on every read of a job (status polls, item claims, the llm worker per item). ``compile_schema``
+therefore keeps the last ``COMPILED_CACHE_SIZE`` compiled schemas, keyed by the schema's exact JSON
+(the order of its properties included, since it is the order of ``fields``): an equal schema gets
+the same ``CompiledSchema``, which is immutable. A schema that is refused is never kept.
 """
 
 import copy
@@ -19,6 +25,8 @@ import hashlib
 import json
 import math
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
@@ -26,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 MAX_DEPTH = 3
 MAX_PROPERTIES = 50
+COMPILED_CACHE_SIZE = 256  # compiled schemas kept (``compile_schema``)
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _SCALARS = ("string", "number", "integer", "boolean")
 _ENUM_TYPES = ("string", "number", "integer")
@@ -78,8 +87,33 @@ class CompiledSchema:
         }
 
 
+# The compiled schemas by the exact JSON of their schema, least recently used first.
+_COMPILED: OrderedDict[str, CompiledSchema] = OrderedDict()
+_COMPILED_LOCK = threading.Lock()  # options are validated on the event loop and in threads
+
+
 def compile_schema(schema: Mapping[str, Any]) -> CompiledSchema:
-    """Check ``schema`` against the subset and compile it. Raises ``SchemaError``."""
+    """Check ``schema`` against the subset and compile it, or return the ``CompiledSchema`` of an
+    equal schema compiled before (the module docstring). Raises ``SchemaError``."""
+    try:
+        exact = json.dumps(schema, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):  # not JSON: the check names what is wrong
+        return _compile(schema)
+    with _COMPILED_LOCK:
+        compiled = _COMPILED.get(exact)
+        if compiled is not None:
+            _COMPILED.move_to_end(exact)
+            return compiled
+    compiled = _compile(schema)
+    with _COMPILED_LOCK:
+        _COMPILED[exact] = compiled
+        _COMPILED.move_to_end(exact)
+        while len(_COMPILED) > COMPILED_CACHE_SIZE:
+            _COMPILED.popitem(last=False)
+    return compiled
+
+
+def _compile(schema: Mapping[str, Any]) -> CompiledSchema:
     if schema.get("type") != "object":
         raise SchemaError("$", "the root must have type 'object'")
     count = _check_object(schema, "$", 1, root=True)

@@ -14,7 +14,8 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
    seconds here). An item that lost too many leases (``exhausted``) fails with
    ``internal_error``, retryable (an item of pool ``docling`` answers its draft with
    ``ocr_unavailable`` instead, when it has one; of pool ``asr`` with ``asr_unavailable``; of
-   pool ``nlp`` with ``pii_failed``, retryable, never its unprocessed draft), and
+   pool ``nlp`` with ``pii_failed``, retryable, never its unprocessed draft; of pool ``llm``
+   with its draft without the LLM work, ``llm_failed``, retryable, when it has one), and
    is completed once that is recorded or its job is gone. A Valkey error leaves it leased: it
    comes back after the lease, so its batch still gets a result for it;
 2. with nothing to claim, sleeps ``min(retry_in or 1, 1)`` seconds, or backs off from 0.05 s to
@@ -29,8 +30,8 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 4. stores the result (only the first result of an item counts), then completes the item. An item
    whose job expired is completed and dropped. A worker whose lease was taken back (it hung past
    it) still stores its result, but its repeat write or deferral is not counted in the metrics.
-   An item the runner moved, or whose result moved to the ``nlp`` pool (PII, below), is
-   completed without a result (outcome ``escalated``). A claimed
+   An item the runner moved, or whose result moved to the ``nlp`` or the ``llm`` pool (PII and
+   the LLM, below), is completed without a result (outcome ``escalated``). A claimed
    item that has its result already (a copy left by a lost lease or a double move) is completed
    without running again. An exhausted item's caller secrets are deleted with its failure.
 
@@ -83,12 +84,23 @@ nlp worker reads; a worker of pool ``nlp`` deletes an item's draft and input, an
 request's caller secrets, once its result is written.
 
 **The post stage (S5, S13).** A result of a job with ``structured`` or ``chunking`` that
-``_finish`` writes gets the post stage first (``structured.post``: ``run_post_patterns``, then
-``finish_post``, off the event loop), on its final content: after the PII step, before the guard
-``fail_closed``. A result that moves to the ``nlp`` pool gets it there, on the masked content;
-one that still owes the PII step and did not move gets none (it is withheld). LLM work the job
-asks for is not done here: the result is ``partial``/``llm_failed``, retryable, with its
-content.
+``_finish`` writes gets the post stage first (``structured.post.post_at_finish``:
+``run_post_patterns``, then ``finish_post``, off the event loop), on its final content: after the
+PII step, before the guard ``fail_closed``. A result that moves to the ``nlp`` pool gets it
+there, on the masked content; one that still owes the PII step and did not move gets none (it is
+withheld).
+
+**The LLM (S13, S14).** While the service has the LLM (``LLM_ENABLED`` and ``JOBS_ENABLED``), a
+result whose post stage needs it (``structured.post.needs_llm``, after the patterns) is not
+written by ``_finish`` of any pool but ``llm``: it moves to the ``llm`` pool
+(``llm_dispatch.LlmMove``) as results move to ``nlp``, after the PII move (so ``nlp`` moves its
+masked results on), and is completed without a result (outcome ``escalated``). The pool that
+moves it keeps the caller's LLM key; ``nlp`` keeps the draft, which the move overwrote. While the
+memory guard is high nothing is stored: the result is written without the LLM work
+(``partial``/``llm_failed``, retryable, "The LLM step is busy; retry later.", its content kept);
+so is a result of a worker without the move. The ``llm_dispatch`` module docstring has what the
+llm worker reads. Whichever pool writes an item's result drops the caller's LLM key of the job
+(R11): a sync request's job at once, a batch with its last result.
 
 **Uploads.** An item of a ``file`` job has no URL (``JobStore.url`` is ``""``): its bytes are
 the item's input, which the runner converts with ``Pipeline.extract_upload``. An input that
@@ -129,6 +141,7 @@ from weakref import WeakKeyDictionary
 
 import structlog
 from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
+from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
@@ -158,6 +171,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_models import UploadInputMeta, form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore
+from text_extraction.llm_dispatch import LLM_POOL, LlmMove, create_llm_move
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
@@ -183,7 +197,7 @@ from text_extraction.server import (
     extraction_graceful_seconds,
 )
 from text_extraction.settings import Settings
-from text_extraction.structured.post import finish_post, post_pending, run_post_patterns
+from text_extraction.structured.post import LlmHop, finish_post, post_at_finish
 from text_extraction.valkey import create_valkey
 
 _log = structlog.get_logger(__name__)
@@ -206,7 +220,7 @@ _INPUT_EXPIRED_MESSAGE = "The uploaded file expired before it was extracted. Upl
 _INTERNAL_MESSAGE = "Internal server error."
 
 # Outcomes of an item besides its envelope's: given back to the queue, its job is gone, or it
-# moved to another pool (the browser's, Docling's, ASR's or nlp's).
+# moved to another pool (the browser's, Docling's, ASR's, nlp's or llm's).
 _DEFERRED = "deferred"
 _LOST = "lost"
 _ESCALATED = "escalated"
@@ -236,8 +250,8 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
                 "text_extraction_job_items_total",
                 "Job items handled by this worker, by outcome: success, the error code of the "
                 "result, deferred (given back while the host is busy or paused), lost (the "
-                "job was gone) or escalated (moved to the browser, the docling, the asr or the nlp "
-                "pool).",
+                "job was gone) or escalated (moved to the browser, the docling, the asr, the nlp "
+                "or the llm pool).",
                 ["outcome"],
                 registry=registry,
             ),
@@ -431,7 +445,8 @@ class Worker:
     ``give_back_on_cancel``: an item cancelled while it runs (the shutdown's end) goes back to
     the queue at once, instead of when its lease expires. ``pii_move`` moves a result that owes
     the PII step to the ``nlp`` pool (every pool but ``nlp``; None while the service has no
-    PII).
+    PII); ``llm_move`` one that needs the LLM to the ``llm`` pool (every pool but ``llm``; None
+    while the service has no LLM).
     """
 
     def __init__(
@@ -449,6 +464,7 @@ class Worker:
         random: Callable[[], float] = random.random,
         give_back_on_cancel: bool = False,
         pii_move: PiiMove | None = None,
+        llm_move: LlmMove | None = None,
     ) -> None:
         self._settings = settings
         self._valkey = valkey
@@ -463,6 +479,7 @@ class Worker:
         self._lease_seconds = runner.lease_seconds
         self._give_back_on_cancel = give_back_on_cancel
         self._pii_move = pii_move
+        self._llm_move = llm_move
 
     async def run(self, stop: asyncio.Event) -> None:
         """Run the slot loops until ``stop`` is set and the items in flight have finished."""
@@ -608,7 +625,9 @@ class Worker:
     async def _fail_exhausted(self, item: QueueItem, job: JobRecord | None) -> str | None:
         """Record the item as lost too often, then complete it; an item of pool ``docling`` or
         ``asr`` answers its draft instead, when it has one (``draft_without_ocr``,
-        ``draft_without_asr``), one of pool ``nlp`` ``pii_failed``, never its draft. A Valkey
+        ``draft_without_asr``), one of pool ``nlp`` ``pii_failed``, never its draft, one of pool
+        ``llm`` its draft without the LLM work (``finish_post``, ``llm_failed``), when it has
+        one. A Valkey
         error propagates and leaves the item leased, so it is offered again after the lease
         instead of vanishing without a result."""
         _log.warning("job_item_exhausted", attempts=item.attempts)
@@ -626,6 +645,24 @@ class Worker:
         elif self._queue.pool == PII_POOL:
             # The draft is the result before its personal data was handled: never answered.
             envelope = failed_extract(ErrorCode.PII_FAILED, FAIL_CLOSED_MESSAGE, retryable=True)
+        elif self._queue.pool == LLM_POOL:
+            # The draft is the final content: it is answered without the LLM work.
+            try:
+                draft = await self._store.draft(item.job_id, item.index)
+            except ValidationError as error:
+                # The type only: pydantic's message quotes the stored text.
+                _log.error("llm_draft_invalid", error=type(error).__name__)
+                draft = None
+            if draft is not None:
+                structured, chunking = job.options.structured, job.options.chunking
+                envelope = await asyncio.to_thread(
+                    finish_post,
+                    draft,
+                    structured,
+                    chunking,
+                    settings=self._settings,
+                    reason="failed",
+                )
         outcome = await self._finish(item, job, envelope)
         # The item never runs again: its caller secrets (a browser job's, B6; an ASR key, M11)
         # are done with. A batch's ASR key serves its other items (a batch has no browser
@@ -644,9 +681,13 @@ class Worker:
         pool instead and is completed here without one. Whatever is written passes the guard
         (``pii.fields.fail_closed``, N12): a result that owes the step and did not move (the
         memory guard, a worker without the move) is ``pii_failed`` with its text withheld. A job
-        that expired before the move (``JobLost``) drops the item, as before a write. Before the
+        that expired before a move (``JobLost``) drops the item, as before a write. Before the
         guard, a result that is not done gets the post stage of the job's ``structured`` and
-        ``chunking`` (S13)."""
+        ``chunking`` (S13, ``structured.post.post_at_finish``): one that needs the LLM moves to
+        the ``llm`` pool (every pool but ``llm``) and is completed here without a result; one
+        whose move declines (the memory guard) or that has no move is answered without the LLM
+        work. The writer of the result drops the caller's LLM key (R11): a sync job's at once
+        (``_drop_input``), a batch's with its last result."""
         pii = job.options.pii
         if (
             pii is not None
@@ -659,18 +700,22 @@ class Worker:
             except JobLost:
                 return await self._drop(item)
             if moved:
-                return await self._moved_to_nlp(job, item)
+                return await self._moved_on(job, item)
             envelope = withheld(envelope, pii, message=PII_BUSY_MESSAGE)
-        structured, chunking = job.options.structured, job.options.chunking
-        if post_pending(envelope, structured, chunking, pii):
-            envelope = await asyncio.to_thread(
-                run_post_patterns, envelope, structured, settings=self._settings
+        try:
+            finished = await post_at_finish(
+                envelope,
+                job.options.structured,
+                job.options.chunking,
+                pii,
+                settings=self._settings,
+                hop=self._llm_hop(job, item),
             )
-            # LLM work (``needs_llm``) is not done here: ``finish_post`` makes it ``llm_failed``.
-            envelope = await asyncio.to_thread(
-                finish_post, envelope, structured, chunking, settings=self._settings
-            )
-        envelope = fail_closed(envelope, pii)
+        except JobLost:
+            return await self._drop(item)
+        if finished is None:
+            return await self._moved_on(job, item)
+        envelope = fail_closed(finished, pii)
         try:
             write = await self._store.write_result(item.job_id, item.index, envelope)
         except JobLost:
@@ -680,25 +725,45 @@ class Worker:
             self._metrics.job_duration.labels(kind=job.kind).observe(seconds)
             _log.info("job_completed", kind=job.kind, seconds=round(seconds, 3))
             if job.kind == "batch":
-                # Its caller's ASR key (M11) served all its items; whichever pool wrote last.
+                # Its caller's keys (M11, R11) served all its items; whichever pool wrote last.
                 await self._store.drop_asr_key(item.job_id)
+                await self._store.drop_llm_key(item.job_id)
         await self._drop_input(job, item)
         await self._queue.complete(item)
         return None if write == "repeat" else _outcome(envelope)
 
-    async def _moved_to_nlp(self, job: JobRecord, item: QueueItem) -> str | None:
-        """Complete an item that moved to ``nlp`` (``_moved``). Once that completion holds, the
-        item never runs on this pool again: what this pool kept for a rerun goes at once
-        (ruling R13), as ``_drop_input`` would delete it with a result, but for the draft,
-        which is nlp's now. Otherwise an nlp pool that is down would keep the inputs of
-        ``docling`` and ``asr`` filling their budget and Valkey."""
+    def _llm_hop(self, job: JobRecord, item: QueueItem) -> LlmHop | None:
+        """The move of the item's result to the ``llm`` pool, for ``post_at_finish``; None on
+        pool ``llm`` and without the move."""
+        move = self._llm_move
+        if move is None or self._queue.pool == LLM_POOL:
+            return None
+
+        async def hop(
+            envelope: Envelope[ExtractResult],
+        ) -> tuple[Envelope[ExtractResult] | None, Literal["busy"] | None]:
+            if await move(job, item, envelope):
+                return None, None
+            return envelope, "busy"  # the memory guard: nothing was stored
+
+        return hop
+
+    async def _moved_on(self, job: JobRecord, item: QueueItem) -> str | None:
+        """Complete an item that moved to a last hop, ``nlp`` or ``llm`` (``_moved``). Once that
+        completion holds, the item never runs on this pool again: what this pool kept for a
+        rerun goes at once (ruling R13), as ``_drop_input`` would delete it with a result, but
+        for the draft, which is the last hop's now (``nlp`` moving on to ``llm`` overwrote its
+        own), and the caller's LLM key, which the llm worker needs. Otherwise a last hop that is
+        down would keep the inputs of ``docling`` and ``asr`` filling their budget and
+        Valkey."""
         outcome = await self._moved(item)
         if outcome is None:
             return None  # the lease was lost: the current holder may need them
-        pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)
-        if job.kind == "file" or pooled:
+        pool = self._queue.pool
+        pooled = pool in (DOCLING_POOL, ASR_POOL)
+        if job.kind == "file" or pooled or pool == PII_POOL:
             await self._store.delete_input(item.job_id, item.index)
-        if self._queue.pool == ASR_POOL and job.kind != "batch":
+        if pool in (ASR_POOL, PII_POOL) and job.kind != "batch":
             await self._store.drop_secrets(item.job_id)
         return outcome
 
@@ -706,20 +771,23 @@ class Worker:
         """Delete the item's bytes once it has its result: an upload's, or those of an item
         that was queued for OCR (pool ``docling``) or a transcription (pool ``asr``), with its
         draft; on pool ``asr`` also the caller's key of a sync request's job (a batch's serves
-        its other items and goes with its last result, ``_finish``). Pool ``nlp`` is the last
-        hop: it deletes the draft, any input of the item that is still there (the pool before
-        deletes it once its move is complete, ``_moved_to_nlp``) and, but for a batch, the job's
-        caller secrets.
+        its other items and goes with its last result, ``_finish``). Pools ``nlp`` and ``llm``
+        are last hops: they delete the draft, any input of the item that is still there (the
+        pool before deletes it once its move is complete, ``_moved_on``) and, but for a batch,
+        the job's caller secrets. Every pool deletes the caller's LLM key of a sync request's
+        job (R11: whoever writes the result; a batch's goes with its last result, ``_finish``).
         Only after the result is written: an item that runs again (a failed write, a lost lease)
         needs them."""
         pooled = self._queue.pool in (DOCLING_POOL, ASR_POOL)
-        last_hop = self._queue.pool == PII_POOL
+        last_hop = self._queue.pool in (PII_POOL, LLM_POOL)
         if pooled or last_hop:
             await self._store.drop_draft(item.job_id, item.index)
         if job.kind == "file" or pooled or last_hop:
             await self._store.delete_input(item.job_id, item.index)
         if (self._queue.pool == ASR_POOL or last_hop) and job.kind != "batch":
             await self._store.drop_secrets(item.job_id)
+        if job.kind != "batch":
+            await self._store.drop_llm_key(item.job_id)
 
     async def _drop(self, item: QueueItem) -> str:
         """Complete an item whose job is gone (expired): there is nowhere to store its result."""
@@ -860,6 +928,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
         FairQueue(valkey, settings),
         registry,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
     )
     return WorkerParts(
         worker=worker,

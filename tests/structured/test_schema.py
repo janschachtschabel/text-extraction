@@ -260,3 +260,73 @@ def test_coerce_string_number_boolean_list_and_misfit() -> None:
     ]
     with pytest.raises(KeyError):
         coerce(compiled, "unknown", "x")
+
+
+# --- the cache of compiled schemas (review M2.3) -------------------------------------------------
+
+
+def _counting_models(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    from text_extraction.structured import schema as schema_module
+
+    made: list[str] = []
+    real = schema_module._model
+
+    def counting(name: str, properties: Any) -> type[BaseModel]:
+        made.append(name)
+        return real(name, properties)
+
+    monkeypatch.setattr(schema_module, "_model", counting)
+    return made
+
+
+def test_equal_schemas_compile_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every read of a job validates its options again (status polls, item claims, the llm
+    worker per item): an equal schema reuses the model compiled first."""
+    from text_extraction.job_models import JobOptions
+    from text_extraction.structured.types import StructuredOptions
+
+    made = _counting_models(monkeypatch)
+    unique = {"type": "object", "properties": {f"f_{id(made)}": {"type": "string"}}}
+    options = JobOptions(
+        compliance="enforce", structured=StructuredOptions.model_validate({"schema": unique})
+    )
+
+    again = JobOptions.model_validate_json(options.model_dump_json())
+    third = compile_schema(copy.deepcopy(unique))
+
+    assert made == ["Structured"]  # once, though validated three times
+    assert options.structured is not None
+    assert again.structured is not None
+    assert again.structured.compiled is options.structured.compiled
+    assert third is options.structured.compiled
+
+
+def test_a_reordered_schema_compiles_its_own_field_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    made = _counting_models(monkeypatch)
+    first = {"type": "object", "properties": {"a_order": {"type": "string"}, "b": NUMBER_NODE}}
+    second = {"type": "object", "properties": {"b": NUMBER_NODE, "a_order": {"type": "string"}}}
+
+    one, two = compile_schema(first), compile_schema(second)
+
+    assert one.schema_id == two.schema_id  # the same schema
+    assert (one.fields, two.fields) == (("a_order", "b"), ("b", "a_order"))
+    assert len(made) == 2
+
+
+def test_an_invalid_schema_is_refused_every_time() -> None:
+    bad = {"type": "object", "properties": {"x": {"type": "date"}}}
+    for _ in range(2):
+        with pytest.raises(SchemaError):
+            compile_schema(bad)
+
+
+def test_the_cache_is_bounded() -> None:
+    from text_extraction.structured import schema as schema_module
+
+    for index in range(schema_module.COMPILED_CACHE_SIZE + 10):
+        compile_schema({"type": "object", "properties": {f"bounded_{index}": {"type": "string"}}})
+
+    assert len(schema_module._COMPILED) == schema_module.COMPILED_CACHE_SIZE
+
+
+NUMBER_NODE: dict[str, Any] = {"type": "number"}

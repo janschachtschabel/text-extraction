@@ -81,6 +81,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, docling_lease_seconds
+from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.pii_dispatch import create_pii_move
 from text_extraction.pipeline import Pipeline, create_outbound, create_pipeline
@@ -388,6 +389,7 @@ def build_docling_worker(
         registry,
         concurrency=settings.docling_concurrency,
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
     )
     return DoclingWorkerParts(
         worker=worker,

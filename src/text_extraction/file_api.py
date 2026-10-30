@@ -45,7 +45,9 @@ answer, and what a P1 job stores, passes ``pii.fields.fail_closed`` (N12).
 
 The form fields ``structured`` and ``chunking`` (JSON strings) get the post stage after that
 (``extract_api.post_stage``, ruling S13): on the final, possibly masked content, in the API pod
-unless a Docling or nlp worker ran it, before the PII guard. A P1 job's write runs it too.
+unless a Docling, nlp or llm worker ran it, before the PII guard; LLM work goes to the llm
+workers (``llm_dispatch.LlmHandoff``), and a slow llm worker turns the upload into a job (202)
+after ``wait_seconds`` (``LLM_SYNC_WAIT_SECONDS`` by default). A P1 job's write runs it too.
 """
 
 import time
@@ -324,10 +326,11 @@ async def _flow(
     asr_key: str | None,
     llm_key: str | None = None,
 ) -> Envelope[ExtractResult] | None:
-    """The upload's envelope, or None when the Docling, the ASR or the nlp worker writes its
-    job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the LLM),
-    kept with every job the flow creates. With ``pii`` the envelope goes through the nlp workers
-    (``pii_dispatch.PiiHandoff``), then it gets the post stage (``extract_api.post_stage``)."""
+    """The upload's envelope, or None when the Docling, the ASR, the nlp or the llm worker writes
+    its job's result. ``llm_key`` is the caller's LLM key (None unless the request may need the
+    LLM), kept with every job the flow creates. With ``pii`` the envelope goes through the nlp
+    workers (``pii_dispatch.PiiHandoff``), then it gets the post stage (``extract_api.post_stage``),
+    whose LLM work goes to the llm workers (``llm_dispatch.LlmHandoff``)."""
     started = time.perf_counter()
     pipeline: Pipeline = state.pipeline
     ocr = docling_handoff(
@@ -372,10 +375,14 @@ async def _flow(
             return None
         envelope = timed(processed, started)
     return await post_stage(
-        state.settings,
+        state,
         envelope,
         started,
-        pii=form.pii,
-        structured=form.structured,
-        chunking=form.chunking,
+        handover,
+        kind="file",
+        options=options,
+        principal=principal,
+        url=None,
+        wait_until=wait_until,
+        llm_key=llm_key,
     )

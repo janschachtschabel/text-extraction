@@ -41,9 +41,12 @@ turns a ``success`` into ``partial`` with ``llm_failed``, retryable (``BUSY_MESS
 **Where it runs** (ruling S13). Every finish point runs it last, after the PII step and before
 ``pii.fields.fail_closed`` and the answer or write: the sync flows (``extract_api._flow``,
 ``file_api._flow``), the P1 job's write (``extract_api._store_result``) and ``Worker._finish``
-of every pool; ``post_pending`` says whether it is still owed there. A result that moves to the
-``nlp`` pool gets it on that pool. The result cache keeps the DOM stage's result, never the post
-stage's: a cache hit gets a post stage of its own (other ``chunking``, other chunks).
+of every pool, all through ``post_at_finish``; ``post_pending`` says whether it is still owed
+there. A result that moves to the ``nlp`` pool gets it on that pool. One that ``needs_llm`` goes
+on to the llm worker (``llm_dispatch``: a sync request's ``LlmHandoff``, a worker's ``LlmMove``),
+which runs ``apply_post``; where it cannot go there, ``finish_post`` answers it without the LLM.
+The result cache keeps the DOM stage's result, never the post stage's: a cache hit gets a post
+stage of its own (other ``chunking``, other chunks).
 
 An envelope without data, or ``failed`` without content, gets no post stage (``structured`` and
 ``chunks`` stay null). Empty content gives ``chunks: []`` and every field missing, without an
@@ -101,11 +104,14 @@ __all__ = [
     "NOTHING_TO_LEARN_WARNING",
     "NOT_RUN_MESSAGE",
     "SELECTOR_LEARNING_FAILED_WARNING",
+    "LlmHop",
+    "LlmHopReason",
     "apply_post",
     "finish_post",
     "llm_extract",
     "needs_llm",
     "patterns_ran",
+    "post_at_finish",
     "post_done",
     "post_pending",
     "run_post_patterns",
@@ -583,6 +589,50 @@ def finish_post(
             work.llm_not_done(message, optional=False)
         work.chunk_without_embeddings()
     return work.finished()
+
+
+# --- a finish point ----------------------------------------------------------------------------
+
+type LlmHopReason = Literal["busy", "failed"]
+# The hop of a finish point to the llm worker (``post_at_finish``): the envelope that comes back
+# and why the LLM work did not run (None: it ran, or it is the llm worker's now), or no envelope
+# once the llm worker writes it.
+type LlmHop = Callable[
+    [Envelope[ExtractResult]],
+    Awaitable[tuple[Envelope[ExtractResult] | None, LlmHopReason | None]],
+]
+
+
+async def post_at_finish(
+    envelope: Envelope[ExtractResult],
+    structured: StructuredOptions | None,
+    chunking: ChunkingOptions | None,
+    pii: PiiOptions | None,
+    *,
+    settings: Settings,
+    hop: LlmHop | None = None,
+) -> Envelope[ExtractResult] | None:
+    """The post stage at a finish point (ruling S13), the one sequence that the sync flows
+    (``extract_api.post_stage``), the P1 job's write (``extract_api._store_result``) and
+    ``Worker._finish`` run. An envelope that does not owe it (``post_pending``) comes back as
+    it is. Otherwise the patterns run (``run_post_patterns``, off the event loop: R10); an
+    envelope that then ``needs_llm`` goes to ``hop`` (a sync request's ``LlmHandoff``, a
+    worker's ``LlmMove``), and None comes back once the llm worker has it (the request handed
+    it over, the item moved). Last, ``finish_post`` (off the event loop) is the guard: LLM work
+    that did not run, with or without a hop, is ``llm_failed`` with the hop's reason. Whatever
+    ``hop`` raises propagates."""
+    if not post_pending(envelope, structured, chunking, pii):
+        return envelope
+    envelope = await asyncio.to_thread(run_post_patterns, envelope, structured, settings=settings)
+    reason: LlmHopReason | None = None
+    if hop is not None and needs_llm(envelope, structured, chunking, settings):
+        hopped, reason = await hop(envelope)
+        if hopped is None:
+            return None
+        envelope = hopped
+    return await asyncio.to_thread(
+        finish_post, envelope, structured, chunking, settings=settings, reason=reason
+    )
 
 
 # --- the stage with the LLM --------------------------------------------------------------------

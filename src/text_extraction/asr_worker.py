@@ -176,6 +176,7 @@ from text_extraction.fetch import USER_AGENT, Fetcher
 from text_extraction.file_models import form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobRecord, JobStore, asr_lease_seconds
+from text_extraction.llm_dispatch import create_llm_move
 from text_extraction.media.captions import Cue
 from text_extraction.media.transcript import Transcription
 from text_extraction.media.types import MediaKind
@@ -1200,6 +1201,7 @@ def build_asr_worker(
         concurrency=settings.asr_concurrency,
         give_back_on_cancel=True,  # the lease lasts hours: a cancelled item must not wait for it
         pii_move=create_pii_move(settings, valkey, store, guard, registry),
+        llm_move=create_llm_move(settings, valkey, store, guard, registry),
     )
     return AsrWorkerParts(
         worker=worker,

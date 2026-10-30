@@ -31,6 +31,7 @@ from text_extraction.file_api import upload_body_limit
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
+from text_extraction.llm_dispatch import LlmDispatcher, llm_queue
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
@@ -42,7 +43,7 @@ from text_extraction.queue_metrics import QueueGauges, job_metrics_for
 from text_extraction.ratelimit import RateLimiter, rate_limited
 from text_extraction.scheduler import FairQueue
 from text_extraction.screenshot_api import router as screenshot_router
-from text_extraction.settings import Settings
+from text_extraction.settings import Settings, llm_available
 from text_extraction.tracing import TraceMiddleware, current_trace_id
 
 _log = structlog.get_logger(__name__)
@@ -163,7 +164,9 @@ def create_public_app(
     (``ASR_ENABLED`` and ``JOBS_ENABLED``), ``app.state.asr_queue`` and
     ``app.state.asr_dispatcher`` for media that needs a transcription; while it has PII
     (``PII_ENABLED`` and ``JOBS_ENABLED``), ``app.state.pii_queue`` and
-    ``app.state.pii_dispatcher`` for results that owe the PII step;
+    ``app.state.pii_dispatcher`` for results that owe the PII step; while it has the LLM
+    (``LLM_ENABLED`` and ``JOBS_ENABLED``), ``app.state.llm_queue`` and
+    ``app.state.llm_dispatcher`` for results whose post stage needs the LLM;
     ``app.state.job_metrics`` counts the jobs and ``app.state.queue_gauges`` exports the backlog
     of each queue; ``app.state.memory_guard`` tells whether Valkey is nearly full (the lifespan
     starts and stops the tasks of both);
@@ -233,6 +236,14 @@ def create_public_app(
             app.state.job_store, app.state.pii_queue, settings, registry=registry
         )
         queues.append(app.state.pii_queue)
+    app.state.llm_queue = None
+    app.state.llm_dispatcher = None
+    if llm_available(settings):
+        app.state.llm_queue = llm_queue(valkey, settings)
+        app.state.llm_dispatcher = LlmDispatcher(
+            app.state.job_store, app.state.llm_queue, settings, registry=registry
+        )
+        queues.append(app.state.llm_queue)
     app.state.job_metrics = job_metrics_for(registry)
     app.state.queue_gauges = QueueGauges(queues, registry)
     app.state.background = set()

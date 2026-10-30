@@ -53,6 +53,7 @@ text-extraction-browser-worker = "text_extraction.browser_worker:main"
 text-extraction-docling-worker = "text_extraction.docling_worker:main"
 text-extraction-asr-worker = "text_extraction.asr_worker:main"
 text-extraction-nlp-worker = "text_extraction.nlp_worker:main"
+text-extraction-llm-worker = "text_extraction.llm_worker:main"
 
 [project.optional-dependencies]
 browser = [
