@@ -38,7 +38,11 @@ _TEXT_PREFIX_LIMIT: Final = 1024  # whitespace before a text/plain body's signat
 TEXT_TYPES: Final = frozenset({"text/plain", "text/markdown", "text/x-markdown"})
 _CSV_SAMPLE: Final = 8192
 # Upload names that make a text body of no real declared type a text type (issue #17).
-_NAMED_TEXT_TYPES: Final = ((".md", "text/markdown"), (".markdown", "text/markdown"))
+_NAMED_TEXT_TYPES: Final = (
+    (".md", "text/markdown"),
+    (".markdown", "text/markdown"),
+    (".txt", "text/plain"),
+)
 _UNTYPED: Final = frozenset({"", "application/octet-stream"})
 _CONTENT_TYPES_LIMIT: Final = 256 * 1024
 _MIMETYPE_LIMIT: Final = 128
@@ -139,7 +143,8 @@ def named_text_type(body: bytes, declared: str | None, name: str | None) -> str 
 
     A part named ``*.md`` or ``*.markdown`` (any case), declared ``application/octet-stream``
     or not at all, whose bytes look like text, is ``text/markdown``: ``curl -F file=@notes.md``
-    and many browsers send such a file without its type. A declared real type is never
+    and many browsers send such a file without its type. One named ``*.txt`` is
+    ``text/plain`` by the same rule. A declared real type is never
     overridden; the caller asks only once ``sniff`` found no kind, so a document's signature
     and an HTML start still win.
     """

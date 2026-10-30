@@ -56,15 +56,15 @@ An upload (``extract_upload``, ``POST /v1/extract/file``) runs steps 7 and 8 on 
 no URL, no compliance checks, no result cache, a fingerprint that is neither compared nor stored
 (ruling F17). A part that sniffs as no kind, named ``*.md`` or ``*.markdown``, declared
 ``application/octet-stream`` or not at all, with bytes that look like text, is read as
-``text/markdown`` (``named_text_type``, issue #17). With ``MEDIA_ENABLED``, bytes that sniff as
-audio or video (``sniff_media``, before the document kinds; the part's declared type never decides)
-are transcribed (M14): while the service has no ASR (``ASR_ENABLED`` and ``JOBS_ENABLED``) the
-upload is ``unsupported_content_type`` ("Transcription is not enabled on this service."), over
-``MEDIA_UPLOAD_MAX_BYTES`` it is ``too_large``, otherwise an ``AsrNeeded`` (``MediaInputMeta`` with
-``source: upload`` and the file name, for the result only) goes to ``asr_handoff`` once the
-deadline's steps are done, as media of a URL does. Without a handoff the stand-in is final. Any
-other upload over its limit (``CONVERT_MAX_BYTES`` for a page, ``DOCUMENT_MAX_BYTES`` for a
-document) is ``too_large`` before its bytes are hashed.
+``text/markdown`` (``named_text_type``, issue #17), one named ``*.txt`` as ``text/plain``. With
+``MEDIA_ENABLED``, bytes that sniff as audio or video (``sniff_media``, before the document kinds;
+the part's declared type never decides) are transcribed (M14): while the service has no ASR
+(``ASR_ENABLED`` and ``JOBS_ENABLED``) the upload is ``unsupported_content_type`` ("Transcription
+is not enabled on this service."), over ``MEDIA_UPLOAD_MAX_BYTES`` it is ``too_large``, otherwise
+an ``AsrNeeded`` (``MediaInputMeta`` with ``source: upload`` and the file name, for the result
+only) goes to ``asr_handoff`` once the deadline's steps are done, as media of a URL does. Without a
+handoff the stand-in is final. Any other upload over its limit (``CONVERT_MAX_BYTES`` for a page,
+``DOCUMENT_MAX_BYTES`` for a document) is ``too_large`` before its bytes are hashed.
 
 The Docling worker builds the result of a document that waited for OCR with
 ``convert_queued_document``: step 8 on its Docling conversion, the better of it and MarkItDown's
@@ -1822,7 +1822,7 @@ class Pipeline:
         # whole of it is hashed.
         kind = await self._pool.run(sniff, body, declared, run.file_name)
         if kind is None and (named := named_text_type(body, declared, run.file_name)):
-            declared, kind = named, "text"  # a `.md` part sent untyped (issue #17)
+            declared, kind = named, "text"  # a `.md` or `.txt` part sent untyped (issue #17)
         run.kind = kind
         if kind is None:
             run.content_type = declared

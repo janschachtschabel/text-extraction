@@ -168,6 +168,16 @@ def test_a_markdown_name_needs_text_bytes_and_no_declared_type() -> None:
     )
 
 
+@pytest.mark.parametrize("name", ["notes.txt", "NOTES.TXT"])
+@pytest.mark.parametrize("declared", [None, "application/octet-stream"])
+def test_a_txt_name_makes_an_untyped_text_body_plain_text(name: str, declared: str | None) -> None:
+    """Issue #17, the ``.txt`` half: such a part is plain text; binary bytes and a declared
+    real type are not."""
+    assert named_text_type(b"Some notes.", declared, name) == "text/plain"
+    assert named_text_type(b"\x00\x01\x02\x03" * 100, declared, name) is None
+    assert named_text_type(b"Some notes.", "application/pdf", name) is None
+
+
 def test_html_bytes_need_the_tag_at_the_start() -> None:
     assert sniff(b"Notes: <html> is a tag", None, None) is None
     assert sniff(b"<htmlish>", None, None) is None

@@ -760,6 +760,18 @@ def test_an_untyped_markdown_name_is_converted_as_markdown(
     assert body["data"]["content"] == MARKDOWN.strip()
 
 
+@pytest.mark.parametrize("declared", ["application/octet-stream", None])
+def test_an_untyped_txt_name_is_converted_as_plain_text(
+    client: TestClient, declared: str | None
+) -> None:
+    """Issue #17: a ``.txt`` part sent untyped is read as plain text."""
+    body = upload_part(client, (PARAGRAPH * 3).encode(), "notes.txt", declared).json()
+
+    assert body["status"] == "success", body["error"]
+    assert body["data"]["content_type"] == "text/plain"
+    assert body["data"]["content"].startswith("Photosynthesis is the process")
+
+
 def test_a_markdown_name_does_not_make_binary_or_declared_types_markdown(
     client: TestClient,
 ) -> None:

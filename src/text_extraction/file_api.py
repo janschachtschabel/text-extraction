@@ -257,7 +257,8 @@ async def extract_file(
     document's `document.file_name` is the part's file name without its path. The kind is
     decided by the bytes; the part's content type decides only where they do not: `text/plain`
     is plain text, `text/markdown` and `text/x-markdown` are Markdown, and so is a text file
-    named `*.md` or `*.markdown` sent as `application/octet-stream` or without a type. A file that
+    named `*.md` or `*.markdown` sent as `application/octet-stream` or without a type (one named
+    `*.txt` is plain text). A file that
     cannot be converted answers 200 with `status: failed` (`unsupported_content_type`,
     `too_large`, `conversion_failed`, ...). An audio or video file (decided by its bytes) is
     transcribed where the service has speech recognition, else `unsupported_content_type`
