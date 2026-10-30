@@ -17,7 +17,7 @@
 - Jan's UI requirements of 2026-10-30, in the Decisions section below.
 - `docs/architecture.md`: the overview diagram (`8080: REST /v1, /mcp, /ui`), the API rows `/mcp` ("MCP tools (optional, `MCP_ENABLED`)", streamable HTTP) and `/ui` ("Playground (optional, `UI_ENABLED`), htmx, no Node build"), "Non-JSON content types … SSE (MCP)", "Auth", "Result envelope and errors", "Sync-to-job (P1)", "Jobs and the fair queue", "Site structure", "Image descriptions (issue #20)".
 - `CLAUDE.md` rules 1, 2 (ports, stateless pods, env vars with defaults, logs and trace headers, jobs over ~30 s, Helm toggles `mcp` and `ui`), 3 (`AUTH_MODE`, the LLM key header wins), 4, 5 (SSRF guard on every fetch, byte and time limits), 6, 7.
-- Decisions D1-D8 below. Until Jan answers them, the plan uses the recommended options and is adjusted if he picks another.
+- Decisions D1-D8 below: Jan approved the plan with the recommended option (a) for each on 2026-10-30, 18:15 UTC.
 
 ## Global Constraints
 
@@ -33,7 +33,7 @@
 - Existing REST answers do not change: the whole existing suite passes unchanged after Task 1.
 - Not in this package: OAuth for MCP (a B-API concern), MCP resources, prompts, sampling and the stdio transport, server-sent progress notifications, a UI password apart from the API keys (P10-S13), a UI session or cookie, a UI language other than English, a Node build, CSV export of results, resizing of preview images.
 
-## Decisions for Jan
+## Decisions of Jan (2026-10-30, 18:15 UTC: plan approved, recommended options confirmed)
 
 **Jan's UI requirements (2026-10-30, translated from German).** "For the UI, please note: UI can be switched on and off, or protected with a password. Perhaps the same password can be used that can be set for using the API. Besides extracting single pages and showing the result as txt or Markdown by choice, there should be an option to read site structures based on sitemaps and links, and to select or deselect site sections or pages in a tree for a batch extraction. Batch files such as CSV or JSON for processing URLs would be good. Progress displays for batch jobs. The option to also extract metadata in structured form. Plan for showing preview images and their description (vision). One should see what is happening, e.g. retries and process progress, if these are returned." Where each is met: switch and password P10-S12, P10-S13 (the password is an API key; D6); text or Markdown and structured metadata P10-S15; site tree P10-S20; batch files P10-S19; progress P10-S18; previews and descriptions P10-S16 (D7); what is happening P10-S11, P10-S17 (D8).
 
