@@ -71,7 +71,7 @@ def _object(description: str) -> Any:
     return WithJsonSchema({"type": "object", "description": description})
 
 
-def _options(route: str) -> Any:
+def options_argument(route: str) -> Any:
     return _object(
         f"Any further field of the REST body of {route} (see /docs), "
         'e.g. {"pii": {"mode": "mask"}}.'
@@ -92,7 +92,7 @@ class _Arguments(BaseModel):
     )
 
 
-class _Sliced(_Arguments):
+class SlicedArguments(_Arguments):
     """The arguments of a tool whose answer has ``content``."""
 
     content_offset: int = Field(
@@ -119,20 +119,20 @@ class _Sliced(_Arguments):
 
 
 Format = Literal["markdown", "text", "html"]
-_FORMAT = "Format of content."
+FORMAT_DESCRIPTION = "Format of content."
 
 
-class ExtractUrlArguments(_Sliced):
+class ExtractUrlArguments(SlicedArguments):
     url: str = Field(description="The http(s) URL of a page or document.")
-    format: Format = Field(default="markdown", description=_FORMAT)
+    format: Format = Field(default="markdown", description=FORMAT_DESCRIPTION)
     mode: Literal["fast", "auto", "browser"] = Field(
         default="auto",
         description="fast: HTTP only; auto: a browser when the page needs one; browser: always.",
     )
-    options: Annotated[dict[str, Any] | None, _options("POST /v1/extract")] = None
+    options: Annotated[dict[str, Any] | None, options_argument("POST /v1/extract")] = None
 
 
-class ExtractFileArguments(_Sliced):
+class ExtractFileArguments(SlicedArguments):
     content_base64: str = Field(
         description="The file as base64; a data:<type>;base64, prefix and line breaks are fine."
     )
@@ -151,17 +151,17 @@ class ExtractFileArguments(_Sliced):
         max_length=MAX_CONTENT_TYPE_CHARS,
         description="The file's media type (default: the data: prefix's; the bytes decide).",
     )
-    format: Format = Field(default="markdown", description=_FORMAT)
-    options: Annotated[dict[str, Any] | None, _options("POST /v1/extract/file")] = None
+    format: Format = Field(default="markdown", description=FORMAT_DESCRIPTION)
+    options: Annotated[dict[str, Any] | None, options_argument("POST /v1/extract/file")] = None
 
 
 class ScreenshotUrlArguments(_Arguments):
     url: str = Field(description="The http(s) URL to capture as a PNG.")
     full_page: bool = Field(default=True, description="The whole page, not the first viewport.")
-    options: Annotated[dict[str, Any] | None, _options("POST /v1/screenshot")] = None
+    options: Annotated[dict[str, Any] | None, options_argument("POST /v1/screenshot")] = None
 
 
-class ExtractStructuredArguments(_Sliced):
+class ExtractStructuredArguments(SlicedArguments):
     url: str = Field(description="The http(s) URL of a page or document.")
     structured: Annotated[
         dict[str, Any],
@@ -170,11 +170,11 @@ class ExtractStructuredArguments(_Sliced):
             '{"name": {"type": "string"}}}, "strategy": "metadata"}.'
         ),
     ]
-    format: Format = Field(default="markdown", description=_FORMAT)
-    options: Annotated[dict[str, Any] | None, _options("POST /v1/structured")] = None
+    format: Format = Field(default="markdown", description=FORMAT_DESCRIPTION)
+    options: Annotated[dict[str, Any] | None, options_argument("POST /v1/structured")] = None
 
 
-class ChunkArguments(_Sliced):
+class ChunkArguments(SlicedArguments):
     url: str | None = Field(default=None, description="The URL to chunk; or give text.")
     text: str | None = Field(default=None, description="The text to chunk; or give url.")
     chunking: Annotated[
@@ -182,10 +182,10 @@ class ChunkArguments(_Sliced):
         _object('How to chunk, e.g. {"strategy": "markdown", "size": 800, "overlap": 80}.'),
     ]
     text_type: Literal["markdown", "plain"] = Field(default="markdown", description="What text is.")
-    options: Annotated[dict[str, Any] | None, _options("POST /v1/chunk")] = None
+    options: Annotated[dict[str, Any] | None, options_argument("POST /v1/chunk")] = None
 
 
-def _lean_schema(model: type[BaseModel]) -> dict[str, Any]:
+def lean_schema(model: type[BaseModel]) -> dict[str, Any]:
     """The JSON schema of a tool's arguments, the required ones first and ``options`` last."""
     schema = model.model_json_schema()
     properties: dict[str, Any] = schema["properties"]
@@ -253,21 +253,24 @@ def check_form_fields(fields: Mapping[str, Any]) -> None:
             )
 
 
-def _keys() -> tuple[str | None, str | None]:
+def call_keys() -> tuple[str | None, str | None]:
     """The raw ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers of the call (P10-S8)."""
     return call_header(ASR_KEY_HEADER), call_header(LLM_KEY_HEADER)
 
 
-class _ExtractionTool(ModelTool):
-    """A tool in front of one extraction route: the body, the core, then the result."""
+class ExtractionTool(ModelTool):
+    """A tool in front of one route that extracts or starts a job: the body, the core, then the
+    result. ``waits`` tools pass ``wait_seconds`` (``_bounded_wait``); a route that always
+    answers a job (``POST /v1/batch``, ``POST /v1/site-structure``) has none."""
 
     route: ClassVar[str]
+    waits: ClassVar[bool] = True
 
     def __init__(self, name: str, description: str) -> None:
         super().__init__(
             name=name,
             description=description,
-            parameters=_lean_schema(self.args_model),
+            parameters=lean_schema(self.args_model),
             annotations=_OPEN_WORLD,
         )
 
@@ -285,7 +288,9 @@ class _ExtractionTool(ModelTool):
         settings: Settings = state.settings
         body = _body(args)
         self.check_body(body, settings)
-        answer = await self.answer(state, principal, args, _bounded_wait(body, settings))
+        if self.waits:
+            body = _bounded_wait(body, settings)
+        answer = await self.answer(state, principal, args, body)
         payload, is_error = answer_payload(answer)
         hints: list[str] = []
         images: list[ImageContent] = []
@@ -293,7 +298,7 @@ class _ExtractionTool(ModelTool):
             job = job_hint(payload, settings.mcp_wait_seconds)
             if job is not None:
                 hints.append(job)
-            if isinstance(args, _Sliced):
+            if isinstance(args, SlicedArguments):
                 share = args.max_chars or settings.mcp_max_content_chars
                 cut = slice_content(payload, offset=args.content_offset, share=share)
                 if cut is not None:
@@ -312,7 +317,7 @@ class _ExtractionTool(ModelTool):
         """Add images or hints to a result that is no error; the default adds none."""
 
 
-class ExtractUrlTool(_ExtractionTool):
+class ExtractUrlTool(ExtractionTool):
     args_model = ExtractUrlArguments
 
     def __init__(self) -> None:
@@ -327,7 +332,7 @@ class ExtractUrlTool(_ExtractionTool):
         self, state: State, principal: Principal, args: BaseModel, body: dict[str, Any]
     ) -> Answer:
         request = ExtractRequest.model_validate(body)
-        asr, llm = _keys()
+        asr, llm = call_keys()
         return await respond(
             state,
             request,
@@ -338,7 +343,7 @@ class ExtractUrlTool(_ExtractionTool):
         )
 
 
-class ExtractFileTool(_ExtractionTool):
+class ExtractFileTool(ExtractionTool):
     args_model = ExtractFileArguments
 
     def __init__(self, settings: Settings) -> None:
@@ -359,7 +364,7 @@ class ExtractFileTool(_ExtractionTool):
         assert isinstance(args, ExtractFileArguments)  # noqa: S101 - narrows the type
         settings: Settings = state.settings
         form = FileForm.model_validate(body)
-        asr, llm = _keys()
+        asr, llm = call_keys()
         # As the route: the checks that need no byte of the file come first.
         check_upload_request(form, principal, settings, asr_header=asr, llm_header=llm)
         data, prefix_type = decode_file(args.content_base64, upload_file_limit(settings))
@@ -375,7 +380,7 @@ class ExtractFileTool(_ExtractionTool):
         )
 
 
-class ScreenshotUrlTool(_ExtractionTool):
+class ScreenshotUrlTool(ExtractionTool):
     args_model = ScreenshotUrlArguments
 
     def __init__(self) -> None:
@@ -424,7 +429,7 @@ class ScreenshotUrlTool(_ExtractionTool):
             images.append(content)
 
 
-class ExtractStructuredTool(_ExtractionTool):
+class ExtractStructuredTool(ExtractionTool):
     args_model = ExtractStructuredArguments
 
     def __init__(self) -> None:
@@ -437,13 +442,13 @@ class ExtractStructuredTool(_ExtractionTool):
     async def answer(
         self, state: State, principal: Principal, args: BaseModel, body: dict[str, Any]
     ) -> Answer:
-        asr, llm = _keys()
+        asr, llm = call_keys()
         return await run_structured(
             state, principal, StructuredRequest.model_validate(body), asr_key=asr, llm_key=llm
         )
 
 
-class ChunkTool(_ExtractionTool):
+class ChunkTool(ExtractionTool):
     args_model = ChunkArguments
 
     def check_body(self, body: dict[str, Any], settings: Settings) -> None:
@@ -460,7 +465,7 @@ class ChunkTool(_ExtractionTool):
     async def answer(
         self, state: State, principal: Principal, args: BaseModel, body: dict[str, Any]
     ) -> Answer:
-        asr, llm = _keys()
+        asr, llm = call_keys()
         try:
             return await run_chunk(
                 state, principal, ChunkRequest.model_validate(body), asr_key=asr, llm_key=llm

@@ -7,7 +7,7 @@ public port, behind ``McpGate``.
 
 import logging
 import math
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -33,6 +33,20 @@ SERVER_INSTRUCTIONS = (
     "The options argument takes any further field of the REST body of the tool's route "
     "(see /docs)."
 )
+# The tool in front of each public route, by (method, path) as the OpenAPI spec names it.
+TOOL_ROUTES: Mapping[tuple[str, str], str] = {
+    ("POST", "/v1/extract"): "extract_url",
+    ("POST", "/v1/extract/file"): "extract_file",
+    ("POST", "/v1/screenshot"): "screenshot_url",
+    ("POST", "/v1/structured"): "extract_structured",
+    ("POST", "/v1/chunk"): "chunk",
+    ("POST", "/v1/batch"): "batch_extract",
+    ("POST", "/v1/site-structure"): "site_structure",
+    ("GET", "/v1/jobs/{job_id}"): "get_job",
+    ("DELETE", "/v1/jobs/{job_id}"): "cancel_job",
+    ("GET", "/v1/jobs/{job_id}/artifacts/{name}"): "get_job_screenshot",
+    ("GET", "/v1/info"): "service_info",
+}
 # FastMCP's import gives its logger a rich text handler on stderr that does not propagate; the
 # service logs JSON on stdout through the root logger. Below WARNING, FastMCP logs tool arguments
 # (DEBUG), which no log line may carry, as `configure_logging` also sets.
@@ -75,6 +89,7 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
     )
     from text_extraction.mcp_server.tools_extract import extraction_tools
     from text_extraction.mcp_server.tools_info import ServiceInfoTool
+    from text_extraction.mcp_server.tools_jobs import job_tools
 
     _log_through_root()
     metrics = ToolMetrics(registry)
@@ -85,7 +100,7 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
         mask_error_details=True,
         middleware=[CallGuard(state, metrics)],
     )
-    tools: list[ModelTool] = [*extraction_tools(settings), ServiceInfoTool()]
+    tools: list[ModelTool] = [*extraction_tools(settings), *job_tools(), ServiceInfoTool()]
     for tool in tools:
         register(server, state, tool)
     metrics.export(tool.name for tool in tools)

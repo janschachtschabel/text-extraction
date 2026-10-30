@@ -130,6 +130,26 @@ def slice_content(envelope: dict[str, Any], *, offset: int, share: int) -> str |
     return f"Cut at {end} of {total} characters; call again with content_offset={end}."
 
 
+def slice_items(envelope: dict[str, Any], *, offset: int, max_chars: int) -> list[str]:
+    """Cut the ``content`` of each item's result of a job page (``data.items``, in place) to
+    an equal share of ``max_chars`` from ``offset`` (``slice_content``), so a page of many items
+    holds no more than one result. Returns the hints, one per item that has more to read."""
+    data = envelope.get("data")
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or not items:
+        return []
+    share = max(1, max_chars // len(items))
+    hints: list[str] = []
+    for item in items:
+        result = item.get("result") if isinstance(item, dict) else None
+        if not isinstance(result, dict):
+            continue
+        hint = slice_content(result, offset=offset, share=share)
+        if hint is not None:
+            hints.append(f"Item {item.get('index')}: {hint}")
+    return hints
+
+
 def image_over_limit_hint(size: object, url: str) -> str:
     """The hint of a screenshot of ``size`` bytes that is not attached."""
     return f"The screenshot ({size} bytes) is over MCP_IMAGE_MAX_BYTES; download it from {url}."
