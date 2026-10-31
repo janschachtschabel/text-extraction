@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -33,7 +34,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
-from text_extraction.outbound import DomainGate
+from text_extraction.outbound import CircuitOpen, DomainGate
 from text_extraction.pipeline import Pipeline
 from text_extraction.render import ArtifactSink, ClearanceStore, CookieData, Renderer
 from text_extraction.result_cache import ResultCache
@@ -57,6 +58,7 @@ SHELL_WITH_WORDS = (
 SHORT_PAGE = """<!doctype html><html lang="en"><head><title>Short</title></head>
 <body><article><h1>Short</h1><p>Only a few words of text are on this page today.</p>
 </article></body></html>"""
+FORBIDDEN_PAGE = "<html><body><p>Forbidden</p></body></html>"
 CHALLENGE_PAGE = """<!doctype html><html><head><title>Just a moment...</title></head>
 <body><p>Checking your browser before accessing the site.</p></body></html>"""
 NOAI_PAGE = ARTICLE.replace("<head>", '<head>\n<meta name="robots" content="noai">', 1)
@@ -1062,6 +1064,107 @@ def test_a_non_html_final_answer_does_not_clear_a_challenge() -> None:
     harness.run_once(mode="browser", principal=ADMIN, compliance="ignore")
 
     assert len(gate_records(harness)) == 2
+
+
+# --- maximum extraction: a plain refusal in unblock mode (P12-S1, P12-S2) -----------------------
+
+
+@pytest.mark.parametrize("status", [403, 429, 503])
+@pytest.mark.parametrize(
+    ("body", "content_type"),
+    [(FORBIDDEN_PAGE, "text/html"), ("Forbidden", "text/plain")],
+    ids=["html", "text"],
+)
+def test_refusal_answer_is_assessed_under_unblock(
+    status: int, body: str, content_type: str
+) -> None:
+    answers: dict[str, Answer] = {
+        PAGE: fetched(body=body, status=status, content_type=content_type)
+    }
+    unblocked = RenderHarness(answers, browser_unblock_enabled=True)  # no renderer: fast only
+
+    envelope = unblocked.run_once(mode="auto", compliance="ignore", principal=ADMIN)
+
+    assert code_of(envelope) == ErrorCode.TARGET_HTTP_ERROR
+    assert data_of(envelope).upstream_status == status
+    quality = data_of(envelope).quality
+    assert quality is not None
+    assert quality.challenge_status is False  # no challenge body: a plain refusal
+    assert needs_browser(envelope, unblock=True)
+
+    for compliance, enabled in (("enforce", True), ("ignore", False)):
+        standard = RenderHarness(answers, browser_unblock_enabled=enabled)
+        envelope = standard.run_once(mode="auto", compliance=compliance, principal=ADMIN)
+        assert code_of(envelope) == ErrorCode.TARGET_HTTP_ERROR
+        assert data_of(envelope).quality is None
+
+
+def test_refusal_escalation_renders_and_keeps_the_better() -> None:
+    answers: dict[str, Answer] = {PAGE: fetched(body=FORBIDDEN_PAGE, status=403)}
+    standard, unblock = FakeRenderer(rendered()), FakeRenderer(rendered())
+    harness = RenderHarness(
+        answers,
+        renderer=standard,
+        unblock_renderer=unblock,
+        clearance=FakeClearance(),
+        browser_unblock_enabled=True,
+    )
+
+    envelope = harness.run_once(mode="auto", compliance="ignore", principal=ADMIN)
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.mode_used == "browser"
+    assert data.unblocked is True
+    assert data.upstream_status == 200
+    assert len(harness.fetcher.page_calls()) == 1  # the fast refusal came first
+    assert len(unblock.calls) == 1
+    assert standard.calls == []
+
+    # Outside unblock mode the refusal stays the answer (the respect mode).
+    respect = RenderHarness(
+        answers, renderer=standard, unblock_renderer=unblock, browser_unblock_enabled=True
+    )
+    refused = respect.run_once(mode="auto", compliance="enforce", principal=ADMIN)
+    assert code_of(refused) == ErrorCode.TARGET_HTTP_ERROR
+    assert data_of(refused).mode_used == "fast"
+    assert standard.calls == []
+    assert len(unblock.calls) == 1
+
+
+def test_a_refused_429_keeps_the_hosts_pause() -> None:
+    answers: dict[str, Answer] = {
+        PAGE: fetched(body=FORBIDDEN_PAGE, status=429, headers={"retry-after": "5"})
+    }
+    unblock = FakeRenderer(rendered())
+    harness = RenderHarness(
+        answers,
+        renderer=FakeRenderer(rendered()),
+        unblock_renderer=unblock,
+        clearance=FakeClearance(),
+        browser_unblock_enabled=True,
+    )
+
+    async def escalate_then_check() -> None:
+        # As the browser worker runs it: a refusal of the gate is raised, and the item given back.
+        with pytest.raises(CircuitOpen) as paused:
+            await harness.pipeline.run(
+                ExtractRequest(url=PAGE, mode="auto", compliance="ignore"),
+                ADMIN,
+                gate_refusals="raise",
+            )
+        assert 4 < paused.value.retry_after <= 5
+        assert unblock.calls == []  # the render waits for the pause the host asked for
+
+        with pytest.raises(CircuitOpen):
+            async with DomainGate(harness.valkey, harness.settings).slot("example.org"):
+                pass
+        later = DomainGate(harness.valkey, harness.settings, clock=lambda: time.time() + 5.5)
+        async with later.slot("example.org"):
+            pass  # the pause has ended
+
+    asyncio.run(escalate_then_check())
+    assert harness.keys("out:cooldown:*") != []
 
 
 def test_an_explicit_cookie_domain_is_a_domain_cookie() -> None:

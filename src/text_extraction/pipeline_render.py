@@ -9,6 +9,7 @@ import hashlib
 from ipaddress import ip_address
 
 from text_extraction.envelope import ErrorCode
+from text_extraction.escalation import REFUSAL_STATUSES as CHALLENGE_STATUSES
 from text_extraction.extract_models import ExtractRequest
 from text_extraction.fetch import FetchError, FetchResult
 from text_extraction.netguard import InvalidUrlError, is_public_address, validate_url
@@ -23,8 +24,8 @@ from text_extraction.render import (
 )
 from text_extraction.settings import Settings
 
-# Answers whose body may be a bot challenge that unblock mode can get past (B5, B14).
-CHALLENGE_STATUSES = frozenset({403, 429, 503})
+# ``CHALLENGE_STATUSES``: answers whose body may be a bot challenge that unblock mode can get
+# past (B5, B14); the refusals that unblock mode tries again in the browser (P12-S1).
 # The renderer's warning for a challenge that was still there when the wait ended (B14).
 CHALLENGE_NOT_CLEARED = "challenge_not_cleared"
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})

@@ -171,7 +171,7 @@ from text_extraction.documents.sniff import media_type, named_text_type, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.escalation import better, needs_browser, unblock_for
+from text_extraction.escalation import REFUSAL_STATUSES, better, needs_browser, unblock_for
 from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators, split_content_type
 from text_extraction.file_models import FileForm
@@ -233,7 +233,6 @@ from text_extraction.pipeline_media import (
     without_asr,
 )
 from text_extraction.pipeline_render import (
-    CHALLENGE_STATUSES,
     answers_for_gate,
     as_fetched,
     blocked_resources,
@@ -1495,8 +1494,8 @@ class Pipeline:
                 f"The target answered with HTTP status {fetched.status}.",
                 retryable=fetched.status in _RETRYABLE_STATUSES or fetched.status >= 500,
             )
-            if failed.data is not None and self._assesses_challenge(run, fetched):
-                failed.data.quality = await self._challenge_quality(run, fetched)
+            if failed.data is not None and self._assesses_refusal(run, fetched):
+                failed.data.quality = await self._refusal_quality(run, fetched)
             return failed
         if self._media is not None and _KINDS.get(fetched.content_type or "") != "html":
             media_kind = await self._pool.run(
@@ -1612,30 +1611,33 @@ class Pipeline:
             return outcome  # the render step keeps the better of it and the draft, and stores it
         return await self._finish(run, outcome, run.validators)
 
-    def _assesses_challenge(self, run: _Run, fetched: FetchResult) -> bool:
-        """Whether a failed answer's body is judged as a possible challenge: only in unblock
-        mode, where ``auto`` escalates a challenge answer (B5, B14)."""
+    def _assesses_refusal(self, run: _Run, fetched: FetchResult) -> bool:
+        """Whether a refused answer (403, 429 or 503) is assessed, whatever its content type:
+        only in unblock mode, where ``auto`` tries every refusal again in the browser (B5, B14,
+        B16)."""
         return (
-            fetched.status in CHALLENGE_STATUSES
+            fetched.status in REFUSAL_STATUSES
             and run.unblock
             and run.req.mode == "auto"
             and self._settings.browser_enabled
-            and _KINDS.get(fetched.content_type or "") == "html"
-            and len(fetched.content) <= self._settings.convert_max_bytes
         )
 
-    async def _challenge_quality(self, run: _Run, fetched: FetchResult) -> Quality | None:
-        """The quality facts of a failed answer's body, with ``challenge_status`` set, when the
-        body is a bot challenge; None otherwise."""
+    async def _refusal_quality(self, run: _Run, fetched: FetchResult) -> Quality:
+        """The quality facts of a refused answer: of its body when that is HTML within
+        ``CONVERT_MAX_BYTES``, else of an empty page. ``challenge_status`` is set when the body is
+        a bot challenge."""
         started = time.perf_counter()
         try:
-            text = await self._pool.run(decode_html, fetched.content, fetched.charset)
+            text = ""
+            if (
+                _KINDS.get(fetched.content_type or "") == "html"
+                and len(fetched.content) <= self._settings.convert_max_bytes
+            ):
+                text = await self._pool.run(decode_html, fetched.content, fetched.charset)
             quality = await self._pool.run(assess, text, "")
         finally:
             run.convert_ms += _ms(started)
-        if not quality.bot_challenge:
-            return None
-        return quality.model_copy(update={"challenge_status": True})
+        return quality.model_copy(update={"challenge_status": quality.bot_challenge})
 
     async def _check_origin(self, run: _Run, url: str, turn: HostTurn) -> ComplianceReport:
         """``before_fetch`` for ``url``. Answered from the cache when it can be; otherwise in the
