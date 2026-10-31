@@ -72,7 +72,8 @@ class RenderOptions:
     without following redirects, a redirect of the main document becomes a navigation that is
     checked like any other (with the headers again only on that site), and any other redirect
     is followed by the browser without them. Resource types in ``blocked_resources`` are not
-    loaded (B3)."""
+    loaded (B3). ``transcript_panel`` runs the steps that read YouTube's new transcript view
+    (``browser_panel.py``) before the page is read."""
 
     actions: tuple[Action, ...] = field(default=(), repr=False)
     cookies: tuple[CookieData, ...] = field(default=(), repr=False)
@@ -83,6 +84,7 @@ class RenderOptions:
     allow_evaluate: bool = False
     unblock: bool = False
     blocked_resources: frozenset[str] = frozenset()
+    transcript_panel: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,7 +96,9 @@ class Rendered:
     egress proxy). ``cookies`` are the target host's and its parent domain's, for the
     clearance reuse of unblock mode (B14). ``download_url`` is the URL of a download the main
     frame started (by a navigation, also a clicked link): the render then has no document; the
-    pipeline may fetch the file directly (F18)."""
+    pipeline may fetch the file directly (F18). ``transcript_panel`` is the raw body of the
+    page's ``get_panel`` answer when the render was asked for it and it could be read (else the
+    warning ``transcript_panel_unavailable``)."""
 
     html: str = field(repr=False)
     final_url: str
@@ -105,6 +109,7 @@ class Rendered:
     hosts: frozenset[str] = frozenset()
     cookies: tuple[CookieData, ...] = field(default=(), repr=False)
     download_url: str | None = None
+    transcript_panel: bytes | None = field(default=None, repr=False)
 
 
 class Renderer(Protocol):

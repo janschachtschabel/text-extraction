@@ -213,7 +213,10 @@ def rendered(
     warnings: Sequence[str] = (),
     hosts: Sequence[str] = (),
     cookies: Sequence[CookieData] = (),
+    transcript_panel: bytes | None = None,
 ) -> Rendered:
+    """A render's result; ``transcript_panel`` is the ``get_panel`` body of a panel render (with
+    ``warnings`` holding ``transcript_panel_unavailable`` when it could not be read)."""
     answers = tuple(responses) if responses is not None else (response(url),)
     return Rendered(
         html=html,
@@ -224,6 +227,7 @@ def rendered(
         warnings=tuple(warnings),
         hosts=frozenset(hosts) | {urlsplit(url).hostname or ""},
         cookies=tuple(cookies),
+        transcript_panel=transcript_panel,
     )
 
 
