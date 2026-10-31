@@ -4,13 +4,18 @@
 (``tests/mcp_server/test_done_when.py``: the app under uvicorn, a real extract worker, the
 sample site on pytest-httpserver). The worker completes the batches and the site job; the API
 pod completes a P1 job. With the browser off, ``screenshot`` shows the REST 400, and
-``artifact`` shows an artifact stored for a job. Every fragment of a forwarded call shows the
-REST route's HTTP status and envelope."""
+``artifact`` shows an artifact stored for a job. Every REST call the views forward is recorded
+with its answer: the tests prove which entries of ``OPERATIONS`` they drove, and check the REST
+status and envelope of each, in the fragment where it shows them (the single operations, the
+job item, a refusal) and at the forward otherwise (the job views: their fragments show the jobs
+started, the image or the "cancelled" line)."""
 
 import json
+import re
 import time
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from typing import Any, Final
 
 import httpx
 import lxml.html
@@ -29,11 +34,79 @@ from tests.mcp_server.test_done_when import (
     serving,
 )
 from text_extraction.jobs import JobStore
+from text_extraction.ui import answers, job_views, routes
 from text_extraction.ui.forms import OPERATIONS
+from text_extraction.ui.forward import Forwarded
+from text_extraction.ui.forward import forward as real_forward
 
 HEADERS = {"HX-Request": "true", "Authorization": f"Bearer {USER_KEY}"}
 LICENSE = "https://creativecommons.org/licenses/by-sa/4.0/"
 DONE_WITHIN_SECONDS = 60
+
+
+# The entries of OPERATIONS each test below drives.
+SINGLE_DRIVEN: Final = frozenset(
+    {"login", "info", "extract", "file", "screenshot", "structured", "chunk", "job"}
+)
+JOBS_DRIVEN: Final = frozenset({"batch", "site-structure", "job", "artifact", "cancel"})
+
+
+@dataclass(frozen=True)
+class Call:
+    """One REST call a ``/ui/run`` view forwarded, with its answer."""
+
+    view: str
+    method: str
+    path: str
+    status: int
+    body: dict[str, Any] | None
+    content_type: str
+
+
+@pytest.fixture
+def forwarded(monkeypatch: pytest.MonkeyPatch) -> list[Call]:
+    """Every REST call the views forward while the test runs (the server runs in this
+    process)."""
+    calls: list[Call] = []
+
+    async def recording(request: Any, method: Any, path: str, **kwargs: Any) -> Forwarded:
+        answer = await real_forward(request, method, path, **kwargs)
+        calls.append(
+            Call(request.url.path, method, path, answer.status, answer.body, answer.content_type)
+        )
+        return answer
+
+    for module in (answers, job_views, routes):
+        monkeypatch.setattr(module, "forward", recording)
+    return calls
+
+
+def _route(path: str) -> re.Pattern[str]:
+    return re.compile(re.sub(r"\\\{\w+\\\}", "[^/]+", re.escape(path)))
+
+
+def driven(calls: Iterable[Call]) -> set[str]:
+    """The entries of ``OPERATIONS`` whose REST call a view forwarded. Entries that share a
+    route (login and info) count only from their own view, ``/ui/run/<name>``."""
+    shared = {
+        name
+        for name, op in OPERATIONS.items()
+        for other, theirs in OPERATIONS.items()
+        if other != name and (op.method, op.path) == (theirs.method, theirs.path)
+    }
+    return {
+        name
+        for name, op in OPERATIONS.items()
+        for call in calls
+        if call.method == op.method
+        and _route(op.path).fullmatch(call.path)
+        and (name not in shared or call.view == f"/ui/run/{name}")
+    }
+
+
+def calls_of(calls: Iterable[Call], name: str) -> list[Call]:
+    op = OPERATIONS[name]
+    return [c for c in calls if c.method == op.method and _route(op.path).fullmatch(c.path)]
 
 
 @pytest.fixture
@@ -128,24 +201,25 @@ def batch_options() -> dict[str, str]:
 
 
 def test_operations_cover_every_rest_route() -> None:
-    """The test below drives each of these."""
-    assert set(OPERATIONS) == {
-        "login",
-        "info",
-        "extract",
-        "file",
-        "screenshot",
-        "structured",
-        "chunk",
-        "batch",
-        "site-structure",
-        "job",
-        "artifact",
-        "cancel",
-    }
+    """The two tests below together drive every entry of ``OPERATIONS``: each proves that it
+    drove its set (from the calls it forwarded), so an entry added to ``OPERATIONS`` fails here
+    until a test drives it."""
+    assert set(OPERATIONS) == SINGLE_DRIVEN | JOBS_DRIVEN
 
 
-def test_single_operations_and_previews(live: Live, ui: httpx.Client) -> None:
+def test_driven_tells_login_from_info() -> None:
+    def call(view: str, method: str, path: str) -> Call:
+        return Call(view, method, path, 200, None, "application/json")
+
+    assert driven([call("/ui/run/login", "GET", "/v1/info")]) == {"login"}
+    assert driven([call("/ui/run/job", "GET", "/v1/jobs/" + "a" * 32)]) == {"job"}
+    assert driven([call("/ui/run/cancel", "DELETE", "/v1/jobs/" + "a" * 32)]) == {"cancel"}
+    assert driven([call("/ui/run/x", "GET", "/v1/jobs/a/b")]) == set()
+
+
+def test_single_operations_and_previews(
+    live: Live, ui: httpx.Client, forwarded: list[Call]
+) -> None:
     origin = live.origin
 
     # login and info: GET /v1/info with the browser's key.
@@ -266,14 +340,20 @@ def test_single_operations_and_previews(live: Live, ui: httpx.Client) -> None:
     steps = texts(item, "//ol[@class='timeline']/li")
     assert not [step for step in steps if "claim" in step]  # it ran in the API pod
 
+    assert driven(forwarded) >= SINGLE_DRIVEN
 
-def test_batches_site_tree_and_cancel(live: Live, ui: httpx.Client) -> None:
+
+def test_batches_site_tree_and_cancel(live: Live, ui: httpx.Client, forwarded: list[Call]) -> None:
     origin = live.origin
     urls = page_urls(live)
 
     # batch: the batch form posts its lines to batch-urls, which forwards POST /v1/batch.
     started = post(ui, "batch-urls", urls="\n".join(urls), **batch_options())
     [batch_id] = job_ids(started)
+    [batch_call] = calls_of(forwarded, "batch")
+    assert (batch_call.view, batch_call.status) == ("/ui/run/batch-urls", 202)
+    assert batch_call.body is not None
+    assert (batch_call.body["status"], batch_call.body["data"]["id"]) == ("success", batch_id)
     done = wait_completed(ui, [batch_id])
     assert [row[:3] for row in rows(done, batch_id)] == [
         [str(index), url, "success"] for index, url in enumerate(urls)
@@ -295,6 +375,9 @@ def test_batches_site_tree_and_cancel(live: Live, ui: httpx.Client) -> None:
         .get("src")
         .startswith("data:image/png;base64,")
     )
+    [artifact_call] = calls_of(forwarded, "artifact")
+    assert (artifact_call.view, artifact_call.status) == ("/ui/run/artifact", 200)
+    assert (artifact_call.content_type, artifact_call.body) == ("image/png", None)
 
     # site-structure, its progress and its tree; "Extract selected" starts a batch.
     site = post(
@@ -307,6 +390,11 @@ def test_batches_site_tree_and_cancel(live: Live, ui: httpx.Client) -> None:
         sitemaps="on",
     )
     [site_id] = job_ids(site)
+    [site_call] = calls_of(forwarded, "site-structure")
+    assert (site_call.view, site_call.status) == ("/ui/run/site-structure", 202)
+    assert site_call.body is not None
+    assert (site_call.body["status"], site_call.body["data"]["id"]) == ("success", site_id)
+    assert site_call.body["data"]["kind"] == "site"
     crawled = wait_completed(ui, [site_id])
     assert texts(crawled, f"//section[@data-job='{site_id}']//span[@class='kind']") == ["site"]
     tree_url = crawled.xpath("//button[contains(@class, 'tree-button')]")[0].get("hx-get")
@@ -341,6 +429,12 @@ def test_batches_site_tree_and_cancel(live: Live, ui: httpx.Client) -> None:
     # cancel: DELETE /v1/jobs/{id}; the job is gone afterwards.
     cancelled = post(ui, "cancel", id=file_batch)
     assert file_batch in texts(cancelled, "//p[@class='cancelled']")[0]
+    [cancel_call] = calls_of(forwarded, "cancel")
+    assert (cancel_call.view, cancel_call.status) == ("/ui/run/cancel", 200)
+    assert cancel_call.body is not None
+    assert (cancel_call.body["status"], cancel_call.body["data"]["id"]) == ("success", file_batch)
     gone = get(ui, "/ui/run/job", id=file_batch, index=0)
     status, envelope = shown_answer(gone)
     assert (status, envelope["error"]["code"]) == ("HTTP 404", "not_found")
+
+    assert driven(forwarded) >= JOBS_DRIVEN
