@@ -12,12 +12,14 @@ from text_extraction.browser_models import ScreenshotResult
 from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
-from text_extraction.ui.i18n import Message
+from text_extraction.ui.i18n import Code, Message
+from text_extraction.ui.texts import status_text
 
 RequestedMode = Literal["fast", "auto", "browser"]
 
 
-# A part of a step's detail: a text (`Message`) or a value of the result shown as it is.
+# A part of a step's detail: a text (`Message`), an identifier of the API (`Code`) or a value of
+# the result shown as it is (a content type, a converter, a compliance reason).
 Part = Message | str
 
 
@@ -47,24 +49,25 @@ def _claim(item: JobItem | None) -> list[TimelineStep]:
     if claimed.tzinfo is not None:
         claimed = claimed.astimezone(UTC)
     when = claimed.strftime("%Y-%m-%d %H:%M:%S UTC")
-    params = {"pool": run.pool, "attempt": run.attempts, "when": when}
+    params = {"pool": Code(run.pool), "attempt": run.attempts, "when": when}
     return [_step("claim", [Message("timeline.claim_detail", params)], None)]
 
 
 def _compliance(result: ExtractResult | ScreenshotResult) -> TimelineStep:
     report = result.compliance
-    checks: list[Part] = [Message("timeline.mode", {"mode": report.mode})]
+    checks: list[Part] = [Message("timeline.mode", {"mode": Code(report.mode)})]
     if report.robots != "not_checked":
-        checks.append(Message("timeline.robots", {"robots": report.robots}))
+        checks.append(Message("timeline.robots", {"robots": Code(report.robots)}))
     if report.ai_txt not in ("not_checked", "absent"):
-        checks.append(Message("timeline.ai_txt", {"ai_txt": report.ai_txt}))
+        checks.append(Message("timeline.ai_txt", {"ai_txt": Code(report.ai_txt)}))
     if report.tdm_reserved:
         checks.append(Message("timeline.tdm_reserved"))
     if report.noai:
         checks.append(Message("timeline.noai"))
     checks.extend(report.reasons)
     detail = Message(
-        "timeline.compliance_detail", {"decision": report.decision, "checks": tuple(checks)}
+        "timeline.compliance_detail",
+        {"decision": Code(report.decision), "checks": tuple(checks)},
     )
     return _step("compliance", [detail], result.timings.compliance_ms)
 
@@ -78,7 +81,7 @@ def _fetch(result: ExtractResult | ScreenshotResult) -> TimelineStep:
     if result.final_url is not None and result.final_url != result.url:
         parts.append(Message("timeline.final_url", {"url": result.final_url}))
     if isinstance(result, ExtractResult):
-        parts.append(Message("timeline.cache", {"cache": result.cache}))
+        parts.append(Message("timeline.cache", {"cache": Code(result.cache)}))
     return _step("fetch", parts, result.timings.fetch_ms)
 
 
@@ -116,7 +119,8 @@ def _pii(result: ExtractResult) -> list[TimelineStep]:
         return []
     count = sum(result.pii.entities.values())
     entities = _count(count, "timeline.entity", "timeline.entities")
-    detail = Message("timeline.pii_detail", {"entities": entities, "mode": result.pii.mode})
+    mode = Code(result.pii.mode)
+    detail = Message("timeline.pii_detail", {"entities": entities, "mode": mode})
     return [_step("pii", [detail], result.timings.pii_ms)]
 
 
@@ -129,9 +133,11 @@ def _llm(result: ExtractResult | ScreenshotResult) -> list[TimelineStep]:
 def _outcome(
     result: ExtractResult | ScreenshotResult, status: str | None, error: ErrorInfo | None
 ) -> TimelineStep:
-    parts: list[Part] = [status] if status else []
+    parts: list[Part] = []
+    if status:
+        parts.append(status_text(status) or Code(status))
     if error is not None:
-        parts.append(str(error.code))
+        parts.append(Code(error.code))
         if error.retryable:
             parts.append(Message("timeline.retryable"))
     return _step("outcome", parts, result.timings.total_ms)

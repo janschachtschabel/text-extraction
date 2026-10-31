@@ -16,7 +16,8 @@
         {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
         {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
         {%- if node.depth is not none %} <span class="depth">{{ t("tree.depth", depth=node.depth) }}</span>{% endif %}
-        {%- if node.status %} <span class="status">{{ node.status }}</span>{% endif %}
+        {%- if node.status %} <span class="status" data-value="{{ node.status }}">{{ t(status_text(node.status)) if status_text(node.status) else code(node.status) }}</span>{% endif %}
+        {%- if node.error_code %} <span class="error-code">{{ code(node.error_code) }}</span>{% endif %}
         {%- if node.lastmod %} <span class="lastmod">{{ t("tree.modified", date=node.lastmod) }}</span>{% endif %}
         {%- endif %}
         {%- if node.children %}

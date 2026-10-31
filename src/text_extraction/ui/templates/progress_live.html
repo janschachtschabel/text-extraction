@@ -8,7 +8,7 @@
   {% for job in jobs %}
   <section class="job" data-job="{{ job.id }}">
     {% set job_id %}<code class="job-id">{{ job.id }}</code>{% endset %}
-    <h4>{{ t("progress.job", id=job_id) }}{% if job.kind %} <span class="kind">{{ job.kind }}</span>{% endif %}{% if job.state %} <span class="state state-{{ job.state }}">{{ job.state }}</span>{% endif %}</h4>
+    <h4>{{ t("progress.job", id=job_id) }}{% if job.kind %} <span class="kind">{{ code(job.kind) }}</span>{% endif %}{% if job.state %} <span class="state state-{{ job.state }}" data-value="{{ job.state }}">{{ t(state_text(job.state)) if state_text(job.state) else code(job.state) }}</span>{% endif %}</h4>
     {% if job.error %}
     <div class="error job-error">
       <p class="error-text">{{ t(job.error) }}</p>
@@ -31,8 +31,8 @@
         <tr>
           <td class="index">{{ item.index }}</td>
           <td class="url">{{ item.url or t("result.the_upload") }}</td>
-          <td class="item-state">{% if item.status %}<span class="badge badge-{{ item.status }}">{{ item.status }}</span>{% else %}{{ t(item.state) }}{% endif %}</td>
-          <td class="error-code">{{ item.error_code or "" }}</td>
+          <td class="item-state">{% if item.status %}<span class="badge badge-{{ item.status }}" data-value="{{ item.status }}">{{ t(status_text(item.status)) if status_text(item.status) else code(item.status) }}</span>{% else %}{{ t(item.state) }}{% endif %}</td>
+          <td class="error-code">{% if item.error_code %}{{ code(item.error_code) }}{% endif %}</td>
           <td class="open">{% if item.link %}<button type="button" class="link" hx-get="{{ item.link }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t("progress.show") }}</button>{% endif %}</td>
         </tr>
         {% endfor %}

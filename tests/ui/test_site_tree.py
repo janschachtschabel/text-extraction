@@ -11,7 +11,8 @@ ORIGIN = "https://example.org"
 
 
 def shape(node: TreeNode) -> tuple[Any, ...]:
-    """A node as (label, kind, url, title, status, depth, lastmod, children), recursively."""
+    """A node as (label, kind, url, title, status, depth, lastmod, children, error_code),
+    recursively."""
     return (
         node.label,
         node.kind,
@@ -21,6 +22,7 @@ def shape(node: TreeNode) -> tuple[Any, ...]:
         node.depth,
         node.lastmod,
         [shape(child) for child in node.children],
+        node.error_code,
     )
 
 
@@ -34,11 +36,12 @@ def leaf(label: str, kind: str, url: str, **fields: Any) -> tuple[Any, ...]:
         fields.get("depth"),
         fields.get("lastmod"),
         [],
+        fields.get("error_code"),
     )
 
 
 def section(label: str, *children: tuple[Any, ...]) -> tuple[Any, ...]:
-    return (label, "section", None, None, None, None, None, list(children))
+    return (label, "section", None, None, None, None, None, list(children), None)
 
 
 def test_tree_by_path_segments() -> None:
@@ -84,7 +87,14 @@ def test_tree_by_path_segments() -> None:
             section("deep/", leaf("x", "linked", f"{ORIGIN}/deep/x")),
             section(
                 "docs/",
-                leaf("/", "page", f"{ORIGIN}/docs/", status="failed: target_http_error", depth=1),
+                leaf(
+                    "/",
+                    "page",
+                    f"{ORIGIN}/docs/",
+                    status="failed",
+                    error_code="target_http_error",
+                    depth=1,
+                ),
                 leaf(
                     "intro",
                     "page",

@@ -1,10 +1,13 @@
-"""The UI's texts of result warnings and API errors (rulings P10-S17, P12-S5). A warning's
+"""The UI's texts of result warnings, API errors, result statuses and job states (rulings
+P10-S17, P12-S5, R-P12-4). A warning's
 one-line text is the catalogue key ``warning.<name>``, for each warning that
 ``ExtractResult.warnings`` and ``docs/architecture.md`` describe; an unknown warning (a
 converter note, a warning newer than the catalogues) is shown by its name. An error's text is
 ``error.<code>``, for each ``ErrorCode``; the API's own English message is shown below it."""
 
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
 from text_extraction.ui.i18n import CATALOGUES, Language, Message
@@ -37,3 +40,30 @@ def error_text(code: object, http_status: int) -> Message:
     if isinstance(code, str) and key in CATALOGUES["en"]:
         return Message(key)
     return Message(HTTP_ANSWER, {"status": http_status})
+
+
+# A result's ``status`` and a job's (or a waiting item's) state, as badges show them.
+STATUS_TEXTS: Final[Mapping[str, Message]] = MappingProxyType(
+    {
+        "success": Message("status.success"),
+        "partial": Message("status.partial"),
+        "failed": Message("status.failed"),
+    }
+)
+STATE_TEXTS: Final[Mapping[str, Message]] = MappingProxyType(
+    {
+        "queued": Message("job_state.queued"),
+        "running": Message("job_state.running"),
+        "completed": Message("job_state.completed"),
+    }
+)
+
+
+def status_text(value: object) -> Message | None:
+    """The text of a result's status; None for another value (shown as code)."""
+    return STATUS_TEXTS.get(value) if isinstance(value, str) else None
+
+
+def state_text(value: object) -> Message | None:
+    """The text of a job's state; None for another value (shown as code)."""
+    return STATE_TEXTS.get(value) if isinstance(value, str) else None

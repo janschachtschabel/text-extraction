@@ -151,7 +151,7 @@ def test_timeline_in_german() -> None:
     assert details[2] == "Fallback nach HTTP, Entsperrmodus"
     assert details[3] == "text/html, docling, 4 von 9 Seiten"
     assert details[4] == "3 Funde (mask)"
-    assert details[6] == "partial, timeout, wiederholbar"
+    assert details[6] == "teilweise, timeout, wiederholbar"
 
     data = browser.model_dump(mode="json")
     data["warnings"] = ["action_2_failed", "no_such_warning_x"]

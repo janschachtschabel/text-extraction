@@ -2571,8 +2571,11 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   rendered in the request's language at the template boundary; a placeholder's value may be a
   `Message` too, or a list of them (joined by ", "). The UI shows an API error as the
   translated `error.<code>` text (one for every `ErrorCode`) with "Details from the API
-  (English)" and `error.message` (and a 422's `details`) below it, marked `lang="en"`. The values
-  of a result (a status, an error code, a job state, a content type) are shown as they are. German texts address the user as "Sie" where an address is needed, and are neutral
+  (English)" and `error.message` (and a 422's `details`) below it, marked `lang="en"`. A result's
+  status and a job's state are badges with the texts `status.<value>` and
+  `job_state.<value>` (the raw value in `data-value`, the CSS classes keyed on it); identifiers of
+  the API (error codes, compliance, robots and cache values, a job's kind) stay as they are, in
+  `<code>` (`i18n.Code`). German texts address the user as "Sie" where an address is needed, and are neutral
   otherwise; fixed terms are in the user guide's glossary ("Job" stays "Job", a field name stays
   the field name in backticks).
 - **Choosing the language (P12-S6, D4 a).** `GET /ui` takes the `lang` query (`en` or `de`), then

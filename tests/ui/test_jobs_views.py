@@ -845,7 +845,7 @@ def test_job_views_in_german(client: TestClient, monkeypatch: pytest.MonkeyPatch
 
     section = jobs_of(html)[job_id]
     assert [row[2] for row in rows(section)] == [
-        "success",
+        "erfolgreich",
         "wartet",
         "läuft in browser, Zuteilung 2",
     ]
@@ -885,3 +885,45 @@ def test_job_views_in_german(client: TestClient, monkeypatch: pytest.MonkeyPatch
     shown = client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=german).text
     found = texts(tree(shown), "//span[contains(@class, 'found')]")
     assert sorted(set(found)) == ["Sitemap", "gecrawlt", "nur verlinkt"]
+
+
+def test_badges_are_translated(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    german = {**HEADERS, LANGUAGE_HEADER: "de"}
+    waiting = start_batch(client, urls(2))
+    done = start_batch(client, urls(2, "https://example.org/done"))
+    store_result(client, done, 0)
+    store_result(client, done, 1, error=ErrorCode.TARGET_HTTP_ERROR)
+
+    html = client.get("/ui/run/progress", params=[("id", waiting), ("id", done)], headers=german)
+
+    jobs = jobs_of(html.text)
+    states = [jobs[job_id].xpath(".//span[contains(@class, 'state')]")[0] for job_id in jobs]
+    assert [(state.text_content(), state.get("data-value")) for state in states] == [
+        ("wartet", "queued"),
+        ("abgeschlossen", "completed"),
+    ]
+    assert states[1].get("class") == "state state-completed"
+    badges = jobs[done].xpath(".//td[@class='item-state']/span")
+    assert [
+        (badge.text_content(), badge.get("data-value"), badge.get("class")) for badge in badges
+    ] == [
+        ("erfolgreich", "success", "badge badge-success"),
+        ("fehlgeschlagen", "failed", "badge badge-failed"),
+    ]
+    # API identifiers stay as they are, as code.
+    assert texts(jobs[done], ".//span[@class='kind']/code") == ["batch"]
+    assert texts(jobs[done], ".//td[@class='error-code']/code") == ["target_http_error"]
+    # The result view and the site tree.
+    envelope = {"status": "partial", "data": None, "error": {"code": "llm_failed", "message": "x"}}
+    result = tree(render_result(op="extract", http_status=200, envelope=envelope, language="de"))
+    badge = result.xpath("//span[contains(@class, 'badge')]")[0]
+    assert (badge.text_content(), badge.get("data-value")) == ("teilweise", "partial")
+    assert texts(result, "//span[@class='error-code']/code") == ["llm_failed"]
+    site = [
+        page_item(0, f"{ORIGIN}/", depth=0),
+        page_item(1, f"{ORIGIN}/x", error=ErrorCode.TIMEOUT),
+    ]
+    fake_reads(monkeypatch, len(site), lambda offset, limit: site[offset : offset + limit])
+    shown = tree(client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=german).text)
+    assert texts(shown, "//span[@class='status']") == ["erfolgreich", "fehlgeschlagen"]
+    assert texts(shown, "//span[@class='error-code']/code") == ["timeout"]

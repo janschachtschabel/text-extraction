@@ -297,7 +297,6 @@
   "jobs.no_item_index": "Give a job id and an item index.",
   "jobs.no_item": "The job has no item {index}.",
   "jobs.not_an_artifact": "This is not an artifact of a job.",
-  "progress.queued": "queued",
   "progress.running": "running in {pool}, claim {attempt}",
   "progress.show_tree": "Show as tree",
   "progress.show_tree_now": "Show tree now",
@@ -346,5 +345,11 @@
   "timeline.entity": "{count} entity",
   "timeline.entities": "{count} entities",
   "timeline.pii_detail": "{entities} ({mode})",
-  "timeline.retryable": "retryable"
+  "timeline.retryable": "retryable",
+  "status.success": "success",
+  "status.partial": "partial",
+  "status.failed": "failed",
+  "job_state.queued": "queued",
+  "job_state.running": "running",
+  "job_state.completed": "completed"
 }

@@ -148,6 +148,13 @@ def text_of(value: object, language: Language) -> object:
     return value
 
 
+class Code(str):
+    """An identifier of the API shown as it is (an error code, a compliance, robots or cache
+    value, a job kind): plain text in `text_of`, ``<code>`` in the templates."""
+
+    __slots__ = ()
+
+
 class MessageError(ValueError):
     """An error whose text the UI shows: ``message`` is rendered in the request's language;
     ``str(error)`` is its English text (for logs and tests)."""

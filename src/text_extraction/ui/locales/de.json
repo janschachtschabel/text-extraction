@@ -297,7 +297,6 @@
   "jobs.no_item_index": "Geben Sie eine Job-ID und einen Eintragsindex an.",
   "jobs.no_item": "Der Job hat keinen Eintrag {index}.",
   "jobs.not_an_artifact": "Das ist kein Artefakt eines Jobs.",
-  "progress.queued": "wartet",
   "progress.running": "läuft in {pool}, Zuteilung {attempt}",
   "progress.show_tree": "Als Baum anzeigen",
   "progress.show_tree_now": "Baum jetzt anzeigen",
@@ -346,5 +345,11 @@
   "timeline.entity": "{count} Fund",
   "timeline.entities": "{count} Funde",
   "timeline.pii_detail": "{entities} ({mode})",
-  "timeline.retryable": "wiederholbar"
+  "timeline.retryable": "wiederholbar",
+  "status.success": "erfolgreich",
+  "status.partial": "teilweise",
+  "status.failed": "fehlgeschlagen",
+  "job_state.queued": "wartet",
+  "job_state.running": "läuft",
+  "job_state.completed": "abgeschlossen"
 }

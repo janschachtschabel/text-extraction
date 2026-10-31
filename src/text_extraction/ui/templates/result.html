@@ -1,18 +1,18 @@
 <article class="result-view">
   <header class="answer">
     <span class="http-status">HTTP {{ http_status }}</span>
-    {% if status %}<span class="badge badge-{{ status }}">{{ status }}</span>{% endif %}
+    {% if status %}<span class="badge badge-{{ status }}" data-value="{{ status }}">{{ t(status_text(status)) if status_text(status) else code(status) }}</span>{% endif %}
     {% if unblocked %}<span class="badge badge-unblocked">{{ t("access.unblocked") }}</span>{% endif %}
   </header>
   {% if error %}
   <div class="error" role="alert">
-    <p><span class="error-code">{{ error["code"] }}</span> <span class="error-text">{{ t(error_text) }}</span>{% if error["retryable"] %} <span class="retryable">{{ t("result.retryable") }}</span>{% endif %}</p>
+    <p><span class="error-code">{{ code(error["code"]) }}</span> <span class="error-text">{{ t(error_text) }}</span>{% if error["retryable"] %} <span class="retryable">{{ t("result.retryable") }}</span>{% endif %}</p>
     {% if retry_after %}<p class="retry-after">{{ t("result.retry_after", seconds=retry_after) }}</p>{% endif %}
     {% with detail=error["message"] if error["message"] is string else none, detail_lines=details %}{% include "api_detail.html" %}{% endwith %}
   </div>
   {% endif %}
   {% if job %}
-  <p class="job">{{ t("result.continues_as_job", id=job["id"], kind=job["kind"], url=job["status_url"]) }}</p>
+  <p class="job">{{ t("result.continues_as_job", id=job["id"], kind=code(job["kind"]), url=job["status_url"]) }}</p>
   <button type="button" class="secondary progress-button" hx-get="{{ progress_url }}" hx-target="closest .result-view" hx-swap="outerHTML">{{ t("result.show_progress") }}</button>
   {% endif %}
   {% if info %}
@@ -36,8 +36,8 @@
     <dt>{{ t("result.language") }}</dt><dd>{{ data["language"] or t("result.unknown") }}</dd>
     <dt>{{ t("result.words") }}</dt><dd>{{ data["word_count"] }}</dd>
     {% endif %}
-    <dt>{{ t("result.mode_used") }}</dt><dd>{{ data["mode_used"] }}</dd>
-    {% if compliance_mode %}<dt>{{ t("access.compliance") }}</dt><dd>{{ compliance_mode }}</dd>{% endif %}
+    <dt>{{ t("result.mode_used") }}</dt><dd>{{ code(data["mode_used"]) }}</dd>
+    {% if compliance_mode %}<dt>{{ t("access.compliance") }}</dt><dd>{{ code(compliance_mode) }}</dd>{% endif %}
   </dl>
   {% if data["content"] is string %}
   <section class="content-view" aria-label="{{ t('result.content') }}">
@@ -138,7 +138,7 @@
     <h4>{{ t("result.links_count", count=links|length) }}</h4>
     <ul class="links">
       {% for link in links %}
-      <li>{% if link["http"] %}<a href="{{ link['url'] }}" rel="noopener noreferrer">{{ link["text"] or link["url"] }}</a>{% else %}<span class="url">{{ link["url"] }}</span> {{ link["text"] }}{% endif %} <span class="kind">{{ link["kind"] }}</span></li>
+      <li>{% if link["http"] %}<a href="{{ link['url'] }}" rel="noopener noreferrer">{{ link["text"] or link["url"] }}</a>{% else %}<span class="url">{{ link["url"] }}</span> {{ link["text"] }}{% endif %} <span class="kind">{{ code(link["kind"]) if link["kind"] }}</span></li>
       {% endfor %}
     </ul>
   </section>

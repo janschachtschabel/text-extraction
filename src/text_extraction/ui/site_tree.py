@@ -64,8 +64,9 @@ _KINDS: Final[tuple[NodeKind, ...]] = ("page", "sitemap", "linked")
 @dataclass
 class TreeNode:
     """One node: a section (no URL) or a URL leaf of ``kind`` ``page`` (crawled), ``sitemap``
-    (listed only) or ``linked`` (linked only). ``status`` is a page's result status (with its
-    error code), ``depth`` its link distance from the start page, ``lastmod`` a sitemap's."""
+    (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
+    ``error_code`` its error's code, ``depth`` its link distance from the start page,
+    ``lastmod`` a sitemap's."""
 
     label: str
     url: str | None
@@ -75,6 +76,7 @@ class TreeNode:
     depth: int | None = None
     lastmod: str | None = None
     children: list["TreeNode"] = field(default_factory=list)
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -95,10 +97,12 @@ class _Found:
     status: str | None = None
     depth: int | None = None
     lastmod: str | None = None
+    error_code: str | None = None
 
     def merge(self, other: "_Found") -> None:
         self.title = self.title or other.title
-        self.status = self.status or other.status
+        if self.status is None:
+            self.status, self.error_code = other.status, other.error_code
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
 
@@ -122,10 +126,14 @@ class TreeBuilder:
         if envelope is None or data is None or site is None:
             return
         if site.role == "page" and item.url:
-            status = str(envelope.status)
-            if envelope.error is not None:
-                status = f"{status}: {envelope.error.code}"
-            found = _Found(item.url, title=data.title, status=status, depth=site.depth)
+            code = str(envelope.error.code) if envelope.error is not None else None
+            found = _Found(
+                item.url,
+                title=data.title,
+                status=str(envelope.status),
+                depth=site.depth,
+                error_code=code,
+            )
             self._add(_PAGE, found)
             for link in site.links or []:
                 if link.crawl in LINKED_ONLY:
@@ -222,6 +230,7 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 kind=kind,
                 title=found.title,
                 status=found.status,
+                error_code=found.error_code,
                 depth=found.depth,
                 lastmod=found.lastmod,
             )
