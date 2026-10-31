@@ -7,7 +7,9 @@
 #
 # It adds two test services from the API image, with tests/ mounted read-only:
 # - `farm` (tests/e2e/site_farm.py): every load target. The service reaches it as http://farm:8000
-#   on the compose network; it is not published.
+#   on the compose network; it is not published. When it stops it writes its record of every
+#   request it saw to load-results/farm/farm-record.json (the workflow creates that directory,
+#   writable for uid 10001, and renames the file after each run).
 # - `fake-llm` (tests/load/fake_llm.py): an OpenAI-compatible server with a fixed delay that counts
 #   the prompt and completion bytes. Published on 127.0.0.1:8000 for the generator's /stats reads.
 #
@@ -31,7 +33,7 @@ x-load-env: &load-env
   ASR_ENABLED: "true"
   ASR_MODEL: ${ASR_MODEL:-large-v3-turbo}
   PII_ENABLED: "true"
-  PII_MODEL_SIZE: ${PII_MODEL_SIZE:-md}
+  PII_MODEL_SIZE: ${PII_MODEL_SIZE:-lg}
   LLM_ENABLED: "true"
   LLM_BASE_URL: http://fake-llm:8000/v1
   LLM_ALLOW_HTTP: "true"
@@ -99,9 +101,12 @@ services:
     ports:
       - "127.0.0.1:9096:9090"
 
-  # One host on every interface of its container; the record goes to the tmpfs.
+  # One host on every interface of its container; the record goes to the bind mount.
   farm:
     <<: *test-service
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./load-results/farm:/records
     command:
       - python
       - -m
@@ -111,7 +116,7 @@ services:
       - --port
       - "8000"
       - --record
-      - /tmp/farm-record.json
+      - /records/farm-record.json
     healthcheck:
       test:
         - CMD

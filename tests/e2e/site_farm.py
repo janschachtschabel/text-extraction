@@ -8,7 +8,8 @@ answers 404 after about 300 ms to anything else (``robots.txt``, ``/.well-known/
 ``ai.txt``): slow enough that turns overlap and cold turns share their file loads. It
 records, per host, the start and end (``time.monotonic()`` of this process) of every request it
 sees, whatever the path. On SIGTERM or SIGINT it writes the record as JSON to ``--record`` and
-exits. Once every server listens it prints ``ready`` on stdout.
+exits. Once every server listens it prints ``ready port=<port>`` on stdout. ``--port 0`` lets the
+system pick a free port (one host only, with ``--bind``).
 
 The addresses are ``127.0.0.2`` … ``127.0.0.<hosts + 1>``: Linux routes all of ``127.0.0.0/8``
 to the loopback interface, so they need no setup. ``--bind <address>`` serves one host on that
@@ -142,6 +143,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     hosts = [args.bind] if args.bind else host_addresses(args.hosts)
+    if args.port == 0 and len(hosts) > 1:
+        parser.error("--port 0 needs --bind: every host must listen on the same port")
     record = _Record(hosts)
     servers = [_FarmServer(host, args.port, record) for host in hosts]
     for server in servers:
@@ -154,7 +157,7 @@ def main(argv: list[str] | None = None) -> None:
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
-    print("ready", flush=True)
+    print(f"ready port={servers[0].server_address[1]}", flush=True)
     while not stop.wait(0.2):
         pass
     for server in servers:

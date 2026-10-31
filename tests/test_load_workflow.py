@@ -6,7 +6,6 @@ import os
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -127,7 +126,8 @@ def test_load_offers_the_sweep_and_model_inputs() -> None:
     assert inputs["asr_model"]["default"] == "large-v3-turbo"
     assert inputs["pii_model_size"]["type"] == "choice"
     assert inputs["pii_model_size"]["options"] == ["md", "lg"]
-    assert inputs["pii_model_size"]["default"] == "md"
+    # Ruling R-P11-6: a run without inputs measures the production defaults.
+    assert inputs["pii_model_size"]["default"] == "lg"
 
 
 def test_a_label_run_uses_the_input_defaults() -> None:
@@ -135,7 +135,7 @@ def test_a_label_run_uses_the_input_defaults() -> None:
     env = _job()["env"]
     assert env["SELECTOR_PROCESSES"] == "${{ inputs.selector_processes || '1,2,4' }}"
     assert env["ASR_MODEL"] == "${{ inputs.asr_model || 'large-v3-turbo' }}"
-    assert env["PII_MODEL_SIZE"] == "${{ inputs.pii_model_size || 'md' }}"
+    assert env["PII_MODEL_SIZE"] == "${{ inputs.pii_model_size || 'lg' }}"
 
 
 def test_load_has_two_hours_and_reads_the_repo_only() -> None:
@@ -212,6 +212,8 @@ def _run_sweep(values: str, *, fail_up: bool = False) -> tuple[int, list[str], s
             "#!/bin/sh\n"
             f'echo "docker $* SP=$STRUCTURED_SELECTOR_PROCESSES" >> "{calls}"\n'
             'case "$*" in *" ps "*) echo api; echo worker;; esac\n'
+            # A stopped farm writes its record into the bind-mounted directory.
+            'case "$*" in *" stop farm"*) echo "{}" > load-results/farm/farm-record.json;; esac\n'
             f'case "$*" in *" up "*) {up};; esac\n',
             encoding="utf-8",
         )
@@ -234,33 +236,57 @@ def _run_sweep(values: str, *, fail_up: bool = False) -> tuple[int, list[str], s
         )
         lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
         logs = sorted(str(p.relative_to(tmp)) for p in Path(tmp).glob("load-results/logs/*/*"))
-    return done.returncode, [*lines, *(f"log {p}" for p in logs)], done.stderr
+        records = sorted(str(p.relative_to(tmp)) for p in Path(tmp).glob("load-results/farm/*"))
+        farm_dir = Path(tmp) / "load-results" / "farm"
+        if farm_dir.exists():
+            # The farm runs as uid 10001 and writes into the runner's directory.
+            assert farm_dir.stat().st_mode & 0o777 == 0o777
+    lines += [f"log {p}" for p in logs] + [f"record {p}" for p in records]
+    return done.returncode, lines, done.stderr
 
 
-def test_the_first_value_runs_every_scenario_and_the_others_only_the_selector_scenario() -> None:
+def test_the_full_profile_runs_once_and_every_value_gets_a_fresh_selector_run() -> None:
+    """The full profile runs at the production default (1); its selector scenario is not part
+    of the sweep. Every value, the first included, measures the selector scenario alone on
+    freshly recreated containers, so the per-child memory compares like with like."""
     code, calls, _ = _run_sweep("1, 2,4")
 
     assert code == 0
     ups = [c for c in calls if " up " in c]
-    assert [c.rsplit("SP=", 1)[1] for c in ups] == ["1", "2", "4"]
+    assert [c.rsplit("SP=", 1)[1] for c in ups] == ["1", "1", "2", "4"]
     assert all("--force-recreate" in c for c in ups)
     runs = [c for c in calls if c.startswith("uv ")]
-    assert len(runs) == 3
+    assert len(runs) == 4
     assert "--only" not in runs[0]
     assert "--out-dir load-results " in runs[0] + " "
     assert "--selector-processes 1" in runs[0]
-    for value, run in zip(("2", "4"), runs[1:], strict=True):
+    for value, run in zip(("1", "2", "4"), runs[1:], strict=True):
         assert f"--only {SELECTOR_SCENARIO}" in run
         assert f"--out-dir load-results/selector-processes-{value}" in run
         assert f"--selector-processes {value}" in run
-    # The logs are saved before the next value recreates the containers.
+    # The logs and the farm record of each run are saved before the next up recreates them.
+    assert "log load-results/logs/full/api.log" in calls
     assert "log load-results/logs/selector-processes-1/api.log" in calls
     assert "log load-results/logs/selector-processes-4/worker.log" in calls
+    assert [c for c in calls if c.startswith("record ")] == [
+        f"record load-results/farm/{run}.json"
+        for run in ("full", "selector-processes-1", "selector-processes-2", "selector-processes-4")
+    ]
+    stops = [i for i, c in enumerate(calls) if " stop farm" in c]
+    up_at = [i for i, c in enumerate(calls) if " up " in c]
+    assert len(stops) == 4
+    assert all(up > stop for up, stop in zip(up_at[1:], stops, strict=False))
 
 
 def test_the_run_targets_the_farm_the_fake_llm_and_every_internal_port() -> None:
     _, calls, _ = _run_sweep("1")
-    (run,) = [c for c in calls if c.startswith("uv ")]
+    runs = [c for c in calls if c.startswith("uv ")]
+    assert len(runs) == 2  # the full profile and the sweep's one value
+    for run in runs:
+        _check_targets(run)
+
+
+def _check_targets(run: str) -> None:
     assert "-m tests.load.run_load" in run
     assert "--base-url http://127.0.0.1:8080" in run
     assert "--farm-url http://farm:8000" in run
@@ -284,11 +310,20 @@ def test_a_value_that_is_not_a_whole_number_starts_nothing() -> None:
     assert "'x'" in stderr
 
 
+def test_a_repeated_value_starts_nothing() -> None:
+    """A second run of a value would overwrite the first one's results and logs."""
+    code, calls, stderr = _run_sweep("1,2,1")
+    assert code != 0
+    assert calls == []
+    assert "'1'" in stderr
+    assert "more than once" in stderr
+
+
 def test_a_stack_that_does_not_come_up_fails_the_run_with_its_logs() -> None:
     code, calls, _ = _run_sweep("1,2", fail_up=True)
     assert code != 0
     assert not [c for c in calls if c.startswith("uv ")]
-    assert "log load-results/logs/selector-processes-1/api.log" in calls
+    assert "log load-results/logs/full/api.log" in calls
 
 
 # --- the compose override -----------------------------------------------------------------------
@@ -332,7 +367,7 @@ def test_override_lifts_the_limits_and_switches_every_feature_on() -> None:
 def test_override_takes_the_models_and_the_sweep_value_from_the_workflow() -> None:
     environment = _override_services()["api"]["environment"]
     assert environment["ASR_MODEL"] == "${ASR_MODEL:-large-v3-turbo}"
-    assert environment["PII_MODEL_SIZE"] == "${PII_MODEL_SIZE:-md}"
+    assert environment["PII_MODEL_SIZE"] == "${PII_MODEL_SIZE:-lg}"
     assert environment["STRUCTURED_SELECTOR_PROCESSES"] == "${STRUCTURED_SELECTOR_PROCESSES:-1}"
 
 
@@ -345,7 +380,7 @@ def test_override_settings_are_real_and_valid() -> None:
     values: dict[str, Any] = {k.lower(): v for k, v in env.items()}
     settings = Settings(auth_mode="none", **values)
     assert settings.llm_enabled
-    assert settings.pii_model_size == "md"
+    assert settings.pii_model_size == "lg"
 
 
 def test_internal_ports_are_published_on_loopback_only() -> None:
@@ -374,7 +409,8 @@ def test_test_services_run_from_the_api_image_with_the_tests_read_only(
     assert service["command"][service["command"].index("--port") + 1] == port
     assert service["working_dir"] == "/app"
     # Relative paths resolve against the first compose file's directory: the repo root.
-    assert service["volumes"] == ["./tests:/app/tests:ro"]
+    assert service["volumes"][0] == "./tests:/app/tests:ro"
+    assert service["volumes"][1:] == (["./load-results/farm:/records"] if name == "farm" else [])
     assert service["read_only"] is True
     assert "env_file" not in service
     assert f"127.0.0.1:{port}" in " ".join(service["healthcheck"]["test"])
@@ -383,6 +419,13 @@ def test_test_services_run_from_the_api_image_with_the_tests_read_only(
 def test_farm_listens_on_every_interface_of_its_container() -> None:
     command = _override_services()["farm"]["command"]
     assert command[command.index("--bind") + 1] == "0.0.0.0"  # noqa: S104 - inside the container
+
+
+def test_farm_writes_its_record_where_the_artifact_collects_it() -> None:
+    """The record (every request the farm saw) is the evidence that the load reached the farm;
+    the tmpfs would lose it with the container."""
+    command = _override_services()["farm"]["command"]
+    assert command[command.index("--record") + 1] == "/records/farm-record.json"
 
 
 def test_ci_checks_the_override() -> None:
@@ -394,15 +437,7 @@ def test_ci_checks_the_override() -> None:
 # --- the site farm's bind address ---------------------------------------------------------------
 
 
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port: int = probe.getsockname()[1]
-        return port
-
-
 def test_farm_serves_one_host_on_the_bind_address(tmp_path: Path) -> None:
-    port = _free_port()
     record = tmp_path / "record.json"
     farm = subprocess.Popen(  # noqa: S603 - the repo's own farm
         [
@@ -412,7 +447,7 @@ def test_farm_serves_one_host_on_the_bind_address(tmp_path: Path) -> None:
             "--bind",
             "127.0.0.1",
             "--port",
-            str(port),
+            "0",
             "--record",
             str(record),
         ],
@@ -422,7 +457,10 @@ def test_farm_serves_one_host_on_the_bind_address(tmp_path: Path) -> None:
     )
     try:
         assert farm.stdout is not None
-        assert farm.stdout.readline().strip() == "ready"
+        # Port 0: the system picks a free port (no race with another process), the farm says it.
+        ready, _, port = farm.stdout.readline().strip().partition(" port=")
+        assert ready == "ready"
+        assert port.isdigit()
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/p/7.html", timeout=5) as answer:
             assert b"Reading room report 7" in answer.read()
     finally:

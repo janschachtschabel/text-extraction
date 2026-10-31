@@ -9,16 +9,18 @@ name: load
 # A dispatch works only once this file is on the default branch, so a pull request that carries
 # the label `load` runs it too, with the dispatch defaults (ruling R-P11-5).
 #
-# The selector sweep: the first value of selector_processes runs every scenario; each further
-# value restarts the stack with STRUCTURED_SELECTOR_PROCESSES set and repeats only the selector
-# scenario, into load-results/selector-processes-<n>/.
+# The full profile runs once, at the production default of one selector process, into
+# load-results/. Then the selector sweep: each value of selector_processes, the first included,
+# restarts the stack with STRUCTURED_SELECTOR_PROCESSES set and runs only the selector scenario on
+# the fresh containers, into load-results/selector-processes-<n>/. The full run's selector
+# scenario is not part of the sweep: its containers have served every other scenario first.
 on:
   workflow_dispatch:
     inputs:
       selector_processes:
         description: >-
-          STRUCTURED_SELECTOR_PROCESSES values, comma-separated; the first runs every scenario,
-          the others only the selector scenario
+          STRUCTURED_SELECTOR_PROCESSES values of the selector sweep, comma-separated, each once;
+          each runs the selector scenario alone on a fresh stack
         type: string
         default: "1,2,4"
       asr_model:
@@ -30,7 +32,7 @@ on:
         description: spaCy model size of the NLP worker (PII_MODEL_SIZE)
         type: choice
         options: [md, lg]
-        default: md
+        default: lg
   pull_request:
     types: [labeled, synchronize, opened, reopened]
 
@@ -62,10 +64,11 @@ jobs:
       COMPOSE: >-
         docker compose -f docker-compose.yml -f deploy/load/compose.load.yml
         --profile docling --profile asr --profile nlp --profile llm
-      # A pull request has no inputs: the dispatch defaults apply. The override reads the models.
+      # A pull request has no inputs: the dispatch defaults apply, which are the production
+      # defaults (ruling R-P11-6). The override reads the models.
       SELECTOR_PROCESSES: ${{ inputs.selector_processes || '1,2,4' }}
       ASR_MODEL: ${{ inputs.asr_model || 'large-v3-turbo' }}
-      PII_MODEL_SIZE: ${{ inputs.pii_model_size || 'md' }}
+      PII_MODEL_SIZE: ${{ inputs.pii_model_size || 'lg' }}
       # The internal ports the override publishes on 127.0.0.1: api, worker, browser, docling,
       # asr, nlp and llm worker.
       INTERNAL_URLS: >-
@@ -110,10 +113,11 @@ jobs:
       - name: Build the images
         run: $COMPOSE build
 
-      # Each value starts from fresh containers (--force-recreate; the model volumes stay), and
-      # the service logs are saved before the next value replaces the containers. A failed or
-      # unexpected request fails the run after the sweep; a stack that does not come up fails it
-      # at once.
+      # Every run starts from fresh containers (--force-recreate; the model volumes stay). Before
+      # the next run replaces them, the farm is stopped, which writes its record of every request
+      # it saw, and the record and the service logs are saved under the run's name. A failed or
+      # unexpected request fails the step after the last run; a stack that does not come up
+      # fails it at once.
       - name: Run the load test
         run: |
           IFS=, read -ra values <<< "$SELECTOR_PROCESSES"
@@ -121,15 +125,31 @@ jobs:
             echo "selector_processes is empty" >&2
             exit 2
           fi
+          seen=","
           for i in "${!values[@]}"; do
             values[i]="${values[i]//[[:space:]]/}"
             if ! [[ "${values[i]}" =~ ^[1-9][0-9]*$ ]]; then
               echo "selector_processes: '${values[i]}' is not a whole number of at least 1" >&2
               exit 2
             fi
+            if [[ "$seen" == *",${values[i]},"* ]]; then
+              echo "selector_processes: '${values[i]}' is given more than once" >&2
+              exit 2
+            fi
+            seen+="${values[i]},"
           done
 
-          save_logs() {
+          # The farm (uid 10001) writes its record into this directory.
+          mkdir -p load-results/farm
+          chmod 0777 load-results/farm
+
+          finish_run() {
+            $COMPOSE stop farm || true
+            if [ -f load-results/farm/farm-record.json ]; then
+              mv load-results/farm/farm-record.json "load-results/farm/$1.json"
+            else
+              echo "::warning::the farm wrote no record for the run $1"
+            fi
             mkdir -p "load-results/logs/$1"
             for service in $($COMPOSE ps --all --services); do
               $COMPOSE logs --no-color --timestamps "$service" \
@@ -137,20 +157,14 @@ jobs:
             done
           }
 
-          status=0
-          for i in "${!values[@]}"; do
-            value="${values[i]}"
-            export STRUCTURED_SELECTOR_PROCESSES="$value"
-            if [ "$i" -eq 0 ]; then
-              out=load-results
-              only=()
-            else
-              out="load-results/selector-processes-$value"
-              only=(--only structured-selectors-200)
-            fi
+          # name, STRUCTURED_SELECTOR_PROCESSES, then the generator's own arguments
+          load_run() {
+            local name="$1" processes="$2"
+            shift 2
+            export STRUCTURED_SELECTOR_PROCESSES="$processes"
             if ! $COMPOSE up -d --wait --wait-timeout 1800 --force-recreate; then
-              echo "the stack did not become ready with STRUCTURED_SELECTOR_PROCESSES=$value" >&2
-              save_logs "selector-processes-$value"
+              echo "the stack did not become ready for the run $name" >&2
+              finish_run "$name"
               exit 1
             fi
             uv run python -m tests.load.run_load \
@@ -158,10 +172,16 @@ jobs:
               --internal-urls "$INTERNAL_URLS" \
               --farm-url http://farm:8000 \
               --fake-llm-url http://127.0.0.1:8000 \
-              --selector-processes "$value" \
-              --out-dir "$out" \
-              "${only[@]}" || status=1
-            save_logs "selector-processes-$value"
+              --selector-processes "$processes" \
+              "$@" || status=1
+            finish_run "$name"
+          }
+
+          status=0
+          load_run full 1 --out-dir load-results
+          for value in "${values[@]}"; do
+            load_run "selector-processes-$value" "$value" \
+              --out-dir "load-results/selector-processes-$value" --only structured-selectors-200
           done
           exit "$status"
 
@@ -178,7 +198,8 @@ jobs:
           exit 0
 
       # Only what the generator wrote (summary.md, sizing.json, stats.jsonl, results.jsonl,
-      # metrics/) and the service logs; never .env or any inspect output.
+      # metrics/), the farm's records (farm/) and the service logs; never .env or any inspect
+      # output.
       - uses: actions/upload-artifact@v7
         if: always()
         with:

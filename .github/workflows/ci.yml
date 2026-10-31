@@ -455,6 +455,7 @@ jobs:
 
       # The load-test override of load.yml: it parses on top of every profile, mounts the repo's
       # tests/ (paths resolve against the first file) read-only into the farm and the fake LLM,
+      # gives the farm a writable load-results/farm/ for its record,
       # publishes nothing new beyond 127.0.0.1, merges its settings into the base environment, and
       # takes the models from the environment.
       - name: docker compose config (load override)
@@ -463,9 +464,12 @@ jobs:
         run: |
           docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile asr --profile nlp --profile llm config --format json > compose.json
           jq -e --arg tests "$PWD/tests" '[.services.farm, .services["fake-llm"]]
-            | all(.image == "text-extraction:dev" and .read_only == true and (.volumes | length == 1)
+            | all(.image == "text-extraction:dev" and .read_only == true
               and .volumes[0].source == $tests and .volumes[0].target == "/app/tests"
               and .volumes[0].read_only == true)' compose.json
+          jq -e '.services["fake-llm"].volumes | length == 1' compose.json
+          jq -e --arg records "$PWD/load-results/farm" '.services.farm.volumes | length == 2
+            and .[1].source == $records and .[1].target == "/records" and (.[1].read_only | not)' compose.json
           jq -e '.services.farm.ports == null' compose.json
           jq -e '[.services[] | .ports // [] | .[] | select(.target != 8080)] | length == 8
             and all(.host_ip == "127.0.0.1")' compose.json
@@ -473,9 +477,9 @@ jobs:
             | all(.value.environment | .OUTBOUND_MIN_DELAY_MS == "0" and .DOCLING_ENABLED == "true"
               and .LLM_BASE_URL == "http://fake-llm:8000/v1" and (.VALKEY_URL | startswith("redis://")))' compose.json
           jq -e '.services["asr-worker"].environment | .ASR_MODEL == "large-v3-turbo" and .ASR_MODELS_PATH == "/models"' compose.json
-          jq -e '.services.api.environment | .MCP_ENABLED == "true" and .PII_MODEL_SIZE == "md"' compose.json
-          ASR_MODEL=small PII_MODEL_SIZE=lg STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile asr --profile nlp --profile llm config --format json \
-            | jq -e '.services | .["asr-models"].environment.ASR_MODEL == "small" and .["nlp-models"].environment.PII_MODEL_SIZE == "lg"
+          jq -e '.services.api.environment | .MCP_ENABLED == "true" and .PII_MODEL_SIZE == "lg"' compose.json
+          ASR_MODEL=small PII_MODEL_SIZE=md STRUCTURED_SELECTOR_PROCESSES=4 docker compose -f docker-compose.yml -f deploy/load/compose.load.yml --profile docling --profile asr --profile nlp --profile llm config --format json \
+            | jq -e '.services | .["asr-models"].environment.ASR_MODEL == "small" and .["nlp-models"].environment.PII_MODEL_SIZE == "md"
               and .api.environment.STRUCTURED_SELECTOR_PROCESSES == "4"'
           rm compose.json
 
