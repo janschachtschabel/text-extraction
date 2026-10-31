@@ -15,7 +15,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
 ## Non-negotiable rules
 
 1. **English only** in code, comments, docs, commit messages and API texts.
-2. **Ops guide compliance** (team T6 hand-over guide). In particular:
+2. **Ops guide compliance** (the operations hand-over guide). In particular:
    - Two ports: public API on `8080`, internal `9090` with `/health`, `/ready`, `/metrics`.
      Internal endpoints never appear in the OpenAPI spec.
    - Stateless pods. All state (jobs, results, cache, rate limits, fingerprints) lives in
