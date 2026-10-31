@@ -524,7 +524,10 @@ def test_farm_listens_on_every_interface_of_its_container() -> None:
 def test_farm_serves_the_sitemap_sites() -> None:
     """The site scenarios start on the farm's ports 8001 to 8003, whose robots.txt lists the
     large sitemaps (``site_farm.SITEMAP_SITES``); the health check stays on 8000."""
-    assert "--sitemap-sites" in _override_services()["farm"]["command"]
+    command = _override_services()["farm"]["command"]
+    assert "--sitemap-sites" in command
+    # The sitemaps are built for the origin the service asks for, http://farm:800N.
+    assert command[command.index("--sitemap-host") + 1] == "farm"
 
 
 def test_farm_writes_its_record_where_the_artifact_collects_it() -> None:

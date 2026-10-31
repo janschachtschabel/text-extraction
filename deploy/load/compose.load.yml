@@ -135,7 +135,11 @@ services:
       - --record
       - /records/farm-record.json
       # Ports 8001 to 8003 too, whose robots.txt lists the large sitemaps of the site scenarios.
+      # They are built for http://farm:800N before the farm listens (and turns healthy), so the
+      # timed sitemap scenarios do not include the build.
       - --sitemap-sites
+      - --sitemap-host
+      - farm
     healthcheck:
       test:
         - CMD

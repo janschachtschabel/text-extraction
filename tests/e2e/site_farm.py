@@ -23,7 +23,10 @@ address instead (``--hosts`` is ignored): the load test's farm container listens
 ``--sitemap-sites`` makes every host listen on the ports ``port + offset`` of
 ``SITEMAP_SITES`` too, where ``robots.txt`` lists those sitemaps (the main port's answers 404).
 robots.txt belongs to an origin, so a crawl picks its sitemaps by the port of its start page.
-The record holds these ports' requests under ``<host>:<port>``.
+The record holds these ports' requests under ``<host>:<port>``. The farm builds those sitemaps
+before it listens (``prebuild_sitemaps``), for the origins ``http://<name>:<port + offset>``
+with the names of ``--sitemap-host`` (default: the hosts it serves), so no timed request waits
+for a build; the ``Host`` the client sends picks the origin.
 """
 
 import argparse
@@ -264,6 +267,15 @@ def build_servers(
     return servers
 
 
+def prebuild_sitemaps(names: list[str], port: int) -> None:
+    """Build the sitemaps of every site of ``SITEMAP_SITES`` for ``http://<name>:<port>``,
+    the origins the clients will ask for, so their first request is served from memory."""
+    for name in names:
+        for offset, sitemaps in SITEMAP_SITES.items():
+            for listed in sitemaps:
+                sitemap(listed, f"http://{name}:{port + offset}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", type=int, required=True)
@@ -277,6 +289,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="also listen on port + 1 to port + 3, whose robots.txt lists the farm's sitemaps",
     )
+    parser.add_argument(
+        "--sitemap-host",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="the host name the clients use (repeatable), for the sitemaps built at start-up; "
+        "default: the served hosts",
+    )
     args = parser.parse_args(argv)
 
     hosts = [args.bind] if args.bind else host_addresses(args.hosts)
@@ -284,6 +304,8 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--port 0 needs --bind: every host must listen on the same port")
     if args.port == 0 and args.sitemap_sites:
         parser.error("--sitemap-sites needs a fixed --port: its sites are at port + offset")
+    if args.sitemap_sites:
+        prebuild_sitemaps(args.sitemap_host or hosts, args.port)
     record = _Record([])
     servers = build_servers(hosts, args.port, record, sitemap_sites=args.sitemap_sites)
     for server in servers:

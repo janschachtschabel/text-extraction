@@ -180,7 +180,7 @@ def _free_block(size: int) -> int:
     raise RuntimeError("no block of free ports")
 
 
-def test_main_with_sitemap_sites_listens_at_the_offsets(tmp_path: Path) -> None:
+def test_build_servers_listens_at_the_sitemap_site_offsets() -> None:
     base = _free_block(1 + max(SITEMAP_SITES))
     record = site_farm._Record([])
     servers = site_farm.build_servers(["127.0.0.1"], base, record, sitemap_sites=True)
@@ -204,3 +204,39 @@ def test_sitemap_sites_need_a_fixed_port(tmp_path: Path) -> None:
         site_farm.main(
             ["--bind", "127.0.0.1", "--port", "0", "--sitemap-sites", "--record", str(tmp_path)]
         )
+
+
+def test_main_builds_the_sitemaps_before_it_listens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The farm answers its health check only once every sitemap of its sites is built, under
+    the origin the service asks for (``--sitemap-host`` and the site's port): a timed
+    sitemap scenario never waits for the build."""
+    built: list[int] = []
+
+    def stop_before_listening(*args: object, **kwargs: object) -> list[object]:
+        built.append(sitemap.cache_info().currsize)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(site_farm, "build_servers", stop_before_listening)
+    with pytest.raises(SystemExit):
+        site_farm.main(
+            [
+                "--bind",
+                "0.0.0.0",  # noqa: S104 - never bound: the farm stops before it listens
+                "--port",
+                "8000",
+                "--sitemap-sites",
+                "--sitemap-host",
+                "farm",
+                "--record",
+                str(tmp_path / "record.json"),
+            ]
+        )
+
+    assert built == [sum(len(names) for names in SITEMAP_SITES.values())]
+    misses = sitemap.cache_info().misses
+    for offset, names in SITEMAP_SITES.items():
+        for name in names:
+            sitemap(name, f"http://farm:{8000 + offset}")
+    assert sitemap.cache_info().misses == misses  # every one was built already
