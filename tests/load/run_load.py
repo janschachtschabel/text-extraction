@@ -27,8 +27,9 @@ such as the compose service ``farm``. Anything else is refused before a request 
 
 The site structure items (ruling P11-S7) go into the summary too:
 
-- **Site crawls**: per crawl its items (the job's ``total``), its duration (the request's
-  latency, read every ``--poll-seconds``) and the Valkey bytes of its keys. With
+- **Site crawls**: per crawl its items (the job's ``total``), its duration (the job's
+  ``finished_at - created_at``, and the request's latency, read every ``--poll-seconds``) and
+  the Valkey bytes of its keys. With
   ``--valkey-cli`` (a command line, e.g. ``docker compose ... exec -T valkey valkey-cli``,
   which authenticates from the container's ``REDISCLI_AUTH``) the generator lists the crawl's
   keys (``job:{<id>}:*``) once it completed, when it holds every result, and sums their
@@ -51,6 +52,7 @@ import time
 from collections import Counter
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, TextIO
 from urllib.parse import urlsplit
@@ -94,6 +96,7 @@ class Record:
     job_id: str | None = None  # an answer that was a job
     items: int | None = None  # the completed job's items (``progress.total``)
     valkey_bytes: int | None = None  # a crawl's keys at completion (``--valkey-cli``)
+    job_seconds: float | None = None  # the job's ``finished_at - created_at``
 
 
 @dataclass(frozen=True)
@@ -213,17 +216,29 @@ async def _send(
     return await client.post(scenario.endpoint, json=body)
 
 
+def _job_seconds(job: Mapping[str, Any]) -> float | None:
+    """The job's ``finished_at - created_at`` in seconds: the service's own times."""
+    try:
+        created = datetime.fromisoformat(job["created_at"])
+        finished = datetime.fromisoformat(job["finished_at"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return round((finished - created).total_seconds(), 3)
+
+
 async def _follow(
     client: httpx.AsyncClient, status_url: str, poll_seconds: float
-) -> tuple[Outcome, int | None]:
-    """Read the job until it is ``completed``; its outcome by its items, and how many."""
+) -> tuple[Outcome, int | None, float | None]:
+    """Read the job until it is ``completed``; its outcome by its items, how many, and how
+    long it took."""
     while True:
         response = await client.get(status_url, params={"limit": 1})
         response.raise_for_status()
         job = response.json().get("data") or {}
         if job.get("state") == "completed":
             total = (job.get("progress") or {}).get("total")
-            return _job_outcome(job), total if isinstance(total, int) else None
+            items = total if isinstance(total, int) else None
+            return _job_outcome(job), items, _job_seconds(job)
         await asyncio.sleep(poll_seconds)
 
 
@@ -246,6 +261,7 @@ async def request_once(
     code: str | None
     job_id: str | None = None
     items: int | None = None
+    job_seconds: float | None = None
     completed = False
     try:
         async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
@@ -262,7 +278,7 @@ async def request_once(
             job_id, code = _job_id(payload), None
             try:
                 async with asyncio.timeout(job_timeout):
-                    outcome, items = await _follow(client, status_url, poll_seconds)
+                    outcome, items, job_seconds = await _follow(client, status_url, poll_seconds)
                 completed = True
             except TimeoutError:
                 outcome, code = "error", "job_timeout"
@@ -287,6 +303,7 @@ async def request_once(
         job_id,
         items,
         valkey_bytes,
+        job_seconds,
     )
 
 
@@ -447,18 +464,20 @@ def _site_table(records: Sequence[Record], crawls: Collection[str]) -> str:
         "",
         "### Site crawls",
         "",
-        "Duration: from the request to the poll that saw the job completed (compare with "
-        "JOB_TTL_SECONDS, which nothing renews mid-crawl). Valkey: MEMORY USAGE of the job's "
-        "keys at completion; - when not read.",
+        "Job s: the job's finished_at - created_at (compare with JOB_TTL_SECONDS, which "
+        "nothing renews mid-crawl). Request s: from the request to the poll that saw the job "
+        "completed (polls every 2 s). Valkey: MEMORY USAGE of the job's keys at completion; - "
+        "when not read.",
         "",
-        "| Scenario | Items | Duration s | Valkey bytes | Valkey MiB |",
-        "| --- | ---: | ---: | ---: | ---: |",
+        "| Scenario | Items | Job s | Request s | Valkey bytes | Valkey MiB |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for record in rows:
         size = record.valkey_bytes
         mib = "-" if size is None else f"{size / 2**20:.1f}"
+        seconds = "-" if record.job_seconds is None else f"{record.job_seconds:.1f}"
         lines.append(
-            f"| {record.scenario} | {record.items} | {record.latency_ms / 1000:.1f} "
+            f"| {record.scenario} | {record.items} | {seconds} | {record.latency_ms / 1000:.1f} "
             f"| {'-' if size is None else size} | {mib} |"
         )
     return "\n".join(lines) + "\n"

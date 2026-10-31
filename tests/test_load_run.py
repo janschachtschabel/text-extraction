@@ -486,7 +486,10 @@ def run_site(
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
             return httpx.Response(202, json=accepted("j1"))
-        return httpx.Response(200, json=job("completed", total=total))
+        answer = job("completed", total=total)
+        answer["data"]["created_at"] = "2026-10-31T10:00:00.250000Z"
+        answer["data"]["finished_at"] = "2026-10-31T10:01:02.500000Z"
+        return httpx.Response(200, json=answer)
 
     plan = scenario(kind, "/v1/site-structure", count=1, concurrency=1)
     sink = io.StringIO()
@@ -510,6 +513,8 @@ def test_a_crawl_records_its_items_and_the_valkey_bytes_of_its_keys(tmp_path: Pa
     assert result.outcomes == {"success": 1}
     assert record["job_id"] == "j1"
     assert record["items"] == 1111
+    # The job's own times, not the 2 s polls: created to finished.
+    assert record["job_seconds"] == 62.25
     assert record["valkey_bytes"] == 20_000_300  # the keys of job j1 only
     calls = (tmp_path / "calls.log").read_text().splitlines()
     assert calls[0] == "--scan --pattern job:{j1}:*"
@@ -574,7 +579,9 @@ def test_the_lag_above_the_last_bound_says_so() -> None:
 
 def test_the_site_and_lag_tables() -> None:
     records = [
-        run_load.Record("sitemap-200k", 0, 202, "success", None, 12_340, True, "j1", 3, 25_165_824),
+        run_load.Record(
+            "sitemap-200k", 0, 202, "success", None, 14_000, True, "j1", 3, 25_165_824, 12.34
+        ),
         run_load.Record("site-crawl", 0, 202, "success", None, 61_000, True, "j2", 100, None),
         run_load.Record("sync-fast-c10", 0, 200, "success", None, 300, True),
     ]
@@ -586,8 +593,8 @@ def test_the_site_and_lag_tables() -> None:
     site = run_load._site_table(records, {"sitemap-200k", "site-crawl"})
     lag = run_load._lag_table(lags)
 
-    assert "| sitemap-200k | 3 | 12.3 | 25165824 | 24.0 |" in site
-    assert "| site-crawl | 100 | 61.0 | - | - |" in site
+    assert "| sitemap-200k | 3 | 12.3 | 14.0 | 25165824 | 24.0 |" in site
+    assert "| site-crawl | 100 | - | 61.0 | - | - |" in site
     assert "sync-fast-c10" not in site
     assert "JOB_TTL_SECONDS" in site
     assert "| sitemap-200k | 127.0.0.1:9091 | 10 | 120 | 2 | 2.5 |" in lag
