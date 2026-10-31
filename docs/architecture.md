@@ -2428,7 +2428,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   the tools and the access line) and the log context.
 - **Each tool call (P10-S4).** A FastMCP middleware counts one `check_rate` hit per `tools/call`
   (`initialize`, `tools/list` and notifications are free), runs the tool and logs `mcp_tool_call`
-  (`tool`, `outcome`, `duration_ms`, `job_id` when a job answered). No exception reaches the
+  (`tool`, `outcome`, `duration_ms`, `job_id` when a job answered or a refused `get_job` or
+  `cancel_job` was asked for a job id). No exception reaches the
   client: a `ServiceError` becomes its code, message and `retryable`; a validation error becomes
   `invalid_request` with REST's `details` (`loc`, `msg`, never the input); anything else
   `internal_error`, logged with its traceback.

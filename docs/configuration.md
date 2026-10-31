@@ -670,7 +670,7 @@ with `isError: true` whose `structuredContent` is the REST error envelope (`rate
 `retryable`, `invalid_request` with the validation `details`, `internal_error` for our own faults,
 without a traceback); a target's `failed` is a normal result, as it is a 200 in REST. Each call
 logs one line `mcp_tool_call` with `tool`, `outcome`, `duration_ms` (and `job_id` when it answered
-a job), the principal and the request's trace fields (`x-client-trace-id`, B3), which the
+a job, or when a refused `get_job` or `cancel_job` was asked for one), the principal and the request's trace fields (`x-client-trace-id`, B3), which the
 envelope's `trace_id` carries too. Tool arguments are never logged; FastMCP's and the MCP SDK's
 own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
 

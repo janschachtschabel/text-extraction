@@ -16,6 +16,7 @@ from anyio.from_thread import BlockingPortal
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from structlog.testing import capture_logs
 
 from tests.fakes import ORIGIN, PAGE
 from tests.mcp_server.rpc import ACCEPT, call_tool, rpc
@@ -387,6 +388,31 @@ def test_job_ids_of_get_job_and_cancel_job_are_logged() -> None:
         "success",
         None,
     )
+
+
+def test_refused_get_job_and_cancel_job_log_their_job_id() -> None:
+    """A refused ``get_job`` or ``cancel_job`` (``not_found``, the 503 of jobs off) logs the
+    ``job_id`` it was asked for, when it is a job id; any other text is never logged."""
+    unknown = "b" * 32
+    with running() as client, capture_logs() as logs:
+        for tool in ("get_job", "cancel_job"):
+            refusal(call_tool(client, tool, {"job_id": unknown}, headers=AUTH))
+        refusal(call_tool(client, "get_job", {"job_id": "not-a-job-id-77"}, headers=AUTH))
+    with running(jobs_enabled=False) as client, capture_logs() as off_logs:
+        refusal(call_tool(client, "cancel_job", {"job_id": unknown}, headers=AUTH))
+
+    lines = [
+        {key: line.get(key) for key in ("tool", "outcome", "job_id")}
+        for line in [*logs, *off_logs]
+        if line["event"] == "mcp_tool_call"
+    ]
+    assert lines == [
+        {"tool": "get_job", "outcome": "not_found", "job_id": unknown},
+        {"tool": "cancel_job", "outcome": "not_found", "job_id": unknown},
+        {"tool": "get_job", "outcome": "not_found", "job_id": None},
+        {"tool": "cancel_job", "outcome": "internal_error", "job_id": unknown},
+    ]
+    assert "not-a-job-id-77" not in repr([*logs, *off_logs])
 
 
 def test_get_job_slices_each_item(client: TestClient) -> None:

@@ -7,6 +7,7 @@ request's scope state.
 """
 
 import logging
+import re
 import time
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping
@@ -39,6 +40,10 @@ _log = structlog.get_logger(__name__)
 # label.
 UNKNOWN_TOOL = "unknown"
 _OUTCOMES = ("success", "partial", "failed")
+# The tools that take a job id: a refused call logs the id it was asked for. Only a job id, as
+# `jobs_api.visible_job` checks it, is logged; any other text of the caller's never is.
+_JOB_ID_TOOLS = frozenset({"get_job", "cancel_job"})
+_JOB_ID = re.compile(r"[0-9a-f]{32}", re.ASCII)
 _SECONDS_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 60, 120)
 
 
@@ -195,6 +200,8 @@ class CallGuard(Middleware):
                 result = self._failed(tool, error)
             seconds = time.perf_counter() - started
             outcome, job_id = outcome_of(result)
+            if job_id is None and tool in _JOB_ID_TOOLS:
+                job_id = _asked_job_id(context.message.arguments)
             self._metrics.calls.labels(tool, outcome).inc()
             self._metrics.seconds.labels(tool).observe(seconds)
             _log.info(
@@ -215,6 +222,12 @@ class CallGuard(Middleware):
         if not isinstance(error, ServiceError | ValidationError | RequestValidationError):
             _log.error("mcp_tool_failed", tool=tool, exc_info=error)
         return error_result(error)
+
+
+def _asked_job_id(arguments: Mapping[str, Any] | None) -> str | None:
+    """The ``job_id`` argument of a call, when it is a job id."""
+    asked = (arguments or {}).get("job_id")
+    return asked if isinstance(asked, str) and _JOB_ID.fullmatch(asked) else None
 
 
 async def _tool_label(context: MiddlewareContext[CallToolRequestParams]) -> str:
