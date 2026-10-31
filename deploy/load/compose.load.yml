@@ -7,9 +7,10 @@
 #
 # It adds two test services from the API image, with tests/ mounted read-only:
 # - `farm` (tests/e2e/site_farm.py): every load target. The service reaches it as http://farm:8000
-#   on the compose network; it is not published. When it stops it writes its record of every
-#   request it saw to load-results/farm/farm-record.json (the workflow creates that directory,
-#   writable for uid 10001, and renames the file after each run).
+#   (and http://farm:8001 to :8003, the sites of the sitemap scenarios) on the compose network; it
+#   is not published. When it stops it writes its record of every request it saw to
+#   load-results/farm/farm-record.json (the workflow creates that directory, writable for uid
+#   10001, and renames the file after each run).
 # - `fake-llm` (tests/load/fake_llm.py): an OpenAI-compatible server with a fixed delay that counts
 #   the prompt and completion bytes. Published on 127.0.0.1:8000 for the generator's /stats reads.
 #
@@ -133,6 +134,8 @@ services:
       - "8000"
       - --record
       - /records/farm-record.json
+      # Ports 8001 to 8003 too, whose robots.txt lists the large sitemaps of the site scenarios.
+      - --sitemap-sites
     healthcheck:
       test:
         - CMD

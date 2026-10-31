@@ -513,6 +513,12 @@ def test_farm_listens_on_every_interface_of_its_container() -> None:
     assert command[command.index("--bind") + 1] == "0.0.0.0"  # noqa: S104 - inside the container
 
 
+def test_farm_serves_the_sitemap_sites() -> None:
+    """The site scenarios start on the farm's ports 8001 to 8003, whose robots.txt lists the
+    large sitemaps (``site_farm.SITEMAP_SITES``); the health check stays on 8000."""
+    assert "--sitemap-sites" in _override_services()["farm"]["command"]
+
+
 def test_farm_writes_its_record_where_the_artifact_collects_it() -> None:
     """The record (every request the farm saw) is the evidence that the load reached the farm;
     the tmpfs would lose it with the container."""

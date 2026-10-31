@@ -1,11 +1,21 @@
 """The load profile (ruling P11-S4): what each scenario sends, how often and how many at once.
 
 Every URL a scenario sends is a page of the local site farm (``tests/e2e/site_farm.py``) under
-the farm base URL that ``body`` gets: the load test sends no load to third-party sites. An
+the farm base URL that ``body`` gets, or on the same farm host at one of its sitemap sites'
+ports (``farm_site``): the load test sends no load to third-party sites. An
 upload sends a file instead: a file of the repo's test corpus (``file``, relative to the repo
 root) or one the generator builds (``GENERATED_DOCX``); ``upload_bytes`` reads either. The
 other keys of an upload's body are the form fields. Every request turns the result cache off,
 so each one is real work.
+
+The site structure items of ruling P11-S7 are crawls (one request each): ``site-crawl`` at the
+request's default caps, ``site-crawl-max-pages`` at ``SITE_MAX_PAGES``, ``sitemap-200k`` (one
+sitemap of ``SITE_MAX_SITEMAP_URLS`` entries), ``sitemap-50m-1`` (one 50 MiB sitemap alone) and
+``sitemaps-50m-3`` (three 50 MiB sitemaps of one crawl in flight at once). The sitemap crawls
+start at depth 0 on the farm's sitemap sites, whose robots.txt lists those files
+(``site_farm.SITEMAP_SITES``): robots.txt belongs to an origin, so the port picks the sitemaps.
+The wall time of the three against the one alone is what the ``SITE_PARSE_CONCURRENCY`` ruling
+compares: one parse thread per pod parses them one after another.
 
 The scenarios run one after another, each alone (``run_load.py``), so ``docker stats``
 attributes the load to one scenario. The models are the stack's: ``ASR_MODEL`` (``small`` or
@@ -19,8 +29,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
-from tests.e2e.site_farm import article
+from tests.e2e.site_farm import SITEMAP_SITES, article
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,6 +53,13 @@ SELECTOR_COUNT = 200
 LLM_COUNT = 50
 SEMANTIC_CHUNK_COUNT = 50
 MCP_COUNT = 20
+# The site structure items (P11-S7): the defaults of Settings and of the request.
+SITE_MAX_PAGES = 1000  # SITE_MAX_PAGES
+SITE_MAX_PAGES_DEPTH = 3  # ten links a farm page: 1,110 pages within depth 3
+# The farm's sitemap sites by what their robots.txt lists (port offsets of SITEMAP_SITES).
+SITEMAP_200K_SITE = next(k for k, names in SITEMAP_SITES.items() if names == ("200k",))
+SITEMAP_50M_SITE = next(k for k, names in SITEMAP_SITES.items() if names == ("50m-1",))
+SITEMAPS_50M_SITE = next(k for k, names in SITEMAP_SITES.items() if len(names) == 3)
 
 # The test corpus files that the uploads send.
 # A DOCX that the load generator builds when it first needs it (``upload_bytes``): the corpus
@@ -65,6 +83,10 @@ _PAGE_OFFSETS = {
     "structured-llm-50": 6_000,
     "chunk-semantic-50": 7_000,
     "site-crawl": 8_000,
+    "site-crawl-max-pages": 8_100,
+    "sitemap-200k": 8_200,
+    "sitemap-50m-1": 8_300,
+    "sitemaps-50m-3": 8_400,
     "mcp-20": 9_000,
 }
 
@@ -119,6 +141,16 @@ def page(farm: str, number: int) -> str:
     return f"{farm.rstrip('/')}/p/{number}.html"
 
 
+def farm_site(farm: str, offset: int) -> str:
+    """The base URL of the farm's site at ``offset`` (``SITEMAP_SITES``): the farm's host on
+    its port + ``offset``."""
+    parts = urlsplit(farm)
+    host = parts.hostname or ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    host = f"[{host}]" if ":" in host else host
+    return f"{parts.scheme}://{host}:{port + offset}"
+
+
 def _extract(name: str, **options: object) -> Body:
     """A body of ``POST /v1/extract`` (and its siblings) for page ``offset + index``."""
     offset = _PAGE_OFFSETS[name]
@@ -144,9 +176,16 @@ def _upload(files: tuple[str, ...], **fields: str) -> Body:
     return body
 
 
-def _site(index: int, farm: str) -> dict[str, object]:
-    # The request's default caps (depth 2, 100 pages); sitemaps as robots.txt lists them.
-    return {"url": page(farm, _PAGE_OFFSETS["site-crawl"] + index), "cache": False}
+def _site(name: str, *, site: int = 0, **options: object) -> Body:
+    """A body of ``POST /v1/site-structure`` from page ``offset + index`` of the farm's site
+    at ``site``; without options the request's default caps (depth 2, 100 pages), and
+    sitemaps as robots.txt lists them."""
+    offset = _PAGE_OFFSETS[name]
+
+    def body(index: int, farm: str) -> dict[str, object]:
+        return {"url": page(farm_site(farm, site), offset + index), "cache": False, **options}
+
+    return body
 
 
 def _mcp(index: int, farm: str) -> dict[str, object]:
@@ -267,15 +306,40 @@ SCENARIOS: tuple[Scenario, ...] = (
         5,
         _extract("chunk-semantic-50", mode="fast", chunking={"strategy": "semantic"}),
     ),
-    # The farm's pages link to "/", which answers 404: a crawl of it has a failed item.
+    # The farm's pages link to ten farm pages each (robots.txt and /sitemap.xml answer 404, the
+    # guess's success): every item succeeds.
+    Scenario("site-crawl", "site", "/v1/site-structure", 1, 1, _site("site-crawl")),
     Scenario(
-        "site-crawl",
+        "site-crawl-max-pages",
         "site",
         "/v1/site-structure",
         1,
         1,
-        _site,
-        expected=frozenset({"success", "partial"}),
+        _site("site-crawl-max-pages", depth=SITE_MAX_PAGES_DEPTH, max_pages=SITE_MAX_PAGES),
+    ),
+    Scenario(
+        "sitemap-200k",
+        "site",
+        "/v1/site-structure",
+        1,
+        1,
+        _site("sitemap-200k", site=SITEMAP_200K_SITE, depth=0),
+    ),
+    Scenario(
+        "sitemap-50m-1",
+        "site",
+        "/v1/site-structure",
+        1,
+        1,
+        _site("sitemap-50m-1", site=SITEMAP_50M_SITE, depth=0),
+    ),
+    Scenario(
+        "sitemaps-50m-3",
+        "site",
+        "/v1/site-structure",
+        1,
+        1,
+        _site("sitemaps-50m-3", site=SITEMAPS_50M_SITE, depth=0),
     ),
     Scenario("mcp-20", "mcp", "/mcp", MCP_COUNT, 5, _mcp),
 )
