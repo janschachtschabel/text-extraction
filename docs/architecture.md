@@ -486,8 +486,8 @@ were accepted complete. Without `maxmemory` there is no guard; a failing read ke
 verdict. The gauges `text_extraction_valkey_used_memory_bytes` and `…_max_memory_bytes` come from
 API pods and workers and feed the alert `TextExtractionValkeyMemoryHigh` (`max()` over the pods). The guard bounds new work, not the worst case:
 batches accepted below the ratio still add their results. Quotas per client and a separate cache
-Valkey are still open: package 11's load test held at most 53 MiB in Valkey, so it gave no reason
-to build them.
+Valkey are still open: package 11 did not build them, and its load test (at most 53 MiB in Valkey)
+did not exercise those cases.
 
 **Outbound limits under load (R21, R22, R25).** The end-to-end run (`tests/e2e`) found two gaps
 in the package-2 gate and fixed them. Spacing counts from real request starts, and the fetcher
