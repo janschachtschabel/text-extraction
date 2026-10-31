@@ -2,6 +2,7 @@
   <header class="answer">
     <span class="http-status">HTTP {{ http_status }}</span>
     {% if status %}<span class="badge badge-{{ status }}">{{ status }}</span>{% endif %}
+    {% if unblocked %}<span class="badge badge-unblocked">{{ t("access.unblocked") }}</span>{% endif %}
   </header>
   {% if error %}
   <div class="error" role="alert">
@@ -40,6 +41,7 @@
     <dt>Words</dt><dd>{{ data["word_count"] }}</dd>
     {% endif %}
     <dt>Mode used</dt><dd>{{ data["mode_used"] }}</dd>
+    {% if compliance_mode %}<dt>{{ t("access.compliance") }}</dt><dd>{{ compliance_mode }}</dd>{% endif %}
   </dl>
   {% if data["content"] is string %}
   <section class="content-view" aria-label="Content">

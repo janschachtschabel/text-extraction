@@ -34,6 +34,7 @@ from text_extraction.ui.forms import (
     OPERATIONS,
     SINGLE_OPERATIONS,
     OptionsError,
+    access_choice,
     build_body,
     multipart_fields,
 )
@@ -49,7 +50,7 @@ from text_extraction.ui.security import (
     require_htmx,
     ui_principal,
 )
-from text_extraction.ui.templating import templates
+from text_extraction.ui.templating import request_language, templates
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.vision.fetch import ImageFetcher
 
@@ -96,6 +97,8 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "auth_none": settings.auth_mode == "none",
         "banner": BANNER,
         "tabs": TABS,
+        "access_choice": access_choice(role, settings),
+        "browser_enabled": settings.browser_enabled,
     }
 
 
@@ -170,6 +173,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             requested_mode=mode if mode in _MODES else None,
             screenshot=screenshot,
             screenshot_note=screenshot_note,
+            language=request_language(request),
         )
         return HTMLResponse(html)
 

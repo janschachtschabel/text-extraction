@@ -5,7 +5,11 @@ Each operation names one REST route. A form's fields build the route's body; the
 Options (so ``format: html``, which the form does not offer, goes through Options), while a key
 the form sets (a typed value, a box or choice changed from its default) and Options both give is
 refused with "<key> is given twice.". Nothing is forwarded for a refused form. The REST route
-validates the merged body as for any client."""
+validates the merged body as for any client.
+
+"Site rules" (``access``, ruling P12-S3) is a form field that is no body field: ``respect`` (the
+default) sends no ``compliance``, ``maximum`` sends ``compliance: "ignore"`` as set by the user.
+Only admins see the choice (`access_choice`); REST refuses ``ignore`` from anyone else."""
 
 import json
 import math
@@ -15,6 +19,7 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from text_extraction.file_api import PATH as FILE_PATH
+from text_extraction.settings import Settings
 from text_extraction.site_api import PATH as SITE_PATH
 from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
 
@@ -23,6 +28,11 @@ DEFAULT_MAX_IMAGES: Final = 5
 DEFAULT_SITE_DEPTH: Final = 2
 DEFAULT_SITE_PAGES: Final = 100
 CHECKED: Final = "on"
+# The "Site rules" choice: its form field and its two values.
+ACCESS_FIELD: Final = "access"
+ACCESS_RESPECT: Final = "respect"
+ACCESS_MAXIMUM: Final = "maximum"
+AccessChoice = Literal["hidden", "enabled", "disabled"]
 
 
 @dataclass(frozen=True)
@@ -137,6 +147,24 @@ def _wait(fields: Fields, form: Mapping[str, str]) -> None:
     fields["wait_seconds"] = _Field(value, set_by_user=value != DEFAULT_WAIT_SECONDS)
 
 
+def _access(fields: Fields, form: Mapping[str, str]) -> None:
+    """The "Site rules" choice: ``maximum`` sends ``compliance: "ignore"`` as set by the user
+    (so Options cannot give ``compliance`` too); ``respect`` or any other value sends nothing."""
+    if _text(form, ACCESS_FIELD) == ACCESS_MAXIMUM:
+        fields["compliance"] = _Field("ignore", set_by_user=True)
+
+
+def access_choice(role: str, settings: Settings) -> AccessChoice:
+    """How the forms offer "Site rules" to a caller of ``role``: ``hidden`` for anyone but an
+    admin; for an admin ``enabled`` while browser mode and unblock mode are both on
+    (``BROWSER_ENABLED``, ``BROWSER_UNBLOCK_ENABLED``), else ``disabled``."""
+    if role != "admin":
+        return "hidden"
+    if settings.browser_enabled and settings.browser_unblock_enabled:
+        return "enabled"
+    return "disabled"
+
+
 def _no_constant(name: str) -> Any:
     """``NaN`` and ``Infinity`` are not JSON."""
     raise ValueError(name)
@@ -166,6 +194,7 @@ def _extract_fields(form: Mapping[str, str]) -> Fields:
     _typed(fields, form, "url")
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
+    _access(fields, form)
     _box(fields, form, "metadata", default=True)
     if _text(form, "metadata_structured") == CHECKED:
         structured = {"strategy": "metadata", "schema": UI_METADATA_SCHEMA}
@@ -188,6 +217,7 @@ def _file_fields(form: Mapping[str, str]) -> Fields:
 def _screenshot_fields(form: Mapping[str, str]) -> Fields:
     fields: Fields = {}
     _typed(fields, form, "url")
+    _access(fields, form)
     _box(fields, form, "full_page", default=True)
     _wait(fields, form)
     return fields
@@ -198,19 +228,22 @@ def _structured_fields(form: Mapping[str, str]) -> Fields:
     _typed(fields, form, "url")
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
+    _access(fields, form)
     _object(fields, form, "structured", "Structured")
     _wait(fields, form)
     return fields
 
 
 def _chunk_fields(form: Mapping[str, str]) -> Fields:
-    """``url`` or ``text``: a text has no page, so no ``mode`` (REST refuses page options with
-    a text)."""
+    """``url`` or ``text``: a text has no page, so no ``mode`` and no "Site rules" (REST
+    refuses page options with a text)."""
     fields: Fields = {}
     _typed(fields, form, "url")
     if form.get("text"):  # kept as typed: its whitespace is part of the text
         fields["text"] = _Field(form["text"], set_by_user=True)
         _choice(fields, form, "text_type", "markdown")
+    else:
+        _access(fields, form)
     _choice(fields, form, "format", "markdown")
     _object(fields, form, "chunking", "Chunking")
     _wait(fields, form)
@@ -227,6 +260,7 @@ def _batch_fields(form: Mapping[str, str]) -> Fields:
     fields: Fields = {"urls": _Field([], set_by_user=True)}
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
+    _access(fields, form)
     _box(fields, form, "metadata", default=True)
     return fields
 
@@ -239,6 +273,7 @@ def _site_fields(form: Mapping[str, str]) -> Fields:
         fields[name] = _Field(value, set_by_user=value != default)
     _choice(fields, form, "scope", "host")
     _box(fields, form, "sitemaps", default=True)
+    _access(fields, form)
     return fields
 
 

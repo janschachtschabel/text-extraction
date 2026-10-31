@@ -258,6 +258,11 @@ label.inline input {
   color: var(--error);
 }
 
+.badge-unblocked {
+  color: var(--warn);
+  background: var(--warn-wash);
+}
+
 .request-status {
   margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;

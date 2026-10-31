@@ -15,6 +15,8 @@
     <legend>Also</legend>
     <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked> robots.txt and sitemaps</label>
   </fieldset>
+  {% set access_site = true %}
+  {% include "forms/access.html" %}
   {% include "forms/options.html" %}
   <button type="submit">Read the site structure</button>
 </form>

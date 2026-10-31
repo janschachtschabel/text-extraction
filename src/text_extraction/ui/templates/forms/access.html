@@ -1,0 +1,14 @@
+{%- if access_choice in ("enabled", "disabled") %}
+{%- set access_off = access_choice == "disabled" %}
+{%- set chosen_access = chosen["access"] if chosen and chosen["access"] == "maximum" and not access_off else "respect" %}
+{%- set maximum_hint = "hint.access.maximum_site" if access_site else "hint.access.maximum" %}
+{%- set off_id = prefix ~ "-access-off-hint" %}
+<fieldset class="choice access"{% if access_off %} disabled aria-describedby="{{ off_id }}"{% endif %}>
+  <legend>{{ t("access.legend") }}</legend>
+  <label class="inline" for="{{ prefix }}-access-respect"><input type="radio" id="{{ prefix }}-access-respect" name="access" value="respect" aria-describedby="{{ prefix }}-access-respect-hint{% if access_off %} {{ off_id }}{% endif %}"{% if chosen_access == "respect" %} checked{% endif %}{% if access_off %} disabled{% endif %}> {{ t("access.respect") }}</label>
+  <p class="hint" id="{{ prefix }}-access-respect-hint">{{ t("hint.access.respect") }}</p>
+  <label class="inline" for="{{ prefix }}-access-maximum"><input type="radio" id="{{ prefix }}-access-maximum" name="access" value="maximum" aria-describedby="{{ prefix }}-access-maximum-hint{% if access_off %} {{ off_id }}{% endif %}"{% if chosen_access == "maximum" %} checked{% endif %}{% if access_off %} disabled{% endif %}> {{ t("access.maximum") }}</label>
+  <p class="hint" id="{{ prefix }}-access-maximum-hint">{{ t(maximum_hint, value=code("compliance: ignore")) }}</p>
+  {% if access_off %}<p class="hint" id="{{ off_id }}">{{ t("hint.access.off", browser=code("BROWSER_ENABLED"), unblock=code("BROWSER_UNBLOCK_ENABLED")) }}</p>{% endif %}
+</fieldset>
+{% endif %}

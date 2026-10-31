@@ -2,6 +2,7 @@
   {% set prefix = "screenshot" %}
   <label for="screenshot-url">URL</label>
   <input id="screenshot-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  {% include "forms/access.html" %}
   <fieldset class="choice">
     <legend>Capture</legend>
     <label class="inline"><input type="checkbox" name="full_page" value="on" checked> The whole page</label>

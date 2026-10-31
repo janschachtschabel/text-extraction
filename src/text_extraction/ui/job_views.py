@@ -45,12 +45,12 @@ from text_extraction.ui.answers import (
     sent_keys,
     text_fields,
 )
-from text_extraction.ui.forms import OPERATIONS, OptionsError, build_body
+from text_extraction.ui.forms import OPERATIONS, OptionsError, access_choice, build_body
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
 from text_extraction.ui.site_tree import NodeKind, SiteTree, TreeBuilder
-from text_extraction.ui.templating import templates
+from text_extraction.ui.templating import language_context, request_language, templates
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.ui.url_lists import (
     UrlList,
@@ -400,7 +400,7 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
     boxes), at most `_max_fields`; a larger one is answered with a message. Its bytes are bounded
     by the route's body limit."""
     try:
-        await authenticate(request)
+        principal = await authenticate(request)
     except ServiceError as error:
         return refusal(error)
     form = await read_form(
@@ -420,7 +420,9 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
         listed = parse_url_lines(lines, max_rows=_max_listed(settings))
         body = build_body("batch", fields)
         if listed.invalid:
-            return _preview(request, listed, settings, source="list", chosen=fields)
+            return _preview(
+                request, listed, settings, role=principal.role, source="list", chosen=fields
+            )
         if not listed.urls:
             return _form_error(request, NO_URLS)
         parts = split_batches(
@@ -459,6 +461,7 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
             envelope=answer.body,
             raw=raw_text(answer),
             curl=curl,
+            language=request_language(request),
         )
         return HTMLResponse(html)
     mode = _mode(body.get("mode"))
@@ -485,12 +488,14 @@ def _preview(
     listed: UrlList,
     settings: Settings,
     *,
+    role: str,
     source: str,
     chosen: Mapping[str, str] | None = None,
 ) -> Response:
     """The batch preview of a parsed list (P10-S19): the counts, the first URLs and problems,
     and the valid URLs in a read-only box with the batch options (``chosen``: the fields the
-    user had set) and "Start batch", unless there are none or too many."""
+    user had set; "Site rules" as `access_choice` offers it to ``role``) and "Start batch",
+    unless there are none or too many."""
     parts = math.ceil(len(listed.urls) / settings.batch_max_urls)
     most = settings.batch_max_open_per_client * settings.batch_max_urls
     context: dict[str, Any] = {
@@ -508,6 +513,8 @@ def _preview(
             else None
         ),
         "chosen": chosen,
+        "access_choice": access_choice(role, settings),
+        "browser_enabled": settings.browser_enabled,
         **_problems(listed.invalid),
     }
     return templates.TemplateResponse(request, "batch_preview.html", context)
@@ -518,7 +525,7 @@ async def batch_file_view(request: Request, settings: Settings) -> Response:
     ``UI_BATCH_FILE_MAX_BYTES``) is parsed on the server and shown as a preview whose "Start
     batch" posts the URLs to ``/ui/run/batch-urls``. Nothing is forwarded here."""
     try:
-        await ui_principal(request)
+        principal = await ui_principal(request)
     except ServiceError as error:
         return refusal(error)
     limit = settings.ui_batch_file_max_bytes
@@ -553,7 +560,7 @@ async def batch_file_view(request: Request, settings: Settings) -> Response:
         invalid=len(listed.invalid),
         duplicates=listed.duplicates,
     )
-    return _preview(request, listed, settings, source="file")
+    return _preview(request, listed, settings, role=principal.role, source="file")
 
 
 async def site_structure_view(request: Request) -> Response:
@@ -588,6 +595,7 @@ async def site_structure_view(request: Request) -> Response:
         envelope=answer.body,
         raw=raw_text(answer),
         curl=curl,
+        language=request_language(request),
     )
     return HTMLResponse(html)
 
@@ -652,10 +660,13 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)
     context = {
+        **language_context(request_language(request)),
         "job_id": job_id,
         "tree": tree,
         "snapshot": read.state != "completed",
         "found_labels": FOUND_LABELS,
+        "access_choice": access_choice(principal.role, settings),
+        "browser_enabled": settings.browser_enabled,
     }
     html = await asyncio.to_thread(templates.get_template("tree.html").render, context)
     return HTMLResponse(html)
@@ -696,7 +707,11 @@ async def job_item_view(request: Request) -> Response:
     items = data.get("items") if answer.status == 200 and isinstance(data, dict) else None
     if not isinstance(items, list):
         html = render_result(
-            op="job", http_status=answer.status, envelope=answer.body, raw=raw_text(answer)
+            op="job",
+            http_status=answer.status,
+            envelope=answer.body,
+            raw=raw_text(answer),
+            language=request_language(request),
         )
         return HTMLResponse(html)
     if not items:
@@ -718,6 +733,7 @@ async def job_item_view(request: Request) -> Response:
         screenshot=screenshot,
         screenshot_note=screenshot_note,
         item=item,
+        language=request_language(request),
     )
     return HTMLResponse(html)
 
@@ -761,7 +777,11 @@ async def cancel_view(request: Request) -> Response:
         context = {"job_id": data.get("id"), "kind": data.get("kind")}
         return templates.TemplateResponse(request, "cancel.html", context)
     html = render_result(
-        op="cancel", http_status=answer.status, envelope=answer.body, raw=raw_text(answer)
+        op="cancel",
+        http_status=answer.status,
+        envelope=answer.body,
+        raw=raw_text(answer),
+        language=request_language(request),
     )
     return HTMLResponse(html)
 

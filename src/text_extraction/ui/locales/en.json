@@ -17,5 +17,20 @@
   "switch.hint": "Switching the language reloads the page. You stay logged in; an open job view closes, but its jobs keep running.",
   "status.request_failed": "Request failed: {status} {reason}",
   "status.network_error": "Network error",
-  "status.selected": "{count} selected"
+  "status.selected": "{count} selected",
+  "access.legend": "Site rules",
+  "access.respect": "Respect the site's rules (default)",
+  "access.maximum": "Maximum extraction (contract partners)",
+  "access.compliance": "Site rules",
+  "access.unblocked": "maximum extraction (unblocked)",
+  "hint.access.respect": "The checks of robots.txt and the TDM opt-out apply as this service is set up.",
+  "hint.access.maximum": "For sites that allowed extraction by contract: sends {value}, so the checks are off, and a page that refuses (HTTP 403, 429 or 503) or gives too little text falls back to the unblock browser. The outbound limits and a host's pause still apply.",
+  "hint.access.maximum_site": "For sites that allowed extraction by contract: sends {value}, so the checks are off. A site crawl reads its pages over HTTP only and never uses the browser.",
+  "hint.access.off": "Not available: maximum extraction needs {browser} and {unblock} switched on in this deployment.",
+  "mode.label": "Browser fallback",
+  "mode.auto": "when the page needs it",
+  "mode.fast": "never",
+  "mode.browser": "always",
+  "mode.no_browser": "This deployment has no browser ({setting} is off), so \"always\" is not available.",
+  "mode.fast_with_maximum": "With maximum extraction, \"never\" stays with HTTP: the page never reaches the browser."
 }

@@ -17,5 +17,20 @@
   "switch.hint": "Ein Sprachwechsel lädt die Seite neu. Sie bleiben angemeldet; eine offene Job-Ansicht schließt sich, ihre Jobs laufen aber weiter.",
   "status.request_failed": "Anfrage fehlgeschlagen: {status} {reason}",
   "status.network_error": "Netzwerkfehler",
-  "status.selected": "{count} ausgewählt"
+  "status.selected": "{count} ausgewählt",
+  "access.legend": "Seitenregeln",
+  "access.respect": "Regeln der Seite beachten (Standard)",
+  "access.maximum": "Maximale Extraktion (Vertragspartner)",
+  "access.compliance": "Seitenregeln",
+  "access.unblocked": "maximale Extraktion (entsperrt)",
+  "hint.access.respect": "Die Prüfungen von robots.txt und des TDM-Nutzungsvorbehalts gelten so, wie dieser Dienst eingerichtet ist.",
+  "hint.access.maximum": "Für Seiten, die die Extraktion vertraglich erlaubt haben: sendet {value}, die Prüfungen sind also aus, und eine Seite, die ablehnt (HTTP 403, 429 oder 503) oder zu wenig Text liefert, wird im Entsperr-Browser geladen. Die Grenzen für ausgehende Anfragen und eine Pause des Hosts gelten weiter.",
+  "hint.access.maximum_site": "Für Seiten, die die Extraktion vertraglich erlaubt haben: sendet {value}, die Prüfungen sind also aus. Ein Site-Crawl liest seine Seiten nur über HTTP und nutzt nie den Browser.",
+  "hint.access.off": "Nicht verfügbar: Für die maximale Extraktion müssen {browser} und {unblock} in diesem Dienst eingeschaltet sein.",
+  "mode.label": "Browser-Fallback",
+  "mode.auto": "wenn die Seite ihn braucht",
+  "mode.fast": "nie",
+  "mode.browser": "immer",
+  "mode.no_browser": "Dieser Dienst hat keinen Browser ({setting} ist aus), daher ist „immer“ nicht verfügbar.",
+  "mode.fast_with_maximum": "Bei maximaler Extraktion bleibt „nie“ bei HTTP: Die Seite erreicht den Browser nie."
 }

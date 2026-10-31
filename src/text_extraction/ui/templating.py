@@ -40,11 +40,16 @@ def language_context(language: Language) -> dict[str, Any]:
     return {"t": text_function(language), "lang": language, "languages": LANGUAGES}
 
 
-def _request_language(request: Request) -> dict[str, Any]:
+def request_language(request: Request) -> Language:
+    """The language of a UI request (set by the UI router), else ``UI_DEFAULT_LANGUAGE``."""
     language: Language = getattr(request.state, STATE_KEY, None) or (
         request.app.state.settings.ui_default_language
     )
-    return language_context(language)
+    return language
+
+
+def _request_language(request: Request) -> dict[str, Any]:
+    return language_context(request_language(request))
 
 
 templates: Final = Jinja2Templates(

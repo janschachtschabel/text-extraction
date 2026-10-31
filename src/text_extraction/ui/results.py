@@ -20,9 +20,10 @@ from text_extraction.browser_models import ScreenshotResult
 from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
+from text_extraction.ui.i18n import Language
 from text_extraction.ui.markdown import is_http, render_markdown
 from text_extraction.ui.security import RUN_PREFIX
-from text_extraction.ui.templating import templates
+from text_extraction.ui.templating import language_context, templates
 from text_extraction.ui.texts import warning_text
 from text_extraction.ui.timeline import RequestedMode, TimelineStep, timeline
 
@@ -340,6 +341,7 @@ def result_context(
     context["images"] = _images(data)
     compliance = data.get("compliance")
     context["compliance_mode"] = compliance.get("mode") if isinstance(compliance, Mapping) else None
+    context["unblocked"] = data.get("unblocked") is True
     context["image_report"] = data.get("image_descriptions")
     context["links"] = _links(data)
     context["warnings"] = _warnings(data)
@@ -369,8 +371,10 @@ def render_result(
     screenshot_note: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
+    language: Language = "en",
 ) -> str:
-    """``result.html`` rendered with `result_context` of the same arguments."""
+    """``result.html`` rendered in ``language`` with `result_context` of the other
+    arguments."""
     context = result_context(
         op=op,
         http_status=http_status,
@@ -383,4 +387,4 @@ def render_result(
         retry_after=retry_after,
         item=item,
     )
-    return templates.get_template("result.html").render(context)
+    return templates.get_template("result.html").render({**language_context(language), **context})
