@@ -11,7 +11,7 @@
       <span class="tree-counter" aria-live="polite">{{ t("status.selected", count=0) }}</span>
     </p>
     {#- A keyboard user need not tab through every checkbox (ruling R-P12-9): this link leads to
-    the actions after the tree. The ids carry the job's id, so two open trees differ. #}
+    the actions after the tree. #}
     <p class="tree-skip"><a class="skip-to-actions" href="#tree-{{ job_id }}-actions">{{ t("tree.skip_to_actions") }}</a></p>
     <ul class="tree">
       {%- for node in tree.roots recursive %}

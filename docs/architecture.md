@@ -2647,8 +2647,7 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   itself (`section.jobs-view`, `tabindex="-1"`), never to a tab.
 - **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
   `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
-  "Extract selected", so a keyboard user does not tab through every checkbox; the ids carry the
-  job's id, so two open trees do not share them.
+  "Extract selected", so a keyboard user does not tab through every checkbox.
 - **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
   progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
   `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its
