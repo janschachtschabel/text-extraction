@@ -1198,10 +1198,10 @@ expected while the farm had no linked pages; run 6's is `success`). Runner speed
 
 | Component (compose service) | Image | Scenario of the peak | CPU mean / p95 / max % | Memory p95 / max MiB | Model share (idle MiB) | Request | Limit | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| API pods (`api`) | `text-extraction` | `upload-docs-50` (CPU), `pii-200` (memory) | 139.4 / 239.5 / 239.5 | 808 / 808 | none (584, 580) | 1400m / 832Mi | 3750m / 2560Mi (rule: 1280Mi; floor: 2 document children of 768 MiB after the 1024 MiB reserve) | CPU run 6, memory run 4 |
+| API pods (`api`) | `text-extraction` | `upload-docs-50` (CPU; memory reached there, 800 / 806 MiB, then held at 796 to 808 MiB, highest p95 in `pii-200`) | 139.4 / 239.5 / 239.5 | 808 / 808 | none (584, 580) | 1400m / 832Mi | 3750m / 2560Mi (rule: 1280Mi; floor: 2 document children of 768 MiB after the 1024 MiB reserve) | CPU run 6, memory run 4 |
 | Extract workers (`worker`) | `text-extraction` | `sitemap-200k` (CPU mean), `sitemap-50m-1` (CPU peak), `sitemaps-50m-3` (memory) | 43.7 / 113.0 / 113.0 | 766 / 766 | none (544, 550) | 450m / 768Mi | 1750m / 2560Mi (rule: 1280Mi; floor as for the API) | run 6 |
 | Browser workers (`browser-worker`) | `text-extraction-browser` | `browser-100` | 72.7 / 122.3 / 148.5 | 1137 / 1147 | none: Chromium (674, 842) | 750m / 1152Mi | 2250m / 4608Mi (rule: 1792Mi; floor: 2 document children of 768 MiB after the 3072 MiB reserve) | run 6 |
-| Docling workers (`docling-worker`) | `text-extraction-docling` | `upload-ocr-10` | 222.2 / 339.1 / 357.6 | 1540 / 1549 | 1139, 1243 (756 to 1061 on the fresh sweep stacks) | 2250m / 1600Mi | 5500m / 8Gi (rule: 2560Mi; floor: `DOCLING_MEMORY_LIMIT_MB` 6144 for one child) | CPU mean run 6, the rest run 4 |
+| Docling workers (`docling-worker`) | `text-extraction-docling` | `upload-ocr-10` | 222.2 / 339.1 / 357.6 | 1540 / 1549 | 756 to 1243 (varies between fresh stacks) | 2250m / 1600Mi | 5500m / 8Gi (rule: 2560Mi; floor: `DOCLING_MEMORY_LIMIT_MB` 6144 for one child) | CPU mean run 6, the rest run 4 |
 | ASR workers (`asr-worker`), `large-v3-turbo` | `text-extraction-asr` | `asr-10` | 301.6 / 354.6 / 359.4 | 1350 / 1380 | 1192, 1146 | 3050m / 1408Mi | 5500m / 6Gi (rule: 2304Mi; floor: `ASR_MEMORY_LIMIT_MB` 4096 for one child) | CPU run 6, memory run 4 |
 | ASR workers, `small` | `text-extraction-asr` | not measured | - | - | - | as above | as above | - |
 | NLP workers (`nlp-worker`), `lg` | `text-extraction-nlp` | `pii-200` | 74.6 / 130.7 / 130.7 | 1704 / 1704 | 1675, 1690 | 750m / 1728Mi | 2 / 3Gi (rule: 2560Mi; floor: `PII_MEMORY_LIMIT_MB` 3072 for one child) | run 6 |
@@ -1210,11 +1210,12 @@ expected while the farm had no linked pages; run 6's is `success`). Runner speed
 | Bundled Valkey (`valkey`) | `valkey/valkey` | `site-crawl-max-pages` (CPU mean), `sitemap-200k` (CPU peak), `sitemaps-50m-3` (memory) | 3.6 / 12.7 / 12.7 | 53 / 53 | none (4, 4) | 500m / 1280Mi (rule: 50m / 64Mi) | 500m / 1280Mi (rule: 250m / 256Mi) | run 6 |
 
 Model share: for a worker that loads a model (Docling, ASR, NLP) it is the memory in the `idle`
-scenario of run 4 and run 6, which includes the worker's Python process. The components without
-a model give their idle memory in brackets. Valkey keeps its sizes: one instance serves every replica of every
-pool (the load ran one pod per pool), its memory request equals its limit (Guaranteed QoS) and its
-limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at once,
-not for this load.
+scenario of run 4 and run 6, which includes the worker's Python process. Docling's idle memory
+varies between fresh stacks (756 to 1243 MiB), so it is no fixed cost. The components without a
+model give their idle memory in brackets. Valkey keeps its sizes: one instance serves every replica
+of every pool (the load ran one pod per pool), its memory request equals its limit (Guaranteed QoS)
+and its limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at
+once, not for this load.
 
 **Selector processes (P11-S5, issue #19).** The selector scenario on a fresh stack per value:
 

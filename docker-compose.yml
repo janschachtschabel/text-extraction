@@ -24,7 +24,7 @@
 # The MCP endpoint (http://127.0.0.1:8080/mcp) and the playground (http://127.0.0.1:8080/ui) are on
 # for the api service; MCP_ENABLED=false or UI_ENABLED=false in .env or the shell switches them off.
 # No service sets deploy.resources. With every profile the stack takes about 6 GiB of memory when
-# idle (most of it the models: NLP lg about 1.7 GiB, ASR large-v3-turbo and Docling about 1.2 GiB
+# idle (most of it the models: NLP lg about 1.6 GiB, ASR large-v3-turbo and Docling about 1.2 GiB
 # each); one OCR or ASR job uses 2 to 3 cores (up to 3.6). docs/configuration.md, "Resource
 # baselines", gives the CPU and memory of each service, measured on a 4-vCPU runner.
 

@@ -486,7 +486,8 @@ were accepted complete. Without `maxmemory` there is no guard; a failing read ke
 verdict. The gauges `text_extraction_valkey_used_memory_bytes` and `…_max_memory_bytes` come from
 API pods and workers and feed the alert `TextExtractionValkeyMemoryHigh` (`max()` over the pods). The guard bounds new work, not the worst case:
 batches accepted below the ratio still add their results. Quotas per client and a separate cache
-Valkey are left to package 11.
+Valkey are still open: package 11's load test held at most 53 MiB in Valkey, so it gave no reason
+to build them.
 
 **Outbound limits under load (R21, R22, R25).** The end-to-end run (`tests/e2e`) found two gaps
 in the package-2 gate and fixed them. Spacing counts from real request starts, and the fetcher
@@ -1986,10 +1987,11 @@ positional; `selector_key` escapes the owner; `learn_selectors` without a page s
 - **One selector child per process by default.** Requests with selector rules wait for it in turn,
   and the wait counts against their `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`: a burst of slow rules
   makes later ones answer `selectors_timed_out` (raise `STRUCTURED_SELECTOR_PROCESSES` for more at
-  once). The load test's sweep (P11-S5, issue #19) found 1 enough: 1, 2 and 4 children served
-  23.2, 24.0 and 22.9 req/s at a p95 of 605, 622 and 623 ms, and each extra child took about
-  36 MiB. A page whose BeautifulSoup tree needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB
-  page needs about 310 MB of address space) answers `selectors_failed`.
+  once). The load test's sweep (P11-S5, issue #19) found 1 enough: in run 41190110782, 1, 2 and 4
+  children served 23.2, 24.0 and 22.9 req/s at a p95 of 605, 622 and 623 ms, and each extra child
+  took about 36 MiB (configuration.md, "Resource baselines"). A page whose BeautifulSoup tree
+  needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB page needs about 310 MB of address
+  space) answers `selectors_failed`.
 - **`metadata` matches by name.** A field is filled only where the page uses its name (`author`
   matches `author`, not `creator`); `<meta name>` lists are split at commas, so an author `Doe,
   John` in a meta tag becomes two values.
@@ -2339,7 +2341,8 @@ a report-only step of the live workflow.
   inflated copy of a gzip file (up to the same) and the parsed entries while it runs; several in
   one pod (fetched while one parses) add up. Size the extract worker's memory limit with that
   headroom: three 50 MiB sitemaps in flight took the load test's worker from about 560 to
-  766 MiB, well inside its 2560Mi limit.
+  766 MiB in run 41194228955, well inside its 2560Mi limit (configuration.md, "Resource
+  baselines").
 - **Shutdown.** A sitemap item's budget (50 s) outlasts the workers' shutdown grace (30 s by
   default): on SIGTERM such an item is cancelled and runs again on another worker after its lease,
   without duplicates (P9-S12).

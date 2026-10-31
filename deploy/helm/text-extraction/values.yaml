@@ -96,7 +96,8 @@ secrets:
 
 # Measured in the load runs 41190110782 (commit ad80ae4) and 41194228955 (commit b7499cc) on a
 # 4-vCPU runner (docs/configuration.md, "Resource baselines"): the requests are the largest
-# memory p95 (808 MiB, PII calls) and the largest CPU mean (1.39 cores, 50 document uploads), the
+# memory p95 (808 MiB, reached with the document uploads and held after them) and the largest CPU
+# mean (1.39 cores, 50 document uploads), the
 # CPU limit 1.5 x the peak (2.4 cores). The memory limit stays above 1.5 x the peak (1280Mi): it
 # covers the service with CONVERT_CONCURRENCY page conversions (a page at CONVERT_MAX_BYTES,
 # 5 MiB, peaks at about 450 MB) and the DOCUMENT_CONCURRENCY (2) document conversion children
@@ -297,10 +298,11 @@ workers:
     # fails below 30 + a 10 s margin.
     terminationGracePeriodSeconds: 60
     # Measured as for the API pods (docs/configuration.md, "Resource baselines"): 10 OCR PDFs gave
-    # a memory p95 of 1540 MiB (1139 and 1243 MiB of it when idle: the models and the process), a
-    # CPU mean of 2.22 and a peak of 3.58 cores with DOCLING_THREADS (4) threads. The memory limit
-    # stays above 1.5 x the peak (2560Mi): it backs one conversion child with
-    # DOCLING_MEMORY_LIMIT_MB (6144) of address space, which the load's short PDFs do not reach.
+    # a memory p95 of 1540 MiB (756 to 1243 MiB of it when idle, varying between fresh stacks: the
+    # models and the process), a CPU mean of 2.22 and a peak of 3.58 cores with DOCLING_THREADS
+    # (4) threads. The memory limit stays above 1.5 x the peak (2560Mi): it backs one conversion
+    # child with DOCLING_MEMORY_LIMIT_MB (6144) of address space, which the load's short PDFs do
+    # not reach.
     resources:
       requests:
         cpu: 2250m
@@ -553,9 +555,11 @@ workers:
       keda:
         enabled: false
         serverAddress: http://prometheus-operated.monitoring.svc:9090
-        # Pending queue items per worker replica (an analysis takes seconds). An untuned
-        # placeholder until package 11 measures real load. A sync request with `pii` waits only
-        # PII_SYNC_WAIT_SECONDS (20): when the backlog waits longer it answers 202 with its job.
+        # Pending queue items per worker replica (an analysis takes seconds). Not measured: the
+        # load test ran one pod per pool without autoscaling. Tune it in production from the
+        # queue gauges (text_extraction_queue_pending_items, the backlog alert). A sync request
+        # with `pii` waits only PII_SYNC_WAIT_SECONDS (20): when the backlog waits longer it
+        # answers 202 with its job.
         threshold: 10
         countLeased: false
         minReplicaCount: 1
@@ -686,8 +690,9 @@ workers:
       keda:
         enabled: false
         serverAddress: http://prometheus-operated.monitoring.svc:9090
-        # Pending queue items per worker replica (null: `concurrency`). An untuned placeholder
-        # until package 11 measures real load.
+        # Pending queue items per worker replica (null: `concurrency`). Not measured: the load
+        # test ran one pod per pool without autoscaling. Tune it in production from the queue
+        # gauges (text_extraction_queue_pending_items, the backlog alert).
         threshold: null
         countLeased: false
         minReplicaCount: 1
