@@ -97,6 +97,20 @@ Measurements feed back into `values.yaml`, `docs/configuration.md` and `docs/arc
   - b) Jan runs them himself from a short checklist in `docs/handover.md`.
   - c) Skip them.
 
+## Decisions of Jan (2026-10-31, 07:49 UTC)
+
+Jan's answer: "tagging als protottyp und kein verweis auf T4 - wenn dann nur mich als Person - das ist ein privates projekt . Name = Jan Schachtschabel. Paket 10 Checks . Erstmal keinen großen Testlauf . kommt später".
+
+- **D1 = a.** No answer given, so the recommendation applies: the load test runs in `load.yml` on the GitHub runner. It sends no traffic to real sites.
+- **D2: deferred.** No full 4,000-URL run in this package. Task 1 still adds the `mode` input so the run can be started later by hand. Task 8 Step 1 is dropped. `docs/handover.md` names the run as open, with the command to start it.
+- **D3 = b.** Tag `v0.1.0` as a prototype; the version is already 0.1.0 in `pyproject.toml`, `Chart.yaml` and `__init__.py`. The CHANGELOG section is `## [0.1.0]`. The maintenance section states that this is a prototype and that no date is set for a decision on permanent operation; Jan Schachtschabel decides.
+- **D4 = a, changed.** The contact person is **Jan Schachtschabel**, as a private person. This is a private project.
+  - **P11-S12.** No deliverable names a team (no "T4", no "T6") or presents the project as a team's service. That covers `docs/handover.md`, README, CHANGELOG, the values example and the docs.
+  - The checklist headings in `docs/handover.md` and the `CHECKLIST` constant in `tests/test_handover_doc.py` use the guide's item texts with the team names taken out. For example, "Ansprechperson in T4 für Rückfragen und Updates" becomes "Ansprechperson für Rückfragen und Updates".
+  - Dependabot as planned. Cost notes use measured token counts and a price parameter, with no real-model run.
+- **D5 = a.** The open package 10 checks run on Jan's PC through Remote Control in a fresh clone. They run now, independent of the package 11 tasks, and their results go into `docs/packages.md` (row 10 note) with the package 11 PR.
+- **Reading of "keinen großen Testlauf".** It means the 4,000-URL WLO regression. The load test against the local site farm stays in, because the resource baselines and the Helm sizing depend on it. If Jan meant the load test too, Tasks 3 to 5 stop before their controller runs.
+
 ## Review Focus
 
 1. **A load-test number that does not measure what the doc claims.** Two examples: memory sampled while the container was idle, or a scenario overlapping another so `docker stats` mixes them. Each scenario must run alone, the sampler must cover its whole window, and the report names the window.
