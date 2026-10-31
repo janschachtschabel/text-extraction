@@ -137,7 +137,7 @@ def test_media_literals() -> None:
         "youtube", "vimeo", "ard", "zdf", "arte", "3sat", "file", "upload", "html5"
     )  # fmt: skip
     assert get_args(TranscriptSource) == (
-        "manual_subtitles", "auto_subtitles", "asr", "metadata_only"
+        "manual_subtitles", "auto_subtitles", "asr", "transcript_panel", "metadata_only"
     )  # fmt: skip
 
 

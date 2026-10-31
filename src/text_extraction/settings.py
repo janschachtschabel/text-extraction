@@ -269,6 +269,9 @@ class Settings(BaseSettings):
     # at most DOCLING_INPUT_BUDGET_BYTES.
     media_upload_max_bytes: int = Field(default=25_000_000, ge=1_000_000)
     media_download_timeout_seconds: int = Field(default=600, ge=30, le=3600)  # one download
+    # YouTube's new transcript view, read in the browser when the subtitles could not be read
+    # (auto requests; nothing happens without BROWSER_ENABLED).
+    media_transcript_panel_enabled: bool = True
     # ASR worker (speech recognition). Off by default: the API image has no models.
     asr_enabled: bool = False
     asr_backend: Literal["local", "openai"] = "local"

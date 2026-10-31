@@ -1,0 +1,145 @@
+{
+  "responseContext": {
+    "...": "elided"
+  },
+  "content": {
+    "engagementPanelSectionListRenderer": {
+      "panelIdentifier": "PAmodern_transcript_view",
+      "header": {
+        "...": "elided"
+      },
+      "content": {
+        "sectionListRenderer": {
+          "contents": [
+            {
+              "itemSectionRenderer": {
+                "contents": [
+                  {
+                    "macroMarkersPanelItemViewModel": {
+                      "item": {
+                        "timelineItemViewModel": {
+                          "contentItems": [
+                            {
+                              "transcriptSegmentViewModel": {
+                                "simpleText": "Welcome to this short look at how rivers shape a valley.",
+                                "timestamp": "0:18",
+                                "accessibilityLabel": "...",
+                                "trackingParams": "..."
+                              }
+                            }
+                          ],
+                          "trackingParams": "..."
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "macroMarkersPanelItemViewModel": {
+                      "item": {
+                        "timelineItemViewModel": {
+                          "contentItems": [
+                            {
+                              "transcriptSegmentViewModel": {
+                                "simpleText": "Water carries sand and stones downstream.",
+                                "timestamp": "0:24",
+                                "accessibilityLabel": "...",
+                                "trackingParams": "..."
+                              }
+                            }
+                          ],
+                          "trackingParams": "..."
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "macroMarkersPanelItemViewModel": {
+                      "item": {
+                        "timelineItemViewModel": {
+                          "contentItems": [
+                            {
+                              "transcriptSegmentViewModel": {
+                                "simpleText": "[Music]",
+                                "timestamp": "0:31",
+                                "accessibilityLabel": "...",
+                                "trackingParams": "..."
+                              }
+                            }
+                          ],
+                          "trackingParams": "..."
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "macroMarkersPanelItemViewModel": {
+                      "item": {
+                        "timelineItemViewModel": {
+                          "contentItems": [
+                            {
+                              "transcriptSegmentViewModel": {
+                                "simpleText": "Over thousands of years the valley grows wider.",
+                                "timestamp": "0:37",
+                                "accessibilityLabel": "...",
+                                "trackingParams": "..."
+                              }
+                            }
+                          ],
+                          "trackingParams": "..."
+                        }
+                      }
+                    }
+                  }
+                ],
+                "trackingParams": "..."
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "frameworkUpdates": {
+    "entityBatchUpdate": {
+      "mutations": [
+        {
+          "entityKey": "...",
+          "type": "ENTITY_MUTATION_TYPE_REPLACE",
+          "payload": {
+            "timedMarkersListSyncEntity": {
+              "key": "...",
+              "timedListData": {
+                "sections": [
+                  {
+                    "timedSyncDataList": [
+                      {
+                        "videoTimeMs": "18000",
+                        "endTimeMs": "23980"
+                      },
+                      {
+                        "videoTimeMs": "24000",
+                        "endTimeMs": "30960"
+                      },
+                      {
+                        "videoTimeMs": "31000",
+                        "endTimeMs": "36500"
+                      },
+                      {
+                        "videoTimeMs": "37000",
+                        "endTimeMs": "42250"
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "timestamp": {
+        "...": "elided"
+      }
+    }
+  },
+  "trackingParams": "..."
+}

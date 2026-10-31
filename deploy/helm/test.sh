@@ -453,6 +453,12 @@ done
 expect_values "config.ASR_ENABLED ignored (API)" \
   "$(document "$(render --set config.ASR_ENABLED=true)" Deployment "$API")" ASR_ENABLED "false"
 expect_values "API gets the upload limit" "$api" MEDIA_UPLOAD_MAX_BYTES "25000000"
+# The transcript panel switch reaches every pod through the ConfigMap (envFrom), default on.
+expect_contains "ConfigMap default MEDIA_TRANSCRIPT_PANEL_ENABLED" "$(document "$on" ConfigMap "$API")" \
+  'MEDIA_TRANSCRIPT_PANEL_ENABLED: "true"'
+expect_contains "config.MEDIA_TRANSCRIPT_PANEL_ENABLED can switch it off" \
+  "$(document "$(render --set-string config.MEDIA_TRANSCRIPT_PANEL_ENABLED=false)" ConfigMap "$API")" \
+  'MEDIA_TRANSCRIPT_PANEL_ENABLED: "false"'
 
 asr_on="$(render --set workers.asr.enabled=true --set workers.docling.enabled=true)"
 asr="$(document "$asr_on" Deployment "$ASR")"
