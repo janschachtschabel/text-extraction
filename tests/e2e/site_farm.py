@@ -11,7 +11,9 @@ sees, whatever the path. On SIGTERM or SIGINT it writes the record as JSON to ``
 exits. Once every server listens it prints ``ready`` on stdout.
 
 The addresses are ``127.0.0.2`` … ``127.0.0.<hosts + 1>``: Linux routes all of ``127.0.0.0/8``
-to the loopback interface, so they need no setup.
+to the loopback interface, so they need no setup. ``--bind <address>`` serves one host on that
+address instead (``--hosts`` is ignored): the load test's farm container listens with
+``--bind 0.0.0.0`` and is reached by its compose service name.
 """
 
 import argparse
@@ -133,10 +135,13 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--hosts", type=int, default=10)
+    parser.add_argument(
+        "--bind", default=None, metavar="ADDRESS", help="serve one host on this address"
+    )
     parser.add_argument("--record", type=Path, required=True, help="JSON file written on exit")
     args = parser.parse_args(argv)
 
-    hosts = host_addresses(args.hosts)
+    hosts = [args.bind] if args.bind else host_addresses(args.hosts)
     record = _Record(hosts)
     servers = [_FarmServer(host, args.port, record) for host in hosts]
     for server in servers:

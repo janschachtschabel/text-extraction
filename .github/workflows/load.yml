@@ -1,0 +1,191 @@
+name: load
+
+# Load test (package 11): the compose stack with every profile, plus a local site farm and a fake
+# LLM (deploy/load/compose.load.yml), under the load profile of tests/load/scenarios.py. docker
+# stats is sampled every 2 s; the report gives CPU and memory per scenario and service and the
+# Helm sizing they lead to. No load goes to a third-party site: every target is the farm container,
+# and the LLM is the fake. Only the image builds and the model downloads use the internet.
+#
+# A dispatch works only once this file is on the default branch, so a pull request that carries
+# the label `load` runs it too, with the dispatch defaults (ruling R-P11-5).
+#
+# The selector sweep: the first value of selector_processes runs every scenario; each further
+# value restarts the stack with STRUCTURED_SELECTOR_PROCESSES set and repeats only the selector
+# scenario, into load-results/selector-processes-<n>/.
+on:
+  workflow_dispatch:
+    inputs:
+      selector_processes:
+        description: >-
+          STRUCTURED_SELECTOR_PROCESSES values, comma-separated; the first runs every scenario,
+          the others only the selector scenario
+        type: string
+        default: "1,2,4"
+      asr_model:
+        description: Whisper model of the ASR worker (ASR_MODEL)
+        type: choice
+        options: [small, large-v3-turbo]
+        default: large-v3-turbo
+      pii_model_size:
+        description: spaCy model size of the NLP worker (PII_MODEL_SIZE)
+        type: choice
+        options: [md, lg]
+        default: md
+  pull_request:
+    types: [labeled, synchronize, opened, reopened]
+
+permissions:
+  contents: read
+
+# A new run for the same ref cancels the one in progress. Adding any other label than `load` gets
+# a group of its own, so it neither cancels a load run nor runs itself (see `if` below).
+concurrency:
+  group: >-
+    load-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'load'
+    && format('-other-label-{0}', github.run_id) || '' }}
+  cancel-in-progress: true
+
+jobs:
+  load:
+    # Pull requests run only while they carry the `load` label, and adding another label does
+    # not start a run.
+    if: >-
+      github.event_name != 'pull_request'
+      || (contains(github.event.pull_request.labels.*.name, 'load')
+          && (github.event.action != 'labeled' || github.event.label.name == 'load'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # The sizing report strips this prefix from the container names.
+      COMPOSE_PROJECT_NAME: text-extraction
+      # Every compose call: the base file, the load override and every profile.
+      COMPOSE: >-
+        docker compose -f docker-compose.yml -f deploy/load/compose.load.yml
+        --profile docling --profile asr --profile nlp --profile llm
+      # A pull request has no inputs: the dispatch defaults apply. The override reads the models.
+      SELECTOR_PROCESSES: ${{ inputs.selector_processes || '1,2,4' }}
+      ASR_MODEL: ${{ inputs.asr_model || 'large-v3-turbo' }}
+      PII_MODEL_SIZE: ${{ inputs.pii_model_size || 'md' }}
+      # The internal ports the override publishes on 127.0.0.1: api, worker, browser, docling,
+      # asr, nlp and llm worker.
+      INTERNAL_URLS: >-
+        http://127.0.0.1:9090,http://127.0.0.1:9091,http://127.0.0.1:9092,http://127.0.0.1:9093,http://127.0.0.1:9094,http://127.0.0.1:9095,http://127.0.0.1:9096
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The five images and the models (about 2.5 GB with large-v3-turbo) need more room than the
+      # runner leaves free; these toolchains are not used here.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # uv reads .python-version (3.13) and provisions its own managed Python. The generator runs
+      # on the runner; the dev group holds python-docx for the generated upload.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      # Both values are masked before anything else uses them. The service gets only the key's
+      # SHA-256; the generator reads the key from API_KEY and sends it only as a header.
+      - name: Create .env with a fresh Valkey password and API key
+        run: |
+          valkey_password="$(openssl rand -hex 24)"
+          api_key="$(openssl rand -hex 32)"
+          echo "::add-mask::$valkey_password"
+          echo "::add-mask::$api_key"
+          sha="$(printf %s "$api_key" | sha256sum | cut -d' ' -f1)"
+          umask 077
+          {
+            echo "VALKEY_PASSWORD=$valkey_password"
+            echo "AUTH_MODE=api_key"
+            echo "API_KEYS='[{\"name\":\"load\",\"role\":\"user\",\"sha256\":\"$sha\"}]'"
+          } > .env
+          echo "API_KEY=$api_key" >> "$GITHUB_ENV"
+
+      - name: Build the images
+        run: $COMPOSE build
+
+      # Each value starts from fresh containers (--force-recreate; the model volumes stay), and
+      # the service logs are saved before the next value replaces the containers. A failed or
+      # unexpected request fails the run after the sweep; a stack that does not come up fails it
+      # at once.
+      - name: Run the load test
+        run: |
+          IFS=, read -ra values <<< "$SELECTOR_PROCESSES"
+          if [ "${#values[@]}" -eq 0 ]; then
+            echo "selector_processes is empty" >&2
+            exit 2
+          fi
+          for i in "${!values[@]}"; do
+            values[i]="${values[i]//[[:space:]]/}"
+            if ! [[ "${values[i]}" =~ ^[1-9][0-9]*$ ]]; then
+              echo "selector_processes: '${values[i]}' is not a whole number of at least 1" >&2
+              exit 2
+            fi
+          done
+
+          save_logs() {
+            mkdir -p "load-results/logs/$1"
+            for service in $($COMPOSE ps --all --services); do
+              $COMPOSE logs --no-color --timestamps "$service" \
+                > "load-results/logs/$1/$service.log" 2>&1 || true
+            done
+          }
+
+          status=0
+          for i in "${!values[@]}"; do
+            value="${values[i]}"
+            export STRUCTURED_SELECTOR_PROCESSES="$value"
+            if [ "$i" -eq 0 ]; then
+              out=load-results
+              only=()
+            else
+              out="load-results/selector-processes-$value"
+              only=(--only structured-selectors-200)
+            fi
+            if ! $COMPOSE up -d --wait --wait-timeout 1800 --force-recreate; then
+              echo "the stack did not become ready with STRUCTURED_SELECTOR_PROCESSES=$value" >&2
+              save_logs "selector-processes-$value"
+              exit 1
+            fi
+            uv run python -m tests.load.run_load \
+              --base-url http://127.0.0.1:8080 \
+              --internal-urls "$INTERNAL_URLS" \
+              --farm-url http://farm:8000 \
+              --fake-llm-url http://127.0.0.1:8000 \
+              --selector-processes "$value" \
+              --out-dir "$out" \
+              "${only[@]}" || status=1
+            save_logs "selector-processes-$value"
+          done
+          exit "$status"
+
+      - name: Add the summaries to the job summary
+        if: always()
+        run: |
+          if [ -f load-results/summary.md ]; then
+            cat load-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+          for file in load-results/selector-processes-*/summary.md; do
+            [ -f "$file" ] || continue
+            { echo; echo "## $(basename "$(dirname "$file")")"; echo; cat "$file"; } >> "$GITHUB_STEP_SUMMARY"
+          done
+          exit 0
+
+      # Only what the generator wrote (summary.md, sizing.json, stats.jsonl, results.jsonl,
+      # metrics/) and the service logs; never .env or any inspect output.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: load-results
+          path: load-results/**
+          if-no-files-found: warn
+
+      - name: Remove the stack and its volumes
+        if: always()
+        run: $COMPOSE down -v --remove-orphans
