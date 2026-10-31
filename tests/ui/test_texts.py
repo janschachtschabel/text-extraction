@@ -148,9 +148,9 @@ def test_timeline_in_german() -> None:
     ]
     details = [text_of(step.detail, "de") for step in steps]
     assert details[1] == "1 Versuch, HTTP 200, Cache miss"
-    assert details[2] == "Fallback nach HTTP, Entsperrmodus"
+    assert details[2] == "Browser-Fallback nach HTTP, Entsperrmodus"
     assert details[3] == "text/html, docling, 4 von 9 Seiten"
-    assert details[4] == "3 Funde (mask)"
+    assert details[4] == "3 Treffer (mask)"
     assert details[6] == "teilweise, timeout, wiederholbar"
 
     data = browser.model_dump(mode="json")
