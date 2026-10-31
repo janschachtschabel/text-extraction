@@ -31,7 +31,7 @@ Valkey ◀──▶ llm-worker      (OpenAI-compatible endpoint: structured llm,
                              semantic chunking; default model gpt-6-luna)
 workers ──▶ model volumes (one PVC per worker type, read-only: Docling and Tesseract,
             Whisper models; spaCy for the nlp-worker)
-optional: S3-compatible store for screenshots and large results
+not built (deferred): an S3-compatible store for screenshots and large results
 ```
 
 Images: `api` (slim), `browser-worker` (image `text-extraction-browser`: Chromium headless
@@ -299,7 +299,8 @@ optional rate limit.
   `ignore` (R9); a job's items run with their owner's role. Without the switch, `ignore`
   renders in the standard browser.
 
-`INTERNAL_API_ENABLED` (off by default) serves the API without auth for cluster-internal callers.
+There is no auth-free internal API: cluster-internal callers send a key like any other caller
+(only `AUTH_MODE=none` turns authentication off, for every caller at once).
 
 ## Feature notes
 
@@ -377,8 +378,9 @@ optional rate limit.
   count toward `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`. A pod
   holds at most `EXTRACT_MAX_BACKGROUND` (32) such tasks; beyond it a request keeps waiting inline
   and answers 200.
-- **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs; `S3_ENABLED`
-  moves screenshots and large results to an S3-compatible store.
+- **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs. An S3-compatible
+  store for screenshots and large results was planned (`S3_ENABLED`) and is not built: it is
+  deferred beyond package 11, and screenshots and results stay in Valkey for their TTLs.
 
 ## Jobs and the fair queue
 
@@ -468,7 +470,9 @@ is, so an item can still be somewhat over the limit; values are bounded by their
 **Valkey memory (P5, R18).** Valkey runs with `--maxmemory 768mb --maxmemory-policy noeviction`:
 eviction would drop gate, lease or job keys silently, while noeviction fails writes loudly (503).
 Its memory request equals its limit, 1280Mi (Guaranteed QoS), so maxmemory is 60 % of the limit
-and leaves room for fragmentation, buffers and the AOF fork. Package 11 measures real sizes.
+and leaves room for fragmentation, buffers and the AOF fork. The load test used at most 53 MiB of
+it with one pod per pool (a crawl at `SITE_MAX_PAGES` 4.2 MiB, a 200,000-entry sitemap 12.8 MiB;
+configuration.md, "Resource baselines"), so the limit stays sized for the results held at once.
 
 **Memory guard (R28).** Under noeviction a full Valkey fails every write, and with it the rate
 limiter, the outbound gate and the job reads, for as long as the results stay (up to
@@ -484,7 +488,8 @@ were accepted complete. Without `maxmemory` there is no guard; a failing read ke
 verdict. The gauges `text_extraction_valkey_used_memory_bytes` and `…_max_memory_bytes` come from
 API pods and workers and feed the alert `TextExtractionValkeyMemoryHigh` (`max()` over the pods). The guard bounds new work, not the worst case:
 batches accepted below the ratio still add their results. Quotas per client and a separate cache
-Valkey are left to package 11.
+Valkey are still open: package 11 did not build them, and its load test (at most 53 MiB in Valkey)
+did not exercise those cases.
 
 **Outbound limits under load (R21, R22, R25).** The end-to-end run (`tests/e2e`) found two gaps
 in the package-2 gate and fixed them. Spacing counts from real request starts, and the fetcher
@@ -1032,7 +1037,7 @@ through the Docling path, and the two-page scan yields its text with a word reca
   answers its text layer with `ocr_unavailable`.
 - Not in this package: vision-LLM descriptions of images (issue #20 describes page images and
   image uploads, not the figures inside a document: see "Image descriptions"), PII (package 7), S3 offload
-  of inputs (package 11), legacy binary `.doc` and `.ppt`, RTF, e-mail files and archives
+  of inputs (deferred, not built), legacy binary `.doc` and `.ppt`, RTF, e-mail files and archives
   (`unsupported_content_type`).
 
 ## Audio and video
@@ -1072,7 +1077,7 @@ OpenAI-compatible endpoint): always a job, answered 202.
   25,000,000 bytes by default (about 25 minutes of MP3 at 128 kbit/s, hours of Opus), adjustable
   by env and Helm (`workers.asr.uploadMaxBytes`), bounded only by the input budget
   (`DOCLING_INPUT_BUDGET_BYTES`, checked at start-up and by the chart). Larger media go by URL;
-  S3 lifts the limit in package 11. Not taken: (b) extracting the audio track in the API pod.
+  an S3 store would lift the limit (deferred, not built). Not taken: (b) extracting the audio track in the API pod.
 - **D4, players embedded in a page: listed, not transcribed (a).** `data.media.embeds` names
   them (platform URL or file URL, at most 10), so the caller can extract each with a request of
   its own; only `<track>` text is added inline.
@@ -1374,7 +1379,9 @@ the media set without gating it (D1).
   `DOCUMENT_MAX_BYTES` while ASR is off is a 413 (the path limit widens only with ASR).
 - **What the ASR child needs in memory** (`ASR_MEMORY_LIMIT_MB`, 4096, an address-space limit)
   is first measured in CI's `media` job (the long clip prints VmPeak and VmHWM) and in the live
-  run; package 11 sets the final resources.
+  run. In the load test the ASR worker with `large-v3-turbo` used 1350 MiB (p95, 1380 at its
+  peak) and about 3 of 4 cores for one transcription; the chart's limit keeps the child's
+  4096 MiB (configuration.md, "Resource baselines").
 - **Cached final failures.** A transcription that failed for a reason of the media's own
   (`media_too_long`, undecodable media, the item's budget) leaves the video's details cached (a
   refused key does not); a later request without
@@ -1394,7 +1401,7 @@ the media set without gating it (D1).
   Tier 1 runs without a JavaScript runtime in the API image (Deno is in the ASR image only).
 - Not in this package: transcripts of players embedded in a page (D4), speaker diarisation,
   translation, timestamps in the content, HLS or DASH URLs outside the platform extractors, S3
-  offload of inputs (package 11), PII in transcripts (package 7 applies to them like to any
+  offload of inputs (deferred, not built), PII in transcripts (package 7 applies to them like to any
   content).
 
 ## PII
@@ -1982,8 +1989,11 @@ positional; `selector_key` escapes the owner; `learn_selectors` without a page s
 - **One selector child per process by default.** Requests with selector rules wait for it in turn,
   and the wait counts against their `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`: a burst of slow rules
   makes later ones answer `selectors_timed_out` (raise `STRUCTURED_SELECTOR_PROCESSES` for more at
-  once). A page whose BeautifulSoup tree needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB
-  page needs about 310 MB of address space) answers `selectors_failed`.
+  once). The load test's sweep (P11-S5, issue #19) found 1 enough: in run 41190110782, 1, 2 and 4
+  children served 23.2, 24.0 and 22.9 req/s at a p95 of 605, 622 and 623 ms, and each extra child
+  took about 36 MiB (configuration.md, "Resource baselines"). A page whose BeautifulSoup tree
+  needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB page needs about 310 MB of address
+  space) answers `selectors_failed`.
 - **`metadata` matches by name.** A field is filled only where the page uses its name (`author`
   matches `author`, not `creator`); `<meta name>` lists are split at commas, so an author `Doe,
   John` in a meta tag becomes two values.
@@ -2163,7 +2173,7 @@ not changed.
 ## Site structure
 
 Package 9: `site/` (`types.py`, `urls.py`, `links.py`, `follow.py`, `sitemaps.py`, `store.py`,
-`runner.py`), `site_api.py`, hooks in `pipeline.py` and `compliance.py`. `POST
+`runner.py`, `sitemap_items.py`), `site_api.py`, hooks in `pipeline.py` and `compliance.py`. `POST
 /v1/site-structure {"url": ..., "depth": 2}` answers 202 with a job of kind `site` that lists every
 sitemap of the site (robots.txt's `Sitemap:` lines, sitemap indexes, gzip, text, RSS and Atom
 sitemaps) with their URLs, and the site's link graph from the start page to the given depth: one
@@ -2268,7 +2278,8 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   the SSRF guard on every hop, the compliance checks in the host's turn and the byte cap, without
   conversion; `Pipeline.robots_sitemaps` and `Pipeline.blocked_from_cache` read the checker's
   cache.
-- **P9-S11, the runner** (`site/runner.py`). A page runs `Pipeline.run` in fast mode
+- **P9-S11, the runner** (`site/runner.py`; the robots and sitemap items in
+  `site/sitemap_items.py`, package 11). A page runs `Pipeline.run` in fast mode
   (`format: text`, `ocr: never`), judges its links and `extend`s with them (its `final_url` as an
   alias, so a redirect's target is the same item) before it answers; a robots item lists the
   sitemaps; a sitemap item fetches, inflates and parses on a pool of its own, reserves its
@@ -2319,10 +2330,21 @@ a report-only step of the live workflow.
   that waits longer than its budget (`EXTRACT_TIMEOUT_SECONDS` × 2, 50 s) plus 5 s fails `timeout`,
   retryable, with "the worker was busy". Many large sitemaps at once therefore take slots from
   page items; more worker pods spread them.
+- **No `SITE_PARSE_CONCURRENCY` (ruling R-P11-8).** Package 9 left a setting for the size of the
+  sitemap pool open until the load test. Load run 41194228955 (commit `b7499cc`) measured one
+  50 MiB sitemap at 3.8 s, three in flight at once at 8.9 s and one sitemap of 200,000 entries at
+  8.9 s (job times). Three take 2.3 × one, above the P11-S7 mark of 2 ×, but only because one
+  thread parses them in turn by design: the worst case of three files at
+  `SITE_SITEMAP_MAX_BYTES` adds about 5 s. A crawl at `SITE_MAX_PAGES` took 51 s against
+  `JOB_TTL_SECONDS` of 24 h, and the event loop was held at most about 1 s (0.9 s in all for the
+  200,000 entries, 1.1 s for the three files). So the one-thread pool is not the bottleneck and
+  the setting is not added; the numbers are in configuration.md, "Resource baselines".
 - **Memory.** A sitemap item holds the raw body (up to `SITE_SITEMAP_MAX_BYTES`, 50 MiB), the
   inflated copy of a gzip file (up to the same) and the parsed entries while it runs; several in
   one pod (fetched while one parses) add up. Size the extract worker's memory limit with that
-  headroom; package 11 measures it.
+  headroom: three 50 MiB sitemaps in flight took the load test's worker from about 560 to
+  766 MiB in run 41194228955, well inside its 2560Mi limit (configuration.md, "Resource
+  baselines").
 - **Shutdown.** A sitemap item's budget (50 s) outlasts the workers' shutdown grace (30 s by
   default): on SIGTERM such an item is cancelled and runs again on another worker after its lease,
   without duplicates (P9-S12).
@@ -2520,8 +2542,8 @@ UI calls are counted as the REST requests they forward.
 **Deployment (P10-S21).** Helm `mcp.enabled` and `ui.enabled` (both false) render `MCP_ENABLED`
 and `UI_ENABLED` on the API pods only; entries for them under `config` are ignored (left out of the
 ConfigMap). The other `MCP_*` and `UI_*` settings are `config` entries with their defaults. The
-ingress already routes `/`; its read timeout must cover a tool call (at least `MCP_WAIT_SECONDS` +
-70 s) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
+ingress already routes `/`; its read timeout must cover a tool call (at least 120 s, or `MCP_WAIT_SECONDS`
++ 70 s if larger) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
 the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for the `api` service
 (local development; `MCP_ENABLED=false` or `UI_ENABLED=false` switches them off).
 
@@ -2560,6 +2582,15 @@ the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship 
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.
 
+**Resource baselines.** The load test (`.github/workflows/load.yml`, `tests/load/`, rulings
+P11-S1 to P11-S7) runs the compose stack with every profile against a local site farm and a fake
+LLM endpoint, one scenario at a time, and samples `docker stats` every 2 s. Its reports give CPU
+(mean, p95, max) and memory (p95, max) per container and scenario, the latency and throughput of
+each scenario, the LLM bytes per call, the site jobs' duration and Valkey bytes, and the extract
+worker's event-loop lag (`text_extraction_event_loop_lag_seconds`, read from its internal port).
+The Helm chart's requests and limits are sized from two such runs (configuration.md, "Resource
+baselines").
+
 ## Lessons from the previous services
 
 | Topic | Source | Taken over |
@@ -2570,3 +2601,5 @@ are never logged.
 | WLO URL sets (25 / 200 / 4,000) and live result buckets | Playwright service | Regression harness |
 | Baseline 2026-09-28 on 4,000 URLs: fast 68 %, browser 80 %; medians 0.5 s / 9-10 s | Playwright service | Bar to beat: the live gate is `wlo_200` in `auto` mode at 80 % (D2) |
 | diskcache state on local disk | Selenium service | Replaced by Valkey |
+| The full 4,000-URL regression for fast, browser and `auto` (likewise the 2026-09-28 baselines) | Playwright service | Planned, not run yet: `live.yml` takes a `mode` input (`auto`, `fast`, `browser`) for a manual `url_set: wlo_4000` run, to compare with the baselines above; until then only the `wlo_200` gate has a result for the current service |
+| Resources set by estimate | Earlier packages (placeholders in the Helm chart) | Replaced by the load test's measurements (runs 41190110782 and 41194228955): requests from the memory p95 and CPU mean, limits 1.5 × the peak and never below the children's address-space budgets; `STRUCTURED_SELECTOR_PROCESSES` stays 1 |

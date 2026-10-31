@@ -10,6 +10,11 @@ helm install text-extraction ./deploy/helm/text-extraction \
 Without API keys the pods refuse to start (exit code 2) while `config.AUTH_MODE` is `api_key`.
 Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`.
 
+For production, start from [`values-production.example.yaml`](values-production.example.yaml): an
+external Valkey, every secret from your own Secrets, pinned SemVer image tags, the measured
+requests and limits, the PrometheusRule and ServiceMonitor on, MCP and the playground off.
+`deploy/helm/test.sh` renders it and lints it with `--strict`.
+
 ## What it creates
 
 | Object | When | Notes |
@@ -172,7 +177,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |
-| `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least this + 70 s, see [MCP and playground](#mcp-and-playground). |
+| `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least 120 s, or this + 70 s if larger, see [MCP and playground](#mcp-and-playground). |
 | `config.MCP_MAX_CONTENT_CHARS` | `"50000"` | Most content characters of one tool answer; the rest is fetched with `content_offset`. |
 | `config.MCP_IMAGE_MAX_BYTES` | `"5000000"` | Largest screenshot attached to a tool answer (0: never attached, only linked). |
 | `config.UI_TREE_MAX_URLS` | `"5000"` | Most URLs the site tree of one site job shows. |
@@ -182,7 +187,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
 | `secrets.existingSecretKey` | `API_KEYS` | Key inside that Secret. |
-| `resources` | requests 100m / 256Mi, limits 1 / 2560Mi | Placeholder until package 11 measures real consumption. The memory limit covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
+| `resources` | requests 1400m / 832Mi, limits 3750m / 2560Mi | Measured in the load test (docs/configuration.md, "Resource baselines"). The memory limit stays above the measured need: it covers the service, `CONVERT_CONCURRENCY` x about 450 MB (one 5 MiB page) and the `DOCUMENT_CONCURRENCY` document conversion children; raise it with either concurrency or `CONVERT_MAX_BYTES`. `DOCUMENT_MEMORY_LIMIT_MB` is rendered from it (see above). |
 | `documentParentReserveMiB` | `1024` | MiB of the API container's memory limit kept for everything but the document conversion children: the server (512) and the selector child (512); the rest is split evenly among them as `DOCUMENT_MEMORY_LIMIT_MB`. |
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
@@ -195,7 +200,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
 | `workers.extract.terminationGracePeriodSeconds` | `45` | Workers have no drain wait: items in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds. The render fails when that plus a 10 s margin does not fit. |
 | `workers.extract.nodeSelector` | `{}` | Merged over the global `nodeSelector` for the extract workers; a key set here wins. |
-| `workers.extract.resources` | requests 100m / 256Mi, limits 1 / 2560Mi | Placeholder, sized like the API: the worker, its page conversions and its document conversion children. |
+| `workers.extract.resources` | requests 450m / 768Mi, limits 1750m / 2560Mi | Measured (docs/configuration.md, "Resource baselines"); the memory limit is sized like the API's: the worker, its page conversions and its document conversion children. |
 | `workers.extract.documentParentReserveMiB` | `1024` | As `documentParentReserveMiB`, for the extract workers. |
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
@@ -213,7 +218,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.browser.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY`: pages per pod at once, also its job slots. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | Renders in flight get `max(30, EXTRACT_TIMEOUT_SECONDS + 5, render deadline + 10)` seconds (40, 70 with unblock mode). The render fails when that plus a 10 s margin does not fit. |
-| `workers.browser.resources` | requests 1 / 2Gi, limits 2 / 4608Mi | Placeholder for a browser with 4 pages plus the conversions and the selector child. |
+| `workers.browser.resources` | requests 750m / 1152Mi, limits 2250m / 4608Mi | Measured with 4 pages (docs/configuration.md, "Resource baselines"); the memory limit holds the browser, the selector child and the conversions. |
 | `workers.browser.documentParentReserveMiB` | `3072` | As `documentParentReserveMiB`, for the browser workers: it covers Chromium with its pages and the selector child, so each document conversion child gets `(4608 - 3072) / 2` = 768 MiB. |
 | `workers.browser.tmpSizeLimit` | `2Gi` | Size limit of the `/tmp` emptyDir. |
 | `workers.browser.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector` for the browser workers; a key set here wins. The browser image is linux/amd64 only (Google Chrome stable), so the default keeps its pods off arm64 nodes. Set the key to `null` to drop it. |
@@ -225,7 +230,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.docling.replicaCount` | `1` | Ignored with KEDA or HPA. |
 | `workers.docling.concurrency` | `1` | `DOCLING_CONCURRENCY`: documents per pod at once, each in a child process of its own. |
 | `workers.docling.terminationGracePeriodSeconds` | `60` | Conversions in flight get 30 s after SIGTERM, then the children are killed and their items run again after their lease. The render fails below 40. |
-| `workers.docling.resources` | requests 1 / 3Gi, limits 4 / 8Gi | Placeholder for one conversion with the layout and table models (`DOCLING_MEMORY_LIMIT_MB` 6144) and `DOCLING_THREADS` (4) threads. |
+| `workers.docling.resources` | requests 2250m / 1600Mi, limits 5500m / 8Gi | Measured for one conversion with `DOCLING_THREADS` (4) threads (docs/configuration.md, "Resource baselines"); the memory limit backs the child's `DOCLING_MEMORY_LIMIT_MB` (6144). |
 | `workers.docling.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector`; the Docling image is built for linux/amd64 only. |
 | `workers.docling.autoscaling.keda.*` | as for the extract workers, `threshold` `4`, `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="docling"})`; the API pods export it while `JOBS_ENABLED` and `DOCLING_ENABLED` are true. With no replica a sync request answers without OCR after `DOCLING_SYNC_WAIT_SECONDS` and batch items wait. |
 | `workers.docling.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
@@ -245,7 +250,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.asr.concurrency` | `1` | `ASR_CONCURRENCY`: transcriptions per pod at once, each in a child process of its own. |
 | `workers.asr.uploadMaxBytes` | `25000000` | `MEDIA_UPLOAD_MAX_BYTES` on every pod: the largest audio or video upload (decision D3). Its bytes travel through Valkey; above `DOCLING_INPUT_BUDGET_BYTES` the render fails. |
 | `workers.asr.terminationGracePeriodSeconds` | `60` | Transcriptions in flight get 30 s after SIGTERM, then the children are killed and their items go back to the queue at once (attempts + 1) to start again on another replica. The render fails below 40. |
-| `workers.asr.resources` | requests 2 / 3Gi, limits 4 / 6Gi | Placeholder for one transcription with `large-v3-turbo` (about 2 GB resident, `ASR_MEMORY_LIMIT_MB` 4096 of address space) and `ASR_THREADS` (4) threads. |
+| `workers.asr.resources` | requests 3050m / 1408Mi, limits 5500m / 6Gi | Measured for one transcription with `large-v3-turbo` and `ASR_THREADS` (4) threads (docs/configuration.md, "Resource baselines"); `small` was not measured. The memory limit backs the child's `ASR_MEMORY_LIMIT_MB` (4096). |
 | `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`) for downloaded media. `concurrency` × (`MEDIA_MAX_BYTES` (500000000) + 5 MB) must fit, or the render fails. |
 | `workers.asr.tmpSizeLimit` | `1Gi` | sizeLimit of the `/tmp` emptyDir (`HOME`, library caches). |
 | `workers.asr.nodeSelector` | `{kubernetes.io/arch: amd64}` | Merged over the global `nodeSelector`; the ASR image is published for linux/amd64. |
@@ -276,7 +281,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.llm.concurrency` | `4` | `LLM_CONCURRENCY`: items per pod at once, each with one call to the endpoint at a time. |
 | `workers.llm.gracefulSeconds` | `30` | `LLM_GRACEFUL_SECONDS` on the llm workers; the render fails outside 10 to 900 (a `config.LLM_GRACEFUL_SECONDS` entry is overridden on the llm workers, but every pod validates it at start (10 to 900, else exit code 2), so leave it out). Items in flight get this long after SIGTERM, then the ones still running go back to the queue at once, run again elsewhere and pay their LLM calls again. One call may take `LLM_TIMEOUT_SECONDS` (120 s by default), so with the defaults a rollout cancels the long calls in flight; raise this and `terminationGracePeriodSeconds` together, e.g. to `LLM_TIMEOUT_SECONDS + 10` (130) and 140. 10 to 900. |
 | `workers.llm.terminationGracePeriodSeconds` | `40` | The render fails below `workers.llm.gracefulSeconds` + 10 (40 by default), so the hand-back happens before the kill. |
-| `workers.llm.resources` | requests 100m / 256Mi, limits 1 / 1Gi | Placeholder until package 11 measures real consumption: the worker waits for the endpoint and holds no model; 512 MiB are its selector child, which checks the proposals of `learn_selectors`. |
+| `workers.llm.resources` | requests 150m / 256Mi, limits 750m / 1Gi | Measured against a fake endpoint (docs/configuration.md, "Resource baselines"): the worker waits for the endpoint and holds no model; 512 MiB of the limit are its selector child, which checks the proposals of `learn_selectors`, and the rest leaves room for `describe_images`. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The workers run the API image. |
 | `workers.llm.autoscaling.keda.*` | as for the extract workers, `threshold` `null` (`concurrency`), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="llm"})`. The API pods export it while `JOBS_ENABLED` and `LLM_ENABLED` are true. Keep one replica. |
 | `workers.llm.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
@@ -287,9 +292,9 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.nlp.replicaCount` | `1` | Ignored with KEDA or HPA. |
 | `workers.nlp.concurrency` | `1` | `PII_CONCURRENCY`: results analysed per pod at once, each in a child process of its own with the models loaded. |
 | `workers.nlp.terminationGracePeriodSeconds` | `60` | Analyses in flight get 30 s after SIGTERM, then the children are killed and their items run again elsewhere once their lease expires: `2 × PII_TIMEOUT_SECONDS + 10`, 610 s by default, so a rollout during an analysis can delay that job by about 10 minutes. The render fails below 40. |
-| `workers.nlp.resources` | requests 1 / 2Gi, limits 2 / 3Gi | Placeholder for one analysis child with the `lg` models (about 1.6 GB resident, 2.2 GB peak on a long text; `PII_MEMORY_LIMIT_MB` 3072 of address space). `md` needs about half. |
+| `workers.nlp.resources` | requests 750m / 1728Mi, limits 2 / 3Gi | Measured for one analysis child with the `lg` models (docs/configuration.md, "Resource baselines"); a long text peaks at about 2.2 GB, and the limit backs `PII_MEMORY_LIMIT_MB` (3072). `md` was not measured (about half). |
 | `workers.nlp.nodeSelector` | `{}` | Merged over the global `nodeSelector`. The nlp wheels are not amd64-only, but the published NLP image is built for linux/amd64 only: pin `kubernetes.io/arch: amd64` here when the cluster has arm64 nodes. |
-| `workers.nlp.autoscaling.keda.*` | as for the extract workers, `threshold` `10` (an untuned placeholder until package 11), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="nlp"})`. The API pods export it while `JOBS_ENABLED` and `PII_ENABLED` are true. Keep one replica: a sync request with `pii` waits only `PII_SYNC_WAIT_SECONDS` (20) for a worker, and answers 202 with its job when the backlog waits longer. |
+| `workers.nlp.autoscaling.keda.*` | as for the extract workers, `threshold` `10` (not measured: the load test ran one pod per pool without autoscaling; tune it in production from the queue gauges), `maxReplicaCount` `4` | Scales on `max(text_extraction_queue_pending_items{pool="nlp"})`. The API pods export it while `JOBS_ENABLED` and `PII_ENABLED` are true. Keep one replica: a sync request with `pii` waits only `PII_SYNC_WAIT_SECONDS` (20) for a worker, and answers 202 with its job when the backlog waits longer. |
 | `workers.nlp.autoscaling.hpa.*` | as for the extract workers, `1` / `4` replicas | CPU-based. Mutually exclusive with KEDA. |
 | `workers.nlp.autoscaling.scaleDownStabilizationWindowSeconds` | `null` | As for the extract workers. |
 | `workers.nlp.hashKey.existingSecret` | `""` | Your own Secret with `PII_HASH_KEY`. Empty: no key, `hash_scope: result`. |
@@ -320,7 +325,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `valkey.persistence.size` | `1Gi` | |
 | `valkey.persistence.storageClass` | `""` | Cluster default when empty. |
 | `valkey.persistence.existingClaim` | `""` | Use this PVC instead of creating one. |
-| `valkey.resources` | requests = limits: 500m / 1280Mi | Guaranteed QoS; reserves 1.25Gi and half a CPU. `valkey.maxmemory` is 60 % of the memory limit: raise both together. |
+| `valkey.resources` | requests = limits: 500m / 1280Mi | Guaranteed QoS; reserves 1.25Gi and half a CPU. `valkey.maxmemory` is 60 % of the memory limit: raise both together. The load test used far less (docs/configuration.md, "Resource baselines"): size it for the results and documents held at once. |
 | `externalValkey.url` | `""` | Valkey or Redis URL used when `valkey.enabled` is `false`. No password in here. |
 | `externalValkey.existingSecret.name` | `""` | Secret holding a `VALKEY_URL` that carries a password (percent-encoded where needed). Takes precedence over `url`. |
 | `externalValkey.existingSecret.key` | `VALKEY_URL` | Key inside that Secret. |
@@ -546,9 +551,11 @@ URLs while they are on. Their settings are the `config.MCP_*` and `config.UI_*` 
   warn when `ui.enabled` goes with `AUTH_MODE=none`.
 - **The ingress** already routes `/` to the public Service, so `/mcp` and `/ui` need no paths of
   their own. Its timeouts and body size must fit them:
-  - a read and send timeout of at least `MCP_WAIT_SECONDS` + 70 s (95 s with the default 25 s): a
-    tool call or a playground form waits up to `MCP_WAIT_SECONDS` (the forms 25 s) plus the
-    route's own hand-over time before it answers a job;
+  - a read and send timeout of at least 120 s (150 s with unblock mode and requests that combine
+    it with `pii` and LLM work, see item 4 of [docs/handover.md](../../../docs/handover.md)), or
+    `MCP_WAIT_SECONDS` + 70 s if larger (95 s with the default 25 s): a tool call or a playground
+    form waits up to `MCP_WAIT_SECONDS` (the forms 25 s) plus the route's own hand-over time
+    before it answers a job;
   - a body size of at least the largest upload: `/mcp` takes a file as base64,
     `ceil(DOCUMENT_MAX_BYTES / 3) x 4 + 64 KiB` (about 27 MB by default, about 33 MB with ASR
     workers, where `workers.asr.uploadMaxBytes` sets the upload limit), the playground's file form
@@ -577,6 +584,7 @@ docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --s
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.nlp.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.llm.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set mcp.enabled=true --set ui.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction -f text-extraction/values-production.example.yaml
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

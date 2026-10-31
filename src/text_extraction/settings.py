@@ -120,8 +120,9 @@ def normalize_origin(value: str) -> str | None:
 
 
 class Settings(BaseSettings):
-    """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content and
-    ``ASR_EXTERNAL_API_KEY`` and ``PII_HASH_KEY``."""
+    """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content,
+    ``ASR_EXTERNAL_API_KEY``, ``PII_HASH_KEY``, ``LLM_API_KEY``, and ``VALKEY_URL`` when it
+    carries a password."""
 
     model_config = SettingsConfigDict(
         case_sensitive=False, extra="ignore", hide_input_in_errors=True
@@ -340,6 +341,8 @@ class Settings(BaseSettings):
     # deadline (ruling R19): one run of all rules of a result, its children per process and the
     # address space of one child.
     structured_selector_timeout_seconds: float = Field(default=5, ge=0.1, le=60)
+    # 1: more children bought no throughput in the load test's sweep (P11-S5; the numbers are in
+    # docs/configuration.md, "Resource baselines").
     structured_selector_processes: int = Field(default=1, ge=1)
     structured_selector_memory_mb: int = Field(default=512, ge=256)
     # The post stage's CPU work (patterns, chunking, learning checks) at once per process, on a

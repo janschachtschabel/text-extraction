@@ -27,3 +27,4 @@ htmlcov/
 
 # End-to-end batch run output
 /e2e-results/
+/load-results/
