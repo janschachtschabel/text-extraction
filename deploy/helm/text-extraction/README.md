@@ -312,7 +312,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `service.port` | `8080` | Public Service port (named `http`). |
 | `ingress.enabled` | `false` | The Ingress targets the public Service port only. |
 | `ingress.className` | `""` | |
-| `ingress.annotations` | `{}` | |
+| `ingress.annotations` | `{}` | The controller's settings. A sync request waits up to 120 s without `wait_seconds` (150 s with unblock mode and requests that combine it with `pii` and LLM work, see item 4 of [docs/handover.md](../../../docs/handover.md); with MCP or the playground at least `MCP_WAIT_SECONDS` + 70 s too), and uploads reach `DOCUMENT_MAX_BYTES` + 192 KiB (`workers.asr.uploadMaxBytes` for media). For ingress-nginx, which cuts at 60 s and 1m by default: `nginx.ingress.kubernetes.io/proxy-read-timeout: "120"`, `nginx.ingress.kubernetes.io/proxy-send-timeout: "120"` (both `"150"` with unblock mode) and `nginx.ingress.kubernetes.io/proxy-body-size: "40m"`, as in [values-production.example.yaml](values-production.example.yaml). |
 | `ingress.hosts` | one example host, path `/` | List of `host` with `paths` (`path`, `pathType`). |
 | `ingress.tls` | `[]` | |
 | `valkey.enabled` | `true` | Deploy a single-replica Valkey. |

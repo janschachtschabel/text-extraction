@@ -1014,6 +1014,12 @@ expect_contains "notes give the MCP_WAIT_SECONDS bound" "$ingress_notes" "MCP_WA
 expect_contains "the ingress read timeout follows MCP_WAIT_SECONDS" \
   "$(render_notes --set ui.enabled=true --set ingress.enabled=true --set config.MCP_WAIT_SECONDS=60)" "(130 s) if larger"
 expect_absent "no ingress note without an ingress" "$(render_notes --set mcp.enabled=true)" "read timeout"
+# The 120 s come from the REST sync waits (handover.md item 4): a plain ingress gets the hint too.
+plain_ingress_notes="$(render_notes --set ingress.enabled=true)"
+expect_contains "notes give the read timeout to a plain ingress" "$plain_ingress_notes" \
+  "read timeout of at least 120 s (150 s with unblock mode"
+expect_contains "notes point a plain ingress at the annotations" "$plain_ingress_notes" "ingress.annotations"
+expect_absent "no MCP bound without MCP and UI" "$plain_ingress_notes" "MCP_WAIT_SECONDS"
 expect_contains "notes give the Claude Code command with the key header" \
   "$(render_notes --set mcp.enabled=true)" '--header "Authorization: Bearer <key>"'
 open_ui_warning="WARNING: ui.enabled is true while config.AUTH_MODE is none"
