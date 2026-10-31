@@ -37,6 +37,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from tests.load import stats
+from tests.load.fake_llm import BYTES_PER_TOKEN
 from tests.load.report import ScenarioResult, markdown, percentile, sizing, summarise
 from tests.load.scenarios import REPO_ROOT, SCENARIOS, Scenario
 
@@ -237,6 +238,27 @@ async def run_scenario(
     )
 
 
+async def _idle() -> ScenarioResult:
+    """The window of the stack at rest, before any load: what the containers hold idle (the
+    models they keep loaded, for instance)."""
+    start = time.time()
+    await asyncio.sleep(IDLE_SECONDS)
+    end = time.time()
+    return ScenarioResult(
+        name="idle",
+        kind="idle",
+        start=start,
+        end=end,
+        settle_end=end,
+        requests=0,
+        outcomes={},
+        latency_p50_ms=0,
+        latency_p95_ms=0,
+        latency_max_ms=0,
+        throughput_per_s=0.0,
+    )
+
+
 async def _wait_ready(client: httpx.AsyncClient, urls: Sequence[str]) -> None:
     deadline = time.monotonic() + READY_TIMEOUT_SECONDS
     for url in urls:
@@ -293,11 +315,13 @@ def _llm_table(usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]])
         for route, count in routes.items():
             if not count["requests"]:
                 continue
-            per_request = max(requests, 1) * 4
+            per_request = max(requests, 1) * BYTES_PER_TOKEN
+            # An embedding answer is vectors: it has no completion tokens.
+            answer = "-" if route == "embeddings" else str(count["response_bytes"] // per_request)
             lines.append(
                 f"| {scenario} | {route} | {count['requests']} | {count['request_bytes']} "
                 f"| {count['response_bytes']} | {count['request_bytes'] // per_request} "
-                f"| {count['response_bytes'] // per_request} |"
+                f"| {answer} |"
             )
     return "\n".join(lines) + "\n"
 
@@ -375,9 +399,9 @@ async def amain(args: argparse.Namespace) -> int:
             async with stats.Sampler(
                 out_dir / "stats.jsonl", interval=STATS_INTERVAL_SECONDS, command=STATS_COMMAND
             ) as sampler:
-                idle_start = time.time()
-                await asyncio.sleep(IDLE_SECONDS)
-                windows["idle"] = (idle_start, time.time())
+                idle = await _idle()
+                windows[idle.name] = (idle.start, idle.settle_end)
+                results.append(idle)
                 for scenario in plan:
                     print(f"{scenario.name}: {scenario.count} requests", file=sys.stderr)
                     before = await _llm_counts(side, args.fake_llm_url)
@@ -399,7 +423,9 @@ async def amain(args: argparse.Namespace) -> int:
 
     rows = summarise(samples, windows)
     label = args.selector_processes
-    heading = "Load test" + (f", {label} selector processes" if label is not None else "")
+    heading = "Load test"
+    if label is not None:
+        heading += f", {label} selector process" + ("" if label == 1 else "es")
     summary = markdown(rows, results, heading=heading)
     if llm_usage:
         summary += _llm_table(llm_usage)

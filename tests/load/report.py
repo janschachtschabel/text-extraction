@@ -180,6 +180,8 @@ def markdown(
         "| Memory max MiB |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
+    if not rows:
+        lines += ["", "No `docker stats` samples fell into any window."]
     for row in rows:
         lines.append(
             f"| {row.scenario} | {row.container} | {row.cpu_mean:.1f} | {row.cpu_p95:.1f} "

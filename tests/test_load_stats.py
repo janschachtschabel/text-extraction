@@ -95,3 +95,21 @@ def test_sampler_writes_stamped_jsonl_until_it_stops(tmp_path: Path) -> None:
     times = [sample.t for sample in sampler.samples]
     assert times == sorted(times)
     assert sampler.samples[0].mem_mib == 100.0
+
+
+def test_sampler_survives_a_command_that_cannot_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No docker on the machine: the run goes on without samples, with a note on stderr."""
+    out = tmp_path / "stats.jsonl"
+
+    async def sample() -> Sampler:
+        async with Sampler(out, interval=0.05, command=[str(tmp_path / "no-docker")]) as sampler:
+            await asyncio.sleep(0.2)
+        return sampler
+
+    sampler = asyncio.run(sample())
+
+    assert sampler.samples == []
+    assert out.read_text() == ""
+    assert "stats:" in capsys.readouterr().err

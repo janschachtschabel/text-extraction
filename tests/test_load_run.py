@@ -272,6 +272,7 @@ def test_main_writes_every_file_and_never_prints_the_key(
     summary = (tmp_path / "summary.md").read_text()
     assert "2 selector processes" in summary
     assert "| test-sync | sync |" in summary
+    assert "| idle | idle |" in summary  # the window of the stack at rest is named too
     assert summary in output.out
     sizing = json.loads((tmp_path / "sizing.json").read_text())
     assert sizing["selector_processes"] == 2
@@ -288,3 +289,31 @@ def test_main_refuses_an_unknown_scenario_and_a_missing_key(
         run_load.main([*common, "--only", "no-such-scenario"])
     with pytest.raises(SystemExit):
         run_load.main([*common, "--api-key-env", "LOAD_TEST_KEY"])
+
+
+def test_llm_table_gives_tokens_per_scenario_request() -> None:
+    usage = {
+        "structured-llm-50": (
+            50,
+            {
+                "chat_completions": {
+                    "requests": 60,
+                    "request_bytes": 200_000,
+                    "response_bytes": 8000,
+                },
+                "embeddings": {"requests": 0, "request_bytes": 0, "response_bytes": 0},
+            },
+        ),
+        "chunk-semantic-50": (
+            50,
+            {"embeddings": {"requests": 50, "request_bytes": 100_000, "response_bytes": 9_000_000}},
+        ),
+    }
+
+    table = run_load._llm_table(usage)
+
+    # 200,000 bytes / 50 requests / 4 bytes per token = 1,000 prompt tokens per request.
+    assert "| structured-llm-50 | chat_completions | 60 | 200000 | 8000 | 1000 | 40 |" in table
+    assert "| structured-llm-50 | embeddings |" not in table  # no calls, no row
+    # An embedding answer is vectors, not tokens.
+    assert "| chunk-semantic-50 | embeddings | 50 | 100000 | 9000000 | 500 | - |" in table

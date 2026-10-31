@@ -35,7 +35,8 @@ SEMANTIC_CHUNK_COUNT = 50
 MCP_COUNT = 20
 
 # The test corpus files that the uploads send.
-DOCUMENT_FILE = "tests/documents/corpus/lesson.docx"  # MarkItDown
+# MarkItDown: a 120-page PDF (100 pages converted) and a DOCX, taken in turns.
+DOCUMENT_FILES = ("tests/documents/corpus/long.pdf", "tests/documents/corpus/lesson.docx")
 SCAN_FILE = "tests/documents/corpus/scan.pdf"  # an image-only PDF: Docling's OCR
 AUDIO_FILE = "tests/media/corpus/speech_de.ogg"  # 30 s of German speech
 
@@ -92,9 +93,11 @@ def _batch(index: int, farm: str) -> dict[str, object]:
     return {"urls": urls, "mode": "fast", "cache": False}
 
 
-def _upload(file: str, **fields: str) -> Body:
+def _upload(files: tuple[str, ...], **fields: str) -> Body:
+    """A body of ``POST /v1/extract/file``: the files in turns, and the form fields."""
+
     def body(index: int, farm: str) -> dict[str, object]:
-        return {"file": file, **fields}
+        return {"file": files[index % len(files)], **fields}
 
     return body
 
@@ -159,7 +162,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "/v1/extract/file",
         DOCUMENT_UPLOADS,
         5,
-        _upload(DOCUMENT_FILE, format="markdown"),
+        _upload(DOCUMENT_FILES, format="markdown"),
     ),
     Scenario(
         "upload-ocr-10",
@@ -167,7 +170,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "/v1/extract/file",
         OCR_UPLOADS,
         2,
-        _upload(SCAN_FILE, format="markdown", ocr="always"),
+        _upload((SCAN_FILE,), format="markdown", ocr="always"),
     ),
     Scenario(
         "pii-200",
@@ -184,7 +187,7 @@ SCENARIOS: tuple[Scenario, ...] = (
         "/v1/extract/file",
         AUDIO_UPLOADS,
         2,
-        _upload(AUDIO_FILE, format="text"),
+        _upload((AUDIO_FILE,), format="text"),
     ),
     Scenario(
         "structured-selectors-200",

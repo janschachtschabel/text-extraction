@@ -114,9 +114,13 @@ class Sampler:
 
     async def _read_once(self) -> None:
         assert self._sink is not None
-        process = await asyncio.create_subprocess_exec(
-            *self.command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *self.command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+        except OSError as error:  # no docker here: no samples, but the run goes on
+            print(f"stats: {type(error).__name__}: {error.strerror}", file=sys.stderr)
+            return
         try:
             out, err = await process.communicate()
         except asyncio.CancelledError:

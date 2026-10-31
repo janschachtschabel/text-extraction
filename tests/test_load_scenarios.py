@@ -106,6 +106,14 @@ def test_each_body_is_a_valid_request_of_its_route(scenario: Scenario) -> None:
         models[scenario.endpoint].model_validate(body)
 
 
+def test_document_uploads_mix_a_long_pdf_and_an_office_file() -> None:
+    """Both MarkItDown paths get load: a 120-page PDF and a DOCX, one after the other."""
+    scenario = by_name("upload-docs-50")
+    files = {str(scenario.body(index, FARM)["file"]) for index in range(scenario.count)}
+
+    assert files == {"tests/documents/corpus/long.pdf", "tests/documents/corpus/lesson.docx"}
+
+
 def test_pages_differ_between_requests_of_a_scenario() -> None:
     """Every request asks for its own page, so no answer is a copy of another."""
     scenario = by_name("sync-fast-c30")

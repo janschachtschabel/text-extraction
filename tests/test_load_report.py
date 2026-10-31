@@ -159,3 +159,8 @@ def test_markdown_names_each_window() -> None:
     assert "| batch-1000 | batch | 2026-10-31T12:00:40Z | 2026-10-31T12:05:50Z |" in text
     assert "success 299, error 1" in text
     assert "| sync-fast-c10 | api | 20.0 | 35.5 | 60.0 | 300 | 310 |" in text
+    assert "No `docker stats` samples" not in text
+
+
+def test_markdown_says_when_there_were_no_samples() -> None:
+    assert "No `docker stats` samples" in markdown([], [])
