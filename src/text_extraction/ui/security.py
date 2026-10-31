@@ -16,6 +16,7 @@ from text_extraction.file_api import text_body_limit, upload_body_limit
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.ratelimit import check_rate
 from text_extraction.settings import Settings
+from text_extraction.ui.i18n import LANGUAGES, STATE_KEY
 
 PREFIX: Final = "/ui"
 RUN_PREFIX: Final = "/ui/run"
@@ -38,8 +39,11 @@ NO_STORE: Final = "no-store"
 STATIC_CACHE: Final = "public, max-age=3600"
 # Replaced on every /ui answer; the UI never sets a cookie (P10-S13).
 _REPLACED: Final = frozenset(
-    {name.encode() for name, _ in SECURITY_HEADERS} | {b"cache-control", b"set-cookie"}
+    {name.encode() for name, _ in SECURITY_HEADERS}
+    | {b"cache-control", b"set-cookie", b"content-language"}
 )
+# The language of an answer whose route chose none (the plain-text refusals, a 404): English.
+_SOURCE_LANGUAGE: Final = "en"
 _DEFAULT_PORTS: Final = {"http": 80, "https": 443}
 REFUSED_TEXT: Final = "This request must come from the UI page itself."
 # Bytes around the batch file of /ui/run/batch-file: the multipart framing and the batch form's
@@ -51,17 +55,30 @@ def is_ui_path(path: str) -> bool:
     return path == PREFIX or path.startswith(f"{PREFIX}/")
 
 
-def _ui_headers(raw: Iterable[tuple[bytes, bytes]], *, cache: str) -> list[tuple[bytes, bytes]]:
+def _ui_headers(
+    raw: Iterable[tuple[bytes, bytes]], *, cache: str, language: str | None
+) -> list[tuple[bytes, bytes]]:
     headers = [(name, value) for name, value in raw if name.lower() not in _REPLACED]
     headers.extend((name.encode(), value.encode()) for name, value in SECURITY_HEADERS)
     headers.append((b"cache-control", cache.encode()))
+    if language is not None:
+        headers.append((b"content-language", language.encode()))
     return headers
+
+
+def _answer_language(scope: Scope) -> str:
+    """The language the route chose (``request.state.ui_language``, always one of the UI's
+    languages, never a value of the request), else English."""
+    state = scope.get("state") or {}
+    language = state.get(STATE_KEY)
+    return language if language in LANGUAGES else _SOURCE_LANGUAGE
 
 
 class UiHeadersMiddleware:
     """Pure ASGI middleware: every answer under ``/ui`` gets the CSP and the other security
-    headers of P10-S12 and ``Cache-Control: no-store`` (``public, max-age=3600`` for a static
-    file that was found); a ``Set-Cookie`` is dropped. A request to ``/ui/run/*`` that is not
+    headers of P10-S12, ``Cache-Control: no-store`` (``public, max-age=3600`` for a static
+    file that was found) and, but for a static file, ``Content-Language`` (P12-S6); a
+    ``Set-Cookie`` is dropped. A request to ``/ui/run/*`` that is not
     `from_the_page` is answered 403 (plain text) here, before anything reads its body. An
     exception that no handler answered before the response started becomes a plain 500 with
     these headers here (and is raised on, so the app's handler still logs it), since
@@ -83,7 +100,8 @@ class UiHeadersMiddleware:
                 started = True
                 found = message["status"] in (200, 206, 304)
                 cache = STATIC_CACHE if static and found else NO_STORE
-                headers = _ui_headers(message.get("headers", []), cache=cache)
+                language = None if static else _answer_language(scope)
+                headers = _ui_headers(message.get("headers", []), cache=cache, language=language)
                 message = {**message, "headers": headers}
             await send(message)
 

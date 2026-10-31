@@ -1,17 +1,20 @@
 <section id="app-shell" class="shell">
   {% if auth_none %}<p class="banner" role="note">{{ banner }}</p>{% endif %}
   <div class="who">
-    <span>Signed in as <strong>{{ principal_name }}</strong> (role <span class="role">{{ role }}</span>)</span>
-    <button type="button" class="secondary" data-action="logout">Log out</button>
+    {% set signed_in_name %}<strong>{{ principal_name }}</strong>{% endset %}
+    {% set signed_in_role %}<span class="role">{{ role }}</span>{% endset %}
+    <span>{{ t("shell.signed_in", name=signed_in_name, role=signed_in_role) }}</span>
+    <button type="button" class="secondary" data-action="logout">{{ t("shell.logout") }}</button>
+    {% with switch_hint=true %}{% include "language_switch.html" %}{% endwith %}
   </div>
   {% if auth_none %}
   <details class="keys">
-    <summary>Optional keys</summary>
-    <label for="keys-llm">LLM key (<code>X-LLM-Api-Key</code>)</label>
+    <summary>{{ t("keys.optional") }}</summary>
+    <label for="keys-llm">{{ t("keys.llm", header=code("X-LLM-Api-Key")) }}</label>
     <input id="keys-llm" type="password" autocomplete="off" spellcheck="false">
-    <label for="keys-asr">ASR key (<code>X-ASR-Api-Key</code>)</label>
+    <label for="keys-asr">{{ t("keys.asr", header=code("X-ASR-Api-Key")) }}</label>
     <input id="keys-asr" type="password" autocomplete="off" spellcheck="false">
-    <button type="button" class="secondary" data-action="save-keys">Use these keys</button>
+    <button type="button" class="secondary" data-action="save-keys">{{ t("keys.use") }}</button>
   </details>
   {% endif %}
   {% if tabs %}

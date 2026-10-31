@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block body %}
 <header class="masthead">
-  <h1>Text Extraction</h1>
-  <p>A playground for the API: every form here sends one request to <code>/v1</code> with your key.</p>
+  <h1>{{ t("page.title") }}</h1>
+  <p>{{ t("page.intro", path=code("/v1")) }}</p>
 </header>
 <main id="app">
 {% if login %}

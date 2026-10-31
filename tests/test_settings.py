@@ -146,6 +146,7 @@ SETTING_ENV_VARS = (
     "UI_BATCH_FILE_MAX_BYTES",
     "UI_BATCH_FILE_MAX_ROWS",
     "UI_IMAGE_MAX_BYTES",
+    "UI_DEFAULT_LANGUAGE",
 )
 
 
@@ -1585,4 +1586,17 @@ def test_mcp_settings_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> No
     for wrong in ("app.example.org", "ftp://app.example.org", "https://a.example/path", "*"):
         monkeypatch.setenv("MCP_ALLOWED_ORIGINS", wrong)
         with pytest.raises(ConfigError, match="mcp_allowed_origins"):
+            load_settings()
+
+
+def test_ui_default_language_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().ui_default_language == "en"
+
+    for value in ("de", "en"):
+        monkeypatch.setenv("UI_DEFAULT_LANGUAGE", value)
+        assert load_settings().ui_default_language == value
+    for wrong in ("fr", "DE", "de-DE", ""):
+        monkeypatch.setenv("UI_DEFAULT_LANGUAGE", wrong)
+        with pytest.raises(ConfigError, match="ui_default_language"):
             load_settings()

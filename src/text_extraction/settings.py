@@ -374,6 +374,9 @@ class Settings(BaseSettings):
     ui_batch_file_max_bytes: int = Field(default=10_485_760, ge=1_024, le=104_857_600)
     ui_batch_file_max_rows: int = Field(default=100_000, ge=10, le=1_000_000)
     ui_image_max_bytes: int = Field(default=1_000_000, ge=10_000, le=20_000_000)
+    # The UI's language when the page has no ``lang`` query and the browser asks for neither
+    # English nor German (ruling P12-S6).
+    ui_default_language: Literal["en", "de"] = "en"
 
     @field_validator("log_level", mode="before")
     @classmethod

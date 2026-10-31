@@ -140,6 +140,33 @@ button.secondary {
   margin-top: 0.75rem;
 }
 
+/* The language switch (P12-S7): two links, the active one marked by aria-current. */
+.language-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  align-items: baseline;
+}
+
+.login .language-switch {
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+
+.language-switch a {
+  color: var(--accent);
+}
+
+.language-switch a[aria-current="true"] {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.language-switch .hint {
+  flex-basis: 100%;
+}
+
 .tabs {
   display: flex;
   flex-wrap: wrap;

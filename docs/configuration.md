@@ -873,6 +873,7 @@ transcribed, + 192 KiB) and `UI_BATCH_FILE_MAX_BYTES` + 64 KiB.
 | `UI_BATCH_FILE_MAX_BYTES` | `10485760` | Largest CSV or JSON file of URLs the batch-file form takes, in bytes. 1024 to 104857600. |
 | `UI_BATCH_FILE_MAX_ROWS` | `100000` | Most rows of one batch file; a file with more is refused. 10 to 1000000. |
 | `UI_IMAGE_MAX_BYTES` | `1000000` | Largest image the UI fetches for a preview, in bytes; a larger one is skipped (`too_large`). 10000 to 20000000. |
+| `UI_DEFAULT_LANGUAGE` | `en` | The playground's language (`en` or `de`) when the page has no `lang` query and the browser's `Accept-Language` names neither English nor German. The choice of the language switch is kept in the browser (`localStorage`, `te.lang`), never in a cookie. The API's texts stay English. Anything else makes the service exit with code 2. |
 
 ## Headers
 

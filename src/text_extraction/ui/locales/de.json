@@ -1,0 +1,21 @@
+{
+  "page.title": "Text Extraction",
+  "page.intro": "Eine Spielwiese für die API: Jedes Formular hier sendet eine Anfrage mit Ihrem Schlüssel an {path}.",
+  "login.title": "Anmelden",
+  "login.intro": "Melden Sie sich mit einem API-Schlüssel dieses Dienstes an. Der Schlüssel bleibt in diesem Tab und wird mit jeder Anfrage als Header gesendet.",
+  "login.api_key": "API-Schlüssel",
+  "login.submit": "Anmelden",
+  "keys.optional": "Optionale Schlüssel",
+  "keys.llm": "LLM-Schlüssel ({header})",
+  "keys.asr": "ASR-Schlüssel ({header})",
+  "keys.use": "Diese Schlüssel verwenden",
+  "shell.signed_in": "Angemeldet als {name} (Rolle {role})",
+  "shell.logout": "Abmelden",
+  "switch.label": "Sprache",
+  "switch.de": "Deutsch",
+  "switch.en": "English",
+  "switch.hint": "Ein Sprachwechsel lädt die Seite neu. Sie bleiben angemeldet; eine offene Job-Ansicht schließt sich, ihre Jobs laufen aber weiter.",
+  "status.request_failed": "Anfrage fehlgeschlagen: {status} {reason}",
+  "status.network_error": "Netzwerkfehler",
+  "status.selected": "{count} ausgewählt"
+}

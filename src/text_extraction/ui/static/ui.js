@@ -1,15 +1,22 @@
 /*
- * The UI's own script (rulings P10-S13, P10-S20 and R-P10-F3), the only one besides htmx: the
- * keys, the tabs, the site tree's selection and the status line of an answer htmx does not swap.
+ * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3 and P12-S6), the only one besides
+ * htmx: the keys, the language, the tabs, the site tree's selection and the status line of an
+ * answer htmx does not swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
  * as a cookie, a form field or part of a URL.
+ *
+ * Language: the page's language is <html lang>; it goes as X-UI-Language with each request to
+ * /ui/run/. The language switch's choice is kept in localStorage (te.lang), never in a cookie;
+ * a page opened without a lang query moves to the stored language. The script's own texts come
+ * from the page's data-text-* attributes.
  */
 (function () {
   "use strict";
 
   var KEYS = { api: "te.apiKey", llm: "te.llmKey", asr: "te.asrKey" };
+  var LANG_KEY = "te.lang";
   var RUN_PREFIX = "/ui/run/";
 
   function readKey(name) {
@@ -30,6 +37,57 @@
     } catch (error) {
       /* storage off: the key lasts until the page is left */
     }
+  }
+
+  function readLanguage() {
+    try {
+      return window.localStorage.getItem(LANG_KEY) || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function writeLanguage(value) {
+    try {
+      window.localStorage.setItem(LANG_KEY, value);
+    } catch (error) {
+      /* storage off: the choice lasts as long as the page's lang query */
+    }
+  }
+
+  // The link of the language switch for "language", if the page has one.
+  function switchLink(language) {
+    var links = document.querySelectorAll(".language-switch a[hreflang]");
+    for (var index = 0; index < links.length; index += 1) {
+      if (links[index].getAttribute("hreflang") === language) {
+        return links[index];
+      }
+    }
+    return null;
+  }
+
+  // A page opened without a lang query moves to the stored language (location.replace, so the
+  // first page leaves no history entry). Returns whether it moves.
+  function moveToStoredLanguage() {
+    if (new URLSearchParams(window.location.search).has("lang")) {
+      return false;
+    }
+    var stored = readLanguage();
+    var link = stored ? switchLink(stored) : null;
+    if (!link || stored === document.documentElement.lang) {
+      return false;
+    }
+    window.location.replace(link.href);
+    return true;
+  }
+
+  // One of the script's texts, from the page's data-text-<name> attribute, with each {key}
+  // replaced by values[key].
+  function text(name, values) {
+    var template = document.body.getAttribute("data-text-" + name) || "";
+    return template.replace(/\{([a-z_][a-z0-9_]*)\}/g, function (match, key) {
+      return Object.prototype.hasOwnProperty.call(values || {}, key) ? String(values[key]) : match;
+    });
   }
 
   function clearKeys() {
@@ -75,6 +133,7 @@
     var api = readKey(KEYS.api);
     var llm = readKey(KEYS.llm);
     var asr = readKey(KEYS.asr);
+    event.detail.headers["X-UI-Language"] = document.documentElement.lang;
     if (api) {
       event.detail.headers["Authorization"] = "Bearer " + api;
     }
@@ -108,6 +167,12 @@
 
   document.addEventListener("click", function (event) {
     var target = event.target instanceof Element ? event.target : null;
+    var choice = target ? target.closest(".language-switch a[hreflang]") : null;
+    if (choice) {
+      // The link reloads the page in its language; the keys stay in sessionStorage.
+      writeLanguage(choice.getAttribute("hreflang"));
+      return;
+    }
     var button = target ? target.closest("[data-action], [data-tab]") : null;
     if (!button) {
       return;
@@ -138,7 +203,9 @@
   function countSelected(form) {
     var counter = form.querySelector(".tree-counter");
     if (counter) {
-      counter.textContent = form.querySelectorAll("input[name=url]:checked").length + " selected";
+      counter.textContent = text("selected", {
+        count: form.querySelectorAll("input[name=url]:checked").length
+      });
     }
   }
 
@@ -217,17 +284,20 @@
 
   document.addEventListener("htmx:responseError", function (event) {
     var xhr = event.detail.xhr;
-    var text = ("Request failed: " + xhr.status + " " + answerReason(xhr)).trim();
-    showStatus(event.detail.target, text);
+    var line = text("request-failed", { status: xhr.status, reason: answerReason(xhr) });
+    showStatus(event.detail.target, line.trim());
   });
 
   document.addEventListener("htmx:sendError", function (event) {
-    showStatus(event.detail.target, "Network error");
+    showStatus(event.detail.target, text("network-error"));
   });
 
   // On a reload the stored key logs in again; the login is only a convenience, every request
-  // to /ui/run/ is checked with its key.
+  // to /ui/run/ is checked with its key. A page that moves to the stored language logs in there.
   document.addEventListener("DOMContentLoaded", function () {
+    if (moveToStoredLanguage()) {
+      return;
+    }
     if (document.getElementById("login-form") && readKey(KEYS.api)) {
       login();
     }

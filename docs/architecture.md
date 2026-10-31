@@ -2405,8 +2405,8 @@ a report-only step of the live workflow.
 Package 10: `mcp_server/` (`server.py`, `gate.py`, `calls.py`, `tools_extract.py`, `tools_jobs.py`,
 `tools_info.py`, `files.py`, `results.py`) and `ui/` (`routes.py`, `security.py`, `forward.py`,
 `forms.py`, `answers.py`, `results.py`, `timeline.py`, `previews.py`, `url_lists.py`,
-`site_tree.py`, `job_views.py`, `markdown.py`, `templating.py`, `texts.py`, `templates/`,
-`static/`), the route cores in the existing route modules, `DELETE /v1/jobs/{id}` and the item
+`site_tree.py`, `job_views.py`, `markdown.py`, `templating.py`, `texts.py`, `i18n.py`,
+`locales/`, `templates/`, `static/`), the route cores in the existing route modules, `DELETE /v1/jobs/{id}` and the item
 runs (see "Jobs and the fair queue"). Settings, access and the forms are described in
 [configuration.md](configuration.md) ("MCP", "UI"); setup for Claude Code and Claude Desktop is
 in the README.
@@ -2556,6 +2556,38 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   the crawl's `parent` depends on discovery order and would move between runs), reads the job in
   pages of 20 items and shows at most `UI_TREE_MAX_URLS` URLs.
 
+**Languages of the UI (package 12, P12-S5 to P12-S7).** The UI speaks English and German; the
+API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) stay English.
+
+- **Catalogues (P12-S5).** `ui/locales/en.json` and `de.json` hold flat dotted keys
+  (`login.title`, `warning.<name>`, `error.<code>`, `timeline.<step>`) with plain-text values and
+  `{name}` placeholders; they hold the same keys and placeholders and no markup
+  (`tests/ui/test_i18n.py`). `i18n.CATALOGUES` loads them once at import. `translate(language,
+  key, **params)` falls back to English, then to the key; tests make sure neither happens.
+  Templates get `t(key, **params)`, `lang` and `languages` from a context processor: `t` escapes
+  the catalogue text and each value, and a template wraps markup around a placeholder's output
+  (`code(...)`, or a `{% set %}` block). Messages from Python are `Message(key, params)`,
+  rendered in the request's language at the template boundary. The UI shows an API error as the
+  translated `error.<code>` text with "Details from the API (English)" and `error.message` below
+  it. German texts address the user as "Sie" where an address is needed, and are neutral
+  otherwise; fixed terms are in the user guide's glossary ("Job" stays "Job", a field name stays
+  the field name in backticks).
+- **Choosing the language (P12-S6, D4 a).** `GET /ui` takes the `lang` query (`en` or `de`), then
+  `Accept-Language` (q-values, primary subtag; `q=0` and a malformed `q` name nothing), then
+  `UI_DEFAULT_LANGUAGE` (`page_language`). `/ui/run/*` takes the `X-UI-Language` header, which
+  `ui.js` sends from `<html lang>`, then the same fallbacks (`run_language`). A router dependency
+  sets `request.state.ui_language`; `UiHeadersMiddleware` sends it as `Content-Language` on every
+  UI answer but a static file (English for the plain-text refusals). An unknown value is ignored
+  and never reflected. The language header is not in `forward`'s `PASSED_HEADERS`, so `/v1`
+  never sees it. The choice is kept in the browser's `localStorage` as `te.lang`, never in a
+  cookie (P10-S13 stands); a page opened without a `lang` query moves to the stored language
+  with `location.replace`. `ui.js` reads its own texts from the page's `data-text-*` attributes.
+- **The switch (P12-S7).** A `<nav class="language-switch">` with the links "Deutsch" and
+  "English" (`/ui?lang=de`, `/ui?lang=en`), each with its own `lang` and `hreflang`; the active
+  one has `aria-current="true"`. It is on the login box and in the application. Switching
+  reloads the page: the keys survive in `sessionStorage` and log in again; an open job view
+  closes, but its jobs keep running, as the switch's hint says.
+
 **Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,
 `partial`, `failed`, `job` or a refusal's error code; every tool exported at 0),
 `text_extraction_mcp_tool_seconds{tool}` (0.05 s to 120 s) and
@@ -2584,8 +2616,8 @@ the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for
 - **A deleted batch's queued items drain later.** Workers claim and drop them; until then they
   count in the queue gauges.
 - **Not in this package:** OAuth, MCP resources, prompts, sampling and the stdio transport,
-  server-sent events, a UI password apart from the API keys, a UI session or cookie, a UI language
-  other than English, a Node build, CSV export of results, resizing of preview images.
+  server-sent events, a UI password apart from the API keys, a UI session or cookie, a Node
+  build, CSV export of results, resizing of preview images.
 
 ## Observability
 

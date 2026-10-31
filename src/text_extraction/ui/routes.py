@@ -38,6 +38,7 @@ from text_extraction.ui.forms import (
     multipart_fields,
 )
 from text_extraction.ui.forward import Forwarded, forward
+from text_extraction.ui.i18n import STATE_KEY, Language, page_language, run_language
 from text_extraction.ui.job_views import add_job_routes
 from text_extraction.ui.previews import SHOWN, load_previews
 from text_extraction.ui.results import curl_line, render_result
@@ -214,12 +215,25 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
     return templates.TemplateResponse(request, "images.html", {"previews": entries})
 
 
+def _language_dependency(
+    choose: Callable[[Request, Settings], Language], settings: Settings
+) -> Callable[[Request], Awaitable[None]]:
+    """A dependency that sets ``request.state.ui_language`` to ``choose``'s language: the
+    templates render in it, and `UiHeadersMiddleware` sends it as ``Content-Language``."""
+
+    async def set_language(request: Request) -> None:
+        setattr(request.state, STATE_KEY, choose(request, settings))
+
+    return set_language
+
+
 def create_ui_router(settings: Settings) -> APIRouter:
     """The UI's routes: ``GET /ui`` (no key needed: the page holds nothing but forms) and the
-    ``/ui/run`` routes behind `require_htmx`."""
+    ``/ui/run`` routes behind `require_htmx`. The page takes its language from `page_language`,
+    the ``/ui/run`` fragments from `run_language` (P12-S6)."""
     router = APIRouter(include_in_schema=False)
 
-    @router.get(PREFIX)
+    @router.get(PREFIX, dependencies=[Depends(_language_dependency(page_language, settings))])
     async def page(request: Request) -> Response:
         """Under ``AUTH_MODE=api_key`` the login box only; under ``none`` the application, under
         the banner."""
@@ -229,7 +243,13 @@ def create_ui_router(settings: Settings) -> APIRouter:
             context.update(_app_context(settings, anonymous.name, anonymous.role))
         return templates.TemplateResponse(request, "index.html", context)
 
-    run = APIRouter(prefix=RUN_PREFIX, dependencies=[Depends(require_htmx)])
+    run = APIRouter(
+        prefix=RUN_PREFIX,
+        dependencies=[
+            Depends(require_htmx),
+            Depends(_language_dependency(run_language, settings)),
+        ],
+    )
 
     @run.post("/login")
     async def login(request: Request) -> Response:

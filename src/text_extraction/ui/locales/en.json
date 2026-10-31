@@ -1,0 +1,21 @@
+{
+  "page.title": "Text Extraction",
+  "page.intro": "A playground for the API: every form here sends one request to {path} with your key.",
+  "login.title": "Log in",
+  "login.intro": "Log in with an API key of this service. The key stays in this tab and is sent as a header with each request.",
+  "login.api_key": "API key",
+  "login.submit": "Log in",
+  "keys.optional": "Optional keys",
+  "keys.llm": "LLM key ({header})",
+  "keys.asr": "ASR key ({header})",
+  "keys.use": "Use these keys",
+  "shell.signed_in": "Signed in as {name} (role {role})",
+  "shell.logout": "Log out",
+  "switch.label": "Language",
+  "switch.de": "Deutsch",
+  "switch.en": "English",
+  "switch.hint": "Switching the language reloads the page. You stay logged in; an open job view closes, but its jobs keep running.",
+  "status.request_failed": "Request failed: {status} {reason}",
+  "status.network_error": "Network error",
+  "status.selected": "{count} selected"
+}
