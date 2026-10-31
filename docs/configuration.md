@@ -1263,7 +1263,12 @@ default stays 1, the smallest value within 10 % of the best throughput (run 4's 
 | `sitemap-50m-1` | 6 | 3.8 | 3.2 | 686 | 0.1, 0, 0.01 |
 | `sitemaps-50m-3` | 14 | 8.9 | 9.5 | 766 | 1.1, 2, 0.5 |
 
+The lag columns come from the extract worker's sampler, which sleeps 0.5 s at a time and records
+how much later than asked it woke. The total is the sum of those delays, a lower bound of the
+time the loop was held: a block longer than one interval counts up to 0.5 s short. The max is
+the bucket bound of the highest sample.
+
 A crawl at `SITE_MAX_PAGES` takes about a minute against `JOB_TTL_SECONDS` (24 h). The extract
-worker's event loop is held for at most about 1 s by the largest sitemap. Three 50 MiB sitemaps
+worker's event loop woke at most about 1 s late on the largest sitemap. Three 50 MiB sitemaps
 take 2.3 x one, because the pod's one sitemap thread parses them in turn: about 5 s in the worst
 case. `SITE_PARSE_CONCURRENCY` is therefore not added (architecture.md, "Site structure").

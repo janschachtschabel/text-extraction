@@ -2336,8 +2336,9 @@ a report-only step of the live workflow.
   8.9 s (job times). Three take 2.3 × one, above the P11-S7 mark of 2 ×, but only because one
   thread parses them in turn by design: the worst case of three files at
   `SITE_SITEMAP_MAX_BYTES` adds about 5 s. A crawl at `SITE_MAX_PAGES` took 51 s against
-  `JOB_TTL_SECONDS` of 24 h, and the event loop was held at most about 1 s (0.9 s in all for the
-  200,000 entries, 1.1 s for the three files). So the one-thread pool is not the bottleneck and
+  `JOB_TTL_SECONDS` of 24 h, and the event loop's lag samples were at most about 1 s (0.9 s in
+  all for the 200,000 entries, 1.1 s for the three files; a lower bound of the time the loop was
+  held, see configuration.md). So the one-thread pool is not the bottleneck and
   the setting is not added; the numbers are in configuration.md, "Resource baselines".
 - **Memory.** A sitemap item holds the raw body (up to `SITE_SITEMAP_MAX_BYTES`, 50 MiB), the
   inflated copy of a gzip file (up to the same) and the parsed entries while it runs; several in

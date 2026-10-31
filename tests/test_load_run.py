@@ -636,7 +636,7 @@ def test_the_lag_of_a_scenario_is_the_difference_of_two_reads() -> None:
     assert lag.mean_ms == round(4000 / 48)
     assert lag.over_100ms == 3  # 58 - 55
     assert lag.max_bound_s == 5.0  # the highest sample is at most 5 s, above 1 s
-    assert lag.total_s == 4.0  # the time the loop was held, over all samples
+    assert lag.total_s == 4.0  # the delay all samples saw, over the window
     assert run_load.lag_between("", after) == run_load.lag_between(
         lag_text({"+Inf": 0}, 0), after
     )  # no read before: from zero

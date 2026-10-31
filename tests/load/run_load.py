@@ -112,8 +112,10 @@ class Record:
 @dataclass(frozen=True)
 class Lag:
     """The event-loop lag samples of one scenario window: how many, their mean, how many were
-    over 100 ms, the bucket bound of the highest (``inf``: above the last bound) and their sum
-    (the time the loop was held)."""
+    over 100 ms, the bucket bound of the highest (``inf``: above the last bound) and their sum.
+    A sample is how much later than asked the sampler woke from its 0.5 s sleep, so the sum is
+    the delay the samples saw: a lower bound of the time the loop was held, because a block
+    longer than one interval is counted up to 0.5 s short."""
 
     samples: int
     mean_ms: int
@@ -540,7 +542,9 @@ def _lag_table(lags: Mapping[str, Mapping[str, Lag | None]]) -> str:
         "### Event-loop lag",
         "",
         f"{LAG_METRIC}, sampled every 0.5 s, in the scenario's window (the reads before and "
-        "after it). Total: the sum of the samples, the time the loop was held. Max: the bucket "
+        "after it). Total: the sum of the samples, the delay the samples saw beyond their "
+        "0.5 s sleeps (a lower bound of the time the loop was held: a block longer than one "
+        "interval counts up to 0.5 s short). Max: the bucket "
         "bound of the highest sample. - : unknown (no read before the window, no sample, or "
         "the worker restarted).",
         "",
