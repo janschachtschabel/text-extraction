@@ -1087,6 +1087,8 @@ else
   expect_absent "the example renders no chart-managed key Secret" "$production" "name: $RELEASE-text-extraction-keys"
   expect_contains "the example renders the PrometheusRule" "$production" "kind: PrometheusRule"
   expect_contains "the example renders the ServiceMonitor" "$production" "kind: ServiceMonitor"
+  expect_contains "the example's ingress waits 120 s for an answer" "$(document "$production" Ingress "$API")" \
+    'nginx.ingress.kubernetes.io/proxy-read-timeout: "120"'
   expect_values "the example keeps MCP off" "$(document "$production" Deployment "$API")" MCP_ENABLED "false"
   expect_values "the example keeps the UI off" "$(document "$production" Deployment "$API")" UI_ENABLED "false"
   # The example takes the measured requests and limits of values.yaml, component by component.

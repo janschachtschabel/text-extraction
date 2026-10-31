@@ -8,8 +8,8 @@ chart README has the [full values table](../deploy/helm/text-extraction/README.m
 
 Every setting with its default. In Helm, put a variable under `config.<NAME>` in the values; it
 lands in the chart's ConfigMap with the same name (values are strings). The secrets among them,
-marked **Secret**, never go under `config`: see [Secrets](#secrets) for where they belong. The chart overrides `PUBLIC_PORT`,
-`INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods (value `jobs.enabled`),
+marked **Secret**, never go under `config`: see [Secrets](#secrets) for where they belong. The
+chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods (value `jobs.enabled`),
 `WORKER_CONCURRENCY` on the extract workers (value `workers.extract.concurrency`),
 `BROWSER_CONCURRENCY` on the browser workers (value `workers.browser.concurrency`), and
 `BROWSER_ENABLED` and `BROWSER_UNBLOCK_ENABLED` on every pod (values `workers.browser.enabled` and
@@ -243,8 +243,13 @@ passes `DOCLING_ENABLED` from `.env` or the shell to every service, default fals
 ## Response times
 
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
-`POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result comes back in a
-few milliseconds. A caller that does not want to hold the connection sends `wait_seconds` (0-60):
+In fast mode `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result
+comes back in a few milliseconds. A request that needs a worker after its fast phase waits longer
+without `wait_seconds`: a browser render up to `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline
++ 5 s more (70 s in all by default, 100 s with unblock mode), OCR up to `DOCLING_SYNC_WAIT_SECONDS`
+more, and `pii` and LLM work up to `PII_SYNC_WAIT_SECONDS` and `LLM_SYNC_WAIT_SECONDS` more on top
+of those (a browser render with both: 120 s, 150 s with unblock mode). Give an ingress or a
+gateway a read timeout that covers this, at least 120 s. A caller that does not want to hold the connection sends `wait_seconds` (0-60):
 an extraction still running after that long continues in the pod and becomes a job (202,
 `GET /v1/jobs/{id}`); `JOBS_ENABLED=false` ignores `wait_seconds`. On SIGTERM `/ready` turns 503
 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5); then the public port stops
@@ -1149,6 +1154,16 @@ OpenAI-compatible server, runs each scenario alone, and samples `docker stats` e
 scenario's numbers come only from the samples inside its window (its first request to its last
 answer plus a settle time). CPU is in % of one core. Memory is `MemUsage` in MiB: cgroup usage
 without the page cache. Percentiles are nearest-rank.
+
+**Load-test conditions.** The load stack (`deploy/load/compose.load.yml`, ruling R-P11-4) sizes
+the service, not the politeness limits: it sets `OUTBOUND_MIN_DELAY_MS=0` (no per-host spacing),
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST=64` and `RATE_LIMIT_ENABLED=false`, and every target is a page
+of the farm, one host with no network latency. The latencies below are therefore the service's
+own processing time. Under the defaults a batch takes at least (URLs per host) ×
+`OUTBOUND_MIN_DELAY_MS` per host, and at least (URLs per host) × fetch time /
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 1,000 s (about
+17 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
+requests a minute.
 
 Source runs, both on a GitHub `ubuntu-latest` runner (4 vCPU, 16 GB), on 2026-10-31:
 

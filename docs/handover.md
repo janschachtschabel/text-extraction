@@ -13,7 +13,8 @@ The service is a prototype of a private project: no version is tagged yet (see
 Stateless API pods answer fast extractions inline and hand slow work (browser renders, OCR,
 transcriptions, PII handling, LLM calls, batches, site crawls) to worker pools through a fair job
 queue in Valkey. Every pod is one process type from one of five images; all shared state (jobs,
-results, cache, rate limits, per-host outbound state, fingerprints) lives in Valkey with TTLs.
+results, cache, rate limits, per-host outbound state, fingerprints) lives in Valkey with TTLs
+(the queue lists have none: they empty as workers claim their items).
 Workers that need a model read it from a read-only volume; no image holds models or data.
 
 ```mermaid
@@ -55,9 +56,11 @@ flowchart LR
 
 Data flow of a request: the API pod checks the key and the rate limit, runs the compliance checks
 (robots.txt, TDM opt-out) and fetches the page within the per-host outbound limits. A result that
-needs more work (a browser render, OCR, PII, the LLM) becomes a job item of that pool; the API pod
-waits for it up to a bound, then answers 202 with the job. Batches and crawls are jobs from the
-start. The full picture is in [architecture.md, Overview](architecture.md#overview) and
+needs more work (a browser render, OCR, PII, the LLM) becomes a job item of that pool, and the
+API pod waits for it up to a bound. When the bound runs out, PII and LLM work answers 202 with the
+job; a browser render or OCR falls back to the fast result (warning `browser_unavailable` or
+`ocr_unavailable`), unless the caller sent `wait_seconds`, which turns any slow request into a 202
+job. Batches and crawls are jobs from the start. The full picture is in [architecture.md, Overview](architecture.md#overview) and
 [Jobs and the fair queue](architecture.md#jobs-and-the-fair-queue).
 
 ## 1. Repository and CI
@@ -119,25 +122,62 @@ start. The full picture is in [architecture.md, Overview](architecture.md#overvi
   `error.code`, `error.retryable`, `upstream_status`, `mode_used` and `timings`. A failed target
   is 200 with `status: failed`; 5xx only for the service's own faults:
   [architecture.md, Result envelope and errors](architecture.md#result-envelope-and-errors).
-- Expected response times, measured by the load test on a 4-vCPU runner against a local site farm
-  (run [41194228955](https://github.com/janschachtschabel/text-extraction/actions/runs/41194228955),
+- Service-side processing times, measured by the load test on a 4-vCPU runner (run
+  [41194228955](https://github.com/janschachtschabel/text-extraction/actions/runs/41194228955),
   2026-10-31, commit `b7499cc`), p50 / p95:
 
-  | Request | p50 / p95 |
-  | --- | --- |
-  | `POST /v1/extract`, fast mode, 10 / 30 clients at once | 395 / 615 ms, 531 / 778 ms |
-  | the same in browser mode, 10 at once | 3,928 / 4,925 ms |
-  | `POST /v1/extract/file`, documents (MarkItDown) | 2,092 / 2,813 ms |
-  | the same, a scanned PDF with OCR (Docling) | 11,974 / 13,984 ms |
-  | `POST /v1/extract` with `pii: mask` | 1,332 / 1,875 ms |
-  | `POST /v1/structured` with selectors | 370 / 609 ms |
-  | `POST /v1/batch` of 1,000 URLs, until done | 50 s |
+  | Request | At once | p50 / p95 |
+  | --- | ---: | --- |
+  | `POST /v1/extract`, fast mode | 10 / 30 | 395 / 615 ms, 531 / 778 ms |
+  | the same in browser mode | 10 | 3,928 / 4,925 ms |
+  | `POST /v1/extract/file`, documents (MarkItDown) | 5 | 2,092 / 2,813 ms |
+  | the same, a scanned PDF with OCR (Docling) | 2 | 11,974 / 13,984 ms |
+  | `POST /v1/extract` with `pii: mask` | 10 | 1,332 / 1,875 ms |
+  | `POST /v1/structured` with selectors | 10 | 370 / 609 ms |
+  | `POST /v1/batch` of 1,000 URLs, until done | 1 | 50 s |
+
+  The load-test conditions differ from production: every target was a page of a local site farm
+  on one host with no network latency, and the load stack switched off the per-host spacing
+  (`OUTBOUND_MIN_DELAY_MS=0`), allowed 64 requests per host at once
+  (`OUTBOUND_MAX_CONCURRENCY_PER_HOST=64`) and switched off the inbound rate limit
+  (`RATE_LIMIT_ENABLED=false`) (`deploy/load/compose.load.yml`). The times above are therefore the
+  service's own processing, without a real site's fetch time. Under the defaults:
+  - a batch's duration per host is at least the larger of (URLs on that host) ×
+    `OUTBOUND_MIN_DELAY_MS` and (URLs on that host) × the site's fetch time /
+    `OUTBOUND_MAX_CONCURRENCY_PER_HOST`, because the spacing applies between the starts of two
+    requests to one host across all pods, and at most 2 run at once. A 1,000-URL batch on one host
+    takes at least 1,000 × 1 s = 1,000 s, about 17 minutes (25 minutes with a 3 s fetch: 1,000 ×
+    3 s / 2), not the 50 s above; a robots.txt `Crawl-delay` stretches it further (up to
+    `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`, 10 s per request). Hosts run in parallel, so a batch over
+    many hosts is bounded by its largest host;
+  - one key may send `RATE_LIMIT_PER_MINUTE` (60) requests a minute, so the 300 and 900 requests
+    of the fast scenarios need a key with a higher `rate_limit_per_minute`.
 
   Every scenario, with run 4 for comparison, is in
-  [configuration.md, Resource baselines](configuration.md#resource-baselines). Bounds that hold
-  for every request are in [configuration.md, Response times](configuration.md#response-times):
-  `POST /v1/extract` ends within `EXTRACT_TIMEOUT_SECONDS` (25 s), or becomes a job after
-  `wait_seconds`. Against real sites the live regression
+  [configuration.md, Resource baselines](configuration.md#resource-baselines).
+- Longest wait of a sync request without `wait_seconds`, from the defaults
+  ([configuration.md, Response times](configuration.md#response-times)):
+
+  | Request | Longest wait |
+  | --- | --- |
+  | fast mode | 25 s (`EXTRACT_TIMEOUT_SECONDS`) |
+  | `auto` that escalates to a browser render | 70 s: 25 + `BROWSER_QUEUE_WAIT_SECONDS` (10) + `BROWSER_TIMEOUT_SECONDS` (30) + 5 |
+  | the same in unblock mode | 100 s: the render deadline is `BROWSER_UNBLOCK_TIMEOUT_SECONDS` (60) |
+  | a document that needs OCR | about 45 s: 25 + `DOCLING_SYNC_WAIT_SECONDS` (20) |
+  | with `pii` | + `PII_SYNC_WAIT_SECONDS` (20) |
+  | with LLM work (`structured` with the LLM, `semantic` chunking, `describe_images`) | + `LLM_SYNC_WAIT_SECONDS` (30) |
+
+  The waits add up along a request's hops: a browser render with `pii` and LLM work waits up to
+  120 s, in unblock mode 150 s. When a wait for the nlp or llm workers runs out, the request
+  answers 202 with its job. A browser wait that runs out answers the fast result in `auto`
+  (warning `browser_unavailable`; `mode: browser` answers `timeout`, retryable), an OCR wait the
+  text layer (warning `ocr_unavailable`). With `wait_seconds` (at most 60) any slower request
+  answers 202 after that time instead (`POST /v1/extract/file` defaults to 25). **Give the
+  ingress, and any gateway in front, a read timeout of at least 120 s** (150 s with unblock mode
+  and requests that combine it with `pii` and LLM work); the
+  [example values](../deploy/helm/text-extraction/values-production.example.yaml) set 120 s for
+  ingress-nginx.
+- Against real sites the live regression
   ([`live.yml`](../.github/workflows/live.yml), gate: 200 WLO URLs in `auto`, at least 80 % usable
   text) measured 82.5 % on 2026-10-31 ([packages.md, Status](packages.md#status)).
 - Job endpoints: `POST /v1/batch` and `POST /v1/site-structure` answer 202 with a job;
@@ -155,7 +195,9 @@ start. The full picture is in [architecture.md, Overview](architecture.md#overvi
 The service runs without B-API today and is prepared for it.
 
 - Auth concept: `AUTH_MODE=api_key` (default) requires `Authorization: Bearer <key>` on every
-  public request; `none` turns auth off. Keys come from the secret `API_KEYS` as SHA-256 hashes
+  public request. `AUTH_MODE=none` turns authentication off and makes every caller an `admin`:
+  anyone who reaches port 8080 may use `compliance: ignore`, JavaScript actions (`evaluate`) and
+  unblock mode, and read and cancel every job. Keys come from the secret `API_KEYS` as SHA-256 hashes
   with a name, a role (`user` or `admin`) and an optional per-key rate limit. Users see their own
   jobs; admins may see all jobs and use `compliance: ignore`, JavaScript actions and unblock mode:
   [architecture.md, Auth](architecture.md#auth),
@@ -164,10 +206,15 @@ The service runs without B-API today and is prepared for it.
   `LLM_EMBEDDING_MODEL`, `LLM_VISION_MODEL` and the secret `LLM_API_KEY`:
   [configuration.md, LLM](configuration.md#llm). The models are chosen by the operator, never per
   request; that is all the model routing there is.
-- B-API readiness: a caller's `X-LLM-Api-Key` header wins over `LLM_API_KEY`, so a B-API virtual
-  key can be passed per request, and `LLM_BASE_URL` can point at B-API's OpenAI-compatible
-  endpoint. Nothing B-API-specific is built. The same pattern holds for the external ASR
-  endpoint (`X-ASR-Api-Key` over `ASR_EXTERNAL_API_KEY`).
+- B-API readiness of the auth: behind a gateway such as B-API, keep `AUTH_MODE=api_key` and
+  give the gateway a key of role `user` (or one per consumer, so that the per-key rate limits and
+  job ownership tell them apart). Do not switch to `none` behind a gateway: every consumer of the
+  gateway would be an admin. `none` belongs only where every caller may be an admin, for example
+  a local stack. Admin keys stay with the operator.
+- B-API readiness of the LLM: a caller's `X-LLM-Api-Key` header wins over `LLM_API_KEY`, so a
+  B-API virtual key can be passed per request, and `LLM_BASE_URL` can point at B-API's
+  OpenAI-compatible endpoint. Nothing B-API-specific is built. The same pattern holds for the
+  external ASR endpoint (`X-ASR-Api-Key` over `ASR_EXTERNAL_API_KEY`).
 
 ## 6. Metrics and alerts
 
@@ -250,7 +297,7 @@ The service runs without B-API today and is prepared for it.
   | Docling models (PVC, ReadWriteMany) | 5Gi (about 335 MiB used) | none; only a model change |
   | ASR models (PVC, ReadWriteMany) | 4Gi (`large-v3-turbo` 1,547 MiB, `small` 464 MiB) | none; only a model change |
   | NLP models (PVC, ReadWriteMany) | 3Gi (`lg` about 1 GB, `md` about 115 MB) | none; only a model change |
-  | Valkey | memory: `valkey.maxmemory` (768mb); optional PVC of 1Gi (`valkey.persistence`) | bounded by maxmemory; every key has a TTL |
+  | Valkey | memory: `valkey.maxmemory` (768mb); optional PVC of 1Gi (`valkey.persistence`) | bounded by maxmemory; every key but the queue lists has a TTL |
   | ASR scratch (emptyDir) | 2Gi (`workers.asr.scratch.sizeLimit`) | bounded |
   | browser `/tmp` (emptyDir) | 2Gi (`workers.browser.tmpSizeLimit`) | bounded |
 
@@ -331,12 +378,13 @@ The notes give formulas with measured inputs and the prices as parameters, not a
 
   | Request | LLM calls | Prompt tokens per call | Completion tokens per call |
   | --- | ---: | ---: | ---: |
-  | `POST /v1/structured`, strategy `llm`, a farm page | 1 chat call | 1,290 | 8 (the fake's minimal answer) |
+  | `POST /v1/structured`, strategy `llm`, a farm page | 1 chat call | 1,290 | about 9 (1,750 bytes / 50 / 4: the fake's minimal answer) |
   | `POST /v1/chunk`, `semantic` | 1 embeddings call | 968 | none |
 
-  Cost per request (one page) = calls × (prompt tokens × P_in + completion tokens × P_out) / 1,000,000, with
-  P_in and P_out the provider's prices per 1M tokens. A real model answers longer than the fake's
-  8 tokens: the completion grows with the caller's schema. The prompt grows with the page, up to
+  Cost per request (one page) = calls × (prompt tokens × P_in + completion tokens × P_out) /
+  1,000,000, with P_in and P_out the chat model's prices per 1M input and output tokens. An
+  embeddings call is billed on its input only: tokens × the embedding model's price per 1M
+  tokens / 1,000,000. A real model answers longer than the fake's 9 tokens: the completion grows with the caller's schema. The prompt grows with the page, up to
   `LLM_MAX_INPUT_TOKENS` (32,000) of content plus the instructions and the schema; the answer is
   capped by `LLM_MAX_TOKENS` (4,096); an invalid answer gets one repair call. `describe_images`
   adds one vision call per image (5 by default, at most 20; not measured). `learn_selectors` asks
@@ -395,9 +443,9 @@ patches and models.
   `X.Y` for all five images; a deployment pins `image.tag` (and the workers' image tags) to
   `X.Y.Z`, as the example values do.
 - Rollback: `helm rollback <release> <revision>`, or `helm upgrade` with the previous tag.
-- No version is tagged yet. The first will be `v0.1.0`, a prototype, after package 12 (languages
-  of the playground, an optional bypass mode in it, bilingual docs). Package 11 is merged without
-  a tag.
+- No version is tagged yet. The first will be `v0.1.0`, a prototype, after package 12 (UI
+  languages, unblock option, bilingual docs; [packages.md](packages.md#status)). Package 11 is
+  merged without a tag.
 
 **Prototype status.** The service is a prototype. No date is set for a decision on permanent
 operation; Jan Schachtschabel decides. What permanent operation adds:

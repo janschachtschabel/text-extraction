@@ -46,6 +46,14 @@ resources:
 ingress:
   enabled: true
   className: ""  # yours
+  # For ingress-nginx (other controllers have their own keys). A sync request waits up to 120 s
+  # without `wait_seconds` (a browser render with `pii` and LLM work; 150 s with unblock mode,
+  # docs/handover.md item 4), and nginx cuts at 60 s by default. Uploads reach
+  # DOCUMENT_MAX_BYTES + 192 KiB (workers.asr.uploadMaxBytes for media), nginx allows 1m.
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-body-size: "40m"
   hosts:
     - host: text-extraction.example.org  # yours
       paths:
@@ -136,7 +144,9 @@ workers:
       limits:
         cpu: "2"
         memory: 3Gi
-    # Yours, optional: a Secret with PII_HASH_KEY (at least 32 bytes) for `mode: hash`.
+    # Yours, optional: a Secret that must exist and hold the key PII_HASH_KEY (at least 32 bytes),
+    # or the NLP pods do not start (CreateContainerConfigError). Delete this block if you do not
+    # need stable hashes for `mode: hash` (each result is then hashed with a random key).
     hashKey:
       existingSecret: text-extraction-pii-hash-key
       existingSecretKey: PII_HASH_KEY
@@ -150,7 +160,9 @@ workers:
     baseUrl: https://llm.example.org/v1  # yours: an OpenAI-compatible endpoint
     model: your-chat-model  # yours
     embeddingModel: your-embedding-model  # yours, for `semantic` chunking; "" turns it off
-    # Yours: a Secret with LLM_API_KEY. A caller's X-LLM-Api-Key header wins over it.
+    # Yours: a Secret that must exist and hold the key LLM_API_KEY, or the API and llm pods do not
+    # start (CreateContainerConfigError). A caller's X-LLM-Api-Key header wins over it. Delete
+    # this block for an endpoint without a key, or when every caller sends X-LLM-Api-Key.
     apiKey:
       existingSecret: text-extraction-llm-key
       existingSecretKey: LLM_API_KEY
