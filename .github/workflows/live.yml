@@ -14,8 +14,15 @@ on:
         type: choice
         options: [smoke, wlo_50, wlo_200, wlo_4000]
         default: wlo_200
+      mode:
+        description: >-
+          Mode of the run on url_set (the gate always runs in auto). The full regression on
+          wlo_4000 is three runs: auto, fast and browser
+        type: choice
+        options: [auto, fast, browser]
+        default: auto
       min_ok_rate:
-        description: Fail below this ok rate, in percent
+        description: Fail below this ok rate, in percent (applies in auto mode only)
         type: string
         default: "80"
       service_ref:
@@ -35,11 +42,14 @@ permissions:
 # A new run for the same ref cancels the one in progress. Adding any other label than `live`
 # gets a group of its own, so it neither cancels a live run nor runs itself (see `if` below), and
 # so does a manual run of another service_ref: both halves of an A/B comparison run side by side.
+# A manual run in fast or browser mode has a group of its own too, so the three runs of the full
+# regression do not cancel each other.
 concurrency:
   group: >-
     live-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'live'
     && format('-other-label-{0}', github.run_id) || '' }}${{ inputs.service_ref
-    && format('-service-{0}', inputs.service_ref) || '' }}
+    && format('-service-{0}', inputs.service_ref) || '' }}${{ inputs.mode && inputs.mode != 'auto'
+    && format('-mode-{0}', inputs.mode) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -52,13 +62,18 @@ jobs:
           && (github.event.action != 'labeled' || github.event.label.name == 'live'))
     runs-on: ubuntu-latest
     # Five runs: the gate, the smoke report, wlo_200 forced through the browser, the media set
-    # and the site structure crawl (at most 20 minutes).
-    timeout-minutes: 110
+    # and the site structure crawl (at most 20 minutes). The full regression on wlo_4000 is one
+    # run of 4,000 URLs and nothing else (the report-only steps are skipped), so it gets 330
+    # minutes, below the 360 that GitHub allows a job.
+    timeout-minutes: ${{ inputs.url_set == 'wlo_4000' && 330 || 110 }}
     env:
       # The gate: wlo_200 in auto mode at the 80 % browser baseline (measured on 4,000 URLs,
       # 2026-09-28). Only a manual run can pick others; the smoke set is never a gate.
       URL_SET: ${{ inputs.url_set || 'wlo_200' }}
       MIN_OK_RATE: ${{ inputs.min_ok_rate || '80' }}
+      # Pull requests and the weekly run always use auto. A manual run can pick fast or browser
+      # to compare with the 2026-09-28 baselines (fast 68 %, browser 80 % on 4,000 URLs).
+      MODE: ${{ inputs.mode || 'auto' }}
     services:
       valkey:
         image: valkey/valkey:8.1-alpine
@@ -132,29 +147,32 @@ jobs:
           tail -n 50 results/browser-worker.log >&2
           exit 1
 
-      # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke). Always
-      # in auto mode, the mode of production. The client waits 120 s: an escalating request can
-      # take the fast phase (25 s), the queue wait (30 s) and the render (30 s + 5 s).
-      - name: Run ${{ env.URL_SET }} in auto mode
+      # The gate: fails the job when the ok rate is below MIN_OK_RATE (not for smoke, and not in
+      # fast or browser mode: those runs compare with the baselines and are reported, never
+      # gated). Pull requests and the weekly run are always in auto mode, the mode of
+      # production. The client waits 120 s: an escalating request can take the fast phase (25 s),
+      # the queue wait (30 s) and the render (30 s + 5 s).
+      - name: Run ${{ env.URL_SET }} in ${{ env.MODE }} mode
         run: |
           gate=(--min-ok-rate "$MIN_OK_RATE")
-          if [ "$URL_SET" = smoke ]; then
+          if [ "$URL_SET" = smoke ] || [ "$MODE" != auto ]; then
             gate=()
           fi
           uv run python -m tests.live.run_live \
             --urls "tests/live/urls/${URL_SET}.csv" \
-            --mode auto \
+            --mode "$MODE" \
             --timeout 120 \
-            --out "results/live_${URL_SET}_auto.jsonl" \
-            --summary-out "results/summary_${URL_SET}_auto.md" \
+            --out "results/live_${URL_SET}_${MODE}.jsonl" \
+            --summary-out "results/summary_${URL_SET}_${MODE}.md" \
             "${gate[@]}"
 
       # Reports only, no gate: the smoke set is a watchlist of hard pages, and wlo_200 with every
       # URL forced through the browser shows what the fast path leaves out (per domain, fast
       # against browser). The smoke report is skipped when the run above was the smoke set. The
-      # browser run sends as many requests at once as the worker renders pages.
+      # browser run sends as many requests at once as the worker renders pages. The report-only
+      # steps are skipped on wlo_4000: the full regression measures one mode per run.
       - name: Run smoke in auto mode (report only)
-        if: always() && env.URL_SET != 'smoke'
+        if: always() && env.URL_SET != 'smoke' && env.URL_SET != 'wlo_4000'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/smoke.csv \
@@ -164,7 +182,7 @@ jobs:
             --summary-out results/summary_smoke_auto.md
 
       - name: Run wlo_200 in browser mode (report only)
-        if: always()
+        if: always() && env.URL_SET != 'wlo_4000'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/wlo_200.csv \
@@ -180,7 +198,7 @@ jobs:
       # the subtitles (decision D1: metadata_only with subtitles_blocked). The summary's media
       # table counts the transcript sources per platform against each row's expected source.
       - name: Run media in auto mode (report only)
-        if: always()
+        if: always() && env.URL_SET != 'wlo_4000'
         run: |
           uv run python -m tests.live.run_live \
             --urls tests/live/urls/media.csv \
@@ -198,7 +216,7 @@ jobs:
       # internal port on 9092. The summary goes to the job log and, with the others, to the job
       # summary. Not after a cancel: no crawl of real sites once someone stopped the run.
       - name: Run the site structure crawl (report only)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.URL_SET != 'wlo_4000' }}
         continue-on-error: true
         timeout-minutes: 20
         env:

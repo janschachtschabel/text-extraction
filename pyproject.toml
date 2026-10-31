@@ -169,7 +169,7 @@ python_version = "3.13"
 files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["av.*", "defusedxml.*", "deno.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "faster_whisper.*", "jstyleson", "lxml.*", "openpyxl.*", "presidio_analyzer.*", "py3langid.*", "pypdfium2.*", "regex.*", "reportlab.*", "spacy.*", "tldextract.*", "xlwt.*", "yt_dlp.*"]
+module = ["av.*", "defusedxml.*", "deno.*", "docling.*", "docling_core.*", "duckduckgo_autoconsent", "extruct.*", "faster_whisper.*", "jstyleson", "lxml.*", "openpyxl.*", "presidio_analyzer.*", "py3langid.*", "pypdfium2.*", "regex.*", "reportlab.*", "spacy.*", "tldextract.*", "xlwt.*", "yaml.*", "yt_dlp.*"]
 ignore_missing_imports = true
 
 # Presidio's classes are Any where the extra `nlp` is not installed (the default environment type-
