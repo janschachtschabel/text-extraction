@@ -25,7 +25,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
      `x-client-trace-id` and B3 headers are passed through and logged.
    - Work longer than ~30 s runs as a job (create, status, results).
    - Images: slim base, multi-stage, non-root, no models or data inside; models come from a PVC.
-   - Optional components are switchable in Helm (`valkey`, workers, `s3`, `mcp`, `ui`).
+   - Optional components are switchable in Helm (`valkey`, workers, `s3`, `mcp`, `ui`) (`s3` is planned, not built yet).
 3. **B-API ready, not integrated:** `AUTH_MODE=none|api_key`; an LLM key from a request
    header (future B-API virtual key) wins over the env key. Do not build B-API specifics.
 4. **Result envelope everywhere:** `status` (`success|partial|failed`), `error.code`,

@@ -44,9 +44,11 @@ without a tag.
   with link types to a set depth, and `POST /v1/site-structure` as a growing job.
 - Package 10, MCP and UI: a FastMCP server at `/mcp` with 11 tools and the htmx playground at
   `/ui`, both off by default and switchable in Helm.
-- Package 11, hand-over: the load test and the resource baselines (`docker stats`), the Helm
+- Package 11, hand-over: a load test (`tests/load/`, run by hand in the `load.yml` GitHub Actions
+  workflow against a local site farm) with the resource baselines from `docker stats`, the Helm
   sizing and an example production values file, the environment reference, the cost notes for the
-  LLM and ASR, the hand-over document, Dependabot and this changelog.
+  LLM and ASR, the hand-over document, Dependabot, this changelog and a `mode` input for the
+  `live.yml` regression.
 
 ### Not in this release
 

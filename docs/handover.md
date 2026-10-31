@@ -60,7 +60,8 @@ needs more work (a browser render, OCR, PII, the LLM) becomes a job item of that
 API pod waits for it up to a bound. When the bound runs out, PII and LLM work answers 202 with the
 job; a browser render or OCR falls back to the fast result (warning `browser_unavailable` or
 `ocr_unavailable`), unless the caller sent `wait_seconds`, which turns any slow request into a 202
-job. Batches and crawls are jobs from the start. The full picture is in [architecture.md, Overview](architecture.md#overview) and
+job. Batches and crawls are jobs from the start. The full picture is in
+[architecture.md, Overview](architecture.md#overview) and
 [Jobs and the fair queue](architecture.md#jobs-and-the-fair-queue).
 
 ## 1. Repository and CI
@@ -168,13 +169,17 @@ job. Batches and crawls are jobs from the start. The full picture is in [archite
   | with LLM work (`structured` with the LLM, `semantic` chunking, `describe_images`) | + `LLM_SYNC_WAIT_SECONDS` (30) |
 
   The waits add up along a request's hops: a browser render with `pii` and LLM work waits up to
-  120 s, in unblock mode 150 s. When a wait for the nlp or llm workers runs out, the request
-  answers 202 with its job. A browser wait that runs out answers the fast result in `auto`
-  (warning `browser_unavailable`; `mode: browser` answers `timeout`, retryable), an OCR wait the
-  text layer (warning `ocr_unavailable`). With `wait_seconds` (at most 60) any slower request
-  answers 202 after that time instead (`POST /v1/extract/file` defaults to 25). **Give the
-  ingress, and any gateway in front, a read timeout of at least 120 s** (150 s with unblock mode
-  and requests that combine it with `pii` and LLM work); the
+  120 s, in unblock mode 150 s. These sums occur only when the pod cannot hand the request over
+  to a job (`EXTRACT_MAX_BACKGROUND` reached, or the Valkey memory guard high). Normally a
+  request with `pii` or LLM work answers 202 with its job once its implicit wait runs out (20 s
+  for `pii`, 30 s for LLM work, the largest default that applies). When a wait for the nlp or
+  llm workers runs out, the request answers 202 with its job. A browser wait that runs out
+  answers the fast result in `auto` (warning `browser_unavailable`; `mode: browser` answers
+  `timeout`, retryable), an OCR wait the text layer (warning `ocr_unavailable`). With
+  `wait_seconds` (at most 60) any slower request answers 202 after that time instead
+  (`POST /v1/extract/file` defaults to 25). **Give the ingress, and any gateway in front, a read
+  timeout of at least 120 s** (150 s with unblock mode and requests that combine it with `pii`
+  and LLM work); the
   [example values](../deploy/helm/text-extraction/values-production.example.yaml) set 120 s for
   ingress-nginx.
 - Against real sites the live regression
@@ -384,10 +389,11 @@ The notes give formulas with measured inputs and the prices as parameters, not a
   Cost per request (one page) = calls × (prompt tokens × P_in + completion tokens × P_out) /
   1,000,000, with P_in and P_out the chat model's prices per 1M input and output tokens. An
   embeddings call is billed on its input only: tokens × the embedding model's price per 1M
-  tokens / 1,000,000. A real model answers longer than the fake's 9 tokens: the completion grows with the caller's schema. The prompt grows with the page, up to
-  `LLM_MAX_INPUT_TOKENS` (32,000) of content plus the instructions and the schema; the answer is
-  capped by `LLM_MAX_TOKENS` (4,096); an invalid answer gets one repair call. `describe_images`
-  adds one vision call per image (5 by default, at most 20; not measured). `learn_selectors` asks
+  tokens / 1,000,000. A real model answers longer than the fake's 9 tokens: the completion grows
+  with the caller's schema. The prompt grows with the page, up to `LLM_MAX_INPUT_TOKENS`
+  (32,000) of content plus the instructions and the schema; the answer is capped by
+  `LLM_MAX_TOKENS` (4,096); an invalid answer gets one repair call. `describe_images` adds one
+  vision call per image (5 by default, at most 20; not measured). `learn_selectors` asks
   the LLM for selectors that later requests of the same key and host reuse without it, for
   `SELECTOR_LEARN_TTL_SECONDS`. No real-model run was made. In operation,
   `text_extraction_llm_tokens_total{kind}` counts the tokens the endpoint reports.
