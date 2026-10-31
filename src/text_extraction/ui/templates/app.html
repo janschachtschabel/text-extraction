@@ -1,30 +1,40 @@
 <section id="app-shell" class="shell">
-  {% if auth_none %}<p class="banner" role="note">{{ banner }}</p>{% endif %}
+  {% if auth_none %}<p class="banner" role="note">{{ t(banner) }}</p>{% endif %}
   <div class="who">
-    <span>Signed in as <strong>{{ principal_name }}</strong> (role <span class="role">{{ role }}</span>)</span>
-    <button type="button" class="secondary" data-action="logout">Log out</button>
+    {% set signed_in_name %}<strong>{{ principal_name }}</strong>{% endset %}
+    {% set signed_in_role %}<span class="role">{{ role }}</span>{% endset %}
+    <span>{{ t("shell.signed_in", name=signed_in_name, role=signed_in_role) }}</span>
+    <button type="button" class="secondary" data-action="logout">{{ t("shell.logout") }}</button>
+    {% with switch_hint=true %}{% include "language_switch.html" %}{% endwith %}
   </div>
   {% if auth_none %}
   <details class="keys">
-    <summary>Optional keys</summary>
-    <label for="keys-llm">LLM key (<code>X-LLM-Api-Key</code>)</label>
-    <input id="keys-llm" type="password" autocomplete="off" spellcheck="false">
-    <label for="keys-asr">ASR key (<code>X-ASR-Api-Key</code>)</label>
-    <input id="keys-asr" type="password" autocomplete="off" spellcheck="false">
-    <button type="button" class="secondary" data-action="save-keys">Use these keys</button>
+    <summary>{{ t("keys.optional") }}</summary>
+    <label for="keys-llm">{{ t("keys.llm", header=code("X-LLM-Api-Key")) }}</label>
+    <input id="keys-llm" type="password" autocomplete="off" spellcheck="false" aria-describedby="keys-llm-hint">
+    <p class="hint" id="keys-llm-hint">{{ t("hint.llm_key") }}</p>
+    <label for="keys-asr">{{ t("keys.asr", header=code("X-ASR-Api-Key")) }}</label>
+    <input id="keys-asr" type="password" autocomplete="off" spellcheck="false" aria-describedby="keys-asr-hint">
+    <p class="hint" id="keys-asr-hint">{{ t("hint.asr_key") }}</p>
+    <button type="button" class="secondary" data-action="save-keys">{{ t("keys.use") }}</button>
   </details>
   {% endif %}
   {% if tabs %}
-  <nav class="tabs" role="tablist">
+  {#- WAI-ARIA tabs (ruling P12-S8): ui.js moves the roving tabindex with the arrow keys,
+  Home and End. #}
+  <div class="tabs" role="tablist" aria-label="{{ t('tabs.label') }}">
     {% for tab in tabs %}
-    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ tab.label }}</button>
+    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ '0' if loop.first else '-1' }}">{{ t(tab.label_key) }}</button>
     {% endfor %}
-  </nav>
+  </div>
   {% for tab in tabs %}
-  <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}"{% if not loop.first %} hidden{% endif %}>
+  <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}" tabindex="0"{% if not loop.first %} hidden{% endif %}>
+    <h2 class="visually-hidden">{{ t(tab.label_key) }}</h2>
+    <p class="intro">{{ t(tab.intro_key) }} <a class="help" href="{{ help_url(lang, tab.help_page) }}" target="_blank" rel="noopener noreferrer">{{ t("help.link") }}<span class="visually-hidden"> {{ t("help.new_tab") }}</span></a></p>
     {% include tab.template %}
   </section>
   {% endfor %}
   {% endif %}
-  <section id="result" class="result" aria-live="polite"></section>
+  {#- No live region: #ui-status announces each answer once (ruling P12-S9). #}
+  <section id="result" class="result"></section>
 </section>

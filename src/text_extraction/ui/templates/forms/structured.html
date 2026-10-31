@@ -1,11 +1,15 @@
-<form class="op" hx-post="/ui/run/structured" hx-target="#result" hx-swap="innerHTML">
-  {% set prefix = "structured" %}
+{% set prefix = "structured" %}
+{% set default_structured = '{"strategy": "auto", "schema": {"type": "object", "properties": {"title": {"type": "string"}, "author": {"type": "string"}}}}' %}
+<form id="structured-form" class="op" hx-post="/ui/run/structured" hx-target="#result" hx-swap="innerHTML">
   <label for="structured-url">URL</label>
-  <input id="structured-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  <input id="structured-url" name="url" type="url" required placeholder="https://" spellcheck="false" aria-describedby="structured-url-hint">
+  <p class="hint" id="structured-url-hint">{{ t("hint.url") }}</p>
   {% include "forms/format.html" %}
   {% include "forms/mode.html" %}
-  <label for="structured-structured">Structured (JSON: strategy, schema, rules)</label>
-  <textarea id="structured-structured" name="structured" rows="6" spellcheck="false" required>{"strategy": "auto", "schema": {"type": "object", "properties": {"title": {"type": "string"}, "author": {"type": "string"}}}}</textarea>
+  {% include "forms/access.html" %}
+  <label for="structured-structured">{{ t("form.structured") }}</label>
+  <textarea id="structured-structured" name="structured" rows="6" spellcheck="false" required aria-describedby="structured-structured-hint">{{ default_structured }}</textarea>
+  <p class="hint" id="structured-structured-hint">{{ t("hint.structured") }}</p>
   {% include "forms/common.html" %}
-  <button type="submit">Extract the fields</button>
+  <button type="submit">{{ t("form.extract_fields") }}</button>
 </form>

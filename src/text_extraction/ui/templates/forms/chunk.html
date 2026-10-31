@@ -1,18 +1,25 @@
-<form class="op" hx-post="/ui/run/chunk" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
-  {% set prefix = "chunk" %}
-  <p class="hint">A URL or a text, not both.</p>
+{% set prefix = "chunk" %}
+{% set default_chunking = '{"strategy": "recursive", "size": 800}' %}
+<form id="chunk-form" class="op" hx-post="/ui/run/chunk" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+  <p class="hint" id="chunk-source-hint">{{ t("form.url_or_text") }}</p>
   <label for="chunk-url">URL</label>
-  <input id="chunk-url" name="url" type="url" placeholder="https://" spellcheck="false">
-  <label for="chunk-text">Text</label>
-  <textarea id="chunk-text" name="text" rows="6"></textarea>
-  <label for="chunk-text-type">The text is</label>
-  <select id="chunk-text-type" name="text_type">
-    <option value="markdown" selected>Markdown</option>
-    <option value="plain">plain text</option>
+  <input id="chunk-url" name="url" type="url" placeholder="https://" spellcheck="false" aria-describedby="chunk-source-hint chunk-url-hint">
+  <p class="hint" id="chunk-url-hint">{{ t("hint.url") }}</p>
+  {% set access_variant = "chunk" %}
+  {% include "forms/access.html" %}
+  <label for="chunk-text">{{ t("form.text") }}</label>
+  <textarea id="chunk-text" name="text" rows="6" aria-describedby="chunk-source-hint chunk-text-hint"></textarea>
+  <p class="hint" id="chunk-text-hint">{{ t("hint.text") }}</p>
+  <label for="chunk-text-type">{{ t("form.text_is") }}</label>
+  <select id="chunk-text-type" name="text_type" aria-describedby="chunk-text-type-hint">
+    <option value="markdown" selected>{{ t("form.format_markdown") }}</option>
+    <option value="plain">{{ t("form.plain_text") }}</option>
   </select>
+  <p class="hint" id="chunk-text-type-hint">{{ t("hint.text_type") }}</p>
   {% include "forms/format.html" %}
-  <label for="chunk-chunking">Chunking (JSON)</label>
-  <textarea id="chunk-chunking" name="chunking" rows="3" spellcheck="false" required>{"strategy": "recursive", "size": 800}</textarea>
+  <label for="chunk-chunking">{{ t("form.chunking") }}</label>
+  <textarea id="chunk-chunking" name="chunking" rows="3" spellcheck="false" required aria-describedby="chunk-chunking-hint">{{ default_chunking }}</textarea>
+  <p class="hint" id="chunk-chunking-hint">{{ t("hint.chunking") }}</p>
   {% include "forms/common.html" %}
-  <button type="submit">Chunk</button>
+  <button type="submit">{{ t("form.chunk") }}</button>
 </form>

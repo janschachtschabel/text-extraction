@@ -6,6 +6,7 @@ call and shows its answer), the previews ``POST /ui/run/images``, the job views
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, cast, get_args
 
@@ -22,7 +23,8 @@ from text_extraction.file_models import FILE_PART
 from text_extraction.ratelimit import check_rate_left
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
-    envelope_message,
+    envelope_error,
+    options_error,
     raw_text,
     read_form,
     refusal,
@@ -34,12 +36,21 @@ from text_extraction.ui.forms import (
     OPERATIONS,
     SINGLE_OPERATIONS,
     OptionsError,
+    access_choice,
     build_body,
     multipart_fields,
 )
 from text_extraction.ui.forward import Forwarded, forward
+from text_extraction.ui.i18n import (
+    STATE_KEY,
+    Language,
+    Message,
+    help_url,
+    page_language,
+    run_language,
+)
 from text_extraction.ui.job_views import add_job_routes
-from text_extraction.ui.previews import SHOWN, load_previews
+from text_extraction.ui.previews import FAILED, SHOWN, SKIP_REASONS, load_previews
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import (
     PREFIX,
@@ -48,42 +59,67 @@ from text_extraction.ui.security import (
     require_htmx,
     ui_principal,
 )
-from text_extraction.ui.templating import templates
+from text_extraction.ui.templating import request_language, templates
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.vision.fetch import ImageFetcher
 
 STATIC_DIR: Final = Path(__file__).parent / "static"
 
-BANNER: Final = (
-    "This service runs without authentication: anyone who can reach it can use the API and this UI."
-)
-NOT_VALID: Final = "This key is not valid."
+BANNER: Final = Message("shell.banner")
+NOT_VALID: Final = Message("login.not_valid")
 # Sent with a refused key: ui.js drops the stored keys (P10-S13).
 LOGIN_FAILED_EVENT: Final = "ui-login-failed"
 
 
 @dataclass(frozen=True)
 class Tab:
-    """One tab of the application: its name, its label and the template of its form."""
+    """One tab of the application: its name, the catalogue keys of its label and its intro, the
+    template of its form and the user guide's page its help link opens (ruling P12-S10)."""
 
     name: str
-    label: str
+    label_key: str
+    intro_key: str
     template: str
+    help_page: str
 
 
 # The application's tabs, in order.
 TABS: Final[tuple[Tab, ...]] = (
-    Tab("extract", "Extract", OPERATIONS["extract"].form),
-    Tab("file", "File", OPERATIONS["file"].form),
-    Tab("screenshot", "Screenshot", OPERATIONS["screenshot"].form),
-    Tab("structured", "Structured", OPERATIONS["structured"].form),
-    Tab("chunk", "Chunk", OPERATIONS["chunk"].form),
-    Tab("batch", "Batch", OPERATIONS["batch"].form),
-    Tab("batch-file", "Batch file", "forms/batch_file.html"),
-    Tab("site-structure", "Site structure", OPERATIONS["site-structure"].form),
-    Tab("info", "Info", OPERATIONS["info"].form),
+    Tab("extract", "tab.extract", "help.extract.intro", OPERATIONS["extract"].form, "single-url"),
+    Tab("file", "tab.file", "help.file.intro", OPERATIONS["file"].form, "usage"),
+    Tab(
+        "screenshot",
+        "tab.screenshot",
+        "help.screenshot.intro",
+        OPERATIONS["screenshot"].form,
+        "usage",
+    ),
+    Tab(
+        "structured",
+        "tab.structured",
+        "help.structured.intro",
+        OPERATIONS["structured"].form,
+        "structured-data",
+    ),
+    Tab("chunk", "tab.chunk", "help.chunk.intro", OPERATIONS["chunk"].form, "structured-data"),
+    Tab("batch", "tab.batch", "help.batch.intro", OPERATIONS["batch"].form, "part-of-a-site"),
+    Tab(
+        "batch-file",
+        "tab.batch_file",
+        "help.batch_file.intro",
+        "forms/batch_file.html",
+        "part-of-a-site",
+    ),
+    Tab(
+        "site-structure",
+        "tab.site_structure",
+        "help.site_structure.intro",
+        OPERATIONS["site-structure"].form,
+        "whole-site-and-metadata",
+    ),
+    Tab("info", "tab.info", "help.info.intro", OPERATIONS["info"].form, "usage"),
 )
-NO_FILE: Final = "Choose a file to upload."
+NO_FILE: Final = Message("form.no_file")
 _MODES: Final = frozenset(get_args(RequestedMode))
 _COMPLIANCE_MODES: Final = frozenset(get_args(ComplianceMode))
 
@@ -95,12 +131,15 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "auth_none": settings.auth_mode == "none",
         "banner": BANNER,
         "tabs": TABS,
+        "help_url": partial(help_url, settings),
+        "access_choice": access_choice(role, settings),
+        "browser_enabled": settings.browser_enabled,
     }
 
 
 async def _forward_single(
     request: Request, op: str, body: dict[str, Any], form: FormData
-) -> tuple[Forwarded, str] | str:
+) -> tuple[Forwarded, str] | Message:
     """Forward the body of ``op`` and return the answer with its curl line, or the message of a
     form that cannot be sent."""
     operation = OPERATIONS[op]
@@ -140,24 +179,25 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             principal = await authenticate(request)
             await check_rate_left(request.app.state, principal)
         except ServiceError as error:
-            return refusal(error)
+            return refusal(error, request_language(request))
         form = await read_form(request, max_part_size=part_limit, max_files=max_files)
-        if isinstance(form, str):
+        if isinstance(form, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": form})
         try:
             body = build_body(op, text_fields(form))
         except OptionsError as error:
             await form.close()
-            return templates.TemplateResponse(request, "form_error.html", {"message": str(error)})
+            context = options_error(error, request)
+            return templates.TemplateResponse(request, "form_error.html", context)
         try:
             forwarded = await _forward_single(request, op, body, form)
         finally:
             await form.close()  # an upload's spooled file
-        if isinstance(forwarded, str):
+        if isinstance(forwarded, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": forwarded})
         answer, curl = forwarded
         mode = body.get("mode")
-        screenshot, screenshot_note = await screenshot_of(request, answer.body)
+        screenshot, screenshot_note, screenshot_detail = await screenshot_of(request, answer.body)
         # In a thread: a long content's Markdown takes a while to render.
         html = await asyncio.to_thread(
             render_result,
@@ -169,6 +209,8 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             requested_mode=mode if mode in _MODES else None,
             screenshot=screenshot,
             screenshot_note=screenshot_note,
+            screenshot_detail=screenshot_detail,
+            language=request_language(request),
         )
         return HTMLResponse(html)
 
@@ -183,13 +225,13 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
     try:
         principal = await ui_principal(request)
         form = await read_form(request, max_files=0)
-        if isinstance(form, str):
+        if isinstance(form, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": form})
         requested = form.get("compliance")
         chosen = cast(ComplianceMode, requested) if requested in _COMPLIANCE_MODES else None
         mode = resolve_mode(chosen, principal, settings)
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     urls = [value for value in form.getlist("url") if isinstance(value, str)]
     alts = [value for value in form.getlist("alt") if isinstance(value, str)]
     alt_of: dict[str, str] = {}
@@ -208,18 +250,36 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
                 "url": preview.url,
                 "data_uri": preview.data_uri,
                 "skipped": preview.skipped,
+                "reason": (
+                    SKIP_REASONS.get(preview.skipped, SKIP_REASONS[FAILED])
+                    if preview.skipped
+                    else None
+                ),
                 "alt": alt_of.get(preview.url, ""),
             }
         )
     return templates.TemplateResponse(request, "images.html", {"previews": entries})
 
 
+def _language_dependency(
+    choose: Callable[[Request, Settings], Language], settings: Settings
+) -> Callable[[Request], Awaitable[None]]:
+    """A dependency that sets ``request.state.ui_language`` to ``choose``'s language: the
+    templates render in it, and `UiHeadersMiddleware` sends it as ``Content-Language``."""
+
+    async def set_language(request: Request) -> None:
+        setattr(request.state, STATE_KEY, choose(request, settings))
+
+    return set_language
+
+
 def create_ui_router(settings: Settings) -> APIRouter:
     """The UI's routes: ``GET /ui`` (no key needed: the page holds nothing but forms) and the
-    ``/ui/run`` routes behind `require_htmx`."""
+    ``/ui/run`` routes behind `require_htmx`. The page takes its language from `page_language`,
+    the ``/ui/run`` fragments from `run_language` (P12-S6)."""
     router = APIRouter(include_in_schema=False)
 
-    @router.get(PREFIX)
+    @router.get(PREFIX, dependencies=[Depends(_language_dependency(page_language, settings))])
     async def page(request: Request) -> Response:
         """Under ``AUTH_MODE=api_key`` the login box only; under ``none`` the application, under
         the banner."""
@@ -229,13 +289,20 @@ def create_ui_router(settings: Settings) -> APIRouter:
             context.update(_app_context(settings, anonymous.name, anonymous.role))
         return templates.TemplateResponse(request, "index.html", context)
 
-    run = APIRouter(prefix=RUN_PREFIX, dependencies=[Depends(require_htmx)])
+    run = APIRouter(
+        prefix=RUN_PREFIX,
+        dependencies=[
+            Depends(require_htmx),
+            Depends(_language_dependency(run_language, settings)),
+        ],
+    )
 
     @run.post("/login")
     async def login(request: Request) -> Response:
         """Forward ``GET /v1/info`` with the browser's key: 200 renders the application, 401 the
         login box with "This key is not valid." and nothing else, any other answer the login box
-        with its message (the stored key is kept: a 429 or 503 says nothing about it)."""
+        with the text of its error code and the API's English message (the stored key is kept:
+        a 429 or 503 says nothing about it)."""
         answer = await forward(request, "GET", "/v1/info")
         data = (answer.body or {}).get("data")
         if answer.status == 200 and isinstance(data, dict):
@@ -248,8 +315,9 @@ def create_ui_router(settings: Settings) -> APIRouter:
                 {"error": NOT_VALID},
                 headers={"HX-Trigger": LOGIN_FAILED_EVENT},
             )
-        message = envelope_message(answer.body, answer.status)
-        return templates.TemplateResponse(request, "login.html", {"error": message})
+        message, detail = envelope_error(answer.body, answer.status)
+        context = {"error": message, "error_detail": detail}
+        return templates.TemplateResponse(request, "login.html", context)
 
     for op in SINGLE_OPERATIONS:
         run.add_api_route(f"/{op}", _single_view(op, settings), methods=["POST"])

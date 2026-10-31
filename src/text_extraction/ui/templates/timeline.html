@@ -1,17 +1,17 @@
-<section class="timeline-view" aria-label="What happened">
-  <h4>What happened</h4>
+<section class="timeline-view" aria-label="{{ t('result.what_happened') }}">
+  <h4>{{ t("result.what_happened") }}</h4>
   {% if steps %}
   <ol class="timeline">
     {% for step in steps %}
-    <li><span class="step">{{ step.label }}</span> {{ step.detail }}{% if step.ms is not none %} <span class="ms">{{ step.ms }} ms</span>{% endif %}</li>
+    <li><span class="step">{{ t(step.label) }}</span> {{ show(step.detail) }}{% if step.ms is not none %} <span class="ms">{{ t("result.ms", ms=step.ms) }}</span>{% endif %}</li>
     {% endfor %}
   </ol>
   {% endif %}
   {% if warnings %}
-  <h5>Warnings</h5>
+  <h5>{{ t("result.warnings") }}</h5>
   <ul class="warnings">
     {% for name, text in warnings %}
-    <li><code>{{ name }}</code>{% if text %}: {{ text }}{% endif %}</li>
+    <li><code>{{ name }}</code>{% if text %}: {{ t(text) }}{% endif %}</li>
     {% endfor %}
   </ul>
   {% endif %}

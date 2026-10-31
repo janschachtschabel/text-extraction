@@ -14,7 +14,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
 
 ## Non-negotiable rules
 
-1. **English only** in code, comments, docs, commit messages and API texts.
+1. **English only** in code, comments, developer docs, commit messages and API texts. User-facing docs (`README.md` and `README.de.md`, `docs/user-guide/en|de/`) and the UI texts (`ui/locales/en.json`, `de.json`) exist in English and German. English is the source: a change to an English text changes its German partner in the same pull request (checked by `tests/test_docs_i18n.py`, `tests/ui/test_i18n.py` and `scripts/check_translation_pairs.py`).
 2. **Ops guide compliance** (the operations hand-over guide). In particular:
    - Two ports: public API on `8080`, internal `9090` with `/health`, `/ready`, `/metrics`.
      Internal endpoints never appear in the OpenAPI spec.

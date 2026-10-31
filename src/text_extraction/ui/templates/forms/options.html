@@ -1,3 +1,4 @@
-<label for="{{ prefix }}-options">Options (JSON)</label>
-<textarea id="{{ prefix }}-options" name="options" rows="3" spellcheck="false" placeholder='{"links": true}'>{{ chosen["options"] if chosen else "" }}</textarea>
-<p class="hint">Any further field of the REST body, merged under the fields above; a field left at its default yields to the same key here.</p>
+{% set options_example = '{"links": true}' %}
+<label for="{{ prefix }}-options">{{ t("form.options") }}</label>
+<textarea id="{{ prefix }}-options" name="options" rows="3" spellcheck="false" placeholder="{{ options_example }}" aria-describedby="{{ prefix }}-options-hint">{{ chosen["options"] if chosen else "" }}</textarea>
+<p class="hint" id="{{ prefix }}-options-hint">{{ t("hint.options") }}</p>

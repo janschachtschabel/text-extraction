@@ -1,6 +1,7 @@
 """The login of the UI in a real Chromium (ruling P10-S13; ``pytest -m browser``): ui.js keeps
 the key in sessionStorage, sends it as a header, logs in again on a reload and forgets it on
-"Log out"; a wrong key shows the message and no application; no cookie, no CSP error."""
+"Log out"; a wrong key shows the message and no application; no cookie, no CSP error. The
+language switch keeps its choice in localStorage and the login in the tab."""
 
 import contextlib
 import glob
@@ -135,6 +136,64 @@ def test_login_keeps_the_key_in_the_tab_only() -> None:
         stored = page.evaluate("Object.keys(sessionStorage)")
         assert [name for name in stored if name.startswith("te.")] == []
         assert page.locator("#app-shell").count() == 0
+        browser.close()
+
+    assert console == []
+
+
+def test_language_switch_keeps_the_choice_and_the_login_without_a_cookie() -> None:
+    """The switch reloads the page in its language and stores the choice in localStorage
+    (``te.lang``); a page without a ``lang`` query moves to it; the key stays in the tab and logs
+    in again; every ``/ui/run`` request says the page's language (ruling P12-S6, P12-S7)."""
+    executable = _chromium()
+    settings = Settings(
+        auth_mode="api_key",
+        ui_enabled=True,
+        rate_limit_per_minute=1000,
+        api_keys=[
+            ApiKey(name="alice", role="user", sha256=hashlib.sha256(USER_KEY.encode()).hexdigest())
+        ],
+    )
+    console: list[str] = []
+    languages: list[str | None] = []
+
+    def on_request(request: Request) -> None:
+        if "/ui/run/" in request.url:
+            languages.append(request.headers.get("x-ui-language"))
+
+    with serving(settings) as url, sync_playwright() as driver:
+        browser = driver.chromium.launch(executable_path=executable)
+        context = browser.new_context(locale="en-US")
+        page = context.new_page()
+        page.on("console", lambda message: console.append(_text(message)))
+        page.on("pageerror", lambda error: console.append(str(error)))
+        page.on("request", on_request)
+        page.goto(url)
+        assert page.inner_text("#login-title") == "Log in"
+
+        page.click(".language-switch a[hreflang=de]")
+        page.wait_for_url("**/ui?lang=de")
+        assert page.inner_text("#login-title") == "Anmelden"
+        assert page.evaluate("document.documentElement.lang") == "de"
+        assert page.evaluate("localStorage.getItem('te.lang')") == "de"
+
+        page.goto(url)  # no lang query: moves to the stored language
+        page.wait_for_url("**/ui?lang=de")
+        assert page.inner_text("#login-title") == "Anmelden"
+
+        page.fill("#login-api-key", USER_KEY)
+        page.click("#login-form button[type=submit]")
+        page.wait_for_selector("#app-shell")
+        assert page.inner_text("[data-action=logout]") == "Abmelden"
+        assert languages == ["de"]
+
+        page.click(".language-switch a[hreflang=en]")
+        page.wait_for_url("**/ui?lang=en")
+        page.wait_for_selector("#app-shell")  # logged in again with the stored key
+        assert page.inner_text("[data-action=logout]") == "Log out"
+        assert languages == ["de", "en"]
+        assert page.evaluate("localStorage.getItem('te.lang')") == "en"
+        assert context.cookies() == []
         browser.close()
 
     assert console == []

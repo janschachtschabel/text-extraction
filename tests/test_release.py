@@ -48,9 +48,9 @@ def test_the_changelog_has_a_section_for_the_version() -> None:
     assert "Keep a Changelog" in changelog
 
 
-def test_the_changelog_names_every_package_from_zero_to_eleven() -> None:
+def test_the_changelog_names_every_package_from_zero_to_twelve() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    for number in range(12):
+    for number in range(13):
         assert re.search(rf"^- Package {number}\b", changelog, re.MULTILINE), number
 
 

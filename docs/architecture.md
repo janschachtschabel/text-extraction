@@ -88,7 +88,8 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    `Content-Type` therefore never escalates, whatever its quality verdict (this includes a
    soft-404 page served without one), and neither does an error status or a non-HTML type.
    Under unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) it also escalates
-   on `bot_protection` and on a 403, 429 or 503 answer whose body is a challenge. The render's
+   on `bot_protection`, on every 403, 429 or 503 answer (`escalation.REFUSAL_STATUSES`) whatever
+   its body or content type, and on any 2xx HTML result that is not `success` (B16). The render's
    result and the fast result are compared and the better one is kept (higher status, then more
    words, on a tie the render). `auto` with `actions`, `cookies`, `headers` or `screenshot`
    skips the fast phase and always renders, like `browser`. `mode` is part of the result cache
@@ -626,7 +627,8 @@ while `BROWSER_ENABLED` is false, are unchanged.
   An `auto` request with browser options always renders (R8); while browser mode is off it
   answers 400 (R19). A stored result is final: a cache `hit` or `revalidated` result never
   escalates, since only the better of both was stored. Accepted consequence: a fast result
-  cached while browser mode was off escalates only once its entry has expired.
+  cached while browser mode was off escalates only once its entry has expired. Under unblock
+  mode a refused answer (403, 429, 503) is assessed so that it can escalate too (B16).
 - **B6, caller secrets.** `actions`, `cookies` and `headers` are accepted by `/v1/extract` and
   `/v1/screenshot` only, not by `/v1/batch`. They are stored in `job:{<id>}:secrets` with a short
   TTL (`BROWSER_QUEUE_WAIT_SECONDS + lease + 60` s, where the browser lease is
@@ -704,12 +706,35 @@ while `BROWSER_ENABLED` is false, are unchanged.
     cookies or headers) stores none: its cookies may be the caller's own or a session they opened
     (B6); it still reads the stored ones. A render that got past a 403, 429 or 503
     challenge keeps that answer out of the host's backoff.
-  - Escalation: under unblock `auto` also escalates per B5. The result carries `unblocked: true`.
+  - Escalation: under unblock `auto` also escalates per B5, and on a plain refusal or an
+    unfinished HTML result per B16. The result carries `unblocked: true`.
 - **B15, what unblock does not do.** No image or puzzle captcha solving and no paid or
   third-party solver services (Jan: nothing paid). Partners are advised to add an allowlist rule
   in their bot protection instead: a secret header (sent with `headers`) or our egress IP. No IP
   or proxy rotation; CLAUDE.md rule 6 keeps that. If a partner blocks by IP, the fix is that they
   allow our egress IP; a later package can add an upstream proxy option if Jan wants it.
+- **B16, maximum extraction (package 12).** "Maximum extraction" is unblock mode (B14) and
+  nothing more: an admin, `compliance: ignore` and `BROWSER_UNBLOCK_ENABLED`. The SSRF guard on
+  every fetch and sub-request, the byte and time caps and the per-host outbound gate (with its
+  429/503 pause) stay; it adds no IP or proxy rotation and no captcha solving (B15).
+  - Fallback (P12-S1): under unblock `auto`, `escalation.needs_browser` also returns true for
+    (a) a fast page answer `failed`/`target_http_error` whose `upstream_status` is in
+    `REFUSAL_STATUSES` (403, 429, 503), whatever its body or content type, and (b) a 2xx HTML
+    fast result whose status is not `success` (for example `content_too_short` or
+    `empty_content`). The exclusions of B5 stay: a document, a platform video or media file, a
+    cache `hit` or `revalidated` result, a result that is not fast, and a `mode` other than
+    `auto`. For (a) the pipeline sets `quality` on every refused answer in unblock `auto` mode
+    with `BROWSER_ENABLED` (`Pipeline._assesses_refusal`, `_refusal_quality`): it assesses an HTML
+    body up to `CONVERT_MAX_BYTES`, any other body as an empty page; `challenge_status` is true
+    only for a challenge body. `better()` keeps the better of the fast and the rendered result.
+    Outside unblock mode nothing changes: a plain 403 stays `target_http_error` in the respect
+    mode (the leifiphysik case of package 10).
+  - The host's pause (P12-S2): a fast 429 or 503 still records its pause (`Retry-After`, else
+    `OUTBOUND_BACKOFF_SECONDS`, at most `OUTBOUND_MAX_BACKOFF_SECONDS`). The render takes its turn
+    after the pause: the browser worker gives the item back on `CircuitOpen`, as for any paused
+    host. A sync call answers within its B13 bound, often with `browser_unavailable`; a call with
+    `wait_seconds` becomes a job that finishes after the pause. A render that gets past the
+    refusal keeps it out of the host's backoff (`answers_for_gate`, B14 unchanged).
 
 **Caller headers (R10, R13).** Headers go only to requests on the requested URL's host and port.
 Playwright would re-apply them to the hops of a redirect, so while a render carries headers every
@@ -2380,11 +2405,11 @@ a report-only step of the live workflow.
 Package 10: `mcp_server/` (`server.py`, `gate.py`, `calls.py`, `tools_extract.py`, `tools_jobs.py`,
 `tools_info.py`, `files.py`, `results.py`) and `ui/` (`routes.py`, `security.py`, `forward.py`,
 `forms.py`, `answers.py`, `results.py`, `timeline.py`, `previews.py`, `url_lists.py`,
-`site_tree.py`, `job_views.py`, `markdown.py`, `templating.py`, `texts.py`, `templates/`,
-`static/`), the route cores in the existing route modules, `DELETE /v1/jobs/{id}` and the item
-runs (see "Jobs and the fair queue"). Settings, access and the forms are described in
-[configuration.md](configuration.md) ("MCP", "UI"); setup for Claude Code and Claude Desktop is
-in the README.
+`site_tree.py`, `job_views.py`, `markdown.py`, `templating.py`, `texts.py`, `i18n.py`,
+`locales/`, `templates/`, `static/`), the route cores in the existing route modules,
+`DELETE /v1/jobs/{id}` and the item runs (see "Jobs and the fair queue"). Settings, access and the
+forms are described in [configuration.md](configuration.md) ("MCP", "UI"); setup for Claude Code
+and Claude Desktop is in the user guide's [MCP page](user-guide/en/mcp.md#setup).
 
 Both are doors to the same routes, not services of their own: an MCP tool call and a UI form run
 the REST route's checks (auth and roles, the rate-limit bucket, body limits, validation, the SSRF
@@ -2518,7 +2543,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   and, for Markdown, rendered by markdown-it-py without raw HTML (links only for http(s), images as
   their alt text), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
-  convert, PII, LLM, outcome) with a one-line text per warning (`WARNING_TEXTS`). Previews follow
+  convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
+  catalogues). Previews follow
   D7: at most 20 images, 4 at once, 10 s each and 25 s per view; a skipped one shows its reason.
 - **Jobs (P10-S18, P10-S19, P10-S20).** The progress view reads one or more jobs through
   `read_job` with one rate-limit hit per refresh, whatever the number of jobs, refreshes every 3 s
@@ -2530,6 +2556,108 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   "linked only" URLs by host and URL path segment (sections are directories, which editors know;
   the crawl's `parent` depends on discovery order and would move between runs), reads the job in
   pages of 20 items and shows at most `UI_TREE_MAX_URLS` URLs.
+
+**Languages of the UI (package 12, P12-S5 to P12-S7).** The UI speaks English and German; the
+API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) stay English.
+
+- **Catalogues (P12-S5).** `ui/locales/en.json` and `de.json` hold flat dotted keys
+  (`login.title`, `warning.<name>`, `error.<code>`, `timeline.<step>`) with plain-text values and
+  `{name}` placeholders; they hold the same keys and placeholders and no markup
+  (`tests/ui/test_i18n.py`). `i18n.CATALOGUES` loads them once at import. `translate(language,
+  key, **params)` falls back to English, then to the key; tests make sure neither happens.
+  Templates get `t(key, **params)`, `lang` and `languages` from a context processor: `t` escapes
+  the catalogue text and each value, and a template wraps markup around a placeholder's output
+  (`code(...)`, or a `{% set %}` block). Messages from Python are `Message(key, params)`,
+  rendered in the request's language at the template boundary; a placeholder's value may be a
+  `Message` too, or a list of them (joined by ", "). The UI shows an API error as the
+  translated `error.<code>` text (one for every `ErrorCode`) with "Details from the API
+  (English)" and `error.message` (and a 422's `details`) below it, marked `lang="en"`. A result's
+  status and a job's state are badges with the texts `status.<value>` and
+  `job_state.<value>` (the raw value in `data-value`, the CSS classes keyed on it); identifiers of
+  the API (error codes, compliance, robots and cache values, a job's kind, a worker pool) stay as
+  they are, in `<code>` (`i18n.Code`). German texts address the user as "Sie" where an address is
+  needed, and are neutral otherwise; fixed terms are in the user guide's glossary ("Job" stays
+  "Job", a field name stays the field name in backticks).
+- **Choosing the language (P12-S6, D4 a).** `GET /ui` takes the `lang` query (`en` or `de`), then
+  `Accept-Language` (q-values, primary subtag; `q=0` and a malformed `q` name nothing), then
+  `UI_DEFAULT_LANGUAGE` (`page_language`). `/ui/run/*` takes the `X-UI-Language` header, which
+  `ui.js` sends from `<html lang>`, then the same fallbacks (`run_language`). A router dependency
+  sets `request.state.ui_language`; `UiHeadersMiddleware` sends it as `Content-Language` on every
+  UI answer but a static file (English for the plain-text refusals). An unknown value is ignored
+  and never reflected. The language header is not in `forward`'s `PASSED_HEADERS`, so `/v1`
+  never sees it. The choice is kept in the browser's `localStorage` as `te.lang`, never in a
+  cookie (P10-S13 stands); a page opened without a `lang` query moves to the stored language
+  with `location.replace`. `ui.js` reads its own texts from the page's `data-text-*` attributes.
+- **The switch (P12-S7).** A `<nav class="language-switch">` with the links "Deutsch" and
+  "English" (`/ui?lang=de`, `/ui?lang=en`), each with its own `lang` and `hreflang`; the active
+  one has `aria-current="true"`. It is on the login box and in the application. Switching
+  reloads the page: the keys survive in `sessionStorage` and log in again; an open job view
+  closes, but its jobs keep running, as the switch's hint says.
+
+**Accessibility, help and status messages (package 12, P12-S8 to P12-S10).** The target is WCAG
+2.2 A and AA.
+
+- **Structure and help.** A skip link to `<main id="app">`, one `h1`, and per tab panel a
+  visually hidden `h2` (the tab's label), an intro (`Tab.intro_key`, `help.<tab>.intro`) and a
+  "Help" link to `help_url(settings, language, Tab.help_page)`, that is
+  `UI_DOCS_BASE_URL/<language>/<page>.md` (ruling R-P12-8; by default the guide on GitHub, a
+  setting so that a fork or an air-gapped deployment links its own copy). The link opens in a new
+  tab (`target="_blank"`, `rel="noopener noreferrer"`), so the open result and job views stay,
+  and a visually hidden `help.new_tab` says so. Extract links to `single-url`, Structured and
+  Chunk to `structured-data`, Batch and Batch file to `part-of-a-site`, Site structure to
+  `whole-site-and-metadata`, File, Screenshot and Info to `usage`. Every field has a `<label>`
+  and a hint (`hint.<field>`) tied to it with `aria-describedby` (a radio group's on its
+  `fieldset`); so do the key fields of the login box and of "Optional keys" (`hint.api_key`,
+  `hint.llm_key`, `hint.asr_key`).
+- **Tabs.** WAI-ARIA tabs in a `div[role=tablist]` (a `nav` may not take that role): the
+  selected tab has `tabindex="0"`, the others `-1`; `ui.js` moves focus and selection with the
+  arrow keys (wrapping around), Home and End; panels have `tabindex="0"`.
+- **Focus and contrast.** `:focus-visible` draws a 3 px outline in `--focus` (at least 3:1 on
+  the page's backgrounds); text keeps at least 4.5:1; `prefers-reduced-motion` turns animations
+  and transitions off.
+- **Errors.** `OptionsError.field` names the form field at fault. Each form's id is
+  `<prefix>-form`, which htmx sends as `HX-Trigger`; `forms.error_control` maps it, through the
+  allowlist `FORM_PREFIXES`, to the control's id `<prefix>-<field>` (`_` as `-`), and
+  `form_error.html` carries it as `data-error-for` with the id `<control>-error` (an unknown
+  form id gives neither, so the header is never reflected). `ui.js` sets `aria-invalid="true"`
+  on the field, adds the error's id to its `aria-describedby` and moves focus there; the next
+  request of the user's unties it. A whole-form error is `role="alert"`.
+- **Status messages (P12-S9).** `base.html` holds `#ui-status` (`role="status"`,
+  `aria-live="polite"`, visually hidden). While a request of the user's runs, it reads
+  "Sending request …" and the request's target is `aria-busy`. Afterwards it reads the answer's
+  `data-announce`: a result's summary ("Result: success, 0.15 s", the seconds with a decimal
+  comma in German, or "Continues as job <id>"), or the states of a progress view's jobs
+  ("Job <id>: running."). An answer with a `role="alert"` empties it (the alert speaks), any
+  other answer reads "Done.". A progress view's own 3 s refresh (`data-refresh`) writes its
+  states only when they differ from the view it replaces, so a refresh is never read out; no
+  other live region wraps an answer (`#result`, `.job-detail`, `.tree-jobs` and `.previews-out`
+  have none). An answer htmx does not swap gets a `.request-status` box (`role="alert"`): the
+  text of its error code (the page holds every `error.<code>` text in
+  `<template id="ui-error-texts">`) and below it the API's English message.
+- **Progress.** A `<progress>` is named "Progress of job <id>"; the buttons of the refreshing
+  view have stable ids (`job-<id>-show-<index>`, `-previous`, `-next`, `-tree`, `-cancel`), so
+  htmx keeps focus on them across a swap.
+- **Focus across a swap (R-P12-9).** htmx gives the focus back only to an element with the
+  focused element's id; when the new content has none (a refresh that shows a job's error or a
+  429 refusal instead of its buttons, the last page without "Next"), the focus fell to the page
+  and a keyboard user's next key started from an arbitrary place. `ui.js` therefore moves it:
+  after a login to the selected tab (the tab list is where the application starts; the
+  masthead's `h1` is outside the swapped `#app` and not focusable), after a refused key to the
+  key field, and after a swap that removed the focused element of a progress view to the view
+  itself (`section.jobs-view`, `tabindex="-1"`), never to a tab.
+- **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
+  `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
+  "Extract selected", so a keyboard user does not tab through every checkbox.
+- **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
+  progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
+  `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its
+  licence and the notices of the MIT code bundled into it, and pinned by SHA-256; never in an
+  image) is injected with `page.evaluate`, so the CSP stays on, and runs with the tags `wcag2a`,
+  `wcag2aa`, `wcag21a`, `wcag21aa` and `wcag22aa` over the login (also with an error), every tab,
+  an extract result, a form error, a running and a completed progress view, the site tree and
+  the Extract tab with "Site rules" enabled (browser and unblock mode on), in both languages; the
+  gate is zero violations, with no rule or element excluded. Keyboard, focus, status and error
+  tests run beside it.
 
 **Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,
 `partial`, `failed`, `job` or a refusal's error code; every tool exported at 0),
@@ -2559,8 +2687,8 @@ the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for
 - **A deleted batch's queued items drain later.** Workers claim and drop them; until then they
   count in the queue gauges.
 - **Not in this package:** OAuth, MCP resources, prompts, sampling and the stdio transport,
-  server-sent events, a UI password apart from the API keys, a UI session or cookie, a UI language
-  other than English, a Node build, CSV export of results, resizing of preview images.
+  server-sent events, a UI password apart from the API keys, a UI session or cookie, a Node
+  build, CSV export of results, resizing of preview images.
 
 ## Observability
 

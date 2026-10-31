@@ -183,6 +183,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.UI_TREE_MAX_URLS` | `"5000"` | Most URLs the site tree of one site job shows. |
 | `config.UI_BATCH_FILE_MAX_BYTES`, `config.UI_BATCH_FILE_MAX_ROWS` | `"10485760"`, `"100000"` | Largest batch file (CSV or JSON of URLs) and its most rows. |
 | `config.UI_IMAGE_MAX_BYTES` | `"1000000"` | Largest preview image the playground fetches. |
+| `config.UI_DEFAULT_LANGUAGE` | `"en"` | Language of the playground (`en` or `de`) when the browser asks for neither. |
+| `config.UI_DOCS_BASE_URL` | `"https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"` | The user guide the help links of the playground open (`http` or `https`; one folder per language below it). |
 | `config.*` | | Any further non-secret setting is added here. |
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |

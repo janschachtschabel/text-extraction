@@ -6,7 +6,6 @@ Chromium (or a full Chromium under ``/opt/pw-browsers``) they are skipped.
 """
 
 import asyncio
-import glob
 import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -19,7 +18,6 @@ from urllib.parse import urlsplit
 import pytest
 from fakeredis import FakeAsyncRedis
 from patchright.async_api import Error as PatchrightError
-from patchright.async_api import async_playwright as async_patchright
 from playwright.async_api import BrowserContext
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
@@ -56,41 +54,11 @@ from text_extraction.settings import Settings
 pytestmark = pytest.mark.browser
 
 ADMIN = Principal(name="root", role="admin", rate_limit_per_minute=None)
-_FULL_GLOB = "/opt/pw-browsers/chromium-*/chrome-linux*/chrome"
-_SHELL_GLOB = (
-    "/opt/pw-browsers/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"
-)
 CHALLENGE_SECONDS = 10.0
 # The launcher's inline attempts and its background window for a profile, with a margin.
 PROFILE_LEFT_SECONDS = 2.0 + browser_unblock._LATER_SECONDS + 3.0
 # Host names the test proxy dials as 127.0.0.1: a site with a parent domain for cookies.
 ALIASED = ("example.test", "www.example.test", "learn.example.test")
-
-
-async def _patchright_own_chromium_works() -> bool:
-    try:
-        async with async_patchright() as driver:
-            # A launch that fails leaves its /tmp/playwright-artifacts-* dir: look first.
-            if not await asyncio.to_thread(Path(driver.chromium.executable_path).exists):
-                return False
-            browser = await driver.chromium.launch(channel="chromium")
-            await browser.close()
-    except Exception:
-        return False
-    return True
-
-
-@pytest.fixture(scope="session")
-def patchright_chromium() -> Path | None:
-    """The Chromium Patchright launches: None for its own (``patchright install chromium``),
-    else a full Chromium, else a headless shell under ``/opt/pw-browsers``; skips without one."""
-    if asyncio.run(_patchright_own_chromium_works()):
-        return None
-    for pattern in (_FULL_GLOB, _SHELL_GLOB):
-        found = sorted(glob.glob(pattern))
-        if found:
-            return Path(found[-1])
-    pytest.skip("no Chromium for Patchright: run `patchright install chromium`")
 
 
 class RecordingPatchright(PatchrightLauncher):

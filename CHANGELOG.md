@@ -7,11 +7,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version 
 `pyproject.toml`, in `deploy/helm/text-extraction/Chart.yaml` (`version` and `appVersion`) and
 in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-10-31
 
-The first release, a prototype: packages 0 to 12 of [docs/packages.md](docs/packages.md). The
-release is tagged `v0.1.0` after the package 12 pull request is merged; package 11 is merged
-without a tag.
+The first release, a prototype: packages 0 to 12 of [docs/packages.md](docs/packages.md), tagged
+`v0.1.0` on the merge of the package 12 pull request; package 11 is merged without a tag.
 
 ### Added
 
@@ -49,6 +48,13 @@ without a tag.
   sizing and an example production values file, the environment reference, the cost notes for the
   LLM and ASR, the hand-over document, Dependabot, this changelog and a `mode` input for the
   `live.yml` regression.
+- Package 12, UI languages, unblock option and bilingual docs: maximum extraction, which falls
+  back to the browser on a plain 403, 429 or 503 for an admin with `compliance: ignore` and
+  `BROWSER_UNBLOCK_ENABLED`; the playground in German and English with a language switch and no
+  cookie, a "Site rules" choice and a "Browser fallback" select, help texts and status messages,
+  and checks for WCAG 2.2 A and AA with a vendored axe-core 4.14.0 and keyboard tests; and the
+  READMEs and a user guide in German and English, kept in sync by tests and a pull request
+  check.
 
 ### Not in this release
 

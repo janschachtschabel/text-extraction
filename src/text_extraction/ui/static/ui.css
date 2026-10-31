@@ -11,6 +11,7 @@
   --warn-wash: #fff4dc;
   --error: #a3222b;
   --error-wash: #fde8ea;
+  --focus: #1f5fbf; /* at least 3:1 against --paper and --wash */
   color-scheme: light;
 }
 
@@ -27,6 +28,53 @@ body {
 
 [hidden] {
   display: none !important;
+}
+
+/* Accessibility (ruling P12-S8): a visible focus, text only screen readers read, the skip link
+   and reduced motion. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.visually-hidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  top: -4rem;
+  left: 0.5rem;
+  z-index: 10;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--accent);
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 code,
@@ -140,6 +188,33 @@ button.secondary {
   margin-top: 0.75rem;
 }
 
+/* The language switch (P12-S7): two links, the active one marked by aria-current. */
+.language-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  align-items: baseline;
+}
+
+.login .language-switch {
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+}
+
+.language-switch a {
+  color: var(--accent);
+}
+
+.language-switch a[aria-current="true"] {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.language-switch .hint {
+  flex-basis: 100%;
+}
+
 .tabs {
   display: flex;
   flex-wrap: wrap;
@@ -165,6 +240,10 @@ button.secondary {
 
 .panel {
   padding: 1rem 0;
+}
+
+.panel .intro {
+  margin: 0 0 0.5rem;
 }
 
 .result:empty {
@@ -229,6 +308,11 @@ label.inline input {
 
 .badge-failed {
   color: var(--error);
+}
+
+.badge-unblocked {
+  color: var(--warn);
+  background: var(--warn-wash);
 }
 
 .request-status {

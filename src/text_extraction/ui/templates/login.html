@@ -1,17 +1,26 @@
 <section class="login" aria-labelledby="login-title">
+  {% include "language_switch.html" %}
   <form id="login-form" autocomplete="off">
-    <h2 id="login-title">Log in</h2>
-    <p>Log in with an API key of this service. The key stays in this tab and is sent as a header with each request.</p>
-    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-    <label for="login-api-key">API key</label>
-    <input id="login-api-key" type="password" autocomplete="off" spellcheck="false" required>
+    <h2 id="login-title">{{ t("login.title") }}</h2>
+    <p>{{ t("login.intro") }}</p>
+    {% if error %}
+    <div class="error" role="alert">
+      <p>{{ t(error) }}</p>
+      {% with detail=error_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
+    </div>
+    {% endif %}
+    <label for="login-api-key">{{ t("login.api_key") }}</label>
+    <input id="login-api-key" type="password" autocomplete="off" spellcheck="false" required aria-describedby="login-api-key-hint">
+    <p class="hint" id="login-api-key-hint">{{ t("hint.api_key", header=code("Authorization")) }}</p>
     <details>
-      <summary>Optional keys</summary>
-      <label for="login-llm-key">LLM key (<code>X-LLM-Api-Key</code>)</label>
-      <input id="login-llm-key" type="password" autocomplete="off" spellcheck="false">
-      <label for="login-asr-key">ASR key (<code>X-ASR-Api-Key</code>)</label>
-      <input id="login-asr-key" type="password" autocomplete="off" spellcheck="false">
+      <summary>{{ t("keys.optional") }}</summary>
+      <label for="login-llm-key">{{ t("keys.llm", header=code("X-LLM-Api-Key")) }}</label>
+      <input id="login-llm-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="login-llm-key-hint">
+      <p class="hint" id="login-llm-key-hint">{{ t("hint.llm_key") }}</p>
+      <label for="login-asr-key">{{ t("keys.asr", header=code("X-ASR-Api-Key")) }}</label>
+      <input id="login-asr-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="login-asr-key-hint">
+      <p class="hint" id="login-asr-key-hint">{{ t("hint.asr_key") }}</p>
     </details>
-    <button type="submit">Log in</button>
+    <button type="submit">{{ t("login.submit") }}</button>
   </form>
 </section>

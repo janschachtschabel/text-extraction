@@ -4,7 +4,7 @@
 the browser calls them. ``unblock_applies`` says whether unblock mode may be used at all.
 """
 
-from typing import Literal
+from typing import Final, Literal
 
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceMode
@@ -14,6 +14,10 @@ from text_extraction.settings import Settings
 
 # Added to a fast result that stays as the answer because the browser could not be used.
 BROWSER_UNAVAILABLE_WARNING = "browser_unavailable"
+
+# Statuses a site refuses a fetch with that unblock mode tries again in the browser (P12-S1):
+# a bot wall's 403, a rate limit's 429, a protection's 503. Their bodies may be a challenge.
+REFUSAL_STATUSES: Final[frozenset[int]] = frozenset({403, 429, 503})
 
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
@@ -30,14 +34,26 @@ def _is_ok_html(result: ExtractResult) -> bool:
     return media_type in _HTML_TYPES and status is not None and 200 <= status < 300
 
 
+def _is_refusal(envelope: Envelope[ExtractResult], result: ExtractResult) -> bool:
+    """A page answer refused with a 403, 429 or 503, whatever its body or content type."""
+    return (
+        envelope.error is not None
+        and envelope.error.code == ErrorCode.TARGET_HTTP_ERROR
+        and result.upstream_status in REFUSAL_STATUSES
+    )
+
+
 def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     """Whether a fast result should be tried again in the browser.
 
     Only a fast result of a page that was fetched and assessed (``quality`` is set) can escalate,
     never a document's, a platform video's or a media file's.
     It does when the quality gate recommends a browser and the answer is 2xx HTML (a browser
-    cannot do better on a text file or an error status). In unblock mode it also does when the
-    page was refused as bot protection, or when the body of a 403/429/503 answer is a challenge.
+    cannot do better on a text file or an error status). In unblock mode (maximum extraction,
+    P12-S1) it also does on every answer refused with a 403, 429 or 503, whatever its body, on
+    any 2xx HTML result that is not ``success``, and when the page was refused as bot
+    protection. A refusal of a 429 or 503 leaves the host's pause in place: the render takes its
+    turn once it has ended (P12-S2).
 
     A stored result (``cache`` ``hit`` or ``revalidated``) never escalates: only the better of the
     fast and the rendered result is stored, so it is final. A fast result stored while browser
@@ -52,6 +68,8 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
         return False  # a platform video's or a media file's answer is final (M1)
     if result.cache in ("hit", "revalidated"):
         return False
+    if unblock and _is_refusal(envelope, result):
+        return True  # judged before the recommendation, which a refusal's body seldom has
     if result.quality.browser_recommended and _is_ok_html(result):
         return True
     if not unblock:
@@ -59,7 +77,8 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     is_bot_protection = (
         envelope.error is not None and envelope.error.code == ErrorCode.BOT_PROTECTION
     )
-    return is_bot_protection or result.quality.challenge_status
+    unfinished = envelope.status != "success" and _is_ok_html(result)
+    return is_bot_protection or unfinished or result.quality.challenge_status
 
 
 def _score(envelope: Envelope[ExtractResult]) -> tuple[int, int]:

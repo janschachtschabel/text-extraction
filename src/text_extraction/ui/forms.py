@@ -5,7 +5,11 @@ Each operation names one REST route. A form's fields build the route's body; the
 Options (so ``format: html``, which the form does not offer, goes through Options), while a key
 the form sets (a typed value, a box or choice changed from its default) and Options both give is
 refused with "<key> is given twice.". Nothing is forwarded for a refused form. The REST route
-validates the merged body as for any client."""
+validates the merged body as for any client.
+
+"Site rules" (``access``, ruling P12-S3) is a form field that is no body field: ``respect`` (the
+default) sends no ``compliance``, ``maximum`` sends ``compliance: "ignore"`` as set by the user.
+Only admins see the choice (`access_choice`); REST refuses ``ignore`` from anyone else."""
 
 import json
 import math
@@ -15,14 +19,21 @@ from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from text_extraction.file_api import PATH as FILE_PATH
+from text_extraction.settings import Settings
 from text_extraction.site_api import PATH as SITE_PATH
 from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
+from text_extraction.ui.i18n import Message, MessageError
 
 DEFAULT_WAIT_SECONDS: Final = 25
 DEFAULT_MAX_IMAGES: Final = 5
 DEFAULT_SITE_DEPTH: Final = 2
 DEFAULT_SITE_PAGES: Final = 100
 CHECKED: Final = "on"
+# The "Site rules" choice: its form field and its two values.
+ACCESS_FIELD: Final = "access"
+ACCESS_RESPECT: Final = "respect"
+ACCESS_MAXIMUM: Final = "maximum"
+AccessChoice = Literal["hidden", "enabled", "disabled"]
 
 
 @dataclass(frozen=True)
@@ -74,8 +85,34 @@ UI_METADATA_SCHEMA: Final[dict[str, Any]] = {
 }
 
 
-class OptionsError(ValueError):
-    """A form that cannot become a REST body; the message is shown, nothing is forwarded."""
+class OptionsError(MessageError):
+    """A form that cannot become a REST body; its ``message`` is shown, nothing is forwarded.
+    ``field`` names the form field at fault (None: the whole form), so the page can tie the
+    message to its control (`error_control`)."""
+
+    def __init__(self, message: Message, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+# The forms whose fields an error can name, by the prefix of their ids: a form's id is
+# ``<prefix>-form`` (htmx sends it as ``HX-Trigger``), a control's ``<prefix>-<field>`` with
+# each ``_`` of the field's name as ``-`` (ruling P12-S8).
+FORM_PREFIXES: Final = frozenset(
+    {"extract", "file", "screenshot", "structured", "chunk", "batch", "site", "tree", "preview"}
+)
+FORM_ID_SUFFIX: Final = "-form"
+
+
+def error_control(form_id: str | None, field: str | None) -> str | None:
+    """The id of the control of ``field`` in the form whose id is ``form_id``; None for an
+    error of the whole form, or a form this page does not have."""
+    if field is None or form_id is None or not form_id.endswith(FORM_ID_SUFFIX):
+        return None
+    prefix = form_id.removesuffix(FORM_ID_SUFFIX)
+    if prefix not in FORM_PREFIXES:
+        return None
+    return f"{prefix}-{field.replace('_', '-')}"
 
 
 @dataclass(frozen=True)
@@ -120,7 +157,7 @@ def _whole_number(form: Mapping[str, str], name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
-        raise OptionsError(f"{name} must be a whole number.") from None
+        raise OptionsError(Message("options.whole_number", {"name": name}), name) from None
 
 
 def _wait(fields: Fields, form: Mapping[str, str]) -> None:
@@ -133,8 +170,26 @@ def _wait(fields: Fields, form: Mapping[str, str]) -> None:
         except ValueError:
             value = math.nan
         if not math.isfinite(value):
-            raise OptionsError("wait_seconds must be a number.")
+            raise OptionsError(Message("options.number", {"name": "wait_seconds"}), "wait_seconds")
     fields["wait_seconds"] = _Field(value, set_by_user=value != DEFAULT_WAIT_SECONDS)
+
+
+def _access(fields: Fields, form: Mapping[str, str]) -> None:
+    """The "Site rules" choice: ``maximum`` sends ``compliance: "ignore"`` as set by the user
+    (so Options cannot give ``compliance`` too); ``respect`` or any other value sends nothing."""
+    if _text(form, ACCESS_FIELD) == ACCESS_MAXIMUM:
+        fields["compliance"] = _Field("ignore", set_by_user=True)
+
+
+def access_choice(role: str, settings: Settings) -> AccessChoice:
+    """How the forms offer "Site rules" to a caller of ``role``: ``hidden`` for anyone but an
+    admin; for an admin ``enabled`` while browser mode and unblock mode are both on
+    (``BROWSER_ENABLED``, ``BROWSER_UNBLOCK_ENABLED``), else ``disabled``."""
+    if role != "admin":
+        return "hidden"
+    if settings.browser_enabled and settings.browser_unblock_enabled:
+        return "enabled"
+    return "disabled"
 
 
 def _no_constant(name: str) -> Any:
@@ -142,20 +197,22 @@ def _no_constant(name: str) -> Any:
     raise ValueError(name)
 
 
-def _json_object(form: Mapping[str, str], name: str, label: str) -> dict[str, Any] | None:
+def _json_object(form: Mapping[str, str], name: str, label: Message) -> dict[str, Any] | None:
+    """The JSON object of the textarea ``name`` (None when it is empty); ``label`` names it in
+    the messages."""
     value = _text(form, name)
     if not value:
         return None
     try:
         parsed = json.loads(value, parse_constant=_no_constant)
     except (ValueError, RecursionError):  # RecursionError: nested too deep
-        raise OptionsError(f"{label} is not valid JSON.") from None
+        raise OptionsError(Message("options.not_json", {"label": label}), name) from None
     if not isinstance(parsed, dict):
-        raise OptionsError(f"{label} must be a JSON object.")
+        raise OptionsError(Message("options.not_object", {"label": label}), name)
     return parsed
 
 
-def _object(fields: Fields, form: Mapping[str, str], name: str, label: str) -> None:
+def _object(fields: Fields, form: Mapping[str, str], name: str, label: Message) -> None:
     parsed = _json_object(form, name, label)
     if parsed is not None:
         fields[name] = _Field(parsed, set_by_user=True)
@@ -166,6 +223,7 @@ def _extract_fields(form: Mapping[str, str]) -> Fields:
     _typed(fields, form, "url")
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
+    _access(fields, form)
     _box(fields, form, "metadata", default=True)
     if _text(form, "metadata_structured") == CHECKED:
         structured = {"strategy": "metadata", "schema": UI_METADATA_SCHEMA}
@@ -188,6 +246,7 @@ def _file_fields(form: Mapping[str, str]) -> Fields:
 def _screenshot_fields(form: Mapping[str, str]) -> Fields:
     fields: Fields = {}
     _typed(fields, form, "url")
+    _access(fields, form)
     _box(fields, form, "full_page", default=True)
     _wait(fields, form)
     return fields
@@ -198,21 +257,24 @@ def _structured_fields(form: Mapping[str, str]) -> Fields:
     _typed(fields, form, "url")
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
-    _object(fields, form, "structured", "Structured")
+    _access(fields, form)
+    _object(fields, form, "structured", Message("options.label.structured"))
     _wait(fields, form)
     return fields
 
 
 def _chunk_fields(form: Mapping[str, str]) -> Fields:
-    """``url`` or ``text``: a text has no page, so no ``mode`` (REST refuses page options with
-    a text)."""
+    """``url`` or ``text``: a text has no page, so no ``mode`` and no "Site rules" (REST
+    refuses page options with a text)."""
     fields: Fields = {}
     _typed(fields, form, "url")
     if form.get("text"):  # kept as typed: its whitespace is part of the text
         fields["text"] = _Field(form["text"], set_by_user=True)
         _choice(fields, form, "text_type", "markdown")
+    else:
+        _access(fields, form)
     _choice(fields, form, "format", "markdown")
-    _object(fields, form, "chunking", "Chunking")
+    _object(fields, form, "chunking", Message("options.label.chunking"))
     _wait(fields, form)
     return fields
 
@@ -227,6 +289,7 @@ def _batch_fields(form: Mapping[str, str]) -> Fields:
     fields: Fields = {"urls": _Field([], set_by_user=True)}
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
+    _access(fields, form)
     _box(fields, form, "metadata", default=True)
     return fields
 
@@ -239,6 +302,7 @@ def _site_fields(form: Mapping[str, str]) -> Fields:
         fields[name] = _Field(value, set_by_user=value != default)
     _choice(fields, form, "scope", "host")
     _box(fields, form, "sitemaps", default=True)
+    _access(fields, form)
     return fields
 
 
@@ -264,12 +328,12 @@ def build_body(op: str, form: Mapping[str, str]) -> dict[str, Any]:
     (``options``) merged under them. Raises `OptionsError` for invalid JSON, an Options value
     that is not an object, a key given twice or a malformed number."""
     fields = _FORMS[op](form)
-    options = _json_object(form, "options", "Options") or {}
+    options = _json_object(form, "options", Message("options.label.options")) or {}
     body: dict[str, Any] = {}
     for name, value in options.items():
         given = fields.get(name)
         if given is not None and given.set_by_user:
-            raise OptionsError(f"{name} is given twice.")
+            raise OptionsError(Message("options.given_twice", {"name": name}), "options")
         body[name] = value
     for name, field in fields.items():
         if field.set_by_user or name not in options:

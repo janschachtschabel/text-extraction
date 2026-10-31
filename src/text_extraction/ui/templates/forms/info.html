@@ -1,4 +1,3 @@
-<form class="op" hx-post="/ui/run/info" hx-target="#result" hx-swap="innerHTML">
-  <p>The service's name and version, and who this key is.</p>
-  <button type="submit">Show service info</button>
+<form id="info-form" class="op" hx-post="/ui/run/info" hx-target="#result" hx-swap="innerHTML">
+  <button type="submit">{{ t("form.show_info") }}</button>
 </form>

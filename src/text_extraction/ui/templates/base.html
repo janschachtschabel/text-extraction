@@ -1,16 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="{{ lang }}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"historyEnabled":false,"historyCacheSize":0}'>
 <meta name="referrer" content="no-referrer">
-<title>{% block title %}Text Extraction{% endblock %}</title>
+<title>{% block title %}{{ t("page.title") }}{% endblock %}</title>
 <link rel="stylesheet" href="/ui/static/ui.css">
 <script src="/ui/static/htmx-2.0.11.min.js" defer></script>
 <script src="/ui/static/ui.js" defer></script>
 </head>
-<body>
+<body data-text-request-failed="{{ t('status.request_failed') }}" data-text-network-error="{{ t('status.network_error') }}" data-text-selected="{{ t('status.selected') }}" data-text-sending="{{ t('status.sending') }}" data-text-done="{{ t('status.done') }}" data-text-api-details="{{ t('result.api_details') }}">
+<a class="skip-link" href="#app">{{ t("a11y.skip") }}</a>
 {% block body %}{% endblock %}
+{#- The status line of the page's requests (ruling P12-S9): ui.js writes into it. -#}
+<p id="ui-status" class="visually-hidden" role="status" aria-live="polite"></p>
+{#- The texts of the API's error codes, for an answer htmx does not swap. -#}
+<template id="ui-error-texts">{% for error_code in error_codes %}<span data-code="{{ error_code }}">{{ t("error." ~ error_code) }}</span>{% endfor %}</template>
 </body>
 </html>

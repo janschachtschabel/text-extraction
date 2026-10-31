@@ -19,17 +19,35 @@ Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a
 page is the leaf ``/`` inside it, and a query string makes a leaf of its own. Children are in
 name order."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Final, Literal
 
 from text_extraction.job_models import JobItem
 from text_extraction.site.types import SiteInfo
 from text_extraction.site.urls import seen_key
+from text_extraction.ui.i18n import Message
 
-__all__ = ["MAX_SECTION_DEPTH", "NodeKind", "SiteTree", "TreeBuilder", "TreeNode", "build_tree"]
+__all__ = [
+    "FOUND_LABELS",
+    "MAX_SECTION_DEPTH",
+    "NodeKind",
+    "SiteTree",
+    "TreeBuilder",
+    "TreeNode",
+    "build_tree",
+]
 
 NodeKind = Literal["section", "page", "sitemap", "linked"]
+# How the tree labels a URL leaf of each kind (a section has no URL and no label).
+FOUND_LABELS: Final[Mapping[NodeKind, Message]] = MappingProxyType(
+    {
+        "page": Message("tree.crawled"),
+        "sitemap": Message("tree.in_sitemap"),
+        "linked": Message("tree.linked_only"),
+    }
+)
 
 # Sections below a host; the segments of a deeper path stay together in its leaf's label, so
 # neither the tree nor its rendering nests without bound.
@@ -46,8 +64,9 @@ _KINDS: Final[tuple[NodeKind, ...]] = ("page", "sitemap", "linked")
 @dataclass
 class TreeNode:
     """One node: a section (no URL) or a URL leaf of ``kind`` ``page`` (crawled), ``sitemap``
-    (listed only) or ``linked`` (linked only). ``status`` is a page's result status (with its
-    error code), ``depth`` its link distance from the start page, ``lastmod`` a sitemap's."""
+    (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
+    ``error_code`` its error's code, ``depth`` its link distance from the start page,
+    ``lastmod`` a sitemap's."""
 
     label: str
     url: str | None
@@ -57,6 +76,7 @@ class TreeNode:
     depth: int | None = None
     lastmod: str | None = None
     children: list["TreeNode"] = field(default_factory=list)
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,10 +97,12 @@ class _Found:
     status: str | None = None
     depth: int | None = None
     lastmod: str | None = None
+    error_code: str | None = None
 
     def merge(self, other: "_Found") -> None:
         self.title = self.title or other.title
-        self.status = self.status or other.status
+        if self.status is None:
+            self.status, self.error_code = other.status, other.error_code
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
 
@@ -104,10 +126,14 @@ class TreeBuilder:
         if envelope is None or data is None or site is None:
             return
         if site.role == "page" and item.url:
-            status = str(envelope.status)
-            if envelope.error is not None:
-                status = f"{status}: {envelope.error.code}"
-            found = _Found(item.url, title=data.title, status=status, depth=site.depth)
+            code = str(envelope.error.code) if envelope.error is not None else None
+            found = _Found(
+                item.url,
+                title=data.title,
+                status=str(envelope.status),
+                depth=site.depth,
+                error_code=code,
+            )
             self._add(_PAGE, found)
             for link in site.links or []:
                 if link.crawl in LINKED_ONLY:
@@ -204,6 +230,7 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 kind=kind,
                 title=found.title,
                 status=found.status,
+                error_code=found.error_code,
                 depth=found.depth,
                 lastmod=found.lastmod,
             )

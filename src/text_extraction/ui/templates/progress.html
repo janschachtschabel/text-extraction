@@ -1,10 +1,12 @@
-<section class="jobs-view" aria-label="Jobs">
+{#- tabindex=-1: ui.js moves focus here when a refresh removes the focused button (R-P12-9). -#}
+<section class="jobs-view" aria-label="{{ t('progress.jobs') }}" tabindex="-1">
   {% if refused %}
   <div class="error" role="alert">
-    <p>Part {{ refused.part }} of {{ refused.parts }} was refused (HTTP {{ refused.http_status }}): {{ refused.message }}</p>
-    <p class="hint">The jobs below were started and keep running.</p>
+    <p>{{ t("progress.part_refused", part=refused.part, parts=refused.parts, status=refused.http_status, message=refused.message) }}</p>
+    {% with detail=refused.detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
+    <p class="hint">{{ t("progress.keep_running") }}</p>
   </div>
   {% endif %}
   {% include "progress_live.html" %}
-  <div class="job-detail" aria-live="polite"></div>
+  <div class="job-detail"></div>
 </section>

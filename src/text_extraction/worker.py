@@ -42,11 +42,12 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 
 **Auto escalation (B5).** With ``BROWSER_ENABLED``, an ``auto`` item whose fast result needs the
 browser (``escalation.needs_browser``; under unblock mode, for an admin's ``compliance: ignore``
-job, bot walls too) moves to the ``browser`` pool: its fast envelope is stored as the item's
-draft, the item is queued on ``browser`` with the same job, index and client, and it is
-completed here without a result. The browser worker renders it and keeps the better of both.
-Draft first, then the browser queue, then the completion: a crash in between leaves the item
-leased here, so it runs again and moves again, and only the first result of an item counts.
+job, bot walls and refusals too, B16) moves to the ``browser`` pool: its fast envelope is
+stored as the item's draft, the item is queued on ``browser`` with the same job, index and
+client, and it is completed here without a result. The browser worker renders it and keeps the
+better of both. Draft first, then the browser queue, then the completion: a crash in between
+leaves the item leased here, so it runs again and moves again, and only the first result of an
+item counts.
 
 **OCR (F13).** While the service has OCR (``DOCLING_ENABLED`` and ``JOBS_ENABLED``), an item
 whose document needs it moves to the ``docling`` pool the same way: its bytes are stored as the

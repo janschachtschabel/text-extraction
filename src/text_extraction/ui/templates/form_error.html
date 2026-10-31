@@ -1,9 +1,11 @@
-<div class="error" role="alert">
-  <p>{{ message }}</p>
+{#- A form that cannot be sent (ruling P12-S8): with ``error_for`` (the id of the field at fault)
+ui.js ties the message to the field and moves focus there. -#}
+<div class="error" role="alert"{% if error_for %} id="{{ error_for }}-error" data-error-for="{{ error_for }}"{% endif %}>
+  <p>{{ t(message) }}</p>
   {% if problems %}
   <ul class="problems">
-    {% for row, reason in problems %}<li>Row {{ row }}: {{ reason }}</li>{% endfor %}
+    {% for row, reason in problems %}<li>{{ t("batch.row_problem", row=row, reason=reason) }}</li>{% endfor %}
   </ul>
-  {% if more_problems %}<p class="hint">{{ more_problems }} more rows with problems.</p>{% endif %}
+  {% if more_problems %}<p class="hint">{{ t("batch.more_problems", count=more_problems) }}</p>{% endif %}
   {% endif %}
 </div>

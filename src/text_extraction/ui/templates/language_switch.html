@@ -1,0 +1,4 @@
+<nav class="language-switch" aria-label="{{ t('switch.label') }}">
+  {% for option in languages %}<a href="/ui?lang={{ option }}" lang="{{ option }}" hreflang="{{ option }}" data-lang="{{ option }}"{% if option == lang %} aria-current="true"{% endif %}{% if switch_hint %} aria-describedby="language-switch-hint"{% endif %}>{{ t("switch." ~ option) }}</a>
+  {% endfor %}{% if switch_hint %}<span id="language-switch-hint" class="hint">{{ t("switch.hint") }}</span>{% endif %}
+</nav>

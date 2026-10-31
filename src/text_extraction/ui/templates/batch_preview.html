@@ -1,33 +1,34 @@
-<section class="batch-preview" aria-label="Batch preview">
-  <h4>The {{ source }} holds {{ urls }} URLs</h4>
+<section class="batch-preview" aria-label="{{ t('batch.preview') }}">
+  <h4>{{ t("batch.holds." ~ source, count=urls) }}</h4>
   <dl class="facts counts">
-    <dt>Rows</dt><dd class="rows">{{ rows }}</dd>
+    <dt>{{ t("batch.rows") }}</dt><dd class="rows">{{ rows }}</dd>
     <dt>URLs</dt><dd class="urls">{{ urls }}</dd>
-    <dt>Not a URL</dt><dd class="invalid">{{ invalid }}</dd>
-    <dt>Duplicates dropped</dt><dd class="duplicates">{{ duplicates }}</dd>
-    <dt>Batches</dt><dd class="parts">{{ parts }}</dd>
+    <dt>{{ t("batch.invalid") }}</dt><dd class="invalid">{{ invalid }}</dd>
+    <dt>{{ t("batch.duplicates") }}</dt><dd class="duplicates">{{ duplicates }}</dd>
+    <dt>{{ t("batch.parts") }}</dt><dd class="parts">{{ parts }}</dd>
   </dl>
   {% if problems %}
-  <h5>Rows that are not used</h5>
+  <h5>{{ t("batch.unused_rows") }}</h5>
   <ul class="problems">
-    {% for row, reason in problems %}<li>Row {{ row }}: {{ reason }}</li>{% endfor %}
+    {% for row, reason in problems %}<li>{{ t("batch.row_problem", row=row, reason=reason) }}</li>{% endfor %}
   </ul>
-  {% if more_problems %}<p class="hint">{{ more_problems }} more rows are not used.</p>{% endif %}
+  {% if more_problems %}<p class="hint">{{ t("batch.more_unused", count=more_problems) }}</p>{% endif %}
   {% endif %}
   {% if first %}
-  <h5>The first URLs</h5>
+  <h5>{{ t("batch.first_urls") }}</h5>
   <ol class="first-urls">
     {% for url in first %}<li>{{ url }}</li>{% endfor %}
   </ol>
   {% endif %}
-  {% if too_many %}<p class="error" role="alert">{{ too_many }}</p>{% endif %}
+  {% if too_many %}<p class="error" role="alert">{{ t(too_many) }}</p>{% endif %}
   {% if urls and not too_many %}
-  <form class="op" hx-post="/ui/run/batch-urls" hx-target="closest .batch-preview" hx-swap="outerHTML">
-    {% set prefix = "preview" %}
+  {% set prefix = "preview" %}
+  <form id="preview-form" class="op" hx-post="/ui/run/batch-urls" hx-target="closest .batch-preview" hx-swap="outerHTML">
     <label for="preview-urls">URLs</label>
-    <textarea id="preview-urls" name="urls" rows="8" spellcheck="false" readonly>{{ text }}</textarea>
+    <textarea id="preview-urls" name="urls" rows="8" spellcheck="false" readonly aria-describedby="preview-urls-hint">{{ text }}</textarea>
+    <p class="hint" id="preview-urls-hint">{{ t("hint.urls", setting=code("BATCH_MAX_URLS")) }}</p>
     {% include "forms/batch_options.html" %}
-    <button type="submit">Start batch</button>
+    <button type="submit">{{ t("batch.start") }}</button>
   </form>
   {% endif %}
 </section>

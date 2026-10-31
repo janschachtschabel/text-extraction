@@ -995,7 +995,8 @@ expect_absent "config.UI_ENABLED not in the ConfigMap" "$(document "$config_on" 
 configmap="$(document "$on" ConfigMap "$API")"
 for entry in 'MCP_ALLOWED_ORIGINS: ""' 'MCP_WAIT_SECONDS: "25"' 'MCP_MAX_CONTENT_CHARS: "50000"' \
   'MCP_IMAGE_MAX_BYTES: "5000000"' 'UI_TREE_MAX_URLS: "5000"' 'UI_BATCH_FILE_MAX_BYTES: "10485760"' \
-  'UI_BATCH_FILE_MAX_ROWS: "100000"' 'UI_IMAGE_MAX_BYTES: "1000000"'; do
+  'UI_BATCH_FILE_MAX_ROWS: "100000"' 'UI_IMAGE_MAX_BYTES: "1000000"' 'UI_DEFAULT_LANGUAGE: "en"' \
+  'UI_DOCS_BASE_URL: "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"'; do
   expect_contains "ConfigMap default $entry" "$configmap" "$entry"
 done
 

@@ -2,7 +2,8 @@
 
 The tests run a real Chromium (``@pytest.mark.browser``; the default ``pytest`` run leaves them
 out). Chromium is ``BROWSER_EXECUTABLE_PATH`` when set, else Playwright's own, else a headless
-shell under ``/opt/pw-browsers``; without one the tests are skipped.
+shell under ``/opt/pw-browsers``; without one the tests are skipped. Patchright's Chromium (the
+unblock renderer's) is found the same way (``patchright_chromium``).
 
 The site is served on three loopback ports. The egress proxy of the tests admits 127.0.0.1 on
 the first two only (the site and its "third party"), so the private-address tests still see the
@@ -22,6 +23,7 @@ from urllib.parse import urlsplit
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from patchright.async_api import async_playwright as async_patchright
 from playwright.async_api import Browser, async_playwright
 from prometheus_client import CollectorRegistry
 
@@ -42,6 +44,7 @@ from text_extraction.result_cache import ResultCache
 from text_extraction.settings import Settings
 
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
+_FULL_GLOB = "/opt/pw-browsers/chromium-*/chrome-linux*/chrome"
 _SHELL_GLOB = (
     "/opt/pw-browsers/chromium_headless_shell-*/chrome-headless-shell-linux64/chrome-headless-shell"
 )
@@ -72,6 +75,32 @@ def chromium() -> Path | None:
     if found:
         return Path(found[-1])
     pytest.skip("no Chromium found: set BROWSER_EXECUTABLE_PATH or run `playwright install`")
+
+
+async def _patchright_own_chromium_works() -> bool:
+    try:
+        async with async_patchright() as driver:
+            # A launch that fails leaves its /tmp/playwright-artifacts-* dir: look first.
+            if not await asyncio.to_thread(Path(driver.chromium.executable_path).exists):
+                return False
+            browser = await driver.chromium.launch(channel="chromium")
+            await browser.close()
+    except Exception:
+        return False
+    return True
+
+
+@pytest.fixture(scope="session")
+def patchright_chromium() -> Path | None:
+    """The Chromium Patchright launches: None for its own (``patchright install chromium``),
+    else a full Chromium, else a headless shell under ``/opt/pw-browsers``; skips without one."""
+    if asyncio.run(_patchright_own_chromium_works()):
+        return None
+    for pattern in (_FULL_GLOB, _SHELL_GLOB):
+        found = sorted(glob.glob(pattern))
+        if found:
+            return Path(found[-1])
+    pytest.skip("no Chromium for Patchright: run `patchright install chromium`")
 
 
 @pytest.fixture(scope="session")

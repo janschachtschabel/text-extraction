@@ -20,10 +20,11 @@ from text_extraction.browser_models import ScreenshotResult
 from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
+from text_extraction.ui.i18n import Language, Message
 from text_extraction.ui.markdown import is_http, render_markdown
 from text_extraction.ui.security import RUN_PREFIX
-from text_extraction.ui.templating import templates
-from text_extraction.ui.texts import warning_text
+from text_extraction.ui.templating import language_context, templates
+from text_extraction.ui.texts import error_text, warning_message
 from text_extraction.ui.timeline import RequestedMode, TimelineStep, timeline
 
 DOWNLOADS: Final = {
@@ -79,12 +80,22 @@ def curl_line(
 
 
 @dataclass(frozen=True)
-class Row:
-    """A label and its text in a definition list; ``link`` when the text is an http(s) URL."""
+class Licence:
+    """A licence as a metadata row shows it: its id, label and URL, and where it was found."""
 
-    label: str
     text: str
+    source: str | None
+
+
+@dataclass(frozen=True)
+class Row:
+    """A label and its text in a definition list; ``link`` when the text is an http(s) URL;
+    ``licences`` instead of a text for the licence rows."""
+
+    label: Message
+    text: str = ""
     link: bool = False
+    licences: tuple[Licence, ...] = ()
 
 
 def _shown(value: Any) -> str:
@@ -92,39 +103,42 @@ def _shown(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
-def _licence_text(licence: Mapping[str, Any]) -> str:
+def _licence(licence: Mapping[str, Any]) -> Licence:
     parts = [str(licence[name]) for name in ("id", "label", "url") if licence.get(name)]
-    if licence.get("source"):
-        parts.append(f"(from {licence['source']})")
-    return " ".join(parts)
+    source = licence.get("source")
+    return Licence(" ".join(parts), str(source) if source else None)
 
 
 def _metadata_rows(metadata: Mapping[str, Any]) -> list[Row]:
     rows: list[Row] = []
     for label, name in (
-        ("Description", "description"),
-        ("Published", "published"),
-        ("Modified", "modified"),
-        ("Site", "site_name"),
-        ("Language", "language"),
+        (Message("result.meta.description"), "description"),
+        (Message("result.meta.published"), "published"),
+        (Message("result.meta.modified"), "modified"),
+        (Message("result.meta.site"), "site_name"),
+        (Message("result.meta.language"), "language"),
     ):
         if metadata.get(name):
             rows.append(Row(label, _shown(metadata[name])))
     if metadata.get("authors"):
-        rows.append(Row("Authors", ", ".join(map(_shown, metadata["authors"]))))
+        authors = ", ".join(map(_shown, metadata["authors"]))
+        rows.append(Row(Message("result.meta.authors"), authors))
     if metadata.get("keywords"):
-        rows.append(Row("Keywords", ", ".join(map(_shown, metadata["keywords"]))))
+        keywords = ", ".join(map(_shown, metadata["keywords"]))
+        rows.append(Row(Message("result.meta.keywords"), keywords))
     canonical = metadata.get("canonical_url")
     if canonical:
-        rows.append(Row("Canonical", _shown(canonical), link=is_http(canonical)))
+        label = Message("result.meta.canonical")
+        rows.append(Row(label, _shown(canonical), link=is_http(canonical)))
     licence = metadata.get("license")
     if isinstance(licence, Mapping):
-        rows.append(Row("Licence", _licence_text(licence)))
+        rows.append(Row(Message("result.meta.licence"), licences=(_licence(licence),)))
     others = [item for item in metadata.get("licenses") or [] if isinstance(item, Mapping)]
     if len(others) > 1:
-        rows.append(Row("Licences found", "; ".join(_licence_text(item) for item in others)))
+        found = tuple(_licence(item) for item in others)
+        rows.append(Row(Message("result.meta.licences_found"), licences=found))
     if metadata.get("lrmi"):
-        rows.append(Row("LRMI", _shown(metadata["lrmi"])))
+        rows.append(Row(Message("result.meta.lrmi"), _shown(metadata["lrmi"])))
     return rows
 
 
@@ -166,7 +180,7 @@ class Download:
     href: str
     name: str
     suffix: str
-    note: str | None = None
+    note: Message | None = None
 
 
 def _download(data: Mapping[str, Any]) -> Download | None:
@@ -177,28 +191,23 @@ def _download(data: Mapping[str, Any]) -> Download | None:
     media_type, suffix = media
     note = None
     if len(content) > DOWNLOAD_MAX_CHARS:
-        note = (
-            f"The download is cut at {DOWNLOAD_MAX_CHARS} of {len(content)} characters; the curl "
-            "command reads all of it."
-        )
+        note = Message("result.download_cut", {"max": DOWNLOAD_MAX_CHARS, "total": len(content)})
         content = content[:DOWNLOAD_MAX_CHARS]
     encoded = base64.b64encode(content.encode()).decode("ascii")
     href = f"data:{media_type};charset=utf-8;base64,{encoded}"
     return Download(href=href, name=f"{DOWNLOAD_NAME}{suffix}", suffix=suffix, note=note)
 
 
-def _content_note(content: str) -> str | None:
+def _content_note(content: str) -> Message | None:
     if len(content) <= SHOWN_MAX_CHARS:
         return None
-    where = (
-        "the download has all of them"
-        if len(content) <= DOWNLOAD_MAX_CHARS
-        else f"the download has the first {DOWNLOAD_MAX_CHARS}"
-    )
-    return f"Showing the first {SHOWN_MAX_CHARS} of {len(content)} characters; {where}."
+    params = {"shown": SHOWN_MAX_CHARS, "total": len(content)}
+    if len(content) <= DOWNLOAD_MAX_CHARS:
+        return Message("result.content_cut_all", params)
+    return Message("result.content_cut_part", {**params, "max": DOWNLOAD_MAX_CHARS})
 
 
-def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], str | None]:
+def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], Message | None]:
     """The chunks whose texts fit ``SHOWN_MAX_CHARS`` together, and a note on the rest."""
     chunks = [chunk for chunk in data.get("chunks") or [] if isinstance(chunk, Mapping)]
     shown: list[Mapping[str, Any]] = []
@@ -209,14 +218,14 @@ def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], str | Non
             break
         shown.append(chunk)
     rest = len(chunks) - len(shown)
-    return shown, (f"{rest} more chunks not shown; see the download." if rest else None)
+    return shown, (Message("result.chunks_more", {"count": rest}) if rest else None)
 
 
-def _raw_json(envelope: Mapping[str, Any]) -> tuple[str, str | None]:
+def _raw_json(envelope: Mapping[str, Any]) -> tuple[str, Message | None]:
     text = json.dumps(envelope, indent=2, ensure_ascii=False)
     if len(text) <= SHOWN_MAX_CHARS:
         return text, None
-    note = f"The raw JSON is cut at {SHOWN_MAX_CHARS} of {len(text)} characters."
+    note = Message("result.raw_cut", {"max": SHOWN_MAX_CHARS, "total": len(text)})
     return text[:SHOWN_MAX_CHARS], note
 
 
@@ -268,8 +277,8 @@ def _structured(data: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _warnings(data: Mapping[str, Any]) -> list[tuple[str, str | None]]:
-    return [(_shown(name), warning_text(_shown(name))) for name in data.get("warnings") or []]
+def _warnings(data: Mapping[str, Any]) -> list[tuple[str, Message | None]]:
+    return [(_shown(name), warning_message(_shown(name))) for name in data.get("warnings") or []]
 
 
 def result_context(
@@ -281,13 +290,17 @@ def result_context(
     curl: str | None = None,
     requested_mode: RequestedMode | None = None,
     screenshot: str | None = None,
-    screenshot_note: str | None = None,
+    screenshot_note: Message | None = None,
+    screenshot_detail: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
 ) -> dict[str, Any]:
     """The context of ``result.html`` for one REST answer: ``envelope`` is its JSON object (None
     for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its PNG (or
-    ``screenshot_note`` why it could not be read), ``retry_after`` the seconds of a 429."""
+    ``screenshot_note`` why it could not be read, with the API's English
+    ``screenshot_detail``), ``retry_after`` the seconds of a 429. An
+    error is shown as the text of its code (``error_text``) with the API's English message and
+    ``details`` below it."""
     envelope = envelope or {}
     data = envelope.get("data")
     data = data if isinstance(data, Mapping) else None
@@ -298,6 +311,9 @@ def result_context(
         "http_status": http_status,
         "status": envelope.get("status"),
         "error": error if isinstance(error, Mapping) else None,
+        "error_text": (
+            error_text(error.get("code"), http_status) if isinstance(error, Mapping) else None
+        ),
         "details": _details(error) if isinstance(error, Mapping) else [],
         "retry_after": retry_after,
         "raw_json": raw_json,
@@ -305,6 +321,7 @@ def result_context(
         "curl": curl,
         "screenshot": screenshot,
         "screenshot_note": screenshot_note,
+        "screenshot_detail": screenshot_detail,
         "job": None,
         "info": None,
         "data": None,
@@ -340,6 +357,7 @@ def result_context(
     context["images"] = _images(data)
     compliance = data.get("compliance")
     context["compliance_mode"] = compliance.get("mode") if isinstance(compliance, Mapping) else None
+    context["unblocked"] = data.get("unblocked") is True
     context["image_report"] = data.get("image_descriptions")
     context["links"] = _links(data)
     context["warnings"] = _warnings(data)
@@ -366,11 +384,14 @@ def render_result(
     curl: str | None = None,
     requested_mode: RequestedMode | None = None,
     screenshot: str | None = None,
-    screenshot_note: str | None = None,
+    screenshot_note: Message | None = None,
+    screenshot_detail: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
+    language: Language = "en",
 ) -> str:
-    """``result.html`` rendered with `result_context` of the same arguments."""
+    """``result.html`` rendered in ``language`` with `result_context` of the other
+    arguments."""
     context = result_context(
         op=op,
         http_status=http_status,
@@ -380,7 +401,8 @@ def render_result(
         requested_mode=requested_mode,
         screenshot=screenshot,
         screenshot_note=screenshot_note,
+        screenshot_detail=screenshot_detail,
         retry_after=retry_after,
         item=item,
     )
-    return templates.get_template("result.html").render(context)
+    return templates.get_template("result.html").render({**language_context(language), **context})

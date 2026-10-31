@@ -1,20 +1,27 @@
-<form class="op" hx-post="/ui/run/site-structure" hx-target="#result" hx-swap="innerHTML">
-  {% set prefix = "site" %}
-  <label for="site-url">Start URL</label>
-  <input id="site-url" name="url" type="url" required placeholder="https://" spellcheck="false">
-  <label for="site-depth">Link depth</label>
-  <input id="site-depth" name="depth" type="number" min="0" max="10" value="2">
-  <label for="site-max-pages">Most pages</label>
-  <input id="site-max-pages" name="max_pages" type="number" min="1" value="100">
-  <label for="site-scope">Scope</label>
-  <select id="site-scope" name="scope">
-    <option value="host" selected>host: the start page's host</option>
-    <option value="path">path: only below the start URL's directory</option>
+{% set prefix = "site" %}
+<form id="site-form" class="op" hx-post="/ui/run/site-structure" hx-target="#result" hx-swap="innerHTML">
+  <label for="site-url">{{ t("form.start_url") }}</label>
+  <input id="site-url" name="url" type="url" required placeholder="https://" spellcheck="false" aria-describedby="site-url-hint">
+  <p class="hint" id="site-url-hint">{{ t("hint.start_url") }}</p>
+  <label for="site-depth">{{ t("form.depth") }}</label>
+  <input id="site-depth" name="depth" type="number" min="0" max="10" value="2" aria-describedby="site-depth-hint">
+  <p class="hint" id="site-depth-hint">{{ t("hint.depth") }}</p>
+  <label for="site-max-pages">{{ t("form.max_pages") }}</label>
+  <input id="site-max-pages" name="max_pages" type="number" min="1" value="100" aria-describedby="site-max-pages-hint">
+  <p class="hint" id="site-max-pages-hint">{{ t("hint.max_pages") }}</p>
+  <label for="site-scope">{{ t("form.scope") }}</label>
+  <select id="site-scope" name="scope" aria-describedby="site-scope-hint">
+    <option value="host" selected>{{ t("form.scope_host") }}</option>
+    <option value="path">{{ t("form.scope_path") }}</option>
   </select>
+  <p class="hint" id="site-scope-hint">{{ t("hint.scope") }}</p>
   <fieldset class="choice">
-    <legend>Also</legend>
-    <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked> robots.txt and sitemaps</label>
+    <legend>{{ t("form.also") }}</legend>
+    <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked aria-describedby="site-sitemaps-hint"> {{ t("form.sitemaps") }}</label>
+    <p class="hint" id="site-sitemaps-hint">{{ t("hint.sitemaps") }}</p>
   </fieldset>
+  {% set access_variant = "site" %}
+  {% include "forms/access.html" %}
   {% include "forms/options.html" %}
-  <button type="submit">Read the site structure</button>
+  <button type="submit">{{ t("form.read_site") }}</button>
 </form>

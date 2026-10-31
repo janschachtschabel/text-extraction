@@ -3,14 +3,17 @@ from typing import Any, Literal
 import pytest
 
 from text_extraction.compliance import ComplianceReport
+from text_extraction.documents.types import DocumentInfo
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.escalation import (
     BROWSER_UNAVAILABLE_WARNING,
+    REFUSAL_STATUSES,
     better,
     needs_browser,
     unblock_applies,
 )
 from text_extraction.extract_models import ExtractResult, Timings
+from text_extraction.media.types import MediaInfo
 from text_extraction.quality import Quality
 from text_extraction.settings import Settings
 
@@ -177,6 +180,91 @@ def test_bot_protection_and_challenge_status_escalate_only_under_unblock() -> No
     assert needs_browser(blocked, unblock=True)
     assert not needs_browser(challenge, unblock=False)
     assert needs_browser(challenge, unblock=True)
+
+
+def refusal(upstream_status: int, **extra: Any) -> Envelope[ExtractResult]:
+    """A fast page answer refused with ``upstream_status``, its body no challenge."""
+    return envelope(
+        status="failed",
+        code=ErrorCode.TARGET_HTTP_ERROR,
+        words=0,
+        q=quality(visible_chars=9, word_count=1),
+        upstream_status=upstream_status,
+        **extra,
+    )
+
+
+def test_refusal_statuses() -> None:
+    assert frozenset({403, 429, 503}) == REFUSAL_STATUSES
+
+
+@pytest.mark.parametrize("status", [403, 429, 503])
+def test_plain_refusal_escalates_only_under_unblock(status: int) -> None:
+    refused = refusal(status)
+    text = refusal(status, content_type="text/plain")
+
+    assert refused.data is not None
+    assert refused.data.quality is not None
+    assert refused.data.quality.challenge_status is False
+    assert needs_browser(refused, unblock=True)
+    assert needs_browser(text, unblock=True)  # whatever its content type (P12-S1)
+    assert not needs_browser(refused, unblock=False)
+    assert not needs_browser(text, unblock=False)
+
+
+@pytest.mark.parametrize("status", [401, 404, 410, 500, 502])
+def test_other_error_statuses_never_escalate(status: int) -> None:
+    assert not needs_browser(refusal(status), unblock=True)
+    assert not needs_browser(refusal(status), unblock=False)
+
+
+def test_refusal_of_a_document_media_or_cached_result_does_not_escalate() -> None:
+    document = refusal(
+        403,
+        document=DocumentInfo(
+            kind="pdf", converter="markitdown", pages=1, pages_converted=1, ocr=False
+        ),
+    )
+    media = refusal(403, media=MediaInfo(platform="youtube", transcript_source=None))
+    fresh = refusal(403)
+    assert fresh.data is not None
+    cached = [
+        fresh.model_copy(update={"data": fresh.data.model_copy(update={"cache": cache})})
+        for cache in ("hit", "revalidated")
+    ]
+
+    for final in (document, media, *cached):
+        assert not needs_browser(final, unblock=True)
+    page_with_players = refusal(403, media=MediaInfo(platform="html5", transcript_source=None))
+    assert needs_browser(page_with_players, unblock=True)
+
+
+def test_non_success_html_escalates_under_unblock() -> None:
+    short = envelope(
+        status="partial",
+        code=ErrorCode.CONTENT_TOO_SHORT,
+        words=12,
+        q=quality(word_count=12, browser_recommended=False),
+    )
+    empty = envelope(
+        status="failed",
+        code=ErrorCode.EMPTY_CONTENT,
+        words=0,
+        q=quality(word_count=0, browser_recommended=False),
+    )
+    plain = envelope(
+        status="partial",
+        code=ErrorCode.CONTENT_TOO_SHORT,
+        words=12,
+        q=quality(word_count=12),
+        content_type="text/plain",
+    )
+
+    for unfinished in (short, empty):
+        assert needs_browser(unfinished, unblock=True)
+        assert not needs_browser(unfinished, unblock=False)
+    assert not needs_browser(plain, unblock=True)  # a browser renders no better text file
+    assert not needs_browser(envelope(q=quality()), unblock=True)  # a success is final
 
 
 @pytest.mark.parametrize(

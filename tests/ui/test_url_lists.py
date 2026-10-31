@@ -2,12 +2,17 @@
 bounds and messages, and the split into batches."""
 
 import json
+import re
 import time
+from pathlib import Path
 
 import pytest
 
+from text_extraction import netguard
 from text_extraction.netguard import MAX_URL_LENGTH
+from text_extraction.ui.i18n import Message
 from text_extraction.ui.url_lists import (
+    URL_PROBLEMS,
     UrlList,
     UrlListError,
     parse_url_file,
@@ -25,6 +30,11 @@ LONGEST = "https://example.org/" + "x" * (MAX_URL_LENGTH - 20)
 def parse(text: str | bytes, max_rows: int = 1000) -> UrlList:
     data = text.encode() if isinstance(text, str) else text
     return parse_url_file(data, max_rows=max_rows)
+
+
+def english(invalid: list[tuple[int, Message]]) -> list[tuple[int, str]]:
+    """The problems of a list with their English texts."""
+    return [(row, reason.text("en")) for row, reason in invalid]
 
 
 def refused(text: str | bytes, message: str, max_rows: int = 1000) -> None:
@@ -71,7 +81,7 @@ def test_parse_url_file_bounds_and_errors() -> None:
     )
     assert found.urls == [A, B]
     assert [row for row, _ in found.invalid] == [3, 4, 5, 6, 7, 8, 9, 10]
-    assert all(reason and "evil" not in reason for _, reason in found.invalid)
+    assert all("evil" not in reason.text("en") for _, reason in found.invalid)
     assert found.rows == 10
     # Duplicates after stripping are dropped and counted.
     assert parse(f"{A}\n {A}\n{B}\n{A}\n") == UrlList(urls=[A, B], invalid=[], duplicates=2, rows=4)
@@ -101,7 +111,10 @@ def test_parse_url_file_bounds_and_errors() -> None:
     refused(f"url,title\n{A},x\n" + "," * 5000 + "\n", "A row has too many columns.")
     # A 10 KB JSON string is a row that is not a URL, not a refusal of the file.
     found = parse(json.dumps([A, "https://example.org/" + "x" * 10_000]))
-    assert (found.urls, found.invalid) == ([A], [(2, "URL is longer than 2048 characters")])
+    assert (found.urls, english(found.invalid)) == (
+        [A],
+        [(2, "URL is longer than 2048 characters")],
+    )
     # An empty file has no URLs.
     assert parse("") == UrlList(urls=[], invalid=[], duplicates=0, rows=0)
 
@@ -109,8 +122,11 @@ def test_parse_url_file_bounds_and_errors() -> None:
 def test_parse_url_lines() -> None:
     found = parse_url_lines([f" {A} ", "", "javascript:alert(1)", A, B], max_rows=10)
 
-    assert found == UrlList(
-        urls=[A, B], invalid=[(3, "URL scheme must be http or https")], duplicates=1, rows=4
+    assert (found.urls, english(found.invalid), found.duplicates, found.rows) == (
+        [A, B],
+        [(3, "URL scheme must be http or https")],
+        1,
+        4,
     )
     with pytest.raises(UrlListError, match=r"^The list has more than 3 URLs\.$"):
         parse_url_lines([A, B, C, "https://example.org/d"], max_rows=3)
@@ -127,3 +143,41 @@ def test_split_batches() -> None:
     assert split_batches([], per_batch=10, max_batches=1) == []
     with pytest.raises(UrlListError, match=r"^Select at most 5000 URLs at once\.$"):
         split_batches(urls * 3, per_batch=1000, max_batches=5)
+
+
+def test_url_list_problems_in_german() -> None:
+    found = parse_url_lines(
+        ["javascript:alert(1)", "https://", A, "https://example.org/a b", LONGEST + "x"],
+        max_rows=10,
+    )
+
+    assert [(row, reason.text("de")) for row, reason in found.invalid] == [
+        (1, "Das Schema der URL muss http oder https sein"),
+        (2, "Die URL hat keinen Host"),
+        (4, "Die URL enthält ein Leerzeichen oder ein Steuerzeichen"),
+        (5, f"Die URL ist länger als {MAX_URL_LENGTH} Zeichen"),
+    ]
+    for data, german in (
+        (
+            "url\nhttps://example.org/caf\xe9\n".encode("latin-1"),
+            "Die Datei ist nicht UTF-8-kodiert.",
+        ),
+        (b"[1", "Die Datei ist kein gültiges JSON."),
+        (f"url,title\n{A},{'t' * 10_000}\n".encode(), "Ein Feld ist zu lang."),
+        (f"{A}\n{B}\n{C}\n".encode(), "Die Datei hat mehr als 2 Zeilen."),
+    ):
+        with pytest.raises(UrlListError) as caught:
+            parse(data, max_rows=2)
+        assert caught.value.message.text("de") == german
+    with pytest.raises(UrlListError) as caught:
+        split_batches([A, B, C], per_batch=1, max_batches=2)
+    assert caught.value.message.text("de") == "Wählen Sie höchstens 2 URLs auf einmal."
+    assert str(caught.value) == "Select at most 2 URLs at once."  # English for logs and tests
+
+
+def test_every_url_problem_of_netguard_has_a_text() -> None:
+    source = Path(netguard.__file__).read_text(encoding="utf-8")
+    raised = set(re.findall(r'InvalidUrlError\("([^"]+)"\)', source))
+
+    assert raised
+    assert raised == set(URL_PROBLEMS)
