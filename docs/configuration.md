@@ -6,8 +6,9 @@ chart README has the [full values table](../deploy/helm/text-extraction/README.m
 
 ## Environment variables
 
-Non-secret settings. In Helm, put a variable under `config.<NAME>` in the values; it lands in the
-chart's ConfigMap with the same name (values are strings). The chart overrides `PUBLIC_PORT`,
+Every setting with its default. In Helm, put a variable under `config.<NAME>` in the values; it
+lands in the chart's ConfigMap with the same name (values are strings). The secrets among them,
+marked **Secret**, never go under `config`: see [Secrets](#secrets) for where they belong. The chart overrides `PUBLIC_PORT`,
 `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods (value `jobs.enabled`),
 `WORKER_CONCURRENCY` on the extract workers (value `workers.extract.concurrency`),
 `BROWSER_CONCURRENCY` on the browser workers (value `workers.browser.concurrency`), and
@@ -23,6 +24,8 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive). Anything else makes the service exit with code 2. |
 | `LOG_FORMAT` | `json` | `json` (stdout, one object per line) or `console` (plain text for local development). |
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
+| `API_KEYS` | empty | **Secret**, see [Secrets](#secrets): the API keys, a JSON list of hashed entries with name and role. |
+| `API_KEYS_FILE` | unset | Path to a JSON file of further keys in the shape of `API_KEYS`, merged with it; its content is a secret, see [Secrets](#secrets). |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
 | `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB), `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB), `/mcp` (see MCP) and some `/ui/run` routes (see UI). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |

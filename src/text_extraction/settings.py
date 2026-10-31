@@ -120,8 +120,9 @@ def normalize_origin(value: str) -> str | None:
 
 
 class Settings(BaseSettings):
-    """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content and
-    ``ASR_EXTERNAL_API_KEY`` and ``PII_HASH_KEY``."""
+    """Service settings. Secrets: ``API_KEYS`` and ``API_KEYS_FILE`` content,
+    ``ASR_EXTERNAL_API_KEY``, ``PII_HASH_KEY``, ``LLM_API_KEY``, and ``VALKEY_URL`` when it
+    carries a password."""
 
     model_config = SettingsConfigDict(
         case_sensitive=False, extra="ignore", hide_input_in_errors=True
