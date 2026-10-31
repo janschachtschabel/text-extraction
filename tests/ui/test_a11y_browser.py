@@ -13,6 +13,7 @@ import time
 from collections.abc import Iterator
 from typing import Any, Final
 
+import httpx
 import pytest
 from playwright.sync_api import Page, expect
 from pytest_httpserver import HTTPServer
@@ -368,6 +369,108 @@ def test_an_error_that_replaces_its_target_is_not_announced_as_done(
     assert translate("en", "status.sending") in texts
     assert translate("en", "status.done") not in texts
     assert status == ""
+    assert console == []
+
+
+def _active(page: Page) -> list[Any]:
+    """The focused element: its tag, id and whether it shows its focus ring."""
+    active: list[Any] = page.evaluate(
+        "() => { const e = document.activeElement;"
+        " return [e.tagName, e.id, e.matches(':focus-visible')]; }"
+    )
+    return active
+
+
+def test_login_moves_focus_into_the_app(ui: tuple[str, str]) -> None:
+    """After a login the selected tab has the focus, so a keyboard user starts in the tab list;
+    after a refused key the key field keeps it (ruling R-P12-9 a)."""
+    url, _ = ui
+    with browsing(url) as (page, console):
+        page.fill("#login-api-key", "wrong-key-0123456789")
+        page.keyboard.press("Enter")
+        expect(page.locator("#login-form .error")).to_be_visible()
+        assert _active(page)[:2] == ["INPUT", "login-api-key"]
+
+        page.fill("#login-api-key", ADMIN_KEY)
+        page.keyboard.press("Enter")
+        page.wait_for_selector("#app-shell")
+        expect(page.locator("#tab-extract")).to_be_focused()
+        assert _active(page) == ["BUTTON", "tab-extract", True]
+
+        page.reload()  # the stored key logs in again
+        page.wait_for_selector("#app-shell")
+        expect(page.locator("#tab-extract")).to_be_focused()
+    assert console == []
+
+
+def _open_tree(page: Page, origin: str) -> str:
+    """Log in, read the local site's structure and show its tree; the site job's id."""
+    _log_in(page)
+    page.wait_for_selector("#app-shell")
+    page.click("#tab-site-structure")
+    page.fill("#site-url", f"{origin}/")
+    page.fill("#site-depth", "1")
+    _submit(page, "site-structure")
+    site = page.locator("#result section.job", has=page.locator("button.tree-button"))
+    expect(site.locator(".state")).to_have_attribute("data-value", "completed")
+    site.locator("button.tree-button").click()
+    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(4)
+    job_id: str = site.get_attribute("data-job") or ""
+    return job_id
+
+
+def test_tree_actions_are_reachable_from_the_start_of_the_tree(ui: tuple[str, str]) -> None:
+    """From the tree's first checkbox, "Extract selected" is a few key presses away, however
+    many URLs the tree lists: Shift+Tab reaches the link before the tree, which leads to the
+    actions after it (ruling R-P12-9 b)."""
+    url, origin = ui
+    with browsing(url) as (page, console):
+        job_id = _open_tree(page, origin)
+        page.locator("#result ul.tree input[type=checkbox]").first.focus()
+        page.keyboard.press("Shift+Tab")
+        expect(page.locator("#result .tree-view a.skip-to-actions")).to_be_focused()
+        page.keyboard.press("Enter")
+        expect(page.locator(f"[id='tree-{job_id}-actions']")).to_be_focused()
+        submit = page.locator("#result .tree-view button[type=submit]")
+        presses = 0
+        while not submit.evaluate("button => button === document.activeElement"):
+            assert presses < 8, _active(page)
+            page.keyboard.press("Tab")
+            presses += 1
+        assert _active(page)[2] is True  # the ring shows
+    assert console == []
+
+
+def test_refresh_that_removes_the_focused_button_keeps_focus_in_the_view(
+    ui: tuple[str, str],
+) -> None:
+    """A refresh whose view no longer has the focused button (here: the job was deleted, so the
+    view shows its error) moves focus to the progress view itself, never to a tab or the page
+    (ruling R-P12-9 c)."""
+    url, origin = ui
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.click("#tab-site-structure")
+        page.fill("#site-url", f"{origin}{SLOW_PATH}")
+        _submit(page, "site-structure")
+        job = page.locator("#result section.job")
+        job_id = job.get_attribute("data-job")
+        button = f"job-{job_id}-tree"
+        page.focus(f"[id='{button}']")
+        page.keyboard.press("Shift+Tab")  # a keyboard user's focus, with its ring
+        page.keyboard.press("Tab")
+        assert _active(page) == ["BUTTON", button, True]
+        deleted = httpx.delete(
+            url.replace("/ui", f"/v1/jobs/{job_id}"),
+            headers={"Authorization": f"Bearer {ADMIN_KEY}"},
+        )
+        assert deleted.status_code == 200, deleted.text
+        expect(job.locator(".job-error")).to_be_visible()
+        expect(page.locator(f"[id='{button}']")).to_have_count(0)
+        view = page.locator("#result section.jobs-view")
+        expect(view).to_be_focused()
+        assert page.evaluate("document.activeElement.closest('[role=tablist]')") is None
     assert console == []
 
 

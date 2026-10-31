@@ -375,6 +375,32 @@ def test_form_error_names_its_field(admin: TestClient, language: Language) -> No
     assert unknown.get("id") is None
 
 
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_tree_has_a_bypass_to_its_actions(
+    admin: TestClient, language: Language, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A keyboard user reaches "Extract selected" from the start of the tree without tabbing
+    through every checkbox (ruling R-P12-9 b): a link before the tree goes to the actions after
+    it. The ids carry the job's id, so two open trees do not share them."""
+    fake_reads(monkeypatch, len(SITE), lambda offset, limit: SITE[offset : offset + limit])
+    job_id = "a" * 32
+    response = admin.get("/ui/run/site-tree", params={"id": job_id}, headers=_headers(language))
+    root = _fragment(response.text)
+
+    (form,) = root.xpath("//form[contains(@class, 'tree-form')]")
+    (skip,) = form.xpath(".//a[contains(@class, 'skip-to-actions')]")
+    target = f"tree-{job_id}-actions"
+    assert skip.get("href") == f"#{target}"
+    assert skip.text_content() == translate(language, "tree.skip_to_actions")
+    (actions,) = form.xpath(f".//*[@id='{target}']")
+    assert actions.get("tabindex") == "-1"
+    assert len(form.xpath(".//button[@type='submit']")) == 1
+    assert actions.xpath(".//button[@type='submit']")
+    tree = form.xpath(".//ul[@class='tree']")[0]
+    elements = list(form.iter())
+    assert elements.index(skip) < elements.index(tree) < elements.index(actions)
+
+
 def test_vendored_axe_is_pinned() -> None:
     assert hashlib.sha256(AXE_FILE.read_bytes()).hexdigest() == AXE_SHA256
     licence = AXE_LICENSE.read_text(encoding="utf-8")

@@ -1,4 +1,5 @@
-<section class="jobs-view" aria-label="{{ t('progress.jobs') }}">
+{#- tabindex=-1: ui.js moves focus here when a refresh removes the focused button (R-P12-9). -#}
+<section class="jobs-view" aria-label="{{ t('progress.jobs') }}" tabindex="-1">
   {% if refused %}
   <div class="error" role="alert">
     <p>{{ t("progress.part_refused", part=refused.part, parts=refused.parts, status=refused.http_status, message=refused.message) }}</p>

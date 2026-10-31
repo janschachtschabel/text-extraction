@@ -2637,6 +2637,18 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
 - **Progress.** A `<progress>` is named "Progress of job <id>"; the buttons of the refreshing
   view have stable ids (`job-<id>-show-<index>`, `-previous`, `-next`, `-tree`, `-cancel`), so
   htmx keeps focus on them across a swap.
+- **Focus across a swap (R-P12-9).** htmx gives the focus back only to an element with the
+  focused element's id; when the new content has none (a refresh that shows a job's error or a
+  429 refusal instead of its buttons, the last page without "Next"), the focus fell to the page
+  and a keyboard user's next key started from an arbitrary place. `ui.js` therefore moves it:
+  after a login to the selected tab (the tab list is where the application starts; the
+  masthead's `h1` is outside the swapped `#app` and not focusable), after a refused key to the
+  key field, and after a swap that removed the focused element of a progress view to the view
+  itself (`section.jobs-view`, `tabindex="-1"`), never to a tab.
+- **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
+  `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
+  "Extract selected", so a keyboard user does not tab through every checkbox; the ids carry the
+  job's id, so two open trees do not share them.
 - **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
   progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
   `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its

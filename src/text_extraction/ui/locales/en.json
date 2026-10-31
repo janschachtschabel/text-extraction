@@ -168,6 +168,7 @@
   "tree.hidden": "{count} more URLs not shown ({setting})",
   "tree.select_all": "Select all",
   "tree.select_none": "Select none",
+  "tree.skip_to_actions": "Skip to the actions after the tree",
   "tree.depth": "depth {depth}",
   "tree.modified": "modified {date}",
   "tree.extract_selected": "Extract selected",

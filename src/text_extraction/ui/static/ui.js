@@ -380,12 +380,46 @@
 
   document.addEventListener("htmx:afterRequest", notBusy);
 
+  // Focus across a swap (ruling R-P12-9). htmx gives the focus back to the element with the
+  // focused element's id; when the new content has none, the focus would fall to the page and a
+  // keyboard user's next key would start from nowhere. So: after a login the selected tab (the
+  // tab list is where the application starts) or, after a refused key, the key field; after a
+  // swap that removed the focused element of a progress view, the view itself.
+  var focusedBeforeSwap = null;
+
+  document.addEventListener("htmx:beforeSwap", function () {
+    focusedBeforeSwap = document.activeElement;
+  });
+
+  function keepFocus(root) {
+    var before = focusedBeforeSwap;
+    focusedBeforeSwap = null;
+    if (root.id === "app") {
+      var start = root.querySelector("[role=tab][aria-selected=true]") ||
+        root.querySelector("#login-api-key");
+      if (start) {
+        start.focus();
+      }
+      return;
+    }
+    var lost = before instanceof Element && before !== document.body && !before.isConnected;
+    var active = document.activeElement;
+    if (!lost || (active && active !== document.body)) {
+      return;
+    }
+    var view = root.closest(".jobs-view") || root.querySelector(".jobs-view");
+    if (view) {
+      view.focus({ preventScroll: true });
+    }
+  }
+
   // htmx fires afterSwap on the swapped target (innerHTML) or on each new element (outerHTML).
   document.addEventListener("htmx:afterSwap", function (event) {
     var root = event.target instanceof Element ? event.target : null;
     if (!root) {
       return;
     }
+    keepFocus(root);
     var message = announcement(root);
     if (isRefresh(event.detail.elt)) {
       // The view before the refresh said its states already.
