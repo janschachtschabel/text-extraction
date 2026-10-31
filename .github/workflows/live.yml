@@ -42,13 +42,17 @@ permissions:
 # A new run for the same ref cancels the one in progress. Adding any other label than `live`
 # gets a group of its own, so it neither cancels a live run nor runs itself (see `if` below), and
 # so does a manual run of another service_ref: both halves of an A/B comparison run side by side.
-# A manual run in fast or browser mode has a group of its own too, so the three runs of the full
-# regression do not cancel each other.
+# A manual run on wlo_4000 and a manual run in fast or browser mode get groups of their own too,
+# so the weekly run or a wlo_200 dispatch never cancels an hours-long full regression and one
+# mode's run never cancels another's by accident. That is no invitation to run the modes of the
+# full regression in parallel: each is its own service with its own outbound limits, so start the
+# next one only when the previous one finished (tests/live/README.md).
 concurrency:
   group: >-
     live-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'live'
     && format('-other-label-{0}', github.run_id) || '' }}${{ inputs.service_ref
-    && format('-service-{0}', inputs.service_ref) || '' }}${{ inputs.mode && inputs.mode != 'auto'
+    && format('-service-{0}', inputs.service_ref) || '' }}${{ inputs.url_set == 'wlo_4000'
+    && '-set-wlo_4000' || '' }}${{ inputs.mode && inputs.mode != 'auto'
     && format('-mode-{0}', inputs.mode) || '' }}
   cancel-in-progress: true
 
