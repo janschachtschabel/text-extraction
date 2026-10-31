@@ -255,6 +255,7 @@ def _run_sweep(values: str, *, fail_up: bool = False, leak: bool = True) -> Swee
             "COMPOSE": f"docker compose {COMPOSE_ARGS}",
             "SELECTOR_PROCESSES": values,
             "INTERNAL_URLS": _job()["env"]["INTERNAL_URLS"],
+            "COMPOSE_PROJECT_NAME": _job()["env"]["COMPOSE_PROJECT_NAME"],
             "ASR_MODEL": "small",
             "PII_MODEL_SIZE": "md",
             "API_KEY": API_KEY,
@@ -318,6 +319,26 @@ def test_the_full_profile_runs_once_and_every_value_gets_a_fresh_selector_run() 
     up_at = [i for i, c in enumerate(calls) if " up " in c]
     assert len(stops) == 4
     assert all(up > stop for up, stop in zip(up_at[1:], stops, strict=False))
+
+
+def test_every_run_starts_on_an_empty_valkey_and_keeps_the_models() -> None:
+    """The sweep's runs must not start on the jobs and results of the run before them: before
+    each up the stack comes down and Valkey's volume goes. The model volumes stay (no
+    `down -v`), so the models are not downloaded again."""
+    calls = _run_sweep("1,2").calls
+    ups = [i for i, c in enumerate(calls) if " up " in c]
+    drops = [
+        i
+        for i, c in enumerate(calls)
+        if c.startswith("docker volume rm -f text-extraction_valkey-data ")
+    ]
+    downs = [i for i, c in enumerate(calls) if " down" in c]
+    assert len(ups) == len(drops) == len(downs) == 3
+    previous = -1
+    for up, drop, down in zip(ups, drops, downs, strict=True):
+        assert previous < down < drop < up
+        previous = up
+    assert not [c for c in calls if " down" in c and (" -v" in c or "--volumes" in c)]
 
 
 def test_the_run_targets_the_farm_the_fake_llm_and_every_internal_port() -> None:

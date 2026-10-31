@@ -16,8 +16,9 @@ name: load
 # The full profile runs once, at the production default of one selector process, into
 # load-results/. Then the selector sweep: each value of selector_processes, the first included,
 # restarts the stack with STRUCTURED_SELECTOR_PROCESSES set and runs only the selector scenario on
-# the fresh containers, into load-results/selector-processes-<n>/. The full run's selector
-# scenario is not part of the sweep: its containers have served every other scenario first.
+# fresh containers and an empty Valkey, into load-results/selector-processes-<n>/. The full run's
+# selector scenario is not part of the sweep: its containers have served every other scenario
+# first.
 on:
   workflow_dispatch:
     inputs:
@@ -117,11 +118,11 @@ jobs:
       - name: Build the images
         run: $COMPOSE build
 
-      # Every run starts from fresh containers (--force-recreate; the model volumes stay). Before
-      # the next run replaces them, the farm is stopped, which writes its record of every request
-      # it saw, and the record and the service logs are saved under the run's name. A failed or
-      # unexpected request fails the step after the last run; a stack that does not come up
-      # fails it at once.
+      # Every run starts from fresh containers and an empty Valkey (its volume is removed; the
+      # model volumes stay). Before the next run replaces them, the farm is stopped, which writes
+      # its record of every request it saw, and the record and the service logs are saved under
+      # the run's name. A failed or unexpected request fails the step after the last run; a
+      # stack that does not come up fails it at once.
       - name: Run the load test
         run: |
           IFS=, read -ra values <<< "$SELECTOR_PROCESSES"
@@ -200,6 +201,11 @@ jobs:
             local name="$1" processes="$2"
             shift 2
             export STRUCTURED_SELECTOR_PROCESSES="$processes"
+            # A fresh stack, Valkey included: the containers come down and Valkey's volume
+            # goes, so no run starts on the jobs and results of the run before it. The model
+            # volumes stay (no `down -v`).
+            $COMPOSE down --remove-orphans
+            docker volume rm -f "${COMPOSE_PROJECT_NAME}_valkey-data"
             if ! $COMPOSE up -d --wait --wait-timeout 1800 --force-recreate; then
               echo "the stack did not become ready for the run $name" >&2
               finish_run "$name"

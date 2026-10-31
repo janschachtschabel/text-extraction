@@ -1179,7 +1179,9 @@ Source runs, both on a GitHub `ubuntu-latest` runner (4 vCPU, 16 GB), on 2026-10
 
 Both runs used the production defaults for the models: ASR `large-v3-turbo` (int8, `ASR_THREADS`
 4) and PII `lg`. **ASR `small` and PII `md` were not measured.** Each run also swept
-`STRUCTURED_SELECTOR_PROCESSES` (1, 2, 4) on fresh stacks with the selector scenario only.
+`STRUCTURED_SELECTOR_PROCESSES` (1, 2, 4) on fresh containers with the selector scenario only.
+In runs 4 and 6 the sweep's Valkey still held the full run's data (about 45 MiB); the API's
+numbers do not depend on it. `load.yml` now removes Valkey's volume before each run.
 
 **Load profile.** All targets are pages of the local farm; no request leaves the compose network.
 
@@ -1240,7 +1242,7 @@ of every pool (the load ran one pod per pool), its memory request equals its lim
 and its limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at
 once, not for this load.
 
-**Selector processes (P11-S5, issue #19).** The selector scenario on a fresh stack per value:
+**Selector processes (P11-S5, issue #19).** The selector scenario on fresh containers per value:
 
 | `STRUCTURED_SELECTOR_PROCESSES` | Requests/s, run 4 / 6 | p95 ms, run 4 / 6 | API memory p95 MiB, run 4 / 6 | API memory idle MiB, run 4 / 6 |
 | ---: | --- | --- | --- | --- |
