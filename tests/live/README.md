@@ -209,18 +209,28 @@ and worker logs as the `live-results` artifact.
 The gate samples 200 URLs. The full regression runs the whole corpus (`wlo_4000`) and compares it
 with the baselines of 2026-09-28, which were measured on the same 4,000 URLs: fast mode 68 %, browser
 mode 80 % ok. Run three manual dispatches of the live workflow, each with `url_set: wlo_4000`,
-one with `mode: auto`, one with `fast` and one with `browser`:
+one with `mode: auto`, one with `fast` and one with `browser`, **one after another, never
+together**. Each run is a service of its own with its own Valkey, so its per-host outbound limits
+(`OUTBOUND_MIN_DELAY_MS` 1,000 ms between request starts, `OUTBOUND_MAX_CONCURRENCY_PER_HOST` 2)
+know nothing of the others: three runs at once would send three times the normal rate to each
+WLO host, for hours. Start the next run when the previous one finished, for example:
 
 ```bash
 for mode in auto fast browser; do
   gh workflow run live.yml --ref <branch> -f url_set=wlo_4000 -f mode="$mode"
+  sleep 15  # until the run is listed
+  run_id="$(gh run list --workflow live.yml --branch <branch> --event workflow_dispatch \
+    --limit 1 --json databaseId --jq '.[0].databaseId')"
+  gh run watch "$run_id" --exit-status || true  # go on with the next mode after a failure too
 done
 ```
 
-The three runs may start together: a run in `fast` or `browser` mode has its own concurrency
-group, so none cancels another. Each is a single run of `run_live.py` over the 4,000 URLs and
-nothing else (the smoke, `wlo_200` browser, media and site steps are skipped), with a job timeout
-of 330 minutes instead of 110. Its files are `live_wlo_4000_<mode>.jsonl` and
+Or start them on three days. A `wlo_4000` run, and one in `fast` or `browser` mode, has a
+concurrency group of its own, so the weekly run and a `wlo_200` dispatch never cancel it, and one
+mode's run never cancels another's by accident; that is a safeguard, not a reason to run them in
+parallel. Each is a single run of `run_live.py` over the 4,000 URLs and nothing else (the smoke,
+`wlo_200` browser, media and site steps are skipped), with a job timeout of 330 minutes instead
+of 110. Its files are `live_wlo_4000_<mode>.jsonl` and
 `summary_wlo_4000_<mode>.md` in the `live-results` artifact and in the job summary.
 
 Read the results against the baselines: `fast` against 68 %, `browser` against 80 %, and `auto`

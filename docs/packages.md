@@ -180,7 +180,7 @@ baselines](configuration.md#resource-baselines) and [handover.md](handover.md)).
 a second; issue #19), and `SITE_PARSE_CONCURRENCY` is not needed (three 50 MiB sitemaps in
 flight added about 5 s and the worker's loop lag stayed at 1 s or less). Not done in this
 package, by Jan's decision: the full 4,000-URL WLO regression (planned; start `live.yml` with
-`url_set: wlo_4000` once per `mode`) and a real-model cost run. The PII `md` and ASR `small`
+`url_set: wlo_4000` once per `mode`, one run after another) and a real-model cost run. The PII `md` and ASR `small`
 sizes are not measured under load. The hand-over contact is Jan Schachtschabel; the project is a
 prototype.
 

@@ -463,8 +463,9 @@ operation; Jan Schachtschabel decides. What permanent operation adds:
   regression (weekly run of [`live.yml`](../.github/workflows/live.yml));
 - open checks:
   - the full WLO regression on 4,000 URLs: planned, not run. Start it with `live.yml`
-    (`url_set: wlo_4000`), once per `mode` (`auto`, `fast`, `browser`), and compare with the
-    baselines of 2026-09-28 (fast 68 %, browser 80 %);
+    (`url_set: wlo_4000`), once per `mode` (`auto`, `fast`, `browser`), one run after another
+    at the normal per-host limits (tests/live/README.md), and compare with the baselines of
+    2026-09-28 (fast 68 %, browser 80 %);
   - ASR `small` and PII `md` under load: not measured (a manual `load.yml` run with
     `asr_model: small` and `pii_model_size: md`);
   - a cost run against a real LLM: not made;
