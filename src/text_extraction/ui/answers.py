@@ -14,7 +14,10 @@ from starlette.responses import HTMLResponse, Response
 from text_extraction.errors import ServiceError
 from text_extraction.ui.forms import OPERATIONS
 from text_extraction.ui.forward import Forwarded, forward
+from text_extraction.ui.i18n import Language, Message
 from text_extraction.ui.results import render_result
+from text_extraction.ui.templating import request_language
+from text_extraction.ui.texts import error_text
 from text_extraction.vision.images import data_url, sniff_image
 
 # The key headers a curl line names (with a shell variable, never the value).
@@ -38,12 +41,12 @@ async def read_form(
     max_part_size: int = FORM_DEFAULT_PART,
     max_fields: int = FORM_DEFAULT_COUNT,
     max_files: int = FORM_DEFAULT_COUNT,
-) -> FormData | str:
+) -> FormData | Message:
     """The form of ``request`` read with these limits, or the message why it cannot be read:
     "The form could not be read: " and Starlette's reason (a field or part over
-    ``max_part_size``, too many fields or files, a malformed multipart body), which names a
-    limit, never the content. A body over the route's limit (413) is raised on: the app answers
-    it."""
+    ``max_part_size``, too many fields or files, a malformed multipart body; English), which
+    names a limit, never the content. A body over the route's limit (413) is raised on: the app
+    answers it."""
     try:
         return await request.form(
             max_files=max_files, max_fields=max_fields, max_part_size=max_part_size
@@ -51,14 +54,26 @@ async def read_form(
     except HTTPException as error:
         if error.status_code != 400:
             raise
-        return f"The form could not be read: {error.detail}"
+        return Message("form.unreadable", {"reason": error.detail})
 
 
-def envelope_message(body: dict[str, Any] | None, status: int) -> str:
-    """The envelope's error message, or "The service answered HTTP <status>."."""
+def envelope_error(body: Mapping[str, Any] | None, status: int) -> tuple[Message, str | None]:
+    """The text of the envelope's ``error.code`` (`error_text`; "The service answered HTTP
+    <status>." without a known code) and the API's English ``error.message`` (None without
+    one)."""
     error = (body or {}).get("error")
-    message = error.get("message") if isinstance(error, dict) else None
-    return message if isinstance(message, str) else f"The service answered HTTP {status}."
+    error = error if isinstance(error, Mapping) else {}
+    message = error.get("message")
+    return error_text(error.get("code"), status), message if isinstance(message, str) else None
+
+
+def envelope_message(
+    body: Mapping[str, Any] | None, status: int, language: Language
+) -> tuple[str, str | None]:
+    """`envelope_error` with its text in ``language``: the translated ``error.<code>`` text and
+    the API's English message."""
+    text, message = envelope_error(body, status)
+    return text.text(language), message
 
 
 def text_fields(form: FormData) -> dict[str, str]:
@@ -87,25 +102,26 @@ def artifact_of(envelope: Mapping[str, Any] | None) -> tuple[str, str] | None:
 
 async def read_screenshot(
     request: Request, job_id: str, name: str
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, Message | None]:
     """The ``data:`` URI of the PNG artifact ``name`` of job ``job_id``, read from the artifact
-    route (a REST call with the browser's key), or the note why it could not be read."""
+    route (a REST call with the browser's key), or the note why it could not be read (in the
+    request's language)."""
     path = OPERATIONS["artifact"].path.format(job_id=job_id, name=name)
     try:
         answer = await forward(request, "GET", path)
     except ValueError:  # not a plain path under /v1/
-        return None, "The screenshot could not be read: it is no artifact of a job."
+        return None, Message("screenshot.not_artifact")
     if answer.status != 200:
-        message = envelope_message(answer.body, answer.status)
-        return None, f"The screenshot could not be read: HTTP {answer.status} {message}"
+        text, _ = envelope_message(answer.body, answer.status, request_language(request))
+        return None, Message("screenshot.http_error", {"status": answer.status, "message": text})
     if sniff_image(answer.content) != "image/png":
-        return None, "The screenshot could not be read: it is not a PNG."
+        return None, Message("screenshot.not_png")
     return data_url(answer.content, "image/png"), None
 
 
 async def screenshot_of(
     request: Request, envelope: Mapping[str, Any] | None
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, Message | None]:
     """The screenshot an answer's ``data.screenshot`` references (`read_screenshot`); (None,
     None) when the answer references none."""
     found = artifact_of(envelope)
@@ -114,15 +130,19 @@ async def screenshot_of(
     return await read_screenshot(request, *found)
 
 
-def refusal(error: ServiceError) -> Response:
-    """A refusal of a view that calls the cores (401, 403, 404, 429, 503) as a fragment, HTTP
-    200 (so htmx swaps it)."""
+def refusal(error: ServiceError, language: Language) -> Response:
+    """A refusal of a view that calls the cores (401, 403, 404, 429, 503) as a fragment in
+    ``language``, HTTP 200 (so htmx swaps it)."""
     envelope = {
         "status": "failed",
         "error": {"code": str(error.code), "message": error.message, "retryable": error.retryable},
     }
     retry_after = (error.headers or {}).get("Retry-After")
     html = render_result(
-        op="view", http_status=error.http_status, envelope=envelope, retry_after=retry_after
+        op="view",
+        http_status=error.http_status,
+        envelope=envelope,
+        retry_after=retry_after,
+        language=language,
     )
     return HTMLResponse(html)

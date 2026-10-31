@@ -22,7 +22,7 @@ from text_extraction.file_models import FILE_PART
 from text_extraction.ratelimit import check_rate_left
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
-    envelope_message,
+    envelope_error,
     raw_text,
     read_form,
     refusal,
@@ -41,7 +41,7 @@ from text_extraction.ui.forms import (
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import STATE_KEY, Language, Message, page_language, run_language
 from text_extraction.ui.job_views import add_job_routes
-from text_extraction.ui.previews import SHOWN, load_previews
+from text_extraction.ui.previews import FAILED, SHOWN, SKIP_REASONS, load_previews
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import (
     PREFIX,
@@ -143,15 +143,16 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             principal = await authenticate(request)
             await check_rate_left(request.app.state, principal)
         except ServiceError as error:
-            return refusal(error)
+            return refusal(error, request_language(request))
         form = await read_form(request, max_part_size=part_limit, max_files=max_files)
-        if isinstance(form, str):
+        if isinstance(form, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": form})
         try:
             body = build_body(op, text_fields(form))
         except OptionsError as error:
             await form.close()
-            return templates.TemplateResponse(request, "form_error.html", {"message": str(error)})
+            context = {"message": error.message}
+            return templates.TemplateResponse(request, "form_error.html", context)
         try:
             forwarded = await _forward_single(request, op, body, form)
         finally:
@@ -187,13 +188,13 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
     try:
         principal = await ui_principal(request)
         form = await read_form(request, max_files=0)
-        if isinstance(form, str):
+        if isinstance(form, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": form})
         requested = form.get("compliance")
         chosen = cast(ComplianceMode, requested) if requested in _COMPLIANCE_MODES else None
         mode = resolve_mode(chosen, principal, settings)
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     urls = [value for value in form.getlist("url") if isinstance(value, str)]
     alts = [value for value in form.getlist("alt") if isinstance(value, str)]
     alt_of: dict[str, str] = {}
@@ -212,6 +213,11 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
                 "url": preview.url,
                 "data_uri": preview.data_uri,
                 "skipped": preview.skipped,
+                "reason": (
+                    SKIP_REASONS.get(preview.skipped, SKIP_REASONS[FAILED])
+                    if preview.skipped
+                    else None
+                ),
                 "alt": alt_of.get(preview.url, ""),
             }
         )
@@ -258,7 +264,8 @@ def create_ui_router(settings: Settings) -> APIRouter:
     async def login(request: Request) -> Response:
         """Forward ``GET /v1/info`` with the browser's key: 200 renders the application, 401 the
         login box with "This key is not valid." and nothing else, any other answer the login box
-        with its message (the stored key is kept: a 429 or 503 says nothing about it)."""
+        with the text of its error code and the API's English message (the stored key is kept:
+        a 429 or 503 says nothing about it)."""
         answer = await forward(request, "GET", "/v1/info")
         data = (answer.body or {}).get("data")
         if answer.status == 200 and isinstance(data, dict):
@@ -271,8 +278,9 @@ def create_ui_router(settings: Settings) -> APIRouter:
                 {"error": NOT_VALID},
                 headers={"HX-Trigger": LOGIN_FAILED_EVENT},
             )
-        message = envelope_message(answer.body, answer.status)
-        return templates.TemplateResponse(request, "login.html", {"error": message})
+        message, detail = envelope_error(answer.body, answer.status)
+        context = {"error": message, "error_detail": detail}
+        return templates.TemplateResponse(request, "login.html", context)
 
     for op in SINGLE_OPERATIONS:
         run.add_api_route(f"/{op}", _single_view(op, settings), methods=["POST"])

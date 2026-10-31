@@ -3,7 +3,12 @@
   <form id="login-form" autocomplete="off">
     <h2 id="login-title">{{ t("login.title") }}</h2>
     <p>{{ t("login.intro") }}</p>
-    {% if error %}<p class="error" role="alert">{{ t(error) if error is message else error }}</p>{% endif %}
+    {% if error %}
+    <div class="error" role="alert">
+      <p>{{ t(error) }}</p>
+      {% with detail=error_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
+    </div>
+    {% endif %}
     <label for="login-api-key">{{ t("login.api_key") }}</label>
     <input id="login-api-key" type="password" autocomplete="off" spellcheck="false" required>
     <details>

@@ -123,10 +123,35 @@ def run_language(request: Request, settings: Settings) -> Language:
 @dataclass(frozen=True)
 class Message:
     """A UI text from Python: its catalogue key and placeholder values, rendered in the
-    request's language at the template boundary."""
+    request's language at the template boundary. A value may be a `Message` itself, or a list
+    or tuple of messages and texts (`text_of`)."""
 
     key: str
     params: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
 
     def text(self, language: Language) -> str:
-        return translate(language, self.key, **self.params)
+        values = {name: text_of(value, language) for name, value in self.params.items()}
+        return translate(language, self.key, **values)
+
+
+# The parts of a list or tuple, as `text_of` and the templates' ``t`` join them.
+PART_SEPARATOR: Final = ", "
+
+
+def text_of(value: object, language: Language) -> object:
+    """``value`` as it reads in ``language``: a `Message` its text, a list or tuple its parts'
+    texts joined by ", ", anything else as it is (data, such as a URL or a count)."""
+    if isinstance(value, Message):
+        return value.text(language)
+    if isinstance(value, list | tuple):
+        return PART_SEPARATOR.join(str(text_of(part, language)) for part in value)
+    return value
+
+
+class MessageError(ValueError):
+    """An error whose text the UI shows: ``message`` is rendered in the request's language;
+    ``str(error)`` is its English text (for logs and tests)."""
+
+    def __init__(self, message: Message) -> None:
+        super().__init__(message.text("en"))
+        self.message = message

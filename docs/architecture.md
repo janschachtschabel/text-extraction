@@ -2543,7 +2543,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   and, for Markdown, rendered by markdown-it-py without raw HTML (links only for http(s), images as
   their alt text), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
-  convert, PII, LLM, outcome) with a one-line text per warning (`WARNING_TEXTS`). Previews follow
+  convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
+  catalogues). Previews follow
   D7: at most 20 images, 4 at once, 10 s each and 25 s per view; a skipped one shows its reason.
 - **Jobs (P10-S18, P10-S19, P10-S20).** The progress view reads one or more jobs through
   `read_job` with one rate-limit hit per refresh, whatever the number of jobs, refreshes every 3 s
@@ -2567,9 +2568,11 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   Templates get `t(key, **params)`, `lang` and `languages` from a context processor: `t` escapes
   the catalogue text and each value, and a template wraps markup around a placeholder's output
   (`code(...)`, or a `{% set %}` block). Messages from Python are `Message(key, params)`,
-  rendered in the request's language at the template boundary. The UI shows an API error as the
-  translated `error.<code>` text with "Details from the API (English)" and `error.message` below
-  it. German texts address the user as "Sie" where an address is needed, and are neutral
+  rendered in the request's language at the template boundary; a placeholder's value may be a
+  `Message` too, or a list of them (joined by ", "). The UI shows an API error as the
+  translated `error.<code>` text (one for every `ErrorCode`) with "Details from the API
+  (English)" and `error.message` (and a 422's `details`) below it, marked `lang="en"`. The values
+  of a result (a status, an error code, a job state, a content type) are shown as they are. German texts address the user as "Sie" where an address is needed, and are neutral
   otherwise; fixed terms are in the user guide's glossary ("Job" stays "Job", a field name stays
   the field name in backticks).
 - **Choosing the language (P12-S6, D4 a).** `GET /ui` takes the `lang` query (`en` or `de`), then

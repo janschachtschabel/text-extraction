@@ -2,6 +2,7 @@
   {% if refused %}
   <div class="error" role="alert">
     <p>{{ t("progress.part_refused", part=refused.part, parts=refused.parts, status=refused.http_status, message=refused.message) }}</p>
+    {% with detail=refused.detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
     <p class="hint">{{ t("progress.keep_running") }}</p>
   </div>
   {% endif %}

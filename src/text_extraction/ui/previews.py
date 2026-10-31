@@ -5,8 +5,9 @@ host's outbound turn, the service's user agent, the type sniffed from the bytes,
 see the viewer and the CSP stays ``img-src 'self' data:``."""
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Final
 from urllib.parse import urlsplit
 
@@ -14,6 +15,7 @@ import structlog
 from prometheus_client import CollectorRegistry, Counter
 
 from text_extraction.compliance import ComplianceMode
+from text_extraction.ui.i18n import Message
 from text_extraction.vision.fetch import ImageBytes, ImageFetcher, ImageSkipped
 from text_extraction.vision.images import data_url
 
@@ -38,6 +40,19 @@ OUTCOMES: Final = (
     "http_error",
     "error",
     "busy",
+)
+# The text of each reason an image was skipped (every outcome but ``shown``).
+SKIP_REASONS: Final[Mapping[str, Message]] = MappingProxyType(
+    {
+        TIME: Message("preview.time"),
+        "blocked": Message("preview.blocked"),
+        "refused": Message("preview.refused"),
+        "too_large": Message("preview.too_large"),
+        "unsupported": Message("preview.unsupported"),
+        "http_error": Message("preview.http_error"),
+        FAILED: Message("preview.error"),
+        "busy": Message("preview.busy"),
+    }
 )
 
 

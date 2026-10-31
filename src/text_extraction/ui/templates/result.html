@@ -6,13 +6,9 @@
   </header>
   {% if error %}
   <div class="error" role="alert">
-    <p><span class="error-code">{{ error["code"] }}</span> {{ error["message"] }}{% if error["retryable"] %} <span class="retryable">{{ t("result.retryable") }}</span>{% endif %}</p>
+    <p><span class="error-code">{{ error["code"] }}</span> <span class="error-text">{{ t(error_text) }}</span>{% if error["retryable"] %} <span class="retryable">{{ t("result.retryable") }}</span>{% endif %}</p>
     {% if retry_after %}<p class="retry-after">{{ t("result.retry_after", seconds=retry_after) }}</p>{% endif %}
-    {% if details %}
-    <ul class="details">
-      {% for line in details %}<li>{{ line }}</li>{% endfor %}
-    </ul>
-    {% endif %}
+    {% with detail=error["message"] if error["message"] is string else none, detail_lines=details %}{% include "api_detail.html" %}{% endwith %}
   </div>
   {% endif %}
   {% if job %}
@@ -30,7 +26,7 @@
   {% if screenshot %}
   <img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}">
   {% elif screenshot_note %}
-  <p class="screenshot-note">{{ screenshot_note }}</p>
+  <p class="screenshot-note">{{ t(screenshot_note) }}</p>
   {% endif %}
   {% if data %}
   {% if data["title"] %}<h3 class="title">{{ data["title"] }}</h3>{% endif %}
@@ -47,14 +43,14 @@
   <section class="content-view" aria-label="{{ t('result.content') }}">
     <h4>{{ t("result.content") }}</h4>
     {% if download %}<a class="download" href="{{ download.href }}" download="{{ download.name }}">{{ t("result.download", suffix=download.suffix) }}</a>
-    {% if download.note %}<p class="cut-note">{{ download.note }}</p>{% endif %}{% endif %}
+    {% if download.note %}<p class="cut-note">{{ t(download.note) }}</p>{% endif %}{% endif %}
     {% if markdown %}
     <details class="rendered">
       <summary>{{ t("result.show_rendered") }}</summary>
       <div class="markdown">{{ markdown }}</div>
     </details>
     {% endif %}
-    {% if content_note %}<p class="cut-note">{{ content_note }}</p>{% endif %}
+    {% if content_note %}<p class="cut-note">{{ t(content_note) }}</p>{% endif %}
     <pre class="content">{{ shown_content }}</pre>
   </section>
   {% endif %}
@@ -63,7 +59,7 @@
     <h4>{{ t("result.metadata") }}</h4>
     <dl class="meta">
       {% for row in metadata %}
-      <dt>{{ row.label }}</dt><dd>{% if row.link %}<a href="{{ row.text }}" rel="noopener noreferrer">{{ row.text }}</a>{% else %}{{ row.text }}{% endif %}</dd>
+      <dt>{{ t(row.label) }}</dt><dd>{% if row.licences %}{% for licence in row.licences %}{{ licence.text }}{% if licence.source %} {{ t("result.licence_source", source=licence.source) }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% elif row.link %}<a href="{{ row.text }}" rel="noopener noreferrer">{{ row.text }}</a>{% else %}{{ row.text }}{% endif %}</dd>
       {% endfor %}
     </dl>
   </section>
@@ -98,7 +94,7 @@
       <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>
       {% endfor %}
     </ol>
-    {% if chunks_note %}<p class="cut-note">{{ chunks_note }}</p>{% endif %}
+    {% if chunks_note %}<p class="cut-note">{{ t(chunks_note) }}</p>{% endif %}
   </section>
   {% endif %}
   {% if images or image_report %}
@@ -157,7 +153,7 @@
   {% if raw_json %}
   <details class="raw">
     <summary>{{ t("result.raw_json") }}</summary>
-    {% if raw_note %}<p class="cut-note">{{ raw_note }}</p>{% endif %}
+    {% if raw_note %}<p class="cut-note">{{ t(raw_note) }}</p>{% endif %}
     <pre>{{ raw_json }}</pre>
   </details>
   {% endif %}

@@ -26,9 +26,10 @@ from text_extraction.ui.forms import (
     OptionsError,
     build_body,
 )
+from text_extraction.ui.i18n import text_of
 from text_extraction.ui.markdown import render_markdown
 from text_extraction.ui.results import render_result
-from text_extraction.ui.texts import WARNING_TEXTS, warning_text
+from text_extraction.ui.texts import warning_text
 from text_extraction.ui.timeline import TimelineStep, timeline
 
 SCRIPT = "<script>alert(1)</script>"
@@ -559,7 +560,12 @@ def test_job_answer_is_shown() -> None:
 
 
 def labels(steps: list[TimelineStep]) -> list[str]:
-    return [step.label for step in steps]
+    return [step.label.text("en") for step in steps]
+
+
+def english(step: TimelineStep) -> tuple[str, str, int | None]:
+    """A step's label and detail in English, and its milliseconds."""
+    return step.label.text("en"), str(text_of(step.detail, "en")), step.ms
 
 
 def test_timeline_from_fields() -> None:
@@ -568,12 +574,12 @@ def test_timeline_from_fields() -> None:
     )
     steps = timeline(None, fast, status="success")
     assert labels(steps) == ["Compliance", "Fetch", "Convert", "Outcome"]
-    assert steps[0] == TimelineStep("Compliance", "allowed (mode enforce, robots allowed)", 3)
+    assert english(steps[0]) == ("Compliance", "allowed (mode enforce, robots allowed)", 3)
     assert steps[1].ms == 20
     for part in ("2 attempts", "HTTP 200", "cache hit", f"final URL {PAGE}#moved"):
-        assert part in steps[1].detail
-    assert steps[2] == TimelineStep("Convert", "text/html", 10)
-    assert steps[3] == TimelineStep("Outcome", "success", 40)
+        assert part in english(steps[1])[1]
+    assert english(steps[2]) == ("Convert", "text/html", 10)
+    assert english(steps[3]) == ("Outcome", "success", 40)
 
     browser = ExtractResult.model_validate(
         result_data(
@@ -601,29 +607,29 @@ def test_timeline_from_fields() -> None:
     error = ErrorInfo(code=ErrorCode.TIMEOUT, message="Too slow.", retryable=True)
     steps = timeline(None, browser, status="partial", error=error, requested_mode="auto")
     assert labels(steps) == ["Compliance", "Fetch", "Render", "Convert", "PII", "LLM", "Outcome"]
-    assert steps[2] == TimelineStep("Render", "escalated from fast, unblock mode", 70)
-    assert steps[3] == TimelineStep("Convert", "text/html, docling, 9 pages, OCR", 4)
-    assert steps[4] == TimelineStep("PII", "3 entities (mask)", 3)
-    assert steps[5] == TimelineStep("LLM", "", 6)
-    assert steps[6] == TimelineStep("Outcome", "partial, timeout, retryable", 90)
-    assert timeline(None, browser, requested_mode="browser")[2].detail == "unblock mode"
+    assert english(steps[2]) == ("Render", "escalated from fast, unblock mode", 70)
+    assert english(steps[3]) == ("Convert", "text/html, docling, 9 pages, OCR", 4)
+    assert english(steps[4]) == ("PII", "3 entities (mask)", 3)
+    assert english(steps[5]) == ("LLM", "", 6)
+    assert english(steps[6]) == ("Outcome", "partial, timeout, retryable", 90)
+    assert english(timeline(None, browser, requested_mode="browser")[2])[1] == "unblock mode"
 
     run = ItemRun(
         pool="browser", attempts=2, claimed_at=datetime(2026, 10, 30, 12, 0, 5, tzinfo=UTC)
     )
     item = JobItem(index=0, url=PAGE, state="done", result=None, run=run)
     steps = timeline(item, fast, status="success")
-    assert steps[0] == TimelineStep("Claim", "browser pool, claim 2, 2026-10-30 12:00:05 UTC", None)
+    assert english(steps[0]) == ("Claim", "browser pool, claim 2, 2026-10-30 12:00:05 UTC", None)
 
     html = rendered(result_data(warnings=["browser_unavailable", "no_such_warning_x"]))
     root = tree(html)
     warnings = texts(root, "//ul[@class='warnings']/li")
     assert warnings == [
-        f"browser_unavailable: {WARNING_TEXTS['browser_unavailable']}",
+        f"browser_unavailable: {warning_text('browser_unavailable', 'en')}",
         "no_such_warning_x",
     ]
-    assert "browser" in WARNING_TEXTS["browser_unavailable"]
-    assert warning_text("action_3_failed") == "Browser action 3 failed."
+    assert "browser" in (warning_text("browser_unavailable", "en") or "")
+    assert warning_text("action_3_failed", "en") == "Browser action 3 failed."
     steps_html = texts(root, "//ol[@class='timeline']/li")
     assert steps_html[0].startswith("Compliance")
     assert steps_html[-1].startswith("Outcome")

@@ -1,5 +1,5 @@
 <div class="error" role="alert">
-  <p>{{ t(message) if message is message else message }}</p>
+  <p>{{ t(message) }}</p>
   {% if problems %}
   <ul class="problems">
     {% for row, reason in problems %}<li>{{ t("batch.row_problem", row=row, reason=reason) }}</li>{% endfor %}

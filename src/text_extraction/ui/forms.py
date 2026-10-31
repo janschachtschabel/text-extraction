@@ -22,6 +22,7 @@ from text_extraction.file_api import PATH as FILE_PATH
 from text_extraction.settings import Settings
 from text_extraction.site_api import PATH as SITE_PATH
 from text_extraction.structured_api import CHUNK_PATH, STRUCTURED_PATH
+from text_extraction.ui.i18n import Message, MessageError
 
 DEFAULT_WAIT_SECONDS: Final = 25
 DEFAULT_MAX_IMAGES: Final = 5
@@ -84,8 +85,9 @@ UI_METADATA_SCHEMA: Final[dict[str, Any]] = {
 }
 
 
-class OptionsError(ValueError):
-    """A form that cannot become a REST body; the message is shown, nothing is forwarded."""
+class OptionsError(MessageError):
+    """A form that cannot become a REST body; its ``message`` is shown, nothing is
+    forwarded."""
 
 
 @dataclass(frozen=True)
@@ -130,7 +132,7 @@ def _whole_number(form: Mapping[str, str], name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
-        raise OptionsError(f"{name} must be a whole number.") from None
+        raise OptionsError(Message("options.whole_number", {"name": name})) from None
 
 
 def _wait(fields: Fields, form: Mapping[str, str]) -> None:
@@ -143,7 +145,7 @@ def _wait(fields: Fields, form: Mapping[str, str]) -> None:
         except ValueError:
             value = math.nan
         if not math.isfinite(value):
-            raise OptionsError("wait_seconds must be a number.")
+            raise OptionsError(Message("options.number", {"name": "wait_seconds"}))
     fields["wait_seconds"] = _Field(value, set_by_user=value != DEFAULT_WAIT_SECONDS)
 
 
@@ -170,20 +172,22 @@ def _no_constant(name: str) -> Any:
     raise ValueError(name)
 
 
-def _json_object(form: Mapping[str, str], name: str, label: str) -> dict[str, Any] | None:
+def _json_object(form: Mapping[str, str], name: str, label: Message) -> dict[str, Any] | None:
+    """The JSON object of the textarea ``name`` (None when it is empty); ``label`` names it in
+    the messages."""
     value = _text(form, name)
     if not value:
         return None
     try:
         parsed = json.loads(value, parse_constant=_no_constant)
     except (ValueError, RecursionError):  # RecursionError: nested too deep
-        raise OptionsError(f"{label} is not valid JSON.") from None
+        raise OptionsError(Message("options.not_json", {"label": label})) from None
     if not isinstance(parsed, dict):
-        raise OptionsError(f"{label} must be a JSON object.")
+        raise OptionsError(Message("options.not_object", {"label": label}))
     return parsed
 
 
-def _object(fields: Fields, form: Mapping[str, str], name: str, label: str) -> None:
+def _object(fields: Fields, form: Mapping[str, str], name: str, label: Message) -> None:
     parsed = _json_object(form, name, label)
     if parsed is not None:
         fields[name] = _Field(parsed, set_by_user=True)
@@ -229,7 +233,7 @@ def _structured_fields(form: Mapping[str, str]) -> Fields:
     _choice(fields, form, "format", "markdown")
     _choice(fields, form, "mode", "auto")
     _access(fields, form)
-    _object(fields, form, "structured", "Structured")
+    _object(fields, form, "structured", Message("options.label.structured"))
     _wait(fields, form)
     return fields
 
@@ -245,7 +249,7 @@ def _chunk_fields(form: Mapping[str, str]) -> Fields:
     else:
         _access(fields, form)
     _choice(fields, form, "format", "markdown")
-    _object(fields, form, "chunking", "Chunking")
+    _object(fields, form, "chunking", Message("options.label.chunking"))
     _wait(fields, form)
     return fields
 
@@ -299,12 +303,12 @@ def build_body(op: str, form: Mapping[str, str]) -> dict[str, Any]:
     (``options``) merged under them. Raises `OptionsError` for invalid JSON, an Options value
     that is not an object, a key given twice or a malformed number."""
     fields = _FORMS[op](form)
-    options = _json_object(form, "options", "Options") or {}
+    options = _json_object(form, "options", Message("options.label.options")) or {}
     body: dict[str, Any] = {}
     for name, value in options.items():
         given = fields.get(name)
         if given is not None and given.set_by_user:
-            raise OptionsError(f"{name} is given twice.")
+            raise OptionsError(Message("options.given_twice", {"name": name}))
         body[name] = value
     for name, field in fields.items():
         if field.set_by_user or name not in options:

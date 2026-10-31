@@ -19,17 +19,35 @@ Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a
 page is the leaf ``/`` inside it, and a query string makes a leaf of its own. Children are in
 name order."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Final, Literal
 
 from text_extraction.job_models import JobItem
 from text_extraction.site.types import SiteInfo
 from text_extraction.site.urls import seen_key
+from text_extraction.ui.i18n import Message
 
-__all__ = ["MAX_SECTION_DEPTH", "NodeKind", "SiteTree", "TreeBuilder", "TreeNode", "build_tree"]
+__all__ = [
+    "FOUND_LABELS",
+    "MAX_SECTION_DEPTH",
+    "NodeKind",
+    "SiteTree",
+    "TreeBuilder",
+    "TreeNode",
+    "build_tree",
+]
 
 NodeKind = Literal["section", "page", "sitemap", "linked"]
+# How the tree labels a URL leaf of each kind (a section has no URL and no label).
+FOUND_LABELS: Final[Mapping[NodeKind, Message]] = MappingProxyType(
+    {
+        "page": Message("tree.crawled"),
+        "sitemap": Message("tree.in_sitemap"),
+        "linked": Message("tree.linked_only"),
+    }
+)
 
 # Sections below a host; the segments of a deeper path stay together in its leaf's label, so
 # neither the tree nor its rendering nests without bound.

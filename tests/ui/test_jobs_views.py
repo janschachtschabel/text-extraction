@@ -27,6 +27,7 @@ from text_extraction.job_models import JobItem, JobProgress, JobView
 from text_extraction.jobs import JobStore
 from text_extraction.ui.forms import OPERATIONS
 from text_extraction.ui.forward import forward
+from text_extraction.ui.i18n import LANGUAGE_HEADER
 from text_extraction.ui.results import render_result
 
 HEADERS = {**HX, **AUTH}
@@ -185,7 +186,11 @@ def test_progress_view(client: TestClient) -> None:
     assert not paged.xpath(".//button[contains(@class, 'next')]")
     # An unknown job is shown as such, beside the others.
     missing = jobs_of(progress(client, small, "f" * 32))["f" * 32]
-    assert texts(missing, ".//p[contains(@class, 'job-error')]") == ["Job not found."]
+    assert texts(missing, ".//div[contains(@class, 'job-error')]//p") == [
+        "Not found.",
+        "Details from the API (English)",
+        "Job not found.",
+    ]
 
 
 def test_progress_refresh_one_hit_and_stops(client: TestClient, hits: list[str]) -> None:
@@ -220,7 +225,10 @@ def test_progress_refusals(hits: list[str]) -> None:
         # A refresh refused for the rate limit tries again after Retry-After.
         holder = live.xpath("//div[@class='progress-live']")[0]
         assert holder.get("hx-trigger").startswith("load delay:")
-        assert texts(live, "//p[@class='error']")[0].startswith("Rate limit exceeded.")
+        assert texts(live, "//div[@class='error']/p[1]") == [
+            "Too many requests: wait a moment and try again."
+        ]
+        assert texts(live, "//p[@class='error-message']")[0].startswith("Rate limit exceeded.")
         whole = tree(progress(client, job_id))
         assert texts(whole, "//*[@class='http-status']") == ["HTTP 429"]
         no_key = client.get("/ui/run/progress", params={"id": job_id}, headers=HX)
@@ -246,7 +254,9 @@ def test_cancel_button(client: TestClient) -> None:
     assert job_id in texts(tree(cancelled), "//p[@class='cancelled']")[0]
     assert client.get(f"/v1/jobs/{job_id}", headers=AUTH).status_code == 404
     gone = tree(progress(client, job_id, live="1"))
-    assert texts(gone, "//p[contains(@class, 'job-error')]") == ["Job not found."]
+    assert texts(gone, "//*[contains(@class, 'job-error')]//*[@class='error-message']") == [
+        "Job not found."
+    ]
     assert gone.xpath("//div[@class='progress-live']")[0].get("hx-trigger") is None
     again = tree(run(client, "cancel", id=job_id).text)
     assert texts(again, "//*[@class='http-status']") == ["HTTP 404"]
@@ -820,3 +830,58 @@ def test_job_ids_are_checked_before_the_forward(
     assert "This is not a job id." in item
     assert "This is not an artifact of a job." in shot
     assert forwarded == []
+
+
+# --- languages -----------------------------------------------------------------------------------
+
+
+def test_job_views_in_german(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    german = {**HEADERS, LANGUAGE_HEADER: "de"}
+    job_id = start_batch(client, urls(3))
+    store_result(client, job_id, 0)
+    claim(client, job_id, 2, "browser", 2)
+
+    html = client.get("/ui/run/progress", params={"id": job_id}, headers=german).text
+
+    section = jobs_of(html)[job_id]
+    assert [row[2] for row in rows(section)] == [
+        "success",
+        "wartet",
+        "läuft in browser, Zuteilung 2",
+    ]
+    assert texts(section, ".//p[@class='elapsed']")[0].startswith("Vergangen: ")
+    # An unknown job: the translated text of its code, with the API's English message below.
+    unknown = client.get("/ui/run/progress", params={"id": "f" * 32}, headers=german).text
+    missing = jobs_of(unknown)["f" * 32]
+    assert texts(missing, ".//*[@class='error-text']") == ["Nicht gefunden."]
+    assert texts(missing, ".//*[@class='api-detail-label']") == ["Details der API (Englisch)"]
+    assert texts(missing, ".//*[@class='error-message']") == ["Job not found."]
+    # The views' own messages.
+    no_job = client.get("/ui/run/progress", headers=german).text
+    assert texts(tree(no_job), "//div[@class='error']/p") == ["Geben Sie eine Job-ID an."]
+    waiting = client.get("/ui/run/job", params={"id": job_id, "index": 1}, headers=german).text
+    assert texts(tree(waiting), "//p") == ["Eintrag 1: wartet."]
+    no_site = client.get("/ui/run/site-tree", params={"id": job_id}, headers=german).text
+    assert texts(tree(no_site), "//div[@class='error']/p") == [
+        "Dieser Job ist kein Website-Struktur-Job."
+    ]
+    lines = client.post(
+        "/ui/run/batch-urls", data={"urls": "ftp://example.org/x"}, headers=german
+    ).text
+    assert texts(tree(lines), "//ul[@class='problems']/li") == [
+        "Zeile 1: Das Schema der URL muss http oder https sein"
+    ]
+    # A site job's tree button and the tree's labels.
+    site = client.post(
+        "/ui/run/site-structure", data={"url": PAGE, "depth": "1"}, headers=german
+    ).text
+    (site_section,) = jobs_of(site).values()
+    assert texts(site_section, ".//button[contains(@class, 'tree-button')]") == [
+        "Baum jetzt anzeigen"
+    ]
+    fake_reads(
+        monkeypatch, len(SMALL_SITE), lambda offset, limit: SMALL_SITE[offset : offset + limit]
+    )
+    shown = client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=german).text
+    found = texts(tree(shown), "//span[contains(@class, 'found')]")
+    assert sorted(set(found)) == ["Sitemap", "gecrawlt", "nur verlinkt"]

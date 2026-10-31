@@ -36,7 +36,7 @@ from text_extraction.job_models import JobAccepted, JobItem, JobView
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     artifact_of,
-    envelope_message,
+    envelope_error,
     raw_text,
     read_form,
     read_screenshot,
@@ -47,10 +47,12 @@ from text_extraction.ui.answers import (
 )
 from text_extraction.ui.forms import OPERATIONS, OptionsError, access_choice, build_body
 from text_extraction.ui.forward import Forwarded, forward
+from text_extraction.ui.i18n import Message
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
-from text_extraction.ui.site_tree import NodeKind, SiteTree, TreeBuilder
+from text_extraction.ui.site_tree import FOUND_LABELS, SiteTree, TreeBuilder
 from text_extraction.ui.templating import language_context, request_language, templates
+from text_extraction.ui.texts import error_text
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.ui.url_lists import (
     UrlList,
@@ -82,19 +84,18 @@ FILE_PART: Final = "file"
 # Fields of a batch form besides its URLs (format, mode, metadata, options and a few more).
 FORM_OPTION_FIELDS: Final = 64
 
-NO_URLS: Final = "Give at least one URL."
-NOT_A_JOB: Final = "This is not a job id."
+NO_URLS: Final = Message("jobs.no_urls")
+NOT_A_JOB: Final = Message("jobs.not_a_job")
 # A job's id, as `jobs_api.visible_job` checks it: anything else is never forwarded.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}", re.ASCII)
-NO_JOB: Final = "Give a job id."
-NOT_A_SITE: Final = "This job is not a site structure job."
-NO_FILE: Final = "Choose a CSV or JSON file."
-FOUND_LABELS: Final[Mapping[NodeKind, str]] = {
-    "section": "",
-    "page": "crawled",
-    "sitemap": "sitemap",
-    "linked": "linked only",
-}
+NO_JOB: Final = Message("jobs.no_job")
+NOT_A_SITE: Final = Message("jobs.not_a_site")
+NO_FILE: Final = Message("jobs.no_file")
+NO_ITEM_INDEX: Final = Message("jobs.no_item_index")
+NOT_AN_ARTIFACT: Final = Message("jobs.not_an_artifact")
+QUEUED: Final = Message("progress.queued")
+SHOW_TREE: Final = Message("progress.show_tree")
+SHOW_TREE_NOW: Final = Message("progress.show_tree_now")
 _MODES: Final = frozenset(get_args(RequestedMode))
 
 
@@ -108,7 +109,7 @@ class ItemRow:
 
     index: int
     url: str | None
-    state: str | None
+    state: Message | None
     status: str | None
     error_code: str | None
     link: str | None
@@ -116,7 +117,8 @@ class ItemRow:
 
 @dataclass
 class JobPanel:
-    """What the progress view shows of one job; ``error`` when it could not be read."""
+    """What the progress view shows of one job; ``error`` (the text of its code) and
+    ``error_detail`` (the API's English message) when it could not be read."""
 
     id: str
     kind: str | None = None
@@ -126,13 +128,14 @@ class JobPanel:
     success: int = 0
     partial: int = 0
     failed: int = 0
-    elapsed: str = ""
+    elapsed: Message | None = None
     items: list[ItemRow] = field(default_factory=list)
     prev_url: str | None = None
     next_url: str | None = None
     tree_url: str | None = None
-    tree_label: str | None = None
-    error: str | None = None
+    tree_label: Message | None = None
+    error: Message | None = None
+    error_detail: str | None = None
     retryable: bool = False
 
     @property
@@ -167,21 +170,21 @@ class _Shown:
         return self.url(offsets=offsets)
 
 
-def _elapsed(start: datetime, end: datetime | None) -> str:
+def _elapsed(start: datetime, end: datetime | None) -> Message:
     seconds = max(0, int(((end or datetime.now(UTC)) - start).total_seconds()))
     hours, rest = divmod(seconds, 3600)
     minutes, seconds = divmod(rest, 60)
     if hours:
-        return f"{hours} h {minutes} min"
+        return Message("progress.hours", {"hours": hours, "minutes": minutes})
     if minutes:
-        return f"{minutes} min {seconds} s"
-    return f"{seconds} s"
+        return Message("progress.minutes", {"minutes": minutes, "seconds": seconds})
+    return Message("progress.seconds", {"seconds": seconds})
 
 
-def _item_state(item: JobItem) -> str:
+def _item_state(item: JobItem) -> Message:
     if item.run is None:
-        return "queued"
-    return f"running in {item.run.pool}, claim {item.run.attempts}"
+        return QUEUED
+    return Message("progress.running", {"pool": item.run.pool, "attempt": item.run.attempts})
 
 
 def _item_link(job_id: str, index: int, mode: RequestedMode | None) -> str:
@@ -224,16 +227,22 @@ def _panel(view: JobView, shown: _Shown, position: int) -> JobPanel:
         panel.next_url = shown.moved(position, view.next_offset)
     if view.kind == "site":
         panel.tree_url = f"{RUN_PREFIX}/site-tree?{urlencode({'id': view.id})}"
-        panel.tree_label = "Show as tree" if view.state == "completed" else "Show tree now"
+        panel.tree_label = SHOW_TREE if view.state == "completed" else SHOW_TREE_NOW
     return panel
 
 
 def _accepted_panel(job: JobAccepted) -> JobPanel:
     """A job as its 202 answer describes it, before it is read."""
-    panel = JobPanel(id=job.id, kind=job.kind, state=job.state, total=job.total, elapsed="0 s")
+    panel = JobPanel(
+        id=job.id,
+        kind=job.kind,
+        state=job.state,
+        total=job.total,
+        elapsed=Message("progress.seconds", {"seconds": 0}),
+    )
     if job.kind == "site":
         panel.tree_url = f"{RUN_PREFIX}/site-tree?{urlencode({'id': job.id})}"
-        panel.tree_label = "Show tree now"
+        panel.tree_label = SHOW_TREE_NOW
     return panel
 
 
@@ -250,18 +259,30 @@ async def _read_panel(
             assert envelope.data is not None  # noqa: S101 - read_job always answers its view
             return _panel(envelope.data, shown, position)
     except ServiceError as error:
-        return JobPanel(id=job_id, error=error.message, retryable=error.retryable)
+        return JobPanel(
+            id=job_id,
+            error=error_text(error.code, error.http_status),
+            error_detail=error.message,
+            retryable=error.retryable,
+        )
 
 
 def _live_context(
-    panels: Sequence[JobPanel], shown: _Shown, *, refusal_text: str | None = None, delay: int = 0
+    panels: Sequence[JobPanel],
+    shown: _Shown,
+    *,
+    refused: ServiceError | None = None,
+    delay: int = 0,
 ) -> dict[str, Any]:
-    running = any(panel.running for panel in panels) or refusal_text is not None
+    """The context of ``progress_live.html``; ``refused`` is the refusal of a refresh (a 429 or
+    503), shown as the text of its code with the API's English message."""
+    running = any(panel.running for panel in panels) or refused is not None
     return {
         "jobs": panels,
         "refresh_url": shown.url() if running else None,
         "delay": max(delay, REFRESH_SECONDS),
-        "refusal": refusal_text,
+        "refusal": error_text(refused.code, refused.http_status) if refused else None,
+        "refusal_detail": refused.message if refused else None,
         "page_items": shown.limit,
     }
 
@@ -318,7 +339,7 @@ async def progress_view(request: Request, settings: Settings) -> Response:
     if not ids:
         return templates.TemplateResponse(request, "form_error.html", {"message": NO_JOB})
     if len(ids) > _max_jobs(settings):
-        message = f"Show at most {_max_jobs(settings)} jobs at once."
+        message = Message("jobs.too_many_jobs", {"max": _max_jobs(settings)})
         return templates.TemplateResponse(request, "form_error.html", {"message": message})
     try:
         principal = await ui_principal(request)
@@ -327,9 +348,9 @@ async def progress_view(request: Request, settings: Settings) -> Response:
         if live and error.retryable:  # a 429 or 503: the view tries again later
             retry_after = (error.headers or {}).get("Retry-After", "")
             delay = int(retry_after) if retry_after.isdigit() else REFRESH_SECONDS
-            context = _live_context([], shown, refusal_text=error.message, delay=delay)
+            context = _live_context([], shown, refused=error, delay=delay)
             return templates.TemplateResponse(request, "progress_live.html", context)
-        return refusal(error)
+        return refusal(error, request_language(request))
     state: State = request.app.state
     gate = asyncio.Semaphore(READS_AT_ONCE)
     panels = await asyncio.gather(
@@ -341,12 +362,12 @@ async def progress_view(request: Request, settings: Settings) -> Response:
 # --- batches -------------------------------------------------------------------------------------
 
 
-def _problems(found: Sequence[tuple[int, str]]) -> dict[str, Any]:
+def _problems(found: Sequence[tuple[int, Message]]) -> dict[str, Any]:
     shown = list(found[:PROBLEMS_SHOWN])
     return {"problems": shown, "more_problems": max(0, len(found) - len(shown))}
 
 
-def _form_error(request: Request, message: str, **extra: Any) -> Response:
+def _form_error(request: Request, message: Message, **extra: Any) -> Response:
     return templates.TemplateResponse(request, "form_error.html", {"message": message, **extra})
 
 
@@ -381,10 +402,13 @@ def _max_fields(settings: Settings) -> int:
 
 @dataclass(frozen=True)
 class _Refused:
+    """A refused part of a batch: the text of its error code and the API's English message."""
+
     part: int
     parts: int
     http_status: int
-    message: str
+    message: Message
+    detail: str | None
 
 
 async def batch_urls_view(request: Request, settings: Settings) -> Response:
@@ -402,14 +426,14 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
     try:
         principal = await authenticate(request)
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     form = await read_form(
         request,
         max_part_size=form_part_limit(settings, f"{RUN_PREFIX}/batch-urls"),
         max_fields=_max_fields(settings),
         max_files=0,
     )
-    if isinstance(form, str):  # more fields than allowed, or malformed
+    if isinstance(form, Message):  # more fields than allowed, or malformed
         return _form_error(request, form)
     try:
         lines = _lines(form)
@@ -431,7 +455,7 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
             max_batches=settings.batch_max_open_per_client,
         )
     except (UrlListError, OptionsError) as error:
-        return _form_error(request, str(error))
+        return _form_error(request, error.message)
     _log.info("ui_batch_split", parts=len(parts), urls=len(listed.urls))
     path = OPERATIONS["batch"].path
     started: list[JobAccepted] = []
@@ -447,8 +471,8 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
         if not started:
             first = (answer, part_body)
         else:
-            message = envelope_message(answer.body, answer.status)
-            refused = _Refused(number, len(parts), answer.status, message)
+            message, detail = envelope_error(answer.body, answer.status)
+            refused = _Refused(number, len(parts), answer.status, message, detail)
         break
     if first is not None:
         answer, part_body = first
@@ -508,7 +532,7 @@ def _preview(
         "first": listed.urls[:PREVIEW_URLS],
         "text": "\n".join(listed.urls),
         "too_many": (
-            f"Select at most {most} URLs at once."
+            Message("urls.select_at_most", {"max": most})
             if parts > settings.batch_max_open_per_client
             else None
         ),
@@ -527,32 +551,33 @@ async def batch_file_view(request: Request, settings: Settings) -> Response:
     try:
         principal = await ui_principal(request)
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     limit = settings.ui_batch_file_max_bytes
     form = await read_form(
         request,
         max_part_size=form_part_limit(settings, f"{RUN_PREFIX}/batch-file"),
         max_files=1,
     )
-    if isinstance(form, str):
+    if isinstance(form, Message):
         return _form_error(request, form)
+    too_large = Message("jobs.file_too_large", {"limit": limit})
     try:
         upload = form.get(FILE_PART)
         if not isinstance(upload, UploadFile):
             return _form_error(request, NO_FILE)
         if upload.size is not None and upload.size > limit:
-            return _form_error(request, f"The file is larger than {limit} bytes.")
+            return _form_error(request, too_large)
         data = await upload.read(limit + 1)
     finally:
         await form.close()
     if len(data) > limit:
-        return _form_error(request, f"The file is larger than {limit} bytes.")
+        return _form_error(request, too_large)
     try:
         listed = await asyncio.to_thread(
             parse_url_file, data, max_rows=settings.ui_batch_file_max_rows
         )
     except UrlListError as error:
-        return _form_error(request, str(error))
+        return _form_error(request, error.message)
     _log.info(
         "ui_batch_file",
         rows=listed.rows,
@@ -569,9 +594,9 @@ async def site_structure_view(request: Request) -> Response:
     try:
         await authenticate(request)  # before the form is parsed; the forward checks it again
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     form = await read_form(request, max_files=0)
-    if isinstance(form, str):
+    if isinstance(form, Message):
         return _form_error(request, form)
     try:
         fields = text_fields(form)
@@ -580,7 +605,7 @@ async def site_structure_view(request: Request) -> Response:
     try:
         body = build_body("site-structure", fields)
     except OptionsError as error:
-        return _form_error(request, str(error))
+        return _form_error(request, error.message)
     path = OPERATIONS["site-structure"].path
     answer = await forward(request, "POST", path, json=body)
     data = (answer.body or {}).get("data")
@@ -655,7 +680,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
                 request.app.state, principal, job_id, offset, builder, read
             )
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     if read.kind != "site":
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)
@@ -691,7 +716,7 @@ async def job_item_view(request: Request) -> Response:
     job_id = params.get("id") or ""
     index = _index(params.get("index"))
     if not job_id or index is None:
-        return _form_error(request, "Give a job id and an item index.")
+        return _form_error(request, NO_ITEM_INDEX)
     if not JOB_ID.fullmatch(job_id):
         return _form_error(request, NOT_A_JOB)
     path = OPERATIONS["job"].path.format(job_id=job_id)
@@ -715,7 +740,7 @@ async def job_item_view(request: Request) -> Response:
         )
         return HTMLResponse(html)
     if not items:
-        return _form_error(request, f"The job has no item {index}.")
+        return _form_error(request, Message("jobs.no_item", {"index": index}))
     item = JobItem.model_validate(items[0])
     if item.result is None:
         context = {"index": item.index, "state": _item_state(item)}
@@ -746,7 +771,7 @@ async def artifact_view(request: Request) -> Response:
     url = OPERATIONS["artifact"].path.format(job_id=job_id, name=name)
     found = artifact_of({"data": {"screenshot": {"url": url}}})
     if found is None or not JOB_ID.fullmatch(job_id):
-        return _form_error(request, "This is not an artifact of a job.")
+        return _form_error(request, NOT_AN_ARTIFACT)
     screenshot, note = await read_screenshot(request, *found)
     context = {"screenshot": screenshot, "note": note}
     return templates.TemplateResponse(request, "artifact.html", context)
@@ -757,9 +782,9 @@ async def cancel_view(request: Request) -> Response:
     try:
         await authenticate(request)  # before the form is parsed; the forward checks it again
     except ServiceError as error:
-        return refusal(error)
+        return refusal(error, request_language(request))
     form = await read_form(request, max_files=0)
-    if isinstance(form, str):
+    if isinstance(form, Message):
         return _form_error(request, form)
     try:
         job_id = text_fields(form).get("id", "")

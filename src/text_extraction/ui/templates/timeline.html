@@ -3,7 +3,7 @@
   {% if steps %}
   <ol class="timeline">
     {% for step in steps %}
-    <li><span class="step">{{ step.label }}</span> {{ step.detail }}{% if step.ms is not none %} <span class="ms">{{ t("result.ms", ms=step.ms) }}</span>{% endif %}</li>
+    <li><span class="step">{{ t(step.label) }}</span> {% for part in step.detail %}{{ part if part is string else t(part) }}{% if not loop.last %}, {% endif %}{% endfor %}{% if step.ms is not none %} <span class="ms">{{ t("result.ms", ms=step.ms) }}</span>{% endif %}</li>
     {% endfor %}
   </ol>
   {% endif %}
@@ -11,7 +11,7 @@
   <h5>{{ t("result.warnings") }}</h5>
   <ul class="warnings">
     {% for name, text in warnings %}
-    <li><code>{{ name }}</code>{% if text %}: {{ text }}{% endif %}</li>
+    <li><code>{{ name }}</code>{% if text %}: {{ t(text) }}{% endif %}</li>
     {% endfor %}
   </ul>
   {% endif %}

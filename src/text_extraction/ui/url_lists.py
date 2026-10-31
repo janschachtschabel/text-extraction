@@ -9,13 +9,22 @@ never kept. The UI writes no CSV, so nothing a cell holds reaches a spreadsheet 
 import csv
 import json
 import math
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Final
 
 from text_extraction.netguard import MAX_URL_LENGTH, InvalidUrlError, validate_url
+from text_extraction.ui.i18n import Message, MessageError
 
-__all__ = ["UrlList", "UrlListError", "parse_url_file", "parse_url_lines", "split_batches"]
+__all__ = [
+    "URL_PROBLEMS",
+    "UrlList",
+    "UrlListError",
+    "parse_url_file",
+    "parse_url_lines",
+    "split_batches",
+]
 
 BOM: Final = b"\xef\xbb\xbf"
 # A CSV field may be one character longer than a URL (so such a URL is reported as too long);
@@ -29,17 +38,30 @@ MAX_COLUMNS: Final = 1000
 # The delimiter of a file of one column: a control character it does not hold (one of these).
 NO_DELIMITER: Final = ("\x1f", "\x1e", "\x1d", "\x1c", "\x00")
 
-NOT_UTF8: Final = "The file is not UTF-8."
-NOT_JSON: Final = "The file is not valid JSON."
-NOT_URL_ARRAY: Final = "Expected a JSON array of URLs or of objects with url."
-FIELD_TOO_LONG: Final = "A field is too long."
-TOO_MANY_COLUMNS: Final = "A row has too many columns."
-BLANK_OR_CONTROL: Final = "URL contains a blank or a control character"
-NO_URL: Final = "no URL"
+NOT_UTF8: Final = Message("urls.not_utf8")
+NOT_JSON: Final = Message("urls.not_json")
+NOT_URL_ARRAY: Final = Message("urls.not_url_array")
+FIELD_TOO_LONG: Final = Message("urls.field_too_long")
+TOO_MANY_COLUMNS: Final = Message("urls.too_many_columns")
+BLANK_OR_CONTROL: Final = Message("urls.blank_or_control")
+NO_URL: Final = Message("urls.no_url")
+TOO_LONG: Final = Message("urls.too_long", {"max": MAX_URL_LENGTH})
+# The text of each ``InvalidUrlError`` that ``netguard.validate_url`` raises (but the length,
+# `TOO_LONG`, which is checked first); another one reads as an invalid URL.
+URL_PROBLEMS: Final[Mapping[str, Message]] = MappingProxyType(
+    {
+        "URL cannot be parsed": Message("urls.unparsable"),
+        "URL scheme must be http or https": Message("urls.scheme"),
+        "URL has no host": Message("urls.no_host"),
+        "URL must not contain user information": Message("urls.user_info"),
+        "URL port must be between 1 and 65535": Message("urls.port"),
+    }
+)
+INVALID_URL: Final = Message("error.invalid_url")
 
 
-class UrlListError(ValueError):
-    """A list or file that is refused as a whole; the message is shown."""
+class UrlListError(MessageError):
+    """A list or file that is refused as a whole; its ``message`` is shown."""
 
 
 @dataclass
@@ -49,21 +71,23 @@ class UrlList:
     how many rows held a value."""
 
     urls: list[str] = field(default_factory=list)
-    invalid: list[tuple[int, str]] = field(default_factory=list)
+    invalid: list[tuple[int, Message]] = field(default_factory=list)
     duplicates: int = 0
     rows: int = 0
 
 
-def _problem(value: str) -> str | None:
+def _problem(value: str) -> Message | None:
     """Why ``value`` (stripped) is no URL to extract, or None."""
     if not value:
         return NO_URL
     if any(char.isspace() or ord(char) < 0x20 or ord(char) == 0x7F for char in value):
         return BLANK_OR_CONTROL
+    if len(value) > MAX_URL_LENGTH:
+        return TOO_LONG
     try:
         validate_url(value)
     except InvalidUrlError as error:
-        return str(error)
+        return URL_PROBLEMS.get(str(error), INVALID_URL)
     return None
 
 
@@ -93,7 +117,7 @@ def parse_url_lines(values: Iterable[str], *, max_rows: int) -> UrlList:
     from 1. More than ``max_rows`` values that are not blank is refused before any is checked."""
     lines = list(values)
     if sum(1 for value in lines if value.strip()) > max_rows:
-        raise UrlListError(f"The list has more than {max_rows} URLs.")
+        raise UrlListError(Message("urls.list_too_long", {"max": max_rows}))
     collector = _Collector()
     for row, value in enumerate(lines, start=1):
         if value.strip():
@@ -125,7 +149,7 @@ def parse_url_file(data: bytes, *, max_rows: int) -> UrlList:
     if start in ("[", "{"):
         return _parse_json(text, max_rows)
     if _rows_in(text) > max_rows:
-        raise UrlListError(f"The file has more than {max_rows} rows.")
+        raise UrlListError(Message("urls.file_too_long", {"max": max_rows}))
     return _parse_csv(text)
 
 
@@ -137,7 +161,7 @@ def _parse_json(text: str, max_rows: int) -> UrlList:
     if not isinstance(parsed, list):
         raise UrlListError(NOT_URL_ARRAY)
     if len(parsed) > max_rows:
-        raise UrlListError(f"The file has more than {max_rows} rows.")
+        raise UrlListError(Message("urls.file_too_long", {"max": max_rows}))
     values: list[str] = []
     for element in parsed:
         value = element.get("url") if isinstance(element, dict) else element
@@ -220,5 +244,5 @@ def split_batches(urls: Sequence[str], *, per_batch: int, max_batches: int) -> l
     batches than ``max_batches`` is refused (`UrlListError`), so nothing is sent."""
     count = math.ceil(len(urls) / per_batch)
     if count > max_batches:
-        raise UrlListError(f"Select at most {max_batches * per_batch} URLs at once.")
+        raise UrlListError(Message("urls.select_at_most", {"max": max_batches * per_batch}))
     return [list(urls[start : start + per_batch]) for start in range(0, len(urls), per_batch)]

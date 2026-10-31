@@ -6,7 +6,7 @@ import asyncio
 import base64
 import socket
 import time
-from typing import Any
+from typing import Any, get_args
 
 import httpcore
 import lxml.html
@@ -17,8 +17,15 @@ from pytest_httpserver import HTTPServer
 from tests.ui.conftest import run, running
 from text_extraction.compliance import ComplianceMode
 from text_extraction.ratelimit import RateDecision, RateLimiter
-from text_extraction.ui.previews import Preview, load_previews
-from text_extraction.vision.fetch import ImageBytes, ImageFetcher, ImageSkipped
+from text_extraction.ui.previews import (
+    OUTCOMES,
+    SHOWN,
+    SKIP_REASONS,
+    TIME,
+    Preview,
+    load_previews,
+)
+from text_extraction.vision.fetch import ImageBytes, ImageFetcher, ImageSkipped, SkipReason
 
 PUBLIC_HOST = "images.example.org"
 PUBLIC_ADDRESS = "93.184.216.34"
@@ -104,11 +111,19 @@ def test_previews_guarded(httpserver: HTTPServer, connects: list[str]) -> None:
     assert [(image.get("src"), image.get("alt")) for image in images] == [
         ("data:image/png;base64," + base64.b64encode(PNG).decode(), "A <b>png</b>")
     ]
-    skipped = [
-        " ".join(node.text_content().split())
-        for node in root.xpath("//figure[@class='preview']//*[@class='skipped']")
+    skipped = root.xpath("//figure[@class='preview']//*[@class='skipped']")
+    assert [node.get("data-reason") for node in skipped] == [
+        "unsupported",
+        "too_large",
+        "refused",
+        "refused",
     ]
-    assert skipped == ["unsupported", "too_large", "refused", "refused"]
+    assert [node.text_content() for node in skipped] == [
+        "not a supported image",
+        "too large",
+        "address not allowed",
+        "address not allowed",
+    ]
     assert "<b>png</b>" not in answer.text
 
     # No connection to anything but the public address (the redirect target and the private
@@ -297,3 +312,8 @@ def test_preview_view_survives_an_unexpected_error() -> None:
         registry.get_sample_value("text_extraction_ui_image_previews_total", {"outcome": "error"})
         == 1.0
     )
+
+
+def test_every_skip_reason_has_a_text() -> None:
+    assert set(SKIP_REASONS) == set(OUTCOMES) - {SHOWN}
+    assert set(get_args(SkipReason)) | {TIME} == set(SKIP_REASONS)

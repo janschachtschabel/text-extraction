@@ -20,7 +20,7 @@
     {% for url in first %}<li>{{ url }}</li>{% endfor %}
   </ol>
   {% endif %}
-  {% if too_many %}<p class="error" role="alert">{{ too_many }}</p>{% endif %}
+  {% if too_many %}<p class="error" role="alert">{{ t(too_many) }}</p>{% endif %}
   {% if urls and not too_many %}
   <form class="op" hx-post="/ui/run/batch-urls" hx-target="closest .batch-preview" hx-swap="outerHTML">
     {% set prefix = "preview" %}

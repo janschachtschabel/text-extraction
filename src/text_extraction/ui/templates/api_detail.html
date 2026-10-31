@@ -1,0 +1,13 @@
+{#- The API's own English text of an error (P12-S5): ``detail`` (its message) and
+``detail_lines`` (a 422's details), below the translated text of its code. -#}
+{% if detail or detail_lines %}
+<div class="api-detail">
+  <p class="api-detail-label">{{ t("result.api_details") }}</p>
+  {% if detail %}<p class="error-message" lang="en">{{ detail }}</p>{% endif %}
+  {% if detail_lines %}
+  <ul class="details" lang="en">
+    {% for line in detail_lines %}<li>{{ line }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% endif %}

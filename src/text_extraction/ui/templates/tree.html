@@ -13,7 +13,7 @@
       {%- for node in tree.roots recursive %}
       <li class="node node-{{ node.kind }}">
         <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}> <span class="label">{{ node.label }}</span></label>
-        {%- if node.url %} <span class="found found-{{ node.kind }}">{{ found_labels[node.kind] }}</span>
+        {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
         {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
         {%- if node.depth is not none %} <span class="depth">{{ t("tree.depth", depth=node.depth) }}</span>{% endif %}
         {%- if node.status %} <span class="status">{{ node.status }}</span>{% endif %}
