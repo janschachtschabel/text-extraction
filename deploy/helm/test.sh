@@ -89,6 +89,14 @@ expect_absent() {
   if grep -qF -- "$needle" <<<"$output"; then fail "$label: '$needle' present"; else pass "$label"; fi
 }
 
+# The container resources in the Deployment $2: limits CPU $3 and memory $4, requests CPU $5 and
+# memory $6, as one block (toYaml sorts limits before requests and cpu before memory).
+expect_resources() {
+  local label="$1" output="$2"
+  expect_contains "$label" "$(flat "$output")" \
+    "resources: limits: cpu: $3 memory: $4 requests: cpu: $5 memory: $6"
+}
+
 expect_render_fails() {
   local label="$1" message="$2" output
   shift 2
@@ -136,8 +144,6 @@ expect_absent "browser worker has no public port" "$browser" "containerPort: 808
 expect_contains "browser worker root filesystem is read-only" "$browser" "readOnlyRootFilesystem: true"
 expect_contains "browser worker /tmp is bounded" "$browser" "sizeLimit: 2Gi"
 expect_contains "browser worker grace period" "$browser" "terminationGracePeriodSeconds: 150"
-expect_contains "browser worker memory request" "$browser" "memory: 2Gi"
-expect_contains "browser worker memory limit" "$browser" "memory: 4608Mi"
 expect_values "browser worker" "$browser" BROWSER_CONCURRENCY "4"
 expect_absent "browser worker gets no WORKER_CONCURRENCY" "$browser" "name: WORKER_CONCURRENCY"
 expect_contains "browser worker internal Service" "$(document "$on" Service "$BROWSER-internal")" "port: 9090"
@@ -259,8 +265,6 @@ expect_contains "extract worker passes its entry point as args" "$extract" "- te
 # of address space: (2560 - 1024) / 2 in the API and extract pods, (4608 - 3072) / 2 in the
 # browser pods. The reserves hold the selector child (STRUCTURED_SELECTOR_MEMORY_MB, 512) beside
 # the server (512) and Chromium (2048).
-expect_contains "API memory limit" "$api" "memory: 2560Mi"
-expect_contains "extract worker memory limit" "$extract" "memory: 2560Mi"
 expect_contains "selector child memory" "$(document "$on" ConfigMap "$API")" "STRUCTURED_SELECTOR_MEMORY_MB: \"512\""
 for name in "$API" "$EXTRACT" "$BROWSER"; do
   expect_values "document memory ($name)" "$(document "$on" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
@@ -322,8 +326,6 @@ expect_absent "docling worker keeps the image's init process" "$docling" "comman
 expect_contains "docling worker serves the internal port" "$docling" "containerPort: 9090"
 expect_absent "docling worker has no public port" "$docling" "containerPort: 8080"
 expect_contains "docling worker grace period" "$docling" "terminationGracePeriodSeconds: 60"
-expect_contains "docling worker memory request" "$docling" "memory: 3Gi"
-expect_contains "docling worker memory limit" "$docling" "memory: 8Gi"
 expect_contains "docling workers stay on amd64 nodes" "$docling" "kubernetes.io/arch: amd64"
 expect_contains "docling worker internal Service" "$(document "$docling_on" Service "$DOCLING-internal")" "port: 9090"
 # The init container downloads into a writable mount, the worker reads it read-only.
@@ -480,9 +482,6 @@ expect_absent "asr worker keeps the image's init process" "$asr" "command:"
 expect_contains "asr worker serves the internal port" "$asr" "containerPort: 9090"
 expect_absent "asr worker has no public port" "$asr" "containerPort: 8080"
 expect_contains "asr worker grace period" "$asr" "terminationGracePeriodSeconds: 60"
-expect_contains "asr worker memory request" "$asr" "memory: 3Gi"
-expect_contains "asr worker memory limit" "$asr" "memory: 6Gi"
-expect_contains "asr worker CPU limit" "$asr" 'cpu: "4"'
 expect_contains "asr workers stay on amd64 nodes" "$asr" "kubernetes.io/arch: amd64"
 expect_contains "asr worker internal Service" "$(document "$asr_on" Service "$ASR-internal")" "port: 9090"
 init="$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$asr")"
@@ -493,7 +492,7 @@ expect_contains "asr init container mounts the models" "$init" "mountPath: /mode
 expect_absent "asr init container mount is writable" "$init" "readOnly: true"
 expect_contains "asr init container root filesystem is read-only" "$init" "readOnlyRootFilesystem: true"
 expect_contains "asr init container requests little memory" "$(flat "$init")" "requests: cpu: 100m memory: 256Mi"
-expect_absent "asr init container does not take the worker's resources" "$init" "memory: 3Gi"
+expect_absent "asr init container does not take the worker's resources" "$init" "memory: 1408Mi"
 expect_contains "models resources follow workers.asr.models.resources" \
   "$(document "$(render --set workers.asr.enabled=true --set workers.asr.models.resources.limits.memory=2Gi)" Deployment "$ASR")" \
   "memory: 2Gi"
@@ -675,8 +674,6 @@ expect_absent "nlp worker keeps the image's init process" "$nlp" "command:"
 expect_contains "nlp worker serves the internal port" "$nlp" "containerPort: 9090"
 expect_absent "nlp worker has no public port" "$nlp" "containerPort: 8080"
 expect_contains "nlp worker grace period" "$nlp" "terminationGracePeriodSeconds: 60"
-expect_contains "nlp worker CPU request" "$(flat "$nlp")" "requests: cpu: \"1\" memory: 2Gi"
-expect_contains "nlp worker memory limit" "$(flat "$nlp")" "limits: cpu: \"2\" memory: 3Gi"
 expect_contains "nlp worker internal Service" "$(document "$nlp_on" Service "$NLP-internal")" "port: 9090"
 # The init container downloads into a writable mount, the worker reads it read-only.
 init="$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$nlp")"
@@ -848,8 +845,6 @@ expect_absent "llm worker is not an nlp worker" "$llm" "PII_MODEL"
 expect_contains "llm worker serves the internal port" "$llm" "containerPort: 9090"
 expect_absent "llm worker has no public port" "$llm" "containerPort: 8080"
 expect_contains "llm worker grace period" "$llm" "terminationGracePeriodSeconds: 40"
-expect_contains "llm worker CPU request" "$(flat "$llm")" "requests: cpu: 100m memory: 256Mi"
-expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: \"1\" memory: 1Gi"
 expect_contains "llm worker internal Service" "$(document "$llm_on" Service "$LLM-internal")" "port: 9090"
 expect_contains "llm worker replicas" "$llm" "replicas: 1"
 expect_absent "llm workers create no volume claim" "$(render --set workers.llm.enabled=true)" "kind: PersistentVolumeClaim"
@@ -1014,10 +1009,17 @@ ingress_notes="$(render_notes --set mcp.enabled=true --set ui.enabled=true --set
   --set 'ingress.tls[0].hosts[0]=te.example.org')"
 expect_contains "notes name the MCP URL of the ingress" "$ingress_notes" "https://te.example.org/mcp"
 expect_contains "notes name the UI URL of the ingress" "$ingress_notes" "https://te.example.org/ui"
-expect_contains "notes give the ingress read timeout" "$ingress_notes" "MCP_WAIT_SECONDS + 70 s (95 s)"
+expect_contains "notes give the ingress read timeout" "$ingress_notes" "read timeout of at least 120 s (150 s with unblock mode"
+expect_contains "notes give the MCP_WAIT_SECONDS bound" "$ingress_notes" "MCP_WAIT_SECONDS + 70 s"
 expect_contains "the ingress read timeout follows MCP_WAIT_SECONDS" \
-  "$(render_notes --set ui.enabled=true --set ingress.enabled=true --set config.MCP_WAIT_SECONDS=60)" "(130 s)"
+  "$(render_notes --set ui.enabled=true --set ingress.enabled=true --set config.MCP_WAIT_SECONDS=60)" "(130 s) if larger"
 expect_absent "no ingress note without an ingress" "$(render_notes --set mcp.enabled=true)" "read timeout"
+# The 120 s come from the REST sync waits (handover.md item 4): a plain ingress gets the hint too.
+plain_ingress_notes="$(render_notes --set ingress.enabled=true)"
+expect_contains "notes give the read timeout to a plain ingress" "$plain_ingress_notes" \
+  "read timeout of at least 120 s (150 s with unblock mode"
+expect_contains "notes point a plain ingress at the annotations" "$plain_ingress_notes" "ingress.annotations"
+expect_absent "no MCP bound without MCP and UI" "$plain_ingress_notes" "MCP_WAIT_SECONDS"
 expect_contains "notes give the Claude Code command with the key header" \
   "$(render_notes --set mcp.enabled=true)" '--header "Authorization: Bearer <key>"'
 open_ui_warning="WARNING: ui.enabled is true while config.AUTH_MODE is none"
@@ -1027,6 +1029,86 @@ expect_absent "no open-UI warning under api_key" \
   "$(render_notes --set ui.enabled=true)" "$open_ui_warning"
 expect_absent "no open-UI warning while the UI is off" \
   "$(render_notes --set config.AUTH_MODE=none)" "$open_ui_warning"
+
+# --- Measured resources --------------------------------------------------------------------------
+
+# Requests and limits from the load runs (docs/configuration.md, "Resource baselines"): request =
+# the measured memory p95 and CPU mean, limit = 1.5 x the peak, but never below the memory that
+# backs the children's address-space budgets.
+sized="$(render --set workers.docling.enabled=true --set workers.asr.enabled=true \
+  --set workers.nlp.enabled=true --set workers.llm.enabled=true)"
+expect_resources "API resources" "$(document "$sized" Deployment "$API")" 3750m 2560Mi 1400m 832Mi
+expect_resources "extract worker resources" "$(document "$sized" Deployment "$EXTRACT")" 1750m 2560Mi 450m 768Mi
+expect_resources "browser worker resources" "$(document "$sized" Deployment "$BROWSER")" 2250m 4608Mi 750m 1152Mi
+expect_resources "docling worker resources" "$(document "$sized" Deployment "$DOCLING")" 5500m 8Gi 2250m 1600Mi
+expect_resources "asr worker resources" "$(document "$sized" Deployment "$ASR")" 5500m 6Gi 3050m 1408Mi
+expect_resources "nlp worker resources" "$(document "$sized" Deployment "$NLP")" '"2"' 3Gi 750m 1728Mi
+expect_resources "llm worker resources" "$(document "$sized" Deployment "$LLM")" 750m 1Gi 150m 256Mi
+expect_resources "valkey resources (Guaranteed QoS)" \
+  "$(document "$sized" Deployment "$RELEASE-text-extraction-valkey")" 500m 1280Mi 500m 1280Mi
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_values "the measured limits keep 768 MiB per document child ($name)" \
+    "$(document "$sized" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
+done
+
+# --- Example production values (ruling P11-S11) ----------------------------------------------------
+
+EXAMPLE="$CHART/values-production.example.yaml"
+# The resources blocks of a render, one per line, in document order (init containers included).
+resource_blocks() {
+  grep -oE "resources: limits: cpu: [^ ]+ memory: [^ ]+ requests: cpu: [^ ]+ memory: [^ ]+" <<<"$(flat "$1")" || true
+}
+if [[ ! -f "$EXAMPLE" ]]; then
+  fail "no $EXAMPLE"
+else
+  if "$HELM" lint --strict "$CHART" -f "$EXAMPLE" >/dev/null; then
+    pass "the example production values pass helm lint --strict"
+  else
+    fail "the example production values fail helm lint --strict"
+  fi
+  production="$(render -f "$EXAMPLE")"
+  example_tag="$(sed -n '/^image:/,/^[^ ]/s/^  tag: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$EXAMPLE")"
+  if [[ "$example_tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    pass "the example pins a SemVer image tag ($example_tag)"
+  else
+    fail "the example's image.tag is '$example_tag', expected a SemVer tag"
+  fi
+  images="$(grep -oE 'image: "ghcr.io/janschachtschabel/text-extraction[^"]*"' <<<"$production" | sort -u)"
+  if [[ -n "$images" ]] && ! grep -qv ":$example_tag\"\$" <<<"$images"; then
+    pass "every image of the example runs tag $example_tag"
+  else
+    fail "images of the example not on tag $example_tag: $(tr '\n' ' ' <<<"$images")"
+  fi
+  for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
+    if [[ -n "$(document "$production" Deployment "$name")" ]]; then
+      pass "the example deploys $name"
+    else
+      fail "the example deploys no $name"
+    fi
+  done
+  expect_absent "the example runs no in-chart Valkey" "$(document "$production" Deployment "$RELEASE-text-extraction-valkey")" "kind: Deployment"
+  expect_contains "the example reads VALKEY_URL from its Secret" "$(flat "$(document "$production" Deployment "$API")")" \
+    "- name: VALKEY_URL valueFrom: secretKeyRef: name: text-extraction-valkey-url key: VALKEY_URL"
+  expect_contains "the example reads API_KEYS from its existing Secret" "$(flat "$(document "$production" Deployment "$API")")" \
+    "- name: API_KEYS valueFrom: secretKeyRef: name: text-extraction-api-keys key: API_KEYS"
+  expect_absent "the example renders no chart-managed key Secret" "$production" "name: $RELEASE-text-extraction-keys"
+  expect_contains "the example renders the PrometheusRule" "$production" "kind: PrometheusRule"
+  expect_contains "the example renders the ServiceMonitor" "$production" "kind: ServiceMonitor"
+  expect_contains "the example's ingress waits 120 s for an answer" "$(document "$production" Ingress "$API")" \
+    'nginx.ingress.kubernetes.io/proxy-read-timeout: "120"'
+  expect_values "the example keeps MCP off" "$(document "$production" Deployment "$API")" MCP_ENABLED "false"
+  expect_values "the example keeps the UI off" "$(document "$production" Deployment "$API")" UI_ENABLED "false"
+  # The example takes the measured requests and limits of values.yaml, component by component.
+  for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
+    measured="$(resource_blocks "$(document "$sized" Deployment "$name")")"
+    example="$(resource_blocks "$(document "$production" Deployment "$name")")"
+    if [[ -n "$measured" && "$measured" == "$example" ]]; then
+      pass "the example's resources of $name are the measured ones"
+    else
+      fail "the example's resources of $name differ: '$example', values.yaml '$measured'"
+    fi
+  done
+fi
 
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2

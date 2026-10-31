@@ -25,8 +25,9 @@ Per package:
 | 7 | PII | merged 2026-10-29 | #13 | corpus test `tests/pii/test_corpus.py` (CI job `nlp`: `md` on every push, `lg` weekly): every mode through `POST /v1/extract/file` as Markdown and HTML with the real nlp worker loop; pattern types found 100 %, `PERSON` recall pinned per model size (`lg` German 0.96, English 1.00; `md` 1.00 and 1.00); no keep word touched except the listed known false positives (`Pythagoras`, `Calvin`: historical names used as concepts); live `wlo_200` auto 83.0 % unchanged; Docker check with `lg` on Jan's PC (2026-10-29) |
 | 8 | Structured output and chunking | merged 2026-10-30 | #18 | done-when test `tests/structured/test_done_when.py` (default suite, no real LLM): on a German teaching page, `metadata`, `selectors` (CSS for a user key, XPath for an admin key), `patterns`, `llm`, `auto` (the LLM asked only for the missing field), `tables`, `learn_selectors` and its reuse without an LLM call (`sources: learned`, per key), every chunker, `POST /v1/structured`, `POST /v1/chunk` (URL and text) and a batch, through the real llm worker loop against a mock OpenAI-compatible endpoint (pytest-httpserver: `/chat/completions`, `/embeddings`); live `wlo_200` auto 82.5 % |
 | 9 | Site structure | merged 2026-10-30 | #23 | done-when test `tests/site/test_done_when.py` (default suite, no network): two sample sites (`tests/site/sites/`) on pytest-httpserver, crawled through `POST /v1/site-structure` by the real extract worker loop and read back through `GET /v1/jobs/{id}` in pages of 50: every entry of robots.txt's sitemaps (an index with a plain and a gzipped urlset, a text sitemap) and of a guessed `/sitemap.xml` of 300 entries across parts, every page to depth 2 as one item, typed links (`region`, `source`, `crawl`) with targets at the right items, a robots.txt-disallowed page never requested, the 404 the only failure; live site run on five WLO-type sites reported by the live workflow (first run 2026-10-30, `enforce`, depth 1, 25 pages: all five jobs completed in 11-47 s; de.serlo.org 13,531 sitemap entries, www.leifiphysik.de answered 2 HTTP errors); live `wlo_200` auto 84.0 % |
-| 10 | MCP and UI | merged 2026-10-31 | #24 | done-when tests (default suite, no network) against the app under uvicorn with the real extract worker loop and a sample site on pytest-httpserver: `tests/mcp_server/test_done_when.py` calls all 11 tools through `fastmcp.Client` over streamable HTTP (the transport Claude Code uses; a wrong or missing key cannot connect, 401) and `tests/ui/test_done_when.py` drives every entry of `OPERATIONS` and the views `progress`, `site-tree`, `batch-file`, `batch-urls` and `images` through `/ui/run`, proven from the REST calls the views forward, with each call's REST status and envelope checked (in its fragment for the single operations and the job item, at the forward for the job views, whose fragments show the jobs, the image or the "cancelled" line); five Chromium tests (`pytest -m browser tests/ui`); Helm toggles in `deploy/helm/test.sh`; live check 2026-10-31 in the build sandbox with Claude Code 2.1.314 (`claude mcp add`, `claude mcp list` connected, all MCP steps through `claude -p`) and the playground in Chromium against a local Valkey, API and worker (see the package 10 note); the WLO pages and Claude Desktop move to Jan's PC (no egress to WLO in the sandbox); live `wlo_200` auto 82.5 % (165 of 200; package 9: 84.0 %), smoke 83.3 %, browser 79.0 %, media 46.4 %, and all five site jobs completed (2026-10-31) |
-| 11 | | open | | |
+| 10 | MCP and UI | merged 2026-10-31 | #24 | done-when tests (default suite, no network) against the app under uvicorn with the real extract worker loop and a sample site on pytest-httpserver: `tests/mcp_server/test_done_when.py` calls all 11 tools through `fastmcp.Client` over streamable HTTP (the transport Claude Code uses; a wrong or missing key cannot connect, 401) and `tests/ui/test_done_when.py` drives every entry of `OPERATIONS` and the views `progress`, `site-tree`, `batch-file`, `batch-urls` and `images` through `/ui/run`, proven from the REST calls the views forward, with each call's REST status and envelope checked (in its fragment for the single operations and the job item, at the forward for the job views, whose fragments show the jobs, the image or the "cancelled" line); five Chromium tests (`pytest -m browser tests/ui`); Helm toggles in `deploy/helm/test.sh`; live check 2026-10-31 in the build sandbox with Claude Code 2.1.314 (`claude mcp add`, `claude mcp list` connected, all MCP steps through `claude -p`) and the playground in Chromium against a local Valkey, API and worker (see the package 10 note); the WLO pages, `docker compose up` and the `mcp-remote` path were checked on Jan's PC on 2026-10-31 (see the package 10 note); live `wlo_200` auto 82.5 % (165 of 200; package 9: 84.0 %), smoke 83.3 %, browser 79.0 %, media 46.4 %, and all five site jobs completed (2026-10-31) |
+| 11 | Hand-over | in review | #25 | `docs/handover.md` answers all 14 checklist items of the ops guide (`tests/test_handover_doc.py`, with `tests/test_configuration_doc.py` pinning the environment reference); load runs [41190110782](https://github.com/janschachtschabel/text-extraction/actions/runs/41190110782) (baseline) and [41194228955](https://github.com/janschachtschabel/text-extraction/actions/runs/41194228955) (with the site items) of `load.yml` against the local site farm; Helm requests and limits sized from them (see the package 11 note); the full 4,000-URL WLO regression is planned and not run yet (`live.yml` takes a `mode` input for it) |
+| 12 | UI languages, unblock option, bilingual docs | planned | | |
 
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |
@@ -41,7 +42,8 @@ Per package:
 | 8 | Structured output and chunking | Strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`; learned selectors; LLM client with key order (header, then env); `POST /v1/structured`, `POST /v1/chunk` | Each strategy tested; LLM path tested against a mock endpoint |
 | 9 | Site structure | Sitemap discovery (robots.txt, index, gzip), link graph with link types to a set depth, `POST /v1/site-structure` job | Sample sites return complete sitemaps and typed links |
 | 10 | MCP and UI | FastMCP at `/mcp`, htmx playground at `/ui`, both toggled by env and Helm | MCP tools usable from Claude; UI drives every endpoint |
-| 11 | Hand-over | Full WLO regression run, load test (it also sizes the default `STRUCTURED_SELECTOR_PROCESSES`, 1 today, issue #19), resource baselines (`docker stats`), env reference, example `values.yaml`, secrets list, cost notes (LLM, ASR), final architecture doc | Ops-guide hand-over checklist complete |
+| 11 | Hand-over | Full WLO regression run (the `mode` input of `live.yml` is ready; the 4,000-URL run is planned and not run in this package), load test (it also sizes the default `STRUCTURED_SELECTOR_PROCESSES`, 1 today, issue #19), resource baselines (`docker stats`), env reference, example `values.yaml`, secrets list, cost notes (LLM, ASR), final architecture doc | Ops-guide hand-over checklist complete |
+| 12 | UI languages, unblock option, bilingual docs | An optional unblock mode in the UI for sites that allowed extraction by contract (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`; CLAUDE.md rule 6), with escalation to the browser on a plain 403, 429 or 503 in unblock mode; the UI in German and English with a language switch, plus accessibility, help texts and status messages; README and user docs in German and English, covering installation, usage, parameters, use cases, the 11 MCP tools and structured data | Plan approved by Jan; to be defined in its plan |
 
 Package 5 note (Jan, D2): a sync request that needs OCR waits up to `DOCLING_SYNC_WAIT_SECONDS`
 (20 s) for the Docling worker and then answers its text layer with the warning `ocr_unavailable`
@@ -141,8 +143,22 @@ resolved, `dns_error`, so the pages came from a local sample site on 127.0.0.1:8
   `success`). No cookie, no console message. Screenshots of the tree and the progress view go into
   the PR.
 
-Open on Jan's PC: the same steps against WLO pages and a WLO-type site with `docker compose up`,
-and Claude Desktop through `mcp-remote`.
+Checks on Jan's PC (2026-10-31, a fresh clone on Jan's PC at the package 10 merge commit, Docker
+Desktop; recorded in package 11): all passed. The image build took 658 s and `docker compose up`
+98 s. The playground, on single pages: planet-schule "Klimawandel" 239 words, Klexikon
+"Elefanten" 1,167 words and "Hamster" 525 words, with 19 of 20 image previews loaded on each
+page. A fourth page, leifiphysik "kraft-und-masse", answered `target_http_error` because the
+site answers 403; `auto` stayed in fast mode. The 403 does not escalate to the browser by design
+(a challenge body is needed, [architecture.md](architecture.md)); plain 403, 429 and 503
+escalation in unblock mode is in the scope of package 12. The site tree of planet-schule (depth
+1, 25 pages, `enforce`): 29 of 29 items `success` in about 45 s, 549 URLs in the tree. A batch
+of five URLs under `sammlung/`: 2 `success`, 3 `blocked_by_robots`. A CSV of five URLs: 3
+`success`, 2 `partial` with `content_too_short`. No console or CSP errors. MCP through
+`mcp-remote` over stdio: 11 tools; `service_info` and `extract_url` answered `success`; `claude
+mcp add`, `claude mcp list` (connected) and `claude mcp remove` worked. A wrong key got 401 on
+`/mcp` and a refused login in the UI. The Claude Desktop app itself was not configured; the
+stdio path through `mcp-remote` that it uses was tested instead. Follow-up: issue #26 tracks
+marking robots-disallowed URLs in the site tree.
 
 Package 11 load-test items from package 9 (final review): the event-loop time of packing a large
 sitemap into parts and encoding the part results at `SITE_MAX_SITEMAP_URLS` (200,000 entries,
@@ -154,3 +170,20 @@ with several 50 MiB sitemaps in flight; the split of `site/runner.py` into `runn
 pages, extend, metrics) and `sitemap_items.py` (robots, sitemaps, parsing), a pure move; and,
 if the measurements call for it, a setting `SITE_PARSE_CONCURRENCY` for the sitemap thread pool
 (one per pod today).
+
+Package 11 note (Jan, 2026-10-31): the load test runs in `load.yml` on the GitHub runner against
+the local site farm (no traffic to real sites). Run 41190110782 gives the resource baselines,
+run 41194228955 adds the site-structure items; the Helm requests and limits, the example
+production values and the cost notes come from them ([configuration.md, Resource
+baselines](configuration.md#resource-baselines) and [handover.md](handover.md)).
+`STRUCTURED_SELECTOR_PROCESSES` stays 1 (1, 2 and 4 processes gave 23.2, 24.0 and 22.9 requests
+a second; issue #19), and `SITE_PARSE_CONCURRENCY` is not needed (three 50 MiB sitemaps in
+flight added about 5 s and the worker's loop lag stayed at 1 s or less). Not done in this
+package, by Jan's decision: the full 4,000-URL WLO regression (planned; start `live.yml` with
+`url_set: wlo_4000` once per `mode`, one run after another) and a real-model cost run. The PII
+`md` and ASR `small` sizes are not measured under load. The hand-over contact is Jan Schachtschabel; the project is a
+prototype.
+
+Package 12 note (Jan, 2026-10-31): package 12 follows package 11, which is merged without a tag.
+The first release, `v0.1.0` (a prototype), is tagged after package 12 is merged. Its scope and
+done-when criterion are set in its plan, which Jan approves.

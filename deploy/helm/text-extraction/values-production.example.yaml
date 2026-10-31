@@ -1,0 +1,192 @@
+# Example values for a production install (ruling P11-S11). Copy the file, replace the names
+# marked "yours" and install with
+#   helm install text-extraction ./deploy/helm/text-extraction -f values-production.yaml
+# Helm merges it over values.yaml, so every key left out keeps its default; README.md documents
+# them all and docs/configuration.md the settings behind them.
+#
+# What differs from a first try-out with values.yaml: an external Valkey, every secret from a
+# Secret you create (nothing secret in this file), pinned SemVer image tags, the PrometheusRule
+# and the ServiceMonitor on, MCP and the playground off, and all optional worker pools on. Switch
+# off a pool you do not need: each is one `enabled` toggle.
+#
+# Requests and limits are the measured ones of values.yaml (docs/configuration.md, "Resource
+# baselines": load runs 41190110782 and 41194228955 on 2026-10-31, commits ad80ae4 and b7499cc).
+# The CPU requests reflect the heaviest scenario of the load profile (for example 10 OCR PDFs or
+# 10 transcriptions back to back) and can be lowered for light traffic; keep the memory limits,
+# which back the children's address-space budgets.
+
+image:
+  repository: ghcr.io/janschachtschabel/text-extraction
+  # A released version (Git tag vX.Y.Z on main publishes X.Y.Z); production never runs `latest`.
+  # Upgrades and rollbacks change this tag. No version is tagged yet: the first will be 0.1.0.
+  tag: "0.1.0"
+
+replicaCount: 2
+
+config:
+  LOG_LEVEL: INFO
+  LOG_FORMAT: json
+  AUTH_MODE: api_key
+
+secrets:
+  # Yours: a Secret with the key API_KEYS (the JSON list of hashed keys, docs/configuration.md,
+  # "Secrets"), for example
+  #   kubectl create secret generic text-extraction-api-keys --from-file=API_KEYS=api-keys.json
+  existingSecret: text-extraction-api-keys
+  existingSecretKey: API_KEYS
+
+resources:
+  requests:
+    cpu: 1400m
+    memory: 832Mi
+  limits:
+    cpu: 3750m
+    memory: 2560Mi
+
+ingress:
+  enabled: true
+  className: ""  # yours
+  # For ingress-nginx (other controllers have their own keys). A sync request waits up to 120 s
+  # without `wait_seconds` (a browser render with `pii` and LLM work; 150 s with unblock mode,
+  # docs/handover.md item 4), and nginx cuts at 60 s by default. Uploads reach
+  # DOCUMENT_MAX_BYTES + 192 KiB (workers.asr.uploadMaxBytes for media), nginx allows 1m.
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-body-size: "40m"
+  hosts:
+    - host: text-extraction.example.org  # yours
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: text-extraction-tls  # yours
+      hosts:
+        - text-extraction.example.org
+
+mcp:
+  enabled: false
+ui:
+  enabled: false
+
+workers:
+  extract:
+    enabled: true
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: 450m
+        memory: 768Mi
+      limits:
+        cpu: 1750m
+        memory: 2560Mi
+
+  browser:
+    enabled: true
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-browser
+      tag: "0.1.0"
+    replicaCount: 2
+    resources:
+      requests:
+        cpu: 750m
+        memory: 1152Mi
+      limits:
+        cpu: 2250m
+        memory: 4608Mi
+
+  docling:
+    enabled: true
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-docling
+      tag: "0.1.0"
+    resources:
+      requests:
+        cpu: 2250m
+        memory: 1600Mi
+      limits:
+        cpu: 5500m
+        memory: 8Gi
+    models:
+      persistence:
+        size: 5Gi
+        storageClass: ""  # yours: a ReadWriteMany class
+
+  asr:
+    enabled: true
+    backend: local
+    model: large-v3-turbo
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-asr
+      tag: "0.1.0"
+    resources:
+      requests:
+        cpu: 3050m
+        memory: 1408Mi
+      limits:
+        cpu: 5500m
+        memory: 6Gi
+    models:
+      persistence:
+        size: 4Gi
+        storageClass: ""  # yours: a ReadWriteMany class
+
+  nlp:
+    enabled: true
+    modelSize: lg
+    image:
+      repository: ghcr.io/janschachtschabel/text-extraction-nlp
+      tag: "0.1.0"
+    resources:
+      requests:
+        cpu: 750m
+        memory: 1728Mi
+      limits:
+        cpu: "2"
+        memory: 3Gi
+    # Yours, optional: a Secret that must exist and hold the key PII_HASH_KEY (at least 32 bytes),
+    # or the NLP pods do not start (CreateContainerConfigError). Delete this block if you do not
+    # need stable hashes for `mode: hash` (each result is then hashed with a random key).
+    hashKey:
+      existingSecret: text-extraction-pii-hash-key
+      existingSecretKey: PII_HASH_KEY
+    models:
+      persistence:
+        size: 3Gi
+        storageClass: ""  # yours: a ReadWriteMany class
+
+  llm:
+    enabled: true
+    baseUrl: https://llm.example.org/v1  # yours: an OpenAI-compatible endpoint
+    model: your-chat-model  # yours
+    embeddingModel: your-embedding-model  # yours, for `semantic` chunking; "" turns it off
+    # Yours: a Secret that must exist and hold the key LLM_API_KEY, or the API and llm pods do not
+    # start (CreateContainerConfigError). A caller's X-LLM-Api-Key header wins over it. Delete
+    # this block for an endpoint without a key, or when every caller sends X-LLM-Api-Key.
+    apiKey:
+      existingSecret: text-extraction-llm-key
+      existingSecretKey: LLM_API_KEY
+    resources:
+      requests:
+        cpu: 150m
+        memory: 256Mi
+      limits:
+        cpu: 750m
+        memory: 1Gi
+
+valkey:
+  enabled: false
+
+# Yours: a Valkey 7.2+ (or Redis 7.0+) run with `--maxmemory-policy noeviction` and a maxmemory
+# sized as README.md says for `valkey.maxmemory`. A Secret with the whole URL, password included
+# (percent-encoded where needed), for example redis://:<password>@valkey.example.svc:6379/0.
+externalValkey:
+  existingSecret:
+    name: text-extraction-valkey-url
+    key: VALKEY_URL
+
+metrics:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true

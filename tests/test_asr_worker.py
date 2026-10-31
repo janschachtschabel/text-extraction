@@ -1546,6 +1546,21 @@ def test_self_check_fails(tmp_path: Path, answers: dict[str, Any]) -> None:
     assert failed["models_path"] == str(settings.asr_models_path)
 
 
+def test_self_check_logs_the_childs_message_of_the_built_in_clip(tmp_path: Path) -> None:
+    """The self-check transcribes our own clip with our own model, so the child's message quotes
+    no caller content: it is logged, or a failed start would say no more than RuntimeError."""
+    error = ConversionError("RuntimeError", "failed to allocate memory")
+    children = FakeChildren(transcribe=error)
+    settings = Settings(auth_mode="none", **settings_for(tmp_path))
+
+    with capture_logs() as logs, pytest.raises(SelfCheckFailed):
+        asyncio.run(self_check(children, settings, children=1))
+
+    (failed,) = [line for line in logs if line["event"] == "asr_self_check_failed"]
+    assert failed["child_error"] == "RuntimeError"
+    assert failed["child_message"] == "failed to allocate memory"
+
+
 # --- the process -------------------------------------------------------------------------------
 
 

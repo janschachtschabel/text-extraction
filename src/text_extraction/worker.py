@@ -125,7 +125,8 @@ its input; so does a worker of pool ``docling`` for each of its items.
 
 While Valkey's memory is at ``VALKEY_MEMORY_GUARD_RATIO`` of its maximum (``memory_guard.py``,
 read every 5 s from the start to the end of the process), the result cache skips its writes; the
-results still go to the job.
+results still go to the job. Over the same time the process samples its event loop's lag every
+0.5 s (``loop_lag.py``, ``text_extraction_event_loop_lag_seconds``).
 
 A Valkey error, an ``OSError`` (a Valkey call timing out) or the gate's 503 backs the loop off
 for 1, 2, 4 … 30 s; the lease of the item in hand then expires and the item is claimed again.
@@ -189,6 +190,7 @@ from text_extraction.file_models import UploadInputMeta, form_of
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import JobLost, JobRecord, JobStore, job_principal
 from text_extraction.llm_dispatch import LLM_POOL, LlmMove, create_llm_move
+from text_extraction.loop_lag import LoopLag
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
@@ -885,18 +887,21 @@ async def _serve(
     graceful_seconds: float,
     guard: MemoryGuard | None = None,
     startup: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    loop_lag: LoopLag | None = None,
 ) -> None:
     """Serve the internal app, run the start-up (by default: load the language model), then run
     the worker until a signal and shut down in the order the module describes. ``/ready``
     answers 200 only once the start-up has finished; a failed start-up raises. ``guard``'s task
     runs from the start to the end of this call, so it is stopped before the caller closes the
-    Valkey client."""
+    Valkey client; so does ``loop_lag``'s sampling."""
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
     for sig in _HANDLED_SIGNALS:
         loop.add_signal_handler(sig, stop.set)
     if guard is not None:
         guard.start()
+    if loop_lag is not None:
+        loop_lag.start()
     internal_task = asyncio.create_task(internal.serve())
     stopping = asyncio.create_task(stop.wait())
     starting = asyncio.create_task(startup() if startup is not None else _load_language_model())
@@ -936,6 +941,8 @@ async def _serve(
             if not starting.done():
                 _log.warning("worker_start_not_unwound", waited_seconds=_START_UNWIND_SECONDS)
         finally:
+            if loop_lag is not None:
+                await loop_lag.stop()
             if guard is not None:
                 await guard.stop()
 
@@ -946,13 +953,15 @@ async def _load_language_model() -> None:
 
 @dataclass(frozen=True)
 class WorkerParts:
-    """What one worker process runs on: the worker, its memory guard, and the fetcher,
-    conversion pool, document pool, selector children, post pool, sitemap pool (one thread for
-    the site crawl's sitemap parses, so they never hold the pages' conversion threads) and media
-    fetcher (None without ``MEDIA_ENABLED``) to close at the end."""
+    """What one worker process runs on: the worker, its memory guard, its event-loop lag
+    sampling (``text_extraction_event_loop_lag_seconds``), and the fetcher, conversion pool,
+    document pool, selector children, post pool, sitemap pool (one thread for the site crawl's
+    sitemap parses, so they never hold the pages' conversion threads) and media fetcher (None
+    without ``MEDIA_ENABLED``) to close at the end."""
 
     worker: Worker
     guard: MemoryGuard
+    loop_lag: LoopLag
     fetcher: Fetcher
     pool: ConversionPool
     document_pool: DocumentPool
@@ -1034,6 +1043,7 @@ def build_worker(settings: Settings, valkey: Redis, registry: CollectorRegistry)
     return WorkerParts(
         worker=worker,
         guard=guard,
+        loop_lag=LoopLag(registry),
         fetcher=fetcher,
         pool=pool,
         document_pool=document_pool,
@@ -1064,6 +1074,7 @@ async def _run(settings: Settings) -> None:
             graceful_seconds=graceful,
             guard=parts.guard,
             startup=lambda: start_up(parts),
+            loop_lag=parts.loop_lag,
         )
     finally:
         await parts.fetcher.aclose()

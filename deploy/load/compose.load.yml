@@ -1,0 +1,176 @@
+# Load-test override for docker-compose.yml (package 11). Used only by .github/workflows/load.yml:
+#
+#   docker compose -f docker-compose.yml -f deploy/load/compose.load.yml \
+#     --profile docling --profile asr --profile nlp --profile llm up -d --wait
+#
+# Relative paths resolve against the first file's directory, the repo root.
+#
+# It adds two test services from the API image, with tests/ mounted read-only:
+# - `farm` (tests/e2e/site_farm.py): every load target. The service reaches it as http://farm:8000
+#   (and http://farm:8001 to :8003, the sites of the sitemap scenarios) on the compose network; it
+#   is not published. When it stops it writes its record of every request it saw to
+#   load-results/farm/farm-record.json (the workflow creates that directory, writable for uid
+#   10001, and renames the file after each run).
+# - `fake-llm` (tests/load/fake_llm.py): an OpenAI-compatible server with a fixed delay that counts
+#   the prompt and completion bytes. Published on 127.0.0.1:8000 for the generator's /stats reads.
+#
+# It sets the same settings on every app service. They switch every feature on and lift the limits
+# that would measure our politeness instead of the service (ruling R-P11-4).
+# - The farm is ours and sits on a private address, so the SSRF guard allows private networks.
+#   Never set FETCH_ALLOW_PRIVATE_NETWORKS outside this stack.
+# - The per-host outbound spacing is off and the per-host cap is above the scenarios' concurrency.
+# - The inbound rate limit is off.
+# - LLM_API_KEY is a dummy: the fake server checks no key, and no real endpoint is configured.
+# The internal ports (9090 in every container) are published on 127.0.0.1 only, one host port per
+# service, for the generator's /ready and /metrics reads (--internal-urls).
+# No proxy is set anywhere: no request of this stack may leave the compose network.
+
+x-load-env: &load-env
+  FETCH_ALLOW_PRIVATE_NETWORKS: "true"
+  OUTBOUND_MIN_DELAY_MS: "0"
+  OUTBOUND_MAX_CONCURRENCY_PER_HOST: "64"
+  RATE_LIMIT_ENABLED: "false"
+  DOCLING_ENABLED: "true"
+  ASR_ENABLED: "true"
+  ASR_MODEL: ${ASR_MODEL:-large-v3-turbo}
+  PII_ENABLED: "true"
+  PII_MODEL_SIZE: ${PII_MODEL_SIZE:-lg}
+  LLM_ENABLED: "true"
+  LLM_BASE_URL: http://fake-llm:8000/v1
+  LLM_ALLOW_HTTP: "true"
+  LLM_API_KEY: dummy-key-of-the-fake-llm
+  LLM_EMBEDDING_MODEL: fake-embedding
+  # The load workflow's sweep sets it per run (1, 2, 4 by default).
+  STRUCTURED_SELECTOR_PROCESSES: ${STRUCTURED_SELECTOR_PROCESSES:-1}
+
+# The health checks of every app service with one: the base file's test, with a start period that
+# survives a start-up beside every model load on a 4-vCPU runner (the first run saw the extract
+# worker unhealthy after 58 s). During the start period the check runs every 5 s, so a container
+# counts as healthy as soon as it is ready; after it, more retries than the base file's 3.
+x-load-healthcheck: &load-healthcheck
+  start_period: 600s
+  start_interval: 5s
+  retries: 6
+
+# The test services: the API image, the repo's tests read-only, no .env (they need no secret).
+x-test-service: &test-service
+  image: text-extraction:dev
+  working_dir: /app
+  volumes:
+    - ./tests:/app/tests:ro
+  read_only: true
+  tmpfs:
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  api:
+    environment:
+      <<: *load-env
+      MCP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck: *load-healthcheck
+
+  worker:
+    environment: *load-env
+    ports:
+      - "127.0.0.1:9091:9090"
+    healthcheck: *load-healthcheck
+
+  browser-worker:
+    environment: *load-env
+    ports:
+      - "127.0.0.1:9092:9090"
+    healthcheck: *load-healthcheck
+
+  docling-models:
+    environment: *load-env
+
+  docling-worker:
+    environment: *load-env
+    ports:
+      - "127.0.0.1:9093:9090"
+    healthcheck: *load-healthcheck
+
+  asr-models:
+    environment: *load-env
+
+  asr-worker:
+    environment: *load-env
+    ports:
+      - "127.0.0.1:9094:9090"
+    healthcheck: *load-healthcheck
+
+  nlp-models:
+    environment: *load-env
+
+  nlp-worker:
+    environment: *load-env
+    ports:
+      - "127.0.0.1:9095:9090"
+    healthcheck: *load-healthcheck
+
+  llm-worker:
+    environment: *load-env
+    ports:
+      - "127.0.0.1:9096:9090"
+    healthcheck: *load-healthcheck
+
+  # One host on every interface of its container; the record goes to the bind mount.
+  farm:
+    <<: *test-service
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./load-results/farm:/records
+    command:
+      - python
+      - -m
+      - tests.e2e.site_farm
+      - --bind
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --record
+      - /records/farm-record.json
+      # Ports 8001 to 8003 too, whose robots.txt lists the large sitemaps of the site scenarios.
+      # They are built for http://farm:800N before the farm listens (and turns healthy), so the
+      # timed sitemap scenarios do not include the build.
+      - --sitemap-sites
+      - --sitemap-host
+      - farm
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/p/1.html', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 10s
+
+  # Answers after FAKE_LLM_DELAY_MS (default 800 ms).
+  fake-llm:
+    <<: *test-service
+    command:
+      - python
+      - -m
+      - tests.load.fake_llm
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/stats', timeout=2)"
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 10s

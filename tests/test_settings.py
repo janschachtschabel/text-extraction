@@ -1265,6 +1265,19 @@ def test_llm_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.chunk_max_chunks == 2000
 
 
+def test_selector_processes_default_is_measured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """P11-S5: the smallest value whose throughput is within 10 % of the best stays the default.
+
+    The selector sweep of load run 41190110782 (commit ad80ae4, GitHub runner with 4 vCPU) gave
+    23.2 / 24.0 / 22.9 req/s and p95 605 / 622 / 623 ms with 1 / 2 / 4 selector processes, at
+    574 / 610 / 681 MiB of API memory: 1 is within 10 % of the best (24.0), so it stays.
+    """
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.delenv("STRUCTURED_SELECTOR_PROCESSES", raising=False)
+
+    assert Settings().structured_selector_processes == 1
+
+
 @pytest.mark.parametrize(
     "value", ["https://llm.example.org/v1", "HTTPS://llm.example.org:8443/v1", "https://a/v1"]
 )

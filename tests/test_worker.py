@@ -47,6 +47,7 @@ from text_extraction.jobs import JobLost, JobRecord, JobStore, ResultWrite
 from text_extraction.jobs_api import delete_job
 from text_extraction.llm_dispatch import create_llm_move, llm_queue
 from text_extraction.llm_worker import LlmRunner
+from text_extraction.loop_lag import LAG_METRIC, LoopLag
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.nlp_worker import PiiRunner
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
@@ -1355,6 +1356,45 @@ async def test_serve_runs_the_guard_while_the_worker_runs() -> None:
         await serving
 
     assert not guard.running
+
+
+def test_worker_process_exports_the_event_loop_lag() -> None:
+    """P11-S7: the time the extract worker's loop is held (a large sitemap's parts are packed
+    and encoded on it) is on its internal metrics."""
+    registry = CollectorRegistry()
+    parts = build_worker(make_settings(), FakeAsyncRedis(), registry)
+    try:
+        assert isinstance(parts.loop_lag, LoopLag)
+        assert LAG_METRIC in registry._names_to_collectors
+    finally:
+        parts.pool.shutdown()
+        parts.sitemap_pool.shutdown()
+
+
+@scenario
+async def test_serve_samples_the_loop_lag_while_the_worker_runs() -> None:
+    harness = Harness({}, worker_concurrency=1)
+    lag = LoopLag(CollectorRegistry(), interval=0.01)
+    readiness = Readiness()
+    app = create_internal_app(
+        harness.settings, harness.valkey, harness.registry, readiness=readiness
+    )
+    internal = _server(app, "127.0.0.1", free_port())
+
+    serving = asyncio.create_task(
+        _serve(harness.worker, internal, readiness, graceful_seconds=1, loop_lag=lag)
+    )
+    deadline = time.monotonic() + 20
+    while not readiness.ready:
+        assert time.monotonic() < deadline, "the worker never started"
+        await asyncio.sleep(0.01)
+    assert lag.running
+
+    os.kill(os.getpid(), signal.SIGTERM)
+    async with asyncio.timeout(20):
+        await serving
+
+    assert not lag.running
 
 
 # --- auto escalation to the browser pool (B5) --------------------------------------------------

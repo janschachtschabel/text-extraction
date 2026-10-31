@@ -15,7 +15,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
 ## Non-negotiable rules
 
 1. **English only** in code, comments, docs, commit messages and API texts.
-2. **Ops guide compliance** (team T6 hand-over guide). In particular:
+2. **Ops guide compliance** (the operations hand-over guide). In particular:
    - Two ports: public API on `8080`, internal `9090` with `/health`, `/ready`, `/metrics`.
      Internal endpoints never appear in the OpenAPI spec.
    - Stateless pods. All state (jobs, results, cache, rate limits, fingerprints) lives in
@@ -25,7 +25,7 @@ without an LLM), chunking, an optional MCP server and an optional web UI.
      `x-client-trace-id` and B3 headers are passed through and logged.
    - Work longer than ~30 s runs as a job (create, status, results).
    - Images: slim base, multi-stage, non-root, no models or data inside; models come from a PVC.
-   - Optional components are switchable in Helm (`valkey`, workers, `s3`, `mcp`, `ui`).
+   - Optional components are switchable in Helm (`valkey`, workers, `s3`, `mcp`, `ui`) (`s3` is planned, not built yet).
 3. **B-API ready, not integrated:** `AUTH_MODE=none|api_key`; an LLM key from a request
    header (future B-API virtual key) wins over the env key. Do not build B-API specifics.
 4. **Result envelope everywhere:** `status` (`success|partial|failed`), `error.code`,

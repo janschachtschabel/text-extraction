@@ -23,6 +23,10 @@
 # `llm-worker` runs from the API image (no model, no volume). All four profiles can run together.
 # The MCP endpoint (http://127.0.0.1:8080/mcp) and the playground (http://127.0.0.1:8080/ui) are on
 # for the api service; MCP_ENABLED=false or UI_ENABLED=false in .env or the shell switches them off.
+# No service sets deploy.resources. With every profile the stack takes about 6 GiB of memory when
+# idle (most of it the models: NLP lg about 1.6 GiB, ASR large-v3-turbo and Docling about 1.2 GiB
+# each); one OCR or ASR job uses 2 to 3 cores (up to 3.6). docs/configuration.md, "Resource
+# baselines", gives the CPU and memory of each service, measured on a 4-vCPU runner.
 
 # Shared by the API and the workers: same settings, same hardening. The API and the extract worker
 # use the default image (no browser); the browser worker builds the target `browser`.
@@ -108,7 +112,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-      start_period: 20s
+      start_period: 60s
     # SIGTERM stops claiming and gives items in flight up to 30 s; no drain wait.
     stop_grace_period: 45s
 
