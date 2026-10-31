@@ -2163,7 +2163,7 @@ not changed.
 ## Site structure
 
 Package 9: `site/` (`types.py`, `urls.py`, `links.py`, `follow.py`, `sitemaps.py`, `store.py`,
-`runner.py`), `site_api.py`, hooks in `pipeline.py` and `compliance.py`. `POST
+`runner.py`, `sitemap_items.py`), `site_api.py`, hooks in `pipeline.py` and `compliance.py`. `POST
 /v1/site-structure {"url": ..., "depth": 2}` answers 202 with a job of kind `site` that lists every
 sitemap of the site (robots.txt's `Sitemap:` lines, sitemap indexes, gzip, text, RSS and Atom
 sitemaps) with their URLs, and the site's link graph from the start page to the given depth: one
@@ -2268,7 +2268,8 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   the SSRF guard on every hop, the compliance checks in the host's turn and the byte cap, without
   conversion; `Pipeline.robots_sitemaps` and `Pipeline.blocked_from_cache` read the checker's
   cache.
-- **P9-S11, the runner** (`site/runner.py`). A page runs `Pipeline.run` in fast mode
+- **P9-S11, the runner** (`site/runner.py`; the robots and sitemap items in
+  `site/sitemap_items.py`, package 11). A page runs `Pipeline.run` in fast mode
   (`format: text`, `ocr: never`), judges its links and `extend`s with them (its `final_url` as an
   alias, so a redirect's target is the same item) before it answers; a robots item lists the
   sitemaps; a sitemap item fetches, inflates and parses on a pool of its own, reserves its
