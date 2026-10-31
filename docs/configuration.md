@@ -19,7 +19,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `PUBLIC_HOST` | `0.0.0.0` | Bind address of the public API. |
 | `PUBLIC_PORT` | `8080` | Port of the public API. Fixed to 8080 by the Helm chart. |
 | `INTERNAL_HOST` | `0.0.0.0` | Bind address of the internal listener. |
-| `INTERNAL_PORT` | `9090` | Port of the internal listener (`/health`, `/ready`, `/metrics`). Fixed to 9090 by the Helm chart. |
+| `INTERNAL_PORT` | `9090` | Port of the internal listener (`/health`, `/ready`, `/metrics`). Fixed to 9090 by the Helm chart. Workers serve it too: an API and a worker run on one host (outside compose and Helm, which give each its own container) need distinct values, e.g. `INTERNAL_PORT=9091` for the worker. |
 | `LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive). Anything else makes the service exit with code 2. |
 | `LOG_FORMAT` | `json` | `json` (stdout, one object per line) or `console` (plain text for local development). |
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
@@ -655,7 +655,9 @@ Every request to `/mcp` passes the same checks as a REST request, in this order:
 
 1. The body limit: `ceil(DOCUMENT_MAX_BYTES / 3) × 4 + 64 KiB` (a file of the upload limit as
    base64, or of `MEDIA_UPLOAD_MAX_BYTES` where uploaded media are transcribed); a larger body
-   answers 413 `invalid_request` before it is read whole or authenticated.
+   answers 413 `invalid_request`. A body whose `Content-Length` is over the limit is refused at
+   once, before anything is read or authenticated; a body without one (chunked) is read only
+   after the checks 2 and 3 and is cut with the 413 when the bytes read pass the limit.
 2. A request with an `Origin` header that is not in `MCP_ALLOWED_ORIGINS` answers 403 `forbidden`
    ("This origin may not call the MCP endpoint."). A client without a browser sends no `Origin`.
 3. The API key (`Authorization: Bearer <key>`, as for REST): without a valid one the answer is the
