@@ -1,6 +1,6 @@
 /*
- * The UI's own script (rulings P10-S13 and P10-S20), the only one besides htmx: the keys, the
- * tabs and the site tree's selection.
+ * The UI's own script (rulings P10-S13, P10-S20 and R-P10-F3), the only one besides htmx: the
+ * keys, the tabs, the site tree's selection and the status line of an answer htmx does not swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -181,6 +181,48 @@
     box.indeterminate = false;
     settleParents(item);
     countSelected(box.closest("form"));
+  });
+
+  // An answer htmx does not swap (a 4xx or 5xx from outside a view, such as the 413 of a body
+  // over its route's limit) or no answer at all: a status line at the top of the request's
+  // target, set with textContent only (the answer may hold a caller's text).
+  function answerReason(xhr) {
+    var type = xhr.getResponseHeader("Content-Type") || "";
+    if (type.indexOf("application/json") === 0) {
+      try {
+        var body = JSON.parse(xhr.responseText);
+        if (body && body.error && typeof body.error.message === "string") {
+          return body.error.message;
+        }
+      } catch (error) {
+        /* not an envelope: the status text below */
+      }
+    }
+    return xhr.statusText || "";
+  }
+
+  function showStatus(target, text) {
+    if (!(target instanceof Element)) {
+      return;
+    }
+    var line = target.querySelector(":scope > .request-status");
+    if (!line) {
+      line = document.createElement("p");
+      line.className = "request-status";
+      line.setAttribute("role", "alert");
+      target.insertBefore(line, target.firstChild);
+    }
+    line.textContent = text;
+  }
+
+  document.addEventListener("htmx:responseError", function (event) {
+    var xhr = event.detail.xhr;
+    var text = ("Request failed: " + xhr.status + " " + answerReason(xhr)).trim();
+    showStatus(event.detail.target, text);
+  });
+
+  document.addEventListener("htmx:sendError", function (event) {
+    showStatus(event.detail.target, "Network error");
   });
 
   // On a reload the stored key logs in again; the login is only a convenience, every request

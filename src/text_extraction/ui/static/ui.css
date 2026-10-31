@@ -231,6 +231,14 @@ label.inline input {
   color: var(--error);
 }
 
+.request-status {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--error-wash);
+  color: var(--error);
+}
+
 .error-code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 600;

@@ -836,7 +836,10 @@ and the JSON escapes count against that route's limit). `/ui/run/file` and `/ui/
 the key and the rate limit before the body is read, as their REST routes do; the check does not
 count, the forwarded call counts the view's one hit. A form that cannot be read is answered with
 "The form could not be read: " and the reason (too many fields or files, a part too large,
-malformed).
+malformed). An answer htmx does not swap (such as that 413, the plain 403 of the guard or a 5xx)
+puts the status line "Request failed: <status> <reason>" (the envelope's message, else the
+status text) at the top of the request's target, and a request that gets no answer "Network
+error"; the line is text only.
 
 Behind an ingress or a proxy, give `/ui` the read timeout of `/mcp` (at least `MCP_WAIT_SECONDS` +
 70 s: the forms wait 25 s plus the route's hand-over time) and a body size of at least the largest

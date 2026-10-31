@@ -680,3 +680,14 @@ def test_forward_takes_query_parameters_through_params() -> None:
 
     assert answer["status"] == 200
     assert answer["body"]["data"]["principal"] == "alice"
+
+
+def test_ui_js_writes_text_only() -> None:
+    """ui.js never writes markup (the status line of an unswapped answer may quote a caller's
+    text), and handles both htmx error events (ruling R-P10-F3)."""
+    script = (UI_PACKAGE / "static" / "ui.js").read_text()
+
+    for sink in (".innerHTML", ".outerHTML", "insertAdjacentHTML", "document.write", "eval("):
+        assert sink not in script
+    assert '"htmx:responseError"' in script
+    assert '"htmx:sendError"' in script

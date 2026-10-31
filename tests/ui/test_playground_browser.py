@@ -228,3 +228,51 @@ def test_csv_upload_to_progress(ui: tuple[str, str]) -> None:
         expect(job.locator("progress")).to_have_attribute("value", "3")
         expect(job.locator(".done")).to_have_text("3/3")
     assert console == []
+
+
+def test_an_answer_htmx_does_not_swap_shows_a_status_line(ui_small: str) -> None:
+    """A file over the upload route's limit is answered 413 (JSON) before the UI's view runs, so
+    htmx does not swap it; ui.js writes "Request failed: <status> <reason>" into the target
+    instead, and "Network error" when no answer comes (ruling R-P10-F3). Only text: a status
+    line holds no markup of the answer's."""
+    with browsing(ui_small) as (page, console):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "file")
+        panel = page.locator("#panel-file")
+        panel.locator("input[type=file]").set_input_files(
+            {"name": "big.txt", "mimeType": "text/plain", "buffer": b"<b>x</b>" * 50_000}
+        )
+        panel.locator("button[type=submit]").click()
+        status = page.locator("#result > p.request-status[role=alert]")
+        expect(status).to_have_text(
+            "Request failed: 413 The request body is too large: at most 206608 bytes are accepted."
+        )
+        assert status.evaluate("line => line.children.length") == 0
+
+        page.route("**/ui/run/extract", lambda route: route.abort())
+        open_tab(page, "extract")
+        extract = page.locator("#panel-extract")
+        extract.locator("input[name=url]").fill("https://example.org/")
+        extract.locator("button[type=submit]").click()
+        expect(status).to_have_text("Network error")
+        expect(page.locator("#result > p.request-status")).to_have_count(1)
+    # Chromium reports the failed loads, htmx the error events; nothing else (no CSP violation).
+    assert not [line for line in console if "Content Security Policy" in line or "Refused" in line]
+
+
+@pytest.fixture
+def ui_small() -> Iterator[str]:
+    """The /ui URL of a service whose upload route takes at most 10,000 bytes of a file."""
+    settings = Settings(
+        auth_mode="api_key",
+        ui_enabled=True,
+        rate_limit_per_minute=10_000,
+        outbound_min_delay_ms=0,
+        document_max_bytes=10_000,
+        api_keys=[
+            ApiKey(name="alice", role="user", sha256=hashlib.sha256(USER_KEY.encode()).hexdigest())
+        ],
+    )
+    with serving(settings) as url:
+        yield url
