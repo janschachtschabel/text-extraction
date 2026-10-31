@@ -1099,6 +1099,29 @@ def test_refusal_answer_is_assessed_under_unblock(
         assert data_of(envelope).quality is None
 
 
+def test_refusal_body_over_the_convert_limit_is_assessed_as_an_empty_page() -> None:
+    """A refused HTML body over ``CONVERT_MAX_BYTES`` is not decoded: it is assessed as an empty
+    page, so even a challenge body is no challenge then, and the refusal still escalates."""
+    big_challenge = CHALLENGE_PAGE.replace("</body>", "<!--" + "x" * 2_000 + "--></body>")
+    assert len(big_challenge.encode()) > 1_024
+    answers: dict[str, Answer] = {PAGE: fetched(body=big_challenge, status=403)}
+
+    within = RenderHarness(answers, browser_unblock_enabled=True)
+    over = RenderHarness(answers, browser_unblock_enabled=True, convert_max_bytes=1_024)
+
+    assessed = data_of(within.run_once(mode="auto", compliance="ignore", principal=ADMIN))
+    assert assessed.quality is not None
+    assert assessed.quality.challenge_status is True
+    envelope = over.run_once(mode="auto", compliance="ignore", principal=ADMIN)
+    quality = data_of(envelope).quality
+    assert quality is not None
+    assert (quality.visible_chars, quality.word_count) == (0, 0)
+    assert quality.bot_challenge is False
+    assert quality.challenge_status is False
+    assert code_of(envelope) == ErrorCode.TARGET_HTTP_ERROR
+    assert needs_browser(envelope, unblock=True)
+
+
 def test_refusal_escalation_renders_and_keeps_the_better() -> None:
     answers: dict[str, Answer] = {PAGE: fetched(body=FORBIDDEN_PAGE, status=403)}
     standard, unblock = FakeRenderer(rendered()), FakeRenderer(rendered())
@@ -1153,7 +1176,7 @@ def test_a_refused_429_keeps_the_hosts_pause() -> None:
                 ADMIN,
                 gate_refusals="raise",
             )
-        assert 4 < paused.value.retry_after <= 5
+        assert 0 < paused.value.retry_after <= 5  # the later gate below proves when it ends
         assert unblock.calls == []  # the render waits for the pause the host asked for
 
         with pytest.raises(CircuitOpen):

@@ -47,9 +47,10 @@ def _git(*args: str) -> str:
 
 
 def changed_files(base: str) -> set[str]:
-    """The files changed (added, modified or deleted) from the merge base to ``HEAD``."""
-    out = _git("diff", "--name-only", "--no-renames", f"{base}...HEAD")
-    return {line for line in out.splitlines() if line}
+    """The files changed (added, modified or deleted) from the merge base to ``HEAD``, by their
+    real names (``-z``: git quotes a non-ASCII name otherwise, and it would match no pair)."""
+    out = _git("diff", "--name-only", "-z", "--no-renames", f"{base}...HEAD")
+    return {name for name in out.split("\0") if name}
 
 
 def exempted_paths(base: str) -> set[str]:

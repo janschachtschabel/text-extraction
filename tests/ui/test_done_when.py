@@ -402,6 +402,7 @@ def test_batches_site_tree_and_cancel(
     status, envelope = shown_answer(item)  # the item's result
     assert (status, envelope["status"], envelope["data"]["url"]) == ("HTTP 200", "success", urls[1])
     claimed = translate(lang, "timeline.claim_detail", pool="extract", attempt=1, when="\0")
+    assert "extract" in claimed.split("\0")[0]  # the prefix names the pool, so it says something
     assert claimed.split("\0")[0] in " ".join(texts(item, "//ol[@class='timeline']/li"))
     assert texts(item, "//h3[@class='title']") == ["Einheit b"]
 

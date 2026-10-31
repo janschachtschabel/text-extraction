@@ -146,6 +146,19 @@ def test_a_new_english_page_needs_its_german_partner(repo: Path) -> None:
     assert check_translation_pairs.main(["--base", base]) == 1
 
 
+def test_a_non_ascii_path_is_checked(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """git quotes such a path by default ("docs/user-guide/en/\\303\\274.md"); the check must
+    see the real name, so the page still needs its German partner."""
+    base = _base(repo)
+    _commit(repo, "docs: new page", **{"docs/user-guide/en/ü.md": "# Ü\n"})
+
+    assert check_translation_pairs.main(["--base", base]) == 1
+    assert "docs/user-guide/de/ü.md" in capsys.readouterr().out
+
+    _commit(repo, "docs: its German page", **{"docs/user-guide/de/ü.md": "# Ü\n"})
+    assert check_translation_pairs.main(["--base", base]) == 0
+
+
 def test_ci_runs_the_check_on_pull_requests() -> None:
     workflow: dict[Any, Any] = yaml.safe_load(CI.read_text(encoding="utf-8"))
     steps = workflow["jobs"]["ci"]["steps"]
