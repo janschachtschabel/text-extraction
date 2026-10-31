@@ -2,19 +2,22 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any
 
 import structlog
 from fastapi import Depends, FastAPI
 from prometheus_client import REGISTRY, CollectorRegistry
 from prometheus_fastapi_instrumentator import Instrumentator
-from pydantic import BaseModel
 from redis.asyncio import Redis
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.routing import Route
 
 from text_extraction import __version__
 from text_extraction.asr_dispatch import AsrDispatcher, asr_queue
-from text_extraction.auth import Principal, Role, require_role
+from text_extraction.auth import Principal, require_role
 from text_extraction.body_limit import BodyLimitMiddleware
 from text_extraction.browser_dispatch import BrowserDispatcher
 from text_extraction.conversion_pool import ConversionPool
@@ -28,10 +31,14 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_api import PATH as UPLOAD_PATH
 from text_extraction.file_api import router as file_router
 from text_extraction.file_api import text_body_limit, upload_body_limit
+from text_extraction.info import InfoData, service_info
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
 from text_extraction.jobs_api import router as jobs_router
 from text_extraction.llm_dispatch import LlmDispatcher, llm_queue
+from text_extraction.mcp_server.gate import McpGate
+from text_extraction.mcp_server.server import PATH as MCP_PATH
+from text_extraction.mcp_server.server import McpMount, build_mcp, mcp_body_limit
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
@@ -50,11 +57,11 @@ from text_extraction.site_api import router as site_router
 from text_extraction.structured.selector_pool import SelectorRunner, create_selector_runner
 from text_extraction.structured_api import CHUNK_PATH
 from text_extraction.structured_api import router as structured_router
-from text_extraction.tracing import TraceMiddleware, current_trace_id
+from text_extraction.tracing import TraceMiddleware
+from text_extraction.vision.fetch import ImageFetcher
 
 _log = structlog.get_logger(__name__)
 
-SERVICE_NAME = "text-extraction"
 DESCRIPTION = (
     "Turns web pages, files, audio and video into clean text or Markdown, "
     "with a fast HTTP mode and a browser mode."
@@ -66,13 +73,6 @@ DESCRIPTION = (
 _BACKGROUND_GRACE_SECONDS = 5.0
 # What the shutdown waits for the result writes of extractions it had to cancel.
 _CANCELLED_WRITE_SECONDS = 2.0
-
-
-class InfoData(BaseModel):
-    name: str
-    version: str
-    principal: str
-    role: Role
 
 
 async def _wait_for(background: set[asyncio.Task[Any]], seconds: float) -> None:
@@ -115,7 +115,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     the queue gauges; wait for extractions handed over to a job; stop the guard and the gauges
     (their tasks read Valkey, whose client the server closes after the lifespan); close the
     fetcher's connections, the conversion pool, the document pool, the selector children, the
-    media fetcher and, last, the post pool."""
+    media fetcher, the UI's image fetcher and, last, the post pool. With ``MCP_ENABLED`` it runs
+    the MCP app's lifespan (its session manager) while the app serves."""
     documents: DocumentPool = app.state.document_pool
     selectors: SelectorRunner = app.state.selector_runner
     media: MediaFetcher | None = app.state.media_fetcher
@@ -131,8 +132,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     guard.start()
     if app.state.settings.jobs_enabled:
         gauges.start()
+    mcp: McpMount | None = app.state.mcp
     try:
-        yield
+        # The MCP session manager stops first, so no tool call starts while the rest shuts down.
+        async with AsyncExitStack() as stack:
+            if mcp is not None:
+                await stack.enter_async_context(mcp.lifespan())
+            yield
     finally:
         try:
             await _finish_background(app)
@@ -147,8 +153,67 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         await selectors.shutdown()
         if media is not None:
             await media.stop()
+        ui_images: ImageFetcher | None = app.state.ui_images
+        if ui_images is not None:
+            await ui_images.aclose()
         post_pool: ConversionPool = app.state.post_pool
         post_pool.shutdown()
+
+
+async def _not_found(request: Request) -> Response:
+    raise StarletteHTTPException(404)
+
+
+def _add_mcp(app: FastAPI, settings: Settings, registry: CollectorRegistry) -> McpMount:
+    """Serve the MCP endpoint at exactly ``/mcp`` behind its gate (rulings P10-S2, P10-S3), left
+    out of the OpenAPI spec. ``/mcp/`` is 404 rather than a redirect. ``GET /mcp`` reaches the
+    stateless MCP app, which answers 405 (it has no stream)."""
+    mount = build_mcp(app.state, settings, registry)
+    gate = McpGate(mount.app, settings)
+    app.router.routes.append(
+        Route(MCP_PATH, gate, methods=["GET", "POST", "DELETE"], include_in_schema=False)
+    )
+    app.router.add_route(
+        f"{MCP_PATH}/", _not_found, methods=["GET", "POST", "DELETE"], include_in_schema=False
+    )
+    return mount
+
+
+def _add_ui(app: FastAPI, settings: Settings) -> dict[str, int]:
+    """Serve the UI at ``/ui`` (rulings P10-S12 to P10-S16): its routes (left out of the OpenAPI
+    spec), its static files at ``/ui/static``, the plain-text 403 of the ``/ui/run`` guard and
+    the previews' ``ImageFetcher`` in ``app.state.ui_images`` (with its counter).
+    Returns the body limits of its ``/ui/run`` routes. The UI's modules are imported only here
+    and in `_add_ui_headers`, so ``jinja2`` is not imported while the UI is off."""
+    from fastapi.staticfiles import StaticFiles  # only with UI_ENABLED
+
+    from text_extraction.ui.previews import preview_counter
+    from text_extraction.ui.routes import STATIC_DIR, create_ui_router
+    from text_extraction.ui.security import (
+        STATIC_PREFIX,
+        UiRefused,
+        run_body_limits,
+        ui_refused_response,
+    )
+    from text_extraction.vision.fetch import create_image_fetcher
+
+    # The previews' fetcher (P10-S16): the vision step's checks, a fetcher of its own; the
+    # lifespan closes it.
+    app.state.ui_images = create_image_fetcher(settings, app.state.valkey)
+    app.state.ui_image_previews = preview_counter(app.state.registry)
+    app.include_router(create_ui_router(settings))
+    app.mount(STATIC_PREFIX, StaticFiles(directory=STATIC_DIR), name="ui-static")
+    app.add_exception_handler(UiRefused, ui_refused_response)
+    return run_body_limits(settings)
+
+
+def _add_ui_headers(app: FastAPI) -> None:
+    """The security headers of every ``/ui`` answer (P10-S12) and the guard of ``/ui/run/*``
+    (P10-S13); added after the body limit, so it wraps it: a 413 under ``/ui`` carries the
+    headers, and a refused ``/ui/run`` request is answered before its body is read."""
+    from text_extraction.ui.security import UiHeadersMiddleware  # only with UI_ENABLED
+
+    app.add_middleware(UiHeadersMiddleware)
 
 
 def create_public_app(
@@ -283,24 +348,29 @@ def create_public_app(
         principal: Annotated[Principal, Depends(require_role("user"))],
     ) -> Envelope[InfoData]:
         """Name and version of the service, and who the caller is."""
-        data = InfoData(
-            name=SERVICE_NAME,
-            version=__version__,
-            principal=principal.name,
-            role=principal.role,
-        )
-        return Envelope(status="success", data=data, trace_id=current_trace_id())
+        return service_info(principal)
+
+    path_limits = {
+        "/v1/batch": batch_body_limit(settings),
+        UPLOAD_PATH: upload_body_limit(settings),
+        CHUNK_PATH: text_body_limit(settings),  # a text is chunked as an upload
+    }
+    app.state.mcp = None
+    app.state.ui_images = None
+    if settings.mcp_enabled:
+        app.state.mcp = _add_mcp(app, settings, registry)
+        path_limits[MCP_PATH] = mcp_body_limit(settings)
+    if settings.ui_enabled:
+        path_limits.update(_add_ui(app, settings))
 
     # Inside the metrics middleware, so refused bodies are counted like any other answer.
     app.add_middleware(
         BodyLimitMiddleware,
         default_limit=settings.request_max_body_bytes,
-        path_limits={
-            "/v1/batch": batch_body_limit(settings),
-            UPLOAD_PATH: upload_body_limit(settings),
-            CHUNK_PATH: text_body_limit(settings),  # a text is chunked as an upload
-        },
+        path_limits=path_limits,
     )
+    if settings.ui_enabled:
+        _add_ui_headers(app)
     Instrumentator(registry=registry).instrument(app)
     # Added last, so it is the outermost middleware and sees every request.
     app.add_middleware(TraceMiddleware)

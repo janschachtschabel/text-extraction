@@ -488,6 +488,26 @@ the items still running are given back to the queue at once. */}}
 {{- end -}}
 {{- end -}}
 
+{{/* MCP_ENABLED and UI_ENABLED ("true"/"false") of the API pods, from mcp.enabled and ui.enabled.
+The workers serve no public port, so they get neither. */}}
+{{- define "text-extraction.mcpEnabled" -}}
+{{- ternary "true" "false" (.Values.mcp.enabled | default false) -}}
+{{- end -}}
+
+{{- define "text-extraction.uiEnabled" -}}
+{{- ternary "true" "false" (.Values.ui.enabled | default false) -}}
+{{- end -}}
+
+{{/* The base URL of the public API for the install notes: the first ingress host (https when the
+ingress has TLS), else the port-forward of the notes. */}}
+{{- define "text-extraction.publicBaseUrl" -}}
+{{- if and .Values.ingress.enabled .Values.ingress.hosts -}}
+{{- printf "%s://%s" (ternary "https" "http" (not (empty .Values.ingress.tls))) (first .Values.ingress.hosts).host -}}
+{{- else -}}
+http://127.0.0.1:8080
+{{- end -}}
+{{- end -}}
+
 {{/* Secret that holds the Valkey password: the existing one, or the chart-managed one. */}}
 {{- define "text-extraction.valkeySecretName" -}}
 {{- if .Values.valkey.auth.existingSecret -}}

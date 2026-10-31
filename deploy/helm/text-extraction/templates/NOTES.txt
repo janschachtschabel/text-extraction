@@ -5,6 +5,29 @@ Public API (port 8080):
   curl http://127.0.0.1:8080/v1/info
 
 Internal port 9090 (/health, /ready, /metrics) is served by svc/{{ include "text-extraction.internalServiceName" . }} inside the cluster only.
+{{- $base := include "text-extraction.publicBaseUrl" . }}
+{{- $open := eq (toString (get .Values.config "AUTH_MODE" | default "api_key")) "none" }}
+{{- if .Values.mcp.enabled }}
+
+MCP endpoint (mcp.enabled): {{ $base }}/mcp (streamable HTTP, stateless){{ if not $open }}, with an API key as
+  Authorization: Bearer <key>{{ end }}. For Claude Code:
+  claude mcp add --transport http text-extraction {{ $base }}/mcp{{ if not $open }} --header "Authorization: Bearer <key>"{{ end }}
+{{- end }}
+{{- if .Values.ui.enabled }}
+
+Playground (ui.enabled): {{ $base }}/ui{{ if not $open }} (log in with an API key of the service){{ end }}.
+{{- end }}
+{{- if and .Values.ingress.enabled (or .Values.mcp.enabled .Values.ui.enabled) }}
+
+Give the ingress a read timeout of at least MCP_WAIT_SECONDS + 70 s ({{ add (get .Values.config "MCP_WAIT_SECONDS" | default "25" | int) 70 }} s) and a body size
+  that fits /mcp and /ui (see "MCP and playground" in the chart README).
+{{- end }}
+{{- if and .Values.ui.enabled $open }}
+
+WARNING: ui.enabled is true while config.AUTH_MODE is none: anyone who can reach the service can use
+  the API and the playground at /ui{{ if .Values.mcp.enabled }} (and the MCP endpoint){{ end }}. For a shared deployment set
+  config.AUTH_MODE=api_key or ui.enabled=false.
+{{- end }}
 {{- if and (eq (toString (get .Values.config "AUTH_MODE" | default "api_key")) "api_key") (not (include "text-extraction.hasApiKeys" .)) }}
 
 WARNING: AUTH_MODE is api_key but no API keys are configured. The pods will refuse to start.

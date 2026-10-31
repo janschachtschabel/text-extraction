@@ -1,0 +1,20 @@
+<form class="op" hx-post="/ui/run/site-structure" hx-target="#result" hx-swap="innerHTML">
+  {% set prefix = "site" %}
+  <label for="site-url">Start URL</label>
+  <input id="site-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  <label for="site-depth">Link depth</label>
+  <input id="site-depth" name="depth" type="number" min="0" max="10" value="2">
+  <label for="site-max-pages">Most pages</label>
+  <input id="site-max-pages" name="max_pages" type="number" min="1" value="100">
+  <label for="site-scope">Scope</label>
+  <select id="site-scope" name="scope">
+    <option value="host" selected>host: the start page's host</option>
+    <option value="path">path: only below the start URL's directory</option>
+  </select>
+  <fieldset class="choice">
+    <legend>Also</legend>
+    <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked> robots.txt and sitemaps</label>
+  </fieldset>
+  {% include "forms/options.html" %}
+  <button type="submit">Read the site structure</button>
+</form>

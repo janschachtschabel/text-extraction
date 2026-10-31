@@ -620,3 +620,16 @@ async def test_init_twice_changes_nothing() -> None:
 
     assert await valkey.hget(f"job:{{{job_id}}}:site", "pages") == b"2"
     assert await seen_index(valkey, job_id, seen_key("https://other.example/")) is None
+
+
+@scenario
+async def test_extend_gives_runs_the_job_ttl() -> None:
+    """Ruling R-P10-1: ``extend`` gives the item runs the job's TTL, as the job's other keys."""
+    valkey = FakeAsyncRedis()
+    jobs, sites, job_id = await start(valkey, job_ttl_seconds=3600)
+    await jobs.record_claim(job_id, 0, "extract", 1)
+    await valkey.expire(f"job:{{{job_id}}}:runs", 60)
+
+    await sites.extend(job_id, 0, [page("https://example.org/a")], max_pages=10, scope=SCOPE)
+
+    assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:runs") <= 3600

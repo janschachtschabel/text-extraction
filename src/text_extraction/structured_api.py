@@ -25,6 +25,7 @@ from typing import Annotated, Any, Final
 
 from fastapi import APIRouter, Body, Depends, Header, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.datastructures import State
 
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
 from text_extraction.auth import Principal, require_role
@@ -152,8 +153,26 @@ async def structured(
     (`X-LLM-Api-Key` or the service's own), and such a request waits `LLM_SYNC_WAIT_SECONDS`
     (30 s) for the llm worker without `wait_seconds`, then answers 202 with a job.
     """
+    return await run_structured(
+        request.app.state, principal, body, asr_key=asr_key, llm_key=llm_key
+    )
+
+
+async def run_structured(
+    state: State,
+    principal: Principal,
+    body: StructuredRequest,
+    *,
+    asr_key: str | None,
+    llm_key: str | None,
+) -> Envelope[ExtractResult] | JSONResponse:
+    """The core of ``POST /v1/structured`` (ruling P10-S1). ``asr_key`` and ``llm_key`` are the
+    raw values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     return await respond(
-        request,
+        state,
         body,
         principal,
         "extract",
@@ -202,9 +221,25 @@ async def chunk(
     202 with a job (kind `extract` for a `url`, `file` for a `text`). `format: html` is 422.
     `structured` and `pii` may be combined with `chunking`, as on `POST /v1/extract`.
     """
+    return await run_chunk(request.app.state, principal, body, asr_key=asr_key, llm_key=llm_key)
+
+
+async def run_chunk(
+    state: State,
+    principal: Principal,
+    body: ChunkRequest,
+    *,
+    asr_key: str | None,
+    llm_key: str | None,
+) -> Envelope[ExtractResult] | Response:
+    """The core of ``POST /v1/chunk`` (ruling P10-S1). ``asr_key`` and ``llm_key`` are the raw
+    values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     if body.url is not None:
         return await respond(
-            request,
+            state,
             body.as_extract(),
             principal,
             "extract",
@@ -212,7 +247,7 @@ async def chunk(
             llm_key=llm_key_of(llm_key),
         )
     assert body.text is not None  # noqa: S101 - one of url and text is set; narrows the type
-    settings: Settings = request.app.state.settings
+    settings: Settings = state.settings
     data = body.text.encode()
     if len(data) > settings.document_max_bytes:  # a text is never media (R14)
         raise BodyTooLarge(settings.document_max_bytes)
@@ -229,7 +264,7 @@ async def chunk(
         form, principal, settings, asr_header=None, llm_header=llm_key
     )
     return await answer_upload(
-        request,
+        state,
         principal,
         form,
         data,

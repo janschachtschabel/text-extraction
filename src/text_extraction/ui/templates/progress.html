@@ -1,0 +1,10 @@
+<section class="jobs-view" aria-label="Jobs">
+  {% if refused %}
+  <div class="error" role="alert">
+    <p>Part {{ refused.part }} of {{ refused.parts }} was refused (HTTP {{ refused.http_status }}): {{ refused.message }}</p>
+    <p class="hint">The jobs below were started and keep running.</p>
+  </div>
+  {% endif %}
+  {% include "progress_live.html" %}
+  <div class="job-detail" aria-live="polite"></div>
+</section>

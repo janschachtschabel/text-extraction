@@ -19,13 +19,13 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `PUBLIC_HOST` | `0.0.0.0` | Bind address of the public API. |
 | `PUBLIC_PORT` | `8080` | Port of the public API. Fixed to 8080 by the Helm chart. |
 | `INTERNAL_HOST` | `0.0.0.0` | Bind address of the internal listener. |
-| `INTERNAL_PORT` | `9090` | Port of the internal listener (`/health`, `/ready`, `/metrics`). Fixed to 9090 by the Helm chart. |
+| `INTERNAL_PORT` | `9090` | Port of the internal listener (`/health`, `/ready`, `/metrics`). Fixed to 9090 by the Helm chart. Workers serve it too: an API and a worker run on one host (outside compose and Helm, which give each its own container) need distinct values, e.g. `INTERNAL_PORT=9091` for the worker. |
 | `LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive). Anything else makes the service exit with code 2. |
 | `LOG_FORMAT` | `json` | `json` (stdout, one object per line) or `console` (plain text for local development). |
 | `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Default requests per minute per API key. A key can override it with `rate_limit_per_minute`. |
-| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB) and `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
+| `REQUEST_MAX_BODY_BYTES` | `65536` | Largest request body the public API accepts, in bytes. A larger one answers 413 `invalid_request` before it is read whole, parsed or authenticated: at once when its `Content-Length` says so, else when the bytes read pass the limit. `POST /v1/batch` has its own bound instead, see `BATCH_MAX_URLS`, and so have `POST /v1/extract/file` (`DOCUMENT_MAX_BYTES` + 192 KiB: the file, the form fields `structured` and `chunking` of up to 64 KiB each and the other fields of up to 1 KiB), `POST /v1/chunk` (`DOCUMENT_MAX_BYTES` + 64 KiB), `/mcp` (see MCP) and some `/ui/run` routes (see UI). The internal port has no body limit (it has no route that takes a body). Minimum 1024. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Valkey (Redis protocol) that holds all shared state: rate-limit counters, the per-host outbound state, the compliance file cache, cached results and fingerprints, jobs and the job queue. Needs Valkey 7.2+ or Redis 7.0+ (the queue scripts use script flags). A secret when it carries a password, see below. |
 | `VALKEY_MEMORY_GUARD_RATIO` | `0.8` | Share of Valkey's `maxmemory` from which the API pods take on no new bulk: `POST /v1/batch` and `POST /v1/site-structure` answer 503 `internal_error` (retryable), a running site job appends no further pages or sitemaps (warning `site_memory_guard`), a slow `POST /v1/extract` with `wait_seconds` is not handed over to a job and keeps waiting inline (200), and the result cache skips its writes, on the API pods and on the workers. Workers keep storing the results of accepted jobs in the job store. Each API pod and each worker reads `INFO memory` every 5 s (API pods also with `JOBS_ENABLED=false`); with `maxmemory` 0 there is no guard. While the read fails the last verdict stays. 0.1 to 1.0. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Total time budget of one outbound fetch, in seconds. Minimum 1 (the least time a target fetch is started with). |
@@ -59,7 +59,7 @@ chart's ConfigMap with the same name (values are strings). The chart overrides `
 | `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. Helm: `workers.extract.concurrency`. |
 | `BATCH_MAX_URLS` | `1000` | Most URLs one `POST /v1/batch` may carry. More answers 422 `invalid_request`. A body over `BATCH_MAX_URLS` × (`MAX_URL_LENGTH` (2048) + 8) bytes plus 4 KiB answers 413 `invalid_request` before it is read whole or parsed (see `REQUEST_MAX_BODY_BYTES`). Minimum 1, maximum 100000. |
 | `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches and site jobs (`POST /v1/site-structure`) one API key may have unfinished (queued or running) at a time, both kinds counted together. The next `POST /v1/batch` or `POST /v1/site-structure` answers 429 `rate_limited` (retryable) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
-| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch`, `POST /v1/site-structure` and `GET /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
+| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch`, `POST /v1/site-structure`, `GET /v1/jobs/{id}` and `DELETE /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
 | `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `BROWSER_ENABLED` | `false` | Switch browser mode on: pages are rendered by the browser workers (`text-extraction-browser-worker`, pool `browser`); the API pods queue them and wait. Off, `mode: browser`, `screenshot: true`, `actions`, `cookies`, `headers`, `POST /v1/screenshot` and a batch with `mode: browser` answer 400 `invalid_request` ("Browser mode is not enabled on this service."), and `mode: auto` never uses a browser (its answers are those of fast mode). The image of an API pod has no browser; the browser worker image has. On, the graceful shutdown of the API covers a sync request that waits for the browser: the fast phase of an escalating `auto` request (`EXTRACT_TIMEOUT_SECONDS`) + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 s, that is 75 s by default and 105 s with unblock mode. The Kubernetes `terminationGracePeriodSeconds` of the API pods must cover `SHUTDOWN_DRAIN_SECONDS` plus that plus a margin: the Helm chart sets it to 90 s (120 s with unblock mode) unless you set it, and docker compose stops the API with a 120 s grace period. Extract workers keep their own bound; browser workers have theirs (see Ports and probes). Helm: `workers.browser.enabled` (default true) deploys the browser workers and renders this variable into the API, extract worker and browser worker pods. docker compose always starts a browser worker and sets it to true for every service. |
 | `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. 5 to 120. |
@@ -644,6 +644,220 @@ Deployments at once, so send site jobs only once every pod runs the new release.
   SIGTERM it is cancelled and runs again on another worker after its lease, without duplicate
   items.
 
+## MCP
+
+`MCP_ENABLED=true` serves an MCP server (FastMCP, streamable HTTP, stateless, JSON answers) at
+exactly `/mcp` on the public port 8080; `/mcp/` is 404, `GET /mcp` 405 (a stateless server has no
+event stream), and neither appears in the OpenAPI spec. Off, there is no route and `fastmcp` is not
+imported. An MCP client posts JSON-RPC with `Accept: application/json, text/event-stream`.
+
+Every request to `/mcp` passes the same checks as a REST request, in this order:
+
+1. The body limit: `ceil(DOCUMENT_MAX_BYTES / 3) × 4 + 64 KiB` (a file of the upload limit as
+   base64, or of `MEDIA_UPLOAD_MAX_BYTES` where uploaded media are transcribed); a larger body
+   answers 413 `invalid_request`. A body whose `Content-Length` is over the limit is refused at
+   once, before anything is read or authenticated; a body without one (chunked) is read only
+   after the checks 2 and 3 and is cut with the 413 when the bytes read pass the limit.
+2. A request with an `Origin` header that is not in `MCP_ALLOWED_ORIGINS` answers 403 `forbidden`
+   ("This origin may not call the MCP endpoint."). A client without a browser sends no `Origin`.
+3. The API key (`Authorization: Bearer <key>`, as for REST): without a valid one the answer is the
+   REST 401 envelope with `WWW-Authenticate: Bearer`. Under `AUTH_MODE=none` every caller is the
+   anonymous admin, as for REST.
+
+Each `tools/call` counts once against the caller's rate limit, the bucket REST calls share;
+`initialize`, `tools/list` and notifications are free. A refused or failed call is a tool result
+with `isError: true` whose `structuredContent` is the REST error envelope (`rate_limited` with
+`retryable`, `invalid_request` with the validation `details`, `internal_error` for our own faults,
+without a traceback); a target's `failed` is a normal result, as it is a 200 in REST. Each call
+logs one line `mcp_tool_call` with `tool`, `outcome`, `duration_ms` (and `job_id` when it answered
+a job, or when a refused `get_job` or `cancel_job` was asked for one), the principal and the request's trace fields (`x-client-trace-id`, B3), which the
+envelope's `trace_id` carries too. Tool arguments are never logged; FastMCP's and the MCP SDK's
+own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
+
+Behind an ingress or a proxy, give `/mcp` a read timeout of at least `MCP_WAIT_SECONDS` + 70 s
+(95 s by default: a tool call ends within `MCP_WAIT_SECONDS` plus the route's own hand-over time)
+and a body size of at least its body limit (about 27 MB with the default `DOCUMENT_MAX_BYTES`; about 33 MB where uploads are transcribed, from `MEDIA_UPLOAD_MAX_BYTES`), or
+`extract_file` calls are cut off before the service sees them. The Helm chart's README lists
+annotations for ingress-nginx.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MCP_ENABLED` | `false` | Serve the MCP endpoint at `/mcp`. Helm: `mcp.enabled`, rendered on the API pods only (a `config.MCP_ENABLED` entry is ignored); docker compose switches it on for the `api` service unless `.env` or the shell sets it. |
+| `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash and a default port, `:443` for https and `:80` for http, are dropped, in the setting and in the `Origin` header). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
+| `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of these tools and of `get_job` (a larger `wait_seconds` is cut to it). 0 to 60. |
+| `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
+| `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |
+
+## UI
+
+`UI_ENABLED=true` serves a playground at `/ui` on the public port 8080: server-rendered pages
+(Jinja2) with htmx 2.0.11 served from `/ui/static` (no CDN, no Node build). Off, `/ui` is 404 and
+`jinja2` is not imported. No `/ui` route appears in the OpenAPI spec, and none is on the internal
+port.
+
+Access (the UI has no password of its own: its password is an API key of the service):
+
+- The page `GET /ui` and its static files need no key; they hold nothing but forms.
+- Under `AUTH_MODE=api_key` the page shows only a login box: the API key, and optionally the LLM
+  key (`X-LLM-Api-Key`) and the ASR key (`X-ASR-Api-Key`). The page's script keeps them in the
+  tab's `sessionStorage` (`te.apiKey`, `te.llmKey`, `te.asrKey`): they survive a reload and go
+  away with the tab. It sends them only as request headers to `/ui/run/*`, never as a cookie, a
+  form field or part of a URL, and the service never renders them into a page. The login
+  forwards `GET /v1/info` with the key: a valid key shows the application with the key's name
+  and role and a "Log out" button (which clears the stored keys); a refused key shows "This key
+  is not valid." and nothing else. A reload logs in again with the stored key. The login is
+  only a convenience: every request the UI forwards carries the key and is checked as any REST
+  request.
+- Under `AUTH_MODE=none` the application shows at once, under the banner "This service runs
+  without authentication: anyone who can reach it can use the API and this UI." An open UI goes
+  with an open API. For a shared deployment, keep `UI_ENABLED=false` (Helm `ui.enabled=false`)
+  or use `AUTH_MODE=api_key`.
+
+Every form posts to `/ui/run/<op>`, which forwards it in-process (no network) to the matching
+`/v1` route with the browser's `Authorization`, `X-LLM-Api-Key`, `X-ASR-Api-Key` and B3 headers
+only (no cookie, no other header) and with `x-client-trace-id` set to the outer request's trace
+id, so both access lines carry one id. The outer `/ui/run/...` access line has no `principal`
+(the view does not authenticate a forwarded call itself); the inner `/v1/...` line carries it. The REST route runs every check (body limit, validation,
+auth, roles, rate limit, the hand-over to a job), and each forwarded call counts once against the
+caller's rate limit. Views that combine several reads count one hit per view.
+
+Requests to `/ui/run/*` answer 403 (plain text) without `HX-Request: true`, and when their
+`Origin` names another host or port than the `Host` header (a default port counts as none; the
+scheme is not compared, as TLS may end at the ingress), before the body is read or any route
+runs. The service has no CORS middleware, so a page of another origin cannot send `HX-Request`.
+The UI never sets a cookie. The page's script sends the keys only to `/ui/run/*` of its own
+origin, and the UI forwards only to relative paths under `/v1/`.
+
+Every answer under `/ui` carries `Content-Security-Policy: default-src 'none'; script-src 'self';
+style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none';
+frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Resource-Policy: same-origin`, `Permissions-Policy: camera=(), microphone=(),
+geolocation=()` and `Cache-Control: no-store` (`public, max-age=3600` for a static file). The
+templates have no inline script, style or event handler, and htmx runs with `allowEval`,
+`allowScriptTags` and its history off and `selfRequestsOnly` on.
+
+The tabs Extract, File, Screenshot, Structured, Chunk and Info each send one REST call
+(`POST /v1/extract`, `POST /v1/extract/file`, `POST /v1/screenshot`, `POST /v1/structured`,
+`POST /v1/chunk`, `GET /v1/info`). Their fields build the REST body; the "Options (JSON)" box
+adds any further field of it. A field left at its default yields to the same key in Options (so
+`format: html`, which the form does not offer, goes there); a key both the form sets and Options
+give is refused ("<key> is given twice."), as is invalid JSON, and nothing is sent. The forms'
+`wait_seconds` is 25. The extract form offers Markdown or Text, the mode, "Metadata" (on),
+"Metadata, structured" (the `metadata` strategy of `structured` with a schema of schema.org and
+LRMI names: `name`, `headline`, `description`, `author`, `datePublished`, `dateModified`,
+`license`, `inLanguage`, `keywords`, `publisher`, `educationalLevel`, `learningResourceType`,
+`isAccessibleForFree`) and "Describe images" (`describe_images.max_images`, 5 by default; the
+REST answers apply, such as 400 without the LLM).
+
+Every answer is shown with its HTTP status, the envelope's status and error (with the `details`
+of a 422), the raw JSON and the request as a curl command, with `$API_KEY`, `$LLM_API_KEY` and
+`$ASR_API_KEY` in place of the keys. A result shows its content as source, Markdown also
+rendered (raw HTML shown as text, links only for http(s), images as their alt text), a download
+(`.md` or `.txt`; an `html` result saves as `.html` but is served as `text/plain`), its title, language and word count, its metadata, structured values (with
+their sources and the missing fields), chunks, images with their alt texts and descriptions, its
+links (clickable only for http(s)) and a timeline built from its fields: the job item's claim,
+compliance, fetch (attempts, upstream status, final URL, cache), render (with "escalated from
+fast" after `auto`), convert, PII, LLM and the outcome, with a one-line text for each warning. A
+screenshot is read from the artifact route (one more REST call) and shown inline, or a note says
+why it could not be read. A large content is bounded in the page: the source, the raw JSON and
+the chunks show at most 200,000 characters each (and only such a content is rendered as
+Markdown), with a note when cut; the download is the full copy, up to 10,000,000 characters.
+
+"Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit, then the
+service fetches at most 20 of them (4 at once, 10 s each, 25 s for the whole view) itself, with the vision step's checks:
+the SSRF guard on the URL and every redirect, the caller's compliance mode, the host's outbound
+turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF or
+WebP by their bytes. A fetched image is inlined as a `data:` URI, so the image hosts never see
+the viewer and the CSP stays `img-src 'self' data:`; a skipped one shows why (`blocked`,
+`refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`, or `time` when the view's
+25 s ran out). An unexpected failure of one image skips that image as `error`; the others go on.
+
+The tabs Batch, Batch file and Site structure start jobs, and every job is shown with its
+progress:
+
+- **Batch**: URLs, one per line, with the format, mode, metadata and Options of `POST /v1/batch`.
+  The lines are checked on the server: each must be a plain http(s) URL of at most 2048
+  characters without blanks; exact duplicates are dropped. A list with other rows is answered
+  with the batch preview (below): the rows that are not used, and "Start batch" for the valid
+  URLs with the options chosen. The key is checked before the form is read; the form takes at
+  most `max(UI_TREE_MAX_URLS, BATCH_MAX_OPEN_PER_CLIENT × BATCH_MAX_URLS)` + 64 fields (one per
+  checked box of the tree), and a typed list may fill the route's whole body limit. A form that
+  cannot be read is answered with "The form could not be read: " and the reason (too many
+  fields, a part too large, malformed). The URLs are split into batches of `BATCH_MAX_URLS`;
+  more batches than
+  `BATCH_MAX_OPEN_PER_CLIENT` is refused ("Select at most <n> URLs at once.") and nothing is
+  sent. Otherwise the batches are sent one after another; a refused part (such as the 429 while
+  other jobs are open) stops the rest and is shown beside the jobs already started, which keep
+  running. Log line `ui_batch_split` (`parts`, `urls`).
+- **Batch file**: a CSV or JSON file of at most `UI_BATCH_FILE_MAX_BYTES` and
+  `UI_BATCH_FILE_MAX_ROWS` rows, parsed on the server (one rate-limit hit, nothing sent yet). It
+  must be UTF-8 (a BOM is dropped). A JSON file is an array of URLs or of objects with `url`
+  (nested too deep or broken: "The file is not valid JSON."). A CSV is delimited by commas,
+  semicolons or tabs (one that splits every one of the first 50 rows alike; else each line is one
+  value); a `url` column (any case) is used, else the first column, and a first row that is not
+  an http(s) URL is a header. A field over 2049 characters, or a row of more than 1000 fields,
+  refuses the file. The
+  preview shows the counts (rows, URLs, rows that are not URLs, duplicates, batches), the first
+  50 URLs, the first 20 problems by row, and the URLs in a read-only box with the batch options
+  and "Start batch". Values such as `=HYPERLINK(...)` or `@cmd` are no URLs and are only
+  reported; the UI writes no CSV. Log line `ui_batch_file` (`rows`, `urls`, `invalid`,
+  `duplicates`).
+- **Site structure**: `POST /v1/site-structure` with the start URL, depth, most pages, scope and
+  sitemaps.
+- **Progress** (`/ui/run/progress`): each job's kind and state, a progress bar with done/total
+  and the success, partial and failed counts (a site job's total grows while it crawls), the
+  elapsed time and a page of 20 items with previous and next buttons. An item shows "queued",
+  "running in <pool>, claim <n>" (its last claim, from `items[].run`) or its status and error
+  code, and "Show" opens its result with the timeline. "Cancel" deletes the job
+  (`DELETE /v1/jobs/{id}`). While any job shown runs, the view refreshes itself every 3 s; each
+  refresh reads all its jobs (each once, at most 20 per view, two at a time and 100 items in
+  all, so fewer per page when it shows more than five) through the job core with one rate-limit
+  hit, and refreshing stops
+  once all are completed (after a 429 it tries again after `Retry-After`). A single operation
+  that continues as a job (202) has a "Show progress" button for it.
+- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree
+  now" while it runs): the job is read in pages of 20 items, so at most 20 items are held at a
+  time, and only the tree's fields are kept. The tree is built by URL path: a root per host (a
+  leading `www.` dropped), a section per directory, and every URL a leaf (a directory's own page
+  is the leaf `/`, a query string a leaf of its own), in name order. It merges the crawled pages
+  (title, link depth, status), the sitemaps' entries (`lastmod`) and links not followed for depth
+  or the page limit ("linked only"), by the crawl's seen key; pages come first. It shows at most
+  `UI_TREE_MAX_URLS` URLs and counts the rest ("<n> more URLs not shown (UI_TREE_MAX_URLS)").
+  Checking a section checks its subtree, a section shows a mixed state while part of it is
+  checked, and a counter shows the selection; "Extract selected" starts batches of the checked
+  URLs as the Batch tab does.
+
+Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/file`,
+`/ui/run/chunk` that of `POST /v1/chunk`, `/ui/run/batch-file` `UI_BATCH_FILE_MAX_BYTES` + 64 KiB,
+`/ui/run/batch-urls` `BATCH_MAX_OPEN_PER_CLIENT` times that of `POST /v1/batch`, every other route
+`REQUEST_MAX_BODY_BYTES`. A larger body answers 413 `invalid_request` before it is read whole.
+One field of a form may fill its route's whole limit: the Chunk tab posts its text as multipart
+(no percent-encoding), so a text the chunk route takes goes through (it is forwarded as JSON,
+and the JSON escapes count against that route's limit). Every single operation (`/ui/run/file`,
+`/ui/run/chunk` and the others) checks the key and the rate limit before the body is read, as its
+REST route does; the check does not
+count, the forwarded call counts the view's one hit. A form that cannot be read is answered with
+"The form could not be read: " and the reason (too many fields or files, a part too large,
+malformed). An answer htmx does not swap (such as that 413, the plain 403 of the guard or a 5xx)
+puts the status line "Request failed: <status> <reason>" (the envelope's message, else the
+status text) at the top of the request's target, and a request that gets no answer "Network
+error"; the line is text only.
+
+Behind an ingress or a proxy, give `/ui` the read timeout of `/mcp` (at least `MCP_WAIT_SECONDS` +
+70 s: the forms wait 25 s plus the route's hand-over time) and a body size of at least the largest
+of these limits: the upload route's (`DOCUMENT_MAX_BYTES`, or `MEDIA_UPLOAD_MAX_BYTES` where uploads are
+transcribed, + 192 KiB) and `UI_BATCH_FILE_MAX_BYTES`
++ 64 KiB.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `UI_ENABLED` | `false` | Serve the playground at `/ui`. Helm: `ui.enabled`, rendered on the API pods only (a `config.UI_ENABLED` entry is ignored; the install notes warn while `config.AUTH_MODE` is `none`); docker compose switches it on for the `api` service unless `.env` or the shell sets it. |
+| `UI_TREE_MAX_URLS` | `5000` | Most URLs the site tree of one site job shows; the rest are counted ("<n> more URLs not shown"). 100 to 50000. |
+| `UI_BATCH_FILE_MAX_BYTES` | `10485760` | Largest CSV or JSON file of URLs the batch-file form takes, in bytes. 1024 to 104857600. |
+| `UI_BATCH_FILE_MAX_ROWS` | `100000` | Most rows of one batch file; a file with more is refused. 10 to 1000000. |
+| `UI_IMAGE_MAX_BYTES` | `1000000` | Largest image the UI fetches for a preview, in bytes; a larger one is skipped (`too_large`). 10000 to 20000000. |
+
 ## Headers
 
 Read from the request:
@@ -735,6 +949,17 @@ slot.
 A result is written once: storing the same index again changes nothing, so an item that is run a
 second time after a lost lease counts once. Times are epoch seconds from the pod's clock.
 
+Each claim of an item by a worker is recorded in one more hash, `job:{<id>}:runs`: item index to
+`<claim number>|<pool>|<epoch ms>`, the item's last claim (about 40 bytes per item).
+`GET /v1/jobs/{id}` shows it as the item's `run` (pool, claim number, `claimed_at`), so a job
+shows where an item runs and how often it was claimed: the claim number is 1 on the first claim
+and grows after a lost lease or a deferral. The worker writes it with one script per claim
+before the item runs (one Valkey round trip; a failed write is logged as
+`job_item_claim_not_recorded` and the item runs anyway); nothing is written for a job that is
+gone. It lives as long as the job: each write takes the remaining TTL of `meta`, and the
+completing result write renews it with the job's other keys (as does a site job's growth). An item
+of a sync request that ran in the API pod has none.
+
 Per API key (the job's owner) one more key lists the unfinished batches and site jobs:
 `jobs:{owner:<name>}:open` is a set of job ids with a TTL of `JOB_TTL_SECONDS`, renewed on each
 batch or site job. `POST /v1/batch` and `POST /v1/site-structure` remove the ids of finished or
@@ -742,6 +967,21 @@ expired jobs before they count, and refuse the job when the owner has
 `BATCH_MAX_OPEN_PER_CLIENT` open ones. The name is escaped (`%` as
 `%25`, `{` as `%7B`, `}` as `%7D`), so the braces always enclose exactly the name. No script
 touches this key together with a job key or a queue key.
+
+`DELETE /v1/jobs/{id}` (the owner or an admin; 404 for anyone else) cancels a job of any kind and
+state. It deletes every key of the job under `job:{<id>}:` that the job store knows by name:
+`meta`, `urls`, `results`, `done`, `runs`, the browser secrets, the drafts, the caller's ASR and
+LLM keys, the crawl keys of a site job (below), its files (`job:{<id>}:artifact:screenshot.png`)
+and the input of item 0 (an upload, whose bytes leave the input budget). Then it removes the id
+from the owner's `jobs:{owner:<name>}:open`, so an admin's delete frees the owner's slot. Items
+still in a queue stay there until a worker claims them; the worker drops them as items of an
+expired job (`job_item_dropped`, reason `job_gone`, counted as `lost`). An item that is running, and a
+handed-over request still running in an API pod, finish without storing anything: every write
+checks for `meta` first, so nothing of the job comes back. The input of an item past index 0
+that a batch queued for OCR or transcription (`job:{<id>}:input:<index>`) is deleted, and leaves
+the budget, when a Docling or ASR worker drops the item, queued or in flight; while no such
+worker runs, it expires by its own TTL. The owner's Docling and ASR sets count a deleted job out
+on their next check.
 
 The bytes of an item (an upload, a document queued for OCR, media queued for transcription) are
 kept in `job:{<id>}:input:<index>` (a hash of `body` and `meta`) for `DOCLING_INPUT_TTL_SECONDS`
@@ -856,6 +1096,9 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`, `unknown` for an item without a crawl record), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
 | `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
 | `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
+| `text_extraction_mcp_tool_calls_total` | counter | `tool`, `outcome` (`success`, `partial`, `failed`, `job` or the error code of a refusal or error result) | API pods (with `MCP_ENABLED`) | MCP tool calls. `tool` is the tool's name, or `unknown` for a name the server has no tool of (a caller's text is never a label). Every tool is exported with `success` at 0 from the start. Use `sum()` over pods. |
+| `text_extraction_mcp_tool_seconds` | histogram | `tool` | API pods (with `MCP_ENABLED`) | Seconds of one MCP tool call, the rate limit check included. Buckets 0.05 s to 120 s. |
+| `text_extraction_ui_image_previews_total` | counter | `outcome` (`shown`, `time`, `blocked`, `refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`) | API pods (with `UI_ENABLED`) | Preview images the UI fetched for "Load previews": `shown` (inlined) or why one was skipped. Every outcome is exported at 0 from the start. Never a label of a URL or an alt text. |
 | `text_extraction_job_items_total` | counter | `outcome` | workers | Items handled: `success`, the error code of the result, `deferred` (given back while the host is busy or paused), `lost` (the job was gone) or `escalated` (an `auto` item the extract worker moved to the browser pool). |
 | `text_extraction_job_item_seconds` | histogram | none | workers | Time one item took in the worker, from the claim to the stored result. |
 | `text_extraction_worker_busy_slots` | gauge | none | workers | Slots of the worker that are processing an item. |

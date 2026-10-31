@@ -14,7 +14,8 @@ page, and answers its bytes or why it was skipped; it never raises for the targe
   outcome is recorded while the turn is held, and a busy or paused host skips the image
   (``busy``) instead of deferring the work;
 * the fetcher's ``USER_AGENT`` and nothing of the caller (no cookies, headers or actions), at
-  most ``LLM_VISION_MAX_IMAGE_BYTES``, within ``timeout`` seconds for the whole call.
+  most ``max_bytes`` (default ``LLM_VISION_MAX_IMAGE_BYTES``; the UI's previews pass
+  ``UI_IMAGE_MAX_BYTES``), within ``timeout`` seconds for the whole call.
 
 The type comes from the body's magic bytes (``sniff_image``), never from ``Content-Type``.
 Logs carry the host and the reason only, never the URL.
@@ -134,11 +135,14 @@ class ImageFetcher:
         mode: ComplianceMode,
         *,
         timeout: float,  # noqa: ASYNC109 - fixed by the plan's interface
+        max_bytes: int | None = None,
     ) -> ImageBytes | ImageSkipped:
-        """The image at ``url``, or why it was skipped, within ``timeout`` seconds."""
+        """The image at ``url``, or why it was skipped, within ``timeout`` seconds and at most
+        ``max_bytes`` (default ``LLM_VISION_MAX_IMAGE_BYTES``)."""
         host = _host_of(url)
+        cap = self._settings.llm_vision_max_image_bytes if max_bytes is None else max_bytes
         try:
-            outcome = await self._get(url, mode, timeout)
+            outcome = await self._get(url, mode, timeout, cap)
         except (OutboundBusy, CircuitOpen):
             outcome = ImageSkipped("busy")
         if isinstance(outcome, ImageSkipped):
@@ -146,7 +150,7 @@ class ImageFetcher:
         return outcome
 
     async def _get(
-        self, url: str, mode: ComplianceMode, seconds: float
+        self, url: str, mode: ComplianceMode, seconds: float, max_bytes: int
     ) -> ImageBytes | ImageSkipped:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + seconds
@@ -167,7 +171,7 @@ class ImageFetcher:
             budget = deadline - loop.time()
             if budget <= 0:
                 return ImageSkipped("error")
-            fetched, report = await self._fetch(url, mode, report, turn, budget)
+            fetched, report = await self._fetch(url, mode, report, turn, budget, max_bytes)
         except FetchError as error:
             return ImageSkipped(_reason_of(error))
         finally:
@@ -190,6 +194,7 @@ class ImageFetcher:
         report: ComplianceReport,
         turn: HostTurn,
         budget: float,
+        max_bytes: int,
     ) -> tuple[FetchResult, ComplianceReport]:
         """Fetch ``url`` in the turn held for its host; the outcome is recorded for the host
         that gave it while its turn is held, judged against the time that host's request had
@@ -220,7 +225,7 @@ class ImageFetcher:
         try:
             fetched = await self._fetcher.fetch(
                 url,
-                max_bytes=self._settings.llm_vision_max_image_bytes,
+                max_bytes=max_bytes,
                 timeout_seconds=budget,
                 on_redirect=on_redirect,
             )

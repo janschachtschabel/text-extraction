@@ -12,7 +12,8 @@ counters, next to the job's own keys and under the same hash tag, so one script 
                           (sitemap entries granted) and ``e:<index>`` (the grant of one item)
 
 Every write gives the keys the remaining TTL of ``meta``, so they expire with the job; ``delete``
-and ``shorten`` of ``JobStore`` remove or cut them.
+and ``shorten`` of ``JobStore`` remove or cut them. ``extend`` gives the job's item runs
+(``job:{<id>}:runs``, ruling R-P10-1) the same TTL, as it does the job's other keys.
 
 ``extend`` is the one step that grows the job: in one script per batch of at most
 ``EXTEND_BATCH`` candidates it appends the parent's new items (``urls``, ``total``, node, seen
@@ -90,7 +91,8 @@ return 1
 """
 )
 
-# KEYS = meta, urls, results, done, nodes, seen, children, site.
+# KEYS = meta, urls, results, done, nodes, seen, children, site, runs (the item runs, ruling
+# R-P10-1: they get the job's TTL with the other keys).
 # ARGV = parent, max_pages, max_files, ttl_ms, scope JSON ('' for none), candidate count,
 # finished count, alias count, the ``children`` field of the call (``<parent>`` for batch 0,
 # ``<parent>:<batch>`` after it), then per candidate key (prefixed), url, node JSON, add ('1'/'0'),
@@ -212,7 +214,7 @@ if appended > 0 then
 end
 redis.call('HSET', KEYS[8], 'pages', pages, 'files', files)
 redis.call('HSET', KEYS[7], field, answer)
-for i = 2, 8 do
+for i = 2, 9 do
   if redis.call('EXISTS', KEYS[i]) == 1 then
     redis.call('PEXPIRE', KEYS[i], ttl)
   end
@@ -404,7 +406,17 @@ class SiteStore:
         reply = await self._extend(
             keys=[
                 job_key(job_id, kind)
-                for kind in ("meta", "urls", "results", "done", "nodes", "seen", "children", "site")
+                for kind in (
+                    "meta",
+                    "urls",
+                    "results",
+                    "done",
+                    "nodes",
+                    "seen",
+                    "children",
+                    "site",
+                    "runs",
+                )
             ],
             args=args,
         )

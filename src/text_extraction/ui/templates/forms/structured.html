@@ -1,0 +1,11 @@
+<form class="op" hx-post="/ui/run/structured" hx-target="#result" hx-swap="innerHTML">
+  {% set prefix = "structured" %}
+  <label for="structured-url">URL</label>
+  <input id="structured-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  {% include "forms/format.html" %}
+  {% include "forms/mode.html" %}
+  <label for="structured-structured">Structured (JSON: strategy, schema, rules)</label>
+  <textarea id="structured-structured" name="structured" rows="6" spellcheck="false" required>{"strategy": "auto", "schema": {"type": "object", "properties": {"title": {"type": "string"}, "author": {"type": "string"}}}}</textarea>
+  {% include "forms/common.html" %}
+  <button type="submit">Extract the fields</button>
+</form>

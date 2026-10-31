@@ -26,3 +26,8 @@ reason = "Emscripten only: a dependency of httpx2 under sys_platform == 'emscrip
 name = "pywin32"
 license = "PSF-2.0"
 reason = "Windows only: a dependency of docling-parse (extra docling) under sys_platform == 'win32'"
+
+[[not_installed]]
+name = "pywin32-ctypes"
+license = "BSD-3-Clause"
+reason = "Windows only: a dependency of keyring (through fastmcp) under sys_platform == 'win32'"

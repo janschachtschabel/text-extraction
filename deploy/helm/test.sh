@@ -969,6 +969,65 @@ expect_contains "notes fall back to LLM_MODEL for images" \
   "$(render_notes --set workers.llm.enabled=true)" "model gpt-6-luna (no workers.llm.visionModel"
 expect_contains "notes say the LLM is off" "$(render_notes)" "No llm workers are deployed"
 
+# --- MCP and UI (package 10, ruling P10-S21) ------------------------------------------------------
+
+# Off by default; the toggles render MCP_ENABLED and UI_ENABLED on the API pods and on no worker.
+expect_values "API (MCP off by default)" "$api" MCP_ENABLED "false"
+expect_values "API (UI off by default)" "$api" UI_ENABLED "false"
+all_workers=(--set workers.docling.enabled=true --set workers.asr.enabled=true
+  --set workers.nlp.enabled=true --set workers.llm.enabled=true)
+mcp_ui="$(render --set mcp.enabled=true --set ui.enabled=true "${all_workers[@]}")"
+expect_values "API (mcp.enabled)" "$(document "$mcp_ui" Deployment "$API")" MCP_ENABLED "true"
+expect_values "API (ui.enabled)" "$(document "$mcp_ui" Deployment "$API")" UI_ENABLED "true"
+# The whole render holds exactly one entry of each: the API pod's.
+expect_values "only the API pods get MCP_ENABLED" "$mcp_ui" MCP_ENABLED "true"
+expect_values "only the API pods get UI_ENABLED" "$mcp_ui" UI_ENABLED "true"
+for name in "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
+  worker_doc="$(document "$mcp_ui" Deployment "$name")"
+  if [[ -z "$worker_doc" ]]; then fail "no Deployment $name with every worker on"; continue; fi
+  expect_absent "no MCP_ENABLED on $name" "$worker_doc" "MCP_ENABLED"
+  expect_absent "no UI_ENABLED on $name" "$worker_doc" "UI_ENABLED"
+done
+
+# config.* entries do not switch them: the chart leaves them out of the ConfigMap.
+config_on="$(render --set config.MCP_ENABLED=true --set config.UI_ENABLED=true)"
+expect_values "config.MCP_ENABLED ignored (API)" "$(document "$config_on" Deployment "$API")" MCP_ENABLED "false"
+expect_values "config.UI_ENABLED ignored (API)" "$(document "$config_on" Deployment "$API")" UI_ENABLED "false"
+expect_absent "config.MCP_ENABLED not in the ConfigMap" "$(document "$config_on" ConfigMap "$API")" "MCP_ENABLED"
+expect_absent "config.UI_ENABLED not in the ConfigMap" "$(document "$config_on" ConfigMap "$API")" "UI_ENABLED"
+
+# The settings of both, with their defaults, in the ConfigMap.
+configmap="$(document "$on" ConfigMap "$API")"
+for entry in 'MCP_ALLOWED_ORIGINS: ""' 'MCP_WAIT_SECONDS: "25"' 'MCP_MAX_CONTENT_CHARS: "50000"' \
+  'MCP_IMAGE_MAX_BYTES: "5000000"' 'UI_TREE_MAX_URLS: "5000"' 'UI_BATCH_FILE_MAX_BYTES: "10485760"' \
+  'UI_BATCH_FILE_MAX_ROWS: "100000"' 'UI_IMAGE_MAX_BYTES: "1000000"'; do
+  expect_contains "ConfigMap default $entry" "$configmap" "$entry"
+done
+
+# NOTES: the URLs while on, and the warning for an open UI.
+expect_absent "notes name no /mcp while off" "$(render_notes)" "/mcp"
+expect_absent "notes name no /ui while off" "$(render_notes)" "/ui"
+expect_contains "notes name the MCP endpoint" "$(render_notes --set mcp.enabled=true)" "http://127.0.0.1:8080/mcp"
+expect_contains "notes name the playground" "$(render_notes --set ui.enabled=true)" "http://127.0.0.1:8080/ui"
+ingress_notes="$(render_notes --set mcp.enabled=true --set ui.enabled=true --set ingress.enabled=true \
+  --set 'ingress.hosts[0].host=te.example.org' --set 'ingress.hosts[0].paths[0].path=/' \
+  --set 'ingress.tls[0].hosts[0]=te.example.org')"
+expect_contains "notes name the MCP URL of the ingress" "$ingress_notes" "https://te.example.org/mcp"
+expect_contains "notes name the UI URL of the ingress" "$ingress_notes" "https://te.example.org/ui"
+expect_contains "notes give the ingress read timeout" "$ingress_notes" "MCP_WAIT_SECONDS + 70 s (95 s)"
+expect_contains "the ingress read timeout follows MCP_WAIT_SECONDS" \
+  "$(render_notes --set ui.enabled=true --set ingress.enabled=true --set config.MCP_WAIT_SECONDS=60)" "(130 s)"
+expect_absent "no ingress note without an ingress" "$(render_notes --set mcp.enabled=true)" "read timeout"
+expect_contains "notes give the Claude Code command with the key header" \
+  "$(render_notes --set mcp.enabled=true)" '--header "Authorization: Bearer <key>"'
+open_ui_warning="WARNING: ui.enabled is true while config.AUTH_MODE is none"
+expect_contains "notes warn about an open UI" \
+  "$(render_notes --set ui.enabled=true --set config.AUTH_MODE=none)" "$open_ui_warning"
+expect_absent "no open-UI warning under api_key" \
+  "$(render_notes --set ui.enabled=true)" "$open_ui_warning"
+expect_absent "no open-UI warning while the UI is off" \
+  "$(render_notes --set config.AUTH_MODE=none)" "$open_ui_warning"
+
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2
   exit 1

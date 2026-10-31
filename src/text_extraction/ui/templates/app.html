@@ -1,0 +1,30 @@
+<section id="app-shell" class="shell">
+  {% if auth_none %}<p class="banner" role="note">{{ banner }}</p>{% endif %}
+  <div class="who">
+    <span>Signed in as <strong>{{ principal_name }}</strong> (role <span class="role">{{ role }}</span>)</span>
+    <button type="button" class="secondary" data-action="logout">Log out</button>
+  </div>
+  {% if auth_none %}
+  <details class="keys">
+    <summary>Optional keys</summary>
+    <label for="keys-llm">LLM key (<code>X-LLM-Api-Key</code>)</label>
+    <input id="keys-llm" type="password" autocomplete="off" spellcheck="false">
+    <label for="keys-asr">ASR key (<code>X-ASR-Api-Key</code>)</label>
+    <input id="keys-asr" type="password" autocomplete="off" spellcheck="false">
+    <button type="button" class="secondary" data-action="save-keys">Use these keys</button>
+  </details>
+  {% endif %}
+  {% if tabs %}
+  <nav class="tabs" role="tablist">
+    {% for tab in tabs %}
+    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ tab.label }}</button>
+    {% endfor %}
+  </nav>
+  {% for tab in tabs %}
+  <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}"{% if not loop.first %} hidden{% endif %}>
+    {% include tab.template %}
+  </section>
+  {% endfor %}
+  {% endif %}
+  <section id="result" class="result" aria-live="polite"></section>
+</section>

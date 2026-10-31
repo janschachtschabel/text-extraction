@@ -150,6 +150,9 @@ class Api:
     def job(self, job_id: str, headers: dict[str, str] = ALICE, **query: Any) -> Any:
         return self.client.get(f"/v1/jobs/{job_id}", params=query, headers=headers)
 
+    def delete(self, job_id: str, headers: dict[str, str] = ALICE) -> Any:
+        return self.client.delete(f"/v1/jobs/{job_id}", headers=headers)
+
 
 @pytest.fixture
 def make_api() -> Iterator[Callable[..., Api]]:
@@ -1174,3 +1177,179 @@ def test_batch_stores_describe_images_in_the_job_options(make_api: Callable[...,
     assert stored.describe_images == DescribeImagesOptions(max_images=4)
     unset = api.run(lambda valkey: options(valkey, plain.json()["data"]["id"]))
     assert unset.describe_images is None
+
+
+# --- DELETE /v1/jobs/{id} (P10-S10) ----------------------------------------------------------
+
+
+def open_jobs(api: Api, owner: str) -> set[Any]:
+    async def members(valkey: FakeAsyncRedis) -> set[Any]:
+        return set(await valkey.smembers(f"jobs:{{owner:{owner}}}:open"))
+
+    return api.run(members)
+
+
+def test_delete_own_job_then_404(api: Api) -> None:
+    job_id = api.batch([PAGE, OTHER_PAGE], headers={**ALICE, "x-client-trace-id": "t-d"}).json()[
+        "data"
+    ]["id"]
+    assert api.work({PAGE: fetched(body=ARTICLE)}, items=1) == 1  # one result is stored
+    assert api.keys(f"job:{{{job_id}}}:*")
+
+    with capture_logs() as logs:
+        response = api.delete(job_id, headers={**ALICE, "x-client-trace-id": "t-d"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["error"] is None
+    assert body["trace_id"] == "t-d"
+    assert body["data"] == {"id": job_id, "kind": "batch"}
+    # Every key of the job is gone, and with it the owner's open slot.
+    assert api.keys(f"job:{{{job_id}}}*") == []
+    assert open_jobs(api, "alice") == set()
+    deleted = [log for log in logs if log["event"] == "job_deleted"]
+    assert [(log["job_id"], log["kind"]) for log in deleted] == [(job_id, "batch")]
+
+    for answer in (api.job(job_id), api.delete(job_id)):
+        assert answer.status_code == 404
+        assert answer.json()["error"]["code"] == "not_found"
+        assert answer.json()["error"]["message"] == NOT_FOUND_MESSAGE
+
+
+@pytest.mark.parametrize("job_id", ["f" * 32, "not-an-id", "A" * 32])
+def test_delete_unknown_or_malformed_id_is_404(api: Api, job_id: str) -> None:
+    response = api.delete(job_id)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+
+
+def test_delete_needs_a_key(api: Api) -> None:
+    job_id = api.batch([PAGE]).json()["data"]["id"]
+
+    assert api.client.delete(f"/v1/jobs/{job_id}").status_code == 401
+    assert api.job(job_id).status_code == 200
+
+
+def test_delete_foreign_job_404_admin_ok(api: Api) -> None:
+    job_id = api.batch([PAGE]).json()["data"]["id"]
+
+    foreign = api.delete(job_id, headers=BOB)
+    assert foreign.status_code == 404
+    # The same answer as for a job that does not exist: ids leak nothing.
+    assert foreign.json()["error"] == api.delete("f" * 32, headers=BOB).json()["error"]
+    assert api.job(job_id).status_code == 200  # still there
+
+    by_admin = api.delete(job_id, headers=ROOT)
+    assert by_admin.status_code == 200
+    assert by_admin.json()["data"] == {"id": job_id, "kind": "batch"}
+    assert api.job(job_id).status_code == 404
+    assert api.keys(f"job:{{{job_id}}}*") == []
+
+
+def test_delete_frees_open_slot(make_api: Callable[..., Api]) -> None:
+    api = make_api(batch_max_open_per_client=1)
+    first = api.batch([PAGE]).json()["data"]["id"]
+    assert api.batch([PAGE]).status_code == 429
+
+    assert api.delete(first).status_code == 200
+    second = api.batch([PAGE])
+    assert second.status_code == 202
+    assert api.batch([PAGE]).status_code == 429
+
+    # An admin's delete frees the owner's slot, not the admin's.
+    assert api.delete(second.json()["data"]["id"], headers=ROOT).status_code == 200
+    assert open_jobs(api, "alice") == set()
+    assert api.batch([PAGE]).status_code == 202
+
+
+def test_delete_counts_against_the_rate_limit(make_api: Callable[..., Api]) -> None:
+    api = make_api(rate_limit_per_minute=2)
+    job_id = api.batch([PAGE]).json()["data"]["id"]  # hit 1
+
+    assert api.delete(job_id).status_code == 200  # hit 2
+    refused = api.delete(job_id)
+    assert refused.status_code == 429
+    assert refused.json()["error"]["code"] == "rate_limited"
+
+
+def test_delete_jobs_disabled_503(make_api: Callable[..., Api]) -> None:
+    api = make_api(jobs_enabled=False)
+
+    response = api.delete("a" * 32)
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["message"] == "Jobs are disabled on this deployment."
+    # Authentication still comes first.
+    assert api.client.delete(f"/v1/jobs/{'a' * 32}").status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("target", "method", "job_left"),
+    [("job_store", "get", True), ("job_store", "delete", True), ("valkey", "srem", False)],
+)
+def test_delete_valkey_down_is_503(
+    make_api: Callable[..., Api],
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    method: str,
+    job_left: bool,
+) -> None:
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    api = make_api(batch_max_open_per_client=1)
+    job_id = api.batch([PAGE]).json()["data"]["id"]
+
+    async def down(*_: object) -> None:
+        raise RedisConnectionError("valkey is down")
+
+    # The visibility check, the job's deletion and the open set's update: any of them failing
+    # is a retryable 503, never a 200 that claims the job is gone.
+    monkeypatch.setattr(getattr(api.client.app.state, target), method, down)  # type: ignore[attr-defined]
+    response = api.delete(job_id)
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "internal_error"
+    assert response.json()["error"]["retryable"] is True
+    monkeypatch.undo()
+    assert api.job(job_id).status_code == (200 if job_left else 404)
+    # A job deleted without its open-set update holds no slot: the next count drops its id.
+    assert api.batch([PAGE]).status_code == (429 if job_left else 202)
+
+
+def test_openapi_lists_delete_jobs(api: Api) -> None:
+    spec = api.client.get("/openapi.json").json()
+
+    operation = spec["paths"]["/v1/jobs/{job_id}"]["delete"]
+    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    assert "JobDeleted" in json.dumps(schema) or "JobDeleted" in json.dumps(
+        spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
+    )
+    assert set(spec["components"]["schemas"]["JobDeleted"]["properties"]) == {"id", "kind"}
+
+
+def test_job_json_has_run_field(api: Api) -> None:
+    """D8: each item shows its last claim (`run`), null until a worker claims it."""
+    job_id = api.batch([PAGE, OTHER_PAGE]).json()["data"]["id"]
+
+    queued = api.job(job_id).json()["data"]["items"]
+    assert [item["run"] for item in queued] == [None, None]
+
+    assert api.work({PAGE: fetched(body=ARTICLE)}, items=1) == 1
+    first, second = api.job(job_id).json()["data"]["items"]
+    assert set(first["run"]) == {"pool", "attempts", "claimed_at"}
+    assert (first["run"]["pool"], first["run"]["attempts"]) == ("extract", 1)
+    assert first["run"]["claimed_at"].startswith(time.strftime("%Y-%m-%d", time.gmtime()))
+    assert second["run"] is None
+
+    spec = api.client.get("/openapi.json").json()
+    assert set(spec["components"]["schemas"]["ItemRun"]["properties"]) == {
+        "pool",
+        "attempts",
+        "claimed_at",
+    }
+    assert "run" in spec["components"]["schemas"]["JobItem"]["properties"]

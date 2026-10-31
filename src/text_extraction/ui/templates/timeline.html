@@ -1,0 +1,18 @@
+<section class="timeline-view" aria-label="What happened">
+  <h4>What happened</h4>
+  {% if steps %}
+  <ol class="timeline">
+    {% for step in steps %}
+    <li><span class="step">{{ step.label }}</span> {{ step.detail }}{% if step.ms is not none %} <span class="ms">{{ step.ms }} ms</span>{% endif %}</li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+  {% if warnings %}
+  <h5>Warnings</h5>
+  <ul class="warnings">
+    {% for name, text in warnings %}
+    <li><code>{{ name }}</code>{% if text %}: {{ text }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>

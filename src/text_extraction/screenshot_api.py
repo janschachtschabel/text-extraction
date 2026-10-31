@@ -12,6 +12,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from redis.exceptions import RedisError
+from starlette.datastructures import State
 
 from text_extraction.auth import Principal, require_role
 from text_extraction.browser_models import ScreenshotRequest, ScreenshotResult, screenshot_view
@@ -56,6 +57,17 @@ async def screenshot(
     `evaluate` action of a non-admin key or a compliance mode the key may not choose. With
     `wait_seconds`: 202 with the job (kind `screenshot`), whose item holds the result.
     """
+    return await run_screenshot(request.app.state, principal, body)
+
+
+async def run_screenshot(
+    state: State, principal: Principal, body: ScreenshotRequest
+) -> Envelope[ScreenshotResult] | JSONResponse:
+    """The core of ``POST /v1/screenshot`` (ruling P10-S1): the extraction flow
+    (``extract_api.respond``) for a browser capture, its result without the text.
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     req = ExtractRequest(
         url=body.url,
         mode="browser",
@@ -68,7 +80,7 @@ async def screenshot(
         compliance=body.compliance,
         wait_seconds=body.wait_seconds,
     )
-    answer = await respond(request, req, principal, "screenshot")
+    answer = await respond(state, req, principal, "screenshot")
     if isinstance(answer, JSONResponse):
         return answer
     return Envelope(
@@ -107,7 +119,24 @@ async def artifact(
 ) -> Response:
     """Download a file of a job, such as its screenshot. Only the job's owner (and admins) may;
     another caller's job, an unknown or expired job and a missing file all answer 404."""
-    store: JobStore = request.app.state.job_store
+    data = await read_artifact(request.app.state, principal, job_id, name)
+    suffix = name[name.rfind(".") :] if "." in name else ""
+    media_type = _MEDIA_TYPES.get(suffix, "application/octet-stream")
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+async def read_artifact(state: State, principal: Principal, job_id: str, name: str) -> bytes:
+    """The core of ``GET /v1/jobs/{id}/artifacts/{name}`` (ruling P10-S1): the file's bytes, or
+    404 for an invalid name, a job the caller may not see and a missing file; 503 while Valkey
+    is unavailable. Artifacts belong to jobs, so ``check_jobs_enabled`` applies here too.
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    store: JobStore = state.job_store
     if not valid_artifact_name(name):
         raise _no_file()
     try:
@@ -117,13 +146,7 @@ async def artifact(
         raise backend_unavailable(error) from None
     if data is None:
         raise _no_file()
-    suffix = name[name.rfind(".") :] if "." in name else ""
-    media_type = _MEDIA_TYPES.get(suffix, "application/octet-stream")
-    return Response(
-        content=data,
-        media_type=media_type,
-        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
-    )
+    return data
 
 
 def _no_file() -> ServiceError:

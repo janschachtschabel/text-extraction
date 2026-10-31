@@ -12,8 +12,14 @@ dependencies = [
     "defusedxml>=0.7.1",
     "extruct>=0.18.0",
     "fastapi>=0.162.0",
+    # The MCP endpoint (MCP_ENABLED), imported only when it is on. Newest release at least 14
+    # days old when added (ruling R16).
+    "fastmcp==4.1.0",  # Apache-2.0
     "httpcore>=1.0.9",
     "httpx[http2]>=0.28.1",
+    # The UI's templates (UI_ENABLED), imported only when it is on. Newest release at least 14
+    # days old when added (ruling R16).
+    "jinja2==3.1.6",  # BSD-3-Clause
     "jstyleson>=0.0.2",
     "lxml>=6.1.3",
     "markdown-it-py==4.2.0",
@@ -109,7 +115,7 @@ build-backend = "uv_build"
 # The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
 # `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
 # does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
-exclude-newer-package = { thinc = "14 days", blis = "14 days", confection = "14 days", cymem = "14 days", murmurhash = "14 days", phonenumbers = "14 days", preshed = "14 days", smart-open = "14 days", srsly = "14 days", weasel = "14 days", wrapt = "14 days", pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days" }
+exclude-newer-package = { thinc = "14 days", blis = "14 days", confection = "14 days", cymem = "14 days", murmurhash = "14 days", phonenumbers = "14 days", preshed = "14 days", smart-open = "14 days", srsly = "14 days", weasel = "14 days", wrapt = "14 days", pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days", cachetools = "14 days", caio = "14 days", cyclopts = "14 days", dnspython = "14 days", griffelib = "14 days", joserfc = "14 days", sse-starlette = "14 days" }
 
 # torch and torchvision only from the PyTorch CPU index: its wheels carry no CUDA libraries.
 [tool.uv.sources]

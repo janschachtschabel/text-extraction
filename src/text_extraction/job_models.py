@@ -136,6 +136,20 @@ class JobProgress(BaseModel):
     failed: int
 
 
+class ItemRun(BaseModel):
+    """The last claim of a job item by a worker (D8, ruling P10-S11)."""
+
+    pool: str = Field(
+        description="The worker pool that claimed the item: `extract`, `browser`, `docling`, "
+        "`asr`, `nlp` or `llm`."
+    )
+    attempts: int = Field(
+        description="The claim number in that pool: 1 on the first claim, more after a lost "
+        "lease (a worker that stopped) or a deferral (the target host was busy)."
+    )
+    claimed_at: datetime = Field(description="When the worker claimed the item.")
+
+
 class JobItem(BaseModel):
     """One URL of a job; ``result`` is set once its state is ``done``."""
 
@@ -143,6 +157,11 @@ class JobItem(BaseModel):
     url: str | None  # None for an uploaded file
     state: ItemState
     result: Envelope[ExtractResult] | None
+    run: ItemRun | None = Field(
+        default=None,
+        description="The item's last claim by a worker: its pool, claim number and time. Null "
+        "before the first claim and for an item that ran in the API pod.",
+    )
 
 
 class JobView(BaseModel):
@@ -166,3 +185,10 @@ class JobAccepted(BaseModel):
     state: JobState
     total: int
     status_url: str
+
+
+class JobDeleted(BaseModel):
+    """Answer to the deletion of a job (``DELETE /v1/jobs/{id}``): the job that is gone."""
+
+    id: str
+    kind: JobKind

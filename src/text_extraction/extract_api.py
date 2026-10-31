@@ -97,6 +97,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import CollectorRegistry
 from redis.exceptions import RedisError
+from starlette.datastructures import State
 
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, AsrDispatcher, AsrHandoff, asr_key_of
 from text_extraction.auth import Principal, require_role
@@ -260,7 +261,7 @@ async def extract(
     `learn_selectors` with a strategy but `llm` or `auto`.
     """
     return await respond(
-        request,
+        request.app.state,
         body,
         principal,
         "extract",
@@ -367,7 +368,7 @@ def check_browser_request(body: ExtractRequest, principal: Principal, settings: 
 
 
 async def respond(
-    request: Request,
+    state: State,
     body: ExtractRequest,
     principal: Principal,
     kind: BrowserJobKind,
@@ -378,8 +379,12 @@ async def respond(
     """Run the flow for ``body``, or hand it over to a job after ``wait_seconds`` (the module
     docstring). ``kind`` is the kind of a browser job the request creates; ``asr_key`` the
     caller's ``X-ASR-Api-Key``, stored with an ASR job only; ``llm_key`` the caller's
-    ``X-LLM-Api-Key``, stored with every job of a request that may need the LLM."""
-    state = request.app.state
+    ``X-LLM-Api-Key``, stored with every job of a request that may need the LLM. ``state`` is
+    the public app's state: the core of ``POST /v1/extract`` and the routes that share its flow
+    (ruling P10-S1).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     # Checked now, so that a refused request is a 4xx and never a job.
     compliance = resolve_mode(body.compliance, principal, settings)

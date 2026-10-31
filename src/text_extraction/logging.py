@@ -11,7 +11,8 @@ _HANDLER_MARK = "_text_extraction_handler"
 _UVICORN_LOGGERS = ("uvicorn", "uvicorn.error")
 _UVICORN_ACCESS_LOGGER = "uvicorn.access"
 # Client libraries log full request URLs (query strings can carry secrets) at INFO and below.
-_QUIET_CLIENT_LOGGERS = ("httpx", "httpcore")
+# FastMCP logs tool arguments at DEBUG, and the MCP SDK a line per request at INFO (MCP_ENABLED).
+_QUIET_CLIENT_LOGGERS = ("httpx", "httpcore", "fastmcp", "mcp")
 
 
 def _level_number(level: str) -> int:

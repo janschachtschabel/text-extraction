@@ -1,0 +1,12 @@
+<form class="op" hx-post="/ui/run/file" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+  {% set prefix = "file" %}
+  <label for="file-file">File</label>
+  <input id="file-file" name="file" type="file" required>
+  {% include "forms/format.html" %}
+  <fieldset class="choice">
+    <legend>Also</legend>
+    <label class="inline"><input type="checkbox" name="metadata" value="on" checked> Metadata</label>
+  </fieldset>
+  {% include "forms/common.html" %}
+  <button type="submit">Extract the file</button>
+</form>

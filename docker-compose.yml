@@ -21,6 +21,8 @@
 # LLM_ENABLED=true, LLM_BASE_URL, LLM_MODEL and LLM_API_KEY (and LLM_EMBEDDING_MODEL for `semantic`
 # chunking) in .env and start with `docker compose --profile llm up -d --wait`. The service
 # `llm-worker` runs from the API image (no model, no volume). All four profiles can run together.
+# The MCP endpoint (http://127.0.0.1:8080/mcp) and the playground (http://127.0.0.1:8080/ui) are on
+# for the api service; MCP_ENABLED=false or UI_ENABLED=false in .env or the shell switches them off.
 
 # Shared by the API and the workers: same settings, same hardening. The API and the extract worker
 # use the default image (no browser); the browser worker builds the target `browser`.
@@ -66,8 +68,15 @@ x-app: &app
 services:
   api:
     <<: *app
+    environment:
+      <<: *app-env
+      # The MCP endpoint (/mcp) and the playground (/ui) are on for local development unless .env
+      # or the shell switches them off; they live on the public port, so the workers get neither.
+      # Under AUTH_MODE=none both are open to anyone who can reach port 8080.
+      MCP_ENABLED: ${MCP_ENABLED:-true}
+      UI_ENABLED: ${UI_ENABLED:-true}
     ports:
-      - "8080:8080" # public API; the internal port 9090 is not published
+      - "8080:8080" # public API, /mcp and /ui; the internal port 9090 is not published
     healthcheck:
       test:
         - CMD

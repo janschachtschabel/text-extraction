@@ -1,0 +1,7 @@
+{% include "forms/format.html" %}
+{% include "forms/mode.html" %}
+<fieldset class="choice">
+  <legend>Also</legend>
+  <label class="inline"><input type="checkbox" name="metadata" value="on"{% if not chosen or chosen["metadata"] == "on" %} checked{% endif %}> Metadata</label>
+</fieldset>
+{% include "forms/options.html" %}

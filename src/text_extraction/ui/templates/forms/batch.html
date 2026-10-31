@@ -1,0 +1,8 @@
+<form class="op" hx-post="/ui/run/batch-urls" hx-target="#result" hx-swap="innerHTML">
+  {% set prefix = "batch" %}
+  <label for="batch-urls">URLs, one per line</label>
+  <textarea id="batch-urls" name="urls" rows="8" spellcheck="false" required placeholder="https://"></textarea>
+  <p class="hint">More URLs than one batch takes (BATCH_MAX_URLS) are sent as several batches.</p>
+  {% include "forms/batch_options.html" %}
+  <button type="submit">Start batch</button>
+</form>

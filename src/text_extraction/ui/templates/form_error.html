@@ -1,0 +1,9 @@
+<div class="error" role="alert">
+  <p>{{ message }}</p>
+  {% if problems %}
+  <ul class="problems">
+    {% for row, reason in problems %}<li>Row {{ row }}: {{ reason }}</li>{% endfor %}
+  </ul>
+  {% if more_problems %}<p class="hint">{{ more_problems }} more rows with problems.</p>{% endif %}
+  {% endif %}
+</div>

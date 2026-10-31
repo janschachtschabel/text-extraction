@@ -45,8 +45,7 @@ def _unauthorized() -> ServiceError:
     )
 
 
-def _bearer_token(request: Request) -> str | None:
-    header = request.headers.get("authorization")
+def _bearer_token(header: str | None) -> str | None:
     if header is None or header[: len(_BEARER_PREFIX)].lower() != _BEARER_PREFIX:
         return None
     return header[len(_BEARER_PREFIX) :].strip() or None
@@ -70,20 +69,30 @@ def _record_principal(request: Request, principal: Principal) -> None:
     request.scope.setdefault("state", {})["principal"] = principal.name
 
 
+def principal_for(settings: Settings, authorization: str | None) -> Principal:
+    """The caller of a request whose ``Authorization`` header is ``authorization`` (None
+    without one), or a 401 `ServiceError`. Under ``AUTH_MODE=none`` every caller is the
+    anonymous admin.
+
+    It checks the key only: the caller checks the role a door needs (every key has ``user``;
+    ``admin`` routes need ``principal.role == "admin"``), counts the call with ``check_rate``,
+    and binds the name to the log context and the access line (as ``authenticate`` does)."""
+    if settings.auth_mode == "none":
+        # Behind the B-API gateway, which authorises the caller.
+        return _ANONYMOUS
+    token = _bearer_token(authorization)
+    if token is None:
+        raise _unauthorized()
+    found = _find_principal(settings, token)
+    if found is None:
+        raise _unauthorized()
+    return found
+
+
 async def authenticate(request: Request) -> Principal:
     """FastAPI dependency: the caller's `Principal`, or a 401 `ServiceError`."""
     settings: Settings = request.app.state.settings
-    if settings.auth_mode == "none":
-        # Behind the B-API gateway, which authorises the caller.
-        principal = _ANONYMOUS
-    else:
-        token = _bearer_token(request)
-        if token is None:
-            raise _unauthorized()
-        found = _find_principal(settings, token)
-        if found is None:
-            raise _unauthorized()
-        principal = found
+    principal = principal_for(settings, request.headers.get("authorization"))
     _record_principal(request, principal)
     return principal
 

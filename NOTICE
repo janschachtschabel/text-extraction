@@ -46,6 +46,16 @@ data, as the models' meta.json states it:
 Presidio (presidio-analyzer, Microsoft, MIT License) and spaCy (Explosion, MIT License) are
 installed with the extra `nlp` of the NLP worker only.
 
+The MCP endpoint (`MCP_ENABLED`) is served with FastMCP 4.1.0 (fastmcp and fastmcp-slim,
+PrefectHQ/fastmcp, Apache License 2.0) on the MCP Python SDK 2.3.0 (mcp and mcp-types,
+modelcontextprotocol/python-sdk, MIT License, Copyright (c) 2024 Anthropic, PBC). Both are base
+dependencies of the API image and are imported only while `MCP_ENABLED` is true.
+
+The UI (`UI_ENABLED`) includes htmx 2.0.11 (bigskysoftware/htmx, Zero-Clause BSD licence), as
+src/text_extraction/ui/static/htmx-2.0.11.min.js, unchanged from the npm package htmx.org 2.0.11
+(package/dist/htmx.min.js). Its pages are rendered with Jinja2 (pallets/jinja, BSD-3-Clause
+License), a base dependency of the API image imported only while `UI_ENABLED` is true.
+
 The ASR worker image (Dockerfile target `asr`) contains the shared libraries of FFmpeg n9.0.2
 (ffmpeg.org, tag n9.0.2-17-g2a571b6068), licensed under the GNU Lesser General Public License,
 version 3 or later, as built by BtbN/FFmpeg-Builds (release autobuild-2026-09-30-13-08, variant

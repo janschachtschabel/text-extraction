@@ -64,6 +64,7 @@ from typing import Annotated, Any, Final
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import Response
 from fastapi.routing import APIRoute
+from starlette.datastructures import State
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
@@ -289,22 +290,66 @@ async def extract_file(
     `wait_seconds`, then answers its text layer with the warning `ocr_unavailable`.
     """
     settings: Settings = request.app.state.settings
-    key, caller_llm_key = check_upload_request(
-        form, principal, settings, asr_header=asr_key, llm_header=llm_key
-    )
+    # Checked before a byte of the file is read; `run_upload` repeats these pure checks.
+    check_upload_request(form, principal, settings, asr_header=asr_key, llm_header=llm_key)
     try:
         body = await file.read(upload_file_limit(settings) + 1)
     finally:
         await file.close()  # deletes the spooled part now, not when the answer is sent
-    if key is None and _transcribed(body, file.content_type, settings):
-        check_asr_key(settings, key)  # 400 without any key for the external endpoint (M11)
-    return await answer_upload(
-        request,
+    return await run_upload(
+        request.app.state,
         principal,
         form,
         body,
         sanitize_file_name(file.filename),
         file.content_type,
+        asr_header=asr_key,
+        llm_header=llm_key,
+    )
+
+
+async def run_upload(
+    state: State,
+    principal: Principal,
+    form: FileForm,
+    data: bytes,
+    name: str | None,
+    content_type: str | None,
+    *,
+    asr_header: str | None,
+    llm_header: str | None,
+) -> Envelope[ExtractResult] | Response:
+    """The core of ``POST /v1/extract/file`` (ruling P10-S1): the upload's checks
+    (``check_upload_request``), the size check of ``upload_file_limit``, the ASR key check of a
+    file that is transcribed, then ``answer_upload``. ``name`` is the file name as a result may
+    show it (``sanitize_file_name``); ``asr_header`` and ``llm_header`` are the raw values of the
+    ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Callers bound their read of the file to ``upload_file_limit`` + 1 bytes (the route reads no
+    more; MCP refuses a larger file before decoding it): ``data`` over the limit is cut to that
+    and ends as ``failed``/``too_large``, but a caller that holds a larger buffer has already
+    paid for it.
+
+    Caller's checks (this core runs neither, it repeats ``check_upload_request`` only):
+    ``principal_for`` (the user role, which every key has), then one ``check_rate`` hit."""
+    settings: Settings = state.settings
+    key, caller_llm_key = check_upload_request(
+        form, principal, settings, asr_header=asr_header, llm_header=llm_header
+    )
+    limit = upload_file_limit(settings)
+    if len(data) > limit:
+        # What the route's bounded read keeps: the limit and one byte. The pipeline answers
+        # `too_large` for it before it reads the rest, hashes or converts anything.
+        data = data[: limit + 1]
+    if key is None and _transcribed(data, content_type, settings):
+        check_asr_key(settings, key)  # 400 without any key for the external endpoint (M11)
+    return await answer_upload(
+        state,
+        principal,
+        form,
+        data,
+        name,
+        content_type,
         asr_key=key,
         llm_key=caller_llm_key,
     )
@@ -339,7 +384,7 @@ def check_upload_request(
 
 
 async def answer_upload(
-    request: Request,
+    state: State,
     principal: Principal,
     form: FileForm,
     body: bytes,
@@ -354,8 +399,8 @@ async def answer_upload(
     declared type) and answer, or hand it over to a job after ``form.wait_seconds`` (the module
     docstring). The request has passed ``check_upload_request``; ``asr_key`` and ``llm_key`` are
     its keys. ``short_ok`` is for a ``text`` of ``POST /v1/chunk`` (``structured_api.py``), which
-    shares this flow: no word-count gate (``Pipeline.extract_upload``)."""
-    state = request.app.state
+    shares this flow: no word-count gate (``Pipeline.extract_upload``). ``state`` is the public
+    app's state. The caller has run ``principal_for`` and ``check_rate`` (``run_upload``)."""
     settings: Settings = state.settings
     # Only a request that may need the LLM keeps the caller's key with its jobs.
     llm = wants_llm(form.structured, form.chunking, settings, describe=form.describe_images)

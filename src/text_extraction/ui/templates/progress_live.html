@@ -1,0 +1,48 @@
+<div class="progress-live"{% if refresh_url %} hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ delay }}s" hx-swap="outerHTML"{% endif %}>
+  {% if refusal %}<p class="error" role="alert">{{ refusal }}</p>{% endif %}
+  {% for job in jobs %}
+  <section class="job" data-job="{{ job.id }}">
+    <h4>Job <code class="job-id">{{ job.id }}</code>{% if job.kind %} <span class="kind">{{ job.kind }}</span>{% endif %}{% if job.state %} <span class="state state-{{ job.state }}">{{ job.state }}</span>{% endif %}</h4>
+    {% if job.error %}
+    <p class="error job-error">{{ job.error }}</p>
+    {% else %}
+    <p class="bar">
+      <progress value="{{ job.done }}" max="{{ job.total }}">{{ job.done }}/{{ job.total }}</progress>
+      <span class="done">{{ job.done }}/{{ job.total }}</span>
+      <span class="counts">success <span class="success">{{ job.success }}</span>, partial <span class="partial">{{ job.partial }}</span>, failed <span class="failed">{{ job.failed }}</span></span>
+    </p>
+    {% if job.kind == "site" %}<p class="hint">The total grows while it crawls.</p>{% endif %}
+    <p class="elapsed">Elapsed: {{ job.elapsed }}</p>
+    {% if job.items %}
+    <table class="items">
+      <thead><tr><th scope="col">#</th><th scope="col">URL</th><th scope="col">State</th><th scope="col">Error</th><th scope="col"></th></tr></thead>
+      <tbody>
+        {% for item in job.items %}
+        <tr>
+          <td class="index">{{ item.index }}</td>
+          <td class="url">{{ item.url or "(the upload)" }}</td>
+          <td class="item-state">{% if item.status %}<span class="badge badge-{{ item.status }}">{{ item.status }}</span>{% else %}{{ item.state }}{% endif %}</td>
+          <td class="error-code">{{ item.error_code or "" }}</td>
+          <td class="open">{% if item.link %}<button type="button" class="link" hx-get="{{ item.link }}" hx-target="next .job-detail" hx-swap="innerHTML">Show</button>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if job.prev_url or job.next_url %}
+    <p class="pager">
+      {% if job.prev_url %}<button type="button" class="secondary prev" hx-get="{{ job.prev_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">Previous {{ page_items }}</button>{% endif %}
+      {% if job.next_url %}<button type="button" class="secondary next" hx-get="{{ job.next_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">Next {{ page_items }}</button>{% endif %}
+    </p>
+    {% endif %}
+    <p class="actions">
+      {% if job.tree_url %}<button type="button" class="secondary tree-button" hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ job.tree_label }}</button>{% endif %}
+    </p>
+    <form class="cancel" hx-post="/ui/run/cancel" hx-target="next .job-detail" hx-swap="innerHTML" hx-confirm="Cancel this job and delete it with its results?">
+      <input type="hidden" name="id" value="{{ job.id }}">
+      <button type="submit" class="secondary">Cancel</button>
+    </form>
+    {% endif %}
+  </section>
+  {% endfor %}
+</div>

@@ -1,5 +1,6 @@
-"""``POST /v1/batch`` and ``GET /v1/jobs/{id}``: the public routes in front of the job store and
-the fair queue, and ``open_job``, which ``POST /v1/site-structure`` (``site_api.py``) shares.
+"""``POST /v1/batch``, ``GET /v1/jobs/{id}`` and ``DELETE /v1/jobs/{id}``: the public routes in
+front of the job store and the fair queue, and ``open_job``, which ``POST /v1/site-structure``
+(``site_api.py``) shares.
 
 Besides the job keys and the queue keys, each owner has one key of its own,
 ``jobs:{owner:<name>}:open``: a set of the ids of the owner's batches and site jobs that were
@@ -22,6 +23,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
+from starlette.datastructures import State
 
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
 from text_extraction.auth import Principal, authenticate, require_role
@@ -40,6 +42,7 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
+    JobDeleted,
     JobItem,
     JobKind,
     JobOptions,
@@ -89,7 +92,11 @@ async def require_jobs_enabled(
     request: Request, _principal: Annotated[Principal, Depends(authenticate)]
 ) -> None:
     """Dependency: 503 while ``JOBS_ENABLED`` is false (after authentication)."""
-    settings: Settings = request.app.state.settings
+    check_jobs_enabled(request.app.state.settings)
+
+
+def check_jobs_enabled(settings: Settings) -> None:
+    """503 while ``JOBS_ENABLED`` is false."""
     if not settings.jobs_enabled:
         raise ServiceError(ErrorCode.INTERNAL_ERROR, "Jobs are disabled on this deployment.", 503)
 
@@ -169,18 +176,24 @@ async def _add_open(valkey: Redis, owner: str, job_id: str, ttl_seconds: int) ->
     return size
 
 
+async def _remove(valkey: Redis, store: JobStore, owner: str, job_id: str) -> None:
+    """Delete the job with all its keys, then remove it from ``owner``'s open set. Valkey
+    errors propagate."""
+    await store.delete(job_id)
+    await valkey.srem(_open_key(owner), job_id)
+
+
 async def _discard(valkey: Redis, store: JobStore, owner: str, job_id: str) -> None:
     """Delete a job that was created but will not run. Failing to do so only leaves the job to
     expire, so the error is logged and not raised over the one that caused the discard."""
     try:
-        await store.delete(job_id)
-        await valkey.srem(_open_key(owner), job_id)
+        await _remove(valkey, store, owner, job_id)
     except (RedisError, OSError) as error:
         _log_unavailable(error)
 
 
 async def open_job(
-    request: Request,
+    state: State,
     principal: Principal,
     kind: JobKind,
     options: JobOptions,
@@ -194,11 +207,13 @@ async def open_job(
     created with one item per URL, then added to the owner's open set; the count after the add
     keeps the limit under concurrent requests, and a job beyond it is given back. A job whose
     add fails is given back as well. The caller stores what else the job needs and enqueues it,
-    and gives the job back with ``discard_job`` when that fails. Valkey errors propagate."""
-    settings: Settings = request.app.state.settings
-    valkey: Redis = request.app.state.valkey
-    store: JobStore = request.app.state.job_store
-    guard: MemoryPressure = request.app.state.memory_guard
+    and gives the job back with ``discard_job`` when that fails. Valkey errors propagate.
+    ``state`` is the public app's state. The caller has run ``principal_for``,
+    ``check_jobs_enabled`` and ``check_rate`` (``start_batch``, ``start_site``)."""
+    settings: Settings = state.settings
+    valkey: Redis = state.valkey
+    store: JobStore = state.job_store
+    guard: MemoryPressure = state.memory_guard
     if guard.high:
         raise _memory_high()
     limit = settings.batch_max_open_per_client
@@ -211,18 +226,18 @@ async def open_job(
         if await _add_open(valkey, principal.name, job_id, settings.job_ttl_seconds) > limit:
             raise _too_many_open(limit)
     except BaseException:
-        await discard_job(request, principal, job_id)
+        await discard_job(state, principal, job_id)
         raise
     return job_id
 
 
-async def discard_job(request: Request, principal: Principal, job_id: str) -> None:
+async def discard_job(state: State, principal: Principal, job_id: str) -> None:
     """Give back a job from ``open_job`` that will not run: delete it with all its keys and
     remove it from the owner's open set. Also on cancellation, and shielded from a second one:
     the job must not be left queued (it would hold a slot of the client's quota until it
     expires). A Valkey error is logged, not raised."""
-    valkey: Redis = request.app.state.valkey
-    store: JobStore = request.app.state.job_store
+    valkey: Redis = state.valkey
+    store: JobStore = state.job_store
     await asyncio.shield(_discard(valkey, store, principal.name, job_id))
 
 
@@ -272,15 +287,31 @@ async def create_batch(
     `POST /v1/extract` (400 without LLM, embedding model or key; 422 for the refused
     combinations); the key serves all items of the batch, as long as the job.
     """
-    settings: Settings = request.app.state.settings
-    store: JobStore = request.app.state.job_store
-    queue: FairQueue = request.app.state.job_queue
+    return await start_batch(request.app.state, principal, body, asr_key=asr_key, llm_key=llm_key)
+
+
+async def start_batch(
+    state: State,
+    principal: Principal,
+    body: BatchRequest,
+    *,
+    asr_key: str | None,
+    llm_key: str | None,
+) -> Envelope[JobAccepted]:
+    """The core of ``POST /v1/batch`` (ruling P10-S1). ``asr_key`` and ``llm_key`` are the raw
+    values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    settings: Settings = state.settings
+    store: JobStore = state.job_store
+    queue: FairQueue = state.job_queue
 
     _check_size(body, settings.batch_max_urls)
     if body.mode == "browser":  # B9: the browser workers take the items, if there are any
         if not settings.browser_enabled:
             raise ServiceError(ErrorCode.INVALID_REQUEST, BROWSER_DISABLED_MESSAGE, 400)
-        queue = request.app.state.browser_queue
+        queue = state.browser_queue
     check_ocr_request(body.ocr, settings)  # 400 for `ocr: always` while there is no OCR
     key = asr_key_of(asr_key)
     # 400 while there is no ASR (M9), or no key for an external endpoint (M11).
@@ -315,7 +346,7 @@ async def create_batch(
         describe_images=body.describe_images,
     )
     try:
-        job_id = await open_job(request, principal, "batch", options, body.urls)
+        job_id = await open_job(state, principal, "batch", options, body.urls)
         try:
             if key is not None and body.transcribe:
                 # The caller's key of the external endpoint, for any item that moves to the ASR
@@ -328,13 +359,13 @@ async def create_batch(
             # Enqueued exactly once and never retried: a retry could queue some items twice.
             await queue.enqueue(job_id, principal.name, body.urls)
         except BaseException:
-            await discard_job(request, principal, job_id)
+            await discard_job(state, principal, job_id)
             raise
     except (RedisError, OSError) as error:
         _log_unavailable(error)
         raise _unavailable() from None
     # Counted only here: a job that was discarded above never reaches a worker.
-    request.app.state.job_metrics.created.labels(kind="batch").inc()
+    state.job_metrics.created.labels(kind="batch").inc()
     _log.info("batch_accepted", job_id=job_id, total=len(body.urls))
     data = JobAccepted(
         id=job_id,
@@ -453,10 +484,26 @@ async def get_job(
     every item failed; `error` then has the most frequent error code among the first items and
     the message "All N items failed.". `next_offset` is set while more items follow. A `site`
     job (`POST /v1/site-structure`) grows while it runs: each page, robots.txt and sitemap it
-    finds becomes an item, so its `total` rises until it is completed. A job that does not
-    exist, has expired or belongs to another caller (admins see all) answers 404.
+    finds becomes an item, so its `total` rises until it is completed. Each item's `run` is its
+    last claim by a worker: the pool (`extract`, `browser`, `docling`, `asr`, `nlp`, `llm`), the
+    claim number (more than 1 after a lost lease or a deferral) and the time; it is null before
+    the first claim and for an item that ran in the API pod, and a result's `attempts` counts
+    the fetches within one run. A job that does not exist, has expired or belongs to another
+    caller (admins see all) answers 404.
     """
-    store: JobStore = request.app.state.job_store
+    return await read_job(request.app.state, principal, job_id, offset, limit)
+
+
+async def read_job(
+    state: State, principal: Principal, job_id: str, offset: int, limit: int
+) -> Envelope[JobView]:
+    """The core of ``GET /v1/jobs/{id}`` (ruling P10-S1): the job's status and progress with
+    the page of ``limit`` items from ``offset`` (1 to ``MAX_PAGE_SIZE``; the route's query
+    checks them, other callers bound them themselves).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    store: JobStore = state.job_store
     try:
         record = await visible_job(store, job_id, principal)
         total = record.progress.total
@@ -493,5 +540,51 @@ async def get_job(
         status=status,
         data=view,
         error=failure,
+        trace_id=current_trace_id(),
+    )
+
+
+@router.delete(
+    "/v1/jobs/{job_id}", dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)]
+)
+async def remove_job(
+    job_id: str,
+    request: Request,
+    principal: Annotated[Principal, Depends(require_role("user"))],
+) -> Envelope[JobDeleted]:
+    """Cancel a job and delete it with everything stored for it: its results, its files and the
+    keys it keeps for the caller.
+
+    Any kind of job can be deleted, running or completed. A batch or site job no longer counts
+    toward `BATCH_MAX_OPEN_PER_CLIENT`, also when an admin deletes another caller's job. Items
+    still queued are dropped when a worker reaches them, and an item that is running finishes
+    without its result being stored. Afterwards `GET /v1/jobs/{id}` and a second delete answer
+    404. A job that does not exist, has expired or belongs to another caller (admins may delete
+    all) answers 404. 503 when jobs are disabled or Valkey is unavailable (retryable).
+    """
+    return await delete_job(request.app.state, principal, job_id)
+
+
+async def delete_job(state: State, principal: Principal, job_id: str) -> Envelope[JobDeleted]:
+    """The core of ``DELETE /v1/jobs/{id}`` (ruling P10-S10): delete the job with all its keys
+    (``JobStore.delete``) and remove it from its owner's open set, the record's owner, so an
+    admin's delete frees the owner's slot. 404 as ``visible_job``; a Valkey error is a 503
+    (retryable), and the job may then still be there. Workers drop the job's queued items
+    (``job_item_dropped``, ``job_gone``); an item in flight, or the pod's task of a handed-over
+    request (P1), stores nothing once it ends (``JobLost``).
+
+    Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
+    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    valkey: Redis = state.valkey
+    store: JobStore = state.job_store
+    try:
+        record = await visible_job(store, job_id, principal)
+        await _remove(valkey, store, record.owner, job_id)
+    except (RedisError, OSError) as error:
+        raise backend_unavailable(error) from None
+    _log.info("job_deleted", job_id=job_id, kind=record.kind)
+    return Envelope(
+        status="success",
+        data=JobDeleted(id=job_id, kind=record.kind),
         trace_id=current_trace_id(),
     )

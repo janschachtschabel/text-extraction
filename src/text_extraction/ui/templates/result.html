@@ -1,0 +1,162 @@
+<article class="result-view">
+  <header class="answer">
+    <span class="http-status">HTTP {{ http_status }}</span>
+    {% if status %}<span class="badge badge-{{ status }}">{{ status }}</span>{% endif %}
+  </header>
+  {% if error %}
+  <div class="error" role="alert">
+    <p><span class="error-code">{{ error["code"] }}</span> {{ error["message"] }}{% if error["retryable"] %} <span class="retryable">(retryable)</span>{% endif %}</p>
+    {% if retry_after %}<p class="retry-after">Retry after {{ retry_after }} s.</p>{% endif %}
+    {% if details %}
+    <ul class="details">
+      {% for line in details %}<li>{{ line }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% if job %}
+  <p class="job">Continues as job {{ job["id"] }} ({{ job["kind"] }}): {{ job["status_url"] }}</p>
+  <button type="button" class="secondary progress-button" hx-get="{{ progress_url }}" hx-target="closest .result-view" hx-swap="outerHTML">Show progress</button>
+  {% endif %}
+  {% if info %}
+  <dl class="info">
+    <dt>Service</dt><dd>{{ info["name"] }}</dd>
+    <dt>Version</dt><dd>{{ info["version"] }}</dd>
+    <dt>Principal</dt><dd>{{ info["principal"] }}</dd>
+    <dt>Role</dt><dd>{{ info["role"] }}</dd>
+  </dl>
+  {% endif %}
+  {% if screenshot %}
+  <img class="screenshot" src="{{ screenshot }}" alt="Screenshot of the page">
+  {% elif screenshot_note %}
+  <p class="screenshot-note">{{ screenshot_note }}</p>
+  {% endif %}
+  {% if data %}
+  {% if data["title"] %}<h3 class="title">{{ data["title"] }}</h3>{% endif %}
+  <dl class="facts">
+    {% if data["url"] %}<dt>URL</dt><dd>{{ data["url"] }}</dd>{% endif %}
+    {% if data["word_count"] is defined %}
+    <dt>Language</dt><dd>{{ data["language"] or "unknown" }}</dd>
+    <dt>Words</dt><dd>{{ data["word_count"] }}</dd>
+    {% endif %}
+    <dt>Mode used</dt><dd>{{ data["mode_used"] }}</dd>
+  </dl>
+  {% if data["content"] is string %}
+  <section class="content-view" aria-label="Content">
+    <h4>Content</h4>
+    {% if download %}<a class="download" href="{{ download.href }}" download="{{ download.name }}">Download {{ download.suffix }}</a>
+    {% if download.note %}<p class="cut-note">{{ download.note }}</p>{% endif %}{% endif %}
+    {% if markdown %}
+    <details class="rendered">
+      <summary>Show rendered</summary>
+      <div class="markdown">{{ markdown }}</div>
+    </details>
+    {% endif %}
+    {% if content_note %}<p class="cut-note">{{ content_note }}</p>{% endif %}
+    <pre class="content">{{ shown_content }}</pre>
+  </section>
+  {% endif %}
+  {% if metadata %}
+  <section aria-label="Metadata">
+    <h4>Metadata</h4>
+    <dl class="meta">
+      {% for row in metadata %}
+      <dt>{{ row.label }}</dt><dd>{% if row.link %}<a href="{{ row.text }}" rel="noopener noreferrer">{{ row.text }}</a>{% else %}{{ row.text }}{% endif %}</dd>
+      {% endfor %}
+    </dl>
+  </section>
+  {% endif %}
+  {% if structured %}
+  <section aria-label="Structured values">
+    <h4>Structured</h4>
+    {% if structured["values"] %}
+    <table class="values">
+      <thead><tr><th scope="col">Field</th><th scope="col">Value</th><th scope="col">Source</th></tr></thead>
+      <tbody>
+        {% for row in structured["values"] %}
+        <tr><th scope="row">{{ row["name"] }}</th><td class="value">{{ row["value"] }}</td><td class="source">{{ row["source"] }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if structured["missing"] %}
+    <p>Missing:</p>
+    <ul class="missing">
+      {% for name in structured["missing"] %}<li>{{ name }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    {% if structured["tables"] %}<p class="hint">{{ structured["tables"] }} tables: see the raw JSON.</p>{% endif %}
+  </section>
+  {% endif %}
+  {% if chunks %}
+  <section aria-label="Chunks">
+    <h4>Chunks ({{ chunks|length }})</h4>
+    <ol class="chunks">
+      {% for chunk in chunks %}
+      <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>
+      {% endfor %}
+    </ol>
+    {% if chunks_note %}<p class="cut-note">{{ chunks_note }}</p>{% endif %}
+  </section>
+  {% endif %}
+  {% if images or image_report %}
+  <section aria-label="Images">
+    <h4>Images</h4>
+    {% if image_report %}
+    <p class="image-report">Descriptions: asked {{ image_report["asked"] }}, described {{ image_report["described"] }}, skipped {{ image_report["skipped"] }}, failed {{ image_report["failed"] }}</p>
+    {% endif %}
+    {% if images %}
+    <table class="images">
+      <thead><tr><th scope="col">Image</th><th scope="col">Alt text</th><th scope="col">Description</th></tr></thead>
+      <tbody>
+        {% for image in images %}
+        <tr>
+          <td class="url">{% if image["http"] %}<a href="{{ image['url'] }}" rel="noopener noreferrer">{{ image["url"] }}</a>{% else %}{{ image["url"] or "(the upload)" }}{% endif %}</td>
+          <td class="alt">{{ image["alt"] }}</td>
+          <td class="description">{{ image["description"] or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% set shown = images|selectattr("http")|list %}
+    {% if shown %}
+    <form class="previews" hx-post="/ui/run/images" hx-target="next .previews-out" hx-swap="innerHTML">
+      {% for image in shown[:20] %}
+      <input type="hidden" name="url" value="{{ image['url'] }}">
+      <input type="hidden" name="alt" value="{{ image['alt'][:200] }}">
+      {% endfor %}
+      {% if compliance_mode %}<input type="hidden" name="compliance" value="{{ compliance_mode }}">{% endif %}
+      <button type="submit" class="secondary">Load previews</button>
+      <span class="hint">The service fetches the images with its own checks; the image hosts do not see you.</span>
+    </form>
+    <div class="previews-out" aria-live="polite"></div>
+    {% endif %}
+    {% endif %}
+  </section>
+  {% endif %}
+  {% include "timeline.html" %}
+  {% if links %}
+  <section aria-label="Links">
+    <h4>Links ({{ links|length }})</h4>
+    <ul class="links">
+      {% for link in links %}
+      <li>{% if link["http"] %}<a href="{{ link['url'] }}" rel="noopener noreferrer">{{ link["text"] or link["url"] }}</a>{% else %}<span class="url">{{ link["url"] }}</span> {{ link["text"] }}{% endif %} <span class="kind">{{ link["kind"] }}</span></li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+  {% endif %}
+  {% if curl %}
+  <details class="curl-box">
+    <summary>As curl</summary>
+    <pre class="curl">{{ curl }}</pre>
+  </details>
+  {% endif %}
+  {% if raw_json %}
+  <details class="raw">
+    <summary>Raw JSON</summary>
+    {% if raw_note %}<p class="cut-note">{{ raw_note }}</p>{% endif %}
+    <pre>{{ raw_json }}</pre>
+  </details>
+  {% endif %}
+</article>

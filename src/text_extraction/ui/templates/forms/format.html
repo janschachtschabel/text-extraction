@@ -1,0 +1,6 @@
+{% set chosen_format = chosen["format"] if chosen and chosen["format"] in ("markdown", "text") else "markdown" %}
+<fieldset class="choice">
+  <legend>Format</legend>
+  <label class="inline"><input type="radio" name="format" value="markdown"{% if chosen_format == "markdown" %} checked{% endif %}> Markdown</label>
+  <label class="inline"><input type="radio" name="format" value="text"{% if chosen_format == "text" %} checked{% endif %}> Text</label>
+</fieldset>

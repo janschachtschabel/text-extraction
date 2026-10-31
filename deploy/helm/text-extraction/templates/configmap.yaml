@@ -6,6 +6,7 @@ metadata:
   labels:
     {{- include "text-extraction.labels" . | nindent 4 }}
 data:
-  {{- range $key, $value := .Values.config }}
+  {{- /* MCP_ENABLED and UI_ENABLED come from mcp.enabled and ui.enabled, on the API pods only. */}}
+  {{- range $key, $value := omit .Values.config "MCP_ENABLED" "UI_ENABLED" }}
   {{ $key }}: {{ $value | toString | quote }}
   {{- end }}
