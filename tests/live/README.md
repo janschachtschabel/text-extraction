@@ -185,9 +185,11 @@ and worker logs as the `live-results` artifact.
 - **Manually** (Actions, "live", Run workflow): choose `url_set`, `mode` (`auto`, the default,
   `fast` or `browser`) and `min_ok_rate` (default 80), run the set in that mode, then the reports
   below. With `url_set=smoke` the run is a report only; `min_ok_rate` applies only in `auto`
-  mode, so a `fast` or `browser` run is reported and never fails on its rate. `service_ref` (a branch, tag or full commit SHA) measures the
-  service of that commit with this run's harness and URL lists: start one run with it and one
-  without, at the same time, for an A/B comparison under the same site conditions.
+  mode, so a `fast` or `browser` run is reported and never fails on its rate. A `browser` run
+  sends 4 requests at once (the workflow's `BROWSER_CONCURRENCY`), the others 8. `service_ref` (a
+  branch, tag or full commit SHA) measures the service of that commit with this run's harness and
+  URL lists: start one run with it and one without, at the same time, for an A/B comparison under
+  the same site conditions.
 - **Pull requests** that carry the label `live`: `wlo_200` with `--mode auto --min-ok-rate 80` is
   the gate. Reported alongside, with no gate: `smoke` with `--mode auto`, and `wlo_200` with
   `--mode browser`. A new push or the `live` label starts a new run and cancels the one in

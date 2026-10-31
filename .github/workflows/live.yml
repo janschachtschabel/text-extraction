@@ -151,16 +151,23 @@ jobs:
       # fast or browser mode: those runs compare with the baselines and are reported, never
       # gated). Pull requests and the weekly run are always in auto mode, the mode of
       # production. The client waits 120 s: an escalating request can take the fast phase (25 s),
-      # the queue wait (30 s) and the render (30 s + 5 s).
+      # the queue wait (30 s) and the render (30 s + 5 s). A browser run sends as many requests
+      # at once as the worker renders pages (BROWSER_CONCURRENCY), as the report-only browser
+      # step does, so the queue wait does not depress the rate it is compared on.
       - name: Run ${{ env.URL_SET }} in ${{ env.MODE }} mode
         run: |
           gate=(--min-ok-rate "$MIN_OK_RATE")
           if [ "$URL_SET" = smoke ] || [ "$MODE" != auto ]; then
             gate=()
           fi
+          concurrency=()
+          if [ "$MODE" = browser ]; then
+            concurrency=(--concurrency 4)
+          fi
           uv run python -m tests.live.run_live \
             --urls "tests/live/urls/${URL_SET}.csv" \
             --mode "$MODE" \
+            "${concurrency[@]}" \
             --timeout 120 \
             --out "results/live_${URL_SET}_${MODE}.jsonl" \
             --summary-out "results/summary_${URL_SET}_${MODE}.md" \
