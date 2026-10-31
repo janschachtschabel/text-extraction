@@ -216,12 +216,17 @@ know nothing of the others: three runs at once would send three times the normal
 WLO host, for hours. Start the next run when the previous one finished, for example:
 
 ```bash
+last=0
 for mode in auto fast browser; do
   gh workflow run live.yml --ref <branch> -f url_set=wlo_4000 -f mode="$mode"
-  sleep 15  # until the run is listed
-  run_id="$(gh run list --workflow live.yml --branch <branch> --event workflow_dispatch \
-    --limit 1 --json databaseId --jq '.[0].databaseId')"
+  run_id="$last"
+  until [ "$run_id" -gt "$last" ]; do  # wait until the new run is listed, never an older one
+    sleep 10
+    run_id="$(gh run list --workflow live.yml --branch <branch> --event workflow_dispatch \
+      --limit 1 --json databaseId --jq '.[0].databaseId // 0')"
+  done
   gh run watch "$run_id" --exit-status || true  # go on with the next mode after a failure too
+  last="$run_id"
 done
 ```
 
