@@ -2636,10 +2636,11 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
 - **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
   progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
   `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its
-  licence and pinned by SHA-256; never in an image) is injected with `page.evaluate`, so the CSP
-  stays on, and runs with the tags `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa` and `wcag22aa` over
-  the login (also with an error), every tab, an extract result, a form error, a running and a
-  completed progress view and the site tree, in both languages; the gate is zero violations,
+  licence and the notices of the MIT code bundled into it, and pinned by SHA-256; never in an
+  image) is injected with `page.evaluate`, so the CSP stays on, and runs with the tags `wcag2a`,
+  `wcag2aa`, `wcag21a`, `wcag21aa` and `wcag22aa` over the login (also with an error), every tab,
+  an extract result, a form error, a running and a completed progress view, the site tree and
+  the Extract tab with "Site rules" enabled (browser and unblock mode on), in both languages; the gate is zero violations,
   with no rule or element excluded. Keyboard, focus, status and error tests run beside it.
 
 **Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,

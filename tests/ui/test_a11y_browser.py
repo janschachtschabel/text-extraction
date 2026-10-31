@@ -80,6 +80,25 @@ def ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
         yield url, origin
 
 
+@pytest.fixture
+def ui_unblock() -> Iterator[str]:
+    """The /ui URL of a service with one admin key and ``BROWSER_ENABLED`` and
+    ``BROWSER_UNBLOCK_ENABLED`` on, so the forms offer "Site rules" enabled (ruling R-P12-6).
+    Nothing is rendered: the app needs no browser worker to show its forms."""
+    settings = Settings(
+        auth_mode="api_key",
+        ui_enabled=True,
+        rate_limit_per_minute=10_000,
+        browser_enabled=True,
+        browser_unblock_enabled=True,
+        api_keys=[
+            ApiKey(name="root", role="admin", sha256=hashlib.sha256(ADMIN_KEY.encode()).hexdigest())
+        ],
+    )
+    with serving(settings) as url:
+        yield url
+
+
 def _axe(page: Page, state: str) -> list[str]:
     """The axe violations of ``page`` as "<state>: <rule> <target>: <help>" lines."""
     if not page.evaluate("typeof window.axe !== 'undefined'"):
@@ -162,6 +181,22 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         site.locator("button.tree-button").click()
         expect(page.locator("#result .tree-view input[name=url]")).to_have_count(4)
         found += _axe(page, "site tree")
+
+    assert found == [], "\n".join(found)
+    assert console == []
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_axe_finds_no_violations_with_maximum_extraction_on(
+    ui_unblock: str, language: Language
+) -> None:
+    with browsing(f"{ui_unblock}?lang={language}") as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        expect(page.locator("#panel-extract")).to_be_visible()
+        expect(page.locator("#extract-access-maximum")).to_be_enabled()
+        expect(page.locator("#extract-mode-fast-hint")).to_be_visible()
+        found = _axe(page, "extract tab, maximum extraction on")
 
     assert found == [], "\n".join(found)
     assert console == []

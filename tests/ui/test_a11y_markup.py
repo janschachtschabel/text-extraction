@@ -32,6 +32,8 @@ from text_extraction.ui.routes import TABS
 VENDOR = Path(__file__).parent / "vendor"
 AXE_FILE: Final = VENDOR / "axe-core-4.14.0.min.js"
 AXE_LICENSE: Final = VENDOR / "axe-core-LICENSE.txt"
+# The notices of the MIT code bundled into axe.min.js (ruling R-P12-5).
+AXE_THIRD_PARTY: Final = VENDOR / "axe-core-LICENSE-3RD-PARTY.txt"
 # axe.min.js of the npm tarball axe-core-4.14.0.tgz, as its sri-history.json names it.
 AXE_SHA256: Final = "20c09fe157a8a34a30e241aaa1fcdade657734f08ab379ecfbeb7d45cc46e878"
 ORIGIN = "https://example.org"
@@ -330,3 +332,6 @@ def test_vendored_axe_is_pinned() -> None:
     assert hashlib.sha256(AXE_FILE.read_bytes()).hexdigest() == AXE_SHA256
     licence = AXE_LICENSE.read_text(encoding="utf-8")
     assert licence.startswith("Mozilla Public License, version 2.0")
+    third_party = AXE_THIRD_PARTY.read_text(encoding="utf-8")
+    assert "MIT License" in third_party
+    assert "colorjs.io" in third_party
