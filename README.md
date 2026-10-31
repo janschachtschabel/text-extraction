@@ -10,10 +10,10 @@ and a playground in English and German.
 
 ## Status
 
-Under construction: packages 0-11 are merged (foundation, service skeleton, fast extraction,
+Prototype `v0.1.0`: packages 0-12 are merged (foundation, service skeleton, fast extraction,
 jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
-chunking, site structure, MCP and UI, hand-over); package 12 (UI languages, unblock option,
-bilingual docs) is in review. See
+chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
+bilingual docs). See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Two ways to extract
