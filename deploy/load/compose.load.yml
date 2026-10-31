@@ -42,6 +42,15 @@ x-load-env: &load-env
   # The load workflow's sweep sets it per run (1, 2, 4 by default).
   STRUCTURED_SELECTOR_PROCESSES: ${STRUCTURED_SELECTOR_PROCESSES:-1}
 
+# The health checks of every app service with one: the base file's test, with a start period that
+# survives a start-up beside every model load on a 4-vCPU runner (the first run saw the extract
+# worker unhealthy after 58 s). During the start period the check runs every 5 s, so a container
+# counts as healthy as soon as it is ready; after it, more retries than the base file's 3.
+x-load-healthcheck: &load-healthcheck
+  start_period: 600s
+  start_interval: 5s
+  retries: 6
+
 # The test services: the API image, the repo's tests read-only, no .env (they need no secret).
 x-test-service: &test-service
   image: text-extraction:dev
@@ -61,16 +70,19 @@ services:
       MCP_ENABLED: "true"
     ports:
       - "127.0.0.1:9090:9090"
+    healthcheck: *load-healthcheck
 
   worker:
     environment: *load-env
     ports:
       - "127.0.0.1:9091:9090"
+    healthcheck: *load-healthcheck
 
   browser-worker:
     environment: *load-env
     ports:
       - "127.0.0.1:9092:9090"
+    healthcheck: *load-healthcheck
 
   docling-models:
     environment: *load-env
@@ -79,6 +91,7 @@ services:
     environment: *load-env
     ports:
       - "127.0.0.1:9093:9090"
+    healthcheck: *load-healthcheck
 
   asr-models:
     environment: *load-env
@@ -87,6 +100,7 @@ services:
     environment: *load-env
     ports:
       - "127.0.0.1:9094:9090"
+    healthcheck: *load-healthcheck
 
   nlp-models:
     environment: *load-env
@@ -95,11 +109,13 @@ services:
     environment: *load-env
     ports:
       - "127.0.0.1:9095:9090"
+    healthcheck: *load-healthcheck
 
   llm-worker:
     environment: *load-env
     ports:
       - "127.0.0.1:9096:9090"
+    healthcheck: *load-healthcheck
 
   # One host on every interface of its container; the record goes to the bind mount.
   farm:

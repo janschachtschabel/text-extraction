@@ -11,7 +11,7 @@ import sys
 import tempfile
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import yaml
@@ -199,10 +199,29 @@ def test_load_writes_the_summary_and_always_tears_down() -> None:
 # --- the run step: the selector sweep -----------------------------------------------------------
 
 
-def _run_sweep(values: str, *, fail_up: bool = False) -> tuple[int, list[str], str]:
-    """Run the run step under stub `docker` and `uv`; return the exit code, the calls (one line
-    each, `docker`/`uv` and their arguments, the up calls with STRUCTURED_SELECTOR_PROCESSES)
-    and stderr."""
+API_KEY = "a1" * 32
+VALKEY_PASSWORD = "b2" * 24
+# `docker compose ps -a --format json` while the stack is not ready: one JSON object per line.
+PS_JSON = "\n".join(
+    [
+        '{"Service":"api","State":"running","Health":"healthy","ExitCode":0}',
+        '{"Service":"worker","State":"running","Health":"unhealthy","ExitCode":0}',
+        '{"Service":"docling-models","State":"exited","Health":"","ExitCode":0}',
+        '{"Service":"nlp-models","State":"exited","Health":"","ExitCode":1}',
+    ]
+)
+
+
+class Sweep(NamedTuple):
+    code: int
+    calls: list[str]  # docker/uv calls, then `log <path>` and `record <path>` of saved files
+    output: str  # stdout and stderr
+    files: dict[str, str]  # every file under load-results/, by path
+
+
+def _run_sweep(values: str, *, fail_up: bool = False, leak: bool = True) -> Sweep:
+    """Run the run step under stub `docker` and `uv`, with a .env and API_KEY as the workflow
+    writes them. With ``leak`` the stub logs of every service carry both secrets."""
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "bin"
         bin_dir.mkdir()
@@ -211,20 +230,35 @@ def _run_sweep(values: str, *, fail_up: bool = False) -> tuple[int, list[str], s
         (bin_dir / "docker").write_text(
             "#!/bin/sh\n"
             f'echo "docker $* SP=$STRUCTURED_SELECTOR_PROCESSES" >> "{calls}"\n'
-            'case "$*" in *" ps "*) echo api; echo worker;; esac\n'
+            'case "$*" in\n'
+            '  *" ps -a --format json"*) printf "%s\\n" "$STUB_PS_JSON";;\n'
+            '  *" ps --all --services"*) printf "api\\nworker\\ndocling-models\\nnlp-models\\n";;\n'
+            '  *" ps -a"*) echo "NAME STATUS"; echo "stub-ps-table";;\n'
+            '  *" logs "*) for last; do :; done\n'
+            '    if [ -n "$STUB_LEAK" ]; then\n'
+            '      echo "$last started key=$API_KEY password=$STUB_VALKEY_PASSWORD"\n'
+            '    else echo "$last started"; fi;;\n'
             # A stopped farm writes its record into the bind-mounted directory.
-            'case "$*" in *" stop farm"*) echo "{}" > load-results/farm/farm-record.json;; esac\n'
-            f'case "$*" in *" up "*) {up};; esac\n',
+            '  *" stop farm"*) echo "{}" > load-results/farm/farm-record.json;;\n'
+            f'  *" up "*) {up};;\n'
+            "esac\n",
             encoding="utf-8",
         )
         (bin_dir / "uv").write_text(f'#!/bin/sh\necho "uv $*" >> "{calls}"\n', encoding="utf-8")
         for stub in bin_dir.iterdir():
             stub.chmod(0o755)
+        (Path(tmp) / ".env").write_text(
+            f"VALKEY_PASSWORD={VALKEY_PASSWORD}\nAUTH_MODE=api_key\n", encoding="utf-8"
+        )
         env = {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "COMPOSE": f"docker compose {COMPOSE_ARGS}",
             "SELECTOR_PROCESSES": values,
             "INTERNAL_URLS": _job()["env"]["INTERNAL_URLS"],
+            "API_KEY": API_KEY,
+            "STUB_VALKEY_PASSWORD": VALKEY_PASSWORD,
+            "STUB_PS_JSON": PS_JSON,
+            "STUB_LEAK": "1" if leak else "",
         }
         done = subprocess.run(  # noqa: S603 - the repo's own workflow script under stubs
             [BASH, "-e", "-o", "pipefail", "-c", _step("Run the load test")["run"]],
@@ -237,19 +271,24 @@ def _run_sweep(values: str, *, fail_up: bool = False) -> tuple[int, list[str], s
         lines = calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
         logs = sorted(str(p.relative_to(tmp)) for p in Path(tmp).glob("load-results/logs/*/*"))
         records = sorted(str(p.relative_to(tmp)) for p in Path(tmp).glob("load-results/farm/*"))
+        files = {
+            str(p.relative_to(tmp)): p.read_text(encoding="utf-8")
+            for p in Path(tmp).glob("load-results/**/*")
+            if p.is_file()
+        }
         farm_dir = Path(tmp) / "load-results" / "farm"
         if farm_dir.exists():
             # The farm runs as uid 10001 and writes into the runner's directory.
             assert farm_dir.stat().st_mode & 0o777 == 0o777
     lines += [f"log {p}" for p in logs] + [f"record {p}" for p in records]
-    return done.returncode, lines, done.stderr
+    return Sweep(done.returncode, lines, done.stdout + done.stderr, files)
 
 
 def test_the_full_profile_runs_once_and_every_value_gets_a_fresh_selector_run() -> None:
     """The full profile runs at the production default (1); its selector scenario is not part
     of the sweep. Every value, the first included, measures the selector scenario alone on
     freshly recreated containers, so the per-child memory compares like with like."""
-    code, calls, _ = _run_sweep("1, 2,4")
+    code, calls, _, files = _run_sweep("1, 2,4")
 
     assert code == 0
     ups = [c for c in calls if " up " in c]
@@ -268,6 +307,7 @@ def test_the_full_profile_runs_once_and_every_value_gets_a_fresh_selector_run() 
     assert "log load-results/logs/full/api.log" in calls
     assert "log load-results/logs/selector-processes-1/api.log" in calls
     assert "log load-results/logs/selector-processes-4/worker.log" in calls
+    assert "worker started" in files["load-results/logs/selector-processes-4/worker.log"]
     assert [c for c in calls if c.startswith("record ")] == [
         f"record load-results/farm/{run}.json"
         for run in ("full", "selector-processes-1", "selector-processes-2", "selector-processes-4")
@@ -279,7 +319,7 @@ def test_the_full_profile_runs_once_and_every_value_gets_a_fresh_selector_run() 
 
 
 def test_the_run_targets_the_farm_the_fake_llm_and_every_internal_port() -> None:
-    _, calls, _ = _run_sweep("1")
+    calls = _run_sweep("1").calls
     runs = [c for c in calls if c.startswith("uv ")]
     assert len(runs) == 2  # the full profile and the sweep's one value
     for run in runs:
@@ -304,7 +344,7 @@ def _check_targets(run: str) -> None:
 
 
 def test_a_value_that_is_not_a_whole_number_starts_nothing() -> None:
-    code, calls, stderr = _run_sweep("1,x")
+    code, calls, stderr, _ = _run_sweep("1,x")
     assert code != 0
     assert calls == []
     assert "'x'" in stderr
@@ -312,7 +352,7 @@ def test_a_value_that_is_not_a_whole_number_starts_nothing() -> None:
 
 def test_a_repeated_value_starts_nothing() -> None:
     """A second run of a value would overwrite the first one's results and logs."""
-    code, calls, stderr = _run_sweep("1,2,1")
+    code, calls, stderr, _ = _run_sweep("1,2,1")
     assert code != 0
     assert calls == []
     assert "'1'" in stderr
@@ -320,10 +360,40 @@ def test_a_repeated_value_starts_nothing() -> None:
 
 
 def test_a_stack_that_does_not_come_up_fails_the_run_with_its_logs() -> None:
-    code, calls, _ = _run_sweep("1,2", fail_up=True)
+    code, calls, output, files = _run_sweep("1,2", fail_up=True)
     assert code != 0
     assert not [c for c in calls if c.startswith("uv ")]
     assert "log load-results/logs/full/api.log" in calls
+    # The job log shows the state of every container and the tail of the ones that failed:
+    # unhealthy, or exited with an error. Healthy ones and finished one-shots stay out.
+    assert "stub-ps-table" in output
+    assert "worker started" in output
+    assert "nlp-models started" in output
+    assert "api started" not in output
+    assert "docling-models started" not in output
+    _assert_no_secret(output, files)
+
+
+def _assert_no_secret(output: str, files: dict[str, str]) -> None:
+    for secret in (API_KEY, VALKEY_PASSWORD):
+        assert secret not in output
+        for path, text in files.items():
+            assert secret not in text, path
+    assert "key=*** password=***" in files["load-results/logs/full/worker.log"]
+
+
+def test_logs_without_a_secret_pass_unchanged() -> None:
+    code, _, output, files = _run_sweep("1,2", leak=False)
+    assert code == 0, output
+    assert files["load-results/logs/full/worker.log"] == "worker started\n"
+    assert "removed a secret" not in output
+
+
+def test_saved_logs_hold_no_secret() -> None:
+    """The artifact is not masked like the job log: the saved logs are redacted."""
+    code, _, output, files = _run_sweep("1")
+    assert code == 0
+    _assert_no_secret(output, files)
 
 
 # --- the compose override -----------------------------------------------------------------------
@@ -381,6 +451,28 @@ def test_override_settings_are_real_and_valid() -> None:
     settings = Settings(auth_mode="none", **values)
     assert settings.llm_enabled
     assert settings.pii_model_size == "lg"
+
+
+def _seconds(duration: str) -> int:
+    match = re.fullmatch(r"(\d+)s", duration)
+    assert match, duration
+    return int(match.group(1))
+
+
+def test_slow_starts_under_contention_do_not_count_as_unhealthy() -> None:
+    """Every model loads at once on a 4-vCPU runner, and the workers start beside them: the
+    first load-label run saw the extract worker unhealthy 58 s after its start. The override
+    gives every health check a long start period, polled every 5 s so a ready container counts
+    as healthy at once, and more retries; the check itself stays the base file's."""
+    base = _load(BASE)["services"]
+    checked = {name for name, service in base.items() if "healthcheck" in service} - {"valkey"}
+    assert checked == {name for name in _app_services() if not name.endswith("-models")}
+    for name in checked:
+        healthcheck = _override_services()[name]["healthcheck"]
+        assert "test" not in healthcheck, name  # merged: the base file's test stays
+        assert _seconds(healthcheck["start_period"]) >= 600, name
+        assert healthcheck["start_interval"] == "5s", name
+        assert healthcheck["retries"] > base[name]["healthcheck"]["retries"], name
 
 
 def test_internal_ports_are_published_on_loopback_only() -> None:
