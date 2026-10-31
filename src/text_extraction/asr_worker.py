@@ -1107,11 +1107,14 @@ async def self_check(pool: AsrChildren, settings: Settings, *, children: int) ->
         if isinstance(outcome, BaseException):
             if not isinstance(outcome, Exception):
                 raise outcome
-            # The type only: a library's message may quote a path.
+            # The built-in clip and our own model: the child's message quotes no caller content
+            # (only our paths), and without it a failed start says no more than the type.
+            conversion = outcome if isinstance(outcome, ConversionError) else None
             _log.error(
                 "asr_self_check_failed",
                 error=type(outcome).__name__,
-                child_error=outcome.type_name if isinstance(outcome, ConversionError) else None,
+                child_error=conversion.type_name if conversion else None,
+                child_message=conversion.message if conversion else None,
                 models_path=str(settings.asr_models_path),
             )
             raise SelfCheckFailed("the built-in clip failed") from None
