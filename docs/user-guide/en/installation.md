@@ -80,7 +80,7 @@ While a switch is off, a request that needs its worker answers 400: `pii` withou
 text layer with the warning `ocr_unavailable`.
 
 Maximum extraction (for sites that allowed extraction by contract) needs
-`BROWSER_UNBLOCK_ENABLED=true` in `.env`; see [Browser fallback](usage.md#browser-fallback).
+`BROWSER_UNBLOCK_ENABLED=true` in `.env`; see [Site rules](site-rules.md#maximum-extraction).
 
 ## Kubernetes with Helm
 

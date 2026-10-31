@@ -84,7 +84,7 @@ ohne `PII_ENABLED`, die Strategie `llm`, `learn_selectors` und `semantic`-Chunki
 Textebene, mit der Warnung `ocr_unavailable`.
 
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
-`BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Browser-Fallback](usage.md#browser-fallback).
+`BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Website-Regeln](site-rules.md#maximale-extraktion).
 
 ## Kubernetes mit Helm
 

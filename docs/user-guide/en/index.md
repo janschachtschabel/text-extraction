@@ -15,17 +15,28 @@ pages.
   and media, personal data, and the playground.
 - [Parameters](parameters.md): every field of each request body, with its type, its default and
   its meaning.
+- [Site rules](site-rules.md): respecting a site's rules, and maximum extraction for contract
+  partners.
+- [One URL](single-url.md): one page in the playground, with REST and with MCP, and the fields
+  of the answer.
+- [Part of a site](part-of-a-site.md): a section of a site, a list of URLs or a CSV.
+- [A whole site and its metadata](whole-site-and-metadata.md): a site structure, batches of its
+  pages with their metadata and licences, and reading the jobs.
+- [Structured data](structured-data.md): the strategies of `structured`, the LLM and its key, and
+  chunking.
+- [MCP](mcp.md): the setup for Claude Code, Claude Desktop and other clients, and the 11 tools.
 - [Glossary](glossary.md): the terms of this guide and of the playground, in English and German.
 
 ## Use cases
 
-- Extract one page: [Usage](usage.md#the-result-envelope) and
-  [`POST /v1/extract`](parameters.md#post-v1extract).
+- Extract one page: [One URL](single-url.md).
 - Extract many pages: [Batch](usage.md#batch).
-- Map a site or part of it: [Site structure](../../../README.md#site-structure) in the README.
-- Read structured data and chunks: [Structured output and chunking](../../../README.md#structured-output-and-chunking)
-  in the README.
-- Use the MCP server: [MCP](../../../README.md#mcp) in the README.
+- Extract part of a site, a list of URLs or a CSV: [Part of a site](part-of-a-site.md).
+- Map a whole site and read the metadata of its pages:
+  [A whole site and its metadata](whole-site-and-metadata.md).
+- Read structured data and chunks: [Structured data](structured-data.md).
+- Use the MCP server: [MCP](mcp.md).
+- Extract a site that allowed it by contract: [Site rules](site-rules.md#maximum-extraction).
 
 ## For developers
 

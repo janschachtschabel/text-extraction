@@ -187,11 +187,12 @@ TDM-Nutzungsvorbehalt der EU werden so geprüft, wie der Betreiber es eingericht
 erlaubt haben. Ein Admin sendet `"compliance": "ignore"`, und wo der Betreiber
 `BROWSER_UNBLOCK_ENABLED` eingeschaltet hat, lädt die Seite in einem getarnten Chrome, der wartet,
 bis Bot-Prüfungen durchlaufen sind. Mit `mode: auto` fällt die maximale Extraktion außerdem auf
-den Browser zurück, wenn die Seite ablehnt (HTTP 403, 429 oder 503) oder zu wenig Text liefert, und `data.unblocked`
-ist true. Die maximale Extraktion löst keine Bild-Captchas, nutzt keinen bezahlten Dienst und wechselt keine
-IP-Adressen; die Grenzen pro Host und die Pause eines Hosts nach einem 429 oder 503 gelten weiter.
-Wo es geht, bitten Sie den Betreiber der Website besser um eine Freigaberegel: einen geheimen
-Header, den Sie mit `headers` senden, oder eine Ausnahme für die ausgehende IP des Dienstes.
+den Browser zurück, wenn die Seite ablehnt (HTTP 403, 429 oder 503) oder zu wenig Text liefert,
+und `data.unblocked` ist true. Die maximale Extraktion löst keine Bild-Captchas, nutzt keinen
+bezahlten Dienst und wechselt keine IP-Adressen; die Grenzen pro Host und die Pause eines Hosts
+nach einem 429 oder 503 gelten weiter. Wo es geht, bitten Sie den Betreiber der Website besser um
+eine Freigaberegel: einen geheimen Header, den Sie mit `headers` senden, oder eine Ausnahme für
+die ausgehende IP des Dienstes. Die Einzelheiten stehen unter [Website-Regeln](site-rules.md).
 
 <!-- request: POST /v1/extract -->
 ```json
@@ -346,8 +347,8 @@ Die Formulare für eine URL haben die Auswahl „Website-Regeln“:
 
 - „Regeln der Website beachten (Standard)“ sendet kein `compliance`: Es gelten die Prüfungen des
   Betreibers.
-- „Maximale Extraktion (Vertragspartner)“ sendet `compliance: ignore`. Sie ist für Websites, die die
-  Extraktion vertraglich erlaubt haben (siehe [Maximale Extraktion](#maximale-extraktion)).
+- „Maximale Extraktion (Vertragspartner)“ sendet `compliance: ignore`. Diese Wahl ist für Websites,
+  die die Extraktion vertraglich erlaubt haben (siehe [Website-Regeln](site-rules.md)).
 
 Nur Admins sehen die Auswahl, und sie ist mit einem Hinweis gesperrt, solange `BROWSER_ENABLED` oder
 `BROWSER_UNBLOCK_ENABLED` aus ist. Mit `AUTH_MODE=none` zählt jeder Besucher als Admin, daher sieht

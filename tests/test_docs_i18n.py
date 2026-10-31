@@ -10,6 +10,7 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import get_args
 
 import pytest
 from fakeredis import FakeAsyncRedis
@@ -21,10 +22,13 @@ from text_extraction.browser_models import ScreenshotRequest
 from text_extraction.extract_models import ChunkRequest, ExtractRequest, StructuredRequest
 from text_extraction.file_models import FileForm
 from text_extraction.job_models import BatchRequest
+from text_extraction.mcp_server.server import TOOL_ROUTES
 from text_extraction.pii.types import ENTITY_TYPES
 from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
-from text_extraction.ui.i18n import CATALOGUES
+from text_extraction.structured.types import StructuredStrategy
+from text_extraction.ui.i18n import CATALOGUES, DOCS_BASE_URL, LANGUAGES, Language, help_url
+from text_extraction.ui.routes import TABS
 
 ROOT = Path(__file__).resolve().parent.parent
 GUIDE = ROOT / "docs" / "user-guide"
@@ -32,8 +36,24 @@ GUIDE_EN = GUIDE / "en"
 GUIDE_DE = GUIDE / "de"
 README = ROOT / "README.md"
 README_DE = ROOT / "README.de.md"
-# The pages this package's first docs task writes; the use-case pages follow in the same folders.
+# The guide's base pages and its use-case pages (ruling P12-S11).
 BASE_PAGES = ("index", "installation", "usage", "parameters", "glossary")
+USE_CASE_PAGES = (
+    "site-rules",
+    "single-url",
+    "part-of-a-site",
+    "whole-site-and-metadata",
+    "structured-data",
+    "mcp",
+)
+# The README sections that moved into the guide: each keeps its heading and one paragraph with a
+# link to its page.
+MOVED_SECTIONS: Mapping[Path, tuple[str, ...]] = {
+    README: ("Structured output and chunking", "Site structure", "MCP"),
+    README_DE: ("Strukturierte Ausgabe und Chunking", "Website-Struktur", "MCP"),
+}
+# The heading of the strategies table on the structured data page.
+STRATEGIES_HEADING: Mapping[str, str] = {"en": "The strategies", "de": "Die Strategien"}
 
 PAIRS: list[tuple[Path, Path]] = [(README, README_DE)] + [
     (page, GUIDE_DE / page.name) for page in sorted(GUIDE_EN.glob("*.md"))
@@ -63,6 +83,8 @@ _MARKER = re.compile(r"<!-- request: ")
 _ROUTE = re.compile(r"/v1(?:/(?:\{[^}\s/]*\}|<[^>/]*>|[A-Za-z0-9._-]+))*")
 _SETTING = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)(?:=[^`]*)?`")
 _FIELD_ROW = re.compile(r"^\| `([a-z_]+)` \|", re.MULTILINE)
+_BOLD = re.compile(r"\*\*([^*]+)\*\*")
+_TOOL_ROW = re.compile(r"^\| `([a-z_]+)` \|.*?`(GET|POST|DELETE) (/v1/[^`]*)`", re.MULTILINE)
 
 
 @dataclass
@@ -336,3 +358,138 @@ def test_glossary_matches_the_catalogue(language: Path) -> None:
     ]
     assert not problems, "\n".join(problems)
     assert len(rows) > 10
+
+
+def _heading_section(text: str, title: str) -> str | None:
+    """The body of the section whose heading text is exactly ``title``, up to the next heading of
+    the same or a higher level; None without such a heading."""
+    lines = text.splitlines()
+    for start, line in enumerate(lines):
+        heading = _HEADING.match(line)
+        if heading and line[len(heading.group(1)) + 1 :].strip() == title:
+            level = len(heading.group(1))
+            body = []
+            for following in lines[start + 1 :]:
+                other = _HEADING.match(following)
+                if other and len(other.group(1)) <= level:
+                    break
+                body.append(following)
+            return "\n".join(body)
+    return None
+
+
+def _language(folder: Path) -> Language:
+    """The language of a guide folder (``docs/user-guide/<language>``)."""
+    for language in LANGUAGES:
+        if folder.name == language:
+            return language
+    raise AssertionError(f"not a language folder: {folder}")
+
+
+def _tab_labels(folder: Path) -> set[str]:
+    """The tab labels of the catalogue of a guide folder's language."""
+    catalogue = CATALOGUES[_language(folder)]
+    return {value for key, value in catalogue.items() if key.startswith("tab.")}
+
+
+@pytest.mark.parametrize("language", [GUIDE_EN, GUIDE_DE], ids=["en", "de"])
+def test_use_case_pages_exist(language: Path) -> None:
+    """Each use case has its page, and each page but the MCP one shows the playground's way (a
+    bold tab name), the REST way (a request) and the MCP way (a tool)."""
+    labels = _tab_labels(language)
+    tools = set(TOOL_ROUTES.values())
+    problems = []
+    for page in USE_CASE_PAGES:
+        path = language / f"{page}.md"
+        if not path.is_file():
+            problems.append(f"{page}: missing")
+            continue
+        if page == "mcp":
+            continue
+        prose = _prose(_read(path))
+        if not set(_BOLD.findall(prose)) & labels:
+            problems.append(f"{page}: no tab of the playground")
+        if "<!-- request: " not in prose and "curl " not in _read(path):
+            problems.append(f"{page}: no REST request")
+        if not any(f"`{tool}`" in prose for tool in tools):
+            problems.append(f"{page}: no MCP tool")
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("language", [GUIDE_EN, GUIDE_DE], ids=["en", "de"])
+def test_mcp_guide_names_every_tool(language: Path) -> None:
+    """The tools table of the MCP page has one row per tool of the server, with its route."""
+    tools = sorted(TOOL_ROUTES.values())
+    assert len(set(tools)) == 11
+    text = _read(language / "mcp.md")
+    rows = _TOOL_ROW.findall(_section(text, " 11 "))
+    assert sorted(name for name, _, _ in rows) == tools
+    routes = {tool: route for route, tool in TOOL_ROUTES.items()}
+    wrong = [
+        f"{name}: {method} {path}"
+        for name, method, path in rows
+        if method != routes[name][0]
+        or not _route_exists(_segments(path), [_segments(routes[name][1])])
+    ]
+    assert not wrong, f"tools with another route: {wrong}"
+
+
+@pytest.mark.parametrize("language", [GUIDE_EN, GUIDE_DE], ids=["en", "de"])
+def test_structured_guide_names_every_strategy(language: Path) -> None:
+    """Each strategy of ``structured`` has a row of its own in the strategies table of the
+    structured data page."""
+    section = _heading_section(
+        _read(language / "structured-data.md"), STRATEGIES_HEADING[language.name]
+    )
+    assert section is not None
+    rows = _FIELD_ROW.findall(section)
+    missing = sorted(set(get_args(StructuredStrategy)) - set(rows))
+    assert not missing, f"strategies without a row: {missing}"
+
+
+@pytest.mark.parametrize("language", [GUIDE_EN, GUIDE_DE], ids=["en", "de"])
+def test_bold_tab_names_match_the_catalogue(language: Path) -> None:
+    """Bold text in the guide is a tab name, as that language's catalogue labels the tab."""
+    labels = _tab_labels(language)
+    found = 0
+    unknown = []
+    for page in sorted(language.glob("*.md")):
+        for bold in _BOLD.findall(_prose(_read(page))):
+            found += 1
+            if bold not in labels:
+                unknown.append(f"{page.name}: {bold}")
+    assert not unknown, f"bold text that is not a tab label: {unknown}"
+    assert found >= len(labels)
+
+
+@pytest.mark.parametrize("readme", list(MOVED_SECTIONS), ids=lambda path: path.name)
+def test_readme_has_no_moved_section(readme: Path) -> None:
+    """The sections that moved into the guide keep their heading and one paragraph with a link
+    to their page."""
+    text = _read(readme)
+    problems = []
+    for title in MOVED_SECTIONS[readme]:
+        body = _heading_section(text, title)
+        if body is None:
+            problems.append(f"{title}: no heading")
+            continue
+        paragraphs = [block for block in re.split(r"\n\s*\n", body.strip()) if block.strip()]
+        if len(paragraphs) != 1:
+            problems.append(f"{title}: {len(paragraphs)} paragraphs")
+        elif "](docs/user-guide/" not in paragraphs[0]:
+            problems.append(f"{title}: no link into the guide")
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_every_help_link_has_its_page(language: Language) -> None:
+    """The help link of every tab opens a guide page that exists in the tab's language."""
+    prefix = f"{DOCS_BASE_URL}/"
+    assert DOCS_BASE_URL.endswith("/" + GUIDE.relative_to(ROOT).as_posix())
+    missing = []
+    for tab in TABS:
+        url = help_url(language, tab.help_page)
+        assert url.startswith(prefix)
+        if not (GUIDE / url.removeprefix(prefix)).is_file():
+            missing.append(f"{tab.name}: {url}")
+    assert not missing, f"help links without a page: {missing}"

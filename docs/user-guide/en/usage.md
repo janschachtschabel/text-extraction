@@ -183,6 +183,7 @@ or 503) or gives too little text, and `data.unblocked` is true. It solves no ima
 no paid service and rotates no IP address; the per-host limits and a host's pause after a 429 or
 503 still apply. Where you can, ask the site owner for an allowlist rule instead: a secret header
 that you send with `headers`, or an exemption for the service's egress IP.
+[Site rules](site-rules.md) has the details.
 
 <!-- request: POST /v1/extract -->
 ```json
@@ -328,7 +329,7 @@ The forms of a URL have the choice "Site rules":
 
 - "Respect the site's rules (default)" sends no `compliance`: the operator's checks apply.
 - "Maximum extraction (contract partners)" sends `compliance: ignore`. It is for sites that
-  allowed extraction by contract (see [Maximum extraction](#maximum-extraction)).
+  allowed extraction by contract (see [Site rules](site-rules.md)).
 
 Only admins see the choice, and it is disabled with a hint while `BROWSER_ENABLED` or
 `BROWSER_UNBLOCK_ENABLED` is off. With `AUTH_MODE=none` every visitor counts as an admin, so
