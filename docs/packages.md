@@ -27,6 +27,7 @@ Per package:
 | 9 | Site structure | merged 2026-10-30 | #23 | done-when test `tests/site/test_done_when.py` (default suite, no network): two sample sites (`tests/site/sites/`) on pytest-httpserver, crawled through `POST /v1/site-structure` by the real extract worker loop and read back through `GET /v1/jobs/{id}` in pages of 50: every entry of robots.txt's sitemaps (an index with a plain and a gzipped urlset, a text sitemap) and of a guessed `/sitemap.xml` of 300 entries across parts, every page to depth 2 as one item, typed links (`region`, `source`, `crawl`) with targets at the right items, a robots.txt-disallowed page never requested, the 404 the only failure; live site run on five WLO-type sites reported by the live workflow (first run 2026-10-30, `enforce`, depth 1, 25 pages: all five jobs completed in 11-47 s; de.serlo.org 13,531 sitemap entries, www.leifiphysik.de answered 2 HTTP errors); live `wlo_200` auto 84.0 % |
 | 10 | MCP and UI | merged 2026-10-31 | #24 | done-when tests (default suite, no network) against the app under uvicorn with the real extract worker loop and a sample site on pytest-httpserver: `tests/mcp_server/test_done_when.py` calls all 11 tools through `fastmcp.Client` over streamable HTTP (the transport Claude Code uses; a wrong or missing key cannot connect, 401) and `tests/ui/test_done_when.py` drives every entry of `OPERATIONS` and the views `progress`, `site-tree`, `batch-file`, `batch-urls` and `images` through `/ui/run`, proven from the REST calls the views forward, with each call's REST status and envelope checked (in its fragment for the single operations and the job item, at the forward for the job views, whose fragments show the jobs, the image or the "cancelled" line); five Chromium tests (`pytest -m browser tests/ui`); Helm toggles in `deploy/helm/test.sh`; live check 2026-10-31 in the build sandbox with Claude Code 2.1.314 (`claude mcp add`, `claude mcp list` connected, all MCP steps through `claude -p`) and the playground in Chromium against a local Valkey, API and worker (see the package 10 note); the WLO pages and Claude Desktop move to Jan's PC (no egress to WLO in the sandbox); live `wlo_200` auto 82.5 % (165 of 200; package 9: 84.0 %), smoke 83.3 %, browser 79.0 %, media 46.4 %, and all five site jobs completed (2026-10-31) |
 | 11 | | open | | |
+| 12 | | planned | | |
 
 | # | Package | Contents | Done when |
 | --- | --- | --- | --- |
@@ -42,6 +43,7 @@ Per package:
 | 9 | Site structure | Sitemap discovery (robots.txt, index, gzip), link graph with link types to a set depth, `POST /v1/site-structure` job | Sample sites return complete sitemaps and typed links |
 | 10 | MCP and UI | FastMCP at `/mcp`, htmx playground at `/ui`, both toggled by env and Helm | MCP tools usable from Claude; UI drives every endpoint |
 | 11 | Hand-over | Full WLO regression run, load test (it also sizes the default `STRUCTURED_SELECTOR_PROCESSES`, 1 today, issue #19), resource baselines (`docker stats`), env reference, example `values.yaml`, secrets list, cost notes (LLM, ASR), final architecture doc | Ops-guide hand-over checklist complete |
+| 12 | UI languages, unblock option, bilingual docs | An optional unblock mode in the UI that bypasses the site's rules for contract partners; the UI in German and English with a language switch, plus accessibility, help texts and status messages; README and user docs in German and English, covering installation, usage, parameters, use cases, the 11 MCP tools and structured data | Plan approved by Jan; to be defined in its plan |
 
 Package 5 note (Jan, D2): a sync request that needs OCR waits up to `DOCLING_SYNC_WAIT_SECONDS`
 (20 s) for the Docling worker and then answers its text layer with the warning `ocr_unavailable`
@@ -154,3 +156,7 @@ with several 50 MiB sitemaps in flight; the split of `site/runner.py` into `runn
 pages, extend, metrics) and `sitemap_items.py` (robots, sitemaps, parsing), a pure move; and,
 if the measurements call for it, a setting `SITE_PARSE_CONCURRENCY` for the sitemap thread pool
 (one per pod today).
+
+Package 12 note (Jan, 2026-10-31): package 12 follows package 11, which is merged without a tag.
+The first release, `v0.1.0` (a prototype), is tagged after package 12 is merged. Its scope and
+done-when criterion are set in its plan, which Jan approves.

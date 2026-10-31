@@ -31,7 +31,7 @@ Valkey ◀──▶ llm-worker      (OpenAI-compatible endpoint: structured llm,
                              semantic chunking; default model gpt-6-luna)
 workers ──▶ model volumes (one PVC per worker type, read-only: Docling and Tesseract,
             Whisper models; spaCy for the nlp-worker)
-optional: S3-compatible store for screenshots and large results
+not built (deferred): an S3-compatible store for screenshots and large results
 ```
 
 Images: `api` (slim), `browser-worker` (image `text-extraction-browser`: Chromium headless
@@ -299,7 +299,8 @@ optional rate limit.
   `ignore` (R9); a job's items run with their owner's role. Without the switch, `ignore`
   renders in the standard browser.
 
-`INTERNAL_API_ENABLED` (off by default) serves the API without auth for cluster-internal callers.
+There is no auth-free internal API: cluster-internal callers send a key like any other caller
+(only `AUTH_MODE=none` turns authentication off, for every caller at once).
 
 ## Feature notes
 
@@ -377,8 +378,9 @@ optional rate limit.
   count toward `BATCH_MAX_OPEN_PER_CLIENT`. `JOBS_ENABLED=false` ignores `wait_seconds`. A pod
   holds at most `EXTRACT_MAX_BACKGROUND` (32) such tasks; beyond it a request keeps waiting inline
   and answers 200.
-- **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs; `S3_ENABLED`
-  moves screenshots and large results to an S3-compatible store.
+- **Storage:** Valkey (`VALKEY_URL`, any Redis-protocol server) with TTLs. An S3-compatible
+  store for screenshots and large results was planned (`S3_ENABLED`) and is not built: it is
+  deferred beyond package 11, and screenshots and results stay in Valkey for their TTLs.
 
 ## Jobs and the fair queue
 
@@ -1035,7 +1037,7 @@ through the Docling path, and the two-page scan yields its text with a word reca
   answers its text layer with `ocr_unavailable`.
 - Not in this package: vision-LLM descriptions of images (issue #20 describes page images and
   image uploads, not the figures inside a document: see "Image descriptions"), PII (package 7), S3 offload
-  of inputs (package 11), legacy binary `.doc` and `.ppt`, RTF, e-mail files and archives
+  of inputs (deferred, not built), legacy binary `.doc` and `.ppt`, RTF, e-mail files and archives
   (`unsupported_content_type`).
 
 ## Audio and video
@@ -1075,7 +1077,7 @@ OpenAI-compatible endpoint): always a job, answered 202.
   25,000,000 bytes by default (about 25 minutes of MP3 at 128 kbit/s, hours of Opus), adjustable
   by env and Helm (`workers.asr.uploadMaxBytes`), bounded only by the input budget
   (`DOCLING_INPUT_BUDGET_BYTES`, checked at start-up and by the chart). Larger media go by URL;
-  S3 lifts the limit in package 11. Not taken: (b) extracting the audio track in the API pod.
+  an S3 store would lift the limit (deferred, not built). Not taken: (b) extracting the audio track in the API pod.
 - **D4, players embedded in a page: listed, not transcribed (a).** `data.media.embeds` names
   them (platform URL or file URL, at most 10), so the caller can extract each with a request of
   its own; only `<track>` text is added inline.
@@ -1399,7 +1401,7 @@ the media set without gating it (D1).
   Tier 1 runs without a JavaScript runtime in the API image (Deno is in the ASR image only).
 - Not in this package: transcripts of players embedded in a page (D4), speaker diarisation,
   translation, timestamps in the content, HLS or DASH URLs outside the platform extractors, S3
-  offload of inputs (package 11), PII in transcripts (package 7 applies to them like to any
+  offload of inputs (deferred, not built), PII in transcripts (package 7 applies to them like to any
   content).
 
 ## PII
