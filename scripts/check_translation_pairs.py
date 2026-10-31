@@ -37,7 +37,13 @@ def german_partner(path: str) -> str | None:
 
 
 def _git(*args: str) -> str:
-    return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
+    done = subprocess.run(  # noqa: S603 - git from PATH, with our own arguments
+        ["git", *args],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return done.stdout
 
 
 def changed_files(base: str) -> set[str]:

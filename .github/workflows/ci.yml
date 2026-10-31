@@ -25,6 +25,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # A pull request needs the history back to its base for the translation pair check.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       # uv reads .python-version (3.13) and provisions its own managed Python.
       - uses: astral-sh/setup-uv@v7
@@ -32,6 +34,10 @@ jobs:
           enable-cache: true
 
       - run: uv sync --locked
+      # An English user text changed without its German partner fails (ruling P12-S12.2).
+      - name: translation pairs
+        if: github.event_name == 'pull_request'
+        run: uv run python scripts/check_translation_pairs.py --base ${{ github.event.pull_request.base.sha }}
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy

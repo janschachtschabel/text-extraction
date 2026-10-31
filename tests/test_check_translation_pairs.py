@@ -7,11 +7,14 @@ import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_translation_pairs.py"
+CI = ROOT / ".github" / "workflows" / "ci.yml"
 
 EN_GUIDE = "docs/user-guide/en/usage.md"
 DE_GUIDE = "docs/user-guide/de/usage.md"
@@ -33,8 +36,8 @@ check_translation_pairs = _load()
 
 
 def _git(repo: Path, *args: str) -> str:
-    done = subprocess.run(
-        ["git", "-c", "commit.gpgsign=false", *args],
+    done = subprocess.run(  # noqa: S603 - git from PATH, with the test's own arguments
+        ["git", "-c", "commit.gpgsign=false", *args],  # noqa: S607
         cwd=repo,
         check=True,
         capture_output=True,
@@ -141,3 +144,16 @@ def test_a_new_english_page_needs_its_german_partner(repo: Path) -> None:
     _commit(repo, "docs: new page", **{"docs/user-guide/en/mcp.md": "# MCP\n"})
 
     assert check_translation_pairs.main(["--base", base]) == 1
+
+
+def test_ci_runs_the_check_on_pull_requests() -> None:
+    workflow: dict[Any, Any] = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["ci"]["steps"]
+    checkout = next(step for step in steps if step.get("uses", "").startswith("actions/checkout"))
+    assert "pull_request' && '0'" in checkout["with"]["fetch-depth"]
+    check = next(step for step in steps if "check_translation_pairs.py" in step.get("run", ""))
+    assert check["if"] == "github.event_name == 'pull_request'"
+    assert check["run"] == (
+        "uv run python scripts/check_translation_pairs.py "
+        "--base ${{ github.event.pull_request.base.sha }}"
+    )
