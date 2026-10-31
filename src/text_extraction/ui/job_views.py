@@ -26,7 +26,6 @@ from urllib.parse import urlencode
 import structlog
 from fastapi import APIRouter
 from starlette.datastructures import FormData, State, UploadFile
-from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 
@@ -39,6 +38,7 @@ from text_extraction.ui.answers import (
     artifact_of,
     envelope_message,
     raw_text,
+    read_form,
     read_screenshot,
     refusal,
     screenshot_of,
@@ -48,7 +48,7 @@ from text_extraction.ui.answers import (
 from text_extraction.ui.forms import OPERATIONS, OptionsError, build_body
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.results import curl_line, render_result
-from text_extraction.ui.security import RUN_PREFIX, ui_principal
+from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
 from text_extraction.ui.site_tree import NodeKind, SiteTree, TreeBuilder
 from text_extraction.ui.templating import templates
 from text_extraction.ui.timeline import RequestedMode
@@ -83,7 +83,6 @@ FILE_PART: Final = "file"
 FORM_OPTION_FIELDS: Final = 64
 
 NO_URLS: Final = "Give at least one URL."
-TOO_MANY_FIELDS: Final = "The form has too many fields."
 NOT_A_JOB: Final = "This is not a job id."
 # A job's id, as `jobs_api.visible_job` checks it: anything else is never forwarded.
 JOB_ID: Final = re.compile(r"[0-9a-f]{32}", re.ASCII)
@@ -404,10 +403,14 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
         await authenticate(request)
     except ServiceError as error:
         return refusal(error)
-    try:
-        form = await request.form(max_fields=_max_fields(settings))
-    except HTTPException:  # more fields than allowed
-        return _form_error(request, TOO_MANY_FIELDS)
+    form = await read_form(
+        request,
+        max_part_size=form_part_limit(settings, f"{RUN_PREFIX}/batch-urls"),
+        max_fields=_max_fields(settings),
+        max_files=0,
+    )
+    if isinstance(form, str):  # more fields than allowed, or malformed
+        return _form_error(request, form)
     try:
         lines = _lines(form)
         fields = text_fields(form)
@@ -519,7 +522,13 @@ async def batch_file_view(request: Request, settings: Settings) -> Response:
     except ServiceError as error:
         return refusal(error)
     limit = settings.ui_batch_file_max_bytes
-    form = await request.form()
+    form = await read_form(
+        request,
+        max_part_size=form_part_limit(settings, f"{RUN_PREFIX}/batch-file"),
+        max_files=1,
+    )
+    if isinstance(form, str):
+        return _form_error(request, form)
     try:
         upload = form.get(FILE_PART)
         if not isinstance(upload, UploadFile):
@@ -554,7 +563,9 @@ async def site_structure_view(request: Request) -> Response:
         await authenticate(request)  # before the form is parsed; the forward checks it again
     except ServiceError as error:
         return refusal(error)
-    form = await request.form()
+    form = await read_form(request, max_files=0)
+    if isinstance(form, str):
+        return _form_error(request, form)
     try:
         fields = text_fields(form)
     finally:
@@ -731,7 +742,9 @@ async def cancel_view(request: Request) -> Response:
         await authenticate(request)  # before the form is parsed; the forward checks it again
     except ServiceError as error:
         return refusal(error)
-    form = await request.form()
+    form = await read_form(request, max_files=0)
+    if isinstance(form, str):
+        return _form_error(request, form)
     try:
         job_id = text_fields(form).get("id", "")
     finally:

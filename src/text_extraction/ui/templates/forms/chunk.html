@@ -1,4 +1,4 @@
-<form class="op" hx-post="/ui/run/chunk" hx-target="#result" hx-swap="innerHTML">
+<form class="op" hx-post="/ui/run/chunk" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
   {% set prefix = "chunk" %}
   <p class="hint">A URL or a text, not both.</p>
   <label for="chunk-url">URL</label>

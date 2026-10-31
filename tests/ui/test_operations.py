@@ -5,7 +5,7 @@ escaping, the shown REST answers and the curl line."""
 import base64
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import lxml.html
 import pytest
@@ -702,3 +702,71 @@ def test_refusal_shows_when_to_retry() -> None:
     root = tree(html)
     assert texts(root, "//*[@class='error-code']") == ["rate_limited"]
     assert texts(root, "//*[@class='retry-after']")[0].startswith("Retry after ")
+
+
+# A Markdown text of about 1.5 MB: over Starlette's default field size of 1 MiB.
+LONG_TEXT: Final = "\n\n".join(
+    f"## Part {n}\n\n" + "Leaves turn light into sugar. " * 50 for n in range(1000)
+)
+
+
+@pytest.mark.parametrize("encoding", ["multipart", "urlencoded"])
+def test_chunk_text_over_one_mib(client: TestClient, encoding: str) -> None:
+    """A text up to the REST limit of ``POST /v1/chunk`` goes through the Chunk tab, posted as
+    the tab posts it (multipart) and urlencoded (ruling R-P10-F2)."""
+    assert len(LONG_TEXT.encode()) > 1_500_000
+    form: dict[str, Any] = {"text_type": "markdown", "format": "markdown"}
+    form["chunking"] = '{"strategy": "recursive", "size": 8000}'
+    if encoding == "multipart":  # a field part without a file name, as the browser sends it
+        answer = run(client, "chunk", files={"text": (None, LONG_TEXT.encode())}, **form)
+    else:
+        answer = run(client, "chunk", text=LONG_TEXT, **form)
+
+    assert answer.status_code == 200
+    assert answer.headers["content-type"].startswith("text/html")
+    root = tree(answer.text)
+    assert texts(root, "//*[@class='http-status']") == ["HTTP 200"]
+    # 200 chunks of about 7,600 characters: the fragment shows the first ones.
+    assert "174 more chunks not shown; see the download." in texts(root, "//p[@class='cut-note']")
+
+
+def test_chunk_tab_posts_multipart() -> None:
+    """The Chunk tab posts its text unencoded, so a text takes no more bytes than it has."""
+    with running(auth_mode="none") as open_client:
+        root = lxml.html.fromstring(open_client.get("/ui").text)
+    (form,) = root.xpath("//form[@hx-post='/ui/run/chunk']")
+    assert form.get("hx-encoding") == "multipart/form-data"
+
+
+@pytest.mark.parametrize(
+    ("op", "content_type", "body", "cause"),
+    [
+        ("chunk", "multipart/form-data", b"text=x", "Missing boundary in multipart."),
+        (
+            "file",
+            "multipart/form-data; boundary=b",
+            b'--b\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\n\r\nx\r\n'
+            b'--b\r\nContent-Disposition: form-data; name="file"; filename="b.txt"\r\n\r\ny\r\n'
+            b"--b--\r\n",
+            "Too many files. Maximum number of files is 1.",
+        ),
+    ],
+    ids=["malformed", "files"],
+)
+def test_a_form_that_cannot_be_read_is_a_fragment(
+    client: TestClient, op: str, content_type: str, body: bytes, cause: str
+) -> None:
+    answer = client.post(
+        f"/ui/run/{op}",
+        content=body,
+        headers={
+            "HX-Request": "true",
+            "Authorization": f"Bearer {USER_KEY}",
+            "Content-Type": content_type,
+        },
+    )
+
+    assert answer.status_code == 200
+    assert texts(tree(answer.text), "//div[@class='error']/p") == [
+        f"The form could not be read: {cause}"
+    ]

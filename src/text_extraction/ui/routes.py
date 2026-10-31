@@ -24,6 +24,7 @@ from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     envelope_message,
     raw_text,
+    read_form,
     refusal,
     screenshot_of,
     sent_keys,
@@ -40,7 +41,13 @@ from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.job_views import add_job_routes
 from text_extraction.ui.previews import SHOWN, load_previews
 from text_extraction.ui.results import curl_line, render_result
-from text_extraction.ui.security import PREFIX, RUN_PREFIX, require_htmx, ui_principal
+from text_extraction.ui.security import (
+    PREFIX,
+    RUN_PREFIX,
+    form_part_limit,
+    require_htmx,
+    ui_principal,
+)
 from text_extraction.ui.templating import templates
 from text_extraction.ui.timeline import RequestedMode
 from text_extraction.vision.fetch import ImageFetcher
@@ -117,7 +124,10 @@ async def _forward_single(
     return answer, curl
 
 
-def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
+def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[Response]]:
+    part_limit = form_part_limit(settings, f"{RUN_PREFIX}/{op}")
+    max_files = 1 if op == "file" else 0
+
     async def view(request: Request) -> Response:
         """Build the REST body of the form, forward it and show the answer (always 200, so htmx
         swaps it). A form that cannot become a body is answered with its message, and nothing
@@ -131,7 +141,9 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
             await check_rate_left(request.app.state, principal)
         except ServiceError as error:
             return refusal(error)
-        form = await request.form()
+        form = await read_form(request, max_part_size=part_limit, max_files=max_files)
+        if isinstance(form, str):
+            return templates.TemplateResponse(request, "form_error.html", {"message": form})
         try:
             body = build_body(op, text_fields(form))
         except OptionsError as error:
@@ -170,7 +182,9 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
     as ``data:`` images (P10-S16). One rate-limit hit, whatever the number of images."""
     try:
         principal = await ui_principal(request)
-        form = await request.form()
+        form = await read_form(request, max_files=0)
+        if isinstance(form, str):
+            return templates.TemplateResponse(request, "form_error.html", {"message": form})
         requested = form.get("compliance")
         chosen = cast(ComplianceMode, requested) if requested in _COMPLIANCE_MODES else None
         mode = resolve_mode(chosen, principal, settings)
@@ -238,7 +252,7 @@ def create_ui_router(settings: Settings) -> APIRouter:
         return templates.TemplateResponse(request, "login.html", {"error": message})
 
     for op in SINGLE_OPERATIONS:
-        run.add_api_route(f"/{op}", _single_view(op), methods=["POST"])
+        run.add_api_route(f"/{op}", _single_view(op, settings), methods=["POST"])
 
     @run.post("/images")
     async def images(request: Request) -> Response:

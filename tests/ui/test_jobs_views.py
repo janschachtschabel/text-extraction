@@ -425,8 +425,23 @@ def test_batch_urls_checks_the_key_then_caps_the_fields(
         assert len(jobs_of(within.text)) == 2
         over = run(client, "batch-urls", url=urls(165))
         assert over.status_code == 200
-        assert texts(tree(over.text), "//p") == ["The form has too many fields."]
+        assert texts(tree(over.text), "//p") == [
+            "The form could not be read: Too many fields. Maximum number of fields is 164."
+        ]
     assert batch_calls == [10, 10]
+
+
+def test_batch_urls_list_over_one_mib(batch_calls: list[int]) -> None:
+    """A typed or previewed list over Starlette's default field size of 1 MiB is read: the
+    route's body limit bounds it (ruling R-P10-F2)."""
+    listed = urls(4500, prefix="https://example.org/" + "a" * 220)
+    assert len("\n".join(listed).encode()) > 1_048_576
+    with running() as client:
+        answer = run(client, "batch-urls", urls="\n".join(listed), format="text")
+
+    assert answer.status_code == 200
+    assert len(jobs_of(answer.text)) == 5
+    assert batch_calls == [1000, 1000, 1000, 1000, 500]
 
 
 def test_batch_urls_refusals(client: TestClient, batch_calls: list[int]) -> None:

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any, Final
 
 from starlette.datastructures import FormData
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 
@@ -24,6 +25,33 @@ RAW_MAX_CHARS: Final = 10_000
 ARTIFACT_URL: Final = re.compile(
     r"/v1/jobs/([A-Za-z0-9_-]+)/artifacts/([A-Za-z0-9_-][A-Za-z0-9_.-]*)"
 )
+
+
+# Starlette's default form limits: fields and files, and the bytes of one field.
+FORM_DEFAULT_COUNT: Final = 1000
+FORM_DEFAULT_PART: Final = 1_048_576
+
+
+async def read_form(
+    request: Request,
+    *,
+    max_part_size: int = FORM_DEFAULT_PART,
+    max_fields: int = FORM_DEFAULT_COUNT,
+    max_files: int = FORM_DEFAULT_COUNT,
+) -> FormData | str:
+    """The form of ``request`` read with these limits, or the message why it cannot be read:
+    "The form could not be read: " and Starlette's reason (a field or part over
+    ``max_part_size``, too many fields or files, a malformed multipart body), which names a
+    limit, never the content. A body over the route's limit (413) is raised on: the app answers
+    it."""
+    try:
+        return await request.form(
+            max_files=max_files, max_fields=max_fields, max_part_size=max_part_size
+        )
+    except HTTPException as error:
+        if error.status_code != 400:
+            raise
+        return f"The form could not be read: {error.detail}"
 
 
 def envelope_message(body: dict[str, Any] | None, status: int) -> str:

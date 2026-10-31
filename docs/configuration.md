@@ -780,7 +780,10 @@ progress:
   with the batch preview (below): the rows that are not used, and "Start batch" for the valid
   URLs with the options chosen. The key is checked before the form is read; the form takes at
   most `max(UI_TREE_MAX_URLS, BATCH_MAX_OPEN_PER_CLIENT × BATCH_MAX_URLS)` + 64 fields (one per
-  checked box of the tree), else "The form has too many fields.". The URLs are split into batches of `BATCH_MAX_URLS`; more batches than
+  checked box of the tree), and a typed list may fill the route's whole body limit. A form that
+  cannot be read is answered with "The form could not be read: " and the reason (too many
+  fields, a part too large, malformed). The URLs are split into batches of `BATCH_MAX_URLS`;
+  more batches than
   `BATCH_MAX_OPEN_PER_CLIENT` is refused ("Select at most <n> URLs at once.") and nothing is
   sent. Otherwise the batches are sent one after another; a refused part (such as the 429 while
   other jobs are open) stops the rest and is shown beside the jobs already started, which keep
@@ -827,6 +830,13 @@ Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/fi
 `/ui/run/chunk` that of `POST /v1/chunk`, `/ui/run/batch-file` `UI_BATCH_FILE_MAX_BYTES` + 64 KiB,
 `/ui/run/batch-urls` `BATCH_MAX_OPEN_PER_CLIENT` times that of `POST /v1/batch`, every other route
 `REQUEST_MAX_BODY_BYTES`. A larger body answers 413 `invalid_request` before it is read whole.
+One field of a form may fill its route's whole limit: the Chunk tab posts its text as multipart
+(no percent-encoding), so a text the chunk route takes goes through (it is forwarded as JSON,
+and the JSON escapes count against that route's limit). `/ui/run/file` and `/ui/run/chunk` check
+the key and the rate limit before the body is read, as their REST routes do; the check does not
+count, the forwarded call counts the view's one hit. A form that cannot be read is answered with
+"The form could not be read: " and the reason (too many fields or files, a part too large,
+malformed).
 
 Behind an ingress or a proxy, give `/ui` the read timeout of `/mcp` (at least `MCP_WAIT_SECONDS` +
 70 s: the forms wait 25 s plus the route's hand-over time) and a body size of at least the largest

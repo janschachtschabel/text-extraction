@@ -172,6 +172,12 @@ async def ui_principal(request: Request) -> Principal:
     return principal
 
 
+def form_part_limit(settings: Settings, path: str) -> int:
+    """The largest field of a ``/ui/run`` route's form: the route's whole body limit (Starlette's
+    default of 1 MiB would refuse a text or URL list the REST route takes)."""
+    return run_body_limits(settings).get(path, settings.request_max_body_bytes)
+
+
 def run_body_limits(settings: Settings) -> dict[str, int]:
     """The body limits of the ``/ui/run`` routes that take more than ``REQUEST_MAX_BODY_BYTES``
     (P10-S14): a file as the upload route takes it, a text to chunk as the chunk route, a batch
