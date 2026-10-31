@@ -14,7 +14,7 @@ Englisch.
 Im Aufbau: Die Pakete 0 bis 11 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion, Jobs
 und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe); Paket 12 (Sprachen der Oberfläche,
-Entsperroption, zweisprachige Dokumentation) ist in Arbeit. Die Pakete und ihren Stand zeigt
+Entsperroption, zweisprachige Dokumentation) wird geprüft. Die Pakete und ihren Stand zeigt
 [docs/packages.md](docs/packages.md#status) (Englisch).
 
 ## Zwei Arten der Extraktion

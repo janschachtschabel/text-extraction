@@ -49,6 +49,13 @@ without a tag.
   sizing and an example production values file, the environment reference, the cost notes for the
   LLM and ASR, the hand-over document, Dependabot, this changelog and a `mode` input for the
   `live.yml` regression.
+- Package 12, UI languages, unblock option and bilingual docs: maximum extraction, which falls
+  back to the browser on a plain 403, 429 or 503 for an admin with `compliance: ignore` and
+  `BROWSER_UNBLOCK_ENABLED`; the playground in German and English with a language switch and no
+  cookie, a "Site rules" choice and a "Browser fallback" select, help texts and status messages,
+  and checks for WCAG 2.2 A and AA with a vendored axe-core 4.14.0 and keyboard tests; and the
+  READMEs and a user guide in German and English, kept in sync by tests and a pull request
+  check.
 
 ### Not in this release
 

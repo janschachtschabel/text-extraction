@@ -13,7 +13,7 @@ and a playground in English and German.
 Under construction: packages 0-11 are merged (foundation, service skeleton, fast extraction,
 jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over); package 12 (UI languages, unblock option,
-bilingual docs) is in progress. See
+bilingual docs) is in review. See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Two ways to extract
