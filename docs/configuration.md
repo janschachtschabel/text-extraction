@@ -9,8 +9,8 @@ chart README has the [full values table](../deploy/helm/text-extraction/README.m
 Every setting with its default. In Helm, put a variable under `config.<NAME>` in the values; it
 lands in the chart's ConfigMap with the same name (values are strings). The secrets among them,
 marked **Secret**, never go under `config`: see [Secrets](#secrets) for where they belong. The
-chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods (value `jobs.enabled`),
-`WORKER_CONCURRENCY` on the extract workers (value `workers.extract.concurrency`),
+chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` on the API pods
+(value `jobs.enabled`), `WORKER_CONCURRENCY` on the extract workers (value `workers.extract.concurrency`),
 `BROWSER_CONCURRENCY` on the browser workers (value `workers.browser.concurrency`), and
 `BROWSER_ENABLED` and `BROWSER_UNBLOCK_ENABLED` on every pod (values `workers.browser.enabled` and
 `workers.browser.unblock`); values for them under `config` are ignored.
@@ -248,9 +248,12 @@ comes back in a few milliseconds. A request that needs a worker after its fast p
 without `wait_seconds`: a browser render up to `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline
 + 5 s more (70 s in all by default, 100 s with unblock mode), OCR up to `DOCLING_SYNC_WAIT_SECONDS`
 more, and `pii` and LLM work up to `PII_SYNC_WAIT_SECONDS` and `LLM_SYNC_WAIT_SECONDS` more on top
-of those (a browser render with both: 120 s, 150 s with unblock mode). Give an ingress or a
-gateway a read timeout that covers this, at least 120 s. A caller that does not want to hold the connection sends `wait_seconds` (0-60):
-an extraction still running after that long continues in the pod and becomes a job (202,
+of those (a browser render with both: 120 s, 150 s with unblock mode). These totals apply only
+when the pod cannot hand the request over to a job (`EXTRACT_MAX_BACKGROUND` reached, or the
+Valkey memory guard high); normally a request with `pii` or LLM work answers 202 with its job
+after its implicit wait (the largest default that applies, 20 s or 30 s). Give an ingress or a
+gateway a read timeout that covers the totals, at least 120 s. A caller that does not want to
+hold the connection sends `wait_seconds` (0-60): an extraction still running after that long continues in the pod and becomes a job (202,
 `GET /v1/jobs/{id}`); `JOBS_ENABLED=false` ignores `wait_seconds`. On SIGTERM `/ready` turns 503
 at once and both ports keep serving for `SHUTDOWN_DRAIN_SECONDS` (5); then the public port stops
 accepting connections and gives requests in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds
@@ -683,10 +686,12 @@ a job, or when a refused `get_job` or `cancel_job` was asked for one), the princ
 envelope's `trace_id` carries too. Tool arguments are never logged; FastMCP's and the MCP SDK's
 own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
 
-Behind an ingress or a proxy, give `/mcp` a read timeout of at least `MCP_WAIT_SECONDS` + 70 s
-(95 s by default: a tool call ends within `MCP_WAIT_SECONDS` plus the route's own hand-over time)
-and a body size of at least its body limit (about 27 MB with the default `DOCUMENT_MAX_BYTES`; about 33 MB where uploads are transcribed, from `MEDIA_UPLOAD_MAX_BYTES`), or
-`extract_file` calls are cut off before the service sees them. The Helm chart's README lists
+Behind an ingress or a proxy, give `/mcp` a read timeout of at least 120 s (150 s with unblock
+mode and requests that combine it with `pii` and LLM work), or `MCP_WAIT_SECONDS` + 70 s if
+larger (95 s by default: a tool call ends within `MCP_WAIT_SECONDS` plus the route's own
+hand-over time), and a body size of at least its body limit (about 27 MB with the default
+`DOCUMENT_MAX_BYTES`; about 33 MB where uploads are transcribed, from `MEDIA_UPLOAD_MAX_BYTES`),
+or `extract_file` calls are cut off before the service sees them. The Helm chart's README lists
 annotations for ingress-nginx.
 
 | Variable | Default | Meaning |

@@ -177,7 +177,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |
-| `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least this + 70 s, see [MCP and playground](#mcp-and-playground). |
+| `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least 120 s, or this + 70 s if larger, see [MCP and playground](#mcp-and-playground). |
 | `config.MCP_MAX_CONTENT_CHARS` | `"50000"` | Most content characters of one tool answer; the rest is fetched with `content_offset`. |
 | `config.MCP_IMAGE_MAX_BYTES` | `"5000000"` | Largest screenshot attached to a tool answer (0: never attached, only linked). |
 | `config.UI_TREE_MAX_URLS` | `"5000"` | Most URLs the site tree of one site job shows. |
@@ -551,9 +551,11 @@ URLs while they are on. Their settings are the `config.MCP_*` and `config.UI_*` 
   warn when `ui.enabled` goes with `AUTH_MODE=none`.
 - **The ingress** already routes `/` to the public Service, so `/mcp` and `/ui` need no paths of
   their own. Its timeouts and body size must fit them:
-  - a read and send timeout of at least `MCP_WAIT_SECONDS` + 70 s (95 s with the default 25 s): a
-    tool call or a playground form waits up to `MCP_WAIT_SECONDS` (the forms 25 s) plus the
-    route's own hand-over time before it answers a job;
+  - a read and send timeout of at least 120 s (150 s with unblock mode and requests that combine
+    it with `pii` and LLM work, see item 4 of [docs/handover.md](../../../docs/handover.md)), or
+    `MCP_WAIT_SECONDS` + 70 s if larger (95 s with the default 25 s): a tool call or a playground
+    form waits up to `MCP_WAIT_SECONDS` (the forms 25 s) plus the route's own hand-over time
+    before it answers a job;
   - a body size of at least the largest upload: `/mcp` takes a file as base64,
     `ceil(DOCUMENT_MAX_BYTES / 3) x 4 + 64 KiB` (about 27 MB by default, about 33 MB with ASR
     workers, where `workers.asr.uploadMaxBytes` sets the upload limit), the playground's file form

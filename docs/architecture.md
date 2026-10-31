@@ -2542,8 +2542,8 @@ UI calls are counted as the REST requests they forward.
 **Deployment (P10-S21).** Helm `mcp.enabled` and `ui.enabled` (both false) render `MCP_ENABLED`
 and `UI_ENABLED` on the API pods only; entries for them under `config` are ignored (left out of the
 ConfigMap). The other `MCP_*` and `UI_*` settings are `config` entries with their defaults. The
-ingress already routes `/`; its read timeout must cover a tool call (at least `MCP_WAIT_SECONDS` +
-70 s) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
+ingress already routes `/`; its read timeout must cover a tool call (at least 120 s, or `MCP_WAIT_SECONDS`
++ 70 s if larger) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
 the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for the `api` service
 (local development; `MCP_ENABLED=false` or `UI_ENABLED=false` switches them off).
 
@@ -2601,4 +2601,5 @@ baselines").
 | WLO URL sets (25 / 200 / 4,000) and live result buckets | Playwright service | Regression harness |
 | Baseline 2026-09-28 on 4,000 URLs: fast 68 %, browser 80 %; medians 0.5 s / 9-10 s | Playwright service | Bar to beat: the live gate is `wlo_200` in `auto` mode at 80 % (D2) |
 | diskcache state on local disk | Selenium service | Replaced by Valkey |
+| The full 4,000-URL regression for fast, browser and `auto` (likewise the 2026-09-28 baselines) | Playwright service | Planned, not run yet: `live.yml` takes a `mode` input (`auto`, `fast`, `browser`) for a manual `url_set: wlo_4000` run, to compare with the baselines above; until then only the `wlo_200` gate has a result for the current service |
 | Resources set by estimate | Earlier packages (placeholders in the Helm chart) | Replaced by the load test's measurements (runs 41190110782 and 41194228955): requests from the memory p95 and CPU mean, limits 1.5 × the peak and never below the children's address-space budgets; `STRUCTURED_SELECTOR_PROCESSES` stays 1 |

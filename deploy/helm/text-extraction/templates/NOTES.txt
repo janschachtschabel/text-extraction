@@ -19,8 +19,10 @@ Playground (ui.enabled): {{ $base }}/ui{{ if not $open }} (log in with an API ke
 {{- end }}
 {{- if and .Values.ingress.enabled (or .Values.mcp.enabled .Values.ui.enabled) }}
 
-Give the ingress a read timeout of at least MCP_WAIT_SECONDS + 70 s ({{ add (get .Values.config "MCP_WAIT_SECONDS" | default "25" | int) 70 }} s) and a body size
-  that fits /mcp and /ui (see "MCP and playground" in the chart README).
+Give the ingress a read timeout of at least 120 s (150 s with unblock mode and requests that
+  combine it with pii and LLM work; docs/handover.md item 4), or MCP_WAIT_SECONDS + 70 s
+  ({{ add (get .Values.config "MCP_WAIT_SECONDS" | default "25" | int) 70 }} s) if larger, and a body size that fits /mcp and /ui (see "MCP and
+  playground" in the chart README).
 {{- end }}
 {{- if and .Values.ui.enabled $open }}
 

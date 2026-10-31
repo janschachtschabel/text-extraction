@@ -1009,9 +1009,10 @@ ingress_notes="$(render_notes --set mcp.enabled=true --set ui.enabled=true --set
   --set 'ingress.tls[0].hosts[0]=te.example.org')"
 expect_contains "notes name the MCP URL of the ingress" "$ingress_notes" "https://te.example.org/mcp"
 expect_contains "notes name the UI URL of the ingress" "$ingress_notes" "https://te.example.org/ui"
-expect_contains "notes give the ingress read timeout" "$ingress_notes" "MCP_WAIT_SECONDS + 70 s (95 s)"
+expect_contains "notes give the ingress read timeout" "$ingress_notes" "read timeout of at least 120 s (150 s with unblock mode"
+expect_contains "notes give the MCP_WAIT_SECONDS bound" "$ingress_notes" "MCP_WAIT_SECONDS + 70 s"
 expect_contains "the ingress read timeout follows MCP_WAIT_SECONDS" \
-  "$(render_notes --set ui.enabled=true --set ingress.enabled=true --set config.MCP_WAIT_SECONDS=60)" "(130 s)"
+  "$(render_notes --set ui.enabled=true --set ingress.enabled=true --set config.MCP_WAIT_SECONDS=60)" "(130 s) if larger"
 expect_absent "no ingress note without an ingress" "$(render_notes --set mcp.enabled=true)" "read timeout"
 expect_contains "notes give the Claude Code command with the key header" \
   "$(render_notes --set mcp.enabled=true)" '--header "Authorization: Bearer <key>"'
