@@ -89,6 +89,14 @@ expect_absent() {
   if grep -qF -- "$needle" <<<"$output"; then fail "$label: '$needle' present"; else pass "$label"; fi
 }
 
+# The container resources in the Deployment $2: limits CPU $3 and memory $4, requests CPU $5 and
+# memory $6, as one block (toYaml sorts limits before requests and cpu before memory).
+expect_resources() {
+  local label="$1" output="$2"
+  expect_contains "$label" "$(flat "$output")" \
+    "resources: limits: cpu: $3 memory: $4 requests: cpu: $5 memory: $6"
+}
+
 expect_render_fails() {
   local label="$1" message="$2" output
   shift 2
@@ -136,7 +144,7 @@ expect_absent "browser worker has no public port" "$browser" "containerPort: 808
 expect_contains "browser worker root filesystem is read-only" "$browser" "readOnlyRootFilesystem: true"
 expect_contains "browser worker /tmp is bounded" "$browser" "sizeLimit: 2Gi"
 expect_contains "browser worker grace period" "$browser" "terminationGracePeriodSeconds: 150"
-expect_contains "browser worker memory request" "$browser" "memory: 2Gi"
+expect_contains "browser worker memory request" "$browser" "memory: 1152Mi"
 expect_contains "browser worker memory limit" "$browser" "memory: 4608Mi"
 expect_values "browser worker" "$browser" BROWSER_CONCURRENCY "4"
 expect_absent "browser worker gets no WORKER_CONCURRENCY" "$browser" "name: WORKER_CONCURRENCY"
@@ -322,7 +330,7 @@ expect_absent "docling worker keeps the image's init process" "$docling" "comman
 expect_contains "docling worker serves the internal port" "$docling" "containerPort: 9090"
 expect_absent "docling worker has no public port" "$docling" "containerPort: 8080"
 expect_contains "docling worker grace period" "$docling" "terminationGracePeriodSeconds: 60"
-expect_contains "docling worker memory request" "$docling" "memory: 3Gi"
+expect_contains "docling worker memory request" "$docling" "memory: 1600Mi"
 expect_contains "docling worker memory limit" "$docling" "memory: 8Gi"
 expect_contains "docling workers stay on amd64 nodes" "$docling" "kubernetes.io/arch: amd64"
 expect_contains "docling worker internal Service" "$(document "$docling_on" Service "$DOCLING-internal")" "port: 9090"
@@ -480,9 +488,9 @@ expect_absent "asr worker keeps the image's init process" "$asr" "command:"
 expect_contains "asr worker serves the internal port" "$asr" "containerPort: 9090"
 expect_absent "asr worker has no public port" "$asr" "containerPort: 8080"
 expect_contains "asr worker grace period" "$asr" "terminationGracePeriodSeconds: 60"
-expect_contains "asr worker memory request" "$asr" "memory: 3Gi"
+expect_contains "asr worker memory request" "$asr" "memory: 1408Mi"
 expect_contains "asr worker memory limit" "$asr" "memory: 6Gi"
-expect_contains "asr worker CPU limit" "$asr" 'cpu: "4"'
+expect_contains "asr worker CPU limit" "$asr" "cpu: 5500m"
 expect_contains "asr workers stay on amd64 nodes" "$asr" "kubernetes.io/arch: amd64"
 expect_contains "asr worker internal Service" "$(document "$asr_on" Service "$ASR-internal")" "port: 9090"
 init="$(awk '/^      initContainers:/ { f = 1 } /^      containers:/ { f = 0 } f' <<<"$asr")"
@@ -493,7 +501,7 @@ expect_contains "asr init container mounts the models" "$init" "mountPath: /mode
 expect_absent "asr init container mount is writable" "$init" "readOnly: true"
 expect_contains "asr init container root filesystem is read-only" "$init" "readOnlyRootFilesystem: true"
 expect_contains "asr init container requests little memory" "$(flat "$init")" "requests: cpu: 100m memory: 256Mi"
-expect_absent "asr init container does not take the worker's resources" "$init" "memory: 3Gi"
+expect_absent "asr init container does not take the worker's resources" "$init" "memory: 1408Mi"
 expect_contains "models resources follow workers.asr.models.resources" \
   "$(document "$(render --set workers.asr.enabled=true --set workers.asr.models.resources.limits.memory=2Gi)" Deployment "$ASR")" \
   "memory: 2Gi"
@@ -675,7 +683,7 @@ expect_absent "nlp worker keeps the image's init process" "$nlp" "command:"
 expect_contains "nlp worker serves the internal port" "$nlp" "containerPort: 9090"
 expect_absent "nlp worker has no public port" "$nlp" "containerPort: 8080"
 expect_contains "nlp worker grace period" "$nlp" "terminationGracePeriodSeconds: 60"
-expect_contains "nlp worker CPU request" "$(flat "$nlp")" "requests: cpu: \"1\" memory: 2Gi"
+expect_contains "nlp worker CPU request" "$(flat "$nlp")" "requests: cpu: 750m memory: 1728Mi"
 expect_contains "nlp worker memory limit" "$(flat "$nlp")" "limits: cpu: \"2\" memory: 3Gi"
 expect_contains "nlp worker internal Service" "$(document "$nlp_on" Service "$NLP-internal")" "port: 9090"
 # The init container downloads into a writable mount, the worker reads it read-only.
@@ -848,8 +856,8 @@ expect_absent "llm worker is not an nlp worker" "$llm" "PII_MODEL"
 expect_contains "llm worker serves the internal port" "$llm" "containerPort: 9090"
 expect_absent "llm worker has no public port" "$llm" "containerPort: 8080"
 expect_contains "llm worker grace period" "$llm" "terminationGracePeriodSeconds: 40"
-expect_contains "llm worker CPU request" "$(flat "$llm")" "requests: cpu: 100m memory: 256Mi"
-expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: \"1\" memory: 1Gi"
+expect_contains "llm worker CPU request" "$(flat "$llm")" "requests: cpu: 150m memory: 256Mi"
+expect_contains "llm worker memory limit" "$(flat "$llm")" "limits: cpu: 750m memory: 1Gi"
 expect_contains "llm worker internal Service" "$(document "$llm_on" Service "$LLM-internal")" "port: 9090"
 expect_contains "llm worker replicas" "$llm" "replicas: 1"
 expect_absent "llm workers create no volume claim" "$(render --set workers.llm.enabled=true)" "kind: PersistentVolumeClaim"
@@ -1027,6 +1035,27 @@ expect_absent "no open-UI warning under api_key" \
   "$(render_notes --set ui.enabled=true)" "$open_ui_warning"
 expect_absent "no open-UI warning while the UI is off" \
   "$(render_notes --set config.AUTH_MODE=none)" "$open_ui_warning"
+
+# --- Measured resources --------------------------------------------------------------------------
+
+# Requests and limits from the load runs (docs/configuration.md, "Resource baselines"): request =
+# the measured memory p95 and CPU mean, limit = 1.5 x the peak, but never below the memory that
+# backs the children's address-space budgets.
+sized="$(render --set workers.docling.enabled=true --set workers.asr.enabled=true \
+  --set workers.nlp.enabled=true --set workers.llm.enabled=true)"
+expect_resources "API resources" "$(document "$sized" Deployment "$API")" 3750m 2560Mi 1400m 832Mi
+expect_resources "extract worker resources" "$(document "$sized" Deployment "$EXTRACT")" 1750m 2560Mi 450m 768Mi
+expect_resources "browser worker resources" "$(document "$sized" Deployment "$BROWSER")" 2250m 4608Mi 750m 1152Mi
+expect_resources "docling worker resources" "$(document "$sized" Deployment "$DOCLING")" 5500m 8Gi 2250m 1600Mi
+expect_resources "asr worker resources" "$(document "$sized" Deployment "$ASR")" 5500m 6Gi 3050m 1408Mi
+expect_resources "nlp worker resources" "$(document "$sized" Deployment "$NLP")" '"2"' 3Gi 750m 1728Mi
+expect_resources "llm worker resources" "$(document "$sized" Deployment "$LLM")" 750m 1Gi 150m 256Mi
+expect_resources "valkey resources (Guaranteed QoS)" \
+  "$(document "$sized" Deployment "$RELEASE-text-extraction-valkey")" 500m 1280Mi 500m 1280Mi
+for name in "$API" "$EXTRACT" "$BROWSER"; do
+  expect_values "the measured limits keep 768 MiB per document child ($name)" \
+    "$(document "$sized" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
+done
 
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2

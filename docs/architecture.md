@@ -468,7 +468,9 @@ is, so an item can still be somewhat over the limit; values are bounded by their
 **Valkey memory (P5, R18).** Valkey runs with `--maxmemory 768mb --maxmemory-policy noeviction`:
 eviction would drop gate, lease or job keys silently, while noeviction fails writes loudly (503).
 Its memory request equals its limit, 1280Mi (Guaranteed QoS), so maxmemory is 60 % of the limit
-and leaves room for fragmentation, buffers and the AOF fork. Package 11 measures real sizes.
+and leaves room for fragmentation, buffers and the AOF fork. The load test used at most 53 MiB of
+it with one pod per pool (a crawl at `SITE_MAX_PAGES` 4.2 MiB, a 200,000-entry sitemap 12.8 MiB;
+configuration.md, "Resource baselines"), so the limit stays sized for the results held at once.
 
 **Memory guard (R28).** Under noeviction a full Valkey fails every write, and with it the rate
 limiter, the outbound gate and the job reads, for as long as the results stay (up to
@@ -1374,7 +1376,9 @@ the media set without gating it (D1).
   `DOCUMENT_MAX_BYTES` while ASR is off is a 413 (the path limit widens only with ASR).
 - **What the ASR child needs in memory** (`ASR_MEMORY_LIMIT_MB`, 4096, an address-space limit)
   is first measured in CI's `media` job (the long clip prints VmPeak and VmHWM) and in the live
-  run; package 11 sets the final resources.
+  run. In the load test the ASR worker with `large-v3-turbo` used 1350 MiB (p95, 1380 at its
+  peak) and about 3 of 4 cores for one transcription; the chart's limit keeps the child's
+  4096 MiB (configuration.md, "Resource baselines").
 - **Cached final failures.** A transcription that failed for a reason of the media's own
   (`media_too_long`, undecodable media, the item's budget) leaves the video's details cached (a
   refused key does not); a later request without
@@ -1982,7 +1986,9 @@ positional; `selector_key` escapes the owner; `learn_selectors` without a page s
 - **One selector child per process by default.** Requests with selector rules wait for it in turn,
   and the wait counts against their `STRUCTURED_SELECTOR_TIMEOUT_SECONDS`: a burst of slow rules
   makes later ones answer `selectors_timed_out` (raise `STRUCTURED_SELECTOR_PROCESSES` for more at
-  once). A page whose BeautifulSoup tree needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB
+  once). The load test's sweep (P11-S5, issue #19) found 1 enough: 1, 2 and 4 children served
+  23.2, 24.0 and 22.9 req/s at a p95 of 605, 622 and 623 ms, and each extra child took about
+  36 MiB. A page whose BeautifulSoup tree needs more than `STRUCTURED_SELECTOR_MEMORY_MB` (a 5 MB
   page needs about 310 MB of address space) answers `selectors_failed`.
 - **`metadata` matches by name.** A field is filled only where the page uses its name (`author`
   matches `author`, not `creator`); `<meta name>` lists are split at commas, so an author `Doe,
@@ -2320,10 +2326,20 @@ a report-only step of the live workflow.
   that waits longer than its budget (`EXTRACT_TIMEOUT_SECONDS` × 2, 50 s) plus 5 s fails `timeout`,
   retryable, with "the worker was busy". Many large sitemaps at once therefore take slots from
   page items; more worker pods spread them.
+- **No `SITE_PARSE_CONCURRENCY` (ruling R-P11-8).** Package 9 left a setting for the size of the
+  sitemap pool open until the load test. Load run 41194228955 (commit `b7499cc`) measured one
+  50 MiB sitemap at 3.8 s, three in flight at once at 8.9 s and one sitemap of 200,000 entries at
+  8.9 s (job times). Three take 2.3 × one, above the P11-S7 mark of 2 ×, but only because one
+  thread parses them in turn by design: the worst case of three files at
+  `SITE_SITEMAP_MAX_BYTES` adds about 5 s. A crawl at `SITE_MAX_PAGES` took 51 s against
+  `JOB_TTL_SECONDS` of 24 h, and the event loop was held at most about 1 s (0.9 s in all for the
+  200,000 entries, 1.1 s for the three files). So the one-thread pool is not the bottleneck and
+  the setting is not added; the numbers are in configuration.md, "Resource baselines".
 - **Memory.** A sitemap item holds the raw body (up to `SITE_SITEMAP_MAX_BYTES`, 50 MiB), the
   inflated copy of a gzip file (up to the same) and the parsed entries while it runs; several in
   one pod (fetched while one parses) add up. Size the extract worker's memory limit with that
-  headroom; package 11 measures it.
+  headroom: three 50 MiB sitemaps in flight took the load test's worker from about 560 to
+  766 MiB, well inside its 2560Mi limit.
 - **Shutdown.** A sitemap item's budget (50 s) outlasts the workers' shutdown grace (30 s by
   default): on SIGTERM such an item is cancelled and runs again on another worker after its lease,
   without duplicates (P9-S12).
@@ -2561,6 +2577,15 @@ the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship 
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.
 
+**Resource baselines.** The load test (`.github/workflows/load.yml`, `tests/load/`, rulings
+P11-S1 to P11-S7) runs the compose stack with every profile against a local site farm and a fake
+LLM endpoint, one scenario at a time, and samples `docker stats` every 2 s. Its reports give CPU
+(mean, p95, max) and memory (p95, max) per container and scenario, the latency and throughput of
+each scenario, the LLM bytes per call, the site jobs' duration and Valkey bytes, and the extract
+worker's event-loop lag (`text_extraction_event_loop_lag_seconds`, read from its internal port).
+The Helm chart's requests and limits are sized from two such runs (configuration.md, "Resource
+baselines").
+
 ## Lessons from the previous services
 
 | Topic | Source | Taken over |
@@ -2571,3 +2596,4 @@ are never logged.
 | WLO URL sets (25 / 200 / 4,000) and live result buckets | Playwright service | Regression harness |
 | Baseline 2026-09-28 on 4,000 URLs: fast 68 %, browser 80 %; medians 0.5 s / 9-10 s | Playwright service | Bar to beat: the live gate is `wlo_200` in `auto` mode at 80 % (D2) |
 | diskcache state on local disk | Selenium service | Replaced by Valkey |
+| Resources set by estimate | Earlier packages (placeholders in the Helm chart) | Replaced by the load test's measurements (runs 41190110782 and 41194228955): requests from the memory p95 and CPU mean, limits 1.5 × the peak and never below the children's address-space budgets; `STRUCTURED_SELECTOR_PROCESSES` stays 1 |

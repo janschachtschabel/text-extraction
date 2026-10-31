@@ -319,7 +319,7 @@ The Helm keys, with the variables they render (the full table is in the
 | `workers.browser.concurrency` | `4` | `BROWSER_CONCURRENCY` on the browser workers. |
 | `workers.browser.replicaCount` | `2` | Replicas, unless KEDA or HPA scale them. |
 | `workers.browser.terminationGracePeriodSeconds` | `150` | See Response times. |
-| `workers.browser.resources`, `workers.browser.tmpSizeLimit` | 1 / 2Gi to 2 / 4608Mi, `2Gi` | Sized for four pages and the selector child. |
+| `workers.browser.resources`, `workers.browser.tmpSizeLimit` | 750m / 1152Mi to 2250m / 4608Mi, `2Gi` | Measured with four pages (see [Resource baselines](#resource-baselines)); the memory limit holds the selector child and the conversions too. |
 | `workers.browser.nodeSelector` | `kubernetes.io/arch: amd64` | The image exists for linux/amd64 only. |
 | `workers.browser.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `browser` queue or on CPU. |
 | `workers.browser.image.repository`, `.tag` | `ghcr.io/janschachtschabel/text-extraction-browser`, chart version | The browser image. |
@@ -369,7 +369,7 @@ Docling worker and its models volume. The Helm keys (the full table is in the
 | `workers.docling.concurrency` | `1` | `DOCLING_CONCURRENCY` on the Docling workers. |
 | `workers.docling.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. |
 | `workers.docling.terminationGracePeriodSeconds` | `60` | See Response times. |
-| `workers.docling.resources` | 1 / 3Gi to 4 / 8Gi | Sized for one conversion. |
+| `workers.docling.resources` | 2250m / 1600Mi to 5500m / 8Gi | Measured for one conversion (see [Resource baselines](#resource-baselines)); the memory limit backs `DOCLING_MEMORY_LIMIT_MB`. |
 | `workers.docling.nodeSelector` | `kubernetes.io/arch: amd64` | The image is built for linux/amd64 only. |
 | `workers.docling.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `docling` queue or on CPU. |
 | `workers.docling.models.download`, `.downloadMode` | `true`, `init` | An init container (`init`) or a post-install/post-upgrade hook Job (`job`, needs `ReadWriteMany` or one node) fills the volume (`--download-models`); `false` needs `persistence.existingClaim`. |
@@ -429,7 +429,7 @@ the [chart README](../deploy/helm/text-extraction/README.md#asr-workers-and-the-
 | `workers.asr.concurrency` | `1` | `ASR_CONCURRENCY` on the ASR workers. |
 | `workers.asr.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. |
 | `workers.asr.terminationGracePeriodSeconds` | `60` | See Response times. |
-| `workers.asr.resources` | 2 / 3Gi to 4 / 6Gi | Sized for one transcription with `large-v3-turbo`. |
+| `workers.asr.resources` | 3050m / 1408Mi to 5500m / 6Gi | Measured for one transcription with `large-v3-turbo` (see [Resource baselines](#resource-baselines)); the memory limit backs `ASR_MEMORY_LIMIT_MB`. |
 | `workers.asr.scratch.sizeLimit` | `2Gi` | The emptyDir at `/scratch` (`ASR_SCRATCH_PATH`). |
 | `workers.asr.tmpSizeLimit` | `1Gi` | The emptyDir at `/tmp`. |
 | `workers.asr.nodeSelector` | `kubernetes.io/arch: amd64` | The image is published for linux/amd64. |
@@ -499,7 +499,7 @@ Helm keys (the full table is in the chart README):
 | `workers.nlp.concurrency` | `1` | `PII_CONCURRENCY` on the NLP workers; raise `resources` with it. |
 | `workers.nlp.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a request with `pii` waits only `PII_SYNC_WAIT_SECONDS`. |
 | `workers.nlp.terminationGracePeriodSeconds` | `60` | See Response times. |
-| `workers.nlp.resources` | 1 / 2Gi to 2 / 3Gi | Sized for one analysis child with the `lg` models; `md` needs about half. |
+| `workers.nlp.resources` | 750m / 1728Mi to 2 / 3Gi | Measured for one analysis child with the `lg` models (see [Resource baselines](#resource-baselines)); the memory limit backs `PII_MEMORY_LIMIT_MB`. `md` needs about half (not measured). |
 | `workers.nlp.nodeSelector` | `{}` | Merged over the global one; the published image is linux/amd64 only. |
 | `workers.nlp.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `nlp` queue or on CPU. |
 | `workers.nlp.hashKey.existingSecret`, `.existingSecretKey` | `""`, `PII_HASH_KEY` | Your own Secret with `PII_HASH_KEY` (an NLP worker's container only). Empty: a random key per result. |
@@ -556,7 +556,7 @@ transcription client is the same SDK). Neither the chart nor docker compose sets
 | `STRUCTURED_REGEX_TIMEOUT_SECONDS` | `0.5` | Time one caller-supplied pattern may take on a text (all its matches), in seconds; then its field stays missing with the warning `pattern_timeout`. All patterns of one result share a fixed total of 2 s on top of it. 0.05 to 5. |
 | `CHUNK_MAX_CHUNKS` | `2000` | Most chunks of one result; more are cut with the warning `chunks_truncated`. Minimum 1. |
 | `STRUCTURED_SELECTOR_TIMEOUT_SECONDS` | `5` | Time all selector rules of one result (the caller's CSS and XPath, the learned ones, or the proposals that `learn_selectors` checks) may take together, in seconds, also capped by the request's own deadline; waiting for a free selector child counts against it. Then the child is killed and replaced: the rules' fields stay missing with the warning `selectors_timed_out` (for `learn_selectors`: nothing is learned, `selector_learning_failed`), and the result is not failed, nor written to the result cache (the next identical request runs the rules again). A CSS selector's cost has no other bound: soupsieve backtracks, and a few descendant combinators on a deeply nested page run for hours. 0.1 to 60. |
-| `STRUCTURED_SELECTOR_PROCESSES` | `1` | Selector child processes per pod (API, extract, browser and llm workers): selector rules run there, one result's rules at a time per child, never in the server process. Each idle child takes about 40 MB. Minimum 1. |
+| `STRUCTURED_SELECTOR_PROCESSES` | `1` | Selector child processes per pod (API, extract, browser and llm workers): selector rules run there, one result's rules at a time per child, never in the server process. Each idle child takes about 40 MB. Minimum 1. The load test's sweep found no gain from more children: 1 stays the default (see [Resource baselines](#resource-baselines)). |
 | `STRUCTURED_SELECTOR_MEMORY_MB` | `512` | Address space limit (`RLIMIT_AS`) of one selector child, in MiB, as `DOCUMENT_MEMORY_LIMIT_MB` is for the document children. A run that reaches it ends with the warning `selectors_failed` (its fields missing) and the child is replaced; a 5 MB page needs about 310 MB. Minimum 256. Count `STRUCTURED_SELECTOR_PROCESSES` x this into the pod's memory beside the document children: the Helm chart's default limits and `documentParentReserveMiB` values hold 512 MiB for it. |
 | `POST_CONCURRENCY` | `2` | Threads of the post stage per process (API pods and every worker): patterns, chunking, the `semantic` distances and the learning check's parsing run on a pool of their own, never on asyncio's default executor, which resolves host names. A finish point waits for a free thread. Minimum 1. |
 
@@ -585,7 +585,7 @@ docker compose: `.env` with `LLM_ENABLED=true` and the profile `llm`; the llm wo
 | `workers.llm.replicaCount` | `1` | Replicas, unless KEDA or HPA scale them. Keep one: a sync request waits only `LLM_SYNC_WAIT_SECONDS`. |
 | `workers.llm.gracefulSeconds` | `30` | `LLM_GRACEFUL_SECONDS` on the llm workers; the render fails outside 10 to 900 (a `config.LLM_GRACEFUL_SECONDS` entry is overridden on the llm workers, but every pod validates it at start (10 to 900, else exit code 2), so leave it out). Raise it with the grace period, e.g. to `LLM_TIMEOUT_SECONDS + 10`, so that a rollout does not pay calls in flight twice. |
 | `workers.llm.terminationGracePeriodSeconds` | `40` | See Response times. At least `workers.llm.gracefulSeconds` + 10, or the render fails. |
-| `workers.llm.resources` | 100m / 256Mi to 1 / 1Gi | Placeholder until package 11 measures real consumption; 512 MiB of it are the selector child. |
+| `workers.llm.resources` | 150m / 256Mi to 750m / 1Gi | Measured against a fake endpoint (see [Resource baselines](#resource-baselines)); 512 MiB of the limit are the selector child. |
 | `workers.llm.nodeSelector` | `{}` | Merged over the global one. |
 | `workers.llm.autoscaling.keda.*`, `.hpa.*` | off | Scale on the `llm` queue or on CPU. |
 | `alerts.llmQueueBacklogItems` | `100` | Threshold of `TextExtractionQueueBacklog` for the pool `llm`. |
@@ -638,8 +638,9 @@ Deployments at once, so send site jobs only once every pod runs the new release.
   spread them.
 - A sitemap item holds the raw file (up to `SITE_SITEMAP_MAX_BYTES`, 50 MiB), for a gzip file its
   inflated copy (up to the same) and the parsed entries; items that fetch while another parses
-  add up. Leave that headroom in the extract workers' memory limit (`workers.extract.resources`);
-  package 11 measures it.
+  add up. Leave that headroom in the extract workers' memory limit (`workers.extract.resources`):
+  three 50 MiB sitemaps at once took the load test's extract worker from about 560 to 766 MiB
+  (see [Resource baselines](#resource-baselines)).
 - A sitemap item may take 50 s, longer than the workers' shutdown grace (30 s by default): on
   SIGTERM it is cancelled and runs again on another worker after its lease, without duplicate
   items.
@@ -1135,3 +1136,108 @@ the pod keeps exporting the last values and logs `queue_metrics_unavailable` onc
 alert `TextExtractionQueueMetricsStale` uses `max()` and 120 s. With
 `JOBS_ENABLED=false` the pod does not
 read the queue and exports no queue gauge.
+
+## Resource baselines
+
+The Helm chart's requests and limits come from measurement under load, not from estimates (ops
+guide, section 5.3). The load test (`.github/workflows/load.yml`, `tests/load/`) starts the
+compose stack with every profile (one container per service) plus a local site farm and a fake
+OpenAI-compatible server, runs each scenario alone, and samples `docker stats` every 2 s. A
+scenario's numbers come only from the samples inside its window (its first request to its last
+answer plus a settle time). CPU is in % of one core. Memory is `MemUsage` in MiB: cgroup usage
+without the page cache. Percentiles are nearest-rank.
+
+Source runs, both on a GitHub `ubuntu-latest` runner (4 vCPU, 16 GB), on 2026-10-31:
+
+- **Run 4:** [41190110782](https://github.com/janschachtschabel/text-extraction/actions/runs/41190110782),
+  commit `ad80ae4`.
+- **Run 6:** [41194228955](https://github.com/janschachtschabel/text-extraction/actions/runs/41194228955),
+  commit `b7499cc`. It adds the site structure scenarios and the event-loop lag.
+
+Both runs used the production defaults for the models: ASR `large-v3-turbo` (int8, `ASR_THREADS`
+4) and PII `lg`. **ASR `small` and PII `md` were not measured.** Each run also swept
+`STRUCTURED_SELECTOR_PROCESSES` (1, 2, 4) on fresh stacks with the selector scenario only.
+
+**Load profile.** All targets are pages of the local farm; no request leaves the compose network.
+
+| Scenario | Requests (at once) | What it sends | p50 / p95 ms, run 4 | p50 / p95 ms, run 6 | Requests/s, run 4 / 6 |
+| --- | --- | --- | --- | --- | --- |
+| `sync-fast-c10` | 300 (10) | `POST /v1/extract`, fast mode | 398 / 609 | 395 / 615 | 22.7 / 22.5 |
+| `sync-fast-c30` | 900 (30) | the same at 30 clients | 436 / 646 | 531 / 778 | 68.3 / 54.5 |
+| `batch-1000` | 1 batch of 1,000 URLs | `POST /v1/batch`, until done | 50,136 | 50,152 | - |
+| `browser-100` | 100 (10) | `POST /v1/extract`, browser mode | 3,917 / 4,444 | 3,928 / 4,925 | 2.5 / 2.3 |
+| `upload-docs-50` | 50 (5) | `POST /v1/extract/file`, MarkItDown documents | 1,541 / 2,436 | 2,092 / 2,813 | 3.0 / 2.2 |
+| `upload-ocr-10` | 10 (2) | the same, a scanned PDF with `ocr: always` (Docling) | 8,959 / 9,963 | 11,974 / 13,984 | 0.21 / 0.17 |
+| `pii-200` | 200 (10) | `POST /v1/extract` with `pii: mask` | 1,052 / 1,440 | 1,332 / 1,875 | 9.2 / 7.2 |
+| `asr-10` | 10 (2) | audio uploads (a 30 s clip), each a job | 32,109 / 32,133 | 56,249 / 58,285 | - |
+| `structured-selectors-200` | 200 (10) | `POST /v1/structured`, selectors | 422 / 606 | 370 / 609 | 24.1 / 24.7 |
+| `structured-llm-50` | 50 (5) | `POST /v1/structured`, LLM (fake, 800 ms) | 1,739 / 2,232 | 1,831 / 2,428 | 2.8 / 2.6 |
+| `chunk-semantic-50` | 50 (5) | `POST /v1/chunk`, `semantic` (fake embeddings) | 1,797 / 2,824 | 1,816 / 2,353 | 2.7 / 2.6 |
+| `site-crawl` | 1 crawl | `POST /v1/site-structure` at the default caps | 2,010 | 6,024 | - |
+| `site-crawl-max-pages` | 1 crawl | the same at `SITE_MAX_PAGES` (1,000) | - | 52,161 | - |
+| `sitemap-200k` | 1 crawl | one sitemap of `SITE_MAX_SITEMAP_URLS` (200,000) entries | - | 10,042 | - |
+| `sitemap-50m-1` | 1 crawl | one 50 MiB sitemap | - | 4,022 | - |
+| `sitemaps-50m-3` | 1 crawl | three 50 MiB sitemaps in flight at once | - | 10,039 | - |
+| `mcp-20` | 20 (5) | MCP tool calls | 493 / 860 | 436 / 938 | 9.4 / 9.4 |
+
+Every request of both runs had its expected outcome (run 4's `site-crawl` was `partial`, as
+expected while the farm had no linked pages; run 6's is `success`). Runner speed varies: run 6's ASR clips took
+56 s against run 4's 32 s on the same code path.
+
+**Sizing rule.** Per component, over every scenario of both runs:
+
+- memory request = the largest memory p95, rounded up to the next 64Mi;
+- CPU request = the largest CPU mean, rounded up to the next 50m (with 2 s samples the CPU p95 is
+  a burst; the mean is the sustained demand);
+- limit = 1.5 x the largest peak, rounded up to the next 256Mi or 250m;
+- the memory limit is never below the value that backs a child process's address-space budget:
+  `DOCUMENT_MEMORY_LIMIT_MB` (the chart derives it from the limit), `DOCLING_MEMORY_LIMIT_MB`,
+  `ASR_MEMORY_LIMIT_MB`, `PII_MEMORY_LIMIT_MB` and `STRUCTURED_SELECTOR_MEMORY_MB`. The load's
+  documents, audio and texts are small and cannot show the worst case those budgets allow. Where
+  this floor applies, the table gives both numbers.
+
+| Component (compose service) | Image | Scenario of the peak | CPU mean / p95 / max % | Memory p95 / max MiB | Model share (idle MiB) | Request | Limit | Source |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| API pods (`api`) | `text-extraction` | `upload-docs-50` (CPU), `pii-200` (memory) | 139.4 / 239.5 / 239.5 | 808 / 808 | none (584, 580) | 1400m / 832Mi | 3750m / 2560Mi (rule: 1280Mi; floor: 2 document children of 768 MiB after the 1024 MiB reserve) | CPU run 6, memory run 4 |
+| Extract workers (`worker`) | `text-extraction` | `sitemap-200k` (CPU mean), `sitemap-50m-1` (CPU peak), `sitemaps-50m-3` (memory) | 43.7 / 113.0 / 113.0 | 766 / 766 | none (544, 550) | 450m / 768Mi | 1750m / 2560Mi (rule: 1280Mi; floor as for the API) | run 6 |
+| Browser workers (`browser-worker`) | `text-extraction-browser` | `browser-100` | 72.7 / 122.3 / 148.5 | 1137 / 1147 | none: Chromium (674, 842) | 750m / 1152Mi | 2250m / 4608Mi (rule: 1792Mi; floor: 2 document children of 768 MiB after the 3072 MiB reserve) | run 6 |
+| Docling workers (`docling-worker`) | `text-extraction-docling` | `upload-ocr-10` | 222.2 / 339.1 / 357.6 | 1540 / 1549 | 1139, 1243 (756 to 1061 on the fresh sweep stacks) | 2250m / 1600Mi | 5500m / 8Gi (rule: 2560Mi; floor: `DOCLING_MEMORY_LIMIT_MB` 6144 for one child) | CPU mean run 6, the rest run 4 |
+| ASR workers (`asr-worker`), `large-v3-turbo` | `text-extraction-asr` | `asr-10` | 301.6 / 354.6 / 359.4 | 1350 / 1380 | 1192, 1146 | 3050m / 1408Mi | 5500m / 6Gi (rule: 2304Mi; floor: `ASR_MEMORY_LIMIT_MB` 4096 for one child) | CPU run 6, memory run 4 |
+| ASR workers, `small` | `text-extraction-asr` | not measured | - | - | - | as above | as above | - |
+| NLP workers (`nlp-worker`), `lg` | `text-extraction-nlp` | `pii-200` | 74.6 / 130.7 / 130.7 | 1704 / 1704 | 1675, 1690 | 750m / 1728Mi | 2 / 3Gi (rule: 2560Mi; floor: `PII_MEMORY_LIMIT_MB` 3072 for one child) | run 6 |
+| NLP workers, `md` | `text-extraction-nlp` | not measured | - | - | - | as above | as above | - |
+| llm workers (`llm-worker`) | `text-extraction` | `chunk-semantic-50` (CPU), idle with 4 selector processes (memory; 204 MiB at the default 1) | 10.4 / 44.1 / 44.1 | 253 / 253 | none (138, 138) | 150m / 256Mi | 750m / 1Gi (rule: 512Mi; floor: the selector child's 512 MiB plus `describe_images`, which the load did not send) | CPU run 6, memory run 4 |
+| Bundled Valkey (`valkey`) | `valkey/valkey` | `site-crawl-max-pages` (CPU mean), `sitemap-200k` (CPU peak), `sitemaps-50m-3` (memory) | 3.6 / 12.7 / 12.7 | 53 / 53 | none (4, 4) | 500m / 1280Mi (rule: 50m / 64Mi) | 500m / 1280Mi (rule: 250m / 256Mi) | run 6 |
+
+Model share: for a worker that loads a model (Docling, ASR, NLP) it is the memory in the `idle`
+scenario of run 4 and run 6, which includes the worker's Python process. The components without
+a model give their idle memory in brackets. Valkey keeps its sizes: one instance serves every replica of every
+pool (the load ran one pod per pool), its memory request equals its limit (Guaranteed QoS) and its
+limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at once,
+not for this load.
+
+**Selector processes (P11-S5, issue #19).** The selector scenario on a fresh stack per value:
+
+| `STRUCTURED_SELECTOR_PROCESSES` | Requests/s, run 4 / 6 | p95 ms, run 4 / 6 | API memory p95 MiB, run 4 / 6 | API memory idle MiB, run 4 / 6 |
+| ---: | --- | --- | --- | --- |
+| 1 | 23.2 / 22.7 | 605 / 660 | 574 / 584 | 567 / 567 |
+| 2 | 24.0 / 21.5 | 622 / 650 | 610 / 611 | 604 / 604 |
+| 4 | 22.9 / 22.7 | 623 / 681 | 681 / 679 | 674 / 672 |
+
+More children buy no throughput at this load, and each extra child costs about 36 MiB. The
+default stays 1, the smallest value within 10 % of the best throughput (run 4's 24.0 req/s).
+
+**Site structure (P11-S7, run 6).**
+
+| Scenario | Items | Job s | Valkey MiB of the job | Extract worker memory max MiB | Event-loop lag: total s, samples over 100 ms, max s |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `site-crawl` | 102 | 6.0 | 0.4 | 563 | 0.0, 0, 0.005 |
+| `site-crawl-max-pages` | 1,002 | 51.2 | 4.2 | 563 | 0.2, 0, 0.1 |
+| `sitemap-200k` | 15 | 8.9 | 12.8 | 712 | 0.9, 1, 1 |
+| `sitemap-50m-1` | 6 | 3.8 | 3.2 | 686 | 0.1, 0, 0.01 |
+| `sitemaps-50m-3` | 14 | 8.9 | 9.5 | 766 | 1.1, 2, 0.5 |
+
+A crawl at `SITE_MAX_PAGES` takes about a minute against `JOB_TTL_SECONDS` (24 h). The extract
+worker's event loop is held for at most about 1 s by the largest sitemap. Three 50 MiB sitemaps
+take 2.3 x one, because the pod's one sitemap thread parses them in turn: about 5 s in the worst
+case. `SITE_PARSE_CONCURRENCY` is therefore not added (architecture.md, "Site structure").
