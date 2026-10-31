@@ -834,8 +834,9 @@ Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/fi
 `REQUEST_MAX_BODY_BYTES`. A larger body answers 413 `invalid_request` before it is read whole.
 One field of a form may fill its route's whole limit: the Chunk tab posts its text as multipart
 (no percent-encoding), so a text the chunk route takes goes through (it is forwarded as JSON,
-and the JSON escapes count against that route's limit). `/ui/run/file` and `/ui/run/chunk` check
-the key and the rate limit before the body is read, as their REST routes do; the check does not
+and the JSON escapes count against that route's limit). Every single operation (`/ui/run/file`,
+`/ui/run/chunk` and the others) checks the key and the rate limit before the body is read, as its
+REST route does; the check does not
 count, the forwarded call counts the view's one hit. A form that cannot be read is answered with
 "The form could not be read: " and the reason (too many fields or files, a part too large,
 malformed). An answer htmx does not swap (such as that 413, the plain 403 of the guard or a 5xx)
