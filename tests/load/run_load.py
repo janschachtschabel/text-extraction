@@ -24,23 +24,39 @@ outcome is not one its scenario expects (an error never is).
 
 ``--farm-url`` must be local: a loopback or private IP address, or a single-label host name
 such as the compose service ``farm``. Anything else is refused before a request goes out.
+
+The site structure items (ruling P11-S7) go into the summary too:
+
+- **Site crawls**: per crawl its items (the job's ``total``), its duration (the request's
+  latency, read every ``--poll-seconds``) and the Valkey bytes of its keys. With
+  ``--valkey-cli`` (a command line, e.g. ``docker compose ... exec -T valkey valkey-cli``,
+  which authenticates from the container's ``REDISCLI_AUTH``) the generator lists the crawl's
+  keys (``job:{<id>}:*``) once it completed, when it holds every result, and sums their
+  ``MEMORY USAGE ... SAMPLES 0``. A failed read leaves the bytes unknown.
+- **Event-loop lag**: ``text_extraction_event_loop_lag_seconds`` (the extract worker's
+  histogram) per scenario and internal URL, from the ``/metrics`` read before and after it:
+  samples, mean, samples over 100 ms and the bound of the highest one.
 """
 
 import argparse
 import asyncio
 import ipaddress
 import json
+import math
 import os
+import shlex
+import subprocess
 import sys
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, TextIO
 from urllib.parse import urlsplit
 
 import httpx
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.load import stats
 from tests.load.fake_llm import BYTES_PER_TOKEN
@@ -60,6 +76,8 @@ READY_TIMEOUT_SECONDS = 300.0
 STATS_INTERVAL_SECONDS = stats.INTERVAL_SECONDS
 STATS_COMMAND: Sequence[str] = stats.DOCKER_STATS
 MCP_ACCEPT = "application/json, text/event-stream"
+LAG_METRIC = "text_extraction_event_loop_lag_seconds"
+VALKEY_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +91,20 @@ class Record:
     error_code: str | None
     latency_ms: int
     expected: bool  # the outcome is one the scenario expects
+    job_id: str | None = None  # an answer that was a job
+    items: int | None = None  # the completed job's items (``progress.total``)
+    valkey_bytes: int | None = None  # a crawl's keys at completion (``--valkey-cli``)
+
+
+@dataclass(frozen=True)
+class Lag:
+    """The event-loop lag samples of one scenario window: how many, their mean, how many were
+    over 100 ms, and the bucket bound of the highest (``inf``: above the last bound)."""
+
+    samples: int
+    mean_ms: int
+    over_100ms: int
+    max_bound_s: float
 
 
 def _transport() -> httpx.AsyncBaseTransport | None:
@@ -122,6 +154,50 @@ def _status_url(http_status: int, payload: object) -> str | None:
     return status_url if http_status == 202 and isinstance(status_url, str) else None
 
 
+def _job_id(payload: object) -> str | None:
+    data = payload.get("data") if isinstance(payload, dict) else None
+    job_id = data.get("id") if isinstance(data, dict) else None
+    return job_id if isinstance(job_id, str) else None
+
+
+def valkey_job_bytes(command: Sequence[str], job_id: str) -> int:
+    """The ``MEMORY USAGE`` (every element counted: ``SAMPLES 0``) summed over the keys of the
+    job, through ``command`` (a ``valkey-cli`` that reaches the stack's Valkey). Raises
+    ``subprocess.CalledProcessError`` or ``subprocess.TimeoutExpired`` when it fails."""
+    scan = subprocess.run(  # noqa: S603 - the operator's command line, no shell
+        [*command, "--scan", "--pattern", f"job:{{{job_id}}}:*"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=VALKEY_TIMEOUT_SECONDS,
+    )
+    keys = [key for key in scan.stdout.split() if key]
+    if not keys:
+        return 0
+    usage = subprocess.run(  # noqa: S603 - the operator's command line, no shell
+        list(command),
+        input="".join(f"MEMORY USAGE {key} SAMPLES 0\n" for key in keys),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=VALKEY_TIMEOUT_SECONDS,
+    )
+    # One answer a line: a number (``(integer) N`` on a terminal), or nothing for a key gone.
+    words = (line.split() for line in usage.stdout.splitlines())
+    return sum(int(parts[-1]) for parts in words if parts and parts[-1].isdigit())
+
+
+async def _valkey_bytes(command: Sequence[str] | None, job_id: str | None) -> int | None:
+    if command is None or job_id is None:
+        return None
+    try:
+        return await asyncio.to_thread(valkey_job_bytes, command, job_id)
+    except (OSError, subprocess.SubprocessError) as error:
+        # The command line and its output hold no secret; the error's type is enough.
+        print(f"valkey bytes of a crawl: {type(error).__name__}", file=sys.stderr)
+        return None
+
+
 async def _send(
     client: httpx.AsyncClient, scenario: Scenario, body: dict[str, object]
 ) -> httpx.Response:
@@ -139,14 +215,15 @@ async def _send(
 
 async def _follow(
     client: httpx.AsyncClient, status_url: str, poll_seconds: float
-) -> tuple[Outcome, str | None]:
-    """Read the job until it is ``completed``; its outcome by its items."""
+) -> tuple[Outcome, int | None]:
+    """Read the job until it is ``completed``; its outcome by its items, and how many."""
     while True:
         response = await client.get(status_url, params={"limit": 1})
         response.raise_for_status()
         job = response.json().get("data") or {}
         if job.get("state") == "completed":
-            return _job_outcome(job), None
+            total = (job.get("progress") or {}).get("total")
+            return _job_outcome(job), total if isinstance(total, int) else None
         await asyncio.sleep(poll_seconds)
 
 
@@ -158,13 +235,18 @@ async def request_once(
     *,
     poll_seconds: float = POLL_SECONDS,
     job_timeout: float = JOB_TIMEOUT_SECONDS,
+    valkey_cli: Sequence[str] | None = None,
 ) -> Record:
     """One request of a scenario, followed to its end. Never raises: a client failure is the
-    record's ``client_<ExceptionName>``, a job past ``job_timeout`` its ``job_timeout``."""
+    record's ``client_<ExceptionName>``, a job past ``job_timeout`` its ``job_timeout``. A
+    completed crawl's keys are measured through ``valkey_cli`` (after its latency is taken)."""
     started = time.monotonic()
     http_status: int | None = None
     outcome: Outcome
     code: str | None
+    job_id: str | None = None
+    items: int | None = None
+    completed = False
     try:
         async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
             response = await _send(client, scenario, scenario.body(index, farm_url))
@@ -177,9 +259,11 @@ async def request_once(
         if scenario.kind == "mcp" and http_status == 200:
             outcome, code = _mcp_outcome(payload)
         elif status_url is not None:
+            job_id, code = _job_id(payload), None
             try:
                 async with asyncio.timeout(job_timeout):
-                    outcome, code = await _follow(client, status_url, poll_seconds)
+                    outcome, items = await _follow(client, status_url, poll_seconds)
+                completed = True
             except TimeoutError:
                 outcome, code = "error", "job_timeout"
         elif http_status == 200:
@@ -190,7 +274,20 @@ async def request_once(
         outcome, code = "error", f"client_{type(error).__name__}"
     latency_ms = round((time.monotonic() - started) * 1000)
     expected = outcome in scenario.expected
-    return Record(scenario.name, index, http_status, outcome, code, latency_ms, expected)
+    crawl = scenario.kind == "site" and completed
+    valkey_bytes = await _valkey_bytes(valkey_cli if crawl else None, job_id)
+    return Record(
+        scenario.name,
+        index,
+        http_status,
+        outcome,
+        code,
+        latency_ms,
+        expected,
+        job_id,
+        items,
+        valkey_bytes,
+    )
 
 
 async def run_scenario(
@@ -201,11 +298,15 @@ async def run_scenario(
     sink: TextIO,
     poll_seconds: float = POLL_SECONDS,
     job_timeout: float = JOB_TIMEOUT_SECONDS,
+    valkey_cli: Sequence[str] | None = None,
+    collected: list[Record] | None = None,
 ) -> ScenarioResult:
     """All requests of one scenario, at most ``concurrency`` at once, each record written to
-    ``sink`` when it is done; then the settle time. The window is in epoch seconds."""
+    ``sink`` (and added to ``collected``) when it is done; then the settle time. The window is
+    in epoch seconds."""
     slots = asyncio.Semaphore(scenario.concurrency)
-    records: list[Record] = []
+    records: list[Record] = [] if collected is None else collected
+    first = len(records)
 
     async def one(index: int) -> None:
         async with slots:
@@ -216,6 +317,7 @@ async def run_scenario(
                 farm_url,
                 poll_seconds=poll_seconds,
                 job_timeout=job_timeout,
+                valkey_cli=valkey_cli,
             )
         records.append(record)
         sink.write(json.dumps(asdict(record)) + "\n")
@@ -229,6 +331,7 @@ async def run_scenario(
     await asyncio.sleep(scenario.settle_seconds)
     settle_end = time.time()
 
+    records = records[first:]
     counts = Counter(record.outcome for record in records)
     latencies = [float(record.latency_ms) for record in records]
     return ScenarioResult(
@@ -284,17 +387,105 @@ async def _wait_ready(client: httpx.AsyncClient, urls: Sequence[str]) -> None:
 
 async def _save_metrics(
     client: httpx.AsyncClient, urls: Sequence[str], out_dir: Path, scenario: str
-) -> None:
+) -> dict[str, str]:
+    """Save each URL's ``/metrics`` under ``metrics/``; the texts by netloc."""
+    texts: dict[str, str] = {}
     for url in urls:
-        name = urlsplit(url).netloc.replace(":", "_")
+        netloc = urlsplit(url).netloc
         try:
             response = await client.get(f"{url}/metrics")
         except httpx.HTTPError as error:
             print(f"metrics of {url}: {type(error).__name__}", file=sys.stderr)
             continue
-        target = out_dir / "metrics" / f"{scenario}.{name}.prom"
+        target = out_dir / "metrics" / f"{scenario}.{netloc.replace(':', '_')}.prom"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(response.text, encoding="utf-8")
+        texts[netloc] = response.text
+    return texts
+
+
+def _histogram(text: str, name: str) -> tuple[dict[float, float], float] | None:
+    """The cumulative bucket counts (by upper bound) and the sum of histogram ``name``."""
+    for family in text_string_to_metric_families(text):
+        if family.name != name or family.type != "histogram":
+            continue
+        buckets: dict[float, float] = {}
+        total = 0.0
+        for sample in family.samples:
+            if sample.name == f"{name}_bucket":
+                buckets[float(sample.labels["le"])] = sample.value
+            elif sample.name == f"{name}_sum":
+                total = sample.value
+        return buckets, total
+    return None
+
+
+def lag_between(before: str, after: str) -> Lag | None:
+    """The lag samples taken between two ``/metrics`` texts (``before`` may be empty: from
+    zero); None when ``after`` has no lag histogram."""
+    later = _histogram(after, LAG_METRIC)
+    if later is None:
+        return None
+    earlier = _histogram(before, LAG_METRIC) or ({}, 0.0)
+    buckets = {
+        bound: count - earlier[0].get(bound, 0.0) for bound, count in sorted(later[0].items())
+    }
+    samples = round(buckets.get(math.inf, 0.0))
+    total = later[1] - earlier[1]
+    over = samples - round(buckets.get(0.1, samples))
+    bound = next((bound for bound, count in buckets.items() if round(count) >= samples), math.inf)
+    mean_ms = round(total * 1000 / samples) if samples else 0
+    return Lag(samples=samples, mean_ms=mean_ms, over_100ms=over, max_bound_s=bound)
+
+
+def _site_table(records: Sequence[Record], crawls: Collection[str]) -> str:
+    """The table of the jobs of the ``crawls`` scenarios."""
+    rows = [record for record in records if record.scenario in crawls and record.job_id]
+    if not rows:
+        return ""
+    lines = [
+        "",
+        "### Site crawls",
+        "",
+        "Duration: from the request to the poll that saw the job completed (compare with "
+        "JOB_TTL_SECONDS, which nothing renews mid-crawl). Valkey: MEMORY USAGE of the job's "
+        "keys at completion; - when not read.",
+        "",
+        "| Scenario | Items | Duration s | Valkey bytes | Valkey MiB |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    for record in rows:
+        size = record.valkey_bytes
+        mib = "-" if size is None else f"{size / 2**20:.1f}"
+        lines.append(
+            f"| {record.scenario} | {record.items} | {record.latency_ms / 1000:.1f} "
+            f"| {'-' if size is None else size} | {mib} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _lag_table(lags: Mapping[str, Mapping[str, Lag]]) -> str:
+    rows = [
+        (scenario, url, lag) for scenario, by_url in lags.items() for url, lag in by_url.items()
+    ]
+    if not rows:
+        return ""
+    lines = [
+        "",
+        "### Event-loop lag",
+        "",
+        f"{LAG_METRIC}, sampled every 0.5 s, in the scenario's window (the reads before and "
+        "after it). Max: the bucket bound of the highest sample.",
+        "",
+        "| Scenario | Internal URL | Samples | Mean ms | Over 100 ms | Max s |",
+        "| --- | --- | ---: | ---: | ---: | ---: |",
+    ]
+    for scenario, url, lag in rows:
+        bound = "> last bound" if math.isinf(lag.max_bound_s) else f"{lag.max_bound_s:g}"
+        lines.append(
+            f"| {scenario} | {url} | {lag.samples} | {lag.mean_ms} | {lag.over_100ms} | {bound} |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 async def _llm_counts(client: httpx.AsyncClient, url: str | None) -> dict[str, dict[str, int]]:
@@ -395,6 +586,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="the stack's STRUCTURED_SELECTOR_PROCESSES, as a label of the run",
     )
     parser.add_argument("--fake-llm-url", default=None, help="the fake LLM's base URL")
+    parser.add_argument(
+        "--valkey-cli",
+        default=None,
+        type=shlex.split,
+        metavar="COMMAND",
+        help="a valkey-cli command line that reaches the stack's Valkey, for the Valkey bytes "
+        "of each crawl",
+    )
     parser.add_argument("--poll-seconds", type=float, default=POLL_SECONDS)
     parser.add_argument("--job-timeout", type=float, default=JOB_TIMEOUT_SECONDS)
     args = parser.parse_args(argv)
@@ -417,12 +616,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def amain(args: argparse.Namespace) -> int:
     plan = [scenario for scenario in SCENARIOS if not args.only or scenario.name in args.only]
+    crawls = {scenario.name for scenario in plan if scenario.kind == "site"}
     out_dir: Path = args.out_dir
     headers = {"Authorization": f"Bearer {os.environ[args.api_key_env]}"}
     limits = httpx.Limits(max_connections=max(scenario.concurrency for scenario in plan) + 5)
     windows: dict[str, tuple[float, float]] = {}
     results: list[ScenarioResult] = []
     llm_usage: dict[str, tuple[int, dict[str, dict[str, int]]]] = {}
+    records: list[Record] = []
+    lags: dict[str, dict[str, Lag]] = {}
     sampler = stats.Sampler(
         out_dir / "stats.jsonl", interval=STATS_INTERVAL_SECONDS, command=STATS_COMMAND
     )
@@ -445,6 +647,7 @@ async def amain(args: argparse.Namespace) -> int:
                     idle = await _idle()
                     windows[idle.name] = (idle.start, idle.settle_end)
                     results.append(idle)
+                    metrics = await _save_metrics(side, args.internal_urls, out_dir, idle.name)
                     for scenario in plan:
                         print(f"{scenario.name}: {scenario.count} requests", file=sys.stderr)
                         before = await _llm_counts(side, args.fake_llm_url)
@@ -455,17 +658,33 @@ async def amain(args: argparse.Namespace) -> int:
                             sink=sink,
                             poll_seconds=args.poll_seconds,
                             job_timeout=args.job_timeout,
+                            valkey_cli=args.valkey_cli,
+                            collected=records,
                         )
                         windows[scenario.name] = (result.start, result.settle_end)
                         results.append(result)
                         if args.fake_llm_url is not None:
                             after = await _llm_counts(side, args.fake_llm_url)
                             llm_usage[scenario.name] = (result.requests, _delta(before, after))
-                        await _save_metrics(side, args.internal_urls, out_dir, scenario.name)
+                        texts = await _save_metrics(
+                            side, args.internal_urls, out_dir, scenario.name
+                        )
+                        lags[scenario.name] = {
+                            url: lag
+                            for url, text in texts.items()
+                            if (lag := lag_between(metrics.get(url, ""), text)) is not None
+                        }
+                        metrics = texts
     finally:
         # Also after a failure: the scenarios that ran keep their summary and sizing.
         summary = _write_reports(
-            out_dir, sampler.samples, windows, results, llm_usage, args.selector_processes
+            out_dir,
+            sampler.samples,
+            windows,
+            results,
+            llm_usage,
+            args.selector_processes,
+            extra=_site_table(records, crawls) + _lag_table(lags),
         )
     print(summary)
     unexpected = [result.name for result in results if result.unexpected]
@@ -485,8 +704,11 @@ def _write_reports(
     results: Sequence[ScenarioResult],
     llm_usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]],
     selector_processes: int | None,
+    *,
+    extra: str = "",
 ) -> str:
-    """Write ``summary.md`` and ``sizing.json``; the summary's text."""
+    """Write ``summary.md`` (with the ``extra`` tables) and ``sizing.json``; the summary's
+    text."""
     rows = summarise(samples, windows)
     heading = "Load test"
     if selector_processes is not None:
@@ -495,6 +717,7 @@ def _write_reports(
     summary = markdown(rows, results, heading=heading)
     if llm_usage:
         summary += _llm_table(llm_usage)
+    summary += extra
     (out_dir / "summary.md").write_text(summary, encoding="utf-8")
     report = {
         "selector_processes": selector_processes,

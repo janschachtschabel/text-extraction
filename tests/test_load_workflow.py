@@ -343,6 +343,14 @@ def _check_targets(run: str) -> None:
     assert sorted(url.rsplit(":", 1)[1] for url in internal) == published
 
 
+def test_the_run_reads_valkey_inside_its_container() -> None:
+    """The crawls' Valkey bytes come from valkey-cli in the valkey container, which
+    authenticates from its own REDISCLI_AUTH: the password is on no command line."""
+    for run in [c for c in _run_sweep("1").calls if c.startswith("uv ")]:
+        assert f"--valkey-cli docker compose {COMPOSE_ARGS} exec -T valkey valkey-cli" in run
+        assert "VALKEY_PASSWORD" not in run
+
+
 def test_a_value_that_is_not_a_whole_number_starts_nothing() -> None:
     code, calls, stderr, _ = _run_sweep("1,x")
     assert code != 0

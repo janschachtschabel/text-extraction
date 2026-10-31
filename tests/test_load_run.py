@@ -446,3 +446,172 @@ def test_llm_table_gives_tokens_per_scenario_request() -> None:
     assert "| structured-llm-50 | embeddings |" not in table  # no calls, no row
     # An embedding has no completion.
     assert "| chunk-semantic-50 | embeddings | 50 | 100000 | 0 | 500 | - |" in table
+
+
+# --- the site structure items (ruling P11-S7) -----------------------------------------------------
+
+# A stand-in for ``valkey-cli`` in the valkey container: ``--scan --pattern P`` lists the keys
+# that match P, and commands on stdin answer one line each. It logs its calls to ``calls.log``.
+VALKEY_STUB = """
+import fnmatch, sys
+from pathlib import Path
+here = Path(__file__).parent
+sizes = {"job:{j1}:meta": 300, "job:{j1}:results": 20_000_000, "job:{j2}:meta": 7}
+with (here / "calls.log").open("a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\\n")
+if (here / "fail").exists():
+    sys.exit("connection refused")
+if sys.argv[1:3] == ["--scan", "--pattern"]:
+    pattern = sys.argv[3].replace("{", "[{]").replace("}", "[}]")
+    for key in sizes:
+        if fnmatch.fnmatchcase(key, pattern):
+            print(key)
+else:
+    for line in sys.stdin:
+        command, sub, key, *rest = line.split()
+        assert (command, sub, rest) == ("MEMORY", "USAGE", ["SAMPLES", "0"]), line
+        print(sizes.get(key, ""))
+"""
+
+
+def valkey_stub(tmp_path: Path) -> list[str]:
+    script = tmp_path / "valkey_cli.py"
+    script.write_text(VALKEY_STUB)
+    return [sys.executable, str(script)]
+
+
+def run_site(
+    tmp_path: Path, kind: str = "site", *, total: int = 1111
+) -> tuple[ScenarioResult, list[dict[str, Any]]]:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json=accepted("j1"))
+        return httpx.Response(200, json=job("completed", total=total))
+
+    plan = scenario(kind, "/v1/site-structure", count=1, concurrency=1)
+    sink = io.StringIO()
+
+    async def go() -> ScenarioResult:
+        async with httpx.AsyncClient(
+            base_url="http://api.load.test", transport=httpx.MockTransport(handler)
+        ) as client:
+            return await run_load.run_scenario(
+                client, plan, FARM, sink=sink, poll_seconds=0, valkey_cli=valkey_stub(tmp_path)
+            )
+
+    result = asyncio.run(go())
+    return result, [json.loads(line) for line in sink.getvalue().splitlines()]
+
+
+def test_a_crawl_records_its_items_and_the_valkey_bytes_of_its_keys(tmp_path: Path) -> None:
+    """MEMORY USAGE of every key of the job (``job:{<id>}:*``), read when the crawl completed."""
+    result, [record] = run_site(tmp_path)
+
+    assert result.outcomes == {"success": 1}
+    assert record["job_id"] == "j1"
+    assert record["items"] == 1111
+    assert record["valkey_bytes"] == 20_000_300  # the keys of job j1 only
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert calls[0] == "--scan --pattern job:{j1}:*"
+
+
+def test_the_valkey_bytes_are_read_for_crawls_only(tmp_path: Path) -> None:
+    _, [record] = run_site(tmp_path, "batch")
+
+    assert record["items"] == 1111
+    assert record["valkey_bytes"] is None
+    assert not (tmp_path / "calls.log").exists()
+
+
+def test_a_failed_valkey_read_leaves_the_bytes_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "fail").touch()
+
+    result, [record] = run_site(tmp_path)
+
+    assert result.outcomes == {"success": 1}  # the crawl's outcome is the job's
+    assert record["valkey_bytes"] is None
+    assert "valkey" in capsys.readouterr().err
+
+
+LAG = "text_extraction_event_loop_lag_seconds"
+
+
+def lag_text(buckets: dict[str, int], total: float) -> str:
+    """The metrics text of a lag histogram with these cumulative bucket counts."""
+    lines = [f"# HELP {LAG} Event-loop lag.", f"# TYPE {LAG} histogram"]
+    lines += [f'{LAG}_bucket{{le="{le}"}} {count}' for le, count in buckets.items()]
+    lines += [f"{LAG}_count {buckets['+Inf']}", f"{LAG}_sum {total}"]
+    return "\n".join(lines) + "\n"
+
+
+def test_the_lag_of_a_scenario_is_the_difference_of_two_reads() -> None:
+    before = lag_text({"0.01": 10, "0.1": 10, "1.0": 10, "5.0": 10, "+Inf": 10}, 0.05)
+    after = lag_text({"0.01": 50, "0.1": 55, "1.0": 57, "5.0": 58, "+Inf": 58}, 4.05)
+
+    lag = run_load.lag_between(before, after)
+
+    assert lag is not None
+    assert lag.samples == 48
+    assert lag.mean_ms == round(4000 / 48)
+    assert lag.over_100ms == 3  # 58 - 55
+    assert lag.max_bound_s == 5.0  # the highest sample is at most 5 s, above 1 s
+    assert run_load.lag_between("", after) == run_load.lag_between(
+        lag_text({"+Inf": 0}, 0), after
+    )  # no read before: from zero
+    assert run_load.lag_between(before, "other_metric 1\n") is None  # not exported
+
+
+def test_the_lag_above_the_last_bound_says_so() -> None:
+    after = lag_text({"0.01": 1, "5.0": 1, "+Inf": 2}, 9.0)
+
+    lag = run_load.lag_between("", after)
+
+    assert lag is not None
+    assert lag.max_bound_s == float("inf")
+
+
+def test_the_site_and_lag_tables() -> None:
+    records = [
+        run_load.Record("sitemap-200k", 0, 202, "success", None, 12_340, True, "j1", 3, 25_165_824),
+        run_load.Record("site-crawl", 0, 202, "success", None, 61_000, True, "j2", 100, None),
+        run_load.Record("sync-fast-c10", 0, 200, "success", None, 300, True),
+    ]
+    lags = {
+        "sitemap-200k": {"127.0.0.1:9091": run_load.Lag(10, 120, 2, 2.5)},
+        "site-crawl": {"127.0.0.1:9091": run_load.Lag(4, 1, 0, 0.005)},
+    }
+
+    site = run_load._site_table(records, {"sitemap-200k", "site-crawl"})
+    lag = run_load._lag_table(lags)
+
+    assert "| sitemap-200k | 3 | 12.3 | 25165824 | 24.0 |" in site
+    assert "| site-crawl | 100 | 61.0 | - | - |" in site
+    assert "sync-fast-c10" not in site
+    assert "JOB_TTL_SECONDS" in site
+    assert "| sitemap-200k | 127.0.0.1:9091 | 10 | 120 | 2 | 2.5 |" in lag
+    assert "| site-crawl | 127.0.0.1:9091 | 4 | 1 | 0 | 0.005 |" in lag
+    assert run_load._lag_table({}) == ""
+    assert run_load._site_table(records[2:], {"sitemap-200k", "site-crawl"}) == ""
+
+
+def test_main_reads_valkey_through_the_given_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(202, json=accepted("j1"))
+        return httpx.Response(200, json=job("completed", total=4))
+
+    prepare(monkeypatch, handler, [scenario("site", "/v1/site-structure", count=1, concurrency=1)])
+    stub = " ".join(valkey_stub(tmp_path))
+    out = tmp_path / "out"
+    out.mkdir()
+
+    code = run_load.main(arguments(out, "--valkey-cli", stub))
+
+    assert code == 0
+    summary = (out / "summary.md").read_text()
+    assert "| test-site | 4 |" in summary
+    assert "| 20000300 |" in summary
