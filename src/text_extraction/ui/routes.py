@@ -197,7 +197,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             return templates.TemplateResponse(request, "form_error.html", {"message": forwarded})
         answer, curl = forwarded
         mode = body.get("mode")
-        screenshot, screenshot_note = await screenshot_of(request, answer.body)
+        screenshot, screenshot_note, screenshot_detail = await screenshot_of(request, answer.body)
         # In a thread: a long content's Markdown takes a while to render.
         html = await asyncio.to_thread(
             render_result,
@@ -209,6 +209,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             requested_mode=mode if mode in _MODES else None,
             screenshot=screenshot,
             screenshot_note=screenshot_note,
+            screenshot_detail=screenshot_detail,
             language=request_language(request),
         )
         return HTMLResponse(html)

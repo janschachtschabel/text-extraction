@@ -20,7 +20,7 @@
     <label class="inline"><input type="checkbox" name="sitemaps" value="on" checked aria-describedby="site-sitemaps-hint"> {{ t("form.sitemaps") }}</label>
     <p class="hint" id="site-sitemaps-hint">{{ t("hint.sitemaps") }}</p>
   </fieldset>
-  {% set access_site = true %}
+  {% set access_variant = "site" %}
   {% include "forms/access.html" %}
   {% include "forms/options.html" %}
   <button type="submit">{{ t("form.read_site") }}</button>

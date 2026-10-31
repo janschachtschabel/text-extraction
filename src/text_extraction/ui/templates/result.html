@@ -34,6 +34,7 @@
   <img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}">
   {% elif screenshot_note %}
   <p class="screenshot-note">{{ t(screenshot_note) }}</p>
+  {% with detail=screenshot_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
   {% endif %}
   {% if data %}
   {% if data["title"] %}<h3 class="title">{{ data["title"] }}</h3>{% endif %}

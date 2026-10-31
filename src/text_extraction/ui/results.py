@@ -291,12 +291,14 @@ def result_context(
     requested_mode: RequestedMode | None = None,
     screenshot: str | None = None,
     screenshot_note: Message | None = None,
+    screenshot_detail: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
 ) -> dict[str, Any]:
     """The context of ``result.html`` for one REST answer: ``envelope`` is its JSON object (None
     for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its PNG (or
-    ``screenshot_note`` why it could not be read), ``retry_after`` the seconds of a 429. An
+    ``screenshot_note`` why it could not be read, with the API's English
+    ``screenshot_detail``), ``retry_after`` the seconds of a 429. An
     error is shown as the text of its code (``error_text``) with the API's English message and
     ``details`` below it."""
     envelope = envelope or {}
@@ -319,6 +321,7 @@ def result_context(
         "curl": curl,
         "screenshot": screenshot,
         "screenshot_note": screenshot_note,
+        "screenshot_detail": screenshot_detail,
         "job": None,
         "info": None,
         "data": None,
@@ -382,6 +385,7 @@ def render_result(
     requested_mode: RequestedMode | None = None,
     screenshot: str | None = None,
     screenshot_note: Message | None = None,
+    screenshot_detail: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
     language: Language = "en",
@@ -397,6 +401,7 @@ def render_result(
         requested_mode=requested_mode,
         screenshot=screenshot,
         screenshot_note=screenshot_note,
+        screenshot_detail=screenshot_detail,
         retry_after=retry_after,
         item=item,
     )

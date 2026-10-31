@@ -1,7 +1,12 @@
 {%- if access_choice in ("enabled", "disabled") %}
 {%- set access_off = access_choice == "disabled" %}
 {%- set chosen_access = chosen["access"] if chosen and chosen["access"] == "maximum" and not access_off else "respect" %}
-{%- set maximum_hint = "hint.access.maximum_site" if access_site else "hint.access.maximum" %}
+{#- What "maximum" does differs by form (``access_variant``): a site crawl never renders, a
+screenshot always does, and a chunked text has no page. -#}
+{%- if access_variant == "site" %}{% set maximum_hint = "hint.access.maximum_site" %}
+{%- elif access_variant == "screenshot" %}{% set maximum_hint = "hint.access.maximum_screenshot" %}
+{%- elif access_variant == "chunk" %}{% set maximum_hint = "hint.access.maximum_chunk" %}
+{%- else %}{% set maximum_hint = "hint.access.maximum" %}{% endif %}
 {%- set off_id = prefix ~ "-access-off-hint" %}
 <fieldset class="choice access"{% if access_off %} disabled aria-describedby="{{ off_id }}"{% endif %}>
   <legend>{{ t("access.legend") }}</legend>

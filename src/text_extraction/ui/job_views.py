@@ -48,7 +48,7 @@ from text_extraction.ui.answers import (
 )
 from text_extraction.ui.forms import OPERATIONS, OptionsError, access_choice, build_body
 from text_extraction.ui.forward import Forwarded, forward
-from text_extraction.ui.i18n import Message
+from text_extraction.ui.i18n import Code, Message
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
 from text_extraction.ui.site_tree import FOUND_LABELS, SiteTree, TreeBuilder
@@ -185,7 +185,7 @@ def _elapsed(start: datetime, end: datetime | None) -> Message:
 def _item_state(item: JobItem) -> Message:
     if item.run is None:
         return QUEUED
-    return Message("progress.running", {"pool": item.run.pool, "attempt": item.run.attempts})
+    return Message("progress.running", {"pool": Code(item.run.pool), "attempt": item.run.attempts})
 
 
 def _item_link(job_id: str, index: int, mode: RequestedMode | None) -> str:
@@ -749,7 +749,7 @@ async def job_item_view(request: Request) -> Response:
         context = {"index": item.index, "state": _item_state(item)}
         return templates.TemplateResponse(request, "item_state.html", context)
     envelope = item.result.model_dump(mode="json")
-    screenshot, screenshot_note = await screenshot_of(request, envelope)
+    screenshot, screenshot_note, screenshot_detail = await screenshot_of(request, envelope)
     html = await asyncio.to_thread(
         render_result,
         op="job",
@@ -760,6 +760,7 @@ async def job_item_view(request: Request) -> Response:
         requested_mode=_mode(params.get("mode")),
         screenshot=screenshot,
         screenshot_note=screenshot_note,
+        screenshot_detail=screenshot_detail,
         item=item,
         language=request_language(request),
     )
@@ -775,8 +776,8 @@ async def artifact_view(request: Request) -> Response:
     found = artifact_of({"data": {"screenshot": {"url": url}}})
     if found is None or not JOB_ID.fullmatch(job_id):
         return _form_error(request, NOT_AN_ARTIFACT)
-    screenshot, note = await read_screenshot(request, *found)
-    context = {"screenshot": screenshot, "note": note}
+    screenshot, note, detail = await read_screenshot(request, *found)
+    context = {"screenshot": screenshot, "note": note, "detail": detail}
     return templates.TemplateResponse(request, "artifact.html", context)
 
 

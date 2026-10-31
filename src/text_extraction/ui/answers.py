@@ -16,8 +16,7 @@ from text_extraction.ui.forms import OPERATIONS, OptionsError, error_control
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Language, Message
 from text_extraction.ui.results import render_result
-from text_extraction.ui.templating import request_language
-from text_extraction.ui.texts import error_text
+from text_extraction.ui.texts import HTTP_ANSWER, error_text
 from text_extraction.vision.images import data_url, sniff_image
 
 # The key headers a curl line names (with a shell variable, never the value).
@@ -67,15 +66,6 @@ def envelope_error(body: Mapping[str, Any] | None, status: int) -> tuple[Message
     return error_text(error.get("code"), status), message if isinstance(message, str) else None
 
 
-def envelope_message(
-    body: Mapping[str, Any] | None, status: int, language: Language
-) -> tuple[str, str | None]:
-    """`envelope_error` with its text in ``language``: the translated ``error.<code>`` text and
-    the API's English message."""
-    text, message = envelope_error(body, status)
-    return text.text(language), message
-
-
 # The id of the element that sent an htmx request (a form's id).
 TRIGGER_HEADER: Final = "hx-trigger"
 
@@ -111,33 +101,43 @@ def artifact_of(envelope: Mapping[str, Any] | None) -> tuple[str, str] | None:
     return (found[1], found[2]) if found is not None else None
 
 
-async def read_screenshot(
-    request: Request, job_id: str, name: str
-) -> tuple[str | None, Message | None]:
+# A screenshot the view shows: its ``data:`` URI, or the note why it could not be read and the
+# API's English message of that failure (each None when there is none).
+Screenshot = tuple[str | None, Message | None, str | None]
+
+
+def screenshot_failure(body: Mapping[str, Any] | None, status: int) -> tuple[Message, str | None]:
+    """The note of an artifact read that answered ``status``, and the API's English message:
+    "HTTP <status>" and the text of a known code, or "The service answered HTTP <status>." once
+    for an unknown one."""
+    text, detail = envelope_error(body, status)
+    if text.key == HTTP_ANSWER:
+        return Message("screenshot.failed", {"message": text}), detail
+    return Message("screenshot.http_error", {"status": status, "message": text}), detail
+
+
+async def read_screenshot(request: Request, job_id: str, name: str) -> Screenshot:
     """The ``data:`` URI of the PNG artifact ``name`` of job ``job_id``, read from the artifact
-    route (a REST call with the browser's key), or the note why it could not be read (in the
-    request's language)."""
+    route (a REST call with the browser's key), or the note why it could not be read (rendered
+    in the request's language) with the API's English message."""
     path = OPERATIONS["artifact"].path.format(job_id=job_id, name=name)
     try:
         answer = await forward(request, "GET", path)
     except ValueError:  # not a plain path under /v1/
-        return None, Message("screenshot.not_artifact")
+        return None, Message("screenshot.not_artifact"), None
     if answer.status != 200:
-        text, _ = envelope_message(answer.body, answer.status, request_language(request))
-        return None, Message("screenshot.http_error", {"status": answer.status, "message": text})
+        return None, *screenshot_failure(answer.body, answer.status)
     if sniff_image(answer.content) != "image/png":
-        return None, Message("screenshot.not_png")
-    return data_url(answer.content, "image/png"), None
+        return None, Message("screenshot.not_png"), None
+    return data_url(answer.content, "image/png"), None, None
 
 
-async def screenshot_of(
-    request: Request, envelope: Mapping[str, Any] | None
-) -> tuple[str | None, Message | None]:
-    """The screenshot an answer's ``data.screenshot`` references (`read_screenshot`); (None,
-    None) when the answer references none."""
+async def screenshot_of(request: Request, envelope: Mapping[str, Any] | None) -> Screenshot:
+    """The screenshot an answer's ``data.screenshot`` references (`read_screenshot`); all None
+    when the answer references none."""
     found = artifact_of(envelope)
     if found is None:
-        return None, None
+        return None, None, None
     return await read_screenshot(request, *found)
 
 

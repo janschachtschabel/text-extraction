@@ -849,6 +849,8 @@ def test_job_views_in_german(client: TestClient, monkeypatch: pytest.MonkeyPatch
         "wartet",
         "läuft in browser, Zuteilung 2",
     ]
+    # The pool is an identifier of the API, as in the timeline (ruling R-P12-4).
+    assert texts(section, ".//td[@class='item-state']/code") == ["browser"]
     assert texts(section, ".//p[@class='elapsed']")[0].startswith("Vergangen: ")
     # An unknown job: the translated text of its code, with the API's English message below.
     unknown = client.get("/ui/run/progress", params={"id": "f" * 32}, headers=german).text

@@ -37,6 +37,14 @@ WITH_CHOICE = {
     "site-structure": "site",
 }
 
+# The forms whose "maximum" hint says what that choice does there: a site crawl never renders, a
+# screenshot always does, and a chunked text has no page.
+MAXIMUM_HINTS = {
+    "site-structure": "hint.access.maximum_site",
+    "screenshot": "hint.access.maximum_screenshot",
+    "chunk": "hint.access.maximum_chunk",
+}
+
 
 def tree(html: str) -> Any:
     return lxml.html.fragment_fromstring(html, create_parent="div")
@@ -136,9 +144,7 @@ def test_choice_shown_only_to_admins() -> None:
                 en("access.maximum")
             ]
             assert described(admin, respect) == [en("hint.access.respect")]
-            maximum_hint = (
-                "hint.access.maximum_site" if name == "site-structure" else ("hint.access.maximum")
-            )
+            maximum_hint = MAXIMUM_HINTS.get(name, "hint.access.maximum")
             assert described(admin, maximum) == [en(maximum_hint, value="compliance: ignore")]
     with running(api_keys=KEYS, browser_enabled=True) as client:
         admin = app_root(client, ADMIN)
@@ -164,6 +170,32 @@ def test_forged_maximum_from_a_user_is_refused_by_rest() -> None:
         answer = run(client, "extract", url=PAGE, access="maximum")
 
     root = tree(answer.text)
+    assert texts(root, "//*[@class='http-status']") == ["HTTP 403"]
+    assert texts(root, "//*[@class='error-code']") == ["forbidden"]
+    assert fetcher.calls == []
+
+
+@pytest.mark.parametrize(
+    ("view", "fields"),
+    [
+        ("batch-urls", {"urls": PAGE}),
+        ("batch-urls", {"url": [PAGE]}),  # the site tree's selection
+        ("site-structure", {"url": PAGE}),
+    ],
+    ids=["batch", "tree-batch", "site-structure"],
+)
+def test_forged_maximum_from_a_user_starts_no_job(view: str, fields: dict[str, Any]) -> None:
+    """The job routes refuse a user's forged ``access=maximum`` too (REST's ``resolve_mode``):
+    403 ``forbidden``, and no job, so no page is fetched."""
+    fetcher = FakeFetcher({PAGE: fetched(body=ARTICLE)})
+    with running(fetcher, api_keys=KEYS, **BOTH_ON) as client:
+        answer = client.post(
+            f"/ui/run/{view}", data={**fields, "access": "maximum"}, headers={**HX, **AUTH}
+        )
+
+    assert answer.status_code == 200  # a fragment htmx swaps
+    root = tree(answer.text)
+    assert root.xpath("//section[contains(@class, 'job')]") == []
     assert texts(root, "//*[@class='http-status']") == ["HTTP 403"]
     assert texts(root, "//*[@class='error-code']") == ["forbidden"]
     assert fetcher.calls == []

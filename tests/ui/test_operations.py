@@ -20,13 +20,14 @@ from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import ItemRun, JobItem
 from text_extraction.structured.types import StructuredOptions
 from text_extraction.ui import results
+from text_extraction.ui.answers import screenshot_failure
 from text_extraction.ui.forms import (
     OPERATIONS,
     UI_METADATA_SCHEMA,
     OptionsError,
     build_body,
 )
-from text_extraction.ui.i18n import text_of
+from text_extraction.ui.i18n import text_of, translate
 from text_extraction.ui.markdown import render_markdown
 from text_extraction.ui.results import render_result
 from text_extraction.ui.texts import warning_text
@@ -696,8 +697,39 @@ def test_screenshot_read_failure_is_noted() -> None:
     root = tree(html)
     assert root.xpath("//img[@class='screenshot']") == []
     notes = texts(root, "//*[@class='screenshot-note']")
-    assert len(notes) == 1
-    assert notes[0].startswith("The screenshot could not be read: HTTP 429")
+    assert notes == [
+        "The screenshot could not be read: HTTP 429 " + translate("en", "error.rate_limited")
+    ]
+    # The API's own English message below it (P12-S5).
+    details = texts(
+        root,
+        "//*[@class='screenshot-note']/following-sibling::div[@class='api-detail'][1]"
+        "/p[@class='error-message']",
+    )
+    assert len(details) == 1
+    assert details[0]
+
+
+def test_screenshot_failure_names_the_status_once() -> None:
+    """A known code: its text after the status; an unknown one: "The service answered HTTP
+    <status>." once, never "HTTP 502 The service answered HTTP 502."."""
+    known = {"error": {"code": "not_found", "message": "Job not found."}}
+    unknown = {"error": {"code": "something_new", "message": "Bad gateway."}}
+
+    note, detail = screenshot_failure(known, 404)
+    assert text_of(note, "en") == (
+        "The screenshot could not be read: HTTP 404 " + translate("en", "error.not_found")
+    )
+    assert detail == "Job not found."
+    note, detail = screenshot_failure(unknown, 502)
+    assert text_of(note, "en") == (
+        "The screenshot could not be read: The service answered HTTP 502."
+    )
+    assert str(text_of(note, "de")).count("502") == 1
+    assert detail == "Bad gateway."
+    note, detail = screenshot_failure(None, 500)
+    assert str(text_of(note, "en")).count("500") == 1
+    assert detail is None
 
 
 def test_refusal_shows_when_to_retry() -> None:

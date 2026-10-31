@@ -340,6 +340,37 @@ def test_error_is_associated_with_its_field(ui: tuple[str, str]) -> None:
     assert console == []
 
 
+def test_an_error_that_replaces_its_target_is_not_announced_as_done(
+    ui: tuple[str, str],
+) -> None:
+    """The batch preview's form swaps its answer over the preview itself (outerHTML): a form
+    error then is the swapped root, and #ui-status must not say "Done." beside it."""
+    url, origin = ui
+    csv_file = f"url\n{origin}/docs/a.html\n".encode()
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.click("#tab-batch-file")
+        panel = page.locator("#panel-batch-file")
+        panel.locator("input[type=file]").set_input_files(
+            {"name": "urls.csv", "mimeType": "text/csv", "buffer": csv_file}
+        )
+        _submit(page, "batch-file")
+        page.wait_for_selector("#result .batch-preview #preview-options")
+        page.evaluate(_RECORD_STATUS)
+        page.fill("#preview-options", "{")
+        page.locator("#preview-form button[type=submit]").click()
+        expect(page.locator("#result > [role=alert]")).to_have_count(1)
+        page.wait_for_timeout(200)  # the swap settles
+        texts: list[str] = page.evaluate("window.uiStatusTexts")
+        status = page.locator("#ui-status").text_content()
+
+    assert translate("en", "status.sending") in texts
+    assert translate("en", "status.done") not in texts
+    assert status == ""
+    assert console == []
+
+
 def test_language_switch_keeps_the_login(ui: tuple[str, str]) -> None:
     url, _ = ui
     with browsing(url) as (page, console):

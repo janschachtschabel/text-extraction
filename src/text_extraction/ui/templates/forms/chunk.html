@@ -5,6 +5,7 @@
   <label for="chunk-url">URL</label>
   <input id="chunk-url" name="url" type="url" placeholder="https://" spellcheck="false" aria-describedby="chunk-source-hint chunk-url-hint">
   <p class="hint" id="chunk-url-hint">{{ t("hint.url") }}</p>
+  {% set access_variant = "chunk" %}
   {% include "forms/access.html" %}
   <label for="chunk-text">{{ t("form.text") }}</label>
   <textarea id="chunk-text" name="text" rows="6" aria-describedby="chunk-source-hint chunk-text-hint"></textarea>

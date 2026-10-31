@@ -1,1 +1,2 @@
-{% if screenshot %}<img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}">{% else %}<p class="screenshot-note">{{ t(note) }}</p>{% endif %}
+{% if screenshot %}<img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}">{% else %}<p class="screenshot-note">{{ t(note) }}</p>
+{% with detail_lines=none %}{% include "api_detail.html" %}{% endwith %}{% endif %}

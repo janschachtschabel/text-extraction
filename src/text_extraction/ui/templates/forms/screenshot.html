@@ -3,6 +3,7 @@
   <label for="screenshot-url">URL</label>
   <input id="screenshot-url" name="url" type="url" required placeholder="https://" spellcheck="false" aria-describedby="screenshot-url-hint">
   <p class="hint" id="screenshot-url-hint">{{ t("hint.url") }}</p>
+  {% set access_variant = "screenshot" %}
   {% include "forms/access.html" %}
   <fieldset class="choice">
     <legend>{{ t("form.capture") }}</legend>

@@ -397,7 +397,9 @@
     if (message) {
       announce(message);
     } else {
-      announce(root.querySelector("[role=alert]") ? "" : text("done"));
+      // An error that replaced its target (outerHTML) is the root itself.
+      var alert = root.matches("[role=alert]") || root.querySelector("[role=alert]");
+      announce(alert ? "" : text("done"));
     }
     tieError(root);
   });
