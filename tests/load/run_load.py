@@ -574,12 +574,13 @@ async def _llm_counts(client: httpx.AsyncClient, url: str | None) -> dict[str, d
 
 def _llm_table(usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]]) -> str:
     """The fake LLM's counts per scenario: per route the calls, bytes, and the tokens per
-    scenario request, approximated as UTF-8 bytes / 4 (P11-S6)."""
+    scenario request, approximated as UTF-8 bytes / 4 and rounded down (P11-S6)."""
     lines = [
         "",
         "### LLM calls (fake server)",
         "",
-        "Tokens are approximated as UTF-8 bytes / 4. Prompt: a chat request's whole body, an "
+        "Tokens are approximated as UTF-8 bytes / 4 per scenario request, rounded down. "
+        "Prompt: a chat request's whole body, an "
         "embedding request's input texts. Completion: the answer's message content only (the "
         "fake's minimal JSON, not a real model's answer); an embedding has none.",
         "",

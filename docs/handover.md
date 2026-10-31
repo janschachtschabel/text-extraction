@@ -379,17 +379,18 @@ The notes give formulas with measured inputs and the prices as parameters, not a
 - **LLM**, from the load test's fake endpoint (runs
   [41190110782](https://github.com/janschachtschabel/text-extraction/actions/runs/41190110782) and
   [41194228955](https://github.com/janschachtschabel/text-extraction/actions/runs/41194228955),
-  identical counts). Tokens are approximated as UTF-8 bytes / 4 of the request bodies:
+  identical counts). Tokens are approximated as UTF-8 bytes / 4 of the request bodies, rounded
+  down as the harness's table prints them:
 
   | Request | LLM calls | Prompt tokens per call | Completion tokens per call |
   | --- | ---: | ---: | ---: |
-  | `POST /v1/structured`, strategy `llm`, a farm page | 1 chat call | 1,290 | about 9 (1,750 bytes / 50 / 4: the fake's minimal answer) |
+  | `POST /v1/structured`, strategy `llm`, a farm page | 1 chat call | 1,290 | 8 (1,750 bytes / 50 / 4 = 8.75, rounded down: the fake's minimal answer) |
   | `POST /v1/chunk`, `semantic` | 1 embeddings call | 968 | none |
 
   Cost per request (one page) = calls × (prompt tokens × P_in + completion tokens × P_out) /
   1,000,000, with P_in and P_out the chat model's prices per 1M input and output tokens. An
   embeddings call is billed on its input only: tokens × the embedding model's price per 1M
-  tokens / 1,000,000. A real model answers longer than the fake's 9 tokens: the completion grows
+  tokens / 1,000,000. A real model answers longer than the fake's 8 tokens: the completion grows
   with the caller's schema. The prompt grows with the page, up to `LLM_MAX_INPUT_TOKENS`
   (32,000) of content plus the instructions and the schema; the answer is capped by
   `LLM_MAX_TOKENS` (4,096); an invalid answer gets one repair call. `describe_images` adds one
