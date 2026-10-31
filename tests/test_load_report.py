@@ -25,11 +25,20 @@ def sample(t: float, container: str, cpu: float, mem: float) -> StatSample:
     return StatSample(t=START + t, container=container, cpu_percent=cpu, mem_mib=mem)
 
 
-def row(container: str, *, cpu_p95: float, cpu_max: float, mem_p95: float, mem_max: float) -> Row:
+def row(
+    container: str,
+    *,
+    cpu_p95: float,
+    cpu_max: float,
+    mem_p95: float,
+    mem_max: float,
+    cpu_mean: float | None = None,
+) -> Row:
+    """A row of the scenario ``sync-fast-c10``; its CPU mean is its p95 unless given."""
     return Row(
         scenario="sync-fast-c10",
         container=container,
-        cpu_mean=cpu_p95,
+        cpu_mean=cpu_p95 if cpu_mean is None else cpu_mean,
         cpu_p95=cpu_p95,
         cpu_max=cpu_max,
         mem_p95=mem_p95,
@@ -79,14 +88,15 @@ def test_sizing_rounds_request_and_limit() -> None:
 
     resources = sizing(rows)
 
-    # P11-S3: request = p95 rounded up to 64Mi / 50m; limit = 1.5 * peak up to 256Mi / 250m.
+    # R-P11-10: memory request = p95 up to 64Mi, CPU request = mean up to 50m (here mean = p95);
+    # limit = 1.5 * peak up to 256Mi / 250m.
     assert resources["api"].memory_request == "320Mi"
     assert resources["api"].memory_limit == "1536Mi"  # 1.5 * 900 = 1350 → 1536
     assert resources["api"].cpu_request == "400m"  # 0.37 cores → 370m → 400m
     assert resources["api"].cpu_limit == "2500m"  # 1.6 cores * 1.5 = 2.4 → 2500m
 
 
-def test_sizing_takes_the_highest_p95_and_peak_over_the_scenarios() -> None:
+def test_sizing_takes_the_highest_mean_p95_and_peak_over_the_scenarios() -> None:
     rows = [
         row("api", cpu_p95=10.0, cpu_max=90.0, mem_p95=200.0, mem_max=210.0),
         row("api", cpu_p95=50.0, cpu_max=60.0, mem_p95=100.0, mem_max=700.0),
@@ -100,6 +110,7 @@ def test_sizing_takes_the_highest_p95_and_peak_over_the_scenarios() -> None:
         cpu_limit="1500m",  # 1.5 * 0.9 cores = 1.35 → 1500m
         memory_request="256Mi",  # 200 → 256
         memory_limit="1280Mi",  # 1.5 * 700 = 1050 → 1280
+        cpu_mean_cores=0.5,
         cpu_p95_cores=0.5,
         cpu_max_cores=0.9,
         mem_p95_mib=200.0,
@@ -110,6 +121,22 @@ def test_sizing_takes_the_highest_p95_and_peak_over_the_scenarios() -> None:
     assert resources["worker"].cpu_limit == "250m"
     assert resources["worker"].memory_request == "64Mi"
     assert resources["worker"].memory_limit == "256Mi"
+
+
+def test_sizing_takes_the_cpu_request_from_the_highest_mean_not_the_p95() -> None:
+    """R-P11-10: with 2 s samples the CPU p95 is a burst; the request follows the sustained
+    demand, the largest per-scenario mean. The p95 stays in the file as information."""
+    rows = [
+        row("api", cpu_mean=20.0, cpu_p95=90.0, cpu_max=95.0, mem_p95=100.0, mem_max=100.0),
+        row("api", cpu_mean=31.0, cpu_p95=40.0, cpu_max=50.0, mem_p95=100.0, mem_max=100.0),
+    ]
+
+    resources = sizing(rows)
+
+    assert resources["api"].cpu_request == "350m"  # mean 0.31 cores → 350m, not 0.9 → 900m
+    assert resources["api"].cpu_limit == "1500m"  # 1.5 * 0.95 = 1.425 → 1500m
+    assert resources["api"].cpu_mean_cores == 0.31
+    assert resources["api"].cpu_p95_cores == 0.9
 
 
 def test_markdown_names_each_window() -> None:
@@ -196,6 +223,7 @@ def test_sizing_is_keyed_by_service_without_the_test_containers() -> None:
     # The farm and the fake LLM are the test's, Valkey is sized by its own chart.
     assert sorted(resources) == ["api", "worker"]
     # Two replicas of one service: the highest p95 and the peak of both.
+    assert resources["worker"].cpu_mean_cores == 0.6
     assert resources["worker"].cpu_p95_cores == 0.6
     assert resources["worker"].cpu_max_cores == 0.9
     assert resources["worker"].mem_p95_mib == 300.0

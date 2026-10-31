@@ -1,5 +1,5 @@
 """The load test's report: CPU and memory per scenario and container (ruling P11-S2), the
-Markdown summary and the Helm requests and limits (ruling P11-S3).
+Markdown summary and the requests and limits the measurement gives (rulings P11-S3, R-P11-10).
 
 A scenario's window runs from its first request to its last answer plus its settle time; only
 the samples inside it count for the scenario. CPU is in percent of one core (docker's
@@ -15,8 +15,9 @@ from datetime import UTC, datetime
 
 from tests.load.stats import StatSample
 
-# P11-S3: request = p95 rounded up to the next 64Mi or 50m; limit = 1.5 * the peak rounded up
-# to the next 256Mi or 250m.
+# P11-S3 as read by R-P11-10: memory request = the largest p95 rounded up to the next 64Mi, CPU
+# request = the largest mean rounded up to the next 50m; limit = 1.5 * the peak rounded up to the
+# next 256Mi or 250m.
 REQUEST_MEMORY_STEP_MIB = 64
 REQUEST_CPU_STEP_MILLICORES = 50
 LIMIT_MEMORY_STEP_MIB = 256
@@ -66,13 +67,15 @@ class ScenarioResult:
 
 @dataclass(frozen=True)
 class Resources:
-    """The Helm requests and limits of one container (P11-S3) and the measured values they
-    come from: the highest p95 and the peak over all scenarios."""
+    """The requests and limits the measurement gives one container (P11-S3, R-P11-10) and the
+    measured values they come from: the highest CPU mean, the highest memory p95 and the peaks
+    over all scenarios. ``cpu_p95_cores`` is information only: no number comes from it."""
 
     cpu_request: str
     cpu_limit: str
     memory_request: str
     memory_limit: str
+    cpu_mean_cores: float
     cpu_p95_cores: float
     cpu_max_cores: float
     mem_p95_mib: float
@@ -134,9 +137,20 @@ def service_of(container: str, *, project: str = COMPOSE_PROJECT) -> str:
 
 
 def sizing(rows: Sequence[Row], *, project: str = COMPOSE_PROJECT) -> dict[str, Resources]:
-    """P11-S3 per compose service (``service_of``), over all rows of its containers (every
-    replica): the request from the highest p95 of any scenario (the steady state of the
-    busiest scenario), the limit from 1.5 * the peak. ``NOT_SIZED`` services are left out."""
+    """The sizing rule of configuration.md ("Resource baselines"; P11-S3 as read by R-P11-10)
+    per compose service (``service_of``), over all rows of its containers (every replica):
+
+    - the memory request from the highest memory p95 of any scenario (memory is held);
+    - the CPU request from the highest CPU mean of any scenario (with 2 s samples the CPU p95 is
+      a burst; the mean is the sustained demand);
+    - each limit from 1.5 * the peak.
+
+    ``NOT_SIZED`` services are left out. This is the measured part of the rule only. The chart's
+    values apply more on top, which this function does not compute: the R-P11-7 floor (a memory
+    limit never below the value that backs a child process's address-space budget, such as
+    ``DOCUMENT_MEMORY_LIMIT_MB`` or ``DOCLING_MEMORY_LIMIT_MB``), Valkey's own sizing (R-P11-11)
+    and the llm worker's 1Gi memory floor (R-P11-12). So a value here is not by itself the
+    chart's value."""
     by_service: dict[str, list[Row]] = {}
     for row in rows:
         service = service_of(row.container, project=project)
@@ -145,15 +159,17 @@ def sizing(rows: Sequence[Row], *, project: str = COMPOSE_PROJECT) -> dict[str, 
     resources: dict[str, Resources] = {}
     for service in sorted(by_service):
         own = by_service[service]
-        cpu_p95 = max(row.cpu_p95 for row in own) / 100  # cores
+        cpu_mean = max(row.cpu_mean for row in own) / 100  # cores
+        cpu_p95 = max(row.cpu_p95 for row in own) / 100
         cpu_max = max(row.cpu_max for row in own) / 100
         mem_p95 = max(row.mem_p95 for row in own)
         mem_max = max(row.mem_max for row in own)
         resources[service] = Resources(
-            cpu_request=f"{_round_up(cpu_p95 * 1000, REQUEST_CPU_STEP_MILLICORES)}m",
+            cpu_request=f"{_round_up(cpu_mean * 1000, REQUEST_CPU_STEP_MILLICORES)}m",
             cpu_limit=f"{_round_up(LIMIT_FACTOR * cpu_max * 1000, LIMIT_CPU_STEP_MILLICORES)}m",
             memory_request=f"{_round_up(mem_p95, REQUEST_MEMORY_STEP_MIB)}Mi",
             memory_limit=f"{_round_up(LIMIT_FACTOR * mem_max, LIMIT_MEMORY_STEP_MIB)}Mi",
+            cpu_mean_cores=round(cpu_mean, 4),
             cpu_p95_cores=round(cpu_p95, 4),
             cpu_max_cores=round(cpu_max, 4),
             mem_p95_mib=mem_p95,

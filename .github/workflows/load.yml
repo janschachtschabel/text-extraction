@@ -2,9 +2,13 @@ name: load
 
 # Load test (package 11): the compose stack with every profile, plus a local site farm and a fake
 # LLM (deploy/load/compose.load.yml), under the load profile of tests/load/scenarios.py. docker
-# stats is sampled every 2 s; the report gives CPU and memory per scenario and service and the
-# Helm sizing they lead to. No load goes to a third-party site: every target is the farm container,
-# and the LLM is the fake. Only the image builds and the model downloads use the internet.
+# stats is sampled every 2 s; the report gives CPU and memory per scenario and service, and
+# sizing.json the requests and limits the measurement gives (configuration.md, "Sizing rule").
+# Those are an input to the Helm sizing, not the sizing itself: the memory floors that back the
+# children's address-space budgets (R-P11-7), Valkey's sizing (R-P11-11) and the llm worker's
+# floor (R-P11-12) apply on top. No load goes to a third-party site: every target is the farm
+# container, and the LLM is the fake. Only the image builds and the model downloads use the
+# internet.
 #
 # A dispatch works only once this file is on the default branch, so a pull request that carries
 # the label `load` runs it too, with the dispatch defaults (ruling R-P11-5).

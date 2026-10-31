@@ -17,9 +17,15 @@ for (``/ready``) before the run, and their ``/metrics`` are saved after each sce
 go into the summary. ``--selector-processes`` only labels the run.
 
 Writes to ``--out-dir``: ``results.jsonl`` (one line per request), ``stats.jsonl`` (the
-``docker stats`` samples), ``summary.md`` (also printed) and ``sizing.json`` (requests and
-limits per compose service, P11-S3, without the farm, the fake LLM and Valkey). The summary
-and the sizing are written even when the run stops on an error. Exits 1 when a request's
+``docker stats`` samples), ``summary.md`` (also printed) and ``sizing.json`` (the requests and
+limits the measurement gives each compose service, without the farm, the fake LLM and Valkey:
+the memory request from the highest memory p95, the CPU request from the highest CPU mean, the
+limits from 1.5 x the peaks; P11-S3 as read by R-P11-10). ``sizing.json`` is not the chart's
+sizing by itself: the R-P11-7 memory floors (a limit never below the value that backs a child
+process's address-space budget), Valkey's own sizing (R-P11-11) and the llm worker's 1Gi floor
+(R-P11-12) apply on top and are not computed here; configuration.md, "Resource baselines", gives
+the whole rule and the values that follow from it. The summary and the sizing are written even
+when the run stops on an error. Exits 1 when a request's
 outcome is not one its scenario expects (an error never is).
 
 ``--farm-url`` must be local: a loopback or private IP address, or a single-label host name
