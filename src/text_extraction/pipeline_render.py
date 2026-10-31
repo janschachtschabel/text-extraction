@@ -24,8 +24,9 @@ from text_extraction.render import (
 )
 from text_extraction.settings import Settings
 
-# ``CHALLENGE_STATUSES``: answers whose body may be a bot challenge that unblock mode can get
-# past (B5, B14); the refusals that unblock mode tries again in the browser (P12-S1).
+# ``CHALLENGE_STATUSES`` (``escalation.REFUSAL_STATUSES``): answers whose body may be a bot
+# challenge that unblock mode can get past (B5, B14), and that it tries again in the browser (B16).
+
 # The renderer's warning for a challenge that was still there when the wait ended (B14).
 CHALLENGE_NOT_CLEARED = "challenge_not_cleared"
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})

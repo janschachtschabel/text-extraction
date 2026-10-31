@@ -11,8 +11,9 @@ workers.
 2. ``mode: browser``, a screenshot, and an ``auto`` request with actions, cookies or headers
    (R8) go to the browser workers at once (``browser_dispatch.py``).
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
-   (``escalation.needs_browser``, in unblock mode for admins also a bot wall; R9) goes to the
-   browser workers with the fast result as its draft, and the worker keeps the better of both.
+   (``escalation.needs_browser``, in unblock mode for admins also a bot wall or a refusal; R9,
+   B16) goes to the browser workers with the fast result as its draft, and the worker keeps the
+   better of both.
 4. If no browser worker answers in time, ``auto`` answers its fast result with the warning
    ``browser_unavailable``, without its fingerprint (it was never compared or stored, and the
    browser may answer the next request), and ``browser`` answers ``failed``/``timeout``,

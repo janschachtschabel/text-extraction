@@ -88,7 +88,8 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    `Content-Type` therefore never escalates, whatever its quality verdict (this includes a
    soft-404 page served without one), and neither does an error status or a non-HTML type.
    Under unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) it also escalates
-   on `bot_protection` and on a 403, 429 or 503 answer whose body is a challenge. The render's
+   on `bot_protection`, on every 403, 429 or 503 answer (`escalation.REFUSAL_STATUSES`) whatever
+   its body or content type, and on any 2xx HTML result that is not `success` (B16). The render's
    result and the fast result are compared and the better one is kept (higher status, then more
    words, on a tie the render). `auto` with `actions`, `cookies`, `headers` or `screenshot`
    skips the fast phase and always renders, like `browser`. `mode` is part of the result cache
@@ -626,7 +627,8 @@ while `BROWSER_ENABLED` is false, are unchanged.
   An `auto` request with browser options always renders (R8); while browser mode is off it
   answers 400 (R19). A stored result is final: a cache `hit` or `revalidated` result never
   escalates, since only the better of both was stored. Accepted consequence: a fast result
-  cached while browser mode was off escalates only once its entry has expired.
+  cached while browser mode was off escalates only once its entry has expired. Under unblock
+  mode a refused answer (403, 429, 503) is assessed so that it can escalate too (B16).
 - **B6, caller secrets.** `actions`, `cookies` and `headers` are accepted by `/v1/extract` and
   `/v1/screenshot` only, not by `/v1/batch`. They are stored in `job:{<id>}:secrets` with a short
   TTL (`BROWSER_QUEUE_WAIT_SECONDS + lease + 60` s, where the browser lease is
@@ -704,12 +706,35 @@ while `BROWSER_ENABLED` is false, are unchanged.
     cookies or headers) stores none: its cookies may be the caller's own or a session they opened
     (B6); it still reads the stored ones. A render that got past a 403, 429 or 503
     challenge keeps that answer out of the host's backoff.
-  - Escalation: under unblock `auto` also escalates per B5. The result carries `unblocked: true`.
+  - Escalation: under unblock `auto` also escalates per B5, and on a plain refusal or an
+    unfinished HTML result per B16. The result carries `unblocked: true`.
 - **B15, what unblock does not do.** No image or puzzle captcha solving and no paid or
   third-party solver services (Jan: nothing paid). Partners are advised to add an allowlist rule
   in their bot protection instead: a secret header (sent with `headers`) or our egress IP. No IP
   or proxy rotation; CLAUDE.md rule 6 keeps that. If a partner blocks by IP, the fix is that they
   allow our egress IP; a later package can add an upstream proxy option if Jan wants it.
+- **B16, maximum extraction (package 12).** "Maximum extraction" is unblock mode (B14) and
+  nothing more: an admin, `compliance: ignore` and `BROWSER_UNBLOCK_ENABLED`. The SSRF guard on
+  every fetch and sub-request, the byte and time caps and the per-host outbound gate (with its
+  429/503 pause) stay; it adds no IP or proxy rotation and no captcha solving (B15).
+  - Fallback (P12-S1): under unblock `auto`, `escalation.needs_browser` also returns true for
+    (a) a fast page answer `failed`/`target_http_error` whose `upstream_status` is in
+    `REFUSAL_STATUSES` (403, 429, 503), whatever its body or content type, and (b) a 2xx HTML
+    fast result whose status is not `success` (for example `content_too_short` or
+    `empty_content`). The exclusions of B5 stay: a document, a platform video or media file, a
+    cache `hit` or `revalidated` result, a result that is not fast, and a `mode` other than
+    `auto`. For (a) the pipeline sets `quality` on every refused answer in unblock `auto` mode
+    with `BROWSER_ENABLED` (`Pipeline._assesses_refusal`, `_refusal_quality`): it assesses an HTML
+    body up to `CONVERT_MAX_BYTES`, any other body as an empty page; `challenge_status` is true
+    only for a challenge body. `better()` keeps the better of the fast and the rendered result.
+    Outside unblock mode nothing changes: a plain 403 stays `target_http_error` in the respect
+    mode (the leifiphysik case of package 10).
+  - The host's pause (P12-S2): a fast 429 or 503 still records its pause (`Retry-After`, else
+    `OUTBOUND_BACKOFF_SECONDS`, at most `OUTBOUND_MAX_BACKOFF_SECONDS`). The render takes its turn
+    after the pause: the browser worker gives the item back on `CircuitOpen`, as for any paused
+    host. A sync call answers within its B13 bound, often with `browser_unavailable`; a call with
+    `wait_seconds` becomes a job that finishes after the pause. A render that gets past the
+    refusal keeps it out of the host's backoff (`answers_for_gate`, B14 unchanged).
 
 **Caller headers (R10, R13).** Headers go only to requests on the requested URL's host and port.
 Playwright would re-apply them to the hops of a redirect, so while a render carries headers every
