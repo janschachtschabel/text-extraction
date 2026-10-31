@@ -2594,6 +2594,54 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   reloads the page: the keys survive in `sessionStorage` and log in again; an open job view
   closes, but its jobs keep running, as the switch's hint says.
 
+**Accessibility, help and status messages (package 12, P12-S8 to P12-S10).** The target is WCAG
+2.2 A and AA.
+
+- **Structure and help.** A skip link to `<main id="app">`, one `h1`, and per tab panel a
+  visually hidden `h2` (the tab's label), an intro (`Tab.intro_key`, `help.<tab>.intro`) and a
+  "Help" link to `help_url(language, Tab.help_page)`, that is
+  `DOCS_BASE_URL/<language>/<page>.md` on GitHub (a normal link off the page): Extract to
+  `single-url`, Structured and Chunk to `structured-data`, Batch and Batch file to
+  `part-of-a-site`, Site structure to `whole-site-and-metadata`, File, Screenshot and Info to
+  `usage`. Every field has a `<label>` and a hint (`hint.<field>`) tied to it with
+  `aria-describedby` (a radio group's on its `fieldset`).
+- **Tabs.** WAI-ARIA tabs in a `div[role=tablist]` (a `nav` may not take that role): the
+  selected tab has `tabindex="0"`, the others `-1`; `ui.js` moves focus and selection with the
+  arrow keys (wrapping around), Home and End; panels have `tabindex="0"`.
+- **Focus and contrast.** `:focus-visible` draws a 3 px outline in `--focus` (at least 3:1 on
+  the page's backgrounds); text keeps at least 4.5:1; `prefers-reduced-motion` turns animations
+  and transitions off.
+- **Errors.** `OptionsError.field` names the form field at fault. Each form's id is
+  `<prefix>-form`, which htmx sends as `HX-Trigger`; `forms.error_control` maps it, through the
+  allowlist `FORM_PREFIXES`, to the control's id `<prefix>-<field>` (`_` as `-`), and
+  `form_error.html` carries it as `data-error-for` with the id `<control>-error` (an unknown
+  form id gives neither, so the header is never reflected). `ui.js` sets `aria-invalid="true"`
+  on the field, adds the error's id to its `aria-describedby` and moves focus there; the next
+  request of the user's unties it. A whole-form error is `role="alert"`.
+- **Status messages (P12-S9).** `base.html` holds `#ui-status` (`role="status"`,
+  `aria-live="polite"`, visually hidden). While a request of the user's runs, it reads
+  "Sending request …" and the request's target is `aria-busy`. Afterwards it reads the answer's
+  `data-announce`: a result's summary ("Result: success, 0.15 s", the seconds with a decimal
+  comma in German, or "Continues as job <id>"), or the states of a progress view's jobs
+  ("Job <id>: running."). An answer with a `role="alert"` empties it (the alert speaks), any
+  other answer reads "Done.". A progress view's own 3 s refresh (`data-refresh`) writes its
+  states only when they differ from the view it replaces, so a refresh is never read out; no
+  other live region wraps an answer (`#result`, `.job-detail`, `.tree-jobs` and `.previews-out`
+  have none). An answer htmx does not swap gets a `.request-status` box (`role="alert"`): the
+  text of its error code (the page holds every `error.<code>` text in
+  `<template id="ui-error-texts">`) and below it the API's English message.
+- **Progress.** A `<progress>` is named "Progress of job <id>"; the buttons of the refreshing
+  view have stable ids (`job-<id>-show-<index>`, `-previous`, `-next`, `-tree`, `-cancel`), so
+  htmx keeps focus on them across a swap.
+- **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
+  progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
+  `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its
+  licence and pinned by SHA-256; never in an image) is injected with `page.evaluate`, so the CSP
+  stays on, and runs with the tags `wcag2a`, `wcag2aa`, `wcag21a`, `wcag21aa` and `wcag22aa` over
+  the login (also with an error), every tab, an extract result, a form error, a running and a
+  completed progress view and the site tree, in both languages; the gate is zero violations,
+  with no rule or element excluded. Keyboard, focus, status and error tests run beside it.
+
 **Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,
 `partial`, `failed`, `job` or a refusal's error code; every tool exported at 0),
 `text_extraction_mcp_tool_seconds{tool}` (0.05 s to 120 s) and

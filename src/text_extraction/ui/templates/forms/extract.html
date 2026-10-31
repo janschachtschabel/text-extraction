@@ -1,18 +1,23 @@
-<form class="op" hx-post="/ui/run/extract" hx-target="#result" hx-swap="innerHTML">
-  {% set prefix = "extract" %}
+{% set prefix = "extract" %}
+<form id="extract-form" class="op" hx-post="/ui/run/extract" hx-target="#result" hx-swap="innerHTML">
   <label for="extract-url">URL</label>
-  <input id="extract-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  <input id="extract-url" name="url" type="url" required placeholder="https://" spellcheck="false" aria-describedby="extract-url-hint">
+  <p class="hint" id="extract-url-hint">{{ t("hint.url") }}</p>
   {% include "forms/format.html" %}
   {% include "forms/mode.html" %}
   {% include "forms/access.html" %}
   <fieldset class="choice">
     <legend>{{ t("form.also") }}</legend>
-    <label class="inline"><input type="checkbox" name="metadata" value="on" checked> {{ t("form.metadata") }}</label>
-    <label class="inline"><input type="checkbox" name="metadata_structured" value="on"> {{ t("form.metadata_structured") }}</label>
-    <label class="inline"><input type="checkbox" name="describe_images" value="on"> {{ t("form.describe_images") }}</label>
+    <label class="inline"><input type="checkbox" name="metadata" value="on" checked aria-describedby="extract-metadata-hint"> {{ t("form.metadata") }}</label>
+    <p class="hint" id="extract-metadata-hint">{{ t("hint.metadata") }}</p>
+    <label class="inline"><input type="checkbox" name="metadata_structured" value="on" aria-describedby="extract-metadata-structured-hint"> {{ t("form.metadata_structured") }}</label>
+    <p class="hint" id="extract-metadata-structured-hint">{{ t("hint.metadata_structured") }}</p>
+    <label class="inline"><input type="checkbox" name="describe_images" value="on" aria-describedby="extract-describe-images-hint"> {{ t("form.describe_images") }}</label>
+    <p class="hint" id="extract-describe-images-hint">{{ t("hint.describe_images") }}</p>
   </fieldset>
   <label for="extract-max-images">{{ t("form.max_images") }}</label>
-  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5">
+  <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5" aria-describedby="extract-max-images-hint">
+  <p class="hint" id="extract-max-images-hint">{{ t("hint.max_images") }}</p>
   {% include "forms/common.html" %}
   <button type="submit">{{ t("form.extract") }}</button>
 </form>

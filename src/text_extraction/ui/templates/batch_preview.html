@@ -22,10 +22,11 @@
   {% endif %}
   {% if too_many %}<p class="error" role="alert">{{ t(too_many) }}</p>{% endif %}
   {% if urls and not too_many %}
-  <form class="op" hx-post="/ui/run/batch-urls" hx-target="closest .batch-preview" hx-swap="outerHTML">
-    {% set prefix = "preview" %}
+  {% set prefix = "preview" %}
+  <form id="preview-form" class="op" hx-post="/ui/run/batch-urls" hx-target="closest .batch-preview" hx-swap="outerHTML">
     <label for="preview-urls">URLs</label>
-    <textarea id="preview-urls" name="urls" rows="8" spellcheck="false" readonly>{{ text }}</textarea>
+    <textarea id="preview-urls" name="urls" rows="8" spellcheck="false" readonly aria-describedby="preview-urls-hint">{{ text }}</textarea>
+    <p class="hint" id="preview-urls-hint">{{ t("hint.urls", setting=code("BATCH_MAX_URLS")) }}</p>
     {% include "forms/batch_options.html" %}
     <button type="submit">{{ t("batch.start") }}</button>
   </form>

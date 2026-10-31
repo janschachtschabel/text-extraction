@@ -24,6 +24,10 @@ STATE_KEY: Final = "ui_language"
 LOCALES_DIR: Final = Path(__file__).parent / "locales"
 
 _PLACEHOLDER: Final = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+# The user guide (ruling P12-S10): one folder per language, with the same page names.
+DOCS_BASE_URL: Final = (
+    "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"
+)
 
 
 def _load(language: Language) -> Mapping[str, str]:
@@ -67,6 +71,11 @@ def fill(text: str, params: Mapping[str, object]) -> str:
         return str(params[name]) if name in params else match.group(0)
 
     return _PLACEHOLDER.sub(value, text)
+
+
+def help_url(language: Language, page: str) -> str:
+    """The URL of the user guide's ``page`` (a file name without ``.md``) in ``language``."""
+    return f"{DOCS_BASE_URL}/{language}/{page}.md"
 
 
 def _quality(parameters: list[str]) -> float | None:

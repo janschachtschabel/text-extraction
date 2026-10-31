@@ -1,13 +1,15 @@
 {%- set chosen_mode = chosen["mode"] if chosen and chosen["mode"] in ("auto", "fast", "browser") else "auto" %}
 {%- if chosen_mode == "browser" and not browser_enabled %}{% set chosen_mode = "auto" %}{% endif %}
+{%- set mode_id = prefix ~ "-mode-hint" %}
 {%- set no_browser_id = prefix ~ "-mode-no-browser-hint" %}
 {%- set fast_id = prefix ~ "-mode-fast-hint" %}
-{%- set mode_hints = ([no_browser_id] if not browser_enabled else []) + ([fast_id] if access_choice == "enabled" else []) %}
+{%- set mode_hints = [mode_id] + ([no_browser_id] if not browser_enabled else []) + ([fast_id] if access_choice == "enabled" else []) %}
 <label for="{{ prefix }}-mode">{{ t("mode.label") }}</label>
-<select id="{{ prefix }}-mode" name="mode"{% if mode_hints %} aria-describedby="{{ mode_hints|join(' ') }}"{% endif %}>
+<select id="{{ prefix }}-mode" name="mode" aria-describedby="{{ mode_hints|join(' ') }}">
   <option value="auto"{% if chosen_mode == "auto" %} selected{% endif %}>{{ t("mode.auto") }}</option>
   <option value="fast"{% if chosen_mode == "fast" %} selected{% endif %}>{{ t("mode.fast") }}</option>
   <option value="browser"{% if chosen_mode == "browser" %} selected{% endif %}{% if not browser_enabled %} disabled{% endif %}>{{ t("mode.browser") }}</option>
 </select>
+<p class="hint" id="{{ mode_id }}">{{ t("hint.mode") }}</p>
 {% if not browser_enabled %}<p class="hint" id="{{ no_browser_id }}">{{ t("mode.no_browser", setting=code("BROWSER_ENABLED")) }}</p>{% endif %}
 {% if access_choice == "enabled" %}<p class="hint" id="{{ fast_id }}">{{ t("mode.fast_with_maximum") }}</p>{% endif %}

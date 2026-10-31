@@ -1,11 +1,13 @@
-<form class="op" hx-post="/ui/run/screenshot" hx-target="#result" hx-swap="innerHTML">
-  {% set prefix = "screenshot" %}
+{% set prefix = "screenshot" %}
+<form id="screenshot-form" class="op" hx-post="/ui/run/screenshot" hx-target="#result" hx-swap="innerHTML">
   <label for="screenshot-url">URL</label>
-  <input id="screenshot-url" name="url" type="url" required placeholder="https://" spellcheck="false">
+  <input id="screenshot-url" name="url" type="url" required placeholder="https://" spellcheck="false" aria-describedby="screenshot-url-hint">
+  <p class="hint" id="screenshot-url-hint">{{ t("hint.url") }}</p>
   {% include "forms/access.html" %}
   <fieldset class="choice">
     <legend>{{ t("form.capture") }}</legend>
-    <label class="inline"><input type="checkbox" name="full_page" value="on" checked> {{ t("form.full_page") }}</label>
+    <label class="inline"><input type="checkbox" name="full_page" value="on" checked aria-describedby="screenshot-full-page-hint"> {{ t("form.full_page") }}</label>
+    <p class="hint" id="screenshot-full-page-hint">{{ t("hint.full_page") }}</p>
   </fieldset>
   {% include "forms/common.html" %}
   <button type="submit">{{ t("form.take_screenshot") }}</button>

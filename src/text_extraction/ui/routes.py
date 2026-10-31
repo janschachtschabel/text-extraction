@@ -23,6 +23,7 @@ from text_extraction.ratelimit import check_rate_left
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     envelope_error,
+    options_error,
     raw_text,
     read_form,
     refusal,
@@ -64,25 +65,51 @@ LOGIN_FAILED_EVENT: Final = "ui-login-failed"
 
 @dataclass(frozen=True)
 class Tab:
-    """One tab of the application: its name, the catalogue key of its label and the template of
-    its form."""
+    """One tab of the application: its name, the catalogue keys of its label and its intro, the
+    template of its form and the user guide's page its help link opens (ruling P12-S10)."""
 
     name: str
     label_key: str
+    intro_key: str
     template: str
+    help_page: str
 
 
 # The application's tabs, in order.
 TABS: Final[tuple[Tab, ...]] = (
-    Tab("extract", "tab.extract", OPERATIONS["extract"].form),
-    Tab("file", "tab.file", OPERATIONS["file"].form),
-    Tab("screenshot", "tab.screenshot", OPERATIONS["screenshot"].form),
-    Tab("structured", "tab.structured", OPERATIONS["structured"].form),
-    Tab("chunk", "tab.chunk", OPERATIONS["chunk"].form),
-    Tab("batch", "tab.batch", OPERATIONS["batch"].form),
-    Tab("batch-file", "tab.batch_file", "forms/batch_file.html"),
-    Tab("site-structure", "tab.site_structure", OPERATIONS["site-structure"].form),
-    Tab("info", "tab.info", OPERATIONS["info"].form),
+    Tab("extract", "tab.extract", "help.extract.intro", OPERATIONS["extract"].form, "single-url"),
+    Tab("file", "tab.file", "help.file.intro", OPERATIONS["file"].form, "usage"),
+    Tab(
+        "screenshot",
+        "tab.screenshot",
+        "help.screenshot.intro",
+        OPERATIONS["screenshot"].form,
+        "usage",
+    ),
+    Tab(
+        "structured",
+        "tab.structured",
+        "help.structured.intro",
+        OPERATIONS["structured"].form,
+        "structured-data",
+    ),
+    Tab("chunk", "tab.chunk", "help.chunk.intro", OPERATIONS["chunk"].form, "structured-data"),
+    Tab("batch", "tab.batch", "help.batch.intro", OPERATIONS["batch"].form, "part-of-a-site"),
+    Tab(
+        "batch-file",
+        "tab.batch_file",
+        "help.batch_file.intro",
+        "forms/batch_file.html",
+        "part-of-a-site",
+    ),
+    Tab(
+        "site-structure",
+        "tab.site_structure",
+        "help.site_structure.intro",
+        OPERATIONS["site-structure"].form,
+        "whole-site-and-metadata",
+    ),
+    Tab("info", "tab.info", "help.info.intro", OPERATIONS["info"].form, "usage"),
 )
 NO_FILE: Final = Message("form.no_file")
 _MODES: Final = frozenset(get_args(RequestedMode))
@@ -151,7 +178,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             body = build_body(op, text_fields(form))
         except OptionsError as error:
             await form.close()
-            context = {"message": error.message}
+            context = options_error(error, request)
             return templates.TemplateResponse(request, "form_error.html", context)
         try:
             forwarded = await _forward_single(request, op, body, form)

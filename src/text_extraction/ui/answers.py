@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 
 from text_extraction.errors import ServiceError
-from text_extraction.ui.forms import OPERATIONS
+from text_extraction.ui.forms import OPERATIONS, OptionsError, error_control
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Language, Message
 from text_extraction.ui.results import render_result
@@ -74,6 +74,17 @@ def envelope_message(
     the API's English message."""
     text, message = envelope_error(body, status)
     return text.text(language), message
+
+
+# The id of the element that sent an htmx request (a form's id).
+TRIGGER_HEADER: Final = "hx-trigger"
+
+
+def options_error(error: OptionsError, request: Request) -> dict[str, Any]:
+    """The context of ``form_error.html`` for ``error``: its message, and the id of the control
+    it names (``error_for``) in the form that sent ``request``."""
+    form_id = request.headers.get(TRIGGER_HEADER)
+    return {"message": error.message, "error_for": error_control(form_id, error.field)}
 
 
 def text_fields(form: FormData) -> dict[str, str]:

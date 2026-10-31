@@ -4,13 +4,14 @@ repos:
     rev: v6.0.0
     hooks:
       - id: check-yaml
-      # The vendored htmx stays byte for byte as published (its SHA-256 is checked in a test).
+      # The vendored htmx and axe-core stay byte for byte as published (tests check their SHA-256).
       - id: end-of-file-fixer
-        exclude: ^src/text_extraction/ui/static/htmx-[0-9.]+\.min\.js$
+        exclude: ^(src/text_extraction/ui/static/htmx-[0-9.]+\.min\.js|tests/ui/vendor/.*)$
       - id: trailing-whitespace
-        exclude: ^src/text_extraction/ui/static/htmx-[0-9.]+\.min\.js$
+        exclude: ^(src/text_extraction/ui/static/htmx-[0-9.]+\.min\.js|tests/ui/vendor/.*)$
       - id: check-added-large-files
         args: [--maxkb=500]
+        exclude: ^tests/ui/vendor/axe-core-[0-9.]+\.min\.js$
   - repo: local
     hooks:
       - id: ruff-check

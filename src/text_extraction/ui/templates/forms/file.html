@@ -1,11 +1,13 @@
-<form class="op" hx-post="/ui/run/file" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
-  {% set prefix = "file" %}
+{% set prefix = "file" %}
+<form id="file-form" class="op" hx-post="/ui/run/file" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
   <label for="file-file">{{ t("form.file") }}</label>
-  <input id="file-file" name="file" type="file" required>
+  <input id="file-file" name="file" type="file" required aria-describedby="file-file-hint">
+  <p class="hint" id="file-file-hint">{{ t("hint.file") }}</p>
   {% include "forms/format.html" %}
   <fieldset class="choice">
     <legend>{{ t("form.also") }}</legend>
-    <label class="inline"><input type="checkbox" name="metadata" value="on" checked> {{ t("form.metadata") }}</label>
+    <label class="inline"><input type="checkbox" name="metadata" value="on" checked aria-describedby="file-metadata-hint"> {{ t("form.metadata") }}</label>
+    <p class="hint" id="file-metadata-hint">{{ t("hint.metadata") }}</p>
   </fieldset>
   {% include "forms/common.html" %}
   <button type="submit">{{ t("form.extract_file") }}</button>

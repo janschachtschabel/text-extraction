@@ -3,7 +3,8 @@
   {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
   <p class="tree-counts">{{ t("tree.urls", count=tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ t("tree.hidden", count=tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {% if tree.roots %}
-  <form class="tree-form" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
+  {% set prefix = "tree" %}
+  <form id="tree-form" class="tree-form" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
     <p class="tree-tools">
       <button type="button" class="secondary" data-action="tree-all">{{ t("tree.select_all") }}</button>
       <button type="button" class="secondary" data-action="tree-none">{{ t("tree.select_none") }}</button>
@@ -26,10 +27,9 @@
       </li>
       {%- endfor %}
     </ul>
-    {% set prefix = "tree" %}
     {% include "forms/batch_options.html" %}
     <button type="submit">{{ t("tree.extract_selected") }}</button>
   </form>
-  <div class="tree-jobs" aria-live="polite"></div>
+  <div class="tree-jobs"></div>
   {% endif %}
 </section>

@@ -1,4 +1,11 @@
-<article class="result-view">
+{#- The short summary ui.js writes to #ui-status (ruling P12-S9). -#}
+{%- if job %}{% set summary = t("status.result_job", id=job["id"]) %}
+{%- elif status and data and data["timings"] is mapping and data["timings"]["total_ms"] is number %}
+{%- set seconds = "%.2f"|format(data["timings"]["total_ms"] / 1000) %}
+{%- set summary = t("status.result_time", status=t(status_text(status)) if status_text(status) else status, seconds=seconds|replace(".", ",") if lang == "de" else seconds) %}
+{%- elif status %}{% set summary = t("status.result", status=t(status_text(status)) if status_text(status) else status) %}
+{%- else %}{% set summary = t("result.http_answer", status=http_status) %}{% endif %}
+<article class="result-view" data-announce="{{ summary }}">
   <header class="answer">
     <span class="http-status">HTTP {{ http_status }}</span>
     {% if status %}<span class="badge badge-{{ status }}" data-value="{{ status }}">{{ t(status_text(status)) if status_text(status) else code(status) }}</span>{% endif %}
@@ -127,7 +134,7 @@
       <button type="submit" class="secondary">{{ t("result.load_previews") }}</button>
       <span class="hint">{{ t("result.previews_hint") }}</span>
     </form>
-    <div class="previews-out" aria-live="polite"></div>
+    <div class="previews-out"></div>
     {% endif %}
     {% endif %}
   </section>

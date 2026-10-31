@@ -186,8 +186,8 @@ def test_mode_select_reads_as_browser_fallback(admin_client: TestClient) -> None
         ]
         assert [o.get("selected") is not None for o in options] == [True, False, False]
         assert [o.get("disabled") for o in options] == [None, None, None]
-        # With the choice on, a hint says that "never" does not reach the browser.
-        assert described(admin, select) == [en("mode.fast_with_maximum")]
+        # Its own hint and, with the choice on, one that says "never" does not reach the browser.
+        assert described(admin, select) == [en("hint.mode"), en("mode.fast_with_maximum")]
 
 
 def test_browser_option_disabled_while_browser_mode_is_off() -> None:

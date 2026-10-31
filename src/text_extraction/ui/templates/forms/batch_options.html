@@ -3,6 +3,7 @@
 {% include "forms/access.html" %}
 <fieldset class="choice">
   <legend>{{ t("form.also") }}</legend>
-  <label class="inline"><input type="checkbox" name="metadata" value="on"{% if not chosen or chosen["metadata"] == "on" %} checked{% endif %}> {{ t("form.metadata") }}</label>
+  <label class="inline"><input type="checkbox" name="metadata" value="on" aria-describedby="{{ prefix }}-metadata-hint"{% if not chosen or chosen["metadata"] == "on" %} checked{% endif %}> {{ t("form.metadata") }}</label>
+  <p class="hint" id="{{ prefix }}-metadata-hint">{{ t("hint.metadata") }}</p>
 </fieldset>
 {% include "forms/options.html" %}

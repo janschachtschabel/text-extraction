@@ -4,7 +4,7 @@
   <h1>{{ t("page.title") }}</h1>
   <p>{{ t("page.intro", path=code("/v1")) }}</p>
 </header>
-<main id="app">
+<main id="app" tabindex="-1">
 {% if login %}
 {% include "login.html" %}
 {% else %}

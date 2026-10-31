@@ -37,6 +37,7 @@ from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     artifact_of,
     envelope_error,
+    options_error,
     raw_text,
     read_form,
     read_screenshot,
@@ -454,8 +455,10 @@ async def batch_urls_view(request: Request, settings: Settings) -> Response:
             per_batch=settings.batch_max_urls,
             max_batches=settings.batch_max_open_per_client,
         )
-    except (UrlListError, OptionsError) as error:
+    except UrlListError as error:
         return _form_error(request, error.message)
+    except OptionsError as error:
+        return templates.TemplateResponse(request, "form_error.html", options_error(error, request))
     _log.info("ui_batch_split", parts=len(parts), urls=len(listed.urls))
     path = OPERATIONS["batch"].path
     started: list[JobAccepted] = []
@@ -605,7 +608,7 @@ async def site_structure_view(request: Request) -> Response:
     try:
         body = build_body("site-structure", fields)
     except OptionsError as error:
-        return _form_error(request, error.message)
+        return templates.TemplateResponse(request, "form_error.html", options_error(error, request))
     path = OPERATIONS["site-structure"].path
     answer = await forward(request, "POST", path, json=body)
     data = (answer.body or {}).get("data")

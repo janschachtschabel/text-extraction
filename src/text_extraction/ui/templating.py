@@ -12,6 +12,7 @@ from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup, escape
 from starlette.requests import Request
 
+from text_extraction.envelope import ErrorCode
 from text_extraction.ui.i18n import (
     LANGUAGES,
     PART_SEPARATOR,
@@ -20,6 +21,7 @@ from text_extraction.ui.i18n import (
     Language,
     Message,
     fill,
+    help_url,
     translate,
 )
 from text_extraction.ui.texts import state_text, status_text
@@ -94,3 +96,6 @@ templates: Final = Jinja2Templates(
 templates.env.globals["code"] = code
 templates.env.globals["status_text"] = status_text
 templates.env.globals["state_text"] = state_text
+templates.env.globals["help_url"] = help_url
+# The API's error codes, whose texts the page holds for ui.js (``base.html``).
+templates.env.globals["error_codes"] = tuple(code.value for code in ErrorCode)

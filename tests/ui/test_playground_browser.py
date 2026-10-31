@@ -140,7 +140,7 @@ def test_login_and_extract(ui: tuple[str, str]) -> None:
 
         log_in(page)
         page.wait_for_selector("#app-shell")
-        assert page.locator("nav.tabs [data-tab]").count() == 9
+        assert page.locator("[role=tablist] [data-tab]").count() == 9
 
         panel = page.locator("#panel-extract")
         panel.locator("input[name=url]").fill(f"{origin}/docs/a.html")
@@ -233,8 +233,9 @@ def test_csv_upload_to_progress(ui: tuple[str, str]) -> None:
 def test_an_answer_htmx_does_not_swap_shows_a_status_line(ui_small: str) -> None:
     """A file over the upload route's limit is answered 413 (JSON) before the UI's view runs, so
     htmx does not swap it; ui.js writes "Request failed: <status> <reason>" into the target
-    instead, and "Network error" when no answer comes (ruling R-P10-F3). Only text: a status
-    line holds no markup of the answer's."""
+    instead, the reason being the text of the error's code, with the API's English message
+    below it, and "Network error" when no answer comes (rulings R-P10-F3, P12-S9). Only text: a
+    status line holds no markup of the answer's."""
     with browsing(ui_small) as (page, console):
         log_in(page)
         page.wait_for_selector("#app-shell")
@@ -244,19 +245,24 @@ def test_an_answer_htmx_does_not_swap_shows_a_status_line(ui_small: str) -> None
             {"name": "big.txt", "mimeType": "text/plain", "buffer": b"<b>x</b>" * 50_000}
         )
         panel.locator("button[type=submit]").click()
-        status = page.locator("#result > p.request-status[role=alert]")
-        expect(status).to_have_text(
-            "Request failed: 413 The request body is too large: at most 206608 bytes are accepted."
+        status = page.locator("#result > .request-status[role=alert]")
+        line = status.locator(":scope > p")
+        expect(line).to_have_text("Request failed: 413 The request is not valid.")
+        detail = status.locator(".api-detail .error-message[lang=en]")
+        expect(detail).to_have_text(
+            "The request body is too large: at most 206608 bytes are accepted."
         )
-        assert status.evaluate("line => line.children.length") == 0
+        expect(status.locator(".api-detail-label")).to_have_text("Details from the API (English)")
+        assert detail.evaluate("line => line.children.length") == 0
 
         page.route("**/ui/run/extract", lambda route: route.abort())
         open_tab(page, "extract")
         extract = page.locator("#panel-extract")
         extract.locator("input[name=url]").fill("https://example.org/")
         extract.locator("button[type=submit]").click()
-        expect(status).to_have_text("Network error")
-        expect(page.locator("#result > p.request-status")).to_have_count(1)
+        expect(line).to_have_text("Network error")
+        expect(status.locator(".api-detail")).to_have_count(0)
+        expect(page.locator("#result > .request-status")).to_have_count(1)
     # Chromium reports the failed loads, htmx the error events; nothing else (no CSP violation).
     assert not [line for line in console if "Content Security Policy" in line or "Refused" in line]
 

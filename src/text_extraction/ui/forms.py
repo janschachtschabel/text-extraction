@@ -86,8 +86,33 @@ UI_METADATA_SCHEMA: Final[dict[str, Any]] = {
 
 
 class OptionsError(MessageError):
-    """A form that cannot become a REST body; its ``message`` is shown, nothing is
-    forwarded."""
+    """A form that cannot become a REST body; its ``message`` is shown, nothing is forwarded.
+    ``field`` names the form field at fault (None: the whole form), so the page can tie the
+    message to its control (`error_control`)."""
+
+    def __init__(self, message: Message, field: str | None = None) -> None:
+        super().__init__(message)
+        self.field = field
+
+
+# The forms whose fields an error can name, by the prefix of their ids: a form's id is
+# ``<prefix>-form`` (htmx sends it as ``HX-Trigger``), a control's ``<prefix>-<field>`` with
+# each ``_`` of the field's name as ``-`` (ruling P12-S8).
+FORM_PREFIXES: Final = frozenset(
+    {"extract", "file", "screenshot", "structured", "chunk", "batch", "site", "tree", "preview"}
+)
+FORM_ID_SUFFIX: Final = "-form"
+
+
+def error_control(form_id: str | None, field: str | None) -> str | None:
+    """The id of the control of ``field`` in the form whose id is ``form_id``; None for an
+    error of the whole form, or a form this page does not have."""
+    if field is None or form_id is None or not form_id.endswith(FORM_ID_SUFFIX):
+        return None
+    prefix = form_id.removesuffix(FORM_ID_SUFFIX)
+    if prefix not in FORM_PREFIXES:
+        return None
+    return f"{prefix}-{field.replace('_', '-')}"
 
 
 @dataclass(frozen=True)
@@ -132,7 +157,7 @@ def _whole_number(form: Mapping[str, str], name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
-        raise OptionsError(Message("options.whole_number", {"name": name})) from None
+        raise OptionsError(Message("options.whole_number", {"name": name}), name) from None
 
 
 def _wait(fields: Fields, form: Mapping[str, str]) -> None:
@@ -145,7 +170,7 @@ def _wait(fields: Fields, form: Mapping[str, str]) -> None:
         except ValueError:
             value = math.nan
         if not math.isfinite(value):
-            raise OptionsError(Message("options.number", {"name": "wait_seconds"}))
+            raise OptionsError(Message("options.number", {"name": "wait_seconds"}), "wait_seconds")
     fields["wait_seconds"] = _Field(value, set_by_user=value != DEFAULT_WAIT_SECONDS)
 
 
@@ -181,9 +206,9 @@ def _json_object(form: Mapping[str, str], name: str, label: Message) -> dict[str
     try:
         parsed = json.loads(value, parse_constant=_no_constant)
     except (ValueError, RecursionError):  # RecursionError: nested too deep
-        raise OptionsError(Message("options.not_json", {"label": label})) from None
+        raise OptionsError(Message("options.not_json", {"label": label}), name) from None
     if not isinstance(parsed, dict):
-        raise OptionsError(Message("options.not_object", {"label": label}))
+        raise OptionsError(Message("options.not_object", {"label": label}), name)
     return parsed
 
 
@@ -308,7 +333,7 @@ def build_body(op: str, form: Mapping[str, str]) -> dict[str, Any]:
     for name, value in options.items():
         given = fields.get(name)
         if given is not None and given.set_by_user:
-            raise OptionsError(Message("options.given_twice", {"name": name}))
+            raise OptionsError(Message("options.given_twice", {"name": name}), "options")
         body[name] = value
     for name, field in fields.items():
         if field.set_by_user or name not in options:

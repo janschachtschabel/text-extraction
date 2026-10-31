@@ -1,6 +1,6 @@
-<form class="op" hx-post="/ui/run/batch-file" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+<form id="batch-file-form" class="op" hx-post="/ui/run/batch-file" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
   <label for="batch-file-file">{{ t("form.batch_file") }}</label>
-  <input id="batch-file-file" name="file" type="file" accept=".csv,.tsv,.txt,.json,text/csv,application/json,text/plain" required>
-  <p class="hint">{{ t("form.batch_file_hint", column=code("url")) }}</p>
+  <input id="batch-file-file" name="file" type="file" accept=".csv,.tsv,.txt,.json,text/csv,application/json,text/plain" required aria-describedby="batch-file-file-hint">
+  <p class="hint" id="batch-file-file-hint">{{ t("hint.batch_file", column=code("url")) }}</p>
   <button type="submit">{{ t("form.check_file") }}</button>
 </form>

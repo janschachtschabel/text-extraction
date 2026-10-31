@@ -1,4 +1,6 @@
-<div class="error" role="alert">
+{#- A form that cannot be sent (ruling P12-S8): with ``error_for`` (the id of the field at fault)
+ui.js ties the message to the field and moves focus there. -#}
+<div class="error" role="alert"{% if error_for %} id="{{ error_for }}-error" data-error-for="{{ error_for }}"{% endif %}>
   <p>{{ t(message) }}</p>
   {% if problems %}
   <ul class="problems">

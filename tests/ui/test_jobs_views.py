@@ -734,7 +734,7 @@ def test_every_public_route_has_an_operation(client: TestClient) -> None:
 def test_the_job_tabs_are_on_the_page(client: TestClient) -> None:
     html = run(client, "login").text
     root = tree(html)
-    tabs = texts(root, "//nav[@class='tabs']/button")
+    tabs = texts(root, "//*[@role='tablist']/button")
     assert tabs[-4:] == ["Batch", "Batch file", "Site structure", "Info"]
     assert root.xpath("//form[@hx-post='/ui/run/batch-urls']//textarea[@name='urls']")
     assert root.xpath("//form[@hx-post='/ui/run/batch-file']//input[@type='file'][@name='file']")

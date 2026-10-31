@@ -1,4 +1,4 @@
 {% set options_example = '{"links": true}' %}
 <label for="{{ prefix }}-options">{{ t("form.options") }}</label>
-<textarea id="{{ prefix }}-options" name="options" rows="3" spellcheck="false" placeholder="{{ options_example }}">{{ chosen["options"] if chosen else "" }}</textarea>
-<p class="hint">{{ t("form.options_hint") }}</p>
+<textarea id="{{ prefix }}-options" name="options" rows="3" spellcheck="false" placeholder="{{ options_example }}" aria-describedby="{{ prefix }}-options-hint">{{ chosen["options"] if chosen else "" }}</textarea>
+<p class="hint" id="{{ prefix }}-options-hint">{{ t("hint.options") }}</p>

@@ -1,3 +1,4 @@
-<label for="{{ prefix }}-wait">{{ t("form.wait") }}</label>
-<input id="{{ prefix }}-wait" name="wait_seconds" type="number" min="0" max="60" step="any" value="25">
+<label for="{{ prefix }}-wait-seconds">{{ t("form.wait") }}</label>
+<input id="{{ prefix }}-wait-seconds" name="wait_seconds" type="number" min="0" max="60" step="any" value="25" aria-describedby="{{ prefix }}-wait-seconds-hint">
+<p class="hint" id="{{ prefix }}-wait-seconds-hint">{{ t("hint.wait_seconds") }}</p>
 {% include "forms/options.html" %}

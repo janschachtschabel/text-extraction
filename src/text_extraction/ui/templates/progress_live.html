@@ -1,4 +1,12 @@
-<div class="progress-live"{% if refresh_url %} hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ delay }}s" hx-swap="outerHTML"{% endif %}>
+{#- data-announce: each job's state, which ui.js writes to #ui-status only when it changes; a
+refresh (data-refresh) is no request of the user's, so it is not announced (ruling P12-S9). The
+buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8). -#}
+{%- set announce = namespace(parts=[]) %}
+{%- for job in jobs %}
+{%- set state = t(job.error) if job.error else (t(state_text(job.state)) if state_text(job.state) else job.state or "") %}
+{%- set announce.parts = announce.parts + [t("status.job", id=job.id, state=state)] %}
+{%- endfor %}
+<div class="progress-live" data-announce="{{ announce.parts|join(' ') }}"{% if refresh_url %} data-refresh hx-get="{{ refresh_url }}" hx-trigger="load delay:{{ delay }}s" hx-swap="outerHTML"{% endif %}>
   {% if refusal %}
   <div class="error" role="alert">
     <p>{{ t(refusal) }}</p>
@@ -16,7 +24,7 @@
     </div>
     {% else %}
     <p class="bar">
-      <progress value="{{ job.done }}" max="{{ job.total }}">{{ job.done }}/{{ job.total }}</progress>
+      <progress value="{{ job.done }}" max="{{ job.total }}" aria-label="{{ t('progress.bar', id=job.id) }}">{{ job.done }}/{{ job.total }}</progress>
       <span class="done">{{ job.done }}/{{ job.total }}</span>
       {% set success %}<span class="success">{{ job.success }}</span>{% endset %}{% set partial %}<span class="partial">{{ job.partial }}</span>{% endset %}{% set failed %}<span class="failed">{{ job.failed }}</span>{% endset %}
       <span class="counts">{{ t("progress.counts", success=success, partial=partial, failed=failed) }}</span>
@@ -33,7 +41,7 @@
           <td class="url">{{ item.url or t("result.the_upload") }}</td>
           <td class="item-state">{% if item.status %}<span class="badge badge-{{ item.status }}" data-value="{{ item.status }}">{{ t(status_text(item.status)) if status_text(item.status) else code(item.status) }}</span>{% else %}{{ t(item.state) }}{% endif %}</td>
           <td class="error-code">{% if item.error_code %}{{ code(item.error_code) }}{% endif %}</td>
-          <td class="open">{% if item.link %}<button type="button" class="link" hx-get="{{ item.link }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t("progress.show") }}</button>{% endif %}</td>
+          <td class="open">{% if item.link %}<button type="button" id="job-{{ job.id }}-show-{{ item.index }}" class="link" hx-get="{{ item.link }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t("progress.show") }}</button>{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -41,16 +49,16 @@
     {% endif %}
     {% if job.prev_url or job.next_url %}
     <p class="pager">
-      {% if job.prev_url %}<button type="button" class="secondary prev" hx-get="{{ job.prev_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">{{ t("progress.previous", count=page_items) }}</button>{% endif %}
-      {% if job.next_url %}<button type="button" class="secondary next" hx-get="{{ job.next_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">{{ t("progress.next", count=page_items) }}</button>{% endif %}
+      {% if job.prev_url %}<button type="button" id="job-{{ job.id }}-previous" class="secondary prev" hx-get="{{ job.prev_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">{{ t("progress.previous", count=page_items) }}</button>{% endif %}
+      {% if job.next_url %}<button type="button" id="job-{{ job.id }}-next" class="secondary next" hx-get="{{ job.next_url }}" hx-target="closest .progress-live" hx-swap="outerHTML">{{ t("progress.next", count=page_items) }}</button>{% endif %}
     </p>
     {% endif %}
     <p class="actions">
-      {% if job.tree_url %}<button type="button" class="secondary tree-button" hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t(job.tree_label) }}</button>{% endif %}
+      {% if job.tree_url %}<button type="button" id="job-{{ job.id }}-tree" class="secondary tree-button" hx-get="{{ job.tree_url }}" hx-target="next .job-detail" hx-swap="innerHTML">{{ t(job.tree_label) }}</button>{% endif %}
     </p>
     <form class="cancel" hx-post="/ui/run/cancel" hx-target="next .job-detail" hx-swap="innerHTML" hx-confirm="{{ t('progress.cancel_confirm') }}">
       <input type="hidden" name="id" value="{{ job.id }}">
-      <button type="submit" class="secondary">{{ t("progress.cancel") }}</button>
+      <button type="submit" id="job-{{ job.id }}-cancel" class="secondary">{{ t("progress.cancel") }}</button>
     </form>
     {% endif %}
   </section>

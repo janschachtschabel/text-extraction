@@ -18,16 +18,21 @@
   </details>
   {% endif %}
   {% if tabs %}
-  <nav class="tabs" role="tablist">
+  {#- WAI-ARIA tabs (ruling P12-S8): ui.js moves the roving tabindex with the arrow keys,
+  Home and End. #}
+  <div class="tabs" role="tablist" aria-label="{{ t('tabs.label') }}">
     {% for tab in tabs %}
-    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ t(tab.label_key) }}</button>
+    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ '0' if loop.first else '-1' }}">{{ t(tab.label_key) }}</button>
     {% endfor %}
-  </nav>
+  </div>
   {% for tab in tabs %}
-  <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}"{% if not loop.first %} hidden{% endif %}>
+  <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}" tabindex="0"{% if not loop.first %} hidden{% endif %}>
+    <h2 class="visually-hidden">{{ t(tab.label_key) }}</h2>
+    <p class="intro">{{ t(tab.intro_key) }} <a class="help" href="{{ help_url(lang, tab.help_page) }}" rel="noopener noreferrer">{{ t("help.link") }}</a></p>
     {% include tab.template %}
   </section>
   {% endfor %}
   {% endif %}
-  <section id="result" class="result" aria-live="polite"></section>
+  {#- No live region: #ui-status announces each answer once (ruling P12-S9). #}
+  <section id="result" class="result"></section>
 </section>

@@ -1,6 +1,7 @@
 {% set chosen_format = chosen["format"] if chosen and chosen["format"] in ("markdown", "text") else "markdown" %}
-<fieldset class="choice">
+<fieldset class="choice" aria-describedby="{{ prefix }}-format-hint">
   <legend>{{ t("form.format") }}</legend>
   <label class="inline"><input type="radio" name="format" value="markdown"{% if chosen_format == "markdown" %} checked{% endif %}> {{ t("form.format_markdown") }}</label>
   <label class="inline"><input type="radio" name="format" value="text"{% if chosen_format == "text" %} checked{% endif %}> {{ t("form.format_text") }}</label>
+  <p class="hint" id="{{ prefix }}-format-hint">{{ t("hint.format") }}</p>
 </fieldset>
