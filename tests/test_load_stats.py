@@ -4,10 +4,12 @@
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
+from tests.load import stats as stats_module
 from tests.load.stats import Sampler, StatSample, parse_line
 
 
@@ -115,25 +117,43 @@ def test_sampler_survives_a_command_that_cannot_run(
     assert "stats:" in capsys.readouterr().err
 
 
-def test_a_reading_is_stamped_with_the_midpoint_of_its_call(tmp_path: Path) -> None:
+class _Clock:
+    """A wall clock for the sampler: the given readings in turn, then the last one again;
+    ``read`` is set once the last one was handed out. Its ``monotonic`` is the real one, which
+    the sampler's pacing uses."""
+
+    def __init__(self, *readings: float) -> None:
+        self._readings = list(readings)
+        self.monotonic = time.monotonic
+        self.read = asyncio.Event()
+
+    def time(self) -> float:
+        if len(self._readings) > 1:
+            return self._readings.pop(0)
+        self.read.set()
+        return self._readings[0]
+
+
+def test_a_reading_is_stamped_with_the_midpoint_of_its_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``docker stats --no-stream`` takes a second or two; its reading describes that span, so
-    the stamp is its middle, not its end."""
+    the stamp is its middle, not its end. The wall clock is injected (the call starts at 1000.0
+    and ends at 1002.0), so a slow child process cannot move the stamp."""
     line = docker_line("text-extraction-api-1", "1%", "1MiB / 1GiB")
-    started = tmp_path / "started"
-    script = (
-        "import pathlib, sys, time; "
-        f"pathlib.Path({str(started)!r}).write_text(repr(time.time())); "
-        f"time.sleep(0.6); print({line!r})"
-    )
-    command = [sys.executable, "-c", script]
+    command = [sys.executable, "-c", f"print({line!r})"]
+    clock = _Clock(1000.0, 1002.0)
+    monkeypatch.setattr(stats_module, "time", clock)
+    out = tmp_path / "stats.jsonl"
 
     async def sample() -> Sampler:
-        async with Sampler(tmp_path / "stats.jsonl", interval=10, command=command) as sampler:
-            await asyncio.sleep(1.5)
+        async with Sampler(out, interval=60, command=command) as sampler:
+            # The call's end is stamped: its reading is kept before the sampler awaits again.
+            # Only a hung child could take 30 s.
+            await asyncio.wait_for(clock.read.wait(), timeout=30)
         return sampler
 
     sampler = asyncio.run(sample())
 
-    begin = float(started.read_text())  # the call ran from a little before this to after +0.6
-    assert len(sampler.samples) == 1
-    assert begin + 0.1 <= sampler.samples[0].t <= begin + 0.5
+    assert [reading.t for reading in sampler.samples] == [1001.0]
+    assert json.loads(out.read_text())["t"] == 1001.0
