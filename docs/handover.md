@@ -5,7 +5,7 @@ guide's order, and its section 7 on maintenance and lifecycle. Each answer names
 setting or workflow that delivers it and links to the material; it does not repeat it. The
 checklist items are quoted in German, as the guide writes them.
 
-The service is a prototype of a private project: no version is tagged yet (see
+The service is a prototype of a private project. Its first release is `v0.1.0` (see
 [Maintenance and lifecycle](#maintenance-and-lifecycle)).
 
 ## Architecture overview
@@ -464,7 +464,7 @@ patches and models.
   `X.Y` for all five images; a deployment pins `image.tag` (and the workers' image tags) to
   `X.Y.Z`, as the example values do.
 - Rollback: `helm rollback <release> <revision>`, or `helm upgrade` with the previous tag.
-- No version is tagged yet. The first will be `v0.1.0`, a prototype, after package 12 (UI
+- The first release is `v0.1.0`, a prototype, tagged on the merge of package 12 (UI
   languages, unblock option, bilingual docs; [packages.md](packages.md#status)). Package 11 is
   merged without a tag.
 

@@ -185,7 +185,7 @@ package, by Jan's decision: the full 4,000-URL WLO regression (planned; start `l
 prototype.
 
 Package 12 note (Jan, 2026-10-31): package 12 follows package 11, which is merged without a tag.
-The first release, `v0.1.0` (a prototype), is tagged after package 12 is merged. Its scope and
+The first release, `v0.1.0` (a prototype), is tagged on the merge of package 12. Its scope and
 done-when criterion are set in its plan, which Jan approved on 2026-10-31 (D1-D8 = a).
 
 Maximum extraction is unblock mode and nothing more (CLAUDE.md rule 6): the SSRF guard, the byte
