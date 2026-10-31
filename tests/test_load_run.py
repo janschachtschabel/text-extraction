@@ -467,10 +467,17 @@ if sys.argv[1:3] == ["--scan", "--pattern"]:
         if fnmatch.fnmatchcase(key, pattern):
             print(key)
 else:
+    mode = (here / "mode").read_text() if (here / "mode").exists() else "raw"
     for line in sys.stdin:
         command, sub, key, *rest = line.split()
         assert (command, sub, rest) == ("MEMORY", "USAGE", ["SAMPLES", "0"]), line
-        print(sizes.get(key, ""))
+        size = sizes.get(key)
+        if mode == "deny" and key.endswith(":results"):
+            print("NOPERM User load has no permissions to run the 'memory' command")
+        elif mode == "tty":
+            print("(nil)" if size is None else f"(integer) {size}")
+        else:
+            print("" if size is None else size)
 """
 
 
@@ -540,6 +547,24 @@ def test_a_failed_valkey_read_leaves_the_bytes_unknown(
     assert "valkey" in capsys.readouterr().err
 
 
+def test_an_error_reply_leaves_the_bytes_unknown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An error answer to one MEMORY USAGE (an ACL denial, say) must not give a low sum."""
+    (tmp_path / "mode").write_text("deny")
+
+    _, [record] = run_site(tmp_path)
+
+    assert record["valkey_bytes"] is None
+    assert "valkey" in capsys.readouterr().err
+
+
+def test_terminal_style_answers_are_read_too(tmp_path: Path) -> None:
+    (tmp_path / "mode").write_text("tty")
+
+    assert run_load.valkey_job_bytes(valkey_stub(tmp_path), "j1") == 20_000_300
+
+
 LAG = "text_extraction_event_loop_lag_seconds"
 
 
@@ -562,10 +587,41 @@ def test_the_lag_of_a_scenario_is_the_difference_of_two_reads() -> None:
     assert lag.mean_ms == round(4000 / 48)
     assert lag.over_100ms == 3  # 58 - 55
     assert lag.max_bound_s == 5.0  # the highest sample is at most 5 s, above 1 s
+    assert lag.total_s == 4.0  # the time the loop was held, over all samples
     assert run_load.lag_between("", after) == run_load.lag_between(
         lag_text({"+Inf": 0}, 0), after
     )  # no read before: from zero
     assert run_load.lag_between(before, "other_metric 1\n") is None  # not exported
+
+
+def test_no_lag_without_samples_or_after_a_restart() -> None:
+    """Zero samples give no bound; counts that went backwards (the worker restarted between
+    the reads) give no difference either."""
+    before = lag_text({"0.1": 50, "+Inf": 50}, 1.0)
+
+    assert run_load.lag_between(before, before) is None
+    assert run_load.lag_between(before, lag_text({"0.1": 4, "+Inf": 4}, 0.01)) is None
+    assert run_load.lag_between(before, lag_text({"0.1": 49, "+Inf": 60}, 3.0)) is None
+
+
+def test_a_scenarios_lag_needs_the_read_before_it() -> None:
+    """A failed read before the window leaves the lag unknown, not the lag since the start."""
+    before = {"127.0.0.1:9091": lag_text({"0.1": 10, "+Inf": 10}, 0.01)}
+    after = {
+        "127.0.0.1:9091": lag_text({"0.1": 20, "+Inf": 20}, 0.02),
+        "127.0.0.1:9092": lag_text({"0.1": 30, "+Inf": 30}, 0.03),  # its read before failed
+        "127.0.0.1:9090": "other_metric 1\n",  # exports no lag: no row
+    }
+
+    lags = run_load.scenario_lags(before, after)
+
+    assert set(lags) == {"127.0.0.1:9091", "127.0.0.1:9092"}
+    assert lags["127.0.0.1:9091"] == run_load.lag_between(
+        before["127.0.0.1:9091"], after["127.0.0.1:9091"]
+    )
+    assert lags["127.0.0.1:9092"] is None
+    table = run_load._lag_table({"sitemap-200k": lags})
+    assert "| sitemap-200k | 127.0.0.1:9092 | - | - | - | - | - |" in table
 
 
 def test_the_lag_above_the_last_bound_says_so() -> None:
@@ -583,24 +639,27 @@ def test_the_site_and_lag_tables() -> None:
             "sitemap-200k", 0, 202, "success", None, 14_000, True, "j1", 3, 25_165_824, 12.34
         ),
         run_load.Record("site-crawl", 0, 202, "success", None, 61_000, True, "j2", 100, None),
+        run_load.Record("site-crawl-max-pages", 0, 200, "error", "job_timeout", 9, False, "j3"),
         run_load.Record("sync-fast-c10", 0, 200, "success", None, 300, True),
     ]
     lags = {
-        "sitemap-200k": {"127.0.0.1:9091": run_load.Lag(10, 120, 2, 2.5)},
-        "site-crawl": {"127.0.0.1:9091": run_load.Lag(4, 1, 0, 0.005)},
+        "sitemap-200k": {"127.0.0.1:9091": run_load.Lag(10, 120, 2, 2.5, 1.2)},
+        "site-crawl": {"127.0.0.1:9091": run_load.Lag(4, 1, 0, 0.005, 0.004)},
     }
 
-    site = run_load._site_table(records, {"sitemap-200k", "site-crawl"})
+    site = run_load._site_table(records, {"sitemap-200k", "site-crawl", "site-crawl-max-pages"})
     lag = run_load._lag_table(lags)
 
     assert "| sitemap-200k | 3 | 12.3 | 14.0 | 25165824 | 24.0 |" in site
     assert "| site-crawl | 100 | - | 61.0 | - | - |" in site
+    assert "| site-crawl-max-pages | - | - | 0.0 | - | - |" in site  # a crawl that timed out
+    assert "None" not in site
     assert "sync-fast-c10" not in site
     assert "JOB_TTL_SECONDS" in site
-    assert "| sitemap-200k | 127.0.0.1:9091 | 10 | 120 | 2 | 2.5 |" in lag
-    assert "| site-crawl | 127.0.0.1:9091 | 4 | 1 | 0 | 0.005 |" in lag
+    assert "| sitemap-200k | 127.0.0.1:9091 | 10 | 120 | 1.2 | 2 | 2.5 |" in lag
+    assert "| site-crawl | 127.0.0.1:9091 | 4 | 1 | 0.0 | 0 | 0.005 |" in lag
     assert run_load._lag_table({}) == ""
-    assert run_load._site_table(records[2:], {"sitemap-200k", "site-crawl"}) == ""
+    assert run_load._site_table(records[3:], {"sitemap-200k", "site-crawl"}) == ""
 
 
 def test_main_reads_valkey_through_the_given_command(

@@ -36,7 +36,9 @@ The site structure items (ruling P11-S7) go into the summary too:
   ``MEMORY USAGE ... SAMPLES 0``. A failed read leaves the bytes unknown.
 - **Event-loop lag**: ``text_extraction_event_loop_lag_seconds`` (the extract worker's
   histogram) per scenario and internal URL, from the ``/metrics`` read before and after it:
-  samples, mean, samples over 100 ms and the bound of the highest one.
+  samples, mean, total, samples over 100 ms and the bound of the highest one. It is unknown
+  (``-``) when the read before failed, no sample was taken or the counts went backwards.
+- A ``MEMORY USAGE`` answer that is no number (an error) leaves a crawl's Valkey bytes unknown.
 """
 
 import argparse
@@ -102,12 +104,14 @@ class Record:
 @dataclass(frozen=True)
 class Lag:
     """The event-loop lag samples of one scenario window: how many, their mean, how many were
-    over 100 ms, and the bucket bound of the highest (``inf``: above the last bound)."""
+    over 100 ms, the bucket bound of the highest (``inf``: above the last bound) and their sum
+    (the time the loop was held)."""
 
     samples: int
     mean_ms: int
     over_100ms: int
     max_bound_s: float
+    total_s: float
 
 
 def _transport() -> httpx.AsyncBaseTransport | None:
@@ -185,9 +189,16 @@ def valkey_job_bytes(command: Sequence[str], job_id: str) -> int:
         check=True,
         timeout=VALKEY_TIMEOUT_SECONDS,
     )
-    # One answer a line: a number (``(integer) N`` on a terminal), or nothing for a key gone.
-    words = (line.split() for line in usage.stdout.splitlines())
-    return sum(int(parts[-1]) for parts in words if parts and parts[-1].isdigit())
+    # One answer a line: a number (``(integer) N`` on a terminal), or nothing (``(nil)``) for a
+    # key gone. Anything else is an error answer (an ACL denial, say): the sum would be low.
+    total = 0
+    for line in usage.stdout.splitlines():
+        answer = line.strip().removeprefix("(integer)").strip()
+        if answer.isdigit():
+            total += int(answer)
+        elif answer not in ("", "(nil)"):
+            raise ValueError("a MEMORY USAGE answer is no number")
+    return total
 
 
 async def _valkey_bytes(command: Sequence[str] | None, job_id: str | None) -> int | None:
@@ -195,7 +206,7 @@ async def _valkey_bytes(command: Sequence[str] | None, job_id: str | None) -> in
         return None
     try:
         return await asyncio.to_thread(valkey_job_bytes, command, job_id)
-    except (OSError, subprocess.SubprocessError) as error:
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
         # The command line and its output hold no secret; the error's type is enough.
         print(f"valkey bytes of a crawl: {type(error).__name__}", file=sys.stderr)
         return None
@@ -437,9 +448,15 @@ def _histogram(text: str, name: str) -> tuple[dict[float, float], float] | None:
     return None
 
 
+def exports_lag(text: str) -> bool:
+    """Whether a ``/metrics`` text has the lag histogram."""
+    return _histogram(text, LAG_METRIC) is not None
+
+
 def lag_between(before: str, after: str) -> Lag | None:
-    """The lag samples taken between two ``/metrics`` texts (``before`` may be empty: from
-    zero); None when ``after`` has no lag histogram."""
+    """The lag samples taken between two ``/metrics`` texts (``before`` without the histogram:
+    from zero). None when ``after`` has no lag histogram, when no sample was taken, and when a
+    count went backwards (the process restarted between the reads)."""
     later = _histogram(after, LAG_METRIC)
     if later is None:
         return None
@@ -447,12 +464,32 @@ def lag_between(before: str, after: str) -> Lag | None:
     buckets = {
         bound: count - earlier[0].get(bound, 0.0) for bound, count in sorted(later[0].items())
     }
-    samples = round(buckets.get(math.inf, 0.0))
     total = later[1] - earlier[1]
+    if any(count < 0 for count in buckets.values()) or total < 0:
+        return None
+    samples = round(buckets.get(math.inf, 0.0))
+    if not samples:
+        return None
     over = samples - round(buckets.get(0.1, samples))
     bound = next((bound for bound, count in buckets.items() if round(count) >= samples), math.inf)
-    mean_ms = round(total * 1000 / samples) if samples else 0
-    return Lag(samples=samples, mean_ms=mean_ms, over_100ms=over, max_bound_s=bound)
+    return Lag(
+        samples=samples,
+        mean_ms=round(total * 1000 / samples),
+        over_100ms=over,
+        max_bound_s=bound,
+        total_s=round(total, 3),
+    )
+
+
+def scenario_lags(before: Mapping[str, str], after: Mapping[str, str]) -> dict[str, Lag | None]:
+    """A scenario's lag per internal URL whose read after it has the histogram, from the
+    reads before and after the window (by netloc). None (unknown) when the read before
+    failed, as ``lag_between`` gives it otherwise."""
+    return {
+        url: lag_between(before[url], text) if url in before else None
+        for url, text in after.items()
+        if exports_lag(text)
+    }
 
 
 def _site_table(records: Sequence[Record], crawls: Collection[str]) -> str:
@@ -476,14 +513,15 @@ def _site_table(records: Sequence[Record], crawls: Collection[str]) -> str:
         size = record.valkey_bytes
         mib = "-" if size is None else f"{size / 2**20:.1f}"
         seconds = "-" if record.job_seconds is None else f"{record.job_seconds:.1f}"
+        items = "-" if record.items is None else record.items
         lines.append(
-            f"| {record.scenario} | {record.items} | {seconds} | {record.latency_ms / 1000:.1f} "
+            f"| {record.scenario} | {items} | {seconds} | {record.latency_ms / 1000:.1f} "
             f"| {'-' if size is None else size} | {mib} |"
         )
     return "\n".join(lines) + "\n"
 
 
-def _lag_table(lags: Mapping[str, Mapping[str, Lag]]) -> str:
+def _lag_table(lags: Mapping[str, Mapping[str, Lag | None]]) -> str:
     rows = [
         (scenario, url, lag) for scenario, by_url in lags.items() for url, lag in by_url.items()
     ]
@@ -494,15 +532,21 @@ def _lag_table(lags: Mapping[str, Mapping[str, Lag]]) -> str:
         "### Event-loop lag",
         "",
         f"{LAG_METRIC}, sampled every 0.5 s, in the scenario's window (the reads before and "
-        "after it). Max: the bucket bound of the highest sample.",
+        "after it). Total: the sum of the samples, the time the loop was held. Max: the bucket "
+        "bound of the highest sample. - : unknown (no read before the window, no sample, or "
+        "the worker restarted).",
         "",
-        "| Scenario | Internal URL | Samples | Mean ms | Over 100 ms | Max s |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
+        "| Scenario | Internal URL | Samples | Mean ms | Total s | Over 100 ms | Max s |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for scenario, url, lag in rows:
+        if lag is None:
+            lines.append(f"| {scenario} | {url} | - | - | - | - | - |")
+            continue
         bound = "> last bound" if math.isinf(lag.max_bound_s) else f"{lag.max_bound_s:g}"
         lines.append(
-            f"| {scenario} | {url} | {lag.samples} | {lag.mean_ms} | {lag.over_100ms} | {bound} |"
+            f"| {scenario} | {url} | {lag.samples} | {lag.mean_ms} | {lag.total_s:.1f} "
+            f"| {lag.over_100ms} | {bound} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -643,7 +687,7 @@ async def amain(args: argparse.Namespace) -> int:
     results: list[ScenarioResult] = []
     llm_usage: dict[str, tuple[int, dict[str, dict[str, int]]]] = {}
     records: list[Record] = []
-    lags: dict[str, dict[str, Lag]] = {}
+    lags: dict[str, dict[str, Lag | None]] = {}
     sampler = stats.Sampler(
         out_dir / "stats.jsonl", interval=STATS_INTERVAL_SECONDS, command=STATS_COMMAND
     )
@@ -688,11 +732,7 @@ async def amain(args: argparse.Namespace) -> int:
                         texts = await _save_metrics(
                             side, args.internal_urls, out_dir, scenario.name
                         )
-                        lags[scenario.name] = {
-                            url: lag
-                            for url, text in texts.items()
-                            if (lag := lag_between(metrics.get(url, ""), text)) is not None
-                        }
+                        lags[scenario.name] = scenario_lags(metrics, texts)
                         metrics = texts
     finally:
         # Also after a failure: the scenarios that ran keep their summary and sizing.
