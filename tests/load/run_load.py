@@ -14,7 +14,9 @@ The API key comes from the environment variable named by ``--api-key-env`` (``AP
 never printed. ``--internal-urls`` (comma-separated, e.g. ``http://127.0.0.1:9090``) are waited
 for (``/ready``) before the run, and their ``/metrics`` are saved after each scenario under
 ``metrics/``. With ``--fake-llm-url`` the fake LLM's byte counts (``fake_llm.py``) per scenario
-go into the summary. ``--selector-processes`` only labels the run.
+go into the summary. ``--selector-processes``, ``--asr-model`` and ``--pii-model-size`` (the
+stack's ``STRUCTURED_SELECTOR_PROCESSES``, ``ASR_MODEL`` and ``PII_MODEL_SIZE``) only label the
+run: they go into the summary's heading and into ``sizing.json``.
 
 Writes to ``--out-dir``: ``results.jsonl`` (one line per request), ``stats.jsonl`` (the
 ``docker stats`` samples), ``summary.md`` (also printed) and ``sizing.json`` (the requests and
@@ -654,6 +656,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         metavar="N",
         help="the stack's STRUCTURED_SELECTOR_PROCESSES, as a label of the run",
     )
+    parser.add_argument(
+        "--asr-model",
+        default=None,
+        metavar="NAME",
+        help="the stack's ASR_MODEL, as a label of the run",
+    )
+    parser.add_argument(
+        "--pii-model-size",
+        default=None,
+        metavar="SIZE",
+        help="the stack's PII_MODEL_SIZE, as a label of the run",
+    )
     parser.add_argument("--fake-llm-url", default=None, help="the fake LLM's base URL")
     parser.add_argument(
         "--valkey-cli",
@@ -749,6 +763,8 @@ async def amain(args: argparse.Namespace) -> int:
             results,
             llm_usage,
             args.selector_processes,
+            asr_model=args.asr_model,
+            pii_model_size=args.pii_model_size,
             extra=_site_table(records, crawls) + _lag_table(lags),
         )
     print(summary)
@@ -770,15 +786,21 @@ def _write_reports(
     llm_usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]],
     selector_processes: int | None,
     *,
+    asr_model: str | None = None,
+    pii_model_size: str | None = None,
     extra: str = "",
 ) -> str:
-    """Write ``summary.md`` (with the ``extra`` tables) and ``sizing.json``; the summary's
-    text."""
+    """Write ``summary.md`` (with the ``extra`` tables) and ``sizing.json``, both labelled with
+    the run's selector processes and models where known; the summary's text."""
     rows = summarise(samples, windows)
     heading = "Load test"
     if selector_processes is not None:
         heading += f", {selector_processes} selector process"
         heading += "" if selector_processes == 1 else "es"
+    if asr_model is not None:
+        heading += f", ASR model {asr_model}"
+    if pii_model_size is not None:
+        heading += f", PII model size {pii_model_size}"
     summary = markdown(rows, results, heading=heading)
     if llm_usage:
         summary += _llm_table(llm_usage)
@@ -786,6 +808,8 @@ def _write_reports(
     (out_dir / "summary.md").write_text(summary, encoding="utf-8")
     report = {
         "selector_processes": selector_processes,
+        "asr_model": asr_model,
+        "pii_model_size": pii_model_size,
         "windows": windows,
         "services": {name: asdict(value) for name, value in sizing(rows).items()},
     }

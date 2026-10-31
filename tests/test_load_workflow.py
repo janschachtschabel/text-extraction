@@ -255,6 +255,8 @@ def _run_sweep(values: str, *, fail_up: bool = False, leak: bool = True) -> Swee
             "COMPOSE": f"docker compose {COMPOSE_ARGS}",
             "SELECTOR_PROCESSES": values,
             "INTERNAL_URLS": _job()["env"]["INTERNAL_URLS"],
+            "ASR_MODEL": "small",
+            "PII_MODEL_SIZE": "md",
             "API_KEY": API_KEY,
             "STUB_VALKEY_PASSWORD": VALKEY_PASSWORD,
             "STUB_PS_JSON": PS_JSON,
@@ -341,6 +343,15 @@ def _check_targets(run: str) -> None:
         for port in service.get("ports", [])
     )
     assert sorted(url.rsplit(":", 1)[1] for url in internal) == published
+
+
+def test_every_run_is_labelled_with_the_models_of_its_stack() -> None:
+    """A manual run with other models than the defaults must be told apart in its files."""
+    runs = [c for c in _run_sweep("1,2").calls if c.startswith("uv ")]
+    assert len(runs) == 3
+    for run in runs:
+        assert "--asr-model small" in run
+        assert "--pii-model-size md" in run
 
 
 def test_the_run_reads_valkey_inside_its_container() -> None:

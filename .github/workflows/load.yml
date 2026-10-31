@@ -193,6 +193,7 @@ jobs:
           }
 
           # name, STRUCTURED_SELECTOR_PROCESSES, then the generator's own arguments. The
+          # selector processes and the models label the summary and sizing.json. The
           # generator reads the crawls' Valkey bytes with valkey-cli inside the valkey
           # container, which authenticates from its REDISCLI_AUTH: no password on a command line.
           load_run() {
@@ -212,6 +213,8 @@ jobs:
               --fake-llm-url http://127.0.0.1:8000 \
               --valkey-cli "$COMPOSE exec -T valkey valkey-cli" \
               --selector-processes "$processes" \
+              --asr-model "$ASR_MODEL" \
+              --pii-model-size "$PII_MODEL_SIZE" \
               "$@" || status=1
             finish_run "$name"
           }

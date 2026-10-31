@@ -317,6 +317,55 @@ def test_main_writes_every_file_and_never_prints_the_key(
     assert sizing["services"]["api"]["cpu_request"] == "500m"
 
 
+def test_main_labels_the_run_with_its_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run with ASR small and PII md must be told apart from one at the production defaults:
+    the models label the summary's heading and sizing.json."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope())
+
+    prepare(monkeypatch, handler, [scenario("sync", "/v1/extract")])
+
+    code = run_load.main(
+        arguments(
+            tmp_path,
+            "--selector-processes",
+            "1",
+            "--asr-model",
+            "small",
+            "--pii-model-size",
+            "md",
+        )
+    )
+
+    assert code == 0
+    summary = (tmp_path / "summary.md").read_text()
+    assert summary.startswith(
+        "## Load test, 1 selector process, ASR model small, PII model size md\n"
+    )
+    report = json.loads((tmp_path / "sizing.json").read_text())
+    assert report["asr_model"] == "small"
+    assert report["pii_model_size"] == "md"
+
+
+def test_main_leaves_unknown_models_out_of_the_heading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope())
+
+    prepare(monkeypatch, handler, [scenario("sync", "/v1/extract")])
+
+    assert run_load.main(arguments(tmp_path)) == 0
+
+    assert (tmp_path / "summary.md").read_text().startswith("## Load test\n")
+    report = json.loads((tmp_path / "sizing.json").read_text())
+    assert report["asr_model"] is None
+    assert report["pii_model_size"] is None
+
+
 def test_main_fails_on_an_unexpected_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
