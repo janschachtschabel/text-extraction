@@ -1,8 +1,8 @@
-<section class="jobs-view" aria-label="Jobs">
+<section class="jobs-view" aria-label="{{ t('progress.jobs') }}">
   {% if refused %}
   <div class="error" role="alert">
-    <p>Part {{ refused.part }} of {{ refused.parts }} was refused (HTTP {{ refused.http_status }}): {{ refused.message }}</p>
-    <p class="hint">The jobs below were started and keep running.</p>
+    <p>{{ t("progress.part_refused", part=refused.part, parts=refused.parts, status=refused.http_status, message=refused.message) }}</p>
+    <p class="hint">{{ t("progress.keep_running") }}</p>
   </div>
   {% endif %}
   {% include "progress_live.html" %}

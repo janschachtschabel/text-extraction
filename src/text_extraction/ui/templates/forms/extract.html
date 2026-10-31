@@ -6,13 +6,13 @@
   {% include "forms/mode.html" %}
   {% include "forms/access.html" %}
   <fieldset class="choice">
-    <legend>Also</legend>
-    <label class="inline"><input type="checkbox" name="metadata" value="on" checked> Metadata</label>
-    <label class="inline"><input type="checkbox" name="metadata_structured" value="on"> Metadata, structured</label>
-    <label class="inline"><input type="checkbox" name="describe_images" value="on"> Describe images</label>
+    <legend>{{ t("form.also") }}</legend>
+    <label class="inline"><input type="checkbox" name="metadata" value="on" checked> {{ t("form.metadata") }}</label>
+    <label class="inline"><input type="checkbox" name="metadata_structured" value="on"> {{ t("form.metadata_structured") }}</label>
+    <label class="inline"><input type="checkbox" name="describe_images" value="on"> {{ t("form.describe_images") }}</label>
   </fieldset>
-  <label for="extract-max-images">Images to describe (1 to 20)</label>
+  <label for="extract-max-images">{{ t("form.max_images") }}</label>
   <input id="extract-max-images" name="max_images" type="number" min="1" max="20" value="5">
   {% include "forms/common.html" %}
-  <button type="submit">Extract</button>
+  <button type="submit">{{ t("form.extract") }}</button>
 </form>

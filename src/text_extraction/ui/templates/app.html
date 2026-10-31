@@ -1,5 +1,5 @@
 <section id="app-shell" class="shell">
-  {% if auth_none %}<p class="banner" role="note">{{ banner }}</p>{% endif %}
+  {% if auth_none %}<p class="banner" role="note">{{ t(banner) }}</p>{% endif %}
   <div class="who">
     {% set signed_in_name %}<strong>{{ principal_name }}</strong>{% endset %}
     {% set signed_in_role %}<span class="role">{{ role }}</span>{% endset %}
@@ -20,7 +20,7 @@
   {% if tabs %}
   <nav class="tabs" role="tablist">
     {% for tab in tabs %}
-    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ tab.label }}</button>
+    <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ t(tab.label_key) }}</button>
     {% endfor %}
   </nav>
   {% for tab in tabs %}

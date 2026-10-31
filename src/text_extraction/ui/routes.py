@@ -39,7 +39,7 @@ from text_extraction.ui.forms import (
     multipart_fields,
 )
 from text_extraction.ui.forward import Forwarded, forward
-from text_extraction.ui.i18n import STATE_KEY, Language, page_language, run_language
+from text_extraction.ui.i18n import STATE_KEY, Language, Message, page_language, run_language
 from text_extraction.ui.job_views import add_job_routes
 from text_extraction.ui.previews import SHOWN, load_previews
 from text_extraction.ui.results import curl_line, render_result
@@ -56,36 +56,35 @@ from text_extraction.vision.fetch import ImageFetcher
 
 STATIC_DIR: Final = Path(__file__).parent / "static"
 
-BANNER: Final = (
-    "This service runs without authentication: anyone who can reach it can use the API and this UI."
-)
-NOT_VALID: Final = "This key is not valid."
+BANNER: Final = Message("shell.banner")
+NOT_VALID: Final = Message("login.not_valid")
 # Sent with a refused key: ui.js drops the stored keys (P10-S13).
 LOGIN_FAILED_EVENT: Final = "ui-login-failed"
 
 
 @dataclass(frozen=True)
 class Tab:
-    """One tab of the application: its name, its label and the template of its form."""
+    """One tab of the application: its name, the catalogue key of its label and the template of
+    its form."""
 
     name: str
-    label: str
+    label_key: str
     template: str
 
 
 # The application's tabs, in order.
 TABS: Final[tuple[Tab, ...]] = (
-    Tab("extract", "Extract", OPERATIONS["extract"].form),
-    Tab("file", "File", OPERATIONS["file"].form),
-    Tab("screenshot", "Screenshot", OPERATIONS["screenshot"].form),
-    Tab("structured", "Structured", OPERATIONS["structured"].form),
-    Tab("chunk", "Chunk", OPERATIONS["chunk"].form),
-    Tab("batch", "Batch", OPERATIONS["batch"].form),
-    Tab("batch-file", "Batch file", "forms/batch_file.html"),
-    Tab("site-structure", "Site structure", OPERATIONS["site-structure"].form),
-    Tab("info", "Info", OPERATIONS["info"].form),
+    Tab("extract", "tab.extract", OPERATIONS["extract"].form),
+    Tab("file", "tab.file", OPERATIONS["file"].form),
+    Tab("screenshot", "tab.screenshot", OPERATIONS["screenshot"].form),
+    Tab("structured", "tab.structured", OPERATIONS["structured"].form),
+    Tab("chunk", "tab.chunk", OPERATIONS["chunk"].form),
+    Tab("batch", "tab.batch", OPERATIONS["batch"].form),
+    Tab("batch-file", "tab.batch_file", "forms/batch_file.html"),
+    Tab("site-structure", "tab.site_structure", OPERATIONS["site-structure"].form),
+    Tab("info", "tab.info", OPERATIONS["info"].form),
 )
-NO_FILE: Final = "Choose a file to upload."
+NO_FILE: Final = Message("form.no_file")
 _MODES: Final = frozenset(get_args(RequestedMode))
 _COMPLIANCE_MODES: Final = frozenset(get_args(ComplianceMode))
 
@@ -104,7 +103,7 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
 
 async def _forward_single(
     request: Request, op: str, body: dict[str, Any], form: FormData
-) -> tuple[Forwarded, str] | str:
+) -> tuple[Forwarded, str] | Message:
     """Forward the body of ``op`` and return the answer with its curl line, or the message of a
     form that cannot be sent."""
     operation = OPERATIONS[op]
@@ -157,7 +156,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             forwarded = await _forward_single(request, op, body, form)
         finally:
             await form.close()  # an upload's spooled file
-        if isinstance(forwarded, str):
+        if isinstance(forwarded, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": forwarded})
         answer, curl = forwarded
         mode = body.get("mode")

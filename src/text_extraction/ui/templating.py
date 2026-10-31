@@ -11,7 +11,7 @@ from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup, escape
 from starlette.requests import Request
 
-from text_extraction.ui.i18n import LANGUAGES, STATE_KEY, Language, fill, translate
+from text_extraction.ui.i18n import LANGUAGES, STATE_KEY, Language, Message, fill, translate
 
 TEMPLATES_DIR: Final = Path(__file__).parent / "templates"
 
@@ -25,9 +25,11 @@ def code(value: object) -> Markup:
 def text_function(language: Language) -> Callable[..., Markup]:
     """The templates' ``t(key, **params)``: the catalogue text of ``key`` in ``language``,
     escaped, with each placeholder filled with its escaped value (markup such as `code` stays
-    markup)."""
+    markup). ``t(message)`` renders a `Message` from Python the same way."""
 
-    def t(key: str, /, **params: object) -> Markup:
+    def t(key: str | Message, /, **params: object) -> Markup:
+        if isinstance(key, Message):
+            return t(key.key, **{**key.params, **params})
         text = str(escape(translate(language, key)))
         escaped = {name: escape(value) for name, value in params.items()}
         return Markup(fill(text, escaped))  # noqa: S704 - escaped text, escaped values
@@ -57,3 +59,5 @@ templates: Final = Jinja2Templates(
     context_processors=[_request_language],
 )
 templates.env.globals["code"] = code
+# ``{% if value is message %}``: a `Message` (render it with ``t``) rather than a plain text.
+templates.env.tests["message"] = lambda value: isinstance(value, Message)

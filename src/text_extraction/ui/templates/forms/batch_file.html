@@ -1,6 +1,6 @@
 <form class="op" hx-post="/ui/run/batch-file" hx-target="#result" hx-swap="innerHTML" hx-encoding="multipart/form-data">
-  <label for="batch-file-file">CSV or JSON file of URLs</label>
+  <label for="batch-file-file">{{ t("form.batch_file") }}</label>
   <input id="batch-file-file" name="file" type="file" accept=".csv,.tsv,.txt,.json,text/csv,application/json,text/plain" required>
-  <p class="hint">A CSV with a <code>url</code> column (or the URLs in its first column), delimited by commas, semicolons or tabs; or a JSON array of URLs or of objects with <code>url</code>. The service checks it and shows a preview first.</p>
-  <button type="submit">Check the file</button>
+  <p class="hint">{{ t("form.batch_file_hint", column=code("url")) }}</p>
+  <button type="submit">{{ t("form.check_file") }}</button>
 </form>

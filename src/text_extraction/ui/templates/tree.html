@@ -1,13 +1,13 @@
-<section class="tree-view" aria-label="Site tree">
-  <h4>Site tree of job <code>{{ job_id }}</code></h4>
-  {% if snapshot %}<p class="hint">A snapshot: the job is still running.</p>{% endif %}
-  <p class="tree-counts">{{ tree.urls }} URLs{% if tree.hidden %}; <span class="hidden-note">{{ tree.hidden }} more URLs not shown (UI_TREE_MAX_URLS)</span>{% endif %}</p>
+<section class="tree-view" aria-label="{{ t('tree.label') }}">
+  <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
+  {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
+  <p class="tree-counts">{{ t("tree.urls", count=tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ t("tree.hidden", count=tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {% if tree.roots %}
   <form class="tree-form" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
     <p class="tree-tools">
-      <button type="button" class="secondary" data-action="tree-all">Select all</button>
-      <button type="button" class="secondary" data-action="tree-none">Select none</button>
-      <span class="tree-counter" aria-live="polite">0 selected</span>
+      <button type="button" class="secondary" data-action="tree-all">{{ t("tree.select_all") }}</button>
+      <button type="button" class="secondary" data-action="tree-none">{{ t("tree.select_none") }}</button>
+      <span class="tree-counter" aria-live="polite">{{ t("status.selected", count=0) }}</span>
     </p>
     <ul class="tree">
       {%- for node in tree.roots recursive %}
@@ -15,9 +15,9 @@
         <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}> <span class="label">{{ node.label }}</span></label>
         {%- if node.url %} <span class="found found-{{ node.kind }}">{{ found_labels[node.kind] }}</span>
         {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
-        {%- if node.depth is not none %} <span class="depth">depth {{ node.depth }}</span>{% endif %}
+        {%- if node.depth is not none %} <span class="depth">{{ t("tree.depth", depth=node.depth) }}</span>{% endif %}
         {%- if node.status %} <span class="status">{{ node.status }}</span>{% endif %}
-        {%- if node.lastmod %} <span class="lastmod">modified {{ node.lastmod }}</span>{% endif %}
+        {%- if node.lastmod %} <span class="lastmod">{{ t("tree.modified", date=node.lastmod) }}</span>{% endif %}
         {%- endif %}
         {%- if node.children %}
         <ul>{{ loop(node.children) }}</ul>
@@ -27,7 +27,7 @@
     </ul>
     {% set prefix = "tree" %}
     {% include "forms/batch_options.html" %}
-    <button type="submit">Extract selected</button>
+    <button type="submit">{{ t("tree.extract_selected") }}</button>
   </form>
   <div class="tree-jobs" aria-live="polite"></div>
   {% endif %}

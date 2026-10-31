@@ -4,9 +4,9 @@
   <input id="screenshot-url" name="url" type="url" required placeholder="https://" spellcheck="false">
   {% include "forms/access.html" %}
   <fieldset class="choice">
-    <legend>Capture</legend>
-    <label class="inline"><input type="checkbox" name="full_page" value="on" checked> The whole page</label>
+    <legend>{{ t("form.capture") }}</legend>
+    <label class="inline"><input type="checkbox" name="full_page" value="on" checked> {{ t("form.full_page") }}</label>
   </fieldset>
   {% include "forms/common.html" %}
-  <button type="submit">Take a screenshot</button>
+  <button type="submit">{{ t("form.take_screenshot") }}</button>
 </form>

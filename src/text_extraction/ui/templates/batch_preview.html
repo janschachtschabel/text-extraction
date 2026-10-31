@@ -1,21 +1,21 @@
-<section class="batch-preview" aria-label="Batch preview">
-  <h4>The {{ source }} holds {{ urls }} URLs</h4>
+<section class="batch-preview" aria-label="{{ t('batch.preview') }}">
+  <h4>{{ t("batch.holds." ~ source, count=urls) }}</h4>
   <dl class="facts counts">
-    <dt>Rows</dt><dd class="rows">{{ rows }}</dd>
+    <dt>{{ t("batch.rows") }}</dt><dd class="rows">{{ rows }}</dd>
     <dt>URLs</dt><dd class="urls">{{ urls }}</dd>
-    <dt>Not a URL</dt><dd class="invalid">{{ invalid }}</dd>
-    <dt>Duplicates dropped</dt><dd class="duplicates">{{ duplicates }}</dd>
-    <dt>Batches</dt><dd class="parts">{{ parts }}</dd>
+    <dt>{{ t("batch.invalid") }}</dt><dd class="invalid">{{ invalid }}</dd>
+    <dt>{{ t("batch.duplicates") }}</dt><dd class="duplicates">{{ duplicates }}</dd>
+    <dt>{{ t("batch.parts") }}</dt><dd class="parts">{{ parts }}</dd>
   </dl>
   {% if problems %}
-  <h5>Rows that are not used</h5>
+  <h5>{{ t("batch.unused_rows") }}</h5>
   <ul class="problems">
-    {% for row, reason in problems %}<li>Row {{ row }}: {{ reason }}</li>{% endfor %}
+    {% for row, reason in problems %}<li>{{ t("batch.row_problem", row=row, reason=reason) }}</li>{% endfor %}
   </ul>
-  {% if more_problems %}<p class="hint">{{ more_problems }} more rows are not used.</p>{% endif %}
+  {% if more_problems %}<p class="hint">{{ t("batch.more_unused", count=more_problems) }}</p>{% endif %}
   {% endif %}
   {% if first %}
-  <h5>The first URLs</h5>
+  <h5>{{ t("batch.first_urls") }}</h5>
   <ol class="first-urls">
     {% for url in first %}<li>{{ url }}</li>{% endfor %}
   </ol>
@@ -27,7 +27,7 @@
     <label for="preview-urls">URLs</label>
     <textarea id="preview-urls" name="urls" rows="8" spellcheck="false" readonly>{{ text }}</textarea>
     {% include "forms/batch_options.html" %}
-    <button type="submit">Start batch</button>
+    <button type="submit">{{ t("batch.start") }}</button>
   </form>
   {% endif %}
 </section>
