@@ -183,7 +183,7 @@ Optionsobjekte sind JSON-Strings.
 | `format` | `markdown`, `text` oder `html` | `markdown` | Das Format von `content`. |
 | `metadata` | Boolean | `true` | Die Metadaten des Dokuments mitliefern (Titel, Autoren, Lizenz, Datumsangaben). |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
-| `wait_seconds` | Zahl, 0 bis 60 | `25` | Nach so vielen Sekunden wird ein laufender Upload ein Job (202). |
+| `wait_seconds` | Zahl, 0 bis 60 | `25` | Nach so vielen Sekunden wird ein laufender Upload zu einem Job (202). |
 | `pii` | Modus oder JSON-Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `structured` | JSON-Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `chunking` | JSON-Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
