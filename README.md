@@ -1,7 +1,12 @@
 # text-extraction
 
-A FastAPI service that turns web pages, files, audio and video into clean text or
-Markdown, with a fast HTTP mode and a browser mode.
+Deutsch: [README.de.md](README.de.md)
+
+A FastAPI service that turns web pages, files, audio and video into clean text or Markdown, with
+their metadata. It reads a page over HTTP first and renders it in a browser when the page needs
+it. It also converts documents, transcribes audio and video, handles personal data, fills
+structured fields, splits text into chunks and maps whole sites. It has a REST API, an MCP server
+and a playground in English and German.
 
 ## Status
 
@@ -11,22 +16,24 @@ chunking, site structure, MCP and UI, hand-over); package 12 (UI languages, unbl
 bilingual docs) is in progress. See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
-## Quick start
+## Two ways to extract
 
-Requires Python 3.13 and [uv](https://docs.astral.sh/uv/).
+- **Respect the site's rules** (the default): robots.txt and the EU TDM opt-out are checked, every
+  host gets only a few requests at a time, and the service sends its own honest user agent.
+- **Maximum extraction**, for sites that allowed extraction by contract: an admin sends
+  `"compliance": "ignore"`, and where the operator switched on `BROWSER_UNBLOCK_ENABLED`, a
+  stealth browser gets past bot protection, also after a plain 403, 429 or 503. It solves no
+  image captchas, uses no paid service and rotates no IP address; the per-host limits still
+  apply.
 
-```bash
-uv sync                      # install dependencies into .venv
-uv run pytest                # run the tests
-uv run ruff check .          # lint
-uv run ruff format .         # format
-uv run mypy                  # type-check (strict)
-uv run pre-commit install    # install the git hooks
-```
+In both, the browser fallback (`mode`) decides whether a page is rendered in the browser: when
+the page needs it (`auto`, the default), never (`fast`) or always (`browser`). See
+[Browser fallback](docs/user-guide/en/usage.md#browser-fallback).
 
 ## Quick start with Docker
 
-Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker and a Valkey (with a password) for the shared state.
+Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker and a
+Valkey (with a password) for the shared state.
 
 ```bash
 cp .env.example .env         # set API_KEYS (the sha256 of your key) and VALKEY_PASSWORD (openssl rand -hex 24)
@@ -36,184 +43,25 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
 ```
 
-The internal port 9090 (`/health`, `/ready`, `/metrics`) is not published. For Kubernetes use the
-[Helm chart](deploy/helm/text-extraction/README.md).
+The playground is at http://localhost:8080/ui and the MCP endpoint at http://localhost:8080/mcp.
+[Installation](docs/user-guide/en/installation.md) covers the local setup with uv, the optional
+workers (OCR, personal data, LLM, speech recognition), Kubernetes and the key settings.
 
-OCR for scans and images runs in the Docling worker, which is off by default (an image of about
-2 GB and about 335 MiB of models). Set `DOCLING_ENABLED=true` in `.env` and start the profile
-`docling`: `docker compose --profile docling up --build`. The first start downloads the models
-into a volume.
+## Use cases
 
-Personal-data handling (`pii`, below) runs in the NLP worker, which is off by default too (Presidio
-and spaCy; models of about 1 GB for `lg`, 115 MB for `md`, downloaded into a volume on the first
-start). Set `PII_ENABLED=true` in `.env` (optionally `PII_MODEL_SIZE=md` and `PII_HASH_KEY`, from
-`openssl rand -hex 32`) and start the profile `nlp`:
-`docker compose --profile nlp up --build`. Without it a request with `pii` answers 400.
+- One page as text or Markdown, with its metadata:
+  [Usage](docs/user-guide/en/usage.md#the-result-envelope).
+- Documents, audio and video, personal data and image descriptions:
+  [Files, media and personal data](docs/user-guide/en/usage.md#files-media-and-personal-data).
+- Many URLs at once: [Batch](docs/user-guide/en/usage.md#batch).
+- Part of a site or a whole site: [Site structure](#site-structure).
+- Structured data and chunks: [Structured output and chunking](#structured-output-and-chunking).
+- An AI assistant with the 11 tools of the MCP server: [MCP](#mcp).
+- Trying it out in the browser: [the playground](docs/user-guide/en/usage.md#the-playground).
 
-Structured output with an LLM and semantic chunking (below) call an OpenAI-compatible endpoint
-from the LLM worker, which is off by default as well (it runs from the API image, no models). Set
-`LLM_ENABLED=true`, `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` (and `LLM_EMBEDDING_MODEL` for
-`semantic`) in `.env` and start the profile `llm`: `docker compose --profile llm up --build`.
-`docker compose run --rm llm-worker text-extraction-llm-worker --check` sends one tiny extraction to
-the endpoint. Without it, the strategy `llm`, `learn_selectors` and `semantic` chunking answer 400;
-`auto` leaves the fields it would ask the LLM for missing, and everything else works without an
-LLM.
+Every field of each request is in [Parameters](docs/user-guide/en/parameters.md).
 
-### Documents and uploads
-
-PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
-`POST /v1/extract` with their URL, or `POST /v1/batch`. The bytes decide what a file is before its
-`Content-Type` does (a PDF served as `application/octet-stream` is still a PDF). To convert a
-file you have, upload it to `POST /v1/extract/file` as `multipart/form-data` (at most
-`DOCUMENT_MAX_BYTES`, 20 MB):
-
-```bash
-curl -H "Authorization: Bearer $KEY" -F file=@report.pdf -F format=markdown \
-  http://localhost:8080/v1/extract/file
-# {"status": "success", "data": {"mode_used": "upload", "url": null, "content": "# ...",
-#  "document": {"kind": "pdf", "converter": "markitdown", "pages": 12, "pages_converted": 12,
-#  "ocr": false, "file_name": "report.pdf"}, ...}, ...}
-```
-
-The form also takes `metadata`, `ocr` (`auto`, `never` or `always`) and `wait_seconds` (25 by
-default: an upload that takes longer answers 202 with a job to poll). PDFs keep their first
-`DOCUMENT_MAX_PAGES` (100) pages, with the warning `pages_truncated`. With the Docling worker
-(above), scans and images (PNG, JPEG, TIFF, WebP, BMP) are read with OCR and OpenDocument files
-(ODT, ODS, ODP) are converted too; without it a scan answers its text layer with the warning
-`ocr_unavailable`, and images and OpenDocument files answer `unsupported_content_type`.
-
-### Audio and video
-
-A video URL of YouTube, Vimeo or the Mediatheken of ARD, ZDF, arte and 3sat answers with the
-video's subtitles (manual ones first, then the platform's automatic captions), its title,
-description, duration and licence. The page itself is not fetched:
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://www.youtube.com/watch?v=<id>", "languages": ["de"]}' \
-  http://localhost:8080/v1/extract
-# {"status": "success", "data": {"content_type": "text/vtt", "content": "# <title>\n\n...",
-#  "media": {"platform": "youtube", "transcript_source": "manual_subtitles",
-#  "transcript_language": "de", "duration_seconds": 754.0, "embeds": [], ...}, ...}, ...}
-```
-
-A video without subtitles answers its details only (`"transcript_source": "metadata_only"`,
-`status: partial`, `error.code: no_transcript_available`); so does a video whose platform refused
-the service (warning `subtitles_blocked`: YouTube blocks many data-centre IPs). An HTML page whose
-`<video>` or `<audio>` has a `<track>` gets that text after its own, under `## Transcript`, and
-`data.media.embeds` lists the players a page embeds, for you to extract one by one.
-
-Speech recognition is off by default. Start the ASR worker with the profile `asr` and
-`ASR_ENABLED=true` in `.env` (the first start downloads the Whisper model `large-v3-turbo`, about
-1.6 GB, into a volume): `docker compose --profile asr up --build`. Then `"transcribe": true`
-transcribes a video without subtitles or an audio or video file URL. A video with subtitles still
-answers at once; a transcription is always a job, answered 202 at once:
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/podcast/episode-12.mp3", "transcribe": true}' \
-  http://localhost:8080/v1/extract
-# 202 {"status": "success", "data": {"id": "<job id>", "kind": "extract", "state": "running",
-#  "total": 1, "status_url": "/v1/jobs/<job id>"}, ...}
-curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/jobs/<job id>
-# once "state" is "completed": items[0].result is the extraction result, with
-#  "media": {"transcript_source": "asr", "asr_model": "large-v3-turbo", ...}
-```
-
-An uploaded audio or video file is always transcribed (no form field needed; the bytes decide),
-up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB; larger media by URL), and answers 202 with its job the same
-way:
-
-```bash
-curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/v1/extract/file
-# 202 {"status": "success", "data": {"id": "<job id>", "kind": "file", ...,
-#  "status_url": "/v1/jobs/<job id>"}, ...}
-```
-
-A transcription runs at about real time on 4 CPU threads (media up to 2 hours). With
-`ASR_BACKEND=openai` the worker sends the audio to an OpenAI-compatible endpoint instead
-(`ASR_EXTERNAL_BASE_URL`); a caller's own key in the header `X-ASR-Api-Key` wins over the
-operator's `ASR_EXTERNAL_API_KEY`.
-
-### Batch
-
-`POST /v1/batch` queues many URLs as one job (at most `BATCH_MAX_URLS`, 1,000 by default) and
-answers 202 with its id. The extract worker processes the items, fairly between API keys and
-between hosts, within the per-host outbound limits. Poll the job for progress and paged results
-(`offset`, `limit` up to 500):
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"urls": ["https://example.org/", "https://example.com/"], "format": "markdown"}' \
-  http://localhost:8080/v1/batch
-# {"status": "success", "data": {"id": "<job id>", "kind": "batch", "state": "queued", "total": 2,
-#  "status_url": "/v1/jobs/<job id>"}, ...}
-curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?offset=0&limit=100"
-```
-
-The job's `state` goes from `queued` to `running` to `completed`. Every URL gets its own result
-envelope in `items`, also a failed one, and `progress` counts them. A job is kept for
-`JOB_TTL_SECONDS` (24 h), and only its owner (or an admin) can read it. `POST /v1/extract` with
-`wait_seconds` answers 202 with a job when the extraction takes longer; that extraction keeps
-running in the API pod that took the request (not on a worker), and the job stores its result.
-
-Each item also shows `run`, its last claim by a worker (`pool`, `attempts`, `claimed_at`; null
-while it waits): `attempts` above 1 means the item runs again after a lost lease or a deferral.
-`DELETE /v1/jobs/<job id>` cancels a job (its owner or an admin): it deletes the job with its
-results and files at once and frees its slot of `BATCH_MAX_OPEN_PER_CLIENT`; items still queued
-are dropped, and items in flight finish without being stored.
-
-### Personal data (PII)
-
-`pii` finds personal data in the result and handles it, in German and English text: the content
-and the free-text fields (title, authors, description, link texts, ...). `pii` is a mode, or an
-object with `entities`, `language` and `score_threshold`. By default persons and contact or payment
-data are found (`PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `IBAN_CODE`, `CREDIT_CARD`,
-`IP_ADDRESS`); `LOCATION`, `ORGANIZATION` and `URL` only when you name them.
-
-| Mode | An entity becomes |
-| --- | --- |
-| `mask` | `[PERSON]`, `[EMAIL_ADDRESS]`, ... |
-| `redact` | `[REDACTED]` |
-| `hash` | `[PERSON:3f9a1c7d02be]`: a keyed hash, equal for equal values |
-| `annotate` | the text stays; `data.pii.items` lists type, field, offsets, score and text (Markdown and text only, not `format: html`) |
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/team", "pii": "mask"}' http://localhost:8080/v1/extract
-# {"status": "success", "data": {"content": "Contact [PERSON], [EMAIL_ADDRESS] ...",
-#  "pii": {"mode": "mask", "language": "en", "entities": {"PERSON": 3, "EMAIL_ADDRESS": 1},
-#  "items": null, "hash_scope": null}, ...}, ...}
-
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/team", "pii": {"mode": "annotate", "entities": ["PERSON", "ORGANIZATION"]}}' \
-  http://localhost:8080/v1/extract
-# "pii": {"mode": "annotate", "entities": {"PERSON": 3}, "items": [{"field": "content",
-#  "type": "PERSON", "start": 8, "end": 20, "score": 0.85, "text": "Anna Schmidt"}, ...], ...}
-```
-
-A batch and an upload take it the same way; the results of a batch carry the processed text:
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"urls": ["https://example.org/a", "https://example.org/b"], "pii": {"mode": "hash"}}' \
-  http://localhost:8080/v1/batch
-curl -H "Authorization: Bearer $KEY" -F file=@letter.docx -F pii=redact \
-  http://localhost:8080/v1/extract/file
-```
-
-The service answers a request with `pii` when the NLP worker is done; after `PII_SYNC_WAIT_SECONDS`
-(20 s) a slower one answers 202 with a job to poll. A result is never answered unprocessed: when
-PII handling cannot run, the answer is `failed` with `error.code: pii_failed` (retryable) and none
-of the text. `hash` is keyed with `PII_HASH_KEY`: set, the same value has the same hash in every
-result (`hash_scope: service`), unset, only within one result (`result`); with nothing hashed
-`hash_scope` is null. A language other than
-German and English uses the English model for names, with the warning `pii_language_unsupported`.
-`pii` cannot be combined with `screenshot`. Names are found by a statistical model, so a few are
-missed and a few words are taken for names; see "PII" in the [architecture](docs/architecture.md)
-for the limits.
-
-### Structured output and chunking
+## Structured output and chunking
 
 `structured` takes a JSON schema and fills its fields from the page: `metadata` (JSON-LD,
 microdata, RDFa, OpenGraph and meta tags), `selectors` (your CSS rules; XPath with an admin key),
@@ -272,60 +120,7 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   http://localhost:8080/v1/batch
 ```
 
-### Image descriptions
-
-`describe_images` asks the LLM (the operator's vision model, `LLM_VISION_MODEL`, else `LLM_MODEL`)
-for a short description of each image of the page, for a search index and for people who cannot
-see it. It needs `metadata` (on by default; with `"metadata": false` it is 422): the descriptions
-go on the entries of `metadata.images` (cover images first, then the page's `<img>`), at most
-`max_images` of them (default 5, at most 20). `content` stays the page text:
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/natur/wasserkreislauf", "describe_images": {"max_images": 3}}' \
-  http://localhost:8080/v1/extract
-# {"status": "success", "data": {"metadata": {"images": [
-#   {"url": "https://example.org/bilder/titel.png", "alt": "Wolken über einem See",
-#    "description": "Wolken ziehen über einen See, an dessen Ufer Bäume stehen."},
-#   {"url": "https://example.org/bilder/tafel.jpg", "alt": "", "description": "Ein Tafelbild ..."},
-#   {"url": "https://cdn.example.net/x.png", "alt": "", "description": null}], ...},
-#  "image_descriptions": {"asked": 3, "described": 2, "skipped": 1, "failed": 0,
-#   "llm": {"model": "gpt-6-luna", "calls": 2, ...}},
-#  "warnings": ["image_not_described"], "timings": {"llm_ms": 2140, ...}, ...}, ...}
-```
-
-The images are fetched the way pages are: through the SSRF guard, robots.txt and the TDM checks of
-the request's `compliance`, and the per-domain limits, with the service's user agent and never
-your cookies or headers. An image that is not fetched, not a PNG, JPEG, GIF or WebP, larger than
-`LLM_VISION_MAX_IMAGE_BYTES` (5 MB) or that the model cannot describe keeps `description: null`,
-with the warning `image_not_described`; the status stays. `timings.llm_ms` covers the descriptions,
-their image fetches included. An uploaded PNG, JPEG or WebP is described too: its description is
-also appended to `content` after the OCR text (`> Image description: ...` in Markdown), on an image
-entry with `url: null`:
-
-```bash
-curl -H "Authorization: Bearer $KEY" -F file=@arbeitsblatt.png -F 'describe_images={}' \
-  http://localhost:8080/v1/extract/file
-# {"status": "success", "data": {"content": "Der Wasserkreislauf ...\n\n> Image description:
-#  Ein Arbeitsblatt mit einer Skizze des Wasserkreislaufs.", "metadata": {"images": [
-#  {"url": null, "alt": "", "description": "Ein Arbeitsblatt mit einer Skizze ..."}], ...}, ...}, ...}
-```
-
-`describe_images` cannot be combined with `pii` (422): no unmasked image goes to the LLM. As for
-`structured`, your `X-LLM-Api-Key` wins over the operator's key, a request waits
-`LLM_SYNC_WAIT_SECONDS` (30 s) before it answers 202 with a job, and descriptions are never cached:
-a repeated request describes its images again. Images inside PDFs and other documents are not
-described.
-
-The descriptions have their own time budget (1.5 × `LLM_TIMEOUT_SECONDS`), on top of the time of
-`structured` and `semantic` chunking; descriptions already made stay when a later LLM step fails.
-Images still being fetched when the budget ends, for example on a host whose robots.txt sets a
-long `Crawl-delay`, are skipped (`image_not_described`), and the status stays. A page whose result
-is close to `JOB_ITEM_MAX_BYTES` (2 MB) can come back without its `content`, with the warning
-`content_not_stored_too_large`, once `describe_images` sends it through the LLM workers, as with
-`structured`: the descriptions do not need it.
-
-### Site structure
+## Site structure
 
 `POST /v1/site-structure` maps a site: its sitemaps (robots.txt's `Sitemap:` lines, else
 `/sitemap.xml`; indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the
@@ -382,50 +177,6 @@ checks of `compliance`; the items keep title, status, metadata and quality but n
 page's host (a leading `www.` ignored); `scope: "path"` keeps it under the start URL's directory,
 `sitemaps: false` skips the sitemaps, and `depth: 0` reads the start page and the sitemaps only. A
 crawl counts against `BATCH_MAX_OPEN_PER_CLIENT` with your batches.
-
-### Browser mode
-
-Pages that need JavaScript are rendered in Chromium by the browser worker. `mode` is `fast` (HTTP
-only), `auto` (the default: HTTP first, the browser when the page needs it) or `browser` (always).
-The compose file turns it on (`BROWSER_ENABLED=true`); in your own deployment set that on the API
-and all workers. `auto` keeps the HTTP result, with the warning `browser_unavailable`, when no
-browser worker takes the page within `BROWSER_QUEUE_WAIT_SECONDS` (10 s).
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/app", "mode": "browser", "format": "markdown",
-       "actions": [{"type": "accept_cookies"}, {"type": "click", "selector": "button.more"}]}' \
-  http://localhost:8080/v1/extract
-```
-
-`data.mode_used` says which mode produced the answer. `actions` (at most 20), `cookies` and
-`headers` (sent only to the requested site) work in `browser` and `auto` mode, not in `fast` mode
-or batches; see the OpenAPI spec for the actions.
-
-A screenshot is a PNG, 1920 px wide, of the whole page (`full_page: false`: the first 1920×1080).
-`POST /v1/screenshot` answers with the page's data and a reference to the file, which you download
-from the job that holds it (screenshots need `JOBS_ENABLED=true`, the default):
-
-```bash
-curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  -d '{"url": "https://example.org/"}' http://localhost:8080/v1/screenshot
-# {"status": "success", "data": {"screenshot": {"url": "/v1/jobs/<job id>/artifacts/screenshot.png",
-#  "content_type": "image/png", "width": 1920, "height": 2758, ...}, ...}, ...}
-curl -H "Authorization: Bearer $KEY" -o page.png \
-  http://localhost:8080/v1/jobs/<job id>/artifacts/screenshot.png
-```
-
-`POST /v1/extract` takes `"screenshot": true` as well. The file is kept for `ARTIFACT_TTL_SECONDS`
-(one hour) and only its owner (or an admin) can fetch it.
-
-**Unblock mode** is for sites that allowed extraction by contract but keep their bot protection.
-It is off by default. The operator switches it on with `BROWSER_UNBLOCK_ENABLED=true`, and it then
-applies only to an admin's request with `"compliance": "ignore"` (robots.txt and TDM checks are
-off for it): the page is loaded in a stealth Chrome with its own user agent that waits for
-non-interactive bot challenges to clear and clicks a Turnstile or hCaptcha checkbox. It solves no
-image captchas, uses no paid service and rotates no IP address, and the per-domain limits still
-apply. Ask the site owner for an allowlist rule instead where you can: a secret header you send
-with `headers`, or an exemption for the service's egress IP.
 
 ## MCP
 
@@ -496,46 +247,10 @@ same JSON, after a one-line hint when there is something to do:
   tool error with the REST error envelope; a page that failed (`status: failed`, a 200 in REST) is
   a normal answer.
 
-## Playground
-
-With `UI_ENABLED=true` (Helm `ui.enabled=true`; docker compose switches it on) the service serves a
-playground at `https://<host>/ui` (local compose: http://localhost:8080/ui). Its password is an API
-key of the service: log in with it (and optionally your LLM and ASR keys). The page keeps the keys
-in the browser tab only (`sessionStorage`, gone when the tab closes; "Log out" clears them) and
-sends them as request headers, never as a cookie. Under `AUTH_MODE=none` the playground opens at
-once, under a banner: anyone who can reach the service can use it, so keep `UI_ENABLED=false` or
-`AUTH_MODE=api_key` for a shared deployment.
-
-Every form runs one REST call, with the same checks and rate limit as any client, and shows the
-HTTP status, the envelope, the raw JSON and the request as a `curl` command (with `$API_KEY` in
-place of your key). The tabs:
-
-- **Extract**: a URL as Markdown or text, the mode, metadata, structured metadata (schema.org and
-  LRMI fields such as licence, author and educational level) and image descriptions. The result
-  shows the content as source or rendered, a download, the metadata, the structured values, the
-  images with their alt texts and descriptions ("Load previews" fetches them through the service,
-  so the image hosts never see you), the links, and a timeline of what happened: claims and
-  retries, compliance, fetch, browser render, conversion, PII, LLM and the outcome, with a line
-  per warning.
-- **File**, **Screenshot**, **Structured**, **Chunk** and **Info**: the other single calls, with the
-  same result view; an "Options (JSON)" box takes any further field of the REST body.
-- **Batch**: URLs, one per line. **Batch file**: a CSV (comma, semicolon or tab; a `url` column or
-  the first column) or a JSON array of URLs or of objects with `url`, up to
-  `UI_BATCH_FILE_MAX_BYTES` (10 MiB) and `UI_BATCH_FILE_MAX_ROWS` (100,000). The file is checked on
-  the server first: the preview shows the counts, the URLs and the rows that are not URLs, and
-  "Start batch" sends the valid ones. Lists longer than `BATCH_MAX_URLS` are split into several
-  batches, up to `BATCH_MAX_OPEN_PER_CLIENT` of them.
-- **Site structure**: starts a crawl; once it is done (or at any time with "Show tree now") "Show as
-  tree" lists its pages, sitemap entries and linked-only URLs by host and URL path, with a
-  checkbox per page and per section. Checking a section checks everything under it; "Extract
-  selected" starts batches of the checked URLs.
-- **Progress**: every job started from the playground shows its state, a progress bar with the
-  success, partial and failed counts, the elapsed time and its items ("queued", "running in
-  browser, claim 2", or the status and error code; "Show" opens an item's result and timeline),
-  refreshes every 3 s until the job is completed, and has a "Cancel" button.
-
 ## Documentation
 
+- [User guide](docs/user-guide/en/index.md): installation, usage, parameters and the glossary
+  (also in [German](docs/user-guide/de/index.md))
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md): environment variables, secrets, ports, headers
 - [Helm chart](deploy/helm/text-extraction/README.md)
