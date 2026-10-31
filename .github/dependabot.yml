@@ -1,6 +1,6 @@
 version: 2
 
-# Weekly update PRs for the three kinds of dependencies this repo pins. Minor and patch
+# Weekly update PRs for the four kinds of dependencies this repo pins. Minor and patch
 # updates arrive as one PR per ecosystem; a major update gets a PR of its own. The 14-day
 # cooldown is the repo's 14-day rule (CONTRIBUTING.md): a release gets two weeks before an
 # update PR proposes it. Dependabot does not apply the cooldown to security updates.
@@ -37,4 +37,16 @@ updates:
       default-days: 14
     groups:
       docker-minor-patch:
+        update-types: [minor, patch]
+
+  # The Valkey image of docker-compose.yml (the Dockerfile entry above does not read compose files).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 14
+    groups:
+      compose-minor-patch:
         update-types: [minor, patch]

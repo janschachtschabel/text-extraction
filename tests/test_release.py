@@ -54,11 +54,11 @@ def test_the_changelog_names_every_package_from_zero_to_eleven() -> None:
         assert re.search(rf"^- Package {number}\b", changelog, re.MULTILINE), number
 
 
-def test_dependabot_watches_uv_actions_and_docker() -> None:
+def test_dependabot_watches_uv_actions_docker_and_compose() -> None:
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
     assert config["version"] == 2
     updates = {u["package-ecosystem"]: u for u in config["updates"]}
-    assert set(updates) == {"uv", "github-actions", "docker"}
+    assert set(updates) == {"uv", "github-actions", "docker", "docker-compose"}
     for update in updates.values():
         assert update["directory"] == "/"
         assert update["schedule"]["interval"] == "weekly"
