@@ -1095,7 +1095,12 @@ OpenAI-compatible endpoint): always a job, answered 202.
   nor cached (the block may lift); an HTTP 429 goes to the outbound gate's backoff. No proxy, no
   PO-token plugin (`bgutil-ytdlp-pot-provider` is GPL-3.0) and no browser fallback in this
   package. Not taken: (b) one fixed upstream proxy for media requests, (c) a browser fallback
-  that opens the watch page's transcript panel.
+  that opens the watch page's transcript panel. A spike on 2026-10-31
+  (`docs/superpowers/plans/2026-10-31-youtube-transcript-panel-spike.md`) found that the
+  classic panel's request needs a BotGuard attestation a headless browser does not pass (HTTP
+  400), and that only YouTube's new transcript view (`get_panel`) answers without one, served
+  for one captioned video in four. Getting past the attestation is getting past a bot
+  protection (rule 6), so (c) would rest on the new view only. Jan left out (b) for good.
 - **D2, default Whisper model: `large-v3-turbo` (a).** CPU only, `int8`; about 1.6 GB on the
   volume. The spike measured a real-time factor of 0.88 on 4 threads (`small`: 0.43) and a peak
   RSS of 1.9 GB; Jan re-confirmed it after the spike. `small` stays selectable (`ASR_MODEL`).
