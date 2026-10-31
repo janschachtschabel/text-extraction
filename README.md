@@ -538,6 +538,8 @@ place of your key). The tabs:
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md): environment variables, secrets, ports, headers
 - [Helm chart](deploy/helm/text-extraction/README.md)
+- [Hand-over](docs/handover.md): the ops guide's hand-over checklist, costs, maintenance and
+  releases
 - [CLAUDE.md](CLAUDE.md): rules and workflow for contributors
 
 ## Licence
