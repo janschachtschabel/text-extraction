@@ -389,6 +389,10 @@ def test_a_local_farm_url_is_accepted(farm: str, monkeypatch: pytest.MonkeyPatch
         "ftp://farm",
         "farm:18000",
         "http://",
+        # Link-local: Python counts it as private, but it is the cloud metadata range, not a farm.
+        "http://169.254.169.254",
+        "http://169.254.0.1:18000",
+        "http://[fe80::1]:18000",
     ],
 )
 def test_a_farm_url_that_is_not_local_is_refused(

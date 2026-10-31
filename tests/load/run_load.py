@@ -348,7 +348,10 @@ def _delta(
 
 def is_local_url(url: str) -> bool:
     """Whether ``url`` is http(s) on a loopback or private IP literal or on a single-label host
-    name (``farm``, ``localhost``: a name only a local resolver or compose network knows)."""
+    name (``farm``, ``localhost``: a name only a local resolver or compose network knows).
+
+    Link-local addresses (``169.254.0.0/16``, ``fe80::/10``) are refused although Python counts
+    them as private: that range holds the cloud metadata service, never the farm."""
     try:
         parts = urlsplit(url)
         host = parts.hostname
@@ -360,7 +363,7 @@ def is_local_url(url: str) -> bool:
         address = ipaddress.ip_address(host)
     except ValueError:
         return "." not in host
-    return address.is_loopback or address.is_private
+    return not address.is_link_local and (address.is_loopback or address.is_private)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
