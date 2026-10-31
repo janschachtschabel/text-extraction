@@ -5,10 +5,10 @@ Markdown, with a fast HTTP mode and a browser mode.
 
 ## Status
 
-Under construction: packages 0-10 are merged (foundation, service skeleton, fast extraction,
+Under construction: packages 0-11 are merged (foundation, service skeleton, fast extraction,
 jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
-chunking, site structure, MCP and UI); package 11 (hand-over) is in review and package 12 (UI
-languages, unblock option, bilingual docs) is planned. See
+chunking, site structure, MCP and UI, hand-over); package 12 (UI languages, unblock option,
+bilingual docs) is in progress. See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Quick start
