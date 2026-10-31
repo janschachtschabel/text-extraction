@@ -27,7 +27,7 @@ from text_extraction.pii.types import ENTITY_TYPES
 from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
 from text_extraction.structured.types import StructuredStrategy
-from text_extraction.ui.i18n import CATALOGUES, DOCS_BASE_URL, LANGUAGES, Language, help_url
+from text_extraction.ui.i18n import CATALOGUES, LANGUAGES, Language, help_url
 from text_extraction.ui.routes import TABS
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -484,11 +484,12 @@ def test_readme_has_no_moved_section(readme: Path) -> None:
 @pytest.mark.parametrize("language", LANGUAGES)
 def test_every_help_link_has_its_page(language: Language) -> None:
     """The help link of every tab opens a guide page that exists in the tab's language."""
-    prefix = f"{DOCS_BASE_URL}/"
-    assert DOCS_BASE_URL.endswith("/" + GUIDE.relative_to(ROOT).as_posix())
+    settings = Settings(auth_mode="none")  # the default UI_DOCS_BASE_URL
+    prefix = f"{settings.ui_docs_base_url}/"
+    assert settings.ui_docs_base_url.endswith("/" + GUIDE.relative_to(ROOT).as_posix())
     missing = []
     for tab in TABS:
-        url = help_url(language, tab.help_page)
+        url = help_url(settings, language, tab.help_page)
         assert url.startswith(prefix)
         if not (GUIDE / url.removeprefix(prefix)).is_file():
             missing.append(f"{tab.name}: {url}")

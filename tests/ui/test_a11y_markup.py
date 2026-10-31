@@ -19,8 +19,8 @@ from tests.ui.site_items import page_item, result_data, sitemap_item
 from tests.ui.test_jobs_views import fake_reads, job_store, portal
 from text_extraction.envelope import Envelope
 from text_extraction.extract_models import ExtractResult
+from text_extraction.settings import Settings
 from text_extraction.ui.i18n import (
-    DOCS_BASE_URL,
     LANGUAGE_HEADER,
     LANGUAGES,
     Language,
@@ -43,6 +43,9 @@ CONTROLS = (
     " | //select | //textarea"
 )
 REFERENCES = ("aria-describedby", "aria-labelledby", "aria-controls")
+# The settings' defaults, and the user guide's URL they hold (ruling R-P12-8).
+DEFAULTS: Final = Settings(auth_mode="none")
+GUIDE_URL: Final = "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"
 SITE = [
     page_item(0, f"{ORIGIN}/", title="Home", depth=0),
     page_item(1, f"{ORIGIN}/docs/intro", title="Intro"),
@@ -197,6 +200,33 @@ def test_every_field_has_a_hint(admin: TestClient, language: Language) -> None:
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
+def test_every_key_field_has_a_hint(admin: TestClient, language: Language) -> None:
+    """The key fields of the login box and of the app's "Optional keys" have hints too."""
+    login = _login_pages(language)["login"]
+    app = _page(admin, language)
+    expected = {
+        "login-api-key": "hint.api_key",
+        "login-llm-key": "hint.llm_key",
+        "login-asr-key": "hint.asr_key",
+        "keys-llm": "hint.llm_key",
+        "keys-asr": "hint.asr_key",
+    }
+
+    for control_id, key in expected.items():
+        root = login if control_id.startswith("login-") else app
+        (control,) = root.xpath(f"//input[@id='{control_id}']")
+        hints = [
+            " ".join(element.text_content().split())
+            for target in (control.get("aria-describedby") or "").split()
+            for element in root.xpath(f"//*[@id='{target}' and contains(@class, 'hint')]")
+        ]
+        params = {"header": "Authorization"} if key == "hint.api_key" else {}
+        assert hints == [translate(language, key, **params)], control_id
+    assert login.xpath("//input[not(@type='hidden')]")
+    assert all(_described(field, login) for field in login.xpath("//input[not(@type='hidden')]"))
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
 def test_ids_are_unique_on_the_page(
     admin: TestClient, language: Language, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -298,15 +328,32 @@ def test_help_link_points_to_the_guide_in_the_page_language(
         heading, intro = panel.xpath("./h2")[0], panel.xpath("./p[@class='intro']")[0]
         assert heading.text_content() == translate(language, tab.label_key)
         assert intro.xpath("./text()")[0].strip() == translate(language, tab.intro_key)
-        assert [link.get("href") for link in intro.xpath("./a")] == [
-            help_url(language, tab.help_page)
+        (link,) = intro.xpath("./a")
+        assert link.get("href") == help_url(DEFAULTS, language, tab.help_page)
+        # A new tab, so the open result and job views stay (code review I1), and it says so.
+        assert link.get("target") == "_blank"
+        assert link.get("rel") == "noopener noreferrer"
+        hidden = link.xpath("./span[@class='visually-hidden']")
+        assert [" ".join(span.text_content().split()) for span in hidden] == [
+            translate(language, "help.new_tab")
         ]
+        assert " ".join(link.text_content().split()) == (
+            f"{translate(language, 'help.link')} {translate(language, 'help.new_tab')}"
+        )
     extract = page.xpath("//*[@id='panel-extract']/p[@class='intro']/a")[0]
-    assert extract.get("href") == f"{DOCS_BASE_URL}/{language}/single-url.md"
-    assert DOCS_BASE_URL == (
-        "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"
-    )
-    assert help_url("de", "single-url") == f"{DOCS_BASE_URL}/de/single-url.md"
+    assert extract.get("href") == f"{GUIDE_URL}/{language}/single-url.md"
+    assert help_url(DEFAULTS, "de", "single-url") == f"{GUIDE_URL}/de/single-url.md"
+
+
+def test_help_link_follows_the_docs_setting() -> None:
+    """``UI_DOCS_BASE_URL`` moves every help link (ruling R-P12-8), for a fork or an air-gapped
+    deployment."""
+    base = "https://docs.example.org/text-extraction/guide"
+    with running(auth_mode="none", ui_docs_base_url=base) as client:
+        page = _page(client, "de")
+
+    links = page.xpath("//p[@class='intro']/a[@class='help']")
+    assert [link.get("href") for link in links] == [f"{base}/de/{tab.help_page}.md" for tab in TABS]
 
 
 @pytest.mark.parametrize("language", LANGUAGES)

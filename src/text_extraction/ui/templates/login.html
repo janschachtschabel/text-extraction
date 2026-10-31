@@ -10,13 +10,16 @@
     </div>
     {% endif %}
     <label for="login-api-key">{{ t("login.api_key") }}</label>
-    <input id="login-api-key" type="password" autocomplete="off" spellcheck="false" required>
+    <input id="login-api-key" type="password" autocomplete="off" spellcheck="false" required aria-describedby="login-api-key-hint">
+    <p class="hint" id="login-api-key-hint">{{ t("hint.api_key", header=code("Authorization")) }}</p>
     <details>
       <summary>{{ t("keys.optional") }}</summary>
       <label for="login-llm-key">{{ t("keys.llm", header=code("X-LLM-Api-Key")) }}</label>
-      <input id="login-llm-key" type="password" autocomplete="off" spellcheck="false">
+      <input id="login-llm-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="login-llm-key-hint">
+      <p class="hint" id="login-llm-key-hint">{{ t("hint.llm_key") }}</p>
       <label for="login-asr-key">{{ t("keys.asr", header=code("X-ASR-Api-Key")) }}</label>
-      <input id="login-asr-key" type="password" autocomplete="off" spellcheck="false">
+      <input id="login-asr-key" type="password" autocomplete="off" spellcheck="false" aria-describedby="login-asr-key-hint">
+      <p class="hint" id="login-asr-key-hint">{{ t("hint.asr_key") }}</p>
     </details>
     <button type="submit">{{ t("login.submit") }}</button>
   </form>

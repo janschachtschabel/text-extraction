@@ -147,6 +147,7 @@ SETTING_ENV_VARS = (
     "UI_BATCH_FILE_MAX_ROWS",
     "UI_IMAGE_MAX_BYTES",
     "UI_DEFAULT_LANGUAGE",
+    "UI_DOCS_BASE_URL",
 )
 
 
@@ -1599,4 +1600,25 @@ def test_ui_default_language_setting(monkeypatch: pytest.MonkeyPatch) -> None:
     for wrong in ("fr", "DE", "de-DE", ""):
         monkeypatch.setenv("UI_DEFAULT_LANGUAGE", wrong)
         with pytest.raises(ConfigError, match="ui_default_language"):
+            load_settings()
+
+
+def test_ui_docs_base_url_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    assert load_settings().ui_docs_base_url == (
+        "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"
+    )
+
+    for value, expected in (
+        ("https://docs.example.org/guide/", "https://docs.example.org/guide"),
+        (
+            " http://wiki.intranet:8080/text-extraction ",
+            "http://wiki.intranet:8080/text-extraction",
+        ),
+    ):
+        monkeypatch.setenv("UI_DOCS_BASE_URL", value)
+        assert load_settings().ui_docs_base_url == expected
+    for wrong in ("", "docs.example.org/guide", "ftp://docs.example.org", "javascript:alert(1)"):
+        monkeypatch.setenv("UI_DOCS_BASE_URL", wrong)
+        with pytest.raises(ConfigError, match="ui_docs_base_url"):
             load_settings()

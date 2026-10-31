@@ -127,3 +127,4 @@ operator touches most; the [configuration reference](../../configuration.md#envi
 | `MCP_ENABLED` | `false` | The MCP server at `/mcp`. |
 | `UI_ENABLED` | `false` | The playground at `/ui`. |
 | `UI_DEFAULT_LANGUAGE` | `en` | The playground's language when the browser asks for neither `en` nor `de`. |
+| `UI_DOCS_BASE_URL` | `https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide` | The user guide the playground's help links open; point it at your own copy for a fork or an air-gapped deployment. |

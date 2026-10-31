@@ -6,6 +6,7 @@ call and shows its answer), the previews ``POST /ui/run/images``, the job views
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Final, cast, get_args
 
@@ -40,7 +41,14 @@ from text_extraction.ui.forms import (
     multipart_fields,
 )
 from text_extraction.ui.forward import Forwarded, forward
-from text_extraction.ui.i18n import STATE_KEY, Language, Message, page_language, run_language
+from text_extraction.ui.i18n import (
+    STATE_KEY,
+    Language,
+    Message,
+    help_url,
+    page_language,
+    run_language,
+)
 from text_extraction.ui.job_views import add_job_routes
 from text_extraction.ui.previews import FAILED, SHOWN, SKIP_REASONS, load_previews
 from text_extraction.ui.results import curl_line, render_result
@@ -123,6 +131,7 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "auth_none": settings.auth_mode == "none",
         "banner": BANNER,
         "tabs": TABS,
+        "help_url": partial(help_url, settings),
         "access_choice": access_choice(role, settings),
         "browser_enabled": settings.browser_enabled,
     }

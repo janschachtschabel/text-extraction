@@ -2599,12 +2599,16 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
 
 - **Structure and help.** A skip link to `<main id="app">`, one `h1`, and per tab panel a
   visually hidden `h2` (the tab's label), an intro (`Tab.intro_key`, `help.<tab>.intro`) and a
-  "Help" link to `help_url(language, Tab.help_page)`, that is
-  `DOCS_BASE_URL/<language>/<page>.md` on GitHub (a normal link off the page): Extract to
-  `single-url`, Structured and Chunk to `structured-data`, Batch and Batch file to
-  `part-of-a-site`, Site structure to `whole-site-and-metadata`, File, Screenshot and Info to
-  `usage`. Every field has a `<label>` and a hint (`hint.<field>`) tied to it with
-  `aria-describedby` (a radio group's on its `fieldset`).
+  "Help" link to `help_url(settings, language, Tab.help_page)`, that is
+  `UI_DOCS_BASE_URL/<language>/<page>.md` (ruling R-P12-8; by default the guide on GitHub, a
+  setting so that a fork or an air-gapped deployment links its own copy). The link opens in a new
+  tab (`target="_blank"`, `rel="noopener noreferrer"`), so the open result and job views stay,
+  and a visually hidden `help.new_tab` says so. Extract links to `single-url`, Structured and
+  Chunk to `structured-data`, Batch and Batch file to `part-of-a-site`, Site structure to
+  `whole-site-and-metadata`, File, Screenshot and Info to `usage`. Every field has a `<label>`
+  and a hint (`hint.<field>`) tied to it with `aria-describedby` (a radio group's on its
+  `fieldset`); so do the key fields of the login box and of "Optional keys" (`hint.api_key`,
+  `hint.llm_key`, `hint.asr_key`).
 - **Tabs.** WAI-ARIA tabs in a `div[role=tablist]` (a `nav` may not take that role): the
   selected tab has `tabindex="0"`, the others `-1`; `ui.js` moves focus and selection with the
   arrow keys (wrapping around), Home and End; panels have `tabindex="0"`.

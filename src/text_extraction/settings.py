@@ -377,6 +377,12 @@ class Settings(BaseSettings):
     # The UI's language when the page has no ``lang`` query and the browser asks for neither
     # English nor German (ruling P12-S6).
     ui_default_language: Literal["en", "de"] = "en"
+    # Where the help links of the UI's tabs point (ruling R-P12-8): the user guide's folder, with
+    # one folder per language below it (``<url>/de/usage.md``). A fork or an air-gapped
+    # deployment points it at its own copy.
+    ui_docs_base_url: str = (
+        "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -407,6 +413,16 @@ class Settings(BaseSettings):
         if parts.scheme.lower() != "https" or not parts.hostname:
             raise ValueError("the external ASR endpoint must be an https URL")
         return value.strip()
+
+    @field_validator("ui_docs_base_url")
+    @classmethod
+    def _docs_url_is_http(cls, value: str) -> str:
+        """An http(s) URL with a host, without its trailing slash."""
+        url = value.strip().rstrip("/")
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+            raise ValueError("the user guide's URL must be an http or https URL")
+        return url
 
     @field_validator("asr_external_api_key")
     @classmethod

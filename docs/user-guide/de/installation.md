@@ -132,3 +132,4 @@ den [Secrets](../../configuration.md#secrets).
 | `MCP_ENABLED` | `false` | Der MCP-Server unter `/mcp`. |
 | `UI_ENABLED` | `false` | Die Spielwiese unter `/ui`. |
 | `UI_DEFAULT_LANGUAGE` | `en` | Die Sprache der Spielwiese, wenn der Browser weder `en` noch `de` verlangt. |
+| `UI_DOCS_BASE_URL` | `https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide` | Die Anleitung, die die Hilfe-Links der Spielwiese öffnen; für einen Fork oder eine Installation ohne Internet zeigen Sie auf eine eigene Kopie. |

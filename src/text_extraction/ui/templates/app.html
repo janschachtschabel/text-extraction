@@ -11,9 +11,11 @@
   <details class="keys">
     <summary>{{ t("keys.optional") }}</summary>
     <label for="keys-llm">{{ t("keys.llm", header=code("X-LLM-Api-Key")) }}</label>
-    <input id="keys-llm" type="password" autocomplete="off" spellcheck="false">
+    <input id="keys-llm" type="password" autocomplete="off" spellcheck="false" aria-describedby="keys-llm-hint">
+    <p class="hint" id="keys-llm-hint">{{ t("hint.llm_key") }}</p>
     <label for="keys-asr">{{ t("keys.asr", header=code("X-ASR-Api-Key")) }}</label>
-    <input id="keys-asr" type="password" autocomplete="off" spellcheck="false">
+    <input id="keys-asr" type="password" autocomplete="off" spellcheck="false" aria-describedby="keys-asr-hint">
+    <p class="hint" id="keys-asr-hint">{{ t("hint.asr_key") }}</p>
     <button type="button" class="secondary" data-action="save-keys">{{ t("keys.use") }}</button>
   </details>
   {% endif %}
@@ -28,7 +30,7 @@
   {% for tab in tabs %}
   <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}" tabindex="0"{% if not loop.first %} hidden{% endif %}>
     <h2 class="visually-hidden">{{ t(tab.label_key) }}</h2>
-    <p class="intro">{{ t(tab.intro_key) }} <a class="help" href="{{ help_url(lang, tab.help_page) }}" rel="noopener noreferrer">{{ t("help.link") }}</a></p>
+    <p class="intro">{{ t(tab.intro_key) }} <a class="help" href="{{ help_url(lang, tab.help_page) }}" target="_blank" rel="noopener noreferrer">{{ t("help.link") }}<span class="visually-hidden"> {{ t("help.new_tab") }}</span></a></p>
     {% include tab.template %}
   </section>
   {% endfor %}
