@@ -20,12 +20,12 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `links` | boolean | `false` | Include the page's links. |
 | `compliance` | `enforce`, `report` or `ignore` | unset | The site rules: `enforce` refuses what robots.txt or a TDM opt-out forbids, `report` only reports it, `ignore` (admins only) skips the checks and allows maximum extraction. Unset: the operator's `COMPLIANCE_DEFAULT`. |
 | `cache` | boolean | `true` | Use the result cache; `false` neither reads nor stores. |
-| `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202). Unset: the request waits for its answer. |
+| `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202); `0` hands over at once. Unset: the request waits for its answer, with three exceptions: with `transcribe: true` the default is 20, and a request that waits for the NLP or the LLM worker answers 202 after `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_SECONDS`. |
 | `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. |
 | `cookies` | list of objects | empty | Cookies for the requested site. Not with `mode: fast`. |
 | `headers` | object | empty | Request headers for the requested site. Not with `mode: fast`. |
 | `screenshot` | boolean | `false` | Also capture a PNG screenshot. Not with `mode: fast`. |
-| `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. |
+| `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. `false` is refused with `mode: fast`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | OCR of documents: `auto` reads scans and images with OCR where the service has it. |
 | `transcribe` | boolean | `false` | Transcribe audio and video without subtitles (always a job). |
 | `languages` | list of language codes | empty | Preferred subtitle and transcription languages, at most 5, such as `["de", "en"]`. |

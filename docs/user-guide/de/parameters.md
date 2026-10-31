@@ -5,7 +5,7 @@ English: [Parameters](../en/parameters.md)
 Diese Seite listet jedes Feld jedes Anfrage-Bodys, mit seinem Typ, seinem Standardwert und seiner
 Wirkung. Die OpenAPI-Spec unter `/docs` eines laufenden Dienstes hat dieselben Felder mit allen
 Einzelheiten und die verschachtelten Objekte vollständig. Ein Feld, das nicht gelistet ist,
-antwortet mit 422; ebenso ein Wert außerhalb des Bereichs. „nicht gesetzt“ heißt, dass das Feld
+ergibt 422; ebenso ein Wert außerhalb des Bereichs. „nicht gesetzt“ heißt, dass das Feld
 fehlt (oder `null` ist); „Pflicht“ heißt, dass es keinen Standardwert hat.
 
 ## `POST /v1/extract`
@@ -19,14 +19,14 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `format` | `markdown`, `text` oder `html` | `markdown` | Das Format von `content`. |
 | `metadata` | Boolean | `true` | Die Metadaten der Seite mitliefern (Titel, Autoren, Lizenz, Daten, Bilder, schema.org- und LRMI-Felder). |
 | `links` | Boolean | `false` | Die Links der Seite mitliefern. |
-| `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Seitenregeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
+| `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Website-Regeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
-| `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion ein Job (202). Nicht gesetzt: Die Anfrage wartet auf ihre Antwort. |
+| `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion ein Job (202); `0` übergibt sofort. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. |
 | `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website. Nicht mit `mode: fast`. |
 | `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
 | `screenshot` | Boolean | `false` | Auch einen Screenshot als PNG aufnehmen. Nicht mit `mode: fast`. |
-| `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. |
+| `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. `false` wird mit `mode: fast` abgelehnt. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | OCR für Dokumente: `auto` liest Scans und Bilder mit OCR, wo der Dienst sie hat. |
 | `transcribe` | Boolean | `false` | Audio und Video ohne Untertitel transkribieren (immer ein Job). |
 | `languages` | Liste von Sprachcodes | leer | Bevorzugte Sprachen für Untertitel und Transkription, höchstens 5, etwa `["de", "en"]`. |
@@ -74,7 +74,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 
 ## `POST /v1/chunk`
 
-Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eins von `url` und `text`.
+Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines von `url` und `text`.
 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |

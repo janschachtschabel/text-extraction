@@ -38,15 +38,19 @@ Requires Docker with Compose. Compose starts the API, an extract worker, a brows
 Valkey with a password. It switches on browser mode, the MCP server and the playground.
 
 ```bash
-cp .env.example .env         # set API_KEYS (the sha256 of your key) and VALKEY_PASSWORD (openssl rand -hex 24)
-docker compose up --build    # public API on http://localhost:8080
+cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
+KEY=$(openssl rand -hex 32)                    # your API key: keep it
+printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
+openssl rand -hex 24                           # a VALKEY_PASSWORD
+docker compose up --build                      # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
 ```
 
-`API_KEYS` holds the SHA-256 of each key, never the key itself; see
-[API keys](usage.md#api-keys). The internal port 9090 (`/health`, `/ready`, `/metrics`) is not
+`API_KEYS` holds the SHA-256 of each key, never the key itself. `.env.example` has one admin key
+named `local`, whose SHA-256 you replace; [API keys](usage.md#api-keys) explains the keys and
+their roles. The internal port 9090 (`/health`, `/ready`, `/metrics`) is not
 published. The playground is at http://localhost:8080/ui and the MCP endpoint at
 http://localhost:8080/mcp.
 

@@ -23,7 +23,7 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | Site structure | Website-Struktur | Der Tab, der eine Website crawlt; auch der Job und sein Ergebnis. |
 | Info | Info | Der Tab mit Name und Version des Dienstes und der Rolle des Schlüssels. |
 | Operations | Funktionen | Die Liste der Tabs. |
-| Site rules | Seitenregeln | Die Wahl zwischen dem Beachten der Regeln einer Website und der maximalen Extraktion. |
+| Site rules | Website-Regeln | Die Wahl zwischen dem Beachten der Regeln einer Website und der maximalen Extraktion. |
 | Respect the site's rules (default) | Regeln der Website beachten (Standard) | Der Standard: robots.txt und der TDM-Nutzungsvorbehalt werden geprüft. |
 | Maximum extraction (contract partners) | Maximale Extraktion (Vertragspartner) | Für Websites, die die Extraktion vertraglich erlaubt haben: `compliance: ignore`, mit Entsperrmodus. |
 | Browser fallback | Browser-Fallback | Das Feld `mode`: ob der Browser eine Seite rendert. |
@@ -70,3 +70,4 @@ Begriffe der API und dieser Anleitung.
 | entity | Treffer | Ein personenbezogenes Datum, das `pii` gefunden hat („Funde“ wird nicht verwendet). |
 | chunk | Chunk | Ein Stück zerlegten Inhalts. |
 | rate limit | Ratenlimit | Die höchste Zahl der Anfragen pro Minute eines Schlüssels. |
+| user guide | Anleitung | Diese Anleitung („Benutzerhandbuch“ wird nicht verwendet). |

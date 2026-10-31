@@ -1,6 +1,6 @@
 # User guide
 
-Deutsch: [Benutzerhandbuch](../de/index.md)
+Deutsch: [Anleitung](../de/index.md)
 
 text-extraction turns web pages, files, audio and video into clean text or Markdown, with their
 metadata. This guide explains how to install it, how to use the API, the MCP server and the

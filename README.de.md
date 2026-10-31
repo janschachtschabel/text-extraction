@@ -38,15 +38,19 @@ Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Wor
 Browser-Worker und ein Valkey (mit Passwort) für den gemeinsamen Zustand.
 
 ```bash
-cp .env.example .env         # set API_KEYS (the sha256 of your key) and VALKEY_PASSWORD (openssl rand -hex 24)
-docker compose up --build    # public API on http://localhost:8080
+cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
+KEY=$(openssl rand -hex 32)                    # your API key: keep it
+printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
+openssl rand -hex 24                           # a VALKEY_PASSWORD
+docker compose up --build                      # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
 ```
 
-Die Spielwiese liegt unter http://localhost:8080/ui und der MCP-Endpunkt unter
-http://localhost:8080/mcp. [Installation](docs/user-guide/de/installation.md) beschreibt die
+`.env.example` hat einen Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; siehe
+[API-Schlüssel](docs/user-guide/de/usage.md#api-schlüssel). Die Spielwiese liegt unter
+http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp. [Installation](docs/user-guide/de/installation.md) beschreibt die
 lokale Einrichtung mit uv, die optionalen Worker (OCR, personenbezogene Daten, LLM,
 Spracherkennung), Kubernetes und die wichtigsten Einstellungen.
 
@@ -264,7 +268,7 @@ ist:
 
 ## Dokumentation
 
-- [Benutzerhandbuch](docs/user-guide/de/index.md): Installation, Nutzung, Parameter und Glossar
+- [Anleitung](docs/user-guide/de/index.md): Installation, Nutzung, Parameter und Glossar
   (auch auf [Englisch](docs/user-guide/en/index.md))
 - [Architektur](docs/architecture.md) (Englisch)
 - [Konfiguration](docs/configuration.md) (Englisch): Umgebungsvariablen, Secrets, Ports, Header

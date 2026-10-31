@@ -42,15 +42,19 @@ Browser-Worker und ein Valkey mit Passwort. Es schaltet den Browsermodus, den MC
 Spielwiese ein.
 
 ```bash
-cp .env.example .env         # set API_KEYS (the sha256 of your key) and VALKEY_PASSWORD (openssl rand -hex 24)
-docker compose up --build    # public API on http://localhost:8080
+cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
+KEY=$(openssl rand -hex 32)                    # your API key: keep it
+printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
+openssl rand -hex 24                           # a VALKEY_PASSWORD
+docker compose up --build                      # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
 ```
 
-`API_KEYS` enthält den SHA-256 jedes Schlüssels, nie den Schlüssel selbst; siehe
-[API-Schlüssel](usage.md#api-schlüssel). Der interne Port 9090 (`/health`, `/ready`, `/metrics`)
+`API_KEYS` enthält den SHA-256 jedes Schlüssels, nie den Schlüssel selbst. `.env.example` hat einen
+Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; [API-Schlüssel](usage.md#api-schlüssel)
+erklärt die Schlüssel und ihre Rollen. Der interne Port 9090 (`/health`, `/ready`, `/metrics`)
 wird nicht veröffentlicht. Die Spielwiese liegt unter http://localhost:8080/ui und der
 MCP-Endpunkt unter http://localhost:8080/mcp.
 
@@ -76,8 +80,8 @@ Extraktion. Für `pii: hash` mit demselben Hash in jedem Ergebnis setzen Sie `PI
 
 Solange ein Schalter aus ist, antwortet eine Anfrage, die seinen Worker braucht, mit 400: `pii`
 ohne `PII_ENABLED`, die Strategie `llm`, `learn_selectors` und `semantic`-Chunking ohne
-`LLM_ENABLED`, `transcribe` ohne `ASR_ENABLED`. Ein Scan ohne `DOCLING_ENABLED` antwortet mit seiner
-Textebene und der Warnung `ocr_unavailable`.
+`LLM_ENABLED`, `transcribe` ohne `ASR_ENABLED`. Ein Scan ohne `DOCLING_ENABLED` liefert nur seine
+Textebene, mit der Warnung `ocr_unavailable`.
 
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
 `BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Browser-Fallback](usage.md#browser-fallback).
@@ -100,11 +104,11 @@ den [Secrets](../../configuration.md#secrets).
 | `AUTH_MODE` | `api_key` | `api_key`: Jede Anfrage braucht einen Schlüssel. `none`: keine Schlüssel, jeder Aufrufer ist Admin. |
 | `API_KEYS` | leer | Secret. Die Schlüssel als JSON-Liste aus `name`, `role` (`user` oder `admin`) und `sha256`. |
 | `API_KEYS_FILE` | nicht gesetzt | Eine JSON-Datei derselben Form, zusammengeführt mit `API_KEYS`. |
-| `VALKEY_URL` | `redis://localhost:6379/0` | Das Valkey für den gemeinsamen Zustand; ein Secret, wenn sie ein Passwort enthält. |
+| `VALKEY_URL` | `redis://localhost:6379/0` | Die URL des Valkey für den gemeinsamen Zustand; ein Secret, wenn sie ein Passwort enthält. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` oder `CRITICAL`. |
 | `LOG_FORMAT` | `json` | `json` für den Betrieb, `console` für die lokale Entwicklung. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Anfragen pro Minute und Schlüssel; darüber antwortet eine Anfrage mit 429. |
-| `COMPLIANCE_DEFAULT` | `enforce` | Die Seitenregeln, wenn eine Anfrage keine nennt: `enforce`, `report` oder `ignore`. |
+| `COMPLIANCE_DEFAULT` | `enforce` | Die Website-Regeln, wenn eine Anfrage keine nennt: `enforce`, `report` oder `ignore`. |
 | `FETCH_TIMEOUT_SECONDS` | `20` | Zeit für einen Abruf einer Seite. |
 | `FETCH_MAX_BYTES` | `20000000` | Höchstens so viele Bytes einer Seite oder Datei. |
 | `OUTBOUND_MAX_CONCURRENCY_PER_HOST` | `2` | Höchstens so viele gleichzeitige Anfragen an einen Host. |

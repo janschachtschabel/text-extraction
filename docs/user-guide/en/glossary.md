@@ -23,7 +23,7 @@ The labels of the playground, as the English and the German playground show them
 | Site structure | Website-Struktur | The tab that crawls a site; also the job and its result. |
 | Info | Info | The tab with the service's name and version and the key's role. |
 | Operations | Funktionen | The list of tabs. |
-| Site rules | Seitenregeln | The choice between respecting a site's rules and maximum extraction. |
+| Site rules | Website-Regeln | The choice between respecting a site's rules and maximum extraction. |
 | Respect the site's rules (default) | Regeln der Website beachten (Standard) | The default: robots.txt and the TDM opt-out are checked. |
 | Maximum extraction (contract partners) | Maximale Extraktion (Vertragspartner) | For sites that allowed extraction by contract: `compliance: ignore`, with unblock mode. |
 | Browser fallback | Browser-Fallback | The `mode` field: whether the browser renders a page. |
@@ -70,3 +70,4 @@ Terms of the API and of this guide.
 | entity | Treffer | A piece of personal data that `pii` found (not "Funde"). |
 | chunk | Chunk | One piece of split content. |
 | rate limit | Ratenlimit | The most requests per minute of one key. |
+| user guide | Anleitung | This guide (in German not "Benutzerhandbuch"). |

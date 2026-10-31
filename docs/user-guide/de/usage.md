@@ -31,7 +31,7 @@ Mit `AUTH_MODE=none` braucht der Dienst keinen Schlüssel, und jeder Aufrufer is
 Sie das nur auf Ihrem eigenen Rechner.
 
 Ihre eigenen Schlüssel für einen LLM- oder Spracherkennungs-Endpunkt gehören in die Header
-`X-LLM-Api-Key` und `X-ASR-Api-Key`. Sie haben Vorrang vor `LLM_API_KEY` und
+`X-LLM-Api-Key` und `X-ASR-Api-Key`. Diese Header haben Vorrang vor `LLM_API_KEY` und
 `ASR_EXTERNAL_API_KEY` des Betreibers und werden nie mit einem Ergebnis gespeichert.
 
 ## Das Ergebnis-Envelope
@@ -186,9 +186,9 @@ TDM-Nutzungsvorbehalt der EU werden so geprüft, wie der Betreiber es eingericht
 (`COMPLIANCE_DEFAULT`). Die maximale Extraktion ist für Websites, die die Extraktion vertraglich
 erlaubt haben. Ein Admin sendet `"compliance": "ignore"`, und wo der Betreiber
 `BROWSER_UNBLOCK_ENABLED` eingeschaltet hat, lädt die Seite in einem getarnten Chrome, der wartet,
-bis Bot-Prüfungen durchlaufen sind. Mit `mode: auto` fällt sie außerdem auf den Browser zurück,
-wenn die Seite ablehnt (HTTP 403, 429 oder 503) oder zu wenig Text liefert, und `data.unblocked`
-ist true. Sie löst keine Bild-Captchas, nutzt keinen bezahlten Dienst und wechselt keine
+bis Bot-Prüfungen durchlaufen sind. Mit `mode: auto` fällt die maximale Extraktion außerdem auf
+den Browser zurück, wenn die Seite ablehnt (HTTP 403, 429 oder 503) oder zu wenig Text liefert, und `data.unblocked`
+ist true. Die maximale Extraktion löst keine Bild-Captchas, nutzt keinen bezahlten Dienst und wechselt keine
 IP-Adressen; die Grenzen pro Host und die Pause eines Hosts nach einem 429 oder 503 gelten weiter.
 Wo es geht, bitten Sie den Betreiber der Website besser um eine Freigaberegel: einen geheimen
 Header, den Sie mit `headers` senden, oder eine Ausnahme für die ausgehende IP des Dienstes.
@@ -220,14 +220,14 @@ Das Formular nimmt außerdem `metadata`, `ocr` (`auto`, `never` oder `always`) u
 (standardmäßig 25: Ein Upload, der länger dauert, antwortet mit 202 und einem Job). PDFs behalten
 ihre ersten `DOCUMENT_MAX_PAGES` (100) Seiten, mit der Warnung `pages_truncated`. Mit dem
 Docling-Worker werden Scans und Bilder (PNG, JPEG, TIFF, WebP, BMP) mit OCR gelesen und
-OpenDocument-Dateien (ODT, ODS, ODP) ebenfalls umgewandelt; ohne ihn antwortet ein Scan mit seiner
-Textebene und der Warnung `ocr_unavailable`, und Bilder und OpenDocument-Dateien antworten mit
+OpenDocument-Dateien (ODT, ODS, ODP) ebenfalls umgewandelt; ohne ihn liefert ein Scan nur seine
+Textebene, mit der Warnung `ocr_unavailable`, und Bilder und OpenDocument-Dateien ergeben
 `unsupported_content_type`.
 
 ### Audio und Video
 
-Eine Video-URL von YouTube, Vimeo oder den Mediatheken von ARD, ZDF, arte und 3sat antwortet mit den
-Untertiteln des Videos (zuerst manuelle, dann die automatischen der Plattform), seinem Titel, seiner
+Für eine Video-URL von YouTube, Vimeo oder den Mediatheken von ARD, ZDF, arte und 3sat enthält die
+Antwort die Untertitel des Videos (zuerst manuelle, dann die automatischen der Plattform), seinem Titel, seiner
 Beschreibung, Dauer und Lizenz. Die Seite selbst wird nicht geholt:
 
 <!-- request: POST /v1/extract -->
@@ -235,7 +235,7 @@ Beschreibung, Dauer und Lizenz. Die Seite selbst wird nicht geholt:
 {"url": "https://www.youtube.com/watch?v=<id>", "languages": ["de"]}
 ```
 
-Ein Video ohne Untertitel antwortet nur mit seinen Angaben (`"transcript_source": "metadata_only"`,
+Für ein Video ohne Untertitel enthält die Antwort nur seine Angaben (`"transcript_source": "metadata_only"`,
 `status: partial`, `error.code: no_transcript_available`); ebenso ein Video, dessen Plattform den
 Dienst abgelehnt hat (Warnung `subtitles_blocked`: YouTube sperrt viele IPs von Rechenzentren).
 Eine HTML-Seite, deren `<video>` oder `<audio>` ein `<track>` hat, bekommt dessen Text nach ihrem
@@ -243,7 +243,7 @@ eigenen, unter `## Transcript`, und `data.media.embeds` listet die Player, die e
 damit Sie sie einzeln extrahieren.
 
 Mit dem ASR-Worker transkribiert `"transcribe": true` ein Video ohne Untertitel oder die URL einer
-Audio- oder Videodatei. Ein Video mit Untertiteln antwortet weiterhin sofort; eine Transkription ist
+Audio- oder Videodatei. Für ein Video mit Untertiteln kommt die Antwort weiterhin sofort; eine Transkription ist
 immer ein Job und antwortet sofort mit 202. Eine hochgeladene Audio- oder Videodatei wird immer
 transkribiert (die Bytes entscheiden), bis `MEDIA_UPLOAD_MAX_BYTES` (25 MB; größere Medien per
 URL):
@@ -312,7 +312,7 @@ Kein unmaskiertes Bild geht an das LLM.
 Mit `UI_ENABLED=true` (Docker Compose schaltet es ein) bietet der Dienst unter `/ui` eine
 Spielwiese (lokal: http://localhost:8080/ui). Melden Sie sich mit einem API-Schlüssel des Dienstes
 an, optional auch mit Ihren LLM- und ASR-Schlüsseln. Die Seite hält die Schlüssel nur im Tab des
-Browsers (`sessionStorage`, weg, wenn der Tab schließt; „Abmelden“ löscht sie) und sendet sie als
+Browsers (`sessionStorage`, gelöscht, wenn der Tab geschlossen wird; „Abmelden“ löscht sie) und sendet sie als
 Header der Anfragen, nie als Cookie. Unter `AUTH_MODE=none` öffnet sich die Spielwiese sofort, unter
 einem Hinweisbanner: Wer den Dienst erreichen kann, kann ihn nutzen.
 
@@ -340,9 +340,9 @@ Jeder Job, der in der Spielwiese gestartet wurde, zeigt seinen Zustand, einen Fo
 seine Einträge, aktualisiert sich alle 3 s, bis er abgeschlossen ist, und hat eine Schaltfläche
 „Abbrechen“.
 
-### Seitenregeln in der Spielwiese
+### Website-Regeln in der Spielwiese
 
-Die Formulare für eine URL haben die Auswahl „Seitenregeln“:
+Die Formulare für eine URL haben die Auswahl „Website-Regeln“:
 
 - „Regeln der Website beachten (Standard)“ sendet kein `compliance`: Es gelten die Prüfungen des
   Betreibers.

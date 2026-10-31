@@ -1,4 +1,4 @@
-# Benutzerhandbuch
+# Anleitung
 
 English: [User guide](../en/index.md)
 
