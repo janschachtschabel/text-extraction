@@ -1,17 +1,20 @@
 """The load profile (`tests/load/scenarios.py`, ruling P11-S4): every scenario sends load to the
 local site farm only, and the profile holds every part of the ruling."""
 
+import io
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
+import docx
 import pytest
 from pydantic import BaseModel
 
-from tests.load.scenarios import REPO_ROOT, SCENARIOS, Scenario
+from tests.load.scenarios import GENERATED_DOCX, REPO_ROOT, SCENARIOS, Scenario, upload_bytes
 from text_extraction.extract_models import ChunkRequest, ExtractRequest, StructuredRequest
 from text_extraction.file_models import FileForm
 from text_extraction.job_models import BatchRequest
+from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
 
 FARM = "http://farm.load.test:18000"
@@ -92,8 +95,9 @@ def test_each_body_is_a_valid_request_of_its_route(scenario: Scenario) -> None:
         fields = dict(body)
         file = fields.pop("file")
         assert isinstance(file, str)
-        assert (REPO_ROOT / file).is_file(), file
         assert not Path(file).is_absolute()
+        assert file == GENERATED_DOCX or (REPO_ROOT / file).is_file(), file
+        assert upload_bytes(file)
         assert all(isinstance(value, str) for value in fields.values())
         FileForm.model_validate(fields)
     elif scenario.kind == "mcp":
@@ -106,12 +110,26 @@ def test_each_body_is_a_valid_request_of_its_route(scenario: Scenario) -> None:
         models[scenario.endpoint].model_validate(body)
 
 
-def test_document_uploads_mix_a_long_pdf_and_an_office_file() -> None:
-    """Both MarkItDown paths get load: a 120-page PDF and a DOCX, one after the other."""
+def test_document_uploads_mix_a_long_pdf_and_a_long_docx() -> None:
+    """Both MarkItDown paths get load: a 120-page PDF and a DOCX of farm articles, one after
+    the other. Both are long enough to pass the quality gate, so every upload succeeds."""
     scenario = by_name("upload-docs-50")
     files = {str(scenario.body(index, FARM)["file"]) for index in range(scenario.count)}
 
-    assert files == {"tests/documents/corpus/long.pdf", "tests/documents/corpus/lesson.docx"}
+    assert files == {"tests/documents/corpus/long.pdf", GENERATED_DOCX}
+    report = docx.Document(io.BytesIO(upload_bytes(GENERATED_DOCX)))
+    words = sum(len(paragraph.text.split()) for paragraph in report.paragraphs)
+    assert words >= 10 * Settings.model_fields["quality_min_words"].default
+
+
+def test_every_scenario_expects_its_outcomes() -> None:
+    """A scenario names the outcomes it expects (success unless said otherwise); an error is
+    never expected."""
+    for scenario in SCENARIOS:
+        assert scenario.expected, scenario.name
+        assert scenario.expected <= {"success", "partial", "failed"}, scenario.name
+    assert by_name("upload-docs-50").expected == {"success"}
+    assert by_name("sync-fast-c10").expected == {"success"}
 
 
 def test_pages_differ_between_requests_of_a_scenario() -> None:

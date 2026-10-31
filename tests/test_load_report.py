@@ -12,6 +12,7 @@ from tests.load.report import (
     ScenarioResult,
     markdown,
     percentile,
+    service_of,
     sizing,
     summarise,
 )
@@ -164,3 +165,60 @@ def test_markdown_names_each_window() -> None:
 
 def test_markdown_says_when_there_were_no_samples() -> None:
     assert "No `docker stats` samples" in markdown([], [])
+
+
+@pytest.mark.parametrize(
+    ("container", "service"),
+    [
+        ("text-extraction-api-1", "api"),
+        ("text-extraction-browser-worker-2", "browser-worker"),
+        ("text-extraction_llm-worker_1", "llm-worker"),  # Compose v1 names
+        ("api", "api"),
+        ("other-project-api-1", "other-project-api"),  # not our project: the name stays
+    ],
+)
+def test_service_of_strips_the_project_and_the_replica(container: str, service: str) -> None:
+    assert service_of(container, project="text-extraction") == service
+
+
+def test_sizing_is_keyed_by_service_without_the_test_containers() -> None:
+    rows = [
+        row("text-extraction-worker-1", cpu_p95=40.0, cpu_max=50.0, mem_p95=300.0, mem_max=400.0),
+        row("text-extraction-worker-2", cpu_p95=60.0, cpu_max=90.0, mem_p95=200.0, mem_max=500.0),
+        row("text-extraction-api-1", cpu_p95=5.0, cpu_max=10.0, mem_p95=100.0, mem_max=120.0),
+        row("text-extraction-farm-1", cpu_p95=90.0, cpu_max=99.0, mem_p95=50.0, mem_max=60.0),
+        row("text-extraction-fake-llm-1", cpu_p95=1.0, cpu_max=2.0, mem_p95=40.0, mem_max=50.0),
+        row("text-extraction-valkey-1", cpu_p95=3.0, cpu_max=4.0, mem_p95=30.0, mem_max=35.0),
+    ]
+
+    resources = sizing(rows, project="text-extraction")
+
+    # The farm and the fake LLM are the test's, Valkey is sized by its own chart.
+    assert sorted(resources) == ["api", "worker"]
+    # Two replicas of one service: the highest p95 and the peak of both.
+    assert resources["worker"].cpu_p95_cores == 0.6
+    assert resources["worker"].cpu_max_cores == 0.9
+    assert resources["worker"].mem_p95_mib == 300.0
+    assert resources["worker"].mem_max_mib == 500.0
+
+
+def test_markdown_counts_the_unexpected_outcomes() -> None:
+    result = ScenarioResult(
+        name="upload-docs-50",
+        kind="upload",
+        start=START,
+        end=START + 10,
+        settle_end=START + 20,
+        requests=50,
+        outcomes={"success": 48, "partial": 2},
+        latency_p50_ms=500,
+        latency_p95_ms=900,
+        latency_max_ms=1000,
+        throughput_per_s=5.0,
+        unexpected=2,
+    )
+
+    text = markdown([], [result])
+
+    assert "| Outcomes | Unexpected |" in text
+    assert "| success 48, partial 2 | 2 |" in text

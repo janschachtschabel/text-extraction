@@ -2,7 +2,11 @@
 
 ``Sampler`` runs ``docker stats --no-stream --format '{{json .}}'`` every 2 s while a load run
 lasts and writes each container's line to a JSONL file, stamped with ``t``: the wall-clock time
-(epoch seconds) at which the reading came back. ``parse_line`` turns a line into a
+(epoch seconds) halfway between the start of the call and its answer. A ``--no-stream``
+reading takes a second or two and describes that span (its CPU is the use between two reads),
+so its middle is where it belongs; stamped at the answer, a reading at a window's start could
+describe the previous window's last second. The cadence is 2 s from the start of one call to
+the next, or the call's own length when that is longer. ``parse_line`` turns a line into a
 ``StatSample``: CPU in percent of one core (``CPUPerc``, 100 = one core busy) and memory in MiB
 (``MemUsage``, the cgroup's usage without page cache, as docker reports it).
 """
@@ -114,6 +118,7 @@ class Sampler:
 
     async def _read_once(self) -> None:
         assert self._sink is not None
+        called = time.time()
         try:
             process = await asyncio.create_subprocess_exec(
                 *self.command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -128,7 +133,7 @@ class Sampler:
                 process.kill()
                 await process.wait()
             raise
-        stamp = time.time()
+        stamp = (called + time.time()) / 2
         if process.returncode != 0:
             note = err.decode(errors="replace").strip()[:200]
             print(f"stats: exit {process.returncode}: {note}", file=sys.stderr)

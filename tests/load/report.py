@@ -8,6 +8,7 @@ at least 95 % of the samples at or below it.
 """
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -21,6 +22,13 @@ REQUEST_CPU_STEP_MILLICORES = 50
 LIMIT_MEMORY_STEP_MIB = 256
 LIMIT_CPU_STEP_MILLICORES = 250
 LIMIT_FACTOR = 1.5
+# The compose project of the stack's containers (``docker compose`` names them
+# ``<project>-<service>-<replica>``): the repo's directory name.
+COMPOSE_PROJECT = "text-extraction"
+# Containers of the load test itself (the site farm, the fake LLM) and Valkey, which the Helm
+# chart sizes as a dependency of its own: in the stats table, never in the sizing.
+NOT_SIZED = frozenset({"farm", "fake-llm", "valkey"})
+_REPLICA = re.compile(r"[-_][0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -39,7 +47,8 @@ class Row:
 @dataclass(frozen=True)
 class ScenarioResult:
     """What one scenario did: its window (epoch seconds: first request, last answer, end of the
-    settle time), its requests by outcome, latencies and throughput."""
+    settle time), its requests by outcome, how many of them had an outcome the scenario does
+    not expect (they fail the run), latencies and throughput."""
 
     name: str
     kind: str
@@ -52,6 +61,7 @@ class ScenarioResult:
     latency_p95_ms: int
     latency_max_ms: int
     throughput_per_s: float
+    unexpected: int = 0
 
 
 @dataclass(frozen=True)
@@ -113,20 +123,33 @@ def _round_up(value: float, step: int) -> int:
     return max(1, math.ceil(round(value / step, 6))) * step
 
 
-def sizing(rows: Sequence[Row]) -> dict[str, Resources]:
-    """P11-S3 per container, over all its rows: the request from the highest p95 of any
-    scenario (the steady state of the busiest scenario), the limit from 1.5 * the peak."""
-    by_container: dict[str, list[Row]] = {}
+def service_of(container: str, *, project: str = COMPOSE_PROJECT) -> str:
+    """The compose service of a container name: without the ``<project>-`` prefix (``_`` in
+    Compose v1) and the replica number. A name of another project keeps its prefix."""
+    name = _REPLICA.sub("", container)
+    for separator in ("-", "_"):
+        if name.startswith(project + separator):
+            return name[len(project) + 1 :]
+    return name
+
+
+def sizing(rows: Sequence[Row], *, project: str = COMPOSE_PROJECT) -> dict[str, Resources]:
+    """P11-S3 per compose service (``service_of``), over all rows of its containers (every
+    replica): the request from the highest p95 of any scenario (the steady state of the
+    busiest scenario), the limit from 1.5 * the peak. ``NOT_SIZED`` services are left out."""
+    by_service: dict[str, list[Row]] = {}
     for row in rows:
-        by_container.setdefault(row.container, []).append(row)
+        service = service_of(row.container, project=project)
+        if service not in NOT_SIZED:
+            by_service.setdefault(service, []).append(row)
     resources: dict[str, Resources] = {}
-    for container in sorted(by_container):
-        own = by_container[container]
+    for service in sorted(by_service):
+        own = by_service[service]
         cpu_p95 = max(row.cpu_p95 for row in own) / 100  # cores
         cpu_max = max(row.cpu_max for row in own) / 100
         mem_p95 = max(row.mem_p95 for row in own)
         mem_max = max(row.mem_max for row in own)
-        resources[container] = Resources(
+        resources[service] = Resources(
             cpu_request=f"{_round_up(cpu_p95 * 1000, REQUEST_CPU_STEP_MILLICORES)}m",
             cpu_limit=f"{_round_up(LIMIT_FACTOR * cpu_max * 1000, LIMIT_CPU_STEP_MILLICORES)}m",
             memory_request=f"{_round_up(mem_p95, REQUEST_MEMORY_STEP_MIB)}Mi",
@@ -157,18 +180,22 @@ def markdown(
         "",
         "Each scenario ran alone. Its window runs from its first request to its last answer "
         "plus the settle time; only `docker stats` samples inside it count for it. CPU is in % "
-        "of one core, memory in MiB (`MemUsage`), percentiles are nearest-rank.",
+        "of one core, memory in MiB (`MemUsage`), percentiles are nearest-rank. Unexpected: "
+        "requests whose outcome the scenario does not expect; they count as errors and fail "
+        "the run.",
         "",
         "### Scenarios",
         "",
-        "| Scenario | Kind | Window start | Window end | Requests | Outcomes | p50 ms | p95 ms "
+        "| Scenario | Kind | Window start | Window end | Requests | Outcomes | Unexpected "
+        "| p50 ms | p95 ms "
         "| max ms | Requests/s |",
-        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: |",
+        "| --- | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for result in results:
         lines.append(
             f"| {result.name} | {result.kind} | {_utc(result.start)} | {_utc(result.settle_end)} "
-            f"| {result.requests} | {_outcomes(result.outcomes)} | {result.latency_p50_ms} "
+            f"| {result.requests} | {_outcomes(result.outcomes)} | {result.unexpected} "
+            f"| {result.latency_p50_ms} "
             f"| {result.latency_p95_ms} | {result.latency_max_ms} "
             f"| {result.throughput_per_s:.2f} |"
         )

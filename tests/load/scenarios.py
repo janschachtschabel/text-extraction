@@ -2,23 +2,32 @@
 
 Every URL a scenario sends is a page of the local site farm (``tests/e2e/site_farm.py``) under
 the farm base URL that ``body`` gets: the load test sends no load to third-party sites. An
-upload sends a file of the repo's test corpus instead (``file``, relative to the repo root;
-the other keys of its body are the form fields). Every request turns the result cache off, so
-each one is real work.
+upload sends a file instead: a file of the repo's test corpus (``file``, relative to the repo
+root) or one the generator builds (``GENERATED_DOCX``); ``upload_bytes`` reads either. The
+other keys of an upload's body are the form fields. Every request turns the result cache off,
+so each one is real work.
 
 The scenarios run one after another, each alone (``run_load.py``), so ``docker stats``
 attributes the load to one scenario. The models are the stack's: ``ASR_MODEL`` (``small`` or
 ``large-v3-turbo``) and ``PII_MODEL_SIZE`` (``md`` or ``lg``) are set per run, not per request.
 """
 
+import functools
+import io
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from tests.e2e.site_farm import article
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 ScenarioKind = Literal["sync", "batch", "upload", "site", "mcp"]
+# The outcome of one request: its envelope's status (a job's: by its items). An ``error`` (a
+# refusal, a client failure, a timeout) is never expected.
+ExpectedOutcome = Literal["success", "partial", "failed"]
 
 # The counts and concurrencies of P11-S4.
 SYNC_FAST_C10_COUNT = 300
@@ -35,8 +44,13 @@ SEMANTIC_CHUNK_COUNT = 50
 MCP_COUNT = 20
 
 # The test corpus files that the uploads send.
+# A DOCX that the load generator builds when it first needs it (``upload_bytes``): the corpus
+# DOCX files are too short for the quality gate (``content_too_short``), and a load scenario
+# should succeed by design.
+GENERATED_DOCX = "generated/report.docx"
+REPORT_ARTICLES = 5  # farm articles in the generated DOCX, 600 words each
 # MarkItDown: a 120-page PDF (100 pages converted) and a DOCX, taken in turns.
-DOCUMENT_FILES = ("tests/documents/corpus/long.pdf", "tests/documents/corpus/lesson.docx")
+DOCUMENT_FILES = ("tests/documents/corpus/long.pdf", GENERATED_DOCX)
 SCAN_FILE = "tests/documents/corpus/scan.pdf"  # an image-only PDF: Docling's OCR
 AUDIO_FILE = "tests/media/corpus/speech_de.ogg"  # 30 s of German speech
 
@@ -61,7 +75,8 @@ Body = Callable[[int, str], dict[str, object]]
 class Scenario:
     """One part of the profile: ``count`` requests of ``kind`` to ``endpoint``, at most
     ``concurrency`` at once, each with the body ``body(index, farm_base_url)``. Its window
-    ends ``settle_seconds`` after the last answer."""
+    ends ``settle_seconds`` after the last answer. A request whose outcome is not in
+    ``expected`` counts as unexpected and fails the run."""
 
     name: str
     kind: ScenarioKind
@@ -70,6 +85,33 @@ class Scenario:
     concurrency: int
     body: Body
     settle_seconds: int = 10
+    expected: frozenset[ExpectedOutcome] = frozenset({"success"})
+
+
+def _report_docx() -> bytes:
+    """A DOCX of ``REPORT_ARTICLES`` farm articles: a heading and the paragraphs of each."""
+    import docx  # python-docx, a dev dependency: only the load generator builds the file
+
+    report = docx.Document()
+    for number in range(1, REPORT_ARTICLES + 1):
+        html = article(number).decode()
+        heading = re.search(r"<h1>(.*?)</h1>", html)
+        report.add_heading(heading.group(1) if heading else f"Report {number}", level=1)
+        for paragraph in re.findall(r"<p>(.*?)</p>", html):
+            report.add_paragraph(paragraph)
+    buffer = io.BytesIO()
+    report.save(buffer)
+    return buffer.getvalue()
+
+
+_GENERATED: dict[str, Callable[[], bytes]] = {GENERATED_DOCX: _report_docx}
+
+
+@functools.cache
+def upload_bytes(file: str) -> bytes:
+    """The bytes of an upload's ``file``: a generated file, else a file of the repo."""
+    make = _GENERATED.get(file)
+    return make() if make is not None else (REPO_ROOT / file).read_bytes()
 
 
 def page(farm: str, number: int) -> str:
@@ -225,6 +267,15 @@ SCENARIOS: tuple[Scenario, ...] = (
         5,
         _extract("chunk-semantic-50", mode="fast", chunking={"strategy": "semantic"}),
     ),
-    Scenario("site-crawl", "site", "/v1/site-structure", 1, 1, _site),
+    # The farm's pages link to "/", which answers 404: a crawl of it has a failed item.
+    Scenario(
+        "site-crawl",
+        "site",
+        "/v1/site-structure",
+        1,
+        1,
+        _site,
+        expected=frozenset({"success", "partial"}),
+    ),
     Scenario("mcp-20", "mcp", "/mcp", MCP_COUNT, 5, _mcp),
 )

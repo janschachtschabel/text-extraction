@@ -45,15 +45,18 @@ def chat_body(text: str) -> dict[str, object]:
 
 
 def test_fake_llm_counts_request_bytes() -> None:
+    """Per route: the calls, the prompt bytes (a chat request's whole body, as P11-S6 counts
+    it; an embedding request's input texts) and the completion bytes (the answer's message
+    content, never the JSON around it; an embedding has none)."""
     first = json.dumps(chat_body("a page")).encode()
     second = json.dumps(chat_body("another, longer page")).encode()
-    embeddings = json.dumps({"model": "embed", "input": ["one", "two"]}).encode()
+    embeddings = json.dumps({"model": "embed", "input": ["one", "twö"]}).encode()
     headers = {"Content-Type": "application/json"}
 
     with TestClient(create_app(delay_ms=0)) as client:
         assert client.get("/stats").json() == {
-            "chat_completions": {"requests": 0, "request_bytes": 0, "response_bytes": 0},
-            "embeddings": {"requests": 0, "request_bytes": 0, "response_bytes": 0},
+            "chat_completions": {"requests": 0, "prompt_bytes": 0, "completion_bytes": 0},
+            "embeddings": {"requests": 0, "prompt_bytes": 0, "completion_bytes": 0},
         }
         answers = [
             client.post("/v1/chat/completions", content=first, headers=headers),
@@ -63,16 +66,21 @@ def test_fake_llm_counts_request_bytes() -> None:
         stats = client.get("/stats").json()
 
     assert [answer.status_code for answer in answers] == [200, 200, 200]
-    assert stats["chat_completions"]["requests"] == 2
-    assert stats["chat_completions"]["request_bytes"] == len(first) + len(second)
-    assert stats["chat_completions"]["response_bytes"] == sum(
+    messages = [answer.json()["choices"][0]["message"]["content"] for answer in answers[:2]]
+    assert stats["chat_completions"] == {
+        "requests": 2,
+        "prompt_bytes": len(first) + len(second),
+        "completion_bytes": sum(len(message.encode()) for message in messages),
+    }
+    assert stats["chat_completions"]["completion_bytes"] < sum(
         len(answer.content) for answer in answers[:2]
     )
     assert stats["embeddings"] == {
         "requests": 1,
-        "request_bytes": len(embeddings),
-        "response_bytes": len(answers[2].content),
+        "prompt_bytes": len(b"one") + len("twö".encode()),  # 3 + 4
+        "completion_bytes": 0,
     }
+    assert answers[2].json()["usage"]["prompt_tokens"] == 7 // 4
 
 
 def test_chat_answer_is_an_openai_completion_that_fits_the_schema() -> None:

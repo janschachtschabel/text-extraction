@@ -1,6 +1,6 @@
 """A fake OpenAI-compatible server for the load test: the service's structured-output and
-semantic-chunking calls get valid answers after a fixed delay, and the bytes of every request
-and answer are counted per route for the LLM cost note (ruling P11-S6).
+semantic-chunking calls get valid answers after a fixed delay, and their prompt and completion
+bytes are counted per route for the LLM cost note (ruling P11-S6).
 
     python -m tests.load.fake_llm --host 0.0.0.0 --port 8000
 
@@ -9,10 +9,13 @@ and answer are counted per route for the LLM cost note (ruling P11-S6).
   else an empty string, 0, ``false``, the first enum value or an empty array).
 - ``POST /v1/embeddings``: one vector per input, derived from the text's hash (equal texts
   get equal vectors).
-- ``GET /stats``: per route the requests, request bytes and answer bytes so far.
+- ``GET /stats``: per route so far the requests, the prompt bytes and the completion bytes.
+  A chat's prompt is its whole request body (P11-S6 counts from the request bodies), its
+  completion the answer's message content, never the JSON around it. An embedding's prompt is
+  its input texts (what an embedding endpoint bills); it has no completion.
 
 Both answers wait ``FAKE_LLM_DELAY_MS`` (default 800) first. Their ``usage`` approximates the
-tokens as UTF-8 bytes / 4: the prompt from the request body, the completion from the message.
+tokens as those UTF-8 bytes / 4.
 """
 
 import argparse
@@ -73,14 +76,15 @@ def create_app(delay_ms: int | None = None) -> Starlette:
         if delay_ms is not None
         else int(os.environ.get("FAKE_LLM_DELAY_MS", DEFAULT_DELAY_MS))
     ) / 1000
-    counts = {route: {"requests": 0, "request_bytes": 0, "response_bytes": 0} for route in ROUTES}
+    counts = {route: {"requests": 0, "prompt_bytes": 0, "completion_bytes": 0} for route in ROUTES}
 
-    def answer(route: str, request_bytes: int, payload: dict[str, Any]) -> Response:
-        content = json.dumps(payload).encode()
+    def answer(
+        route: str, prompt_bytes: int, completion_bytes: int, payload: dict[str, Any]
+    ) -> Response:
         counts[route]["requests"] += 1
-        counts[route]["request_bytes"] += request_bytes
-        counts[route]["response_bytes"] += len(content)
-        return Response(content, media_type="application/json")
+        counts[route]["prompt_bytes"] += prompt_bytes
+        counts[route]["completion_bytes"] += completion_bytes
+        return Response(json.dumps(payload).encode(), media_type="application/json")
 
     async def chat_completions(request: Request) -> Response:
         raw = await request.body()
@@ -89,10 +93,12 @@ def create_app(delay_ms: int | None = None) -> Starlette:
         response_format = body.get("response_format") or {}
         schema = (response_format.get("json_schema") or {}).get("schema")
         message = json.dumps(instance(schema)) if schema is not None else "{}"
-        prompt, completion = _tokens(len(raw)), _tokens(len(message.encode()))
+        completion_bytes = len(message.encode())
+        prompt, completion = _tokens(len(raw)), _tokens(completion_bytes)
         return answer(
             "chat_completions",
             len(raw),
+            completion_bytes,
             {
                 "id": f"chatcmpl-fake-{counts['chat_completions']['requests'] + 1}",
                 "object": "chat.completion",
@@ -119,10 +125,12 @@ def create_app(delay_ms: int | None = None) -> Starlette:
         body = json.loads(raw)
         texts = body.get("input")
         texts = [texts] if isinstance(texts, str) else list(texts or [])
-        prompt = _tokens(len(raw))
+        prompt_bytes = sum(len(str(text).encode()) for text in texts)
+        prompt = _tokens(prompt_bytes)
         return answer(
             "embeddings",
-            len(raw),
+            prompt_bytes,
+            0,
             {
                 "object": "list",
                 "model": body.get("model", "fake"),

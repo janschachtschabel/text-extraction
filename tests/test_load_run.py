@@ -6,7 +6,7 @@ import asyncio
 import io
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -16,9 +16,9 @@ import pytest
 
 from tests.load import run_load
 from tests.load.report import ScenarioResult
-from tests.load.scenarios import Scenario
+from tests.load.scenarios import GENERATED_DOCX, Scenario, upload_bytes
 
-FARM = "http://farm.load.test:18000"
+FARM = "http://farm:18000"  # a compose service: a single-label name
 KEY = "load-key-secret-4711"
 
 
@@ -56,7 +56,14 @@ def job(state: str, *, total: int = 1, failed: int = 0, partial: int = 0) -> dic
     }
 
 
-def scenario(kind: str, endpoint: str, *, count: int = 3, concurrency: int = 2) -> Scenario:
+def scenario(
+    kind: str,
+    endpoint: str,
+    *,
+    count: int = 3,
+    concurrency: int = 2,
+    expected: frozenset[str] = frozenset({"success"}),
+) -> Scenario:
     def body(index: int, farm: str) -> dict[str, object]:
         if kind == "upload":
             return {"file": "tests/documents/corpus/lesson.docx", "format": "markdown"}
@@ -77,6 +84,7 @@ def scenario(kind: str, endpoint: str, *, count: int = 3, concurrency: int = 2) 
         concurrency=concurrency,
         body=body,
         settle_seconds=0,
+        expected=expected,  # type: ignore[arg-type]
     )
 
 
@@ -111,12 +119,15 @@ def test_sync_scenario_sends_each_body_and_records_latency_and_outcome() -> None
     assert result.name == "test-sync"
     assert result.requests == 3
     assert result.outcomes == {"success": 2, "failed": 1}
+    assert result.unexpected == 1  # the scenario expects success only
     assert result.start <= result.end <= result.settle_end
     assert sorted(record["index"] for record in records) == [0, 1, 2]
     failed = next(record for record in records if record["index"] == 2)
     assert failed["outcome"] == "failed"
     assert failed["error_code"] == "upstream_error"
     assert failed["scenario"] == "test-sync"
+    assert failed["expected"] is False
+    assert all(record["expected"] for record in records if record["index"] != 2)
     assert all(record["latency_ms"] >= 0 for record in records)
 
 
@@ -182,6 +193,24 @@ def test_upload_scenario_posts_the_file_and_the_form_fields() -> None:
     assert b'name="format"\r\n\r\nmarkdown' in parts[0]
 
 
+def test_upload_scenario_posts_a_generated_file() -> None:
+    parts: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        parts.append(request.content)
+        return httpx.Response(200, json=envelope())
+
+    plan = replace(
+        scenario("upload", "/v1/extract/file", count=1, concurrency=1),
+        body=lambda index, farm: {"file": GENERATED_DOCX, "format": "markdown"},
+    )
+    result, _ = run(handler, plan)
+
+    assert result.outcomes == {"success": 1}
+    assert upload_bytes(GENERATED_DOCX) in parts[0]
+    assert b'name="file"; filename="report.docx"' in parts[0]
+
+
 def test_mcp_scenario_posts_json_rpc_and_reads_is_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/mcp"
@@ -216,20 +245,16 @@ def test_concurrency_bounds_the_requests_in_flight() -> None:
     assert result.outcomes == {"success": 10}
 
 
-def test_main_writes_every_file_and_never_prints_the_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def prepare(
+    monkeypatch: pytest.MonkeyPatch,
+    handler: Callable[[httpx.Request], httpx.Response],
+    plan: Sequence[Scenario],
 ) -> None:
-    sent_keys: list[str | None] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        sent_keys.append(request.headers.get("authorization"))
-        return httpx.Response(200, json=envelope())
-
+    """A fake service, a fake docker stats with one api reading, no idle time."""
     stats = json.dumps(
         {"Name": "text-extraction-api-1", "CPUPerc": "50.00%", "MemUsage": "300MiB / 1GiB"}
     )
-    plan = replace(scenario("sync", "/v1/extract"), settle_seconds=1)  # long enough to sample
-    monkeypatch.setattr(run_load, "SCENARIOS", (plan, scenario("mcp", "/mcp")))
+    monkeypatch.setattr(run_load, "SCENARIOS", tuple(plan))
     monkeypatch.setattr(run_load, "IDLE_SECONDS", 0)
     monkeypatch.setattr(run_load, "STATS_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr(
@@ -240,22 +265,34 @@ def test_main_writes_every_file_and_never_prints_the_key(
     monkeypatch.setattr(run_load, "_transport", lambda: httpx.MockTransport(handler))
     monkeypatch.setenv("LOAD_TEST_KEY", KEY)
 
-    code = run_load.main(
-        [
-            "--base-url",
-            "http://api.load.test",
-            "--farm-url",
-            FARM,
-            "--api-key-env",
-            "LOAD_TEST_KEY",
-            "--only",
-            "test-sync",
-            "--out-dir",
-            str(tmp_path),
-            "--selector-processes",
-            "2",
-        ]
-    )
+
+def arguments(out_dir: Path, *extra: str) -> list[str]:
+    return [
+        "--base-url",
+        "http://api.load.test",
+        "--farm-url",
+        FARM,
+        "--api-key-env",
+        "LOAD_TEST_KEY",
+        "--out-dir",
+        str(out_dir),
+        *extra,
+    ]
+
+
+def test_main_writes_every_file_and_never_prints_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sent_keys: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_keys.append(request.headers.get("authorization"))
+        return httpx.Response(200, json=envelope())
+
+    plan = replace(scenario("sync", "/v1/extract"), settle_seconds=1)  # long enough to sample
+    prepare(monkeypatch, handler, [plan, scenario("mcp", "/mcp")])
+
+    code = run_load.main(arguments(tmp_path, "--only", "test-sync", "--selector-processes", "2"))
 
     output = capsys.readouterr()
     assert code == 0
@@ -276,7 +313,94 @@ def test_main_writes_every_file_and_never_prints_the_key(
     assert summary in output.out
     sizing = json.loads((tmp_path / "sizing.json").read_text())
     assert sizing["selector_processes"] == 2
-    assert sizing["containers"]["text-extraction-api-1"]["cpu_request"] == "500m"
+    # Keyed by compose service: the project prefix and the replica number are gone.
+    assert sizing["services"]["api"]["cpu_request"] == "500m"
+
+
+def test_main_fails_on_an_unexpected_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope("partial", "content_too_short"))
+
+    prepare(monkeypatch, handler, [scenario("sync", "/v1/extract")])
+
+    code = run_load.main(arguments(tmp_path))
+
+    assert code == 1
+    summary = (tmp_path / "summary.md").read_text()
+    assert "| test-sync | sync |" in summary
+    assert "partial 3 | 3 |" in summary  # the outcomes, then the unexpected ones
+
+
+def test_main_writes_the_summary_when_a_late_step_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=envelope())
+
+    calls = 0
+
+    async def llm_counts(client: httpx.AsyncClient, url: str | None) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:  # the count after the first scenario
+            raise httpx.ConnectError("the fake LLM is gone")
+        return {}
+
+    prepare(monkeypatch, handler, [scenario("sync", "/v1/extract")])
+    monkeypatch.setattr(run_load, "_llm_counts", llm_counts)
+
+    with pytest.raises(httpx.ConnectError):
+        run_load.main(arguments(tmp_path, "--fake-llm-url", "http://fake-llm:8000"))
+
+    summary = (tmp_path / "summary.md").read_text()
+    assert "| test-sync | sync |" in summary
+    assert json.loads((tmp_path / "sizing.json").read_text())["selector_processes"] is None
+
+
+@pytest.mark.parametrize(
+    "farm",
+    [
+        "http://farm:18000",
+        "http://localhost:18000",
+        "http://127.0.0.2:18000",
+        "http://10.1.2.3",
+        "http://192.168.0.7:8080/",
+        "http://[::1]:18000",
+        "https://farm",
+    ],
+)
+def test_a_local_farm_url_is_accepted(farm: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LOAD_TEST_KEY", KEY)
+
+    args = run_load.parse_args(["--farm-url", farm, "--api-key-env", "LOAD_TEST_KEY"])
+
+    assert args.farm_url == farm
+
+
+@pytest.mark.parametrize(
+    "farm",
+    [
+        "https://example.org",
+        "http://farm.example.com:18000",
+        "http://8.8.8.8",
+        "http://[2001:4860:4860::8888]",
+        "ftp://farm",
+        "farm:18000",
+        "http://",
+    ],
+)
+def test_a_farm_url_that_is_not_local_is_refused(
+    farm: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The load goes to our own farm only, never to a site on the internet."""
+    monkeypatch.setenv("LOAD_TEST_KEY", KEY)
+
+    with pytest.raises(SystemExit):
+        run_load.parse_args(["--farm-url", farm, "--api-key-env", "LOAD_TEST_KEY"])
+
+    assert "--farm-url" in capsys.readouterr().err
 
 
 def test_main_refuses_an_unknown_scenario_and_a_missing_key(
@@ -298,22 +422,23 @@ def test_llm_table_gives_tokens_per_scenario_request() -> None:
             {
                 "chat_completions": {
                     "requests": 60,
-                    "request_bytes": 200_000,
-                    "response_bytes": 8000,
+                    "prompt_bytes": 200_000,
+                    "completion_bytes": 2_000,
                 },
-                "embeddings": {"requests": 0, "request_bytes": 0, "response_bytes": 0},
+                "embeddings": {"requests": 0, "prompt_bytes": 0, "completion_bytes": 0},
             },
         ),
         "chunk-semantic-50": (
             50,
-            {"embeddings": {"requests": 50, "request_bytes": 100_000, "response_bytes": 9_000_000}},
+            {"embeddings": {"requests": 50, "prompt_bytes": 100_000, "completion_bytes": 0}},
         ),
     }
 
     table = run_load._llm_table(usage)
 
-    # 200,000 bytes / 50 requests / 4 bytes per token = 1,000 prompt tokens per request.
-    assert "| structured-llm-50 | chat_completions | 60 | 200000 | 8000 | 1000 | 40 |" in table
+    # 200,000 bytes / 50 requests / 4 bytes per token = 1,000 prompt tokens per request;
+    # the completion from the messages' bytes only: 2,000 / 50 / 4 = 10.
+    assert "| structured-llm-50 | chat_completions | 60 | 200000 | 2000 | 1000 | 10 |" in table
     assert "| structured-llm-50 | embeddings |" not in table  # no calls, no row
-    # An embedding answer is vectors, not tokens.
-    assert "| chunk-semantic-50 | embeddings | 50 | 100000 | 9000000 | 500 | - |" in table
+    # An embedding has no completion.
+    assert "| chunk-semantic-50 | embeddings | 50 | 100000 | 0 | 500 | - |" in table

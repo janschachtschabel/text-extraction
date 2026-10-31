@@ -113,3 +113,27 @@ def test_sampler_survives_a_command_that_cannot_run(
     assert sampler.samples == []
     assert out.read_text() == ""
     assert "stats:" in capsys.readouterr().err
+
+
+def test_a_reading_is_stamped_with_the_midpoint_of_its_call(tmp_path: Path) -> None:
+    """``docker stats --no-stream`` takes a second or two; its reading describes that span, so
+    the stamp is its middle, not its end."""
+    line = docker_line("text-extraction-api-1", "1%", "1MiB / 1GiB")
+    started = tmp_path / "started"
+    script = (
+        "import pathlib, sys, time; "
+        f"pathlib.Path({str(started)!r}).write_text(repr(time.time())); "
+        f"time.sleep(0.6); print({line!r})"
+    )
+    command = [sys.executable, "-c", script]
+
+    async def sample() -> Sampler:
+        async with Sampler(tmp_path / "stats.jsonl", interval=10, command=command) as sampler:
+            await asyncio.sleep(1.5)
+        return sampler
+
+    sampler = asyncio.run(sample())
+
+    begin = float(started.read_text())  # the call ran from a little before this to after +0.6
+    assert len(sampler.samples) == 1
+    assert begin + 0.1 <= sampler.samples[0].t <= begin + 0.5

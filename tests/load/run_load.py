@@ -18,11 +18,17 @@ go into the summary. ``--selector-processes`` only labels the run.
 
 Writes to ``--out-dir``: ``results.jsonl`` (one line per request), ``stats.jsonl`` (the
 ``docker stats`` samples), ``summary.md`` (also printed) and ``sizing.json`` (requests and
-limits per container, P11-S3). Exits 1 when a request failed or was refused.
+limits per compose service, P11-S3, without the farm, the fake LLM and Valkey). The summary
+and the sizing are written even when the run stops on an error. Exits 1 when a request's
+outcome is not one its scenario expects (an error never is).
+
+``--farm-url`` must be local: a loopback or private IP address, or a single-label host name
+such as the compose service ``farm``. Anything else is refused before a request goes out.
 """
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import os
 import sys
@@ -30,7 +36,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal, TextIO
 from urllib.parse import urlsplit
 
@@ -39,7 +45,7 @@ import httpx
 from tests.load import stats
 from tests.load.fake_llm import BYTES_PER_TOKEN
 from tests.load.report import ScenarioResult, markdown, percentile, sizing, summarise
-from tests.load.scenarios import REPO_ROOT, SCENARIOS, Scenario
+from tests.load.scenarios import SCENARIOS, Scenario, upload_bytes
 
 Outcome = Literal["success", "partial", "failed", "error"]
 OUTCOMES: tuple[Outcome, ...] = ("success", "partial", "failed", "error")
@@ -66,6 +72,7 @@ class Record:
     outcome: Outcome
     error_code: str | None
     latency_ms: int
+    expected: bool  # the outcome is one the scenario expects
 
 
 def _transport() -> httpx.AsyncBaseTransport | None:
@@ -120,9 +127,9 @@ async def _send(
 ) -> httpx.Response:
     if scenario.kind == "upload":
         fields = dict(body)
-        path = REPO_ROOT / str(fields.pop("file"))
-        content = await asyncio.to_thread(path.read_bytes)
-        files = {"file": (path.name, content, "application/octet-stream")}
+        file = str(fields.pop("file"))
+        content = await asyncio.to_thread(upload_bytes, file)
+        files = {"file": (PurePosixPath(file).name, content, "application/octet-stream")}
         data = {name: str(value) for name, value in fields.items()}
         return await client.post(scenario.endpoint, files=files, data=data)
     if scenario.kind == "mcp":
@@ -182,7 +189,8 @@ async def request_once(
     except Exception as error:  # one request's failure is its record, not the run's end
         outcome, code = "error", f"client_{type(error).__name__}"
     latency_ms = round((time.monotonic() - started) * 1000)
-    return Record(scenario.name, index, http_status, outcome, code, latency_ms)
+    expected = outcome in scenario.expected
+    return Record(scenario.name, index, http_status, outcome, code, latency_ms, expected)
 
 
 async def run_scenario(
@@ -235,6 +243,7 @@ async def run_scenario(
         latency_p95_ms=round(percentile(latencies, 95)),
         latency_max_ms=round(max(latencies)),
         throughput_per_s=round(len(records) / max(end - start, 1e-3), 2),
+        unexpected=sum(not record.expected for record in records),
     )
 
 
@@ -304,11 +313,12 @@ def _llm_table(usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]])
         "",
         "### LLM calls (fake server)",
         "",
-        "Tokens are approximated as UTF-8 bytes / 4: prompt tokens from the request bodies, "
-        "answer tokens from the fake's answers (not a real model's).",
+        "Tokens are approximated as UTF-8 bytes / 4. Prompt: a chat request's whole body, an "
+        "embedding request's input texts. Completion: the answer's message content only (the "
+        "fake's minimal JSON, not a real model's answer); an embedding has none.",
         "",
-        "| Scenario | Route | Calls | Request bytes | Answer bytes | Prompt tokens per request "
-        "| Answer tokens per request |",
+        "| Scenario | Route | Calls | Prompt bytes | Completion bytes | Prompt tokens per request "
+        "| Completion tokens per request |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for scenario, (requests, routes) in usage.items():
@@ -316,12 +326,13 @@ def _llm_table(usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]])
             if not count["requests"]:
                 continue
             per_request = max(requests, 1) * BYTES_PER_TOKEN
+            completion_bytes = count["completion_bytes"]
             # An embedding answer is vectors: it has no completion tokens.
-            answer = "-" if route == "embeddings" else str(count["response_bytes"] // per_request)
+            completion = "-" if route == "embeddings" else str(completion_bytes // per_request)
             lines.append(
-                f"| {scenario} | {route} | {count['requests']} | {count['request_bytes']} "
-                f"| {count['response_bytes']} | {count['request_bytes'] // per_request} "
-                f"| {answer} |"
+                f"| {scenario} | {route} | {count['requests']} | {count['prompt_bytes']} "
+                f"| {completion_bytes} | {count['prompt_bytes'] // per_request} "
+                f"| {completion} |"
             )
     return "\n".join(lines) + "\n"
 
@@ -335,6 +346,23 @@ def _delta(
     }
 
 
+def is_local_url(url: str) -> bool:
+    """Whether ``url`` is http(s) on a loopback or private IP literal or on a single-label host
+    name (``farm``, ``localhost``: a name only a local resolver or compose network knows)."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return "." not in host
+    return address.is_loopback or address.is_private
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8080")
@@ -343,7 +371,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="",
         help="comma-separated internal base URLs (port 9090): /ready before, /metrics after",
     )
-    parser.add_argument("--farm-url", required=True, help="the site farm's base URL")
+    parser.add_argument(
+        "--farm-url",
+        required=True,
+        help="the site farm's base URL: a loopback or private IP address, or a single-label "
+        "host name (a compose service such as farm)",
+    )
     parser.add_argument(
         "--api-key-env", default="API_KEY", help="the environment variable with the API key"
     )
@@ -366,6 +399,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     unknown = sorted(set(args.only or []) - known)
     if unknown:
         parser.error(f"unknown scenario: {', '.join(unknown)} (known: {', '.join(sorted(known))})")
+    if not is_local_url(args.farm_url):
+        parser.error(
+            "--farm-url must be an http(s) URL of a loopback or private IP address or of a "
+            "single-label host name: the load goes to our own farm only"
+        )
     if not os.environ.get(args.api_key_env):
         parser.error(f"the environment variable {args.api_key_env} with the API key is not set")
     args.internal_urls = [
@@ -382,71 +420,86 @@ async def amain(args: argparse.Namespace) -> int:
     windows: dict[str, tuple[float, float]] = {}
     results: list[ScenarioResult] = []
     llm_usage: dict[str, tuple[int, dict[str, dict[str, int]]]] = {}
-    # trust_env off: the generator talks to the stack only, never through a proxy.
-    async with (
-        httpx.AsyncClient(
-            base_url=args.base_url,
-            headers=headers,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            limits=limits,
-            trust_env=False,
-            transport=_transport(),
-        ) as client,
-        httpx.AsyncClient(timeout=30, trust_env=False) as side,
-    ):
-        await _wait_ready(side, args.internal_urls)
-        with (out_dir / "results.jsonl").open("w", encoding="utf-8") as sink:
-            async with stats.Sampler(
-                out_dir / "stats.jsonl", interval=STATS_INTERVAL_SECONDS, command=STATS_COMMAND
-            ) as sampler:
-                idle = await _idle()
-                windows[idle.name] = (idle.start, idle.settle_end)
-                results.append(idle)
-                for scenario in plan:
-                    print(f"{scenario.name}: {scenario.count} requests", file=sys.stderr)
-                    before = await _llm_counts(side, args.fake_llm_url)
-                    result = await run_scenario(
-                        client,
-                        scenario,
-                        args.farm_url,
-                        sink=sink,
-                        poll_seconds=args.poll_seconds,
-                        job_timeout=args.job_timeout,
-                    )
-                    windows[scenario.name] = (result.start, result.settle_end)
-                    results.append(result)
-                    if args.fake_llm_url is not None:
-                        after = await _llm_counts(side, args.fake_llm_url)
-                        llm_usage[scenario.name] = (result.requests, _delta(before, after))
-                    await _save_metrics(side, args.internal_urls, out_dir, scenario.name)
-                samples = list(sampler.samples)
+    sampler = stats.Sampler(
+        out_dir / "stats.jsonl", interval=STATS_INTERVAL_SECONDS, command=STATS_COMMAND
+    )
+    try:
+        # trust_env off: the generator talks to the stack only, never through a proxy.
+        async with (
+            httpx.AsyncClient(
+                base_url=args.base_url,
+                headers=headers,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                limits=limits,
+                trust_env=False,
+                transport=_transport(),
+            ) as client,
+            httpx.AsyncClient(timeout=30, trust_env=False) as side,
+        ):
+            await _wait_ready(side, args.internal_urls)
+            with (out_dir / "results.jsonl").open("w", encoding="utf-8") as sink:
+                async with sampler:
+                    idle = await _idle()
+                    windows[idle.name] = (idle.start, idle.settle_end)
+                    results.append(idle)
+                    for scenario in plan:
+                        print(f"{scenario.name}: {scenario.count} requests", file=sys.stderr)
+                        before = await _llm_counts(side, args.fake_llm_url)
+                        result = await run_scenario(
+                            client,
+                            scenario,
+                            args.farm_url,
+                            sink=sink,
+                            poll_seconds=args.poll_seconds,
+                            job_timeout=args.job_timeout,
+                        )
+                        windows[scenario.name] = (result.start, result.settle_end)
+                        results.append(result)
+                        if args.fake_llm_url is not None:
+                            after = await _llm_counts(side, args.fake_llm_url)
+                            llm_usage[scenario.name] = (result.requests, _delta(before, after))
+                        await _save_metrics(side, args.internal_urls, out_dir, scenario.name)
+    finally:
+        # Also after a failure: the scenarios that ran keep their summary and sizing.
+        summary = _write_reports(
+            out_dir, sampler.samples, windows, results, llm_usage, args.selector_processes
+        )
+    print(summary)
+    unexpected = [result.name for result in results if result.unexpected]
+    if unexpected:
+        print(
+            f"FAILED: requests with an unexpected outcome in {', '.join(unexpected)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
+
+def _write_reports(
+    out_dir: Path,
+    samples: Sequence[stats.StatSample],
+    windows: Mapping[str, tuple[float, float]],
+    results: Sequence[ScenarioResult],
+    llm_usage: Mapping[str, tuple[int, Mapping[str, Mapping[str, int]]]],
+    selector_processes: int | None,
+) -> str:
+    """Write ``summary.md`` and ``sizing.json``; the summary's text."""
     rows = summarise(samples, windows)
-    label = args.selector_processes
     heading = "Load test"
-    if label is not None:
-        heading += f", {label} selector process" + ("" if label == 1 else "es")
+    if selector_processes is not None:
+        heading += f", {selector_processes} selector process"
+        heading += "" if selector_processes == 1 else "es"
     summary = markdown(rows, results, heading=heading)
     if llm_usage:
         summary += _llm_table(llm_usage)
     (out_dir / "summary.md").write_text(summary, encoding="utf-8")
-    resources = sizing(rows)
     report = {
-        "selector_processes": label,
+        "selector_processes": selector_processes,
         "windows": windows,
-        "containers": {name: asdict(value) for name, value in resources.items()},
+        "services": {name: asdict(value) for name, value in sizing(rows).items()},
     }
     (out_dir / "sizing.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(summary)
-    bad = {
-        result.name: result.outcomes
-        for result in results
-        if result.outcomes.get("failed") or result.outcomes.get("error")
-    }
-    if bad:
-        print(f"FAILED: requests failed or were refused in {', '.join(bad)}", file=sys.stderr)
-        return 1
-    return 0
+    return summary
 
 
 def main(argv: Sequence[str] | None = None) -> int:
