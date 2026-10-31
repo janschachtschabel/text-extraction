@@ -40,24 +40,25 @@ Die maximale Extraktion braucht drei Dinge:
 
 - einen Admin-Schlüssel (ein Nutzer-Schlüssel, der `compliance: ignore` sendet, bekommt 403
   `forbidden`);
-- `"compliance": "ignore"` in der Anfrage;
+- `"compliance": "ignore"` in der Anfrage (oder keines, wo der Betreiber
+  `COMPLIANCE_DEFAULT=ignore` gesetzt hat);
 - `BROWSER_UNBLOCK_ENABLED=true` (mit `BROWSER_ENABLED=true`), vom Betreiber eingeschaltet.
 
 Mit `compliance: ignore`, aber ausgeschaltetem Entsperrmodus entfallen die Prüfungen, und der
 normale Browser wird genutzt: Das ist keine maximale Extraktion. Unter `AUTH_MODE=none` ist jeder
-Aufrufer Admin. Nutzen Sie die maximale Extraktion nur für eine Website, deren Betreiber sie
+Aufrufer Admin. Nutzen Sie die maximale Extraktion nur für eine Website, deren Inhaber sie
 erlaubt hat.
 
 ### Was sie bewirkt
 
 - Die Prüfungen von robots.txt und TDM sind aus.
-- Eine Seite, die an den Browser geht, lädt in einem getarnten Chrome mit dem eigenen User-Agent
-  von Chrome. Der Browser wartet bis zu `BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS` (20 s), bis eine
-  Bot-Prüfung durchlaufen ist, und klickt eine sichtbare Checkbox-Prüfung an, höchstens zweimal
+- Eine Seite, die an den Browser geht, wird in einem getarnten Chrome mit dem eigenen User-Agent von
+  Chrome geladen. Der Browser wartet bis zu `BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS` (20 s), bis
+  eine Bot-Prüfung durchlaufen ist, und klickt eine sichtbare Checkbox-Prüfung an, höchstens zweimal
   pro Seite.
-- Mit `mode: auto` fällt die maximale Extraktion öfter auf den Browser zurück: auch, wenn die Seite ablehnt
-  (HTTP 403, 429 oder 503), und wenn eine HTML-Seite zu wenig Text liefert (`content_too_short`,
-  `empty_content`). Die Antwort ist das bessere Ergebnis von HTTP und Browser.
+- Mit `mode: auto` fällt die maximale Extraktion öfter auf den Browser zurück: auch, wenn die Seite
+  ablehnt (HTTP 403, 429 oder 503), und wenn eine HTML-Seite zu wenig Text liefert
+  (`content_too_short`, `empty_content`). Die Antwort ist das bessere Ergebnis von HTTP und Browser.
 - `data.unblocked` ist true, wenn die Seite auf diese Weise geladen wurde.
 
 ### Was sie nicht tut
@@ -69,19 +70,19 @@ erlaubt hat.
 - Die Schutzmaßnahmen des Dienstes bleiben: der Schutz vor internen Adressen bei jeder Anfrage,
   die die Seite stellt, die Grenzen für Bytes und Zeit und die Grenzen pro Host mit ihrer Pause.
 
-Wo es geht, bitten Sie den Betreiber der Website besser um eine Freigaberegel: einen geheimen
+Wo es geht, bitten Sie den Inhaber der Website besser um eine Freigaberegel: einen geheimen
 Header, den Sie mit `headers` senden, oder eine Ausnahme für die ausgehende IP-Adresse des
 Dienstes.
 
 ## Die Pause nach einem 429 oder 503
 
 Ein Host, der mit 429 oder 503 antwortet, bekommt eine Pause: so lange, wie sein `Retry-After`
-sagt, sonst `OUTBOUND_BACKOFF_SECONDS` (30 s), höchstens `OUTBOUND_MAX_BACKOFF_SECONDS` (300 s).
+angibt, sonst `OUTBOUND_BACKOFF_SECONDS` (30 s), höchstens `OUTBOUND_MAX_BACKOFF_SECONDS` (300 s).
 Die maximale Extraktion hält sie ein: Der Browser übernimmt die Seite erst nach der Pause.
 
-- Eine Anfrage ohne `wait_seconds` wartet nicht so lange. Die Antwort ist dann oft der Fehler von
-  HTTP, mit der Warnung `browser_unavailable`.
-- Eine Anfrage mit `wait_seconds` wird ein Job, und der Job wird nach der Pause fertig. Senden
+- Eine Anfrage ohne `wait_seconds` wartet nicht so lange. Die Antwort ist dann oft der HTTP-Fehler,
+  mit der Warnung `browser_unavailable`.
+- Eine Anfrage mit `wait_seconds` wird zu einem Job, und der Job wird nach der Pause fertig. Senden
   Sie für solche Websites `wait_seconds`, oder verwenden Sie einen Batch.
 
 ## Mit REST
@@ -127,7 +128,7 @@ nicht.
   zusätzlich in „Optionen (JSON)“, lehnt das Formular es ab: `compliance` ist dann doppelt
   angegeben.
 
-Solange `BROWSER_ENABLED` oder `BROWSER_UNBLOCK_ENABLED` aus ist, ist die Auswahl gesperrt, und
-ihr Hinweis nennt den Grund. Steht „Browser-Fallback“ auf „nie“, bleibt die maximale Extraktion
-bei HTTP. Das Ergebnis zeigt den Compliance-Modus und, wenn `data.unblocked` true ist, das
-Kennzeichen „maximale Extraktion (entsperrt)“.
+Solange `BROWSER_ENABLED` oder `BROWSER_UNBLOCK_ENABLED` aus ist, ist die Auswahl gesperrt, und ihr
+Hinweis nennt den Grund. Steht „Browser-Fallback“ auf „nie“, bleibt die maximale Extraktion bei
+HTTP. Das Ergebnis zeigt den Wert der Website-Regeln (`compliance`) und, wenn `data.unblocked` true
+ist, das Kennzeichen „maximale Extraktion (entsperrt)“.

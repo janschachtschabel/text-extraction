@@ -70,12 +70,14 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
 ## In der Spielwiese
 
 - **Website-Struktur**: Geben Sie die Start-URL ein, setzen Sie „Bereich“ auf „path: nur
-  unterhalb des Verzeichnisses der Start-URL“, dazu „Linktiefe“ und „Maximale Seitenzahl“, und
-  klicken Sie auf „Website-Struktur lesen“. Während der Job läuft, listet „Als Baum anzeigen“
-  seine Seiten nach Host und Pfad, jede als gecrawlt, Sitemap oder nur verlinkt markiert.
-  Markieren Sie die Seiten, die Sie möchten, oder einen Abschnitt für alle seine Seiten, und
-  klicken Sie auf „Auswahl extrahieren“: Die markierten URLs werden Batches, mit dem Format, dem
-  Browser-Fallback, den Metadaten und den Optionen, die Sie unter dem Baum setzen.
+  unterhalb des Verzeichnisses der Start-URL“, dazu „Linktiefe“ und „Maximale Seitenzahl“,
+  entfernen Sie das Häkchen bei „robots.txt und Sitemaps“ für `"sitemaps": false`, und klicken
+  Sie auf „Website-Struktur lesen“. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“
+  seine Seiten nach Host und Pfad, jede als gecrawlt, Sitemap oder nur verlinkt markiert;
+  während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. Markieren Sie die Seiten,
+  die Sie möchten, oder einen Abschnitt für alle seine Seiten, und klicken Sie auf „Auswahl
+  extrahieren“: Die markierten URLs werden zu Batches, mit dem Format, dem Browser-Fallback, den
+  Metadaten und den Optionen, die Sie unter dem Baum setzen.
 - **Batch**: Fügen Sie die URLs ein, eine pro Zeile, und klicken Sie auf „Batch starten“. Mehr
   URLs, als ein Batch fasst, werden als mehrere Batches gesendet.
 - **Batch-Datei**: Wählen Sie eine CSV- oder JSON-Datei und klicken Sie auf „Datei prüfen“. Eine

@@ -70,8 +70,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 ## The LLM and its key
 
 The strategy `llm`, `learn_selectors` and the `semantic` chunking need the operator's LLM worker
-(`LLM_ENABLED`); without it they answer 400. `auto` then keeps the values it found, and the
-fields still missing come with the warning `llm_unavailable`.
+(`LLM_ENABLED`) and a key (`X-LLM-Api-Key` or the operator's `LLM_API_KEY`); `semantic` also
+needs `LLM_EMBEDDING_MODEL`. Without them they answer 400. `auto` then keeps the values it found,
+and the fields still missing come with the warning `llm_unavailable`.
 
 - Your own key for the LLM endpoint goes into the header `X-LLM-Api-Key`. It wins over the
   operator's `LLM_API_KEY` and is never stored.
@@ -116,10 +117,10 @@ take `chunking` too; every result of a batch carries its own chunks:
 
 ## In the playground
 
-- **Structured**: enter the URL and edit the box "Structured (JSON: strategy, schema, rules)",
-  which starts with a schema of `title` and `author` and the strategy `auto`. Press "Extract the
-  fields". The result shows "Structured values", a table of each field, its value and its source,
-  and the fields that are missing.
+- **Structured**: enter the URL and edit the box "Structured (JSON: strategy, schema, selectors,
+  patterns)", which starts with a schema of `title` and `author` and the strategy `auto`. Press
+  "Extract the fields". The result shows "Structured values", a table of each field, its value and
+  its source, and the fields that are missing.
 - **Chunk**: enter a URL or paste a text (not both), choose what the text is, edit the box
   "Chunking (JSON)" and press "Chunk". The result lists the chunks.
 

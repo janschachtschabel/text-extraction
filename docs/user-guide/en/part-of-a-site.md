@@ -58,19 +58,20 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?offset=0&limit=100"
 ```
 
-Each URL gets its own result in `items`, with the fields of [One URL](single-url.md#the-fields-to-read).
-A batch has no browser options (`actions`, `cookies`, `headers`) and no `wait_seconds`, but it
-takes `structured`, `chunking` and `pii` for every item. How to page through the items is in
-[Read the job](whole-site-and-metadata.md#read-the-job).
+Each URL gets its own result in `items`, with the fields of
+[One URL](single-url.md#the-fields-to-read). A batch has no browser options (`actions`, `cookies`,
+`headers`) and no `wait_seconds`, but it takes `structured`, `chunking` and `pii` for every item.
+How to page through the items is in [Read the job](whole-site-and-metadata.md#read-the-job).
 
 ## In the playground
 
 - **Site structure**: enter the start URL, set "Scope" to "path: only below the start URL's
-  directory", "Link depth" and "Most pages", and press "Read the site structure". When the job
-  runs, "Show as tree" lists its pages by host and path, each marked crawled, sitemap or linked
-  only. Check the pages you want, or a section to check all its pages, and press "Extract
-  selected": the checked URLs become batches, with the format, the browser fallback, the
-  metadata and the options you set below the tree.
+  directory", "Link depth" and "Most pages", clear "robots.txt and sitemaps" for
+  `"sitemaps": false`, and press "Read the site structure". Once the job is completed, "Show as
+  tree" lists its pages by host and path, each marked crawled, sitemap or linked only; while it
+  runs, "Show tree now" shows a snapshot. Check the pages you want, or a section to check all
+  its pages, and press "Extract selected": the checked URLs become batches, with the format,
+  the browser fallback, the metadata and the options you set below the tree.
 - **Batch**: paste the URLs, one per line, and press "Start batch". More URLs than one batch
   takes are sent as several batches.
 - **Batch file**: choose a CSV or JSON file and press "Check the file". A CSV has a `url` column

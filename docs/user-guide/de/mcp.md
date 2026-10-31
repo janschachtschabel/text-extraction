@@ -64,8 +64,8 @@ REST-Route, mit der Rolle des Schlüssels, und wird auf das Ratenlimit des Schl�
 Ein Admin-Schlüssel darf außerdem `compliance: ignore` (siehe [Website-Regeln](site-rules.md))
 und XPath-Selektoren verwenden. Unter `AUTH_MODE=none` lassen Sie den Header weg.
 
-Ein eigener LLM- oder ASR-Schlüssel geht auf dieselbe Weise, als Header `X-LLM-Api-Key` und
-`X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines Tools.
+Ein eigener LLM- oder ASR-Schlüssel wird auf dieselbe Weise übergeben, als Header `X-LLM-Api-Key`
+und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines Tools.
 
 ## Die 11 Tools
 
@@ -112,10 +112,10 @@ den `content_offset` für den nächsten Aufruf, und dieser liefert den Inhalt ab
 
 ## Fehler
 
-- Eine Antwort, die REST mit 4xx oder 5xx gibt (ein falsches Argument, eine abgelehnte Rolle, das
+- Was REST mit 4xx oder 5xx beantwortet (ein falsches Argument, eine abgelehnte Rolle, das
   Ratenlimit), ist ein Tool-Fehler mit dem Fehler-Envelope von REST.
-- Eine Seite, die fehlschlug (`status: failed`, in REST ein 200), ist eine normale Antwort: Lesen
-  Sie ihren `error.code` und `error.retryable`.
+- Eine Seite, deren Extraktion fehlschlug (`status: failed`, in REST ein 200), ist eine normale
+  Antwort: Lesen Sie ihren `error.code` und `error.retryable`.
 
 ## Beispiel-Prompts
 

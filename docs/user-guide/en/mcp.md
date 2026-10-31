@@ -116,7 +116,8 @@ call again with, and the next call returns the content from there.
 
 - "Extract https://example.org/mathe/brueche as Markdown and tell me its licence."
   (`extract_url`)
-- "Read the name, the licence and the educational level of these three pages." (`extract_structured`)
+- "Read the name, the licence and the educational level of these three pages."
+  (`extract_structured`)
 - "Map the section https://example.org/mathe/ two links deep and extract every page of it."
   (`site_structure`, `get_job`, `batch_extract`)
 - "Take a screenshot of https://example.org/ and describe the layout." (`screenshot_url`)

@@ -73,7 +73,7 @@ Every answer is a [result envelope](usage.md#the-result-envelope): read `status`
 | `metadata` | Title, description, authors, dates, site name, canonical URL, keywords, images, the licence (`license`, the best candidate, and `licenses`, all that were found) and the LRMI fields (`lrmi`). Off with `metadata: false`. |
 | `quality` | Facts about the page: `visible_chars`, `word_count`, `js_heavy`, `bot_challenge`, `soft_404`, `login_wall` and `browser_recommended`. A page with `browser_recommended` is one the browser should render. |
 | `compliance` | What the site rules found: the `mode`, the `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` and the TDM statement. See [Site rules](site-rules.md). |
-| `warnings` | What did not go as asked while the result still answers, such as `browser_unavailable` (the browser did not take the page: the HTTP result). |
+| `warnings` | What did not go as asked, although a result is returned, such as `browser_unavailable` (the browser did not take the page: the HTTP result). |
 
 A licence has an `id` (such as `CC-BY-SA-4.0`), a `url`, a `label`, its `source` (a `rel-license`
 link, JSON-LD, microdata, RDFa, a meta tag or the page text) and a `confidence`. `mode_used`

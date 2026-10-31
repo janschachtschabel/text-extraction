@@ -57,6 +57,8 @@ Terms of the API and of this guide.
 | --- | --- | --- |
 | site | Website | All pages of one host. The German texts do not use "Site-Crawl", nor "Seite" for a whole site. |
 | page | Seite | One web page (in German also "Webseite"). |
+| operator | Betreiber | Who runs and sets up this service. |
+| site owner | Inhaber der Website | Who runs a website; the German texts use "Betreiber" for the operator of this service only. |
 | crawl | Crawl | Following a site's links to map it. |
 | job | Job | Work that runs in the background, with an id to poll. |
 | item | Eintrag | One URL or file of a job, with its own result. |

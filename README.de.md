@@ -51,13 +51,15 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 `.env.example` hat einen Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; siehe
 [API-Schlüssel](docs/user-guide/de/usage.md#api-schlüssel). Die Spielwiese liegt unter
-http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp. [Installation](docs/user-guide/de/installation.md) beschreibt die
-lokale Einrichtung mit uv, die optionalen Worker (OCR, personenbezogene Daten, LLM,
-Spracherkennung), Kubernetes und die wichtigsten Einstellungen.
+http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
+[Installation](docs/user-guide/de/installation.md) beschreibt die lokale Einrichtung mit uv, die
+optionalen Worker (OCR, personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die
+wichtigsten Einstellungen.
 
 ## Anwendungsfälle
 
-- Eine Seite als Text oder Markdown, mit ihren Metadaten: [Eine URL](docs/user-guide/de/single-url.md).
+- Eine Seite als Text oder Markdown, mit ihren Metadaten:
+  [Eine URL](docs/user-guide/de/single-url.md).
 - Dokumente, Audio und Video, personenbezogene Daten und Bildbeschreibungen:
   [Dateien, Medien und personenbezogene Daten](docs/user-guide/de/usage.md#dateien-medien-und-personenbezogene-daten).
 - Ein Teil einer Website oder eine Liste von URLs oder eine CSV:

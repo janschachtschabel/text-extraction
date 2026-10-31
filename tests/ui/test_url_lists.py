@@ -158,7 +158,10 @@ def test_url_list_problems_in_german() -> None:
         (5, f"Die URL ist länger als {MAX_URL_LENGTH} Zeichen"),
     ]
     for data, german in (
-        ("url\nhttps://example.org/caf\xe9\n".encode("latin-1"), "Die Datei ist nicht in UTF-8."),
+        (
+            "url\nhttps://example.org/caf\xe9\n".encode("latin-1"),
+            "Die Datei ist nicht UTF-8-kodiert.",
+        ),
         (b"[1", "Die Datei ist kein gültiges JSON."),
         (f"url,title\n{A},{'t' * 10_000}\n".encode(), "Ein Feld ist zu lang."),
         (f"{A}\n{B}\n{C}\n".encode(), "Die Datei hat mehr als 2 Zeilen."),

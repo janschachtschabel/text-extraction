@@ -3,9 +3,9 @@
 English: [User guide](../en/index.md)
 
 text-extraction wandelt Webseiten, Dateien, Audio und Video in sauberen Text oder Markdown um, mit
-ihren Metadaten. Diese Anleitung erklärt, wie Sie ihn installieren, wie Sie die API, den MCP-Server
-und die Spielwiese nutzen und was jeder Parameter bewirkt. Sie gibt es auf Englisch und auf
-Deutsch, mit denselben Seiten.
+ihren Metadaten. Diese Anleitung erklärt, wie Sie den Dienst installieren, wie Sie die API, den
+MCP-Server und die Spielwiese nutzen und was jeder Parameter bewirkt. Sie gibt es auf Englisch und
+auf Deutsch, mit denselben Seiten.
 
 ## Seiten
 

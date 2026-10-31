@@ -43,7 +43,7 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | queued | wartet | Ein Job oder Eintrag, der auf einen Worker wartet. |
 | running | läuft | Ein Job oder Eintrag in Arbeit. |
 | completed | abgeschlossen | Ein Job, dessen Einträge alle fertig sind. |
-| Metadata | Metadaten | Titel, Autoren, Lizenz, Daten und Bilder einer Seite. |
+| Metadata | Metadaten | Titel, Autoren, Lizenz, Datumsangaben und Bilder einer Seite. |
 | Metadata, structured | Metadaten, strukturiert | Die schema.org- und LRMI-Felder einer Seite. |
 | API key | API-Schlüssel | Der Schlüssel, den jede Anfrage sendet. |
 | Help (user guide) | Hilfe (Anleitung) | Der Link von einem Tab zu dieser Anleitung. |
@@ -56,7 +56,9 @@ Begriffe der API und dieser Anleitung.
 | Englisch | Deutsch | Bedeutung |
 | --- | --- | --- |
 | site | Website | Alle Seiten eines Hosts. „Site-Crawl“ und „Seite“ für eine ganze Website werden nicht verwendet. |
-| page | Seite | Eine einzelne Webseite (auch „Webseite“). |
+| page | Seite | Eine einzelne Seite einer Website (auch „Webseite“). |
+| operator | Betreiber | Wer diesen Dienst betreibt und einrichtet. |
+| site owner | Inhaber der Website | Wer eine Website betreibt; „Betreiber“ meint in dieser Anleitung nur den Betreiber des Dienstes. |
 | crawl | Crawl | Den Links einer Website folgen, um sie zu erfassen. |
 | job | Job | Arbeit, die im Hintergrund läuft, mit einer ID zum Abfragen. |
 | item | Eintrag | Eine URL oder Datei eines Jobs, mit ihrem eigenen Ergebnis. |

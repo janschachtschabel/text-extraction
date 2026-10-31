@@ -1,7 +1,9 @@
 # Contributing
 
-The workflow (packages, plans, reviews) is in [CLAUDE.md](CLAUDE.md); the commands are in the
-[README](README.md#quick-start). This file holds the rules for dependencies.
+The workflow (packages, plans, reviews) is in [CLAUDE.md](CLAUDE.md); the commands are in
+[CLAUDE.md](CLAUDE.md#commands) and the local setup in the
+[installation guide](docs/user-guide/en/installation.md#local-with-uv). This file holds the rules
+for dependencies.
 
 ## Dependencies
 

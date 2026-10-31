@@ -36,7 +36,8 @@ carries the report in `data.compliance`: the `mode` that applied, the `decision`
 Maximum extraction needs three things:
 
 - an admin key (a user key that sends `compliance: ignore` gets 403 `forbidden`);
-- `"compliance": "ignore"` in the request;
+- `"compliance": "ignore"` in the request (or none, where the operator set
+  `COMPLIANCE_DEFAULT=ignore`);
 - `BROWSER_UNBLOCK_ENABLED=true` (with `BROWSER_ENABLED=true`), switched on by the operator.
 
 With `compliance: ignore` but unblock mode off, the checks are skipped and the normal browser is

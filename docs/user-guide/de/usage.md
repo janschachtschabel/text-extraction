@@ -63,8 +63,8 @@ Jede Antwort hat dieselbe Form, das Ergebnis-Envelope:
   `error.retryable` sagt, ob dieselbe Anfrage später gelingen kann.
 - `data.upstream_status` ist der HTTP-Status der Seite, `data.mode_used` ist `fast`, `browser` oder
   `upload`, und `data.timings` gibt die Zeit jedes Schritts in Millisekunden an.
-- `data.warnings` nennt, was nicht wie gewünscht lief, während das Ergebnis trotzdem antwortet,
-  etwa `browser_unavailable`.
+- `data.warnings` nennt, was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa
+  `browser_unavailable`.
 
 Wenn das Ziel scheitert (die Website antwortet mit 404, lehnt den Dienst ab oder ist nicht
 erreichbar), antwortet die API trotzdem mit HTTP 200, mit `status: failed`. Ein 4xx ist ein Problem
@@ -74,7 +74,7 @@ Dienstes.
 ## Synchron und Jobs
 
 Standardmäßig antwortet eine Anfrage, wenn ihre Arbeit fertig ist. Arbeit, die länger dauert, wird
-ein Job: Senden Sie `wait_seconds`, und läuft die Arbeit nach so vielen Sekunden noch, ist die
+zu einem Job: Senden Sie `wait_seconds`, und läuft die Arbeit nach so vielen Sekunden noch, ist die
 Antwort 202 mit der ID des Jobs und `status_url`.
 
 <!-- request: POST /v1/extract -->
@@ -181,18 +181,18 @@ curl -H "Authorization: Bearer $KEY" -o page.png \
 
 ### Maximale Extraktion
 
-Standardmäßig beachtet der Dienst die Regeln einer Website: robots.txt und der
-TDM-Nutzungsvorbehalt der EU werden so geprüft, wie der Betreiber es eingerichtet hat
-(`COMPLIANCE_DEFAULT`). Die maximale Extraktion ist für Websites, die die Extraktion vertraglich
-erlaubt haben. Ein Admin sendet `"compliance": "ignore"`, und wo der Betreiber
-`BROWSER_UNBLOCK_ENABLED` eingeschaltet hat, lädt die Seite in einem getarnten Chrome, der wartet,
-bis Bot-Prüfungen durchlaufen sind. Mit `mode: auto` fällt die maximale Extraktion außerdem auf
-den Browser zurück, wenn die Seite ablehnt (HTTP 403, 429 oder 503) oder zu wenig Text liefert,
-und `data.unblocked` ist true. Die maximale Extraktion löst keine Bild-Captchas, nutzt keinen
-bezahlten Dienst und wechselt keine IP-Adressen; die Grenzen pro Host und die Pause eines Hosts
-nach einem 429 oder 503 gelten weiter. Wo es geht, bitten Sie den Betreiber der Website besser um
-eine Freigaberegel: einen geheimen Header, den Sie mit `headers` senden, oder eine Ausnahme für
-die ausgehende IP des Dienstes. Die Einzelheiten stehen unter [Website-Regeln](site-rules.md).
+Standardmäßig beachtet der Dienst die Regeln einer Website: robots.txt und der TDM-Nutzungsvorbehalt
+der EU werden so geprüft, wie der Betreiber es eingerichtet hat (`COMPLIANCE_DEFAULT`). Die maximale
+Extraktion ist für Websites, die die Extraktion vertraglich erlaubt haben. Ein Admin sendet
+`"compliance": "ignore"`, und wo der Betreiber `BROWSER_UNBLOCK_ENABLED` eingeschaltet hat, wird die
+Seite in einem getarnten Chrome geladen, der wartet, bis Bot-Prüfungen durchlaufen sind. Mit
+`mode: auto` fällt die maximale Extraktion außerdem auf den Browser zurück, wenn die Seite ablehnt
+(HTTP 403, 429 oder 503) oder zu wenig Text liefert, und `data.unblocked` ist true. Die maximale
+Extraktion löst keine Bild-Captchas, nutzt keinen bezahlten Dienst und wechselt keine IP-Adressen;
+die Grenzen pro Host und die Pause eines Hosts nach einem 429 oder 503 gelten weiter. Wo es geht,
+bitten Sie den Inhaber der Website besser um eine Freigaberegel: einen geheimen Header, den Sie mit
+`headers` senden, oder eine Ausnahme für die ausgehende IP des Dienstes. Die Einzelheiten stehen
+unter [Website-Regeln](site-rules.md).
 
 <!-- request: POST /v1/extract -->
 ```json
@@ -228,26 +228,26 @@ Textebene, mit der Warnung `ocr_unavailable`, und Bilder und OpenDocument-Dateie
 ### Audio und Video
 
 Für eine Video-URL von YouTube, Vimeo oder den Mediatheken von ARD, ZDF, arte und 3sat enthält die
-Antwort die Untertitel des Videos (zuerst manuelle, dann die automatischen der Plattform), seinem Titel, seiner
-Beschreibung, Dauer und Lizenz. Die Seite selbst wird nicht geholt:
+Antwort die Untertitel des Videos (zuerst manuelle, dann die automatischen der Plattform), seinen
+Titel, seine Beschreibung, Dauer und Lizenz. Die Seite selbst wird nicht geholt:
 
 <!-- request: POST /v1/extract -->
 ```json
 {"url": "https://www.youtube.com/watch?v=<id>", "languages": ["de"]}
 ```
 
-Für ein Video ohne Untertitel enthält die Antwort nur seine Angaben (`"transcript_source": "metadata_only"`,
-`status: partial`, `error.code: no_transcript_available`); ebenso ein Video, dessen Plattform den
-Dienst abgelehnt hat (Warnung `subtitles_blocked`: YouTube sperrt viele IPs von Rechenzentren).
-Eine HTML-Seite, deren `<video>` oder `<audio>` ein `<track>` hat, bekommt dessen Text nach ihrem
-eigenen, unter `## Transcript`, und `data.media.embeds` listet die Player, die eine Seite einbettet,
-damit Sie sie einzeln extrahieren.
+Für ein Video ohne Untertitel enthält die Antwort nur seine Angaben
+(`"transcript_source": "metadata_only"`, `status: partial`, `error.code: no_transcript_available`);
+ebenso ein Video, dessen Plattform den Dienst abgelehnt hat (Warnung `subtitles_blocked`: YouTube
+sperrt viele IPs von Rechenzentren). Eine HTML-Seite, deren `<video>` oder `<audio>` ein `<track>`
+hat, bekommt dessen Text nach ihrem eigenen, unter `## Transcript`, und `data.media.embeds` listet
+die Player, die eine Seite einbettet, damit Sie sie einzeln extrahieren.
 
 Mit dem ASR-Worker transkribiert `"transcribe": true` ein Video ohne Untertitel oder die URL einer
-Audio- oder Videodatei. Für ein Video mit Untertiteln kommt die Antwort weiterhin sofort; eine Transkription ist
-immer ein Job und antwortet sofort mit 202. Eine hochgeladene Audio- oder Videodatei wird immer
-transkribiert (die Bytes entscheiden), bis `MEDIA_UPLOAD_MAX_BYTES` (25 MB; größere Medien per
-URL):
+Audio- oder Videodatei. Für ein Video mit Untertiteln kommt die Antwort weiterhin sofort; eine
+Transkription ist immer ein Job, die Antwort ist sofort 202. Eine hochgeladene Audio- oder
+Videodatei wird immer transkribiert (die Bytes entscheiden), bis `MEDIA_UPLOAD_MAX_BYTES` (25 MB;
+größere Medien per URL):
 
 ```bash
 curl -H "Authorization: Bearer $KEY" -F file=@lecture.mp3 http://localhost:8080/v1/extract/file
@@ -310,16 +310,18 @@ Kein unmaskiertes Bild geht an das LLM.
 
 ## Die Spielwiese
 
-Mit `UI_ENABLED=true` (Docker Compose schaltet es ein) bietet der Dienst unter `/ui` eine
-Spielwiese (lokal: http://localhost:8080/ui). Melden Sie sich mit einem API-Schlüssel des Dienstes
-an, optional auch mit Ihren LLM- und ASR-Schlüsseln. Die Seite hält die Schlüssel nur im Tab des
-Browsers (`sessionStorage`, gelöscht, wenn der Tab geschlossen wird; „Abmelden“ löscht sie) und sendet sie als
-Header der Anfragen, nie als Cookie. Unter `AUTH_MODE=none` öffnet sich die Spielwiese sofort, unter
-einem Hinweisbanner: Wer den Dienst erreichen kann, kann ihn nutzen.
+Mit `UI_ENABLED=true` (Docker Compose schaltet es ein) bietet der Dienst unter `/ui` eine Spielwiese
+(lokal: http://localhost:8080/ui). Melden Sie sich mit einem API-Schlüssel des Dienstes an, optional
+auch mit Ihren LLM- und ASR-Schlüsseln. Die Seite hält die Schlüssel nur im Tab des Browsers
+(`sessionStorage`, gelöscht, wenn der Tab geschlossen wird; „Abmelden“ löscht sie) und sendet sie
+als Header der Anfragen, nie als Cookie. Unter `AUTH_MODE=none` öffnet sich die Spielwiese sofort,
+unter einem Hinweisbanner: Wer den Dienst erreichen kann, kann ihn nutzen. Für eine gemeinsam
+genutzte Installation lassen Sie `UI_ENABLED=false`, oder Sie setzen `AUTH_MODE=api_key`.
 
 Die Spielwiese spricht Deutsch und Englisch. Der Sprachwechsel („Deutsch“, „English“) steht oben auf
 jeder Seite; die Wahl bleibt im Browser gespeichert. Jeder Tab beginnt mit einer kurzen Einführung
-und einem Link „Hilfe (Anleitung)“ zu dieser Anleitung, und jedes Feld hat einen Hinweis.
+und einem Link „Hilfe (Anleitung)“ zu dieser Anleitung, der sich in einem neuen Tab öffnet, und
+jedes Feld hat einen Hinweis.
 
 Jedes Formular führt einen REST-Aufruf aus, mit denselben Prüfungen und demselben Ratenlimit wie
 jeder Client, und zeigt den HTTP-Status, das Envelope, das rohe JSON und die Anfrage als
@@ -333,9 +335,10 @@ jeder Client, und zeigt den HTTP-Status, das Envelope, das rohe JSON und die Anf
   REST-Bodys.
 - **Batch**: URLs, eine pro Zeile. **Batch-Datei**: eine CSV- oder JSON-Datei mit URLs, zuerst auf
   dem Server geprüft, mit einer Vorschau vor „Batch starten“.
-- **Website-Struktur**: startet einen Crawl; „Als Baum anzeigen“ listet seine Seiten nach Host und
-  Pfad, mit einem Kontrollkästchen pro Seite und pro Abschnitt, und „Auswahl extrahieren“
-  startet Batches der markierten URLs.
+- **Website-Struktur**: startet einen Crawl; wenn er abgeschlossen ist, listet „Als Baum
+  anzeigen“ seine Seiten nach Host und Pfad (während er läuft, zeigt „Baum jetzt anzeigen“ eine
+  Momentaufnahme), mit einem Kontrollkästchen pro Seite und pro Abschnitt, und „Auswahl
+  extrahieren“ startet Batches der markierten URLs.
 
 Jeder Job, der in der Spielwiese gestartet wurde, zeigt seinen Zustand, einen Fortschrittsbalken und
 seine Einträge, aktualisiert sich alle 3 s, bis er abgeschlossen ist, und hat eine Schaltfläche

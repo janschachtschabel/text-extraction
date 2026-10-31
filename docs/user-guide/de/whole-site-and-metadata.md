@@ -10,13 +10,12 @@ das seitenweise Lesen der Jobs. Einen einzelnen Bereich einer Website beschreibt
 
 ## Die Website erfassen
 
-`POST /v1/site-structure` erfasst eine Website: ihre Sitemaps (die `Sitemap:`-Zeilen der
-robots.txt, sonst `/sitemap.xml`; Indizes, gzip, Text, RSS und Atom) mit ihren URLs und ihren
-Linkgraphen ab der Startseite, `depth` Klicks tief (Standard 2, höchstens `SITE_MAX_DEPTH`), für
-höchstens `max_pages` Seiten (Standard 100, höchstens `SITE_MAX_PAGES`). Die Antwort ist 202 mit
-einem Job der Art `site`; die Extract-Worker crawlen, und jede Seite, robots.txt und
-Sitemap-Datei, die sie finden, wird ein Eintrag des Jobs, sodass sein `total` wächst, solange er
-läuft:
+`POST /v1/site-structure` erfasst eine Website: ihre Sitemaps (die `Sitemap:`-Zeilen der robots.txt,
+sonst `/sitemap.xml`; Indizes, gzip, Text, RSS und Atom) mit ihren URLs und ihren Linkgraphen ab der
+Startseite, `depth` Klicks tief (Standard 2, höchstens `SITE_MAX_DEPTH`), für höchstens `max_pages`
+Seiten (Standard 100, höchstens `SITE_MAX_PAGES`). Die Antwort ist 202 mit einem Job der Art `site`;
+die Extract-Worker crawlen, und jede Seite, robots.txt und Sitemap-Datei, die sie finden, wird zu
+einem Eintrag des Jobs, sodass sein `total` wächst, solange er läuft:
 
 <!-- request: POST /v1/site-structure -->
 ```json
@@ -93,10 +92,10 @@ Sitemaps. Senden Sie sie an `POST /v1/batch`, höchstens `BATCH_MAX_URLS` (1.000
 
 Das Ergebnis jedes Eintrags enthält dann:
 
-- `metadata`: Titel, Autoren, Daten, Schlagwörter und Bilder; die Lizenz als `license` (der beste
-  Kandidat, mit `id` wie `CC-BY-4.0`, `url`, `source` und `confidence`) und `licenses` (alle
-  gefundenen); und `lrmi`, die LRMI-Felder der Seite (`educationalLevel`,
-  `learningResourceType`, `audience`, `typicalAgeRange`, `teaches` und weitere).
+- `metadata`: Titel, Autoren, Datumsangaben, Schlagwörter und Bilder; die Lizenz als `license` (der
+  beste Kandidat, mit `id` wie `CC-BY-4.0`, `url`, `source` und `confidence`) und `licenses` (alle
+  gefundenen); und `lrmi`, die LRMI-Felder der Seite (`educationalLevel`, `learningResourceType`,
+  `audience`, `typicalAgeRange`, `teaches` und weitere).
 - `structured.values`: die Felder Ihres Schemas, gelesen aus JSON-LD, Microdata, RDFa, OpenGraph
   und den Meta-Tags der Seite, mit `sources` und `missing`. Siehe
   [Strukturierte Daten](structured-data.md).
@@ -116,7 +115,7 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?offset=500&limit=500"
 ```
 
-Lesen Sie weiter, bis `offset` den Wert `progress.total` erreicht. Jeder Eintrag hat seinen
+Lesen Sie mit `next_offset` weiter, bis es null ist (die letzte Seite). Jeder Eintrag hat seinen
 `index`, seine `url`, seinen `state`, sein `result` (null, bis er fertig ist) und `run`, seine
 letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewahrt;
 `DELETE /v1/jobs/{id}` bricht ihn ab und löscht ihn sofort.
@@ -125,8 +124,9 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
 
 1. **Website-Struktur**: Geben Sie die Start-URL ein, setzen Sie „Linktiefe“ und „Maximale
    Seitenzahl“, lassen Sie „Bereich“ beim Host, und klicken Sie auf „Website-Struktur lesen“.
-2. „Als Baum anzeigen“ listet die Seiten nach Host und Pfad. „Alle auswählen“ markiert jede URL;
-   oder markieren Sie die Abschnitte, die Sie möchten.
+2. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“ die Seiten nach Host und Pfad;
+   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. „Alle auswählen“ markiert
+   jede URL; oder markieren Sie die Abschnitte, die Sie möchten.
 3. Lassen Sie „Metadaten“ an, und tragen Sie für die schema.org- und LRMI-Felder eine
    `structured`-Anfrage in „Optionen (JSON)“ ein, zum Beispiel
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.

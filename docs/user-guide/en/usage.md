@@ -20,9 +20,9 @@ printf %s "$KEY" | sha256sum | cut -d' ' -f1      # the sha256 for API_KEYS
 ```
 
 A key has the role `user` or `admin`. Admins may also choose `compliance: ignore` (and with it
-maximum extraction), use XPath selectors and the `evaluate` action, and read every job; a user
-reads only their own jobs. A missing or wrong key answers 401 `unauthorized`, and a request that the
-role may not make 403 `forbidden`. Each key has a rate limit (`RATE_LIMIT_PER_MINUTE`); over it a request
+maximum extraction), use XPath selectors and the `evaluate` action, and read every job; a user reads
+only their own jobs. A missing or wrong key answers 401 `unauthorized`, and a request that the role
+may not make 403 `forbidden`. Each key has a rate limit (`RATE_LIMIT_PER_MINUTE`); over it a request
 answers 429 `rate_limited` with `Retry-After`.
 
 With `AUTH_MODE=none` the service needs no key and every caller is an admin. Use it on your own
@@ -61,7 +61,7 @@ Every answer has the same shape, the result envelope:
   `error.retryable` says whether the same request may succeed later.
 - `data.upstream_status` is the HTTP status of the page, `data.mode_used` is `fast`, `browser` or
   `upload`, and `data.timings` gives the time of each step in milliseconds.
-- `data.warnings` names what did not go as asked while the result still answers, such as
+- `data.warnings` names what did not go as asked, although a result is returned, such as
   `browser_unavailable`.
 
 When the target fails (the site answers 404, refuses the service or is down), the API still
@@ -300,11 +300,11 @@ With `UI_ENABLED=true` (Docker Compose switches it on) the service serves a play
 your LLM and ASR keys. The page keeps the keys in the browser tab only (`sessionStorage`, gone
 when the tab closes; "Log out" clears them) and sends them as request headers, never as a cookie.
 Under `AUTH_MODE=none` the playground opens at once, under a banner: anyone who can reach the
-service can use it.
+service can use it. For a shared deployment keep `UI_ENABLED=false` or `AUTH_MODE=api_key`.
 
 The playground speaks English and German. The language switch ("Deutsch", "English") is at the
 top of every page; the choice stays in the browser. Each tab starts with a short intro and a
-"Help (user guide)" link to this guide, and each field has a hint.
+"Help (user guide)" link to this guide, which opens in a new tab, and each field has a hint.
 
 Every form runs one REST call, with the same checks and rate limit as any client, and shows the
 HTTP status, the envelope, the raw JSON and the request as a `curl` command (with `$API_KEY` in
@@ -317,8 +317,9 @@ place of your key). The tabs:
   the same result view; the "Options (JSON)" box takes any further field of the REST body.
 - **Batch**: URLs, one per line. **Batch file**: a CSV or JSON file of URLs, checked on the
   server first, with a preview before "Start batch".
-- **Site structure**: starts a crawl; "Show as tree" lists its pages by host and path, with a
-  checkbox per page and per section, and "Extract selected" starts batches of the checked URLs.
+- **Site structure**: starts a crawl; once it is completed, "Show as tree" lists its pages by
+  host and path (while it runs, "Show tree now" shows a snapshot), with a checkbox per page and
+  per section, and "Extract selected" starts batches of the checked URLs.
 
 Every job started from the playground shows its state, a progress bar and its items, refreshes
 every 3 s until it is completed, and has a "Cancel" button.

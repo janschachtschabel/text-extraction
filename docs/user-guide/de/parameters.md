@@ -17,11 +17,11 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `url` | String | Pflicht | Die http(s)-URL, die extrahiert wird. |
 | `mode` | `fast`, `auto` oder `browser` | `auto` | Der Browser-Fallback: `auto` nutzt den Browser, wenn die Seite ihn braucht, `fast` nie, `browser` immer. Siehe [Browser-Fallback](usage.md#browser-fallback). |
 | `format` | `markdown`, `text` oder `html` | `markdown` | Das Format von `content`. |
-| `metadata` | Boolean | `true` | Die Metadaten der Seite mitliefern (Titel, Autoren, Lizenz, Daten, Bilder, schema.org- und LRMI-Felder). |
+| `metadata` | Boolean | `true` | Die Metadaten der Seite mitliefern (Titel, Autoren, Lizenz, Datumsangaben, Bilder, schema.org- und LRMI-Felder). |
 | `links` | Boolean | `false` | Die Links der Seite mitliefern. |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Website-Regeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
-| `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion ein Job (202); `0` übergibt sofort. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
+| `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion zu einem Job (202); `0`: sofort ein Job. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. |
 | `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website. Nicht mit `mode: fast`. |
 | `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
@@ -79,7 +79,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `url` | String | nicht gesetzt | Die Seite, die extrahiert und zerlegt wird, mit den Optionen von `POST /v1/extract`. |
-| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` antworten die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, `describe_images`) mit 422. |
+| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
 | `text_type` | `markdown` oder `plain` | `markdown` | Was `text` ist; Markdown-Chunks tragen ihren Überschriftenpfad. |
 | `chunking` | Objekt | Pflicht | Wie zerlegt wird. Siehe [`chunking`](#chunking). |
 | `format` | `markdown` oder `text` | `markdown` | Das Format von `content` und der Chunks. |
@@ -181,7 +181,7 @@ Optionsobjekte sind JSON-Strings.
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `format` | `markdown`, `text` oder `html` | `markdown` | Das Format von `content`. |
-| `metadata` | Boolean | `true` | Die Metadaten des Dokuments mitliefern (Titel, Autoren, Lizenz, Daten). |
+| `metadata` | Boolean | `true` | Die Metadaten des Dokuments mitliefern (Titel, Autoren, Lizenz, Datumsangaben). |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
 | `wait_seconds` | Zahl, 0 bis 60 | `25` | Nach so vielen Sekunden wird ein laufender Upload ein Job (202). |
 | `pii` | Modus oder JSON-Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |

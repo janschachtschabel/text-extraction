@@ -73,8 +73,10 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 ## Das LLM und sein Schlüssel
 
 Die Strategie `llm`, `learn_selectors` und das `semantic`-Chunking brauchen den LLM-Worker des
-Betreibers (`LLM_ENABLED`); ohne ihn ergeben sie 400. `auto` behält dann die gefundenen Werte, und
-für die Felder, die noch fehlen, kommt die Warnung `llm_unavailable`.
+Betreibers (`LLM_ENABLED`) und einen Schlüssel (`X-LLM-Api-Key` oder `LLM_API_KEY` des
+Betreibers); `semantic` braucht außerdem `LLM_EMBEDDING_MODEL`. Ohne sie ergeben sie 400. `auto`
+behält dann die gefundenen Werte, und für die Felder, die noch fehlen, kommt die Warnung
+`llm_unavailable`.
 
 - Ihr eigener Schlüssel für den LLM-Endpunkt gehört in den Header `X-LLM-Api-Key`. Er hat Vorrang
   vor `LLM_API_KEY` des Betreibers und wird nie gespeichert.
@@ -122,9 +124,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 ## In der Spielwiese
 
 - **Strukturiert**: Geben Sie die URL ein, und bearbeiten Sie das Feld „Strukturiert (JSON:
-  strategy, schema, rules)“, das mit einem Schema aus `title` und `author` und der Strategie
-  `auto` beginnt. Klicken Sie auf „Felder extrahieren“. Das Ergebnis zeigt „Strukturierte Werte“,
-  eine Tabelle mit jedem Feld, seinem Wert und seiner Quelle, und die Felder, die fehlen.
+  strategy, schema, selectors, patterns)“, das mit einem Schema aus `title` und `author` und der
+  Strategie `auto` beginnt. Klicken Sie auf „Felder extrahieren“. Das Ergebnis zeigt „Strukturierte
+  Werte“, eine Tabelle mit jedem Feld, seinem Wert und seiner Quelle, und die Felder, die fehlen.
 - **Chunks**: Geben Sie eine URL ein oder fügen Sie einen Text ein (nicht beides), wählen Sie, was
   der Text ist, bearbeiten Sie das Feld „Chunking (JSON)“, und klicken Sie auf „In Chunks
   zerlegen“. Das Ergebnis listet die Chunks.

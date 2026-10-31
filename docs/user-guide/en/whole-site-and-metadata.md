@@ -111,16 +111,17 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?offset=500&limit=500"
 ```
 
-Read on until `offset` reaches `progress.total`. Each item has its `index`, its `url`, its
-`state`, its `result` (null until it is done) and `run`, its last claim by a worker. A job is
+Read on with `next_offset` until it is null (the last page). Each item has its `index`, its `url`,
+its `state`, its `result` (null until it is done) and `run`, its last claim by a worker. A job is
 kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes it at once.
 
 ## In the playground
 
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
    the host, and press "Read the site structure".
-2. "Show as tree" lists the pages by host and path. "Select all" checks every URL; or check the
-   sections you want.
+2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
+   "Show tree now" shows a snapshot. "Select all" checks every URL; or check the sections you
+   want.
 3. Leave "Metadata" on, and for the schema.org and LRMI fields put a `structured` request into
    "Options (JSON)", for example
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.

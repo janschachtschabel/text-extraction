@@ -58,7 +58,8 @@ workers (OCR, personal data, LLM, speech recognition), Kubernetes and the key se
 - One page as text or Markdown, with its metadata: [One URL](docs/user-guide/en/single-url.md).
 - Documents, audio and video, personal data and image descriptions:
   [Files, media and personal data](docs/user-guide/en/usage.md#files-media-and-personal-data).
-- Part of a site, or a list of URLs or a CSV: [Part of a site](docs/user-guide/en/part-of-a-site.md).
+- Part of a site, or a list of URLs or a CSV:
+  [Part of a site](docs/user-guide/en/part-of-a-site.md).
 - A whole site with the metadata and licences of its pages:
   [A whole site and its metadata](docs/user-guide/en/whole-site-and-metadata.md).
 - Structured data and chunks: [Structured data](docs/user-guide/en/structured-data.md).

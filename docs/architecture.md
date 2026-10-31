@@ -2406,10 +2406,10 @@ Package 10: `mcp_server/` (`server.py`, `gate.py`, `calls.py`, `tools_extract.py
 `tools_info.py`, `files.py`, `results.py`) and `ui/` (`routes.py`, `security.py`, `forward.py`,
 `forms.py`, `answers.py`, `results.py`, `timeline.py`, `previews.py`, `url_lists.py`,
 `site_tree.py`, `job_views.py`, `markdown.py`, `templating.py`, `texts.py`, `i18n.py`,
-`locales/`, `templates/`, `static/`), the route cores in the existing route modules, `DELETE /v1/jobs/{id}` and the item
-runs (see "Jobs and the fair queue"). Settings, access and the forms are described in
-[configuration.md](configuration.md) ("MCP", "UI"); setup for Claude Code and Claude Desktop is
-in the README.
+`locales/`, `templates/`, `static/`), the route cores in the existing route modules,
+`DELETE /v1/jobs/{id}` and the item runs (see "Jobs and the fair queue"). Settings, access and the
+forms are described in [configuration.md](configuration.md) ("MCP", "UI"); setup for Claude Code
+and Claude Desktop is in the user guide's [MCP page](user-guide/en/mcp.md#setup).
 
 Both are doors to the same routes, not services of their own: an MCP tool call and a UI form run
 the REST route's checks (auth and roles, the rate-limit bucket, body limits, validation, the SSRF
@@ -2574,10 +2574,10 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   (English)" and `error.message` (and a 422's `details`) below it, marked `lang="en"`. A result's
   status and a job's state are badges with the texts `status.<value>` and
   `job_state.<value>` (the raw value in `data-value`, the CSS classes keyed on it); identifiers of
-  the API (error codes, compliance, robots and cache values, a job's kind) stay as they are, in
-  `<code>` (`i18n.Code`). German texts address the user as "Sie" where an address is needed, and are neutral
-  otherwise; fixed terms are in the user guide's glossary ("Job" stays "Job", a field name stays
-  the field name in backticks).
+  the API (error codes, compliance, robots and cache values, a job's kind, a worker pool) stay as
+  they are, in `<code>` (`i18n.Code`). German texts address the user as "Sie" where an address is
+  needed, and are neutral otherwise; fixed terms are in the user guide's glossary ("Job" stays
+  "Job", a field name stays the field name in backticks).
 - **Choosing the language (P12-S6, D4 a).** `GET /ui` takes the `lang` query (`en` or `de`), then
   `Accept-Language` (q-values, primary subtag; `q=0` and a malformed `q` name nothing), then
   `UI_DEFAULT_LANGUAGE` (`page_language`). `/ui/run/*` takes the `X-UI-Language` header, which
@@ -2644,8 +2644,9 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   image) is injected with `page.evaluate`, so the CSP stays on, and runs with the tags `wcag2a`,
   `wcag2aa`, `wcag21a`, `wcag21aa` and `wcag22aa` over the login (also with an error), every tab,
   an extract result, a form error, a running and a completed progress view, the site tree and
-  the Extract tab with "Site rules" enabled (browser and unblock mode on), in both languages; the gate is zero violations,
-  with no rule or element excluded. Keyboard, focus, status and error tests run beside it.
+  the Extract tab with "Site rules" enabled (browser and unblock mode on), in both languages; the
+  gate is zero violations, with no rule or element excluded. Keyboard, focus, status and error
+  tests run beside it.
 
 **Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,
 `partial`, `failed`, `job` or a refusal's error code; every tool exported at 0),
