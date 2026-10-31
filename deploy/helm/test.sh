@@ -1044,6 +1044,63 @@ for name in "$API" "$EXTRACT" "$BROWSER"; do
     "$(document "$sized" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
 done
 
+# --- Example production values (ruling P11-S11) ----------------------------------------------------
+
+EXAMPLE="$CHART/values-production.example.yaml"
+# The resources blocks of a render, one per line, in document order (init containers included).
+resource_blocks() {
+  grep -oE "resources: limits: cpu: [^ ]+ memory: [^ ]+ requests: cpu: [^ ]+ memory: [^ ]+" <<<"$(flat "$1")" || true
+}
+if [[ ! -f "$EXAMPLE" ]]; then
+  fail "no $EXAMPLE"
+else
+  if "$HELM" lint --strict "$CHART" -f "$EXAMPLE" >/dev/null; then
+    pass "the example production values pass helm lint --strict"
+  else
+    fail "the example production values fail helm lint --strict"
+  fi
+  production="$(render -f "$EXAMPLE")"
+  example_tag="$(sed -n '/^image:/,/^[^ ]/s/^  tag: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$EXAMPLE")"
+  if [[ "$example_tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    pass "the example pins a SemVer image tag ($example_tag)"
+  else
+    fail "the example's image.tag is '$example_tag', expected a SemVer tag"
+  fi
+  images="$(grep -oE 'image: "ghcr.io/janschachtschabel/text-extraction[^"]*"' <<<"$production" | sort -u)"
+  if [[ -n "$images" ]] && ! grep -qv ":$example_tag\"\$" <<<"$images"; then
+    pass "every image of the example runs tag $example_tag"
+  else
+    fail "images of the example not on tag $example_tag: $(tr '\n' ' ' <<<"$images")"
+  fi
+  for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
+    if [[ -n "$(document "$production" Deployment "$name")" ]]; then
+      pass "the example deploys $name"
+    else
+      fail "the example deploys no $name"
+    fi
+  done
+  expect_absent "the example runs no in-chart Valkey" "$(document "$production" Deployment "$RELEASE-text-extraction-valkey")" "kind: Deployment"
+  expect_contains "the example reads VALKEY_URL from its Secret" "$(flat "$(document "$production" Deployment "$API")")" \
+    "- name: VALKEY_URL valueFrom: secretKeyRef: name: text-extraction-valkey-url key: VALKEY_URL"
+  expect_contains "the example reads API_KEYS from its existing Secret" "$(flat "$(document "$production" Deployment "$API")")" \
+    "- name: API_KEYS valueFrom: secretKeyRef: name: text-extraction-api-keys key: API_KEYS"
+  expect_absent "the example renders no chart-managed key Secret" "$production" "name: $RELEASE-text-extraction-keys"
+  expect_contains "the example renders the PrometheusRule" "$production" "kind: PrometheusRule"
+  expect_contains "the example renders the ServiceMonitor" "$production" "kind: ServiceMonitor"
+  expect_values "the example keeps MCP off" "$(document "$production" Deployment "$API")" MCP_ENABLED "false"
+  expect_values "the example keeps the UI off" "$(document "$production" Deployment "$API")" UI_ENABLED "false"
+  # The example takes the measured requests and limits of values.yaml, component by component.
+  for name in "$API" "$EXTRACT" "$BROWSER" "$DOCLING" "$ASR" "$NLP" "$LLM"; do
+    measured="$(resource_blocks "$(document "$sized" Deployment "$name")")"
+    example="$(resource_blocks "$(document "$production" Deployment "$name")")"
+    if [[ -n "$measured" && "$measured" == "$example" ]]; then
+      pass "the example's resources of $name are the measured ones"
+    else
+      fail "the example's resources of $name differ: '$example', values.yaml '$measured'"
+    fi
+  done
+fi
+
 if ((failures > 0)); then
   echo "$failures check(s) failed" >&2
   exit 1

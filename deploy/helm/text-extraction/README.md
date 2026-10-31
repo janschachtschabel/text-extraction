@@ -10,6 +10,11 @@ helm install text-extraction ./deploy/helm/text-extraction \
 Without API keys the pods refuse to start (exit code 2) while `config.AUTH_MODE` is `api_key`.
 Compute the SHA-256 of a key with `printf %s "$KEY" | sha256sum | cut -d' ' -f1`.
 
+For production, start from [`values-production.example.yaml`](values-production.example.yaml): an
+external Valkey, every secret from your own Secrets, pinned SemVer image tags, the measured
+requests and limits, the PrometheusRule and ServiceMonitor on, MCP and the playground off.
+`deploy/helm/test.sh` renders it and lints it with `--strict`.
+
 ## What it creates
 
 | Object | When | Notes |
@@ -577,6 +582,7 @@ docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --s
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.nlp.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.llm.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set mcp.enabled=true --set ui.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction -f text-extraction/values-production.example.yaml
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```
