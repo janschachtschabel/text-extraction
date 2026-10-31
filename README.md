@@ -457,10 +457,13 @@ Node.js). In `claude_desktop_config.json` (Settings, Developer, Edit Config):
 ```
 
 The key goes in `env`, so it is not part of the arguments (`Authorization:${AUTH_HEADER}` has no
-blank, which some clients split). Restart Claude Desktop after the change. Under `AUTH_MODE=none`
-leave the header out. A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key`
-and `X-ASR-Api-Key` (another `--header` each); it is never a tool argument. Browser-based clients
-must be listed in `MCP_ALLOWED_ORIGINS`; a request with any other `Origin` is refused.
+blank, which some clients split). `mcp-remote` takes plain HTTP only for `localhost` and
+`127.0.0.1` (such as compose's `http://localhost:8080/mcp`); for an `http://` endpoint on any other
+host (another machine of a trusted network) add `"--allow-http"` to the arguments. Restart Claude
+Desktop after the change. Under `AUTH_MODE=none` leave the header out. A caller's LLM or ASR key
+goes the same way, as the headers `X-LLM-Api-Key` and `X-ASR-Api-Key` (another `--header` each);
+it is never a tool argument. Browser-based clients must be listed in `MCP_ALLOWED_ORIGINS`; a
+request with any other `Origin` is refused.
 
 | Tool | Route | Arguments (besides `options`) |
 | --- | --- | --- |
@@ -482,7 +485,9 @@ must be listed in `MCP_ALLOWED_ORIGINS`; a request with any other `Origin` is re
 same JSON, after a one-line hint when there is something to do:
 
 - A call that takes longer than `MCP_WAIT_SECONDS` (25 s) answers a job: call `get_job` with its
-  `job_id` and `wait_seconds` until it is `completed`.
+  `job_id` and `wait_seconds` until it is `completed`. Only with `JOBS_ENABLED=true` (the default):
+  without jobs a slow call runs synchronously within the route's own limits, and `batch_extract`,
+  `site_structure` and the job tools answer 503. The playground's forms behave the same way.
 - A long `content` is cut to `max_chars` (`MCP_MAX_CONTENT_CHARS`, 50,000; shared by the items of a
   `get_job` page) with the warning `mcp_content_truncated`; call again with the `content_offset`
   the hint names.
