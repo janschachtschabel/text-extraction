@@ -5,9 +5,9 @@ Markdown, with a fast HTTP mode and a browser mode.
 
 ## Status
 
-Under construction: packages 0-8 are merged (foundation, service skeleton, fast extraction,
+Under construction: packages 0-9 are merged (foundation, service skeleton, fast extraction,
 jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
-chunking). See
+chunking, site structure); package 10 (MCP and UI) is in review. See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Quick start
@@ -155,6 +155,12 @@ envelope in `items`, also a failed one, and `progress` counts them. A job is kep
 `JOB_TTL_SECONDS` (24 h), and only its owner (or an admin) can read it. `POST /v1/extract` with
 `wait_seconds` answers 202 with a job when the extraction takes longer; that extraction keeps
 running in the API pod that took the request (not on a worker), and the job stores its result.
+
+Each item also shows `run`, its last claim by a worker (`pool`, `attempts`, `claimed_at`; null
+while it waits): `attempts` above 1 means the item runs again after a lost lease or a deferral.
+`DELETE /v1/jobs/<job id>` cancels a job (its owner or an admin): it deletes the job with its
+results and files at once and frees its slot of `BATCH_MAX_OPEN_PER_CLIENT`; items still queued
+are dropped, and items in flight finish without being stored.
 
 ### Personal data (PII)
 
@@ -419,6 +425,108 @@ non-interactive bot challenges to clear and clicks a Turnstile or hCaptcha check
 image captchas, uses no paid service and rotates no IP address, and the per-domain limits still
 apply. Ask the site owner for an allowlist rule instead where you can: a secret header you send
 with `headers`, or an exemption for the service's egress IP.
+
+## MCP
+
+With `MCP_ENABLED=true` (Helm `mcp.enabled=true`; docker compose switches it on for the API) the
+service is an MCP server at `https://<host>/mcp` (streamable HTTP, stateless, JSON answers). An MCP
+client authenticates with an API key of the service, exactly as a REST client does, and every tool
+call runs the REST route's checks and counts against the key's rate limit.
+
+Claude Code:
+
+```bash
+claude mcp add --transport http text-extraction https://<host>/mcp \
+  --header "Authorization: Bearer <key>"
+# local compose: http://localhost:8080/mcp
+```
+
+Claude Desktop reaches a server that needs a header through the `mcp-remote` bridge (needs
+Node.js). In `claude_desktop_config.json` (Settings, Developer, Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "text-extraction": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://<host>/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+      "env": {"AUTH_HEADER": "Bearer <key>"}
+    }
+  }
+}
+```
+
+The key goes in `env`, so it is not part of the arguments (`Authorization:${AUTH_HEADER}` has no
+blank, which some clients split). Restart Claude Desktop after the change. Under `AUTH_MODE=none`
+leave the header out. A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key`
+and `X-ASR-Api-Key` (another `--header` each); it is never a tool argument. Browser-based clients
+must be listed in `MCP_ALLOWED_ORIGINS`; a request with any other `Origin` is refused.
+
+| Tool | Route | Arguments (besides `options`) |
+| --- | --- | --- |
+| `extract_url` | `POST /v1/extract` | `url`, `format` (`markdown`), `mode` (`auto`), `wait_seconds`, `content_offset`, `max_chars` |
+| `extract_file` | `POST /v1/extract/file` | `content_base64` (a `data:` URL prefix allowed), `file_name`, `content_type`, `format`, `wait_seconds`, `content_offset`, `max_chars` |
+| `screenshot_url` | `POST /v1/screenshot` | `url`, `full_page` (true), `wait_seconds`; the PNG is attached up to `MCP_IMAGE_MAX_BYTES` |
+| `extract_structured` | `POST /v1/structured` | `url`, `structured` (required), `format`, `wait_seconds`, `content_offset`, `max_chars` |
+| `chunk` | `POST /v1/chunk` | `url` or `text`, `chunking` (required), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
+| `batch_extract` | `POST /v1/batch` | `urls`, `format`, `mode`; answers a job |
+| `site_structure` | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`); answers a job |
+| `get_job` | `GET /v1/jobs/{id}` | `job_id`, `offset`, `limit` (5, 1-50), `wait_seconds` (0, up to `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; no `options` |
+| `get_job_screenshot` | `GET /v1/jobs/{id}/artifacts/screenshot.png` | `job_id`; no `options` |
+| `cancel_job` | `DELETE /v1/jobs/{id}` | `job_id`; no `options` |
+| `service_info` | `GET /v1/info` | none |
+
+`options` takes any further field of the route's REST body (see `/docs`), for example
+`{"pii": {"mode": "mask"}}` or `{"metadata": false}`; a key given both as an argument and in
+`options` is refused. A tool answer's structured content is the REST envelope, and its text is the
+same JSON, after a one-line hint when there is something to do:
+
+- A call that takes longer than `MCP_WAIT_SECONDS` (25 s) answers a job: call `get_job` with its
+  `job_id` and `wait_seconds` until it is `completed`.
+- A long `content` is cut to `max_chars` (`MCP_MAX_CONTENT_CHARS`, 50,000; shared by the items of a
+  `get_job` page) with the warning `mcp_content_truncated`; call again with the `content_offset`
+  the hint names.
+- An answer that REST gives with 4xx or 5xx (a bad argument, a refused role, the rate limit) is a
+  tool error with the REST error envelope; a page that failed (`status: failed`, a 200 in REST) is
+  a normal answer.
+
+## Playground
+
+With `UI_ENABLED=true` (Helm `ui.enabled=true`; docker compose switches it on) the service serves a
+playground at `https://<host>/ui` (local compose: http://localhost:8080/ui). Its password is an API
+key of the service: log in with it (and optionally your LLM and ASR keys). The page keeps the keys
+in the browser tab only (`sessionStorage`, gone when the tab closes; "Log out" clears them) and
+sends them as request headers, never as a cookie. Under `AUTH_MODE=none` the playground opens at
+once, under a banner: anyone who can reach the service can use it, so keep `UI_ENABLED=false` or
+`AUTH_MODE=api_key` for a shared deployment.
+
+Every form runs one REST call, with the same checks and rate limit as any client, and shows the
+HTTP status, the envelope, the raw JSON and the request as a `curl` command (with `$API_KEY` in
+place of your key). The tabs:
+
+- **Extract**: a URL as Markdown or text, the mode, metadata, structured metadata (schema.org and
+  LRMI fields such as licence, author and educational level) and image descriptions. The result
+  shows the content as source or rendered, a download, the metadata, the structured values, the
+  images with their alt texts and descriptions ("Load previews" fetches them through the service,
+  so the image hosts never see you), the links, and a timeline of what happened: claims and
+  retries, compliance, fetch, browser render, conversion, PII, LLM and the outcome, with a line
+  per warning.
+- **File**, **Screenshot**, **Structured**, **Chunk** and **Info**: the other single calls, with the
+  same result view; an "Options (JSON)" box takes any further field of the REST body.
+- **Batch**: URLs, one per line. **Batch file**: a CSV (comma, semicolon or tab; a `url` column or
+  the first column) or a JSON array of URLs or of objects with `url`, up to
+  `UI_BATCH_FILE_MAX_BYTES` (10 MiB) and `UI_BATCH_FILE_MAX_ROWS` (100,000). The file is checked on
+  the server first: the preview shows the counts, the URLs and the rows that are not URLs, and
+  "Start batch" sends the valid ones. Lists longer than `BATCH_MAX_URLS` are split into several
+  batches, up to `BATCH_MAX_OPEN_PER_CLIENT` of them.
+- **Site structure**: starts a crawl; once it is done (or at any time with "Show tree now") "Show as
+  tree" lists its pages, sitemap entries and linked-only URLs by host and URL path, with a
+  checkbox per page and per section. Checking a section checks everything under it; "Extract
+  selected" starts batches of the checked URLs.
+- **Progress**: every job started from the playground shows its state, a progress bar with the
+  success, partial and failed counts, the elapsed time and its items ("queued", "running in
+  browser, claim 2", or the status and error code; "Show" opens an item's result and timeline),
+  refreshes every 3 s until the job is completed, and has a "Cancel" button.
 
 ## Documentation
 

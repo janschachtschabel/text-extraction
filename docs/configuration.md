@@ -672,9 +672,15 @@ a job), the principal and the request's trace fields (`x-client-trace-id`, B3), 
 envelope's `trace_id` carries too. Tool arguments are never logged; FastMCP's and the MCP SDK's
 own loggers are held at `WARNING` or above (FastMCP logs arguments at `DEBUG`).
 
+Behind an ingress or a proxy, give `/mcp` a read timeout of at least `MCP_WAIT_SECONDS` + 70 s
+(95 s by default: a tool call ends within `MCP_WAIT_SECONDS` plus the route's own hand-over time)
+and a body size of at least its body limit (about 27 MB with the default `DOCUMENT_MAX_BYTES`; about 33 MB where uploads are transcribed, from `MEDIA_UPLOAD_MAX_BYTES`), or
+`extract_file` calls are cut off before the service sees them. The Helm chart's README lists
+annotations for ingress-nginx.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MCP_ENABLED` | `false` | Serve the MCP endpoint at `/mcp`. |
+| `MCP_ENABLED` | `false` | Serve the MCP endpoint at `/mcp`. Helm: `mcp.enabled`, rendered on the API pods only (a `config.MCP_ENABLED` entry is ignored); docker compose switches it on for the `api` service unless `.env` or the shell sets it. |
 | `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash and a default port, `:443` for https and `:80` for http, are dropped, in the setting and in the `Origin` header). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
 | `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of these tools and of `get_job` (a larger `wait_seconds` is cut to it). 0 to 60. |
 | `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
@@ -708,7 +714,8 @@ Access (the UI has no password of its own: its password is an API key of the ser
 Every form posts to `/ui/run/<op>`, which forwards it in-process (no network) to the matching
 `/v1` route with the browser's `Authorization`, `X-LLM-Api-Key`, `X-ASR-Api-Key` and B3 headers
 only (no cookie, no other header) and with `x-client-trace-id` set to the outer request's trace
-id, so both access lines carry one id. The REST route runs every check (body limit, validation,
+id, so both access lines carry one id. The outer `/ui/run/...` access line has no `principal`
+(the view does not authenticate a forwarded call itself); the inner `/v1/...` line carries it. The REST route runs every check (body limit, validation,
 auth, roles, rate limit, the hand-over to a job), and each forwarded call counts once against the
 caller's rate limit. Views that combine several reads count one hit per view.
 
@@ -821,9 +828,15 @@ Body limits of the `/ui/run` routes: `/ui/run/file` that of `POST /v1/extract/fi
 `/ui/run/batch-urls` `BATCH_MAX_OPEN_PER_CLIENT` times that of `POST /v1/batch`, every other route
 `REQUEST_MAX_BODY_BYTES`. A larger body answers 413 `invalid_request` before it is read whole.
 
+Behind an ingress or a proxy, give `/ui` the read timeout of `/mcp` (at least `MCP_WAIT_SECONDS` +
+70 s: the forms wait 25 s plus the route's hand-over time) and a body size of at least the largest
+of these limits: the upload route's (`DOCUMENT_MAX_BYTES`, or `MEDIA_UPLOAD_MAX_BYTES` where uploads are
+transcribed, + 192 KiB) and `UI_BATCH_FILE_MAX_BYTES`
++ 64 KiB.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `UI_ENABLED` | `false` | Serve the playground at `/ui`. |
+| `UI_ENABLED` | `false` | Serve the playground at `/ui`. Helm: `ui.enabled`, rendered on the API pods only (a `config.UI_ENABLED` entry is ignored; the install notes warn while `config.AUTH_MODE` is `none`); docker compose switches it on for the `api` service unless `.env` or the shell sets it. |
 | `UI_TREE_MAX_URLS` | `5000` | Most URLs the site tree of one site job shows; the rest are counted ("<n> more URLs not shown"). 100 to 50000. |
 | `UI_BATCH_FILE_MAX_BYTES` | `10485760` | Largest CSV or JSON file of URLs the batch-file form takes, in bytes. 1024 to 104857600. |
 | `UI_BATCH_FILE_MAX_ROWS` | `100000` | Most rows of one batch file; a file with more is refused. 10 to 1000000. |

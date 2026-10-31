@@ -293,6 +293,12 @@ jobs:
           helm lint --strict deploy/helm/text-extraction --set workers.docling.enabled=true
           --set workers.asr.enabled=true --set workers.nlp.enabled=true --set workers.llm.enabled=true
           --set workers.nlp.autoscaling.hpa.enabled=true --set workers.llm.autoscaling.hpa.enabled=true
+      - name: helm lint (MCP and UI on)
+        run: helm lint --strict deploy/helm/text-extraction --set mcp.enabled=true --set ui.enabled=true
+      - name: helm lint (MCP and UI on, open service behind an ingress)
+        run: >-
+          helm lint --strict deploy/helm/text-extraction --set mcp.enabled=true --set ui.enabled=true
+          --set config.AUTH_MODE=none --set ingress.enabled=true
       # Render checks: toggles, env, grace periods, KEDA queries, network policies, alerts.
       - run: deploy/helm/test.sh
 
@@ -432,6 +438,19 @@ jobs:
           if docker compose config --services | grep -q llm; then
             echo "an llm service runs without the profile" >&2; exit 1
           fi
+          rm compose.json
+
+      # MCP and the UI: on for the api service (local development) unless the environment
+      # switches them off, and on no worker (they serve no public port).
+      - name: docker compose config (MCP and UI)
+        env:
+          VALKEY_PASSWORD: ci-dummy-password
+        run: |
+          docker compose --profile docling --profile asr --profile nlp --profile llm config --format json > compose.json
+          jq -e '.services.api.environment | .MCP_ENABLED == "true" and .UI_ENABLED == "true"' compose.json
+          jq -e '.services | to_entries | map(select(.key != "api")) | all(.value.environment // {} | has("MCP_ENABLED") or has("UI_ENABLED") | not)' compose.json
+          MCP_ENABLED=false UI_ENABLED=false docker compose config --format json \
+            | jq -e '.services.api.environment | .MCP_ENABLED == "false" and .UI_ENABLED == "false"'
           rm compose.json
 
       # VALKEY_PASSWORD has no default: without it the file must be rejected.

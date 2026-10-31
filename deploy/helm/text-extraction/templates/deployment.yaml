@@ -64,6 +64,10 @@ spec:
               value: "9090"
             - name: JOBS_ENABLED
               value: {{ include "text-extraction.jobsEnabled" . | quote }}
+            - name: MCP_ENABLED
+              value: {{ include "text-extraction.mcpEnabled" . | quote }}
+            - name: UI_ENABLED
+              value: {{ include "text-extraction.uiEnabled" . | quote }}
             {{- with include "text-extraction.documentMemoryEnv" (list . .Values.resources .Values.documentParentReserveMiB "resources") | trim }}
             {{- . | nindent 12 }}
             {{- end }}

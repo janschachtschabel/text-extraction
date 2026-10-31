@@ -69,6 +69,21 @@ config:
   # DOCLING_INPUT_BUDGET_BYTES (200000000): the most bytes that documents queued for OCR and slow
   # uploads may hold in Valkey at once, across all pods. Beyond it nothing more is queued (the
   # text layer answers with ocr_unavailable). Size valkey.maxmemory for it.
+  # MCP endpoint (/mcp, switched by mcp.enabled): browser origins that may call it, as a comma
+  # list of http(s)://host[:port] (empty: a request with any Origin header is refused; MCP
+  # clients outside a browser send none); what a tool that may become a job waits for its result
+  # and get_job's longest wait (0-60 s); the most content characters of one tool answer; the
+  # largest screenshot attached to a tool answer (0: never attached, only linked).
+  MCP_ALLOWED_ORIGINS: ""
+  MCP_WAIT_SECONDS: "25"
+  MCP_MAX_CONTENT_CHARS: "50000"
+  MCP_IMAGE_MAX_BYTES: "5000000"
+  # Playground (/ui, switched by ui.enabled): the most URLs of one site tree, the largest batch
+  # file (CSV or JSON of URLs) and its most rows, and the largest preview image the UI fetches.
+  UI_TREE_MAX_URLS: "5000"
+  UI_BATCH_FILE_MAX_BYTES: "10485760"
+  UI_BATCH_FILE_MAX_ROWS: "100000"
+  UI_IMAGE_MAX_BYTES: "1000000"
 
 # Secrets. API_KEYS is a JSON list of {"name", "role", "sha256", "rate_limit_per_minute"} objects.
 # Set `apiKeys` for a chart-managed Secret, or point `existingSecret` at your own Secret.
@@ -117,6 +132,19 @@ jobs:
   # false to override. A `config.JOBS_ENABLED` entry is ignored: the chart sets the variable.
   # Only API pods with JOBS_ENABLED=true export the queue gauges that KEDA and the alerts read.
   enabled: null
+
+# MCP server (FastMCP, stateless streamable HTTP) at /mcp on the public port 8080 of the API pods:
+# rendered as MCP_ENABLED on the API pods only. It uses the API's keys, roles, rate limits and
+# ingress; its settings are the config.MCP_* entries. A `config.MCP_ENABLED` entry is ignored.
+mcp:
+  enabled: false
+
+# Playground (server-rendered, htmx) at /ui on the public port 8080 of the API pods: rendered as
+# UI_ENABLED on the API pods only. Its password is an API key of the service; under
+# config.AUTH_MODE=none it is open to anyone who can reach the service (the install notes warn).
+# Its settings are the config.UI_* entries. A `config.UI_ENABLED` entry is ignored.
+ui:
+  enabled: false
 
 workers:
   # Extract workers: they claim job items from the fair queue in Valkey and run the extraction

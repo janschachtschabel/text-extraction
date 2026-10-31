@@ -199,6 +199,9 @@ add a note of its own):
   `chunks_not_stored_too_large` and `tables_not_stored_too_large` (still over
   `JOB_ITEM_MAX_BYTES` without its content, the item was stored without its chunks or its
   `structured.tables` too, R20).
+- MCP (tool answers only, never REST): `mcp_content_truncated` (the tool answer holds a slice of
+  `content`, at most `max_chars` characters, from `content_offset`; the hint names the offset of
+  the rest, P10-S6).
 
 A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
 `meta`, `opengraph`, `text`, `xmp` (a PDF's XMP packet, F8), or `platform` (the licence a video
@@ -267,15 +270,20 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 503 while jobs are off or Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together | job |
-| `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
+| `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 503 when jobs are disabled (`JOBS_ENABLED=false`) or Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
-| `/mcp` | MCP tools (optional, `MCP_ENABLED`) | streamable HTTP |
-| `/ui` | Playground (optional, `UI_ENABLED`), htmx, no Node build | — |
+| `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 503 while jobs are disabled or Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
+| `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
+| `/ui` | Playground (optional, `UI_ENABLED`, Helm `ui.enabled`): server-rendered pages with htmx 2.0.11 served from `/ui/static`, no Node build, no CDN; every form forwards to a `/v1` route in-process (see "MCP and UI"); not in OpenAPI | sync pages and fragments; job views refresh every 3 s |
 
 Internal port 9090: `/health`, `/ready`, `/metrics` (not in OpenAPI).
 
-Non-JSON content types to clear with operations: `multipart/form-data` (uploads),
-`image/png` (artifact download), SSE (MCP).
+Non-JSON content types to clear with operations: `multipart/form-data` (uploads, and the UI's
+file and batch-file forms), `application/x-www-form-urlencoded` (the UI's other forms), `image/png`
+(artifact download), `text/html` (the UI's pages and fragments), `text/javascript` and `text/css`
+(the UI's static files). `/mcp` answers `application/json` only (FastMCP's `json_response`): no
+server-sent events, so a client posts with `Accept: application/json, text/event-stream` and gets
+JSON; `GET /mcp` (the event stream of a stateful server) answers 405.
 
 ## Auth
 
@@ -417,6 +425,28 @@ and queues them, before it writes its own result, so the job completes with its 
 crawl lives in four more hashes under the job's hash tag (`nodes`, `seen`, `children`, `site`;
 see configuration.md, "Job keys"), with the job's TTL, deleted with it. The items run on the
 extract pool, fair between clients and hosts as a batch's; see "Site structure".
+
+**Item runs (package 10, D8, P10-S11).** The worker loop that every pool shares records each claim
+with the job before the item runs: one Lua script on the job's hash tag writes
+`job:{<id>}:runs[<index>] = "<claim number>|<pool>|<epoch ms>"` and gives the hash the meta's TTL,
+and writes nothing once the job is gone. The claim number is the queue item's attempts (1 on the
+first claim, more after a lost lease or a deferral). `GET /v1/jobs/{id}` reads the page's fields
+in the same pipeline and shows them as `items[].run` (`pool`, `attempts`, `claimed_at`), so a
+client sees "running in browser, claim 2" before the item ends. It costs one round trip per
+claimed item and about 40 bytes per item. A Valkey error is logged
+(`job_item_claim_not_recorded`) and the item runs anyway. Storing a result renews the hash's TTL
+with the job's (R-P10-1), and `delete` and `shorten` treat it as one of the job's keys. `run` is
+null before the first claim, for the item of a sync-to-job hand-over (it runs in the API pod) and
+while older workers run.
+
+**Deleting a job (package 10, D4, P10-S10).** `DELETE /v1/jobs/{id}` (the owner or an admin) runs
+`JobStore.delete` and removes the job from its owner's open set, so an admin's delete frees the
+owner's slot. A worker that claims one of its queued items later finds no job and completes the
+queue item without running it (`job_item_dropped`, reason `job_gone`), deleting a queued OCR or
+media input with it; an item in flight, or a P1 task, that finishes later stores nothing
+(`JobLost`). The queued items of a deleted batch stay in the fair queue until workers drain them,
+so the queue gauges count them until then. There is no soft cancel: the results so far go with
+the job.
 
 **Workers.** `text-extraction-worker` runs `WORKER_CONCURRENCY` slot loops on the internal port
 only (`/health`, `/ready`, `/metrics`). An item is leased for `EXTRACT_TIMEOUT_SECONDS` × 2 + 10 s;
@@ -2322,6 +2352,191 @@ a report-only step of the live workflow.
 - **Not in this package:** browser rendering, page content, sitemap extensions (`image:`,
   `video:`, `news:`, `xhtml:link` alternates), an MCP tool (package 10).
 
+## MCP and UI
+
+Package 10: `mcp_server/` (`server.py`, `gate.py`, `calls.py`, `tools_extract.py`, `tools_jobs.py`,
+`tools_info.py`, `files.py`, `results.py`) and `ui/` (`routes.py`, `security.py`, `forward.py`,
+`forms.py`, `answers.py`, `results.py`, `timeline.py`, `previews.py`, `url_lists.py`,
+`site_tree.py`, `job_views.py`, `markdown.py`, `templating.py`, `texts.py`, `templates/`,
+`static/`), the route cores in the existing route modules, `DELETE /v1/jobs/{id}` and the item
+runs (see "Jobs and the fair queue"). Settings, access and the forms are described in
+[configuration.md](configuration.md) ("MCP", "UI"); setup for Claude Code and Claude Desktop is
+in the README.
+
+Both are doors to the same routes, not services of their own: an MCP tool call and a UI form run
+the REST route's checks (auth and roles, the rate-limit bucket, body limits, validation, the SSRF
+guard, compliance, the hand-over to a job) and answer its envelope. Both are off by default
+(`MCP_ENABLED`, `UI_ENABLED`; Helm `mcp.enabled`, `ui.enabled`, rendered on the API pods only), live
+on the public port 8080 only and in no OpenAPI spec. Off, there is no route and neither `fastmcp`
+nor `jinja2` is imported. Neither keeps state of its own: no MCP session, no UI session or cookie.
+
+**Decisions of Jan (2026-10-30; Jan confirmed the recommended options).**
+
+- **D1, MCP in the API pods (a, decided).** FastMCP at exactly `/mcp` on port 8080 of the API pods,
+  stateless streamable HTTP with JSON answers: one image, one ingress, the API's auth, limits,
+  scaling and probes. No Deployment of its own, no thin server calling the REST API over HTTP.
+- **D2, lean tool arguments (a, decided).** Each tool lists the few fields agents use plus one
+  `options` object for any other field of the REST body, validated by the REST model. `tools/list`
+  stays a few KB instead of about 85 KB of JSON schema that every client puts into its model's
+  context.
+- **D3, files over MCP as base64 (a, decided).** `extract_file` takes the file as base64 (a
+  `data:` URL prefix allowed) within the upload route's limit, and the body limit of `/mcp` is
+  `ceil(upload limit / 3) × 4 + 64 KiB`. A file at a URL goes through `extract_url`.
+- **D4, cancelling jobs (a, decided).** `DELETE /v1/jobs/{id}` deletes the job with all its keys and
+  frees its open-job slot; the MCP tool `cancel_job` and the UI's "Cancel" button call it. No soft
+  cancel, no job state `cancelled`.
+- **D5, a server-rendered UI that forwards (a, decided).** A form that is one REST call posts to
+  `/ui/run/<op>`, which forwards it in-process (httpx `ASGITransport`, no network) to the real
+  `/v1` route with the browser's key headers, so every HTTP-layer check runs as for any client.
+  Views that combine many reads (progress, site tree, previews, the batch file) call the route
+  cores with one rate-limit hit per view.
+- **D6, the key in the tab's `sessionStorage` (a, decided).** The UI's password is an API key of
+  the service (Jan's requirement 1). The UI's own script keeps it in `sessionStorage` and sends it
+  only as the `Authorization` header to `/ui/run/*`, never as a cookie (so there is no CSRF), and
+  the CSP forbids any other script.
+- **D7, server-side image previews (a, decided).** "Load previews" makes the server fetch the
+  result's images through the vision `ImageFetcher` (the SSRF guard on the URL and every redirect,
+  the caller's compliance mode, the host's outbound turn, the service's user agent, types sniffed
+  from the bytes, `UI_IMAGE_MAX_BYTES` each) and inline them as `data:` URIs. Image hosts never see
+  the viewer, and the CSP stays `img-src 'self' data:`.
+- **D8, item runs recorded with the job (a, decided).** Each claim of a job item is recorded with
+  the job and shown as `items[].run`, so the UI and `get_job` show "running in browser, claim 2"
+  while the item runs. See "Jobs and the fair queue".
+
+**Route cores (P10-S1).** The bodies of the public routes moved unchanged into functions that take
+the app's `State` and the caller's `Principal` instead of the `Request` (`respond`, `run_upload`,
+`run_screenshot`, `read_artifact`, `run_structured`, `run_chunk`, `start_batch`, `read_job`,
+`delete_job`, `start_site`, `service_info`), next to `principal_for`, `check_rate` and
+`check_jobs_enabled`; each route is a thin wrapper. A core does not repeat the route's
+dependencies: its docstring names the checks its caller runs (the user role, one `check_rate`
+hit, `check_jobs_enabled` for the job routes). `asr_key` and `llm_key` are the raw header values,
+so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
+
+**The MCP endpoint (P10-S2 to P10-S8, P10-S22).**
+
+- **Endpoint (P10-S2).** `FastMCP(name="text-extraction", version, instructions,
+  mask_error_details=True)` served by `http_app(path="/mcp", stateless_http=True,
+  json_response=True)` as one Starlette route with the methods `GET`, `POST` and `DELETE`: `/mcp/`
+  is 404, `GET /mcp` 405 (no stream). The public lifespan enters the MCP app's lifespan. The
+  server's instructions tell a model to use `extract_url` for pages and documents, to poll
+  `get_job` with `wait_seconds` when an answer's `data` has a `status_url`, and that `options`
+  takes any field of the REST body (`/docs`).
+- **Gate (P10-S3).** A pure ASGI gate in front of FastMCP runs for every HTTP request, after the
+  body limit: a browser `Origin` not in `MCP_ALLOWED_ORIGINS` is 403 `forbidden` (FastMCP's own
+  host and origin check is off; this one replaces it), then `principal_for` (401 with
+  `WWW-Authenticate: Bearer`, the REST envelope). The principal goes into the request scope (for
+  the tools and the access line) and the log context.
+- **Each tool call (P10-S4).** A FastMCP middleware counts one `check_rate` hit per `tools/call`
+  (`initialize`, `tools/list` and notifications are free), runs the tool and logs `mcp_tool_call`
+  (`tool`, `outcome`, `duration_ms`, `job_id` when a job answered). No exception reaches the
+  client: a `ServiceError` becomes its code, message and `retryable`; a validation error becomes
+  `invalid_request` with REST's `details` (`loc`, `msg`, never the input); anything else
+  `internal_error`, logged with its traceback.
+- **Tools (P10-S5).** Eleven tools, one per public capability: `extract_url`, `extract_file`,
+  `screenshot_url`, `extract_structured`, `chunk`, `batch_extract`, `site_structure` (open world,
+  each with `options`), `get_job`, `get_job_screenshot`, `service_info` (read only) and
+  `cancel_job` (destructive). A call validates its arguments, merges `options` under them (a key
+  given in both is `invalid_request`, "<key> is given twice."), holds the merged body to the
+  route's body limit and validates it with the REST model, so extra fields, a user's
+  `compliance: ignore`, an `evaluate` action or an XPath rule are refused exactly as REST refuses
+  them. `extract_file` strips a `data:` prefix, ignores whitespace, refuses what is not base64 and
+  decoded bytes over the upload limit before the core runs, and holds its other fields to the
+  upload route's part limits.
+- **Results (P10-S6).** `structuredContent` is the route's envelope (a 202's job included), with
+  no `outputSchema` (it would double `tools/list`); `isError` is true exactly where REST answers
+  4xx or 5xx, so a target's `failed` is a normal result. `content` holds one-line hints first (a
+  job to poll, a cut content, a screenshot too large to attach), then a PNG `ImageContent` for a
+  screenshot of at most `MCP_IMAGE_MAX_BYTES`, then the envelope as JSON text. `data.content` is cut
+  to `max_chars` (`MCP_MAX_CONTENT_CHARS` by default; shared by the items of a `get_job` page) from
+  `content_offset`, with the warning `mcp_content_truncated` and a hint naming the next offset; no
+  other field is cut.
+- **Long work (P10-S7).** The extraction tools pass `wait_seconds = MCP_WAIT_SECONDS` when the
+  caller gives none (a larger one is cut to it), so a call ends within that time plus the route's
+  own hand-over time, with a result or a job. `batch_extract` and `site_structure` always answer a
+  job. `get_job` with `wait_seconds` reads the job once a second until it is `completed`, the time
+  is up or the client went away, and counts as one rate-limit hit.
+- **Headers (P10-S8).** `X-LLM-Api-Key` and `X-ASR-Api-Key` are read from the call's HTTP request,
+  never from tool arguments. `TraceMiddleware` covers `/mcp`, so the access line, every log line of
+  the call and the envelope's `trace_id` carry `x-client-trace-id` and B3. Tool arguments are never
+  logged (FastMCP's and the MCP SDK's loggers are held at `WARNING`, as FastMCP logs arguments at
+  `DEBUG`).
+
+**The UI (P10-S12 to P10-S20).**
+
+- **Shell (P10-S12).** `GET /ui` renders the page; `/ui/static` serves the vendored
+  `htmx-2.0.11.min.js`, `ui.js` (the UI's only script) and `ui.css`. Jinja2 autoescapes; templates
+  have no inline script, `style` attribute or `hx-on`; htmx runs with `allowEval`,
+  `allowScriptTags` and its history off and `selfRequestsOnly` on. Every answer under `/ui` carries
+  a strict CSP (`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; …`)
+  and the other security headers listed in configuration.md, and `Cache-Control: no-store`
+  (static files `public, max-age=3600`).
+- **Access (P10-S13).** Under `AUTH_MODE=api_key` the page shows only a login box; the login
+  forwards `GET /v1/info` with the key, and a refused key shows "This key is not valid." and
+  nothing else. The login is a convenience: every forwarded call carries and checks the key.
+  Under `AUTH_MODE=none` the application shows at once under a banner that it is open; there is no
+  UI-only password (an open UI goes with an open API), and the Helm notes warn when `ui.enabled`
+  goes with `config.AUTH_MODE=none`. `/ui/run/*` answers 403 without `HX-Request: true` or for an
+  `Origin` whose host and port differ from `Host`, before the body is read; with no CORS
+  middleware a foreign page cannot send that header. The service sets no cookie under `/ui`.
+- **Forwarding (P10-S14).** `OPERATIONS` maps each op (`login`, `info`, `extract`, `file`,
+  `screenshot`, `structured`, `chunk`, `batch`, `site-structure`, `job`, `artifact`, `cancel`) to its
+  REST method and path. The form's fields plus an "Options (JSON)" box build the REST body
+  (invalid JSON or a key given twice is refused before anything is sent). `forward` sends it
+  through `httpx.ASGITransport` to a relative `/v1/` path with only `Authorization`, the two key
+  headers, B3 and `x-client-trace-id` set to the outer request's trace id. Every outcome renders as
+  a 200 fragment: the HTTP status, the envelope's status and error (with a 422's `details`), the
+  raw JSON and the request as a curl command with `$API_KEY` in place of the key. The outer
+  `/ui/run` access line carries no principal; the inner `/v1` line carries it, under the same trace
+  id. Body limits per `/ui/run` route are listed in configuration.md.
+- **Single results (P10-S15, P10-S16, P10-S17).** The extract form offers Markdown or Text, the
+  mode, metadata, "Metadata, structured" (the `metadata` strategy with `UI_METADATA_SCHEMA`, a
+  schema of schema.org and LRMI names) and "Describe images". A result shows its content as source
+  and, for Markdown, rendered by markdown-it-py without raw HTML (links only for http(s), images as
+  their alt text), a download, its metadata, structured values, images with alt texts and
+  descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
+  convert, PII, LLM, outcome) with a one-line text per warning (`WARNING_TEXTS`). Previews follow
+  D7: at most 20 images, 4 at once, 10 s each and 25 s per view; a skipped one shows its reason.
+- **Jobs (P10-S18, P10-S19, P10-S20).** The progress view reads one or more jobs through
+  `read_job` with one rate-limit hit per refresh, whatever the number of jobs, refreshes every 3 s
+  while any is not `completed`, and stops then; "Cancel" calls D4's route. Batches come from a
+  list, a CSV or JSON file (parsed on the server, bounded by `UI_BATCH_FILE_MAX_BYTES` and
+  `UI_BATCH_FILE_MAX_ROWS`, bad rows reported, never written back as CSV) or the site tree, and
+  are split into `ceil(n / BATCH_MAX_URLS)` batches; more than `BATCH_MAX_OPEN_PER_CLIENT` is
+  refused before anything is sent. The site tree groups a site job's pages, sitemap entries and
+  "linked only" URLs by host and URL path segment (sections are directories, which editors know;
+  the crawl's `parent` depends on discovery order and would move between runs), reads the job in
+  pages of 20 items and shows at most `UI_TREE_MAX_URLS` URLs.
+
+**Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,
+`partial`, `failed`, `job` or a refusal's error code; every tool exported at 0),
+`text_extraction_mcp_tool_seconds{tool}` (0.05 s to 120 s) and
+`text_extraction_ui_image_previews_total{outcome}` (`shown` or the skip reason). Log lines
+`mcp_tool_call`, `job_deleted` (`job_id`, `kind`), `ui_batch_split` (`parts`, `urls`) and
+`ui_batch_file` (`rows`, `urls`, `invalid`, `duplicates`). Labels and log fields carry tool and
+operation names, outcomes, counts and job ids only, never arguments, URLs, contents or keys; other
+UI calls are counted as the REST requests they forward.
+
+**Deployment (P10-S21).** Helm `mcp.enabled` and `ui.enabled` (both false) render `MCP_ENABLED`
+and `UI_ENABLED` on the API pods only; entries for them under `config` are ignored (left out of the
+ConfigMap). The other `MCP_*` and `UI_*` settings are `config` entries with their defaults. The
+ingress already routes `/`; its read timeout must cover a tool call (at least `MCP_WAIT_SECONDS` +
+70 s) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
+the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for the `api` service
+(local development; `MCP_ENABLED=false` or `UI_ENABLED=false` switches them off).
+
+**Known limits.**
+
+- **No OAuth for MCP.** A client sends a static API key as `Authorization: Bearer`; Claude Desktop
+  reaches the endpoint through the `mcp-remote` bridge. OAuth is a B-API concern.
+- **No progress notifications.** A long call answers a job; the client polls `get_job`.
+- **Large answers are sliced, not streamed.** Only `content` is cut; a page of many items with
+  large metadata can still be long.
+- **A deleted batch's queued items drain later.** Workers claim and drop them; until then they
+  count in the queue gauges.
+- **Not in this package:** OAuth, MCP resources, prompts, sampling and the stdio transport,
+  server-sent events, a UI password apart from the API keys, a UI session or cookie, a UI language
+  other than English, a Node build, CSV export of results, resizing of preview images.
+
 ## Observability
 
 Prometheus via prometheus-fastapi-instrumentator plus: queue length per pool, job
@@ -2338,7 +2553,8 @@ or description), items of site jobs by role and outcome, their links by crawl de
 caps they ran into (`text_extraction_site_items_total`, `…_site_links_total`,
 `…_site_caps_total`; never by URL), sync NLP and LLM dispatches by outcome (answered, not claimed, no result, handed
 over, backend error, memory guard; LLM also input budget), entities found by PII
-handling by type (never by value), rate-limit rejections. The queue gauges, the backlog alert and
+handling by type (never by value), MCP tool calls by tool and outcome with their seconds and the UI's
+preview images by outcome (see "MCP and UI"; never by argument or URL), rate-limit rejections. The queue gauges, the backlog alert and
 the autoscaling cover the pools `nlp` and `llm` as the others. Alert rules ship in the Helm chart
 (queue filling, error-rate spike, workers down). structlog JSON logs; query strings
 are never logged.

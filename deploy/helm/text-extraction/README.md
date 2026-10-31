@@ -1,6 +1,6 @@
 # text-extraction Helm chart
 
-Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription, optional NLP workers for PII handling and optional llm workers for structured output with an LLM, semantic chunking and image descriptions (all off by default), and an optional single-replica Valkey (with a password).
+Deploys the text-extraction API, the extract workers for batches and jobs, the browser workers for browser mode and screenshots, optional Docling workers for OCR, optional ASR workers for transcription, optional NLP workers for PII handling and optional llm workers for structured output with an LLM, semantic chunking and image descriptions (all off by default), an optional single-replica Valkey (with a password), and optionally an MCP endpoint (`/mcp`) and a playground (`/ui`) on the API pods.
 
 ```bash
 helm install text-extraction ./deploy/helm/text-extraction \
@@ -57,7 +57,9 @@ variables of the same name. The chart overrides `config.PUBLIC_PORT` (8080), `co
 (9090) and `config.VALKEY_URL`: values set there are ignored. Set the Valkey address with
 `valkey.enabled` or `externalValkey.*`.
 
-Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`) on the API pods,
+Besides these, the chart sets `JOBS_ENABLED` (from `jobs.enabled`), `MCP_ENABLED` (from
+`mcp.enabled`) and `UI_ENABLED` (from `ui.enabled`) on the API pods (`MCP_ENABLED` and `UI_ENABLED`
+on no other pod, and entries for them under `config` are left out of the ConfigMap),
 `WORKER_CONCURRENCY` (from `workers.extract.concurrency`) on the extract workers,
 `BROWSER_CONCURRENCY` (from `workers.browser.concurrency`) on the browser workers,
 `DOCLING_CONCURRENCY` (from `workers.docling.concurrency`) and `DOCLING_MODELS_PATH` (`/models`,
@@ -169,6 +171,13 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.SITE_MAX_LINKS_PER_PAGE` | `"1000"` | Most links kept of one crawled page. |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
+| `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |
+| `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least this + 70 s, see [MCP and playground](#mcp-and-playground). |
+| `config.MCP_MAX_CONTENT_CHARS` | `"50000"` | Most content characters of one tool answer; the rest is fetched with `content_offset`. |
+| `config.MCP_IMAGE_MAX_BYTES` | `"5000000"` | Largest screenshot attached to a tool answer (0: never attached, only linked). |
+| `config.UI_TREE_MAX_URLS` | `"5000"` | Most URLs the site tree of one site job shows. |
+| `config.UI_BATCH_FILE_MAX_BYTES`, `config.UI_BATCH_FILE_MAX_ROWS` | `"10485760"`, `"100000"` | Largest batch file (CSV or JSON of URLs) and its most rows. |
+| `config.UI_IMAGE_MAX_BYTES` | `"1000000"` | Largest preview image the playground fetches. |
 | `config.*` | | Any further non-secret setting is added here. |
 | `secrets.apiKeys` | `""` | `API_KEYS` JSON. Creates a chart-managed Secret. |
 | `secrets.existingSecret` | `""` | Existing Secret with the `API_KEYS` JSON. Takes precedence over `secrets.apiKeys`. |
@@ -179,6 +188,8 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
 | `jobs.enabled` | unset (true with extract workers, false without) | `JOBS_ENABLED` of the API pods. When `workers.extract.enabled` is false the chart renders `JOBS_ENABLED=false` so the batch and job routes answer 503 and `wait_seconds` is ignored, unless you set `jobs.enabled=true` (workers run elsewhere). `false` forces it off. Only API pods with `JOBS_ENABLED=true` export the queue gauges. |
+| `mcp.enabled` | `false` | Serve the MCP endpoint at `/mcp` on the API pods (`MCP_ENABLED`); see [MCP and playground](#mcp-and-playground). A `config.MCP_ENABLED` entry is ignored. |
+| `ui.enabled` | `false` | Serve the playground at `/ui` on the API pods (`UI_ENABLED`). Its password is an API key; under `config.AUTH_MODE=none` it is open to anyone who can reach the service, and the install notes warn. A `config.UI_ENABLED` entry is ignored. |
 | `workers.extract.enabled` | `true` | Deploy the extract workers. |
 | `workers.extract.replicaCount` | `2` | Ignored with KEDA or HPA. |
 | `workers.extract.concurrency` | `8` | `WORKER_CONCURRENCY`: job items per worker pod at once. |
@@ -520,6 +531,43 @@ answer is validated against the caller's schema or the description's), and every
   reaches a log, a metric label or the ConfigMap; the workers count calls and tokens by outcome
   only, images by outcome (`text_extraction_vision_images_total`).
 
+## MCP and playground
+
+`mcp.enabled=true` serves an MCP server at `/mcp` and `ui.enabled=true` a playground at `/ui`, both
+on the public port 8080 of the API pods: no Deployment, Service or ingress path of their own, the
+API's keys, roles, rate limits and scaling. Both are off by default; the install notes print their
+URLs while they are on. Their settings are the `config.MCP_*` and `config.UI_*` entries
+(docs/configuration.md, "MCP" and "UI").
+
+- **Access.** Both use the API keys of `secrets.apiKeys`: an MCP client sends one as
+  `Authorization: Bearer <key>`, and the playground's login takes one. Under `config.AUTH_MODE=none`
+  anyone who can reach the service can use the API, the MCP endpoint and the playground. For a
+  shared deployment keep `ui.enabled=false` or use `config.AUTH_MODE=api_key`; the install notes
+  warn when `ui.enabled` goes with `AUTH_MODE=none`.
+- **The ingress** already routes `/` to the public Service, so `/mcp` and `/ui` need no paths of
+  their own. Its timeouts and body size must fit them:
+  - a read and send timeout of at least `MCP_WAIT_SECONDS` + 70 s (95 s with the default 25 s): a
+    tool call or a playground form waits up to `MCP_WAIT_SECONDS` (the forms 25 s) plus the
+    route's own hand-over time before it answers a job;
+  - a body size of at least the largest upload: `/mcp` takes a file as base64,
+    `ceil(DOCUMENT_MAX_BYTES / 3) x 4 + 64 KiB` (about 27 MB by default, about 33 MB with ASR
+    workers, where `workers.asr.uploadMaxBytes` sets the upload limit), the playground's file form
+    `DOCUMENT_MAX_BYTES` + 192 KiB and its batch-file form `UI_BATCH_FILE_MAX_BYTES` + 64 KiB.
+
+  For ingress-nginx, for example:
+
+  ```yaml
+  ingress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+      nginx.ingress.kubernetes.io/proxy-body-size: "40m"
+  ```
+- **Logs.** A playground call logs two access lines under one trace id: the outer `/ui/run/...`
+  line without a principal and the inner `/v1/...` line with it. An MCP call logs its access line
+  and one `mcp_tool_call` line (tool, outcome, duration, job id); tool arguments are never logged.
+
 ## Local checks
 
 ```bash
@@ -528,6 +576,7 @@ docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --s
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.asr.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.nlp.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set workers.llm.enabled=true
+docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 lint --strict text-extraction --set mcp.enabled=true --set ui.enabled=true
 docker run --rm -v "$PWD/deploy/helm:/apps" -w /apps alpine/helm:3.19.0 template rel text-extraction
 deploy/helm/test.sh   # render checks (needs helm on PATH, or HELM=/path/to/helm)
 ```

@@ -59,6 +59,8 @@ WARNING_TEXTS: Final[dict[str, str]] = {
     "links_truncated": "More links than SITE_MAX_LINKS_PER_PAGE: the first ones.",
     "max_pages_reached": "Links of the page were not followed: the crawl has max_pages pages.",
     "site_memory_guard": "Valkey was nearly full: no link of the page was followed.",
+    # MCP tool answers.
+    "mcp_content_truncated": "The MCP answer holds part of the content: ask for content_offset.",
 }
 
 _ACTION_FAILED: Final = re.compile(r"action_(\d+)_failed")
