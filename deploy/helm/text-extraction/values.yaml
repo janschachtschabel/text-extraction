@@ -127,6 +127,9 @@ autoscaling:
   enabled: false
   minReplicas: 2
   maxReplicas: 10
+  # A share of resources.requests.cpu: at the measured 1400m an API pod scales out at about 0.98
+  # cores on average. Lower the request or this target for an earlier scale-out (the same holds
+  # for the workers' HPAs; docs/handover.md item 8).
   targetCPUUtilizationPercentage: 70
 
 # Jobs (POST /v1/batch, GET /v1/jobs/{id}, slow POST /v1/extract) are executed by the workers below.

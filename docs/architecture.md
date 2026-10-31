@@ -399,9 +399,9 @@ a queue key. Items are `<job>:<index>:<attempts>` in lists per client and domain
 - Client = API key name (P3); under `AUTH_MODE=none` everyone is `anonymous` and batches share
   by domain only. Domain = `normalize_host(hostname)`, the key the outbound gate uses; a URL
   without a valid host goes to `-` (P2).
-- A claim is one script: it takes back up to 20 expired leases (front of their domain, attempts
-  + 1), then rotates clients and, within the client, its domains. It skips a domain that is
-  deferred (`notbefore`) or holds `OUTBOUND_MAX_CONCURRENCY_PER_HOST` leases (P4: the scheduler
+- A claim is one script: it takes back up to 20 expired leases (front of their domain,
+  attempts + 1), then rotates clients and, within the client, its domains. It skips a domain that
+  is deferred (`notbefore`) or holds `OUTBOUND_MAX_CONCURRENCY_PER_HOST` leases (P4: the scheduler
   only avoids pointless waits; the gate stays the authority on limits). The next item is leased
   with a random token, so a worker whose lease was taken back cannot complete or defer the next
   worker's lease.
@@ -963,9 +963,10 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   --profile docling up` with `DOCLING_ENABLED=true`).
 - **F17, `POST /v1/extract/file`** (`file_api.py`). `multipart/form-data` with one file part
   `file` and the fields `format`, `metadata`, `ocr`, `wait_seconds` (default 25, D2); at most one
-  file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB (`MEDIA_UPLOAD_MAX_BYTES`
-  + 64 KiB where it is larger and audio and video uploads are transcribed); package 8 added the
-  form fields `structured` and `chunking` (64 KiB each) and raised the 64 KiB to 192 KiB (R18).
+  file and 8 fields. The body limit is `DOCUMENT_MAX_BYTES` + 64 KiB
+  (`MEDIA_UPLOAD_MAX_BYTES` + 64 KiB where it is larger and audio and video uploads are
+  transcribed); package 8 added the form fields `structured` and `chunking` (64 KiB each) and
+  raised the 64 KiB to 192 KiB (R18).
   Auth (role `user`) and the inbound rate limit are checked before a byte of the body is read, so a caller without a key or
   over its limit never makes the pod receive or spool the upload. The part is read into memory
   and its spooled file in `/tmp` deleted at once. The file name is reduced to its base name,
@@ -2148,17 +2149,16 @@ input past the move to `llm`; a PDF or a text upload with `describe_images` that
 
 Rulings of the final review (2026-10-30). R-V2: an llm item with an image to describe gets
 `describe_seconds` (`1.5 × LLM_TIMEOUT_SECONDS`) on top of its `3 × LLM_TIMEOUT_SECONDS`, and the
-lease (fixed at the claim) covers that longest case plus one timeout: `5.5 × LLM_TIMEOUT_SECONDS
-+ 10`. `LLM_GRACEFUL_SECONDS` and the give-back on SIGTERM are unchanged, so a dead worker's item
+lease (fixed at the claim) covers that longest case plus one timeout: `5.5 × LLM_TIMEOUT_SECONDS +
+10`. `LLM_GRACEFUL_SECONDS` and the give-back on SIGTERM are unchanged, so a dead worker's item
 waits longer before it runs again, never a live one's. `apply_post` runs the steps after the
 descriptions under the item's deadline; when it passes or one of them raises, the answer is
-`finish_post` of the envelope after the descriptions, so they stay. R-V3: see V-S7. R-V4: the
-memory an image in flight takes is documented with `LLM_VISION_MAX_IMAGE_BYTES`. R-V5: the
-step's budget ending with no vision call outstanding (only fetches, e.g. a `Crawl-delay`) skips
-the images not done, without `llm_failed`. R-V6: the API pods count the images in the app's
-registry. A describe-only request on a page whose result is near `JOB_ITEM_MAX_BYTES` can answer
-without `content` (`content_not_stored_too_large`), as every last hop does; this is documented,
-not changed.
+`finish_post` of the envelope after the descriptions, so they stay. R-V3: see V-S7. R-V4: the memory
+an image in flight takes is documented with `LLM_VISION_MAX_IMAGE_BYTES`. R-V5: the step's budget
+ending with no vision call outstanding (only fetches, e.g. a `Crawl-delay`) skips the images not
+done, without `llm_failed`. R-V6: the API pods count the images in the app's registry. A
+describe-only request on a page whose result is near `JOB_ITEM_MAX_BYTES` can answer without
+`content` (`content_not_stored_too_large`), as every last hop does; this is documented, not changed.
 
 **Known limits.**
 
@@ -2543,8 +2543,9 @@ UI calls are counted as the REST requests they forward.
 **Deployment (P10-S21).** Helm `mcp.enabled` and `ui.enabled` (both false) render `MCP_ENABLED`
 and `UI_ENABLED` on the API pods only; entries for them under `config` are ignored (left out of the
 ConfigMap). The other `MCP_*` and `UI_*` settings are `config` entries with their defaults. The
-ingress already routes `/`; its read timeout must cover a tool call (at least 120 s, or `MCP_WAIT_SECONDS`
-+ 70 s if larger) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
+ingress already routes `/`; its read timeout must cover a tool call (at least 120 s, 150 s with
+unblock mode and requests that combine it with `pii` and LLM work, or `MCP_WAIT_SECONDS` + 70 s if
+larger) and its body size `/mcp`'s and the UI's uploads (the chart README). The install notes print
 the `/mcp` and `/ui` URLs while they are on. docker compose switches both on for the `api` service
 (local development; `MCP_ENABLED=false` or `UI_ENABLED=false` switches them off).
 

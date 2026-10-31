@@ -245,10 +245,11 @@ passes `DOCLING_ENABLED` from `.env` or the shell to every service, default fals
 `/v1/info` answers in under 50 ms (one Valkey round trip for the rate limit, no other I/O).
 In fast mode `POST /v1/extract` takes at most `EXTRACT_TIMEOUT_SECONDS` (25 s); a cached result
 comes back in a few milliseconds. A request that needs a worker after its fast phase waits longer
-without `wait_seconds`: a browser render up to `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline
-+ 5 s more (70 s in all by default, 100 s with unblock mode), OCR up to `DOCLING_SYNC_WAIT_SECONDS`
-more, and `pii` and LLM work up to `PII_SYNC_WAIT_SECONDS` and `LLM_SYNC_WAIT_SECONDS` more on top
-of those (a browser render with both: 120 s, 150 s with unblock mode). These totals apply only
+without `wait_seconds`: a browser render up to `BROWSER_QUEUE_WAIT_SECONDS` + the render
+deadline + 5 s more (70 s in all by default, 100 s with unblock mode), OCR up to
+`DOCLING_SYNC_WAIT_SECONDS` more, and `pii` and LLM work up to `PII_SYNC_WAIT_SECONDS` and
+`LLM_SYNC_WAIT_SECONDS` more on top of those (a browser render with both: 120 s, 150 s with
+unblock mode). These totals apply only
 when the pod cannot hand the request over to a job (`EXTRACT_MAX_BACKGROUND` reached, or the
 Valkey memory guard high); normally a request with `pii` or LLM work answers 202 with its job
 after its implicit wait (the largest default that applies, 20 s or 30 s). Give an ingress or a
@@ -858,11 +859,12 @@ puts the status line "Request failed: <status> <reason>" (the envelope's message
 status text) at the top of the request's target, and a request that gets no answer "Network
 error"; the line is text only.
 
-Behind an ingress or a proxy, give `/ui` the read timeout of `/mcp` (at least `MCP_WAIT_SECONDS` +
-70 s: the forms wait 25 s plus the route's hand-over time) and a body size of at least the largest
-of these limits: the upload route's (`DOCUMENT_MAX_BYTES`, or `MEDIA_UPLOAD_MAX_BYTES` where uploads are
-transcribed, + 192 KiB) and `UI_BATCH_FILE_MAX_BYTES`
-+ 64 KiB.
+Behind an ingress or a proxy, give `/ui` the read timeout of `/mcp`: at least 120 s (150 s with
+unblock mode and requests that combine it with `pii` and LLM work, see
+[handover.md](handover.md), item 4), or `MCP_WAIT_SECONDS` + 70 s if larger (the forms wait 25 s
+plus the route's hand-over time). Give it a body size of at least the largest of these limits:
+the upload route's (`DOCUMENT_MAX_BYTES`, or `MEDIA_UPLOAD_MAX_BYTES` where uploads are
+transcribed, + 192 KiB) and `UI_BATCH_FILE_MAX_BYTES` + 64 KiB.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

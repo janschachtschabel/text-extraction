@@ -104,8 +104,10 @@ job. Batches and crawls are jobs from the start. The full picture is in
 - Internal: port 9090 with `/health` (liveness), `/ready` (readiness) and `/metrics`, on the API
   pods and on every worker, through the cluster-internal Services `...-internal`. They are not in
   the spec and not reachable on 8080. Workers serve only 9090.
-- Details and probe semantics: [configuration.md, Ports and probes](configuration.md#ports-and-probes).
-  `mcp.enabled` and `ui.enabled` are off by default ([Helm chart, MCP and playground](../deploy/helm/text-extraction/README.md#mcp-and-playground)).
+- Details and probe semantics:
+  [configuration.md, Ports and probes](configuration.md#ports-and-probes). `mcp.enabled` and
+  `ui.enabled` are off by default
+  ([Helm chart, MCP and playground](../deploy/helm/text-extraction/README.md#mcp-and-playground)).
 
 ## 4. Headers, content types, response times, job endpoints
 
@@ -202,9 +204,10 @@ The service runs without B-API today and is prepared for it.
 - Auth concept: `AUTH_MODE=api_key` (default) requires `Authorization: Bearer <key>` on every
   public request. `AUTH_MODE=none` turns authentication off and makes every caller an `admin`:
   anyone who reaches port 8080 may use `compliance: ignore`, JavaScript actions (`evaluate`) and
-  unblock mode, and read and cancel every job. Keys come from the secret `API_KEYS` as SHA-256 hashes
-  with a name, a role (`user` or `admin`) and an optional per-key rate limit. Users see their own
-  jobs; admins may see all jobs and use `compliance: ignore`, JavaScript actions and unblock mode:
+  unblock mode, and read and cancel every job. Keys come from the secret `API_KEYS` as SHA-256
+  hashes with a name, a role (`user` or `admin`) and an optional per-key rate limit. Users see
+  their own jobs; admins may see all jobs and use `compliance: ignore`, JavaScript actions and
+  unblock mode:
   [architecture.md, Auth](architecture.md#auth),
   [configuration.md, Secrets](configuration.md#secrets).
 - LLM: `LLM_ENABLED`, `LLM_BASE_URL` (any OpenAI-compatible endpoint), `LLM_MODEL`,
@@ -230,7 +233,8 @@ The service runs without B-API today and is prepared for it.
   worker pool.
 - Metrics: the HTTP metrics of prometheus-fastapi-instrumentator plus the application metrics
   (queue gauges per pool, jobs, items, extractions, browser, documents, media, ASR, LLM calls and
-  tokens, site jobs, MCP tools, the event-loop lag): [configuration.md, Metrics](configuration.md#metrics).
+  tokens, site jobs, MCP tools, the event-loop lag):
+  [configuration.md, Metrics](configuration.md#metrics).
   Query the queue gauges with `max()` over the API pods.
 - Alert rules: the PrometheusRule (`metrics.prometheusRule.enabled`) with service down, 5xx share,
   Valkey memory, queue backlog and workers down per pool, job item failures and stale queue
@@ -242,7 +246,8 @@ The service runs without B-API today and is prepared for it.
 
 - Format: one JSON object per line on stdout (structlog), with `timestamp` (ISO 8601, UTC),
   `level`, `logger` and `event`; `LOG_FORMAT=console` switches to plain text for local work,
-  `LOG_LEVEL` sets the level ([configuration.md, Environment variables](configuration.md#environment-variables)).
+  `LOG_LEVEL` sets the level
+  ([configuration.md, Environment variables](configuration.md#environment-variables)).
   Each request writes one access line (`event: request`, method, path, status, `duration_ms`).
   Query strings and secrets are never logged.
 - Trace headers: `x-client-trace-id` becomes `trace_id` on every log line of the request and in
@@ -257,16 +262,22 @@ The service runs without B-API today and is prepared for it.
 *Aussage zu Zustand und horizontaler Skalierbarkeit, kurze Architekturübersicht*
 
 - The pods are stateless: everything shared is in Valkey; a pod's local files are scratch space
-  (temporary media and browser files) that nothing needs after the pod. Any pod can be removed; a job item whose worker dies runs again on another worker
-  once its lease expires (`JOB_ITEM_MAX_ATTEMPTS`).
+  (temporary media and browser files) that nothing needs after the pod. Any pod can be removed;
+  a job item whose worker dies runs again on another worker once its lease expires
+  (`JOB_ITEM_MAX_ATTEMPTS`).
 - API pods scale horizontally behind the Service (`replicaCount`, or `autoscaling.*` on CPU).
   Every worker pool scales on its own: `workers.<pool>.replicaCount`, KEDA on the pool's queue
   backlog or an HPA on CPU (`workers.<pool>.autoscaling.*`). The KEDA thresholds are not measured
   yet (the load test ran one pod per pool); tune them from the queue gauges. Per-host outbound
   limits and the fair queue hold across all pods, because they live in Valkey.
+- The HPA's CPU target (`targetCPUUtilizationPercentage`, 70 %) is a share of the pod's CPU
+  request, and the requests are now the measured ones of item 9: an API pod at 1400m scales out
+  only at about 0.98 cores on average, more than the load test's 30 clients took (0.59 to
+  0.77 cores). For an earlier scale-out, lower the request (item 9) or the target.
 - Exceptions to plain scaling: ASR transcriptions in flight restart elsewhere when their pod is
   removed, so prefer fixed ASR replicas for steady load
-  ([Helm chart, ASR workers](../deploy/helm/text-extraction/README.md#asr-workers-and-the-models-volume));
+  ([Helm chart, ASR
+  workers](../deploy/helm/text-extraction/README.md#asr-workers-and-the-models-volume));
   the in-chart Valkey is a single replica.
 - The short architecture overview is [at the top of this document](#architecture-overview).
 
@@ -319,7 +330,8 @@ The service runs without B-API today and is prepared for it.
   `.unblock`), `.docling`, `.asr`, `.nlp` and `.llm` (`enabled` each), `jobs.enabled`,
   `mcp.enabled`, `ui.enabled`, `ingress.enabled`, `autoscaling.enabled` and the scalers per pool,
   `metrics.serviceMonitor.enabled`, `metrics.prometheusRule.enabled` and
-  `networkPolicy.enabled`: [Helm chart, What it creates](../deploy/helm/text-extraction/README.md#what-it-creates).
+  `networkPolicy.enabled`:
+  [Helm chart, What it creates](../deploy/helm/text-extraction/README.md#what-it-creates).
 - Not built: an S3-compatible store. Screenshots and results stay in Valkey for their TTLs
   (`ARTIFACT_TTL_SECONDS`, `JOB_TTL_SECONDS`).
 
@@ -347,10 +359,12 @@ keeps no other data set.
 
 *Env-Variablen mit Defaults, Beispiel-Values-YAML, Liste der Secrets, Dockerfile und docker-compose.yml als Referenz*
 
-- Environment variables with their defaults: [configuration.md](configuration.md#environment-variables)
-  (every setting, pinned by `tests/test_configuration_doc.py`), and the Helm values in the
+- Environment variables with their defaults:
+  [configuration.md](configuration.md#environment-variables) (every setting, pinned by
+  `tests/test_configuration_doc.py`), and the Helm values in the
   [chart README](../deploy/helm/text-extraction/README.md#values).
-- Example values: [`values-production.example.yaml`](../deploy/helm/text-extraction/values-production.example.yaml)
+- Example values:
+  [`values-production.example.yaml`](../deploy/helm/text-extraction/values-production.example.yaml)
   (external Valkey, secrets from existing Secrets, pinned SemVer tags, the measured resources,
   rules and ServiceMonitor on, MCP and UI off; `deploy/helm/test.sh` lints and renders it).
 - Secrets, kept apart from the ConfigMap: `API_KEYS` (or `API_KEYS_FILE`), `VALKEY_PASSWORD`
