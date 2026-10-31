@@ -12,7 +12,12 @@ from structlog.testing import capture_logs
 
 from text_extraction.auth import Principal, require_role
 from text_extraction.errors import install_error_handlers
-from text_extraction.ratelimit import RateDecision, RateLimiter, rate_limited
+from text_extraction.ratelimit import (
+    RateDecision,
+    RateLimiter,
+    check_rate_left,
+    rate_limited,
+)
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey, valkey_ping
 
@@ -142,6 +147,69 @@ def test_retry_after_is_at_least_one_second(fake: Redis, clock: Clock) -> None:
         return await limiter.hit("alice", 1)
 
     assert asyncio.run(scenario()).retry_after == 1
+
+
+async def _count(client: Redis, name: str) -> bytes | str | None:
+    value: bytes | str | None = await client.get(f"rl:{name}:{int(NOW // 60)}")
+    return value
+
+
+def test_peek_does_not_count(fake: Redis, clock: Clock) -> None:
+    limiter = RateLimiter(fake, 2, clock=clock)
+
+    async def scenario() -> list[RateDecision]:
+        fresh = await limiter.peek("alice", 2)
+        await limiter.hit("alice", 2)
+        one_used = await limiter.peek("alice", 2)
+        await limiter.hit("alice", 2)
+        return [fresh, one_used, await limiter.peek("alice", 2), await limiter.peek("alice", 2)]
+
+    decisions = asyncio.run(scenario())
+
+    assert decisions[0] == RateDecision(allowed=True, remaining=2, retry_after=40)
+    assert decisions[1] == RateDecision(allowed=True, remaining=1, retry_after=40)
+    # The bucket is used up: a peek says so, and does not count itself.
+    assert decisions[2] == decisions[3] == RateDecision(allowed=False, remaining=0, retry_after=40)
+    assert asyncio.run(_count(fake, "alice")) == b"2"
+
+
+def test_check_rate_left_refuses_a_used_bucket_without_counting(fake: Redis, clock: Clock) -> None:
+    app = build_app(make_settings(), fake, clock, default_per_minute=2)
+    bob = Principal(name="bob", role="user", rate_limit_per_minute=1)
+
+    @app.get("/peek")
+    async def peek(request: Request) -> dict[str, bool]:
+        await check_rate_left(request.app.state, bob)
+        return {"ok": True}
+
+    with TestClient(app) as client:
+        before = [client.get("/peek").status_code for _ in range(3)]
+        client.get("/limited", headers=bearer("bob"))
+        after = client.get("/peek")
+
+    assert before == [200, 200, 200]
+    assert after.status_code == 429
+    assert after.json()["error"]["code"] == "rate_limited"
+    assert after.headers["retry-after"] == "40"
+    assert asyncio.run(_count(fake, "bob")) == b"1"
+
+
+def test_check_rate_left_off_and_down(clock: Clock) -> None:
+    bob = Principal(name="bob", role="user", rate_limit_per_minute=1)
+    down = FakeAsyncRedis(connected=False)
+    statuses = []
+    for enabled in (False, True):
+        app = build_app(make_settings(enabled=enabled), down, clock, default_per_minute=1)
+
+        @app.get("/peek")
+        async def peek(request: Request) -> dict[str, bool]:
+            await check_rate_left(request.app.state, bob)
+            return {"ok": True}
+
+        with TestClient(app) as client:
+            statuses.append(client.get("/peek").status_code)
+
+    assert statuses == [200, 503]
 
 
 def test_counter_key_expires_after_the_window(fake: Redis, clock: Clock) -> None:

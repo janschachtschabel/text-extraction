@@ -451,11 +451,107 @@ def test_run_body_limits() -> None:
         batch_file = client.post("/ui/run/batch-file", headers=HX, content=b"x" * 2049)
 
     assert over_default.status_code == 413
-    # Within its limit the upload route reads the form (here not one: "Choose a file").
+    # Within its limit the upload route answers (here without a key: the 401 fragment, before
+    # the body is read).
     assert file_route.status_code == 200
+    assert "HTTP 401" in file_route.text
     # Within its limit the batch file route answers (here without a key: the 401 fragment).
     assert over_batch_file.status_code == 413
     assert batch_file.status_code == 200
+
+
+_FILE_BODY: Final = (
+    b'--b\r\nContent-Disposition: form-data; name="file"; filename="a.txt"\r\n'
+    b"Content-Type: text/plain\r\n\r\n" + b"x" * 4096 + b"\r\n--b--\r\n"
+)
+_UPLOADS: Final = (
+    ("/ui/run/file", b"multipart/form-data; boundary=b", _FILE_BODY),
+    ("/ui/run/chunk", b"application/x-www-form-urlencoded", b"text=" + b"x" * 4096),
+)
+
+
+def _post_raw(
+    client: TestClient, path: str, content_type: bytes, body: bytes, auth: bool
+) -> tuple[int, str, bool]:
+    """POST ``body`` to ``path`` straight into the app, as htmx does; the status, the answer and
+    whether the app read any of the body."""
+    app = cast(FastAPI, client.app)
+    headers = [
+        (b"host", b"testserver"),
+        (b"hx-request", b"true"),
+        (b"content-type", content_type),
+        (b"content-length", str(len(body)).encode()),
+    ]
+    if auth:
+        headers.append((b"authorization", AUTH["Authorization"].encode()))
+
+    async def call() -> tuple[int, str, bool]:
+        read = False
+        sent: list[Any] = []
+
+        async def receive() -> dict[str, Any]:
+            nonlocal read
+            if read:  # the body was sent: from now on the client waits
+                return {"type": "http.disconnect"}
+            read = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(message: Any) -> None:
+            sent.append(message)
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "root_path": "",
+            "query_string": b"",
+            "headers": headers,
+            "client": ("127.0.0.1", 1),
+            "server": ("testserver", 80),
+        }
+        await app(scope, receive, send)
+        text = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+        return sent[0]["status"], text.decode(), read
+
+    return cast(tuple[int, str, bool], client.portal.call(call))  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize(("path", "content_type", "body"), _UPLOADS, ids=["file", "chunk"])
+def test_single_upload_views_check_the_key_before_the_body(
+    path: str, content_type: bytes, body: bytes
+) -> None:
+    """``/ui/run/file`` and ``/ui/run/chunk`` take large bodies: a caller without a valid key
+    gets its 401 fragment without the app reading a byte of the body (R16, ruling R-P10-F1)."""
+    with running() as client:
+        status, text, read = _post_raw(client, path, content_type, body, auth=False)
+        with_key = _post_raw(client, path, content_type, body, auth=True)
+
+    assert (status, read) == (200, False)
+    assert "HTTP 401" in text
+    assert with_key[0] == 200
+    assert with_key[2] is True
+    assert "HTTP 401" not in with_key[1]
+
+
+@pytest.mark.parametrize(("path", "content_type", "body"), _UPLOADS, ids=["file", "chunk"])
+def test_single_upload_views_check_the_rate_before_the_body(
+    path: str, content_type: bytes, body: bytes
+) -> None:
+    """A caller over its rate limit gets its 429 fragment before the body is read; the check
+    does not count (the forwarded call counts the view's one hit)."""
+    with running(rate_limit_per_minute=1) as client:
+        first = _post_raw(client, path, content_type, body, auth=True)
+        second = _post_raw(client, path, content_type, body, auth=True)
+
+    assert first[0] == 200
+    assert "HTTP 429" not in first[1]
+    assert first[2] is True
+    assert (second[0], second[2]) == (200, False)
+    assert "HTTP 429" in second[1]
 
 
 def test_refused_before_the_body_is_read() -> None:

@@ -60,6 +60,19 @@ class RateLimiter:
             retry_after=max(math.ceil(seconds_left), 1),
         )
 
+    async def peek(self, principal_name: str, limit: int) -> RateDecision:
+        """Whether one more hit would pass, without counting one."""
+        now = self._clock()
+        window = int(now // _WINDOW_SECONDS)
+        raw = await self._client.get(f"rl:{principal_name}:{window}")
+        count = int(raw) if raw is not None else 0
+        seconds_left = (window + 1) * _WINDOW_SECONDS - now
+        return RateDecision(
+            allowed=count < limit,
+            remaining=max(limit - count, 0),
+            retry_after=max(math.ceil(seconds_left), 1),
+        )
+
 
 def _unavailable() -> ServiceError:
     return ServiceError(
@@ -88,6 +101,17 @@ async def check_rate(state: State, principal: Principal) -> None:
 
     The caller has authenticated ``principal`` (``principal_for``) and checks its role; one call
     of a door (a request, an MCP tool call, a UI view) counts exactly once."""
+    await _decide(state, principal, count=True)
+
+
+async def check_rate_left(state: State, principal: Principal) -> None:
+    """As `check_rate`, but without counting: raise 429 when the bucket of ``principal`` is used
+    up. For a door that refuses early, before it reads a body, a call that is counted later
+    (the UI's single views, whose forwarded REST call counts)."""
+    await _decide(state, principal, count=False)
+
+
+async def _decide(state: State, principal: Principal, *, count: bool) -> None:
     settings: Settings = state.settings
     if not settings.rate_limit_enabled:
         return
@@ -98,7 +122,10 @@ async def check_rate(state: State, principal: Principal) -> None:
         else limiter.default_per_minute
     )
     try:
-        decision = await limiter.hit(principal.name, limit)
+        if count:
+            decision = await limiter.hit(principal.name, limit)
+        else:
+            decision = await limiter.peek(principal.name, limit)
     except (RedisError, OSError) as error:
         # Type and text only, no traceback per request. Not the URL: it may carry a password;
         # the exception text names host and port only.

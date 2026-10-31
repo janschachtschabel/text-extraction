@@ -15,10 +15,11 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 
-from text_extraction.auth import principal_for
+from text_extraction.auth import authenticate, principal_for
 from text_extraction.compliance import ComplianceMode, resolve_mode
 from text_extraction.errors import ServiceError
 from text_extraction.file_models import FILE_PART
+from text_extraction.ratelimit import check_rate_left
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     envelope_message,
@@ -120,7 +121,16 @@ def _single_view(op: str) -> Callable[[Request], Awaitable[Response]]:
     async def view(request: Request) -> Response:
         """Build the REST body of the form, forward it and show the answer (always 200, so htmx
         swaps it). A form that cannot become a body is answered with its message, and nothing
-        is forwarded."""
+        is forwarded.
+
+        The key and the rate limit are checked first, as REST checks them (R16), so the form of
+        a caller without a valid key, or over its limit, is never read. The rate check does not
+        count: the forwarded call counts the view's one hit."""
+        try:
+            principal = await authenticate(request)
+            await check_rate_left(request.app.state, principal)
+        except ServiceError as error:
+            return refusal(error)
         form = await request.form()
         try:
             body = build_body(op, text_fields(form))
