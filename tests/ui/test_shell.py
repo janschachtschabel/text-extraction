@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated, Any, Final, cast
 
 import pytest
+import structlog
 from fastapi import Depends, FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.testclient import TestClient
@@ -19,7 +20,7 @@ from starlette.requests import Request
 from structlog.testing import capture_logs
 
 from tests.ui.conftest import AUTH, HX, USER_KEY, running
-from text_extraction.auth import Principal
+from text_extraction.auth import Principal, authenticate
 from text_extraction.settings import ConfigError, load_settings
 from text_extraction.ui.forward import checked_path, forward
 from text_extraction.ui.security import ui_principal
@@ -662,6 +663,30 @@ def test_forward_refuses_paths_outside_v1(path: str) -> None:
     assert answer["refused"]
     # Only the outer request's access line: nothing was sent.
     assert [log["path"] for log in logs if log["event"] == "request"] == ["/ui/test-forward-path"]
+
+
+def test_forward_keeps_the_outer_log_context() -> None:
+    """The inner request runs in the outer one's task: its ``TraceMiddleware`` unbinds the
+    ``principal`` and resets its trace fields. After the forward the outer request's log context
+    (principal, trace id, B3 fields) is as it was, so its later lines still carry them."""
+    with running() as client:
+        app = cast(FastAPI, client.app)
+
+        @app.get("/ui/test-forward-context")
+        async def outer(request: Request) -> dict[str, Any]:
+            await authenticate(request)  # binds the principal, as the job views do
+            before = dict(structlog.contextvars.get_contextvars())
+            await forward(request, "GET", "/v1/info")
+            await forward(request, "GET", "/v1/no-such-route")
+            return {"before": before, "after": dict(structlog.contextvars.get_contextvars())}
+
+        sent = {**AUTH, "x-client-trace-id": "outer-trace-9", "X-B3-Sampled": "1"}
+        answer = client.get("/ui/test-forward-context", headers=sent).json()
+
+    assert answer["before"]["principal"] == "alice"
+    assert answer["before"]["trace_id"] == "outer-trace-9"
+    assert answer["before"]["x_b3_sampled"] == "1"
+    assert answer["after"] == answer["before"]
 
 
 def test_forward_takes_query_parameters_through_params() -> None:

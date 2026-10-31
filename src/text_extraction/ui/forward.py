@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal
 
 import httpx
+import structlog
 from starlette.requests import Request
 
 from text_extraction.tracing import B3_HEADERS, TRACE_HEADER, current_trace_id
@@ -93,24 +94,32 @@ async def forward(
     """Send ``method path`` to the app of ``request`` in-process, with only the headers of
     ``PASSED_HEADERS``, and return its answer. No timeout of its own: the route bounds its work
     (``wait_seconds``, the hand-over to a job). An exception of the app is its 500 answer.
-    ``path`` must pass `checked_path` (else `ValueError`, before anything is sent)."""
+    ``path`` must pass `checked_path` (else `ValueError`, before anything is sent).
+
+    The inner request runs in this task, and its ``TraceMiddleware`` unbinds the principal and
+    resets its trace fields when it ends: the outer request's log context is bound again
+    afterwards, so its later log lines keep them."""
     path = checked_path(path)
     transport = httpx.ASGITransport(app=request.app, raise_app_exceptions=False)
-    # No timeout of the client's own: the route bounds its work.
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url=BASE_URL,
-        timeout=None,  # noqa: S113
-    ) as client:
-        response = await client.request(
-            method,
-            path,
-            json=json,
-            data=data,
-            files=files,
-            params=params,
-            headers=_forwarded_headers(request),
-        )
+    outer_context = structlog.contextvars.get_contextvars()
+    try:
+        # No timeout of the client's own: the route bounds its work.
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=BASE_URL,
+            timeout=None,  # noqa: S113
+        ) as client:
+            response = await client.request(
+                method,
+                path,
+                json=json,
+                data=data,
+                files=files,
+                params=params,
+                headers=_forwarded_headers(request),
+            )
+    finally:
+        structlog.contextvars.bind_contextvars(**outer_context)
     return Forwarded(
         status=response.status_code,
         body=_json_object(response),
