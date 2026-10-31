@@ -2,11 +2,11 @@
 
 Every URL a scenario sends is a page of the local site farm (``tests/e2e/site_farm.py``) under
 the farm base URL that ``body`` gets, or on the same farm host at one of its sitemap sites'
-ports (``farm_site``): the load test sends no load to third-party sites. An
-upload sends a file instead: a file of the repo's test corpus (``file``, relative to the repo
-root) or one the generator builds (``GENERATED_DOCX``); ``upload_bytes`` reads either. The
-other keys of an upload's body are the form fields. Every request turns the result cache off,
-so each one is real work.
+ports (``farm_site``): the load test sends no load to third-party sites. An upload sends a file
+instead: a file of the repo's test corpus (``file``, relative to the repo root) or one the
+generator builds (``GENERATED_DOCX``); ``upload_bytes`` reads either. The other keys of an
+upload's body are the form fields. Every request turns the result cache off, so each one is
+real work.
 
 The site structure items of ruling P11-S7 are crawls (one request each): ``site-crawl`` at the
 request's default caps, ``site-crawl-max-pages`` at ``SITE_MAX_PAGES``, ``sitemap-200k`` (one
@@ -306,8 +306,8 @@ SCENARIOS: tuple[Scenario, ...] = (
         5,
         _extract("chunk-semantic-50", mode="fast", chunking={"strategy": "semantic"}),
     ),
-    # The farm's pages link to ten farm pages each (robots.txt and /sitemap.xml answer 404, the
-    # guess's success): every item succeeds.
+    # Every farm page links to ten farm pages, and robots.txt answers 404, so the crawl guesses
+    # /sitemap.xml, whose 404 is a success too: every item succeeds.
     Scenario("site-crawl", "site", "/v1/site-structure", 1, 1, _site("site-crawl")),
     Scenario(
         "site-crawl-max-pages",
