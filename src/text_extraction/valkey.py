@@ -1,16 +1,10 @@
 """Valkey (Redis protocol) client. All shared state of the service lives there."""
 
 from redis.asyncio import Redis
-from redis.asyncio.retry import Retry
-from redis.backoff import ConstantBackoff
-from redis.exceptions import ConnectionError, RedisError
+from redis.exceptions import RedisError
 
 # Short timeouts: a Valkey that is down must fail a request fast, not hang it.
 _SOCKET_TIMEOUT_SECONDS = 2
-# One retry on a broken connection: a pooled connection goes stale when Valkey restarts or
-# fails over, and the first command on it fails although Valkey is back. A command that
-# timed out is not retried, since it may have run (a rate-limit count, a job claim).
-_RETRY_BACKOFF_SECONDS = 0.05
 
 
 def create_valkey(url: str) -> Redis:
@@ -19,7 +13,6 @@ def create_valkey(url: str) -> Redis:
         url,
         socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
         socket_timeout=_SOCKET_TIMEOUT_SECONDS,
-        retry=Retry(ConstantBackoff(_RETRY_BACKOFF_SECONDS), 1, (ConnectionError,)),
     )
 
 
