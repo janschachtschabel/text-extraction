@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.13.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -10,36 +10,36 @@ resolution-markers = [
 [options]
 
 [options.exclude-newer-package]
-setuptools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-pandas = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-doclang = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-dnspython = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-sse-starlette = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-odfdo = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-preshed = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-weasel = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-caio = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-transformers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-pluggy = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-confection = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-cymem = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-cachetools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-wrapt = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-thinc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-srsly = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-docling-ibm-models = "2026-10-23T00:00:00Z"
-jiter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-xlsxwriter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-cyclopts = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-griffelib = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-joserfc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-docling-core = "2026-10-23T00:00:00Z"
-docling-parse = "2026-10-23T00:00:00Z"
-smart-open = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-phonenumbers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-murmurhash = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 blis = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+cachetools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+caio = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+confection = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+cyclopts = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+cymem = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+dnspython = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+doclang = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+docling-core = "2026-10-23T00:00:00Z"
+docling-ibm-models = "2026-10-23T00:00:00Z"
+docling-parse = "2026-10-23T00:00:00Z"
+griffelib = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+jiter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+joserfc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+murmurhash = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+odfdo = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+pandas = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+phonenumbers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+pluggy = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+preshed = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 pycparser = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+setuptools = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+smart-open = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+srsly = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+sse-starlette = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+thinc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+transformers = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+weasel = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+wrapt = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+xlsxwriter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 
 [[package]]
 name = "accelerate"
@@ -480,18 +480,18 @@ wheels = [
 
 [[package]]
 name = "ctranslate2"
-version = "4.8.2"
+version = "4.8.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "pyyaml" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2c/00/3f5d12d94daa22ddf51de0252313476c0f8fca8b1c7776592953764a8b85/ctranslate2-4.8.2-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a40b190248389e1adb38ff90407937131c6bb9d7f9771f29ca1dca01946ff252", size = 1271572, upload-time = "2026-08-31T19:37:33.476Z" },
-    { url = "https://files.pythonhosted.org/packages/b4/b5/fde838502472462f2c8fd9e8fe17e734854bbe1047452c28d4fbe3eab7b2/ctranslate2-4.8.2-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:2778eaf89340062feb0d2d3dd35bedb14644673ccbce8934782dc8d093b2cab9", size = 11931591, upload-time = "2026-08-31T19:37:35.016Z" },
-    { url = "https://files.pythonhosted.org/packages/a6/c7/cf22407330c90c1f3ef642ece11ff6bfe686509e995b95545951edf29117/ctranslate2-4.8.2-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:249b35f575adf8dd11e6ba43b212d5cbfc845d1140abc610c2872eef1ffb3481", size = 16895415, upload-time = "2026-08-31T19:37:37.342Z" },
-    { url = "https://files.pythonhosted.org/packages/89/8b/051962470b8e9df1a43f0c9c7a03ce1c8a279db76be4e6a6fcb5171d1d29/ctranslate2-4.8.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:633f19d1ff8d053a8b179ca742b242002ac7882a2ab44e319c6efcde27d586a4", size = 39555517, upload-time = "2026-08-31T19:37:40.87Z" },
-    { url = "https://files.pythonhosted.org/packages/c2/fc/a9e9e0ce1c0a29bc4c17bf56ccb4274293c0bbb2b8aae561727d82fcb0ca/ctranslate2-4.8.2-cp313-cp313-win_amd64.whl", hash = "sha256:399c20a7336b6358f69ce3c615e090eabc08f29735a079fd1ac1e464119e0861", size = 19222061, upload-time = "2026-08-31T19:37:43.754Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/af/6a3e6bd4b82aced0d39aa09fecae0a140980dc503f441a3a5cfefb3dd4f9/ctranslate2-4.8.3-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:a88f2782708edc20d03c3b811ecfec50ef12f9a92d7a6b5bd86edb1a4adb9cd7", size = 1286052, upload-time = "2026-10-13T05:57:23.485Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/c4/f09a8ddcfa53f5572b0af79266a8cb8687d46d175ead4fa923e8054295ac/ctranslate2-4.8.3-cp313-cp313-macosx_11_0_x86_64.whl", hash = "sha256:86daaf7f6b8b5527d7ea21205c5ab998d660a9f370451fd2861a00252d5b8115", size = 11946148, upload-time = "2026-10-13T05:57:24.635Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/e2/06129fd90ce89a6c33551cb33e5a8310e662a4d709ba3a5d76322de8051f/ctranslate2-4.8.3-cp313-cp313-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:34f3ce8a4306a0d44d916fda7605fb71c6fa81411a147fb09ffe819ac4590f1b", size = 17570120, upload-time = "2026-10-13T05:57:26.357Z" },
+    { url = "https://files.pythonhosted.org/packages/16/f0/38111e687f35c4b85682738455989331ff9917c6e2818c2fa0c8cff8e293/ctranslate2-4.8.3-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:19deb5b17497bf588bb200f4114b1339f884929b3cba6644dc62a833acb0e623", size = 40251927, upload-time = "2026-10-13T05:57:28.888Z" },
+    { url = "https://files.pythonhosted.org/packages/1d/d0/86d89881ffaa29ac54bb01a2da0b0680d39a9b737f5d0f799056ffc00bfe/ctranslate2-4.8.3-cp313-cp313-win_amd64.whl", hash = "sha256:c3c5d19b83df19f9f708ed16145fbc20b06827462f1a68c5286efc0ad41aa0c1", size = 19230496, upload-time = "2026-10-13T05:57:31.154Z" },
 ]
 
 [[package]]
@@ -1839,7 +1839,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "3.29.0"
+version = "3.35.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1849,9 +1849,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/99/5f6206494a87edbaa67b35c5212a2cb5e6f414bee5efb0f0672c4704315a/openai-3.29.0.tar.gz", hash = "sha256:bc70a46d97b70ba64daedfcb3227f610a395f297ec68d39f735676190a92be94", size = 1828914, upload-time = "2026-10-11T17:39:41.895Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/87/4c/609b16f2a6e9a99f27a82ce93ff75868e7cb364fe6daff50cc0c1d620772/openai-3.35.1.tar.gz", hash = "sha256:b33e6561b90586e450def8a388e7d364755325da6884fc71348be5542e043bd0", size = 2250942, upload-time = "2026-10-18T01:06:38.964Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ef/9a/91285d01a9293d0b3d86167f9c7bd13f08c960d3fa365782751ce9bcbfb1/openai-3.29.0-py3-none-any.whl", hash = "sha256:860d3bad424c5d38cd9ba0a0a2050d558b58ce027596a39f9ccbc0f51a2090b7", size = 2173181, upload-time = "2026-10-11T17:39:39.493Z" },
+    { url = "https://files.pythonhosted.org/packages/22/7b/6d7e70f0762d1b286051bd7cb2fd0c364c1830d0f8826738673aeec05c2b/openai-3.35.1-py3-none-any.whl", hash = "sha256:264fd0fafc889021f526b7c1e5a2df5ca3e8dea874738ecd31da666434f25967", size = 2280230, upload-time = "2026-10-18T01:06:36.16Z" },
 ]
 
 [[package]]
@@ -1941,21 +1941,21 @@ wheels = [
 
 [[package]]
 name = "patchright"
-version = "1.63.0"
+version = "1.64.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "greenlet" },
     { name = "pyee" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/b1/b30a9c6f9c077d68836055c6ef6be38441f3588213ec69218fa068e77ada/patchright-1.63.0-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:74878ef6abaceabf630cf0e9fb40b6e3158fd1a02509b89bbe46e626a3c999b8", size = 44270755, upload-time = "2026-09-20T12:14:03.692Z" },
-    { url = "https://files.pythonhosted.org/packages/f9/aa/5be5f58aff4abab91094f7aa29a2da67e05c3d7bf7eae50845bc79df4323/patchright-1.63.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b1093a9788ea7e76cd9329619d04e10b7b97b89e4e6f6895489d6c7134f1ccc7", size = 42937029, upload-time = "2026-09-20T12:14:06.884Z" },
-    { url = "https://files.pythonhosted.org/packages/15/91/453d0acc3eb9353bb874b48367fef2673af87aea49235ebd93243bb5dfb6/patchright-1.63.0-py3-none-macosx_11_0_universal2.whl", hash = "sha256:b3d2b1baae00b22f93837b0429cad7b250c51b3b46a4de0e5db0db0c4d48edc0", size = 44270759, upload-time = "2026-09-20T12:14:09.515Z" },
-    { url = "https://files.pythonhosted.org/packages/f0/41/71d4fc9ca8ce35dc16e9f325ae1f6ae2a7e5ffa45bcea85af276473b1833/patchright-1.63.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:1c08a30d0fbd4b76d27fc5b254687ec6311e3da65b6451f55eac1c8ebe81fc15", size = 48209506, upload-time = "2026-09-20T12:14:12.816Z" },
-    { url = "https://files.pythonhosted.org/packages/6b/13/42034b3d31e6dc7a5fb698361163c413b8ba47b59ab34cfe95a0e8ece14a/patchright-1.63.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2f0b285cc3fc482b818560e30ee811486bb2eb7bcfb3522dbf75b703ef3cc24d", size = 47895054, upload-time = "2026-09-20T12:14:16.499Z" },
-    { url = "https://files.pythonhosted.org/packages/1a/30/f4d5e282a566b41a7b4e7b671c1982bc3c7127ce7e640c7ed3cfc41aae80/patchright-1.63.0-py3-none-win32.whl", hash = "sha256:e28eca0e6424b2e84b2c8af6b06ee89d8764e5b675061a934d9a99fc3ae441ea", size = 38598431, upload-time = "2026-09-20T12:14:19.177Z" },
-    { url = "https://files.pythonhosted.org/packages/0e/25/cd96cc46503ac0e433b0f57dac8a4fa6a9bec9ac229b0aa96fe8e4d37433/patchright-1.63.0-py3-none-win_amd64.whl", hash = "sha256:cbeb9c7f552d96ced0922ad2fc4bd5fca817a97fb2eeabc13d1bfadf95efac1a", size = 38598436, upload-time = "2026-09-20T12:14:21.961Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/88/1addae3bfa94d156b5a80c0cb9c913679fdaf0eb687d71442f1fb467fc81/patchright-1.63.0-py3-none-win_arm64.whl", hash = "sha256:a1ddf092b330b9b47fb1a4db63563be4906c295cb386233aac71b92b7338c24a", size = 34515901, upload-time = "2026-09-20T12:14:24.763Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/a0/19b2d80eedc22fd8935ee3a7c0ee627eed6443a521f62d98e5b950f23694/patchright-1.64.1-py3-none-macosx_10_13_x86_64.whl", hash = "sha256:cfbff95e926b1a1a61339dc59da2e8f0236c2bc13c508959432532bbabeafbbd", size = 44337731, upload-time = "2026-10-15T17:43:16.171Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/49/1ba8f64f2f4e1ad430af213ef3bbc3ac44d9e106f4ec20d3078a2f7e8b01/patchright-1.64.1-py3-none-macosx_11_0_arm64.whl", hash = "sha256:5cf5aa747646a2824cf4ca88a4f0a6c758865c4575c74cdef250d92b6fd76d44", size = 43004006, upload-time = "2026-10-15T17:43:20.641Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/63/b0e9a748c3b4d5f5bf5a671406a618c79f8e174718443a22517364a59e3d/patchright-1.64.1-py3-none-macosx_11_0_universal2.whl", hash = "sha256:08a4ad197d3f2e3739206255e11b7bff5948190fe6540f54be5fb4629f2361ff", size = 44337732, upload-time = "2026-10-15T17:43:25.204Z" },
+    { url = "https://files.pythonhosted.org/packages/11/1a/2822f0f5a530d47161cc78fa35381023831e1068749378ecff3eb54a766d/patchright-1.64.1-py3-none-manylinux1_x86_64.whl", hash = "sha256:ff5f7e2f46b6cb26008e401a2c52d6ff09c1c09ba4b24e2c75bc501f62a3f084", size = 48276484, upload-time = "2026-10-15T17:43:29.858Z" },
+    { url = "https://files.pythonhosted.org/packages/df/10/f00d4eba7f3b944a77cfcf04ce25262123021c9b56dfb0e0234d6546c724/patchright-1.64.1-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2654f77810ad02980124bd8a7bc8d28658787b1583a94bcb2529faa612773992", size = 47962034, upload-time = "2026-10-15T17:43:34.585Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/8d/b098f1f4056f07e90a89a556e292fef48b345ed5bd52bb6eb112de1c96cc/patchright-1.64.1-py3-none-win32.whl", hash = "sha256:b630a5d8e80608d93d533ca278628a709d09bf5dc0b2a921c05b5a8baadbf503", size = 38665410, upload-time = "2026-10-15T17:43:38.584Z" },
+    { url = "https://files.pythonhosted.org/packages/82/a5/f0d454cecbaef15c35574268ce6a4327f370788bb8e2da3a216cf5f9908f/patchright-1.64.1-py3-none-win_amd64.whl", hash = "sha256:3cd3e7e1e94034e3f3a732ef7d6f87376dc7d27a9b598de51565051acabf3428", size = 38665415, upload-time = "2026-10-15T17:43:42.697Z" },
+    { url = "https://files.pythonhosted.org/packages/81/ee/b192304784a40ebe18c4a713a0027ab245063ec5b7137562806be7a413d0/patchright-1.64.1-py3-none-win_arm64.whl", hash = "sha256:2b7aa403c2b0223adf210753277aae53f489ebe4208d78192450fb01b67d0f53", size = 34582882, upload-time = "2026-10-15T17:43:46.719Z" },
 ]
 
 [[package]]
@@ -3089,7 +3089,7 @@ requires-dist = [
     { name = "av", marker = "extra == 'asr'", specifier = "==19.0.1" },
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "charset-normalizer", specifier = ">=3.5.2" },
-    { name = "ctranslate2", marker = "extra == 'asr'", specifier = "==4.8.2" },
+    { name = "ctranslate2", marker = "extra == 'asr'", specifier = "==4.8.3" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "deno", marker = "extra == 'asr'", specifier = "==2.9.7" },
     { name = "docling-slim", extras = ["convert-core", "format-pdf", "format-opendocument", "models-local"], marker = "extra == 'docling'", specifier = "==2.142.1" },
@@ -3106,9 +3106,9 @@ requires-dist = [
     { name = "markdown-it-py", specifier = "==4.2.0" },
     { name = "markitdown", extras = ["docx", "pdf", "pptx", "xls", "xlsx"], specifier = "==0.1.8" },
     { name = "numpy", specifier = ">=2.0" },
-    { name = "openai", specifier = "==3.29.0" },
+    { name = "openai", specifier = "==3.35.1" },
     { name = "opencv-python-headless", marker = "extra == 'docling'", specifier = "==4.14.0.94" },
-    { name = "patchright", marker = "extra == 'browser'", specifier = "==1.63.0" },
+    { name = "patchright", marker = "extra == 'browser'", specifier = "==1.64.1" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.64" },
     { name = "presidio-analyzer", marker = "extra == 'nlp'", specifier = "==2.2.364" },
     { name = "prometheus-client", specifier = ">=0.26.0" },
@@ -3141,7 +3141,7 @@ dev = [
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "mypy" },
     { name = "openpyxl", specifier = "==3.1.5" },
-    { name = "patchright", specifier = "==1.63.0" },
+    { name = "patchright", specifier = "==1.64.1" },
     { name = "pillow", specifier = "==13.0.0" },
     { name = "playwright", specifier = ">=1.64" },
     { name = "pre-commit" },
