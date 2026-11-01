@@ -9,7 +9,7 @@ from typing import Annotated
 import structlog
 from fastapi import Depends, Request
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
+from redis.exceptions import OutOfMemoryError, RedisError
 from starlette.datastructures import State
 
 from text_extraction.auth import Principal, authenticate
@@ -126,6 +126,12 @@ async def _decide(state: State, principal: Principal, *, count: bool) -> None:
             decision = await limiter.hit(principal.name, limit)
         else:
             decision = await limiter.peek(principal.name, limit)
+    except OutOfMemoryError:
+        # Valkey is full (noeviction) and refuses the counter's write: the call goes through
+        # uncounted, so job reads and DELETE (which frees memory) still work; the memory guard
+        # refuses new jobs meanwhile.
+        _log.warning("rate_limit_backend_full")
+        return
     except (RedisError, OSError) as error:
         # Type and text only, no traceback per request. Not the URL: it may carry a password;
         # the exception text names host and port only.
