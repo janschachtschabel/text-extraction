@@ -28,7 +28,12 @@ from typing import Any, Final
 
 from text_extraction.media.captions import Cue
 
-__all__ = ["PanelError", "parse_panel"]
+__all__ = ["TRANSCRIPT_PANEL_UNAVAILABLE", "PanelError", "parse_panel"]
+
+# The warning of a render that could not read the transcript view (P13-S3), and of the answer
+# that is then the video's details (P13-S5). Here, not in ``browser_panel.py``, so that the
+# pipeline names it without importing the browser.
+TRANSCRIPT_PANEL_UNAVAILABLE: Final = "transcript_panel_unavailable"
 
 _TIMESTAMP: Final = re.compile(r"(?:(\d{1,4}):)?(\d{1,2}):(\d{2})", re.ASCII)
 # Digits of a time in milliseconds: years of video, and far below Python's limit for int().

@@ -30,12 +30,11 @@ import structlog
 from playwright.async_api import Locator, Page, Response
 
 from text_extraction.browser_driver import DRIVER_ERRORS, DRIVER_TIMEOUTS
+from text_extraction.media.panel import TRANSCRIPT_PANEL_UNAVAILABLE
 
 __all__ = ["TRANSCRIPT_PANEL_UNAVAILABLE", "read_transcript_panel"]
 
 _log = structlog.get_logger(__name__)
-
-TRANSCRIPT_PANEL_UNAVAILABLE: Final = "transcript_panel_unavailable"
 
 _NEW_VIEW: Final = "PAmodern_transcript_view"
 _PANEL_PATH: Final = "/youtubei/v1/get_panel"

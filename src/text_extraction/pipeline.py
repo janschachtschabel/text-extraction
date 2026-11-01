@@ -171,12 +171,20 @@ from text_extraction.documents.sniff import media_type, named_text_type, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.escalation import REFUSAL_STATUSES, better, needs_browser, unblock_for
+from text_extraction.escalation import (
+    REFUSAL_STATUSES,
+    better,
+    needs_browser,
+    needs_transcript_panel,
+    transcript_panel_applies,
+    unblock_for,
+)
 from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators, split_content_type
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
 from text_extraction.jobs import CONTENT_NOT_STORED_WARNING
+from text_extraction.media.panel import TRANSCRIPT_PANEL_UNAVAILABLE
 from text_extraction.media.pool import MediaFetcher
 from text_extraction.media.sites import MediaTarget, media_target
 from text_extraction.media.sniff import MEDIA_HEAD_BYTES, media_type_of, sniff_media
@@ -227,6 +235,7 @@ from text_extraction.pipeline_media import (
     asr_failed,
     cached_details_only,
     no_speech,
+    panel_result,
     transcribed,
     transcribed_content,
     transcription_final,
@@ -1292,6 +1301,10 @@ class Pipeline:
             return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, PLAYLIST_MESSAGE)
         run.media = target
         await self._load_learned(run)
+        if run.draft is not None and needs_transcript_panel(run.draft):
+            # A video's details whose subtitles could not be read: its transcript view, never
+            # the watch page's own text (P13-S2).
+            return await self._panel_rendered(run, run.draft)
 
         stored = await self._cached(run) if run.cacheable else None
         if stored is not None and req.transcribe and _metadata_only(stored.result):
@@ -1309,6 +1322,12 @@ class Pipeline:
                 run.media = target
             # A platform result has no validators: a stale one is extracted again.
             answer = await self._guarded(run, self._platform(run, target))
+            if (
+                answer is not None
+                and self._renderer is not None
+                and self._panel_escalates(run, answer)
+            ):
+                return await self._panel_rendered(run, answer)
             if answer is not None:
                 return answer
             # No video after all: the URL is a page (``page_fallback``), from here on as any.
@@ -1912,11 +1931,21 @@ class Pipeline:
         return replace(processed, structured=structured, warnings=warnings, dom=None)
 
     def _escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
-        """Whether this fast result of an ``auto`` request goes on to the browser (B5)."""
+        """Whether this fast result of an ``auto`` request goes on to the browser (B5), also to
+        YouTube's transcript view (P13-S1)."""
         return (
             run.req.mode == "auto"
             and self._settings.browser_enabled
             and needs_browser(envelope, unblock=run.unblock)
+        ) or self._panel_escalates(run, envelope)
+
+    def _panel_escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
+        """Whether this fast result of an ``auto`` request goes on to YouTube's transcript view
+        in the browser (P13-S1)."""
+        return (
+            run.req.mode == "auto"
+            and self._settings.browser_enabled
+            and transcript_panel_applies(envelope, self._settings, transcribe=run.req.transcribe)
         )
 
     async def _finish(
@@ -2210,6 +2239,68 @@ class Pipeline:
             await turn.give_back()
         return await self._extract_rendered(run, rendered, unblock)
 
+    async def _panel_rendered(
+        self, run: _Run, draft: Envelope[ExtractResult]
+    ) -> Envelope[ExtractResult]:
+        """``draft``, a YouTube video's details whose subtitles could not be read, tried in the
+        video's transcript view (P13-S2): its watch page is rendered in the standard browser
+        with the transcript view steps (``_render_panel``), and ``MediaSteps.panel`` answers
+        from the ``get_panel`` body alone (P13-S5). A transcript is stored under the video's
+        key like any; the draft with ``transcript_panel_unavailable`` (no body, one without
+        text, a failed render) is not. The render's document answers are added to the draft's
+        (P13-S6); its time, the transcript view steps included, is the run's ``render_ms``.
+        With the switch off, without a renderer or the media steps, the draft gets the warning
+        without a render."""
+        fmt = run.req.format
+        run.media = media_target(run.req.url)  # filed under the video's key, as its details
+        renderer = self._renderer
+        if (
+            draft.data is None
+            or renderer is None
+            or self._media is None
+            or not self._settings.media_transcript_panel_enabled
+        ):
+            return panel_result(draft, None, fmt, warnings=())
+        url = draft.data.final_url or run.cache_url
+        attempts = run.attempts
+        rendered = await self._guarded(run, self._render_panel(run, renderer, url))
+        if isinstance(rendered, Envelope):  # a block, a failed render, a refused answer
+            code = rendered.error.code.value if rendered.error is not None else None
+            _log.info("media_transcript_panel_render_failed", error_code=code)
+            body: bytes | None = None
+            warnings: tuple[str, ...] = (TRANSCRIPT_PANEL_UNAVAILABLE,)
+        else:
+            body, warnings = rendered.transcript_panel, rendered.warnings
+        answer = await self._media.panel(run, draft, body, warnings=warnings)
+        answer = _with_render(answer, run, attempts)
+        if answer.data is not None and answer.data.mode_used == "browser":
+            return await self._finish(run, answer, Validators())  # B10: never revalidated
+        return answer
+
+    async def _render_panel(
+        self, run: _Run, renderer: Renderer, url: str
+    ) -> Rendered | Envelope[ExtractResult]:
+        """The watch page at ``url`` (the canonical URL) rendered with ``transcript_panel`` and
+        otherwise the standard options: never unblock mode, no caller options (a request with
+        them never takes the media path). As any render (B2): the origin's compliance check,
+        the host's turn held during the render, every document answer checked afterwards."""
+        run.mode_used, run.unblocked = "browser", False
+        run.host = urlsplit(url).hostname
+        turn = HostTurn(self._gate)
+        checked = {url}
+        try:
+            run.report = await self._check_origin(run, url, turn)
+            if (code := blocking_code(run.report)) is not None:
+                return run.failed(code, _BLOCK_MESSAGES[code])
+            options = replace(await self._render_options(run, False), transcript_panel=True)
+            rendered = await self._render(run, renderer, options, turn, checked, url=url)
+            refused = await self._check_answers(run, rendered, turn, checked)
+            if refused is not None:
+                return refused
+        finally:
+            await turn.give_back()
+        return rendered
+
     async def _render_options(self, run: _Run, unblock: bool) -> RenderOptions:
         """The request's browser options; an unblock render first adds the clearance cookies
         stored for the host (B14), so the caller's own cookies of the same name win."""
@@ -2228,10 +2319,13 @@ class Pipeline:
         options: RenderOptions,
         turn: HostTurn,
         checked: set[str],
+        *,
+        url: str | None = None,
     ) -> Rendered:
-        """Take the host's turn and render. Each later main-frame navigation is checked before
-        it is sent: its URL, its origin's compliance files (a block refuses it) and the turn of
-        its host, which moves along with that host's own crawl delay. The checks count as render
+        """Take the host's turn and render ``url`` (the request URL by default). Each later
+        main-frame navigation is checked before it is sent: its URL, its origin's compliance
+        files (a block refuses it) and the turn of its host, which moves along with that host's
+        own crawl delay. The checks count as render
         time. A failed render is reported to the gate for the host whose turn is held, as a
         failed fetch is: a status the renderer saw, or a timeout or connection error."""
         host = normalize_host(run.host or "")
@@ -2265,7 +2359,7 @@ class Pipeline:
         started = time.perf_counter()
         budget = deadline - loop.time()  # what the render had, for `_record_failure`
         try:
-            return await renderer.render(run.req.url, check, options, deadline=deadline)
+            return await renderer.render(url or run.req.url, check, options, deadline=deadline)
         except FetchError as error:
             # Recorded while the turn is held, so a 429 pauses the host before the next turn.
             if turn.answering is not None:
@@ -2721,6 +2815,18 @@ def _cacheable(req: ExtractRequest, private: bool) -> bool:
     or ``learn_selectors``, which needs the page itself for its ``learn_html`` (ruling R6)."""
     learning = req.structured is not None and req.structured.learn_selectors
     return req.cache and not private and not req.screenshot and not learning
+
+
+def _with_render(
+    answer: Envelope[ExtractResult], run: _Run, attempts: int
+) -> Envelope[ExtractResult]:
+    """``answer`` (built from a draft) with the document answers ``run`` counted since it had
+    ``attempts`` added to the draft's (P13-S6). The times are the run's anyway (``run``)."""
+    data = answer.data
+    if data is None:  # pragma: no cover - built from a draft with data
+        return answer
+    counted = data.attempts + run.attempts - attempts
+    return answer.model_copy(update={"data": data.model_copy(update={"attempts": counted})})
 
 
 def _fingerprint_variant(req: ExtractRequest, result: ExtractResult) -> str:

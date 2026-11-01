@@ -114,6 +114,7 @@ from text_extraction.fingerprint import compute_fingerprint
 from text_extraction.licenses import License, normalize_license
 from text_extraction.media.captions import CaptionError, Cue, parse_captions
 from text_extraction.media.html5 import PageTrack, page_media, track_format
+from text_extraction.media.panel import TRANSCRIPT_PANEL_UNAVAILABLE, PanelError, parse_panel
 from text_extraction.media.pool import FetchedTrack, MediaFetcher, MediaProbe
 from text_extraction.media.select import track_language
 from text_extraction.media.sites import MediaTarget
@@ -165,6 +166,7 @@ __all__ = [
     "cached_details_only",
     "media_too_long_message",
     "no_speech",
+    "panel_result",
     "transcribed",
     "transcribed_content",
     "transcription_final",
@@ -613,10 +615,100 @@ def asr_failed(
     return _failed(result, error.code, error.message, error.retryable)
 
 
+# --- YouTube's transcript view (P13-S5) -------------------------------------------------------
+
+_UNREAD_SUBTITLES: Final = frozenset({SUBTITLES_BLOCKED_WARNING, SUBTITLES_FAILED_WARNING})
+PanelOutcome = Literal["transcript", "unavailable", "empty"]
+
+
+def panel_result(
+    draft: Envelope[ExtractResult],
+    cues: Sequence[Cue] | None,
+    fmt: OutputFormat,
+    *,
+    warnings: Sequence[str],
+) -> Envelope[ExtractResult]:
+    """The answer of a transcript view render for ``draft``, a YouTube video's details whose
+    subtitles could not be read (P13-S5). ``warnings`` are the render's.
+
+    With cues that have text (and without ``transcript_panel_unavailable`` in ``warnings``):
+    the draft's result with the transcript under the draft's title as its content (``text/vtt``,
+    ``mode_used`` ``browser``, ``transcript_source`` ``transcript_panel``), its quality, words
+    and language read from that content, the draft's warnings without ``subtitles_blocked`` and
+    ``subtitles_failed``, and a fingerprint of the cues' text. The envelope is ``success``
+    without an error: the caller judges it by the quality verdict. The render's warnings say
+    how the page went, not the transcript, and are left out.
+
+    Otherwise the draft with the warning ``transcript_panel_unavailable`` and without a
+    fingerprint: never stored. The page's own text is never part of either. Pure; CPU-bound
+    (runs on the conversion pool)."""
+    data = draft.data
+    if data is None:  # pragma: no cover - only a draft with data needs the panel
+        return draft
+    texts = [cue.text for cue in cues or [] if cue.text.strip()]
+    if cues is None or not texts or TRANSCRIPT_PANEL_UNAVAILABLE in warnings:
+        noted = list(dict.fromkeys([*data.warnings, TRANSCRIPT_PANEL_UNAVAILABLE]))
+        return draft.model_copy(
+            update={"data": data.model_copy(update={"warnings": noted, "fingerprint": None})}
+        )
+    content = build_transcript(cues, data.title, [], fmt)
+    quality = assess(None, content)
+    language = detect_language(None, None, content)
+    raw = hashlib.sha256("\n".join(texts).encode()).hexdigest()
+    media = data.media or MediaInfo(platform="youtube", transcript_source=None)
+    result = data.model_copy(
+        update={
+            "content": content,
+            "content_type": "text/vtt",
+            "quality": quality,
+            "word_count": quality.word_count,
+            "language": language,
+            "mode_used": "browser",
+            "unblocked": False,
+            "metadata": (
+                data.metadata.model_copy(update={"language": language})
+                if data.metadata is not None
+                else None
+            ),
+            "fingerprint": compute_fingerprint(raw, content),
+            "warnings": [w for w in data.warnings if w not in _UNREAD_SUBTITLES],
+            "media": media.model_copy(
+                update={"transcript_source": "transcript_panel", "transcript_language": language}
+            ),
+        }
+    )
+    return Envelope(status="success", data=result)
+
+
+def _panel_answer(
+    draft: Envelope[ExtractResult],
+    body: bytes | None,
+    fmt: OutputFormat,
+    warnings: Sequence[str],
+    max_bytes: int,
+) -> tuple[Envelope[ExtractResult], PanelOutcome]:
+    """``panel_result`` for the ``get_panel`` body (None: none could be read) and the outcome
+    to count. CPU-bound: runs on the conversion pool."""
+    cues: list[Cue] | None = None
+    if body is not None:
+        try:
+            cues = parse_panel(body, max_bytes=max_bytes)
+        except PanelError:
+            _log.info("media_transcript_panel_unreadable", bytes=len(body))
+    answer = panel_result(draft, cues, fmt, warnings=warnings)
+    media = answer.data.media if answer.data is not None else None
+    if media is not None and media.transcript_source == "transcript_panel":
+        return answer, "transcript"
+    if cues is None or TRANSCRIPT_PANEL_UNAVAILABLE in warnings:
+        return answer, "unavailable"
+    return answer, "empty"
+
+
 @dataclass(frozen=True)
 class _Metrics:
     extractions: Counter
     seconds: Histogram
+    panel: Counter
 
 
 _METRICS: WeakKeyDictionary[CollectorRegistry, _Metrics] = WeakKeyDictionary()
@@ -639,6 +731,13 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
                 "Duration of media extractions (the probe, a watch page, the tracks).",
                 ["platform"],
                 buckets=_SECONDS_BUCKETS,
+                registry=registry,
+            ),
+            panel=Counter(
+                "text_extraction_media_transcript_panel_total",
+                "Renders of YouTube's transcript view by outcome (transcript; unavailable: no "
+                "answer or one that could not be read; empty: an answer without text).",
+                ["outcome"],
                 registry=registry,
             ),
         )
@@ -876,6 +975,40 @@ class MediaSteps:
             message = _NO_SUBTITLES_MESSAGE
         error = _details_only_error(message, self._settings, retryable=retryable)
         return Envelope(status="partial", data=result, error=error)
+
+    async def panel(
+        self,
+        run: MediaRun,
+        draft: Envelope[ExtractResult],
+        body: bytes | None,
+        *,
+        warnings: Sequence[str],
+    ) -> Envelope[ExtractResult]:
+        """The answer of a transcript view render for ``draft`` (P13-S5): ``body`` (the
+        ``get_panel`` answer, None when the render could not read one) is parsed on the
+        conversion pool, ``panel_result`` makes the answer, and a transcript is judged by the
+        quality verdict (one that fails loses its fingerprint). Counted once in
+        ``text_extraction_media_transcript_panel_total`` (P13-S7)."""
+        started = time.perf_counter()
+        try:
+            answer, outcome = await self._threads.run(
+                _panel_answer,
+                draft,
+                body,
+                run.req.format,
+                tuple(warnings),
+                self._settings.media_subtitle_max_bytes,
+            )
+        finally:
+            run.convert_ms += _ms(started)
+        self._metrics.panel.labels(outcome=outcome).inc()
+        _log.info("media_transcript_panel", outcome=outcome)
+        result = answer.data
+        if outcome != "transcript" or result is None or result.quality is None:
+            return answer
+        if self._fails(result.quality):
+            result = result.model_copy(update={"fingerprint": None})
+        return self._judge(result)
 
     def _result(
         self,
