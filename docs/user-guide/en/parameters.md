@@ -4,8 +4,11 @@ Deutsch: [Parameter](../de/parameters.md)
 
 This page lists every field of each request body, with its type, its default and what it does.
 The OpenAPI spec at `/docs` of a running service has the same fields with every detail, and the
-nested objects in full. A field that is not listed answers 422; so does a value out of range.
-"unset" means that the field is left out (or `null`); "required" means that it has no default.
+nested objects in full. A field that is not listed answers 422; so does a value out of range,
+and a value of the wrong JSON type (`"5"` is no number and `"yes"` no boolean; a whole number is
+a valid decimal). An invalid URL answers 200 with `status: failed` and `invalid_url` on the
+routes that answer at once (also in browser mode and for screenshots), 422 on
+`POST /v1/site-structure`, and a failed item in a batch. "unset" means that the field is left out (or `null`); "required" means that it has no default.
 
 ## `POST /v1/extract`
 

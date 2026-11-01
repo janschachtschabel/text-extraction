@@ -82,7 +82,7 @@ def _bound_lastmod(value: object) -> object:
     return value
 
 
-class SiteOptions(BaseModel):
+class SiteOptions(BaseModel, strict=True):
     """The crawl options of a ``site`` job, stored as ``JobOptions.site``: the request without
     its URL and its compliance mode (the job's own ``compliance`` holds the resolved mode)."""
 

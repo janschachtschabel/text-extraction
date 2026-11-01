@@ -62,7 +62,7 @@ __all__ = [
 ]
 
 
-class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
+class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """Body of ``POST /v1/screenshot``. The fields have the limits of ``ExtractRequest``."""
 
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to capture.")

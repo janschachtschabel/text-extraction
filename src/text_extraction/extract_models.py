@@ -35,7 +35,7 @@ from text_extraction.vision.types import DescribeImagesOptions, ImageDescription
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
 
-class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
+class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """Body of ``POST /v1/extract``."""
 
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to extract.")

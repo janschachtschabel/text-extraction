@@ -99,6 +99,32 @@ def test_unknown_field_is_422_invalid_request(client: TestClient) -> None:
     assert body["error"]["code"] == "invalid_request"
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"wait_seconds": "5"},
+        {"wait_seconds": True},
+        {"cache": "yes"},
+        {"cache": "false"},
+        {"metadata": 0},
+        {"links": 1},
+        {"chunking": {"strategy": "fixed", "size": "200"}},
+    ],
+)
+def test_a_value_of_the_wrong_json_type_is_422(client: TestClient, field: dict[str, Any]) -> None:
+    # JSON types are taken as sent: "5" is no number and "yes" no boolean.
+    response = client.post("/v1/extract", json={"url": PAGE, **field}, headers=AUTH)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_an_integer_is_a_valid_float(client: TestClient) -> None:
+    response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 5}, headers=AUTH)
+
+    assert response.status_code == 200
+
+
 def test_overlong_url_is_422(client: TestClient) -> None:
     url = "https://example.org/" + "a" * 2048
     response = client.post("/v1/extract", json={"url": url}, headers=AUTH)

@@ -28,7 +28,7 @@ ItemState = Literal["pending", "done"]
 MAX_BATCH_URLS = 100_000
 
 
-class BatchRequest(BaseModel, extra="forbid"):
+class BatchRequest(BaseModel, extra="forbid", strict=True):
     """Body of ``POST /v1/batch``: the URLs and the options of ``ExtractRequest`` (same defaults).
 
     The most URLs a batch may have is ``BATCH_MAX_URLS``; the route checks it, since a model
