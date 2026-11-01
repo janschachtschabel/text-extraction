@@ -19,7 +19,6 @@ from structlog.testing import capture_logs
 from tests.fakes import FakeFetcher, FakeRenderer, RecordingGate, rendered, response
 from tests.test_pipeline_media import SENTENCES, YT, YT_ID, YT_SHORT, FakeMediaFetcher, Probe, probe
 from text_extraction.auth import Principal
-from text_extraction.browser_panel import TRANSCRIPT_PANEL_UNAVAILABLE
 from text_extraction.compliance import ComplianceChecker, ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.escalation import needs_transcript_panel
@@ -27,6 +26,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, Timing
 from text_extraction.fetch import Fetcher, FetchError
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.media.captions import Cue
+from text_extraction.media.panel import TRANSCRIPT_PANEL_UNAVAILABLE
 from text_extraction.media.pool import MediaFetcher
 from text_extraction.media.types import MediaInfo
 from text_extraction.outbound import DomainGate
@@ -390,6 +390,36 @@ def test_an_unblock_admin_still_gets_the_standard_browser() -> None:
     assert renderer.calls[0].options.unblock is False
     assert data_of(envelope).unblocked is False
     assert data_of(envelope).media is not None
+
+
+def test_a_panel_escalation_of_a_page_result_is_never_a_page_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A page result that looks like a panel draft (no such page result is known today) goes to
+    # the transcript view: never the whole-page render, never the unblock renderer.
+    renderer, unblock = watch(), watch()
+    harness = Harness(renderer=renderer, unblock_renderer=unblock, browser_unblock_enabled=True)
+
+    async def no_video(*args: Any) -> None:
+        return None
+
+    async def page_result(*args: Any) -> Envelope[ExtractResult]:
+        return draft_envelope()
+
+    monkeypatch.setattr(harness.pipeline, "_platform", no_video)
+    monkeypatch.setattr(harness.pipeline, "_fetch_and_extract", page_result)
+
+    envelope = harness.run(principal=ADMIN, compliance="ignore")
+
+    assert unblock.calls == []
+    assert [call.url for call in renderer.calls] == [CANONICAL]
+    assert renderer.calls[0].options.transcript_panel is True
+    assert renderer.calls[0].options.unblock is False
+    data = data_of(envelope)
+    assert data.unblocked is False
+    assert data.media is not None
+    assert data.media.transcript_source == "transcript_panel"
+    assert PAGE_TEXT not in (data.content or "")
 
 
 def test_with_the_switch_off_the_draft_is_not_rendered() -> None:

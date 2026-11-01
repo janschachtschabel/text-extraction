@@ -1344,7 +1344,9 @@ class Pipeline:
         if self._renders_first(run):
             return await self._rendered(run, earlier=run.draft)
         fast = await self._guarded(run, self._fetch_and_extract(run, stored))
-        if self._renderer_for(run) is not None and self._escalates(run, fast):
+        if self._renderer is not None and self._panel_escalates(run, fast):
+            return await self._panel_rendered(run, fast)  # never a page render (P13-S2)
+        if self._renderer_for(run) is not None and self._page_escalates(run, fast):
             return await self._rendered(run, earlier=fast)
         return fast
 
@@ -1939,13 +1941,17 @@ class Pipeline:
         return replace(processed, structured=structured, warnings=warnings, dom=None)
 
     def _escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
-        """Whether this fast result of an ``auto`` request goes on to the browser (B5), also to
-        YouTube's transcript view (P13-S1)."""
+        """Whether this fast result of an ``auto`` request goes on to the browser: to the page's
+        render (B5) or to YouTube's transcript view (P13-S1)."""
+        return self._page_escalates(run, envelope) or self._panel_escalates(run, envelope)
+
+    def _page_escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
+        """Whether this fast result of an ``auto`` request goes on to the page's render (B5)."""
         return (
             run.req.mode == "auto"
             and self._settings.browser_enabled
             and needs_browser(envelope, unblock=run.unblock)
-        ) or self._panel_escalates(run, envelope)
+        )
 
     def _panel_escalates(self, run: _Run, envelope: Envelope[ExtractResult]) -> bool:
         """Whether this fast result of an ``auto`` request goes on to YouTube's transcript view
