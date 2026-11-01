@@ -280,6 +280,10 @@ The service runs without B-API today and is prepared for it.
   ([Helm chart, ASR
   workers](../deploy/helm/text-extraction/README.md#asr-workers-and-the-models-volume));
   the in-chart Valkey is a single replica.
+- After a Valkey restart the pods recover by themselves: a pooled connection idle for more than
+  5 s is checked with PING before its next command and opened again once if it is dead.
+  Commands are never retried, since one lost in flight may have run already (a Lua script, a
+  MULTI, a job claim); a request that meets the restart itself fails with a retryable 503.
 - The short architecture overview is [at the top of this document](#architecture-overview).
 
 ## 9. Resource baseline

@@ -60,6 +60,9 @@ and
 
 ### Fixed
 
+- Valkey: the client retried a command up to 10 times on a connection error, so a Lua script, a
+  MULTI or a job claim lost in flight could run twice. Commands are no longer retried; instead a
+  pooled connection idle for more than 5 s is checked with PING and opened again once.
 - B3 trace headers: a job keeps them with its trace id and its workers log them; without
   `x-client-trace-id` the B3 trace id is the `trace_id`; the LLM and the external ASR endpoint
   receive `x-client-trace-id` and the B3 headers. CLAUDE.md no longer names OpenTelemetry, which
