@@ -105,6 +105,14 @@ Rendered results store no validators, so they are never revalidated. Unblock mod
 ``compliance: ignore``, ``BROWSER_UNBLOCK_ENABLED``) uses the unblock renderer and its clearance
 cookies.
 
+A YouTube video's details whose subtitles could not be read (``escalation.needs_transcript_panel``,
+while ``MEDIA_TRANSCRIPT_PANEL_ENABLED`` and without ``transcribe``) escalate too, and an ``auto``
+item with such a draft is rendered by ``_panel_rendered`` instead (P13-S2): the canonical watch
+URL in the standard browser (never unblock mode) with the transcript view steps, its checks and
+turn as for any render. The answer comes from the page's ``get_panel`` body alone
+(``MediaSteps.panel``), never from the rendered page: a transcript, stored under the video's key,
+or the draft with ``transcript_panel_unavailable``, not stored.
+
 A page over ``CONVERT_MAX_BYTES`` fails with ``too_large`` before it is decoded. CPU-bound steps
 run on the ``ConversionPool`` (``CONVERT_CONCURRENCY`` threads); waiting for a slot counts
 against the deadline. The deadline cannot stop a running thread, but every step bounds its

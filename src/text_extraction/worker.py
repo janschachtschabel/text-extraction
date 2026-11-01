@@ -42,7 +42,9 @@ A worker pod runs ``WORKER_CONCURRENCY`` slot loops. Each loop:
 
 **Auto escalation (B5).** With ``BROWSER_ENABLED``, an ``auto`` item whose fast result needs the
 browser (``escalation.needs_browser``; under unblock mode, for an admin's ``compliance: ignore``
-job, bot walls and refusals too, B16) moves to the ``browser`` pool: its fast envelope is
+job, bot walls and refusals too, B16), or whose fast result is a YouTube video's details whose
+subtitles could not be read (``escalation.transcript_panel_applies``, P13-S1: the browser worker
+tries the video's transcript view), moves to the ``browser`` pool: its fast envelope is
 stored as the item's draft, the item is queued on ``browser`` with the same job, index and
 client, and it is completed here without a result. The browser worker renders it and keeps the
 better of both. Draft first, then the browser queue, then the completion: a crash in between
@@ -184,7 +186,7 @@ from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import ocr_available
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.escalation import needs_browser, unblock_for
+from text_extraction.escalation import needs_browser, transcript_panel_applies, unblock_for
 from text_extraction.extract_models import ExtractRequest, ExtractResult, failed_extract
 from text_extraction.fetch import Fetcher
 from text_extraction.file_models import UploadInputMeta, form_of
@@ -402,7 +404,10 @@ class ExtractRunner:
         if self._browser_queue is None or job.options.mode != "auto":
             return envelope
         unblock = unblock_for(principal, job.options.compliance, self._settings)
-        if not needs_browser(envelope, unblock=unblock):
+        if not (
+            needs_browser(envelope, unblock=unblock)
+            or transcript_panel_applies(envelope, self._settings, transcribe=request.transcribe)
+        ):
             return envelope
         # Draft first: the browser worker may claim the item as soon as it is queued.
         await self._store.put_draft(job.id, item.index, envelope)

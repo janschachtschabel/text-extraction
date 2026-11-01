@@ -67,6 +67,13 @@ rest:
   ``media: null`` and is returned unchanged; a page judged a challenge, an error page or a
   login wall is left alone.
 
+- ``panel(run, draft, body, warnings=...)``, in the browser worker after a render of a YouTube
+  video's watch page with its transcript view steps (P13-S5): ``panel_result`` makes the
+  transcript of the ``get_panel`` body (``media/panel.py``) under the draft's title
+  (``transcript_source`` ``transcript_panel``, ``mode_used`` ``browser``), judged and
+  fingerprinted like any transcript; without text in it, the draft with the warning
+  ``transcript_panel_unavailable``. The rendered page itself is never read.
+
 ``AsrNeeded`` goes to the run's ``asr_handoff`` once the deadline's steps are done, with
 ``without_asr``'s answer as the stand-in (never stored); without a handoff that answer is
 final: the draft with ``asr_unavailable`` and without its fingerprint, or, for a file,
@@ -81,7 +88,9 @@ the answer when the transcription failed (the draft with ``asr_unavailable`` and
 error, without its fingerprint when the failure is retryable; without a draft ``failed``).
 
 Metrics (M15), per registry: ``text_extraction_media_extractions_total{platform, source,
-outcome}`` and ``text_extraction_media_seconds{platform}``. Logs carry the platform, the host and
+outcome}``, ``text_extraction_media_seconds{platform}`` and, one count per transcript view
+render, ``text_extraction_media_transcript_panel_total{outcome}`` (``transcript``,
+``unavailable``, ``empty``; P13-S7). Logs carry the platform, the host and
 codes only: never a URL, a video id or a file name.
 """
 

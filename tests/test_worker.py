@@ -1525,6 +1525,61 @@ async def test_only_auto_items_move(mode: str) -> None:
     assert (await harness.browser_queue.counts()).pending == 0
 
 
+def refused_video_harness(**overrides: Any) -> Harness:
+    """A worker whose pipeline reads a YouTube video whose subtitles were refused."""
+    from tests.test_pipeline_media import FakeMediaFetcher, probe
+
+    refused = probe(manual={}, automatic={}, track=None, blocked=True, error="blocked")
+    return Harness(media_fetcher=FakeMediaFetcher(refused), **overrides)
+
+
+@scenario
+async def test_a_video_whose_subtitles_were_refused_moves_to_the_browser_pool() -> None:
+    harness = refused_video_harness(browser_enabled=True)
+    job_id = await harness.submit([YOUTUBE])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert await browser_list(harness.valkey, "www.youtube.com") == [f"{job_id}:0:0"]
+    draft = await harness.store.draft(job_id, 0)
+    assert draft is not None
+    assert draft.data is not None
+    assert draft.data.media is not None
+    assert draft.data.media.transcript_source == "metadata_only"
+    assert "subtitles_blocked" in draft.data.warnings
+    assert outcome_count(harness, "escalated") == 1
+
+
+@pytest.mark.parametrize(
+    ("options", "overrides"),
+    [
+        ({"mode": "fast"}, {"browser_enabled": True}),
+        ({"transcribe": True}, {"browser_enabled": True}),
+        ({}, {"browser_enabled": True, "media_transcript_panel_enabled": False}),
+        ({}, {}),  # BROWSER_ENABLED off
+    ],
+    ids=["fast", "transcribe", "switch_off", "browser_off"],
+)
+@scenario
+async def test_a_video_whose_subtitles_were_refused_stays_without_its_conditions(
+    options: dict[str, Any], overrides: dict[str, Any]
+) -> None:
+    harness = refused_video_harness(**overrides)
+    job_options = JobOptions(compliance="enforce", **options)
+    job_id = await harness.store.create("batch", OWNER, job_options, [YOUTUBE])
+    await harness.queue.enqueue(job_id, OWNER.name, [YOUTUBE])
+
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert await harness.completed(job_id)
+    assert (await harness.browser_queue.counts()).pending == 0
+    [item] = await harness.items(job_id)
+    assert item.result is not None
+    assert item.result.data is not None
+    assert item.result.data.mode_used == "fast"
+    assert "subtitles_blocked" in item.result.data.warnings
+
+
 @pytest.mark.parametrize(
     ("owner", "compliance", "unblock_enabled", "moves"),
     [
