@@ -9,6 +9,24 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-01
+
+Dependency updates that v0.1.1 left out. Jan waived the 14-day rule for new dependency versions
+(CONTRIBUTING.md) for these on 2026-11-01.
+
+### Changed
+
+- fastmcp 4.1.2 (was 4.1.0): fixes advisories in code paths the MCP endpoint does not use.
+- Pillow 13.0.0 (was 12.3.0), with the Docling releases that allow it: docling-slim 2.142.1 (was
+  2.137.0), docling-core 2.104.0, docling-parse 7.23.0 and docling-ibm-models 4.0.4. Pillow 13
+  fixes the TIFF out-of-bounds reads of 12.3.0; the image check of uploads already opened only
+  the formats it sniffs.
+
+### Fixed
+
+- CHANGELOG: the entry for `docker-compose.release.yml` in 0.1.1 named the default version
+  `0.1.0`; the default is the version of the release the file comes with.
+
 ## [0.1.1] - 2026-11-01
 
 Fixes from the audit of v0.1.0 (plans in
@@ -22,7 +40,8 @@ and
   release (a redirect loop, a 30 MB body, a gzip bomb, a slow drip, binary and mis-declared
   pages; with `--ssrf`, private addresses in their various spellings and forbidden schemes).
 - `docker-compose.release.yml`: runs the stack of `docker-compose.yml` with the published
-  images of a release (`TEXT_EXTRACTION_VERSION`, default `0.1.0`) instead of building them.
+  images of a release (`TEXT_EXTRACTION_VERSION`, default: that release's version) instead of
+  building them.
 - The `release` workflow: a pushed tag `vX.Y.Z`, or a manual run for an existing tag, puts the
   tag's section of this file on its GitHub release page, with the images and where to start
   (`scripts/release_notes.py`); a `0.x` release is marked as a pre-release.
@@ -138,8 +157,7 @@ and
 
 ### Not in this release
 
-- fastmcp 4.1.2 and Pillow 13 (with docling-slim 2.142): they wait for the 14-day rule for new
-  dependency versions and come in v0.1.2.
+- fastmcp 4.1.2 and Pillow 13 (with docling-slim 2.142): they came in v0.1.2.
 
 ## [0.1.0] - 2026-11-01
 

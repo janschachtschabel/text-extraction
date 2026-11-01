@@ -39,8 +39,9 @@ sha256 = "59d079bb75d8b3d7c839a3564580cb559e362c93a9d70f234e421c0c3e767e04"
 size = 22
 
 # The layout model "heron" (Apache-2.0), docling-project/docling-layout-heron at commit 8f39ad3
-# (`main` as of 2026-02-09), the revision Docling 2.137.0 names. Docling's default Transformers
-# engine reads these three files from <artifacts_path>/docling-project--docling-layout-heron.
+# (`main` as of 2026-02-09), the revision Docling 2.142.1 names (as 2.137.0 did). Docling's
+# default Transformers engine reads these three files from
+# <artifacts_path>/docling-project--docling-layout-heron.
 
 [[files]]
 path = "docling/docling-project--docling-layout-heron/config.json"
@@ -61,8 +62,9 @@ sha256 = "00333a43451945aaf89db8ca9c0a17e75d1537c17db60fdb91aa95f4c7929e0c"
 size = 171658996
 
 # TableFormer (CDLA-Permissive-2.0), docling-project/docling-models at tag v2.3.0, commit fc0f2d4
-# (2025-07-23), the revision Docling 2.137.0 names. Only the fast mode (TableFormerMode.FAST, as
-# docling_convert.py uses it): its config and the one tableformer_*.safetensors next to it.
+# (2025-07-23), the revision Docling 2.142.1 names (as 2.137.0 did). Only the fast mode
+# (TableFormerMode.FAST, as docling_convert.py uses it): its config and the one
+# tableformer_*.safetensors next to it.
 
 [[files]]
 path = "docling/docling-project--docling-models/model_artifacts/tableformer/fast/tm_config.json"
