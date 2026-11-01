@@ -557,23 +557,27 @@ def test_busy() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.RATE_LIMITED
     assert envelope.error.retryable is True
+    assert envelope.error.details == [{"retry_after_seconds": 3}]
     assert data_of(envelope).attempts == 0
 
 
 def test_circuit_open() -> None:
-    harness = Harness({PAGE: fetched()}, gate=RefusingGate(CircuitOpen(30.0)))
+    # The service's own pause of a host is a rate limit of ours, not a connection fault (C11).
+    harness = Harness({PAGE: fetched()}, gate=RefusingGate(CircuitOpen(29.2)))
 
     envelope = harness.run_once()
 
     assert envelope.status == "failed"
     assert envelope.error is not None
-    assert envelope.error.code == ErrorCode.CONNECTION_ERROR
+    assert envelope.error.code == ErrorCode.RATE_LIMITED
     assert envelope.error.retryable is True
+    assert envelope.error.details == [{"retry_after_seconds": 30}]
+    assert "paused" in envelope.error.message
 
 
 @pytest.mark.parametrize(
     ("refusal", "code"),
-    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.CONNECTION_ERROR)],
+    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.RATE_LIMITED)],
 )
 def test_gate_refusals_raise_when_asked(refusal: Exception, code: ErrorCode) -> None:
     harness = Harness({PAGE: fetched()}, gate=RefusingGate(refusal))
@@ -998,7 +1002,7 @@ def test_redirect_to_a_paused_host_gives_every_lease_back() -> None:
     envelope = harness.run_once()
 
     assert envelope.error is not None
-    assert envelope.error.code == ErrorCode.CONNECTION_ERROR  # the circuit-open answer
+    assert envelope.error.code == ErrorCode.RATE_LIMITED  # the circuit-open answer
     assert target not in [url for url, _ in harness.fetcher.calls]
     assert gate.events == [("take", "example.org"), ("give back", "example.org")]
     assert leases(harness) == 0

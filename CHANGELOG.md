@@ -9,8 +9,10 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
-Fixes from the audit of v0.1.0 (plan in
-[docs/superpowers/plans/2026-11-01-api-audit-docs-release.md](docs/superpowers/plans/2026-11-01-api-audit-docs-release.md)).
+Fixes from the audit of v0.1.0 (plans in
+[docs/superpowers/plans/2026-11-01-api-audit-docs-release.md](docs/superpowers/plans/2026-11-01-api-audit-docs-release.md)
+and
+[docs/superpowers/plans/2026-11-01-remaining-audit-findings.md](docs/superpowers/plans/2026-11-01-remaining-audit-findings.md)).
 
 ### Added
 
@@ -23,8 +25,20 @@ Fixes from the audit of v0.1.0 (plan in
   every error answer (instead of FastAPI's `HTTPValidationError`), the error statuses each
   operation can answer, and a tag per area.
 
+### Changed
+
+- JSON request bodies are read strictly: a value of the wrong JSON type (`"5"` for a number,
+  `"yes"` for a boolean) answers 422. The form fields of `POST /v1/extract/file` are unchanged.
+- A JSON route answers 415 `invalid_request` for a body sent with another `Content-Type`,
+  instead of a 422 about a missing body.
+- The service's own pause of a host (after errors or a 429) answers `rate_limited` instead of
+  `connection_error`, still retryable; a refusal of the outbound gate carries the wait in
+  `error.details` (`retry_after_seconds`).
+
 ### Fixed
 
+- `POST /v1/screenshot` and a browser-mode `POST /v1/extract` with an invalid URL started a job
+  (202); they fail at once with `invalid_url`, as fast mode does.
 - A host name without a DNS form (a label over 63 characters, an empty label) answered 500;
   it is `invalid_url` now.
 - Under `compliance: enforce`, a robots.txt that could not be fetched because of the host (DNS,

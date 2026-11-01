@@ -411,14 +411,24 @@ def _ms(since: float) -> int:
 
 
 def _failed(
-    result: ExtractResult, code: ErrorCode, message: str, *, retryable: bool
+    result: ExtractResult,
+    code: ErrorCode,
+    message: str,
+    *,
+    retryable: bool,
+    details: list[dict[str, Any]] | None = None,
 ) -> Envelope[ExtractResult]:
     """A failed envelope with as much of the result as the run reached."""
     return Envelope(
         status="failed",
         data=result,
-        error=ErrorInfo(code=code, message=message, retryable=retryable),
+        error=ErrorInfo(code=code, message=message, retryable=retryable, details=details),
     )
+
+
+def _retry_after(seconds: float) -> list[dict[str, Any]]:
+    """The ``error.details`` of a gate refusal: the wait in whole seconds (C11)."""
+    return [{"retry_after_seconds": _seconds(seconds)}]
 
 
 @dataclass
@@ -512,9 +522,14 @@ class _Run:
         return ExtractResult(**values)
 
     def failed(
-        self, code: ErrorCode, message: str, *, retryable: bool = False
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: list[dict[str, Any]] | None = None,
     ) -> Envelope[ExtractResult]:
-        return _failed(self.result(), code, message, retryable=retryable)
+        return _failed(self.result(), code, message, retryable=retryable, details=details)
 
 
 @dataclass(frozen=True)
@@ -598,9 +613,14 @@ class _UploadRun:
         return ExtractResult(**values)
 
     def failed(
-        self, code: ErrorCode, message: str, *, retryable: bool = False
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: list[dict[str, Any]] | None = None,
     ) -> Envelope[ExtractResult]:
-        return _failed(self.result(), code, message, retryable=retryable)
+        return _failed(self.result(), code, message, retryable=retryable, details=details)
 
 
 @dataclass(frozen=True)
@@ -767,9 +787,10 @@ class Pipeline:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
         and an unavailable Valkey (503).
 
-        A refusal of the outbound gate is a ``rate_limited`` (busy) or ``connection_error``
-        (paused) envelope, retryable. With ``gate_refusals="raise"`` the ``OutboundBusy`` or
-        ``CircuitOpen`` propagates unchanged instead; the metrics count it under the same code.
+        A refusal of the outbound gate (busy or paused) is a ``rate_limited`` envelope,
+        retryable, with the wait in ``error.details``. With ``gate_refusals="raise"`` the
+        ``OutboundBusy`` or ``CircuitOpen`` propagates unchanged instead; the metrics count it
+        under the same code.
 
         With a renderer: ``artifacts`` stores the screenshot of a ``screenshot`` request (it is
         required then), and ``draft`` is the fast result of an ``auto`` item, which the render is
@@ -831,7 +852,7 @@ class Pipeline:
             outcome = ErrorCode.RATE_LIMITED.value
             raise
         except CircuitOpen:
-            outcome = ErrorCode.CONNECTION_ERROR.value
+            outcome = ErrorCode.RATE_LIMITED.value
             raise
         finally:
             self._observe(run, outcome)
@@ -1367,15 +1388,17 @@ class Pipeline:
                 "Too many requests to this site are waiting; "
                 f"retry after {_seconds(busy.retry_after)} s.",
                 retryable=True,
+                details=_retry_after(busy.retry_after),
             )
         except CircuitOpen as paused:
             if run.raise_refusals:
                 raise
             return run.failed(
-                ErrorCode.CONNECTION_ERROR,
+                ErrorCode.RATE_LIMITED,
                 "Requests to this site are paused after errors or a rate limit; "
                 f"retry after {_seconds(paused.retry_after)} s.",
                 retryable=True,
+                details=_retry_after(paused.retry_after),
             )
         except RedisError as error:
             _log.warning("outbound_gate_unavailable", error_type=type(error).__name__)

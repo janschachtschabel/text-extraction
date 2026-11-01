@@ -503,7 +503,7 @@ async def test_gate_refusal_defers_the_item() -> None:
 
 @pytest.mark.parametrize(
     ("refusal", "code"),
-    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.CONNECTION_ERROR)],
+    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.RATE_LIMITED)],
 )
 @scenario
 async def test_item_deferred_too_often_fails_with_the_gate_code(

@@ -16,7 +16,8 @@ Das ist der Standard. Der Dienst:
   und Data-Mining), bevor er eine Seite holt;
 - sendet nur wenige Anfragen gleichzeitig an einen Host (`OUTBOUND_MAX_CONCURRENCY_PER_HOST`, 2),
   mit einem Abstand dazwischen (`OUTBOUND_MIN_DELAY_MS`, 1 s), und pausiert einen Host, der mit
-  429 oder 503 geantwortet hat;
+  429 oder 503 geantwortet hat; eine Anfrage, die er deshalb zurückhält, antwortet mit
+  `rate_limited` (wiederholbar), die Wartezeit steht in `error.details` (`retry_after_seconds`);
 - sendet seinen eigenen, ehrlichen User-Agent.
 
 `compliance` entscheidet, was die Prüfungen bewirken:

@@ -1076,7 +1076,8 @@ A worker leases an item for `EXTRACT_TIMEOUT_SECONDS * 2 + 10` seconds (60 by de
 through the fast pipeline with the job's options, as the job's owner. When the outbound gate
 refuses the host (busy, or paused after errors or a 429), the item goes back to the front of its
 domain, which is not claimed before the gate's retry time; an item at `JOB_ITEM_MAX_ATTEMPTS` is
-stored with the gate's error (`rate_limited` or `connection_error`, retryable) instead. An item
+stored with the gate's error (`rate_limited`, retryable, with `retry_after_seconds` in
+`error.details`) instead. An item
 whose job has expired is dropped. While Valkey fails, a worker backs off for 1, 2, 4 … 30 s and
 then goes on; the item it held (an exhausted one too) is claimed again once its lease expires.
 

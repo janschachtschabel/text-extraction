@@ -598,9 +598,8 @@ class AsrRunner:
         except (OutboundBusy, CircuitOpen) as refusal:
             if gate_refusals == "raise":
                 raise
-            if isinstance(refusal, OutboundBusy):
-                return _Failure(ErrorCode.RATE_LIMITED, _BUSY_MESSAGE, True)
-            return _Failure(ErrorCode.CONNECTION_ERROR, _PAUSED_MESSAGE, True)
+            message = _BUSY_MESSAGE if isinstance(refusal, OutboundBusy) else _PAUSED_MESSAGE
+            return _Failure(ErrorCode.RATE_LIMITED, message, True)
 
     async def _download(
         self,
