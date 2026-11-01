@@ -115,7 +115,9 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?offset=500&limit=500"
 ```
 
-Lesen Sie mit `next_offset` weiter, bis es null ist (die letzte Seite). Jeder Eintrag hat seinen
+Lesen Sie mit `next_offset` weiter, bis es null ist (die letzte Seite): Eine Seite endet früher,
+sobald ihre Ergebnisse etwa 20 MB erreichen, setzen Sie also immer bei `next_offset` fort, nicht
+bei `offset + limit`. Jeder Eintrag hat seinen
 `index`, seine `url`, seinen `state`, sein `result` (null, bis er fertig ist) und `run`, seine
 letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewahrt;
 `DELETE /v1/jobs/{id}` bricht ihn ab und löscht ihn sofort.

@@ -888,13 +888,19 @@ class JobStore:
         raw = await self._valkey.lindex(_key(job_id, "urls"), index)
         return reply_text(raw) if raw is not None else None
 
-    async def items(self, job_id: str, offset: int, limit: int) -> list[JobItem]:
+    async def items(
+        self, job_id: str, offset: int, limit: int, *, max_bytes: int | None = None
+    ) -> list[JobItem]:
         """Up to ``limit`` items from ``offset`` in index order, each with its last claim
-        (``run``). Indexes past the end are absent."""
+        (``run``). Indexes past the end are absent. With ``max_bytes`` the page stops before
+        the item whose stored result would take the results past it (the first item always
+        comes): the lengths are read first, then only the results of the page."""
         if offset < 0:
             raise ValueError("offset must not be negative")
         if limit <= 0:
             return []
+        if max_bytes is not None:
+            limit = await self._fitting(job_id, offset, limit, max_bytes)
         fields = [str(n) for n in range(offset, offset + limit)]
         async with self._valkey.pipeline(transaction=False) as pipe:
             pipe.lrange(_key(job_id, "urls"), offset, offset + limit - 1)
@@ -915,6 +921,19 @@ class JobStore:
             )
             for position, url in enumerate(urls)
         ]
+
+    async def _fitting(self, job_id: str, offset: int, limit: int, max_bytes: int) -> int:
+        """How many items from ``offset`` (1 to ``limit``) fit ``max_bytes`` of results."""
+        async with self._valkey.pipeline(transaction=False) as pipe:
+            for index in range(offset, offset + limit):
+                pipe.hstrlen(_key(job_id, "results"), str(index))
+            sizes: list[int] = await pipe.execute()
+        total = 0
+        for count, size in enumerate(sizes):
+            total += size
+            if total > max_bytes and count > 0:
+                return count
+        return limit
 
     async def record_claim(self, job_id: str, index: int, pool: str, attempts: int) -> None:
         """Record that a worker of ``pool`` claimed item ``index`` (D8, ruling P10-S11):
