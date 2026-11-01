@@ -500,8 +500,10 @@ jobs:
           VALKEY_PASSWORD: ci-dummy-password
         run: |
           docker compose -f docker-compose.yml -f docker-compose.release.yml --profile docling --profile asr --profile nlp --profile llm config --format json > compose.json
+          jq -c '.services | map_values({image, pull_policy, build: (.build != null)})' compose.json
           jq -e '.services | to_entries | map(select(.key != "valkey")) | length == 10
-            and all(.value.build == null and .value.pull_policy == "missing"
+            and all(.value.build == null
+              and (.value.pull_policy == "missing" or .value.pull_policy == "if_not_present")
               and (.value.image | test("^ghcr\\.io/janschachtschabel/text-extraction(-browser|-docling|-asr|-nlp)?:[0-9]+\\.[0-9]+\\.[0-9]+$")))' compose.json
           jq -e '.services | .["browser-worker"].image | contains("/text-extraction-browser:")' compose.json
           TEXT_EXTRACTION_VERSION=0.1 docker compose -f docker-compose.yml -f docker-compose.release.yml config --format json \
