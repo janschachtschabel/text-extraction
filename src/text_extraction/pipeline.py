@@ -338,6 +338,10 @@ _MIN_FETCH_SECONDS = 1.0
 # The renderer's deadline is this much before the extraction's, so the render ends in time for
 # the conversion and the result after it.
 _RENDER_MARGIN_SECONDS = 2.0
+# A panel render (its compliance check and turn included) is cut off this much before the
+# extraction's deadline, so a renderer that overruns its own still leaves time to answer with
+# the draft (P13-S2).
+_PANEL_ANSWER_SECONDS = 1.0
 # Only the start of a page is searched for the <html lang> attribute.
 _LANG_SCAN_CHARS = 65_536
 _MAX_TAG_CHARS = 4096
@@ -2277,7 +2281,7 @@ class Pipeline:
             return panel_result(draft, None, fmt, warnings=())
         url = draft.data.final_url or run.cache_url
         attempts = run.attempts
-        rendered = await self._guarded(run, self._render_panel(run, renderer, url))
+        rendered = await self._guarded(run, self._bounded_panel_render(run, renderer, url))
         if isinstance(rendered, Envelope):  # a block, a failed render, a refused answer
             code = rendered.error.code.value if rendered.error is not None else None
             _log.info("media_transcript_panel_render_failed", error_code=code)
@@ -2290,6 +2294,24 @@ class Pipeline:
         if answer.data is not None and answer.data.mode_used == "browser":
             return await self._finish(run, answer, Validators())  # B10: never revalidated
         return answer
+
+    async def _bounded_panel_render(
+        self, run: _Run, renderer: Renderer, url: str
+    ) -> Rendered | Envelope[ExtractResult]:
+        """``_render_panel``, cut off ``_PANEL_ANSWER_SECONDS`` before the run's deadline: one
+        that overruns it is a failed render (a timeout), and the run still answers with the
+        draft instead of failing as a whole."""
+        when = run.deadline.when() if run.deadline is not None else None
+        cutoff = asyncio.timeout_at(None if when is None else when - _PANEL_ANSWER_SECONDS)
+        try:
+            async with cutoff:
+                return await self._render_panel(run, renderer, url)
+        except TimeoutError:
+            if not cutoff.expired():
+                raise
+            return run.failed(
+                ErrorCode.TIMEOUT, "The transcript view did not render in time.", retryable=True
+            )
 
     async def _render_panel(
         self, run: _Run, renderer: Renderer, url: str

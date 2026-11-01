@@ -430,6 +430,40 @@ def test_a_refused_panel_render_is_the_draft_with_the_warning(case: str) -> None
         assert renderer.calls == []  # never rendered
 
 
+@pytest.mark.parametrize("in_worker_draft", [True, False], ids=["draft", "own_request"])
+def test_a_panel_render_past_the_runs_deadline_is_the_draft_with_the_warning(
+    in_worker_draft: bool,
+) -> None:
+    # A renderer that overruns its own deadline and the run's: the answer is still the video's
+    # details with the warning, not a timeout.
+    renderer = watch()
+
+    async def hang() -> None:
+        await asyncio.sleep(30)
+
+    renderer.during = hang
+    if in_worker_draft:
+        draft, valkey = draft_of()
+        harness = Harness(renderer=renderer, valkey=valkey, extract_timeout_seconds=4)
+        details = data_of(draft)
+        envelope = harness.run(draft=draft)
+    else:
+        harness = Harness(renderer=renderer, extract_timeout_seconds=4)
+        envelope = harness.run()
+        details = data_of(Harness().run())
+
+    assert renderer.calls  # the render was started
+    assert envelope.status == "partial"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.NO_TRANSCRIPT_AVAILABLE
+    data = data_of(envelope)
+    assert data.mode_used == "fast"
+    assert data.content == details.content
+    assert data.warnings == [*details.warnings, TRANSCRIPT_PANEL_UNAVAILABLE]
+    assert harness.keys("res:*") == []
+    assert harness.panel_count("unavailable") == 1
+
+
 def test_an_unblock_admin_still_gets_the_standard_browser() -> None:
     draft, valkey = draft_of(principal=ADMIN, compliance="ignore")
     renderer, unblock = watch(), watch()
