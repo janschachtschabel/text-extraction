@@ -2333,9 +2333,9 @@ class Pipeline:
         """Take the host's turn and render ``url`` (the request URL by default). Each later
         main-frame navigation is checked before it is sent: its URL, its origin's compliance
         files (a block refuses it) and the turn of its host, which moves along with that host's
-        own crawl delay. The checks count as render
-        time. A failed render is reported to the gate for the host whose turn is held, as a
-        failed fetch is: a status the renderer saw, or a timeout or connection error."""
+        own crawl delay. The checks count as render time. A failed render is reported to the
+        gate for the host whose turn is held, as a failed fetch is: a status the renderer saw,
+        or a timeout or connection error."""
         host = normalize_host(run.host or "")
         crawl_delays = {host: run.report.crawl_delay}  # by host, as the turns are
         await turn.take(host, crawl_delays[host])

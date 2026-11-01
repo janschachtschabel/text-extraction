@@ -627,7 +627,7 @@ def asr_failed(
 # --- YouTube's transcript view (P13-S5) -------------------------------------------------------
 
 _UNREAD_SUBTITLES: Final = frozenset({SUBTITLES_BLOCKED_WARNING, SUBTITLES_FAILED_WARNING})
-PanelOutcome = Literal["transcript", "unavailable", "empty"]
+_PanelOutcome = Literal["transcript", "unavailable", "empty"]
 
 
 def panel_result(
@@ -695,7 +695,7 @@ def _panel_answer(
     fmt: OutputFormat,
     warnings: Sequence[str],
     max_bytes: int,
-) -> tuple[Envelope[ExtractResult], PanelOutcome]:
+) -> tuple[Envelope[ExtractResult], _PanelOutcome]:
     """``panel_result`` for the ``get_panel`` body (None: none could be read) and the outcome
     to count. CPU-bound: runs on the conversion pool."""
     cues: list[Cue] | None = None
