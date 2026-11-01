@@ -39,6 +39,7 @@ logs of every process and the farm's record (``farm-record.json``) go to ``--log
 """
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -197,9 +198,17 @@ def read_record(path: Path) -> dict[str, list[Request]]:
 
 
 def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+    return free_ports(1)[0]
+
+
+def free_ports(count: int) -> list[int]:
+    """``count`` distinct free ports. The probes stay bound until all are taken: probed one by
+    one, the kernel can hand out a port again before the process it was meant for binds it."""
+    with contextlib.ExitStack() as stack:
+        probes = [stack.enter_context(socket.socket()) for _ in range(count)]
+        for probe in probes:
+            probe.bind(("127.0.0.1", 0))
+        return [int(probe.getsockname()[1]) for probe in probes]
 
 
 @dataclass
@@ -646,8 +655,8 @@ def main(argv: list[str] | None = None) -> int:
 
         keys, api_keys = _api_keys()
         env = {**os.environ, **SETTINGS, "VALKEY_URL": url, "API_KEYS": api_keys}
-        public_port = free_port()
-        internal_ports = {"api": free_port()}
+        public_port, *ports = free_ports(2 + WORKERS)
+        internal_ports = {"api": ports[0]}
         processes.start(
             "api",
             [_entry_point("text-extraction")],
@@ -655,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         for n in range(1, WORKERS + 1):
             name = f"worker-{n}"
-            internal_ports[name] = free_port()
+            internal_ports[name] = ports[n]
             processes.start(
                 name,
                 [_entry_point("text-extraction-worker")],
