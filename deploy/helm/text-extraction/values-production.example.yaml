@@ -18,8 +18,8 @@
 image:
   repository: ghcr.io/janschachtschabel/text-extraction
   # A released version (Git tag vX.Y.Z on main publishes X.Y.Z); production never runs `latest`.
-  # Upgrades and rollbacks change this tag. The first release is 0.1.0 (Git tag v0.1.0).
-  tag: "0.1.0"
+  # Upgrades and rollbacks change this tag. The first release was 0.1.0 (Git tag v0.1.0); this example pins 0.1.1.
+  tag: "0.1.1"
 
 replicaCount: 2
 
@@ -85,7 +85,7 @@ workers:
     enabled: true
     image:
       repository: ghcr.io/janschachtschabel/text-extraction-browser
-      tag: "0.1.0"
+      tag: "0.1.1"
     replicaCount: 2
     resources:
       requests:
@@ -99,7 +99,7 @@ workers:
     enabled: true
     image:
       repository: ghcr.io/janschachtschabel/text-extraction-docling
-      tag: "0.1.0"
+      tag: "0.1.1"
     resources:
       requests:
         cpu: 2250m
@@ -118,7 +118,7 @@ workers:
     model: large-v3-turbo
     image:
       repository: ghcr.io/janschachtschabel/text-extraction-asr
-      tag: "0.1.0"
+      tag: "0.1.1"
     resources:
       requests:
         cpu: 3050m
@@ -136,7 +136,7 @@ workers:
     modelSize: lg
     image:
       repository: ghcr.io/janschachtschabel/text-extraction-nlp
-      tag: "0.1.0"
+      tag: "0.1.1"
     resources:
       requests:
         cpu: 750m
