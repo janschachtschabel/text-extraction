@@ -163,6 +163,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
+| `config.ALLOWED_HOSTS` | `"localhost,127.0.0.1,[::1],api"` | Under `AUTH_MODE=none`: the `Host` names the API answers (others get 400); add the Service's name, or `*`. |
 | `config.RATE_LIMIT_ENABLED` | `"true"` | Inbound rate limit per API key. |
 | `config.RATE_LIMIT_PER_MINUTE` | `"60"` | Default limit per key. |
 | `config.CONVERT_CONCURRENCY` | `"2"` | Conversions at once per pod. The memory limit is sized for it. |

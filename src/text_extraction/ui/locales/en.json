@@ -218,6 +218,7 @@
   "warning.links_truncated": "More links than SITE_MAX_LINKS_PER_PAGE: the first ones.",
   "warning.max_pages_reached": "Links of the page were not followed: the crawl has max_pages pages.",
   "warning.site_memory_guard": "Valkey was nearly full: no link of the page was followed.",
+  "warning.mcp_answer_truncated": "The MCP answer holds part of a list (chunks, links or tables): the REST route returns all of it.",
   "warning.mcp_content_truncated": "The MCP answer holds part of the content: ask for content_offset.",
   "warning.action_index_failed": "Browser action {index} failed.",
   "error.invalid_url": "The URL is not a valid http(s) URL.",

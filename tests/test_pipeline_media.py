@@ -401,7 +401,8 @@ def test_a_youtube_429_reaches_the_gates_backoff() -> None:
     assert harness.keys("out:cooldown:*") == [b"out:cooldown:{www.youtube.com}"]
     assert ("record", "www.youtube.com") in harness.gate.events
     assert second.error is not None
-    assert second.error.code == ErrorCode.CONNECTION_ERROR  # paused
+    assert second.error.code == ErrorCode.RATE_LIMITED  # paused: our own hold-back (C11)
+    assert second.error.details is not None  # the wait
     assert harness.probes() == 1
     assert page_files(harness.fetched_urls()) == []  # no watch page after a 429
 

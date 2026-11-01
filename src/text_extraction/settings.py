@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -28,6 +29,9 @@ from text_extraction.pii.types import ENTITY_TYPES, EntityType
 # (``media/asr_external.py``, the same SDK). ``OPENAI_ORG_ID`` and ``OPENAI_PROJECT_ID`` are read
 # too, but neither client sends them.
 OPENAI_ENV_REFUSED = ("OPENAI_CUSTOM_HEADERS", "OPENAI_LOG")
+
+# An entry of ALLOWED_HOSTS: a host name or IPv4 address, or an IPv6 address in brackets.
+_HOST_ENTRY = re.compile(r"[a-z0-9_]([a-z0-9_.-]*[a-z0-9_])?|\[[0-9a-f:.]+\]")
 
 # Playwright's resource types (``Request.resource_type``). A blocked type is not loaded.
 _RESOURCE_TYPES = (
@@ -137,6 +141,8 @@ class Settings(BaseSettings):
     auth_mode: Literal["api_key", "none"] = "api_key"
     api_keys: list[ApiKey] = []  # secret; JSON list in env API_KEYS
     api_keys_file: Path | None = None  # JSON file with the same shape, merged with API_KEYS
+    # Under AUTH_MODE=none: the Host names the public app answers (M3/S4); "*" switches it off.
+    allowed_hosts: Annotated[list[str], NoDecode] = ["localhost", "127.0.0.1", "[::1]", "api"]
     valkey_url: str = "redis://localhost:6379/0"  # secret when it carries a password
     # Share of Valkey's maxmemory from which no new bulk is taken on: POST /v1/batch answers 503,
     # slow extractions are not handed over to jobs, the result cache (API and workers) skips.
@@ -443,6 +449,28 @@ class Settings(BaseSettings):
         `semantic` chunking is refused without an embedding model, and image descriptions use
         `llm_model` without a vision model."""
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def _host_list(cls, value: object) -> object:
+        """A comma-separated list in the env var (blank entries dropped); a list from code
+        passes."""
+        if isinstance(value, str):
+            return [item for item in (part.strip() for part in value.split(",")) if item]
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _hosts_are_names(cls, value: list[str]) -> list[str]:
+        """Each entry is ``*``, a host name or IPv4 address, or an IPv6 address in brackets,
+        stored in lower case without a trailing dot."""
+        hosts: list[str] = []
+        for entry in value:
+            host = entry.strip().lower().rstrip(".")
+            if host != "*" and not _HOST_ENTRY.fullmatch(host):
+                raise ValueError("expected '*' or host names without scheme, port or path")
+            hosts.append(host)
+        return list(dict.fromkeys(hosts))
 
     @field_validator("mcp_allowed_origins", mode="before")
     @classmethod

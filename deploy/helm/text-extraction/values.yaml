@@ -34,6 +34,8 @@ config:
   LOG_LEVEL: INFO
   LOG_FORMAT: json
   AUTH_MODE: api_key
+  # Under AUTH_MODE=none: the Host names the API answers; add the Service's name, or "*".
+  ALLOWED_HOSTS: "localhost,127.0.0.1,[::1],api"
   RATE_LIMIT_ENABLED: "true"
   RATE_LIMIT_PER_MINUTE: "60"
   # Conversions at once per pod; the memory limit below is sized for it.

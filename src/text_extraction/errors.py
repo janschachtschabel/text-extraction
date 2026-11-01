@@ -59,12 +59,13 @@ def _trace_id(request: HTTPConnection) -> str | None:
     return request_log_context(request).get("trace_id") or current_trace_id()
 
 
-def _failed(
+def failed_response(
     request: HTTPConnection,
     http_status: int,
     error: ErrorInfo,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
+    """The failed envelope of ``error`` with the request's trace id, as a JSON response."""
     envelope: Envelope[None] = Envelope(status="failed", error=error, trace_id=_trace_id(request))
     return JSONResponse(
         status_code=http_status,
@@ -85,7 +86,7 @@ async def _handle_service_error(request: Request, exc: Exception) -> JSONRespons
     waits = any(name.lower() == "retry-after" for name in headers)
     if exc.http_status == HTTPStatus.SERVICE_UNAVAILABLE and exc.retryable and not waits:
         headers["Retry-After"] = str(UNAVAILABLE_RETRY_AFTER_SECONDS)
-    return _failed(request, exc.http_status, error, headers)
+    return failed_response(request, exc.http_status, error, headers)
 
 
 def _not_json(request: Request, exc: RequestValidationError) -> bool:
@@ -106,7 +107,7 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
             code=ErrorCode.INVALID_REQUEST,
             message="The body must be JSON (Content-Type: application/json).",
         )
-        return _failed(request, HTTPStatus.UNSUPPORTED_MEDIA_TYPE, error)
+        return failed_response(request, HTTPStatus.UNSUPPORTED_MEDIA_TYPE, error)
     details: list[dict[str, Any]] = [
         {"loc": list(item["loc"]), "msg": item["msg"]} for item in exc.errors()
     ]
@@ -115,13 +116,13 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
         message="The request is invalid.",
         details=details,
     )
-    return _failed(request, HTTPStatus.UNPROCESSABLE_ENTITY, error)
+    return failed_response(request, HTTPStatus.UNPROCESSABLE_ENTITY, error)
 
 
 def body_too_large_response(request: HTTPConnection, error: BodyTooLarge) -> JSONResponse:
     """413 ``invalid_request``; the connection is closed, since the rest of the body is unread."""
     info = ErrorInfo(code=ErrorCode.INVALID_REQUEST, message=error.detail)
-    return _failed(request, error.status_code, info, {"connection": "close"})
+    return failed_response(request, error.status_code, info, {"connection": "close"})
 
 
 async def _handle_body_too_large(request: Request, exc: Exception) -> JSONResponse:
@@ -139,7 +140,7 @@ async def _handle_http_exception(request: Request, exc: Exception) -> JSONRespon
     except ValueError:
         message = "Request failed."
     error = ErrorInfo(code=code, message=message)
-    return _failed(request, exc.status_code, error, exc.headers)
+    return failed_response(request, exc.status_code, error, exc.headers)
 
 
 async def _handle_unhandled(request: Request, exc: Exception) -> JSONResponse:
@@ -147,7 +148,7 @@ async def _handle_unhandled(request: Request, exc: Exception) -> JSONResponse:
     with structlog.contextvars.bound_contextvars(**request_log_context(request)):
         _log.error("unhandled_exception", exc_info=exc)
     error = ErrorInfo(code=ErrorCode.INTERNAL_ERROR, message=_GENERIC_INTERNAL_MESSAGE)
-    return _failed(request, HTTPStatus.INTERNAL_SERVER_ERROR, error)
+    return failed_response(request, HTTPStatus.INTERNAL_SERVER_ERROR, error)
 
 
 def install_error_handlers(app: FastAPI) -> None:

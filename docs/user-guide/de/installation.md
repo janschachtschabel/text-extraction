@@ -21,8 +21,9 @@ INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extrac
 ```
 
 `AUTH_MODE=none` lässt jeden, der den Port erreicht, den Dienst nutzen: Verwenden Sie es nur auf
-Ihrem eigenen Rechner und nur, solange Sie es brauchen. Auch eine Webseite, die in Ihrem Browser
-offen ist, kann ihn über DNS-Rebinding erreichen, mit der Rolle Admin. Jeder Prozess liest
+Ihrem eigenen Rechner und nur, solange Sie es brauchen. Er antwortet nur den Hostnamen aus
+`ALLOWED_HOSTS` (`localhost`, `127.0.0.1`, `[::1]` und `api`), sodass eine Webseite, die ihre
+eigene Domain auf Ihren Rechner zeigen lässt (DNS-Rebinding), abgewiesen wird. Jeder Prozess liest
 dieselben Einstellungen, also braucht jedes Terminal `AUTH_MODE=none` (oder dieselben
 `API_KEYS`), und jeder bedient seinen internen Port: Geben Sie jedem weiteren Prozess einen
 eigenen `INTERNAL_PORT`. Der Browser-Worker braucht das Extra `browser` und Chromium
@@ -124,6 +125,7 @@ den [Secrets](../../configuration.md#secrets).
 | Einstellung | Standard | Was sie bewirkt |
 | --- | --- | --- |
 | `AUTH_MODE` | `api_key` | `api_key`: Jede Anfrage braucht einen Schlüssel. `none`: keine Schlüssel, jeder Aufrufer ist Admin. |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1],api` | Mit `AUTH_MODE=none`: die Hostnamen, denen der Dienst antwortet; `*` antwortet jedem. |
 | `API_KEYS` | leer | Secret. Die Schlüssel als JSON-Liste aus `name`, `role` (`user` oder `admin`) und `sha256`. |
 | `API_KEYS_FILE` | nicht gesetzt | Eine JSON-Datei derselben Form, zusammengeführt mit `API_KEYS`. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | Die URL des Valkey für den gemeinsamen Zustand; ein Secret, wenn sie ein Passwort enthält. |

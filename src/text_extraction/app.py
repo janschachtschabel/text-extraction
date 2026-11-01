@@ -32,6 +32,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_api import PATH as UPLOAD_PATH
 from text_extraction.file_api import router as file_router
 from text_extraction.file_api import text_body_limit, upload_body_limit
+from text_extraction.host_guard import HostGuardMiddleware
 from text_extraction.info import InfoData, service_info
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
@@ -379,6 +380,9 @@ def create_public_app(
         default_limit=settings.request_max_body_bytes,
         path_limits=path_limits,
     )
+    if settings.auth_mode == "none" and "*" not in settings.allowed_hosts:
+        # Outside the body limit: a refused host's body is never read.
+        app.add_middleware(HostGuardMiddleware, allowed=settings.allowed_hosts)
     if settings.ui_enabled:
         _add_ui_headers(app)
     Instrumentator(registry=registry).instrument(app)

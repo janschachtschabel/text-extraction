@@ -1,12 +1,17 @@
 """Shared pytest fixtures."""
 
 import logging
+import os
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 import structlog
 from fakeredis import FakeAsyncRedis
+
+# Under AUTH_MODE=none the public app answers only the hosts of ALLOWED_HOSTS (M3/S4); the
+# TestClient sends ``Host: testserver``, so the tests add it to the default list.
+os.environ.setdefault("ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],api,testserver")
 
 
 @pytest.fixture(scope="session")

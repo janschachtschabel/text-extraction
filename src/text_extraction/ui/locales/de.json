@@ -218,6 +218,7 @@
   "warning.links_truncated": "Mehr Links als SITE_MAX_LINKS_PER_PAGE: die ersten.",
   "warning.max_pages_reached": "Links der Seite wurden nicht verfolgt: Der Crawl hat max_pages Seiten.",
   "warning.site_memory_guard": "Valkey war fast voll: Kein Link der Seite wurde verfolgt.",
+  "warning.mcp_answer_truncated": "Die MCP-Antwort enthält nur einen Teil einer Liste (Chunks, Links oder Tabellen): Die REST-Route liefert sie vollständig.",
   "warning.mcp_content_truncated": "Die MCP-Antwort enthält nur einen Teil des Inhalts: Fordern Sie den Rest mit content_offset an.",
   "warning.action_index_failed": "Browser-Aktion {index} ist fehlgeschlagen.",
   "error.invalid_url": "Die URL ist keine gültige http(s)-URL.",
