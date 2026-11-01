@@ -336,10 +336,10 @@ def test_target_failure_is_not_tool_error() -> None:
 
 
 def test_private_url_blocked() -> None:
-    """The SSRF guard of the real fetcher: under ``enforce`` its robots.txt cannot be read
-    (``blocked_by_robots``), under ``report`` the page itself is refused (``blocked_url``)."""
+    """The SSRF guard of the real fetcher: under ``enforce`` its robots.txt is refused, under
+    ``report`` the page itself; both answer ``blocked_url``."""
     private = "http://169.254.169.254/"
-    for mode, code in (("enforce", "blocked_by_robots"), ("report", "blocked_url")):
+    for mode, code in (("enforce", "blocked_url"), ("report", "blocked_url")):
         with running(real_fetcher=True, compliance_default=mode) as client:
             rest = client.post("/v1/extract", json={"url": private}, headers=AUTH).json()
             result = call_tool(client, "extract_url", {"url": private}, headers=AUTH)

@@ -55,6 +55,7 @@ URL_PROBLEMS: Final[Mapping[str, Message]] = MappingProxyType(
         "URL has no host": Message("urls.no_host"),
         "URL must not contain user information": Message("urls.user_info"),
         "URL port must be between 1 and 65535": Message("urls.port"),
+        "URL host is not a valid host name": Message("urls.bad_host"),
     }
 )
 INVALID_URL: Final = Message("error.invalid_url")
