@@ -192,3 +192,33 @@ def test_screenshot_evaluate_by_user_is_403() -> None:
 
         assert response.status_code == 403
         assert case.keys("job*") == []
+
+
+@pytest.mark.parametrize("url", ["ftp://example.org/", "example.org/page", "https://a..b/"])
+@pytest.mark.parametrize("wait", [None, 0])
+def test_screenshot_of_an_invalid_url_fails_at_once(url: str, wait: int | None) -> None:
+    # Like /v1/extract: the envelope with invalid_url, never a job or a wait for a worker.
+    case = BrowserCase(browser_queue_wait_seconds=0)
+    body: dict[str, Any] = {"url": url} if wait is None else {"url": url, "wait_seconds": wait}
+    with TestClient(case.app) as client:
+        response = client.post("/v1/screenshot", json=body, headers=AUTH)
+
+        assert response.status_code == 200
+        answer = response.json()
+        assert (answer["status"], answer["error"]["code"]) == ("failed", "invalid_url")
+        assert answer["error"]["retryable"] is False
+        assert case.keys("job*") == []
+
+
+def test_browser_extract_of_an_invalid_url_fails_at_once() -> None:
+    case = BrowserCase(browser_queue_wait_seconds=0)
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={"url": "ftp://example.org/", "mode": "browser", "wait_seconds": 0},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == "invalid_url"
+        assert case.keys("job*") == []

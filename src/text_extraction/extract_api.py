@@ -137,6 +137,7 @@ from text_extraction.file_models import UploadInputMeta
 from text_extraction.job_models import JobAccepted, JobKind, JobOptions, JobState
 from text_extraction.jobs import InputBudgetExceeded, JobLost, JobStore
 from text_extraction.llm_dispatch import LlmDispatcher, LlmHandoff, UploadInput
+from text_extraction.netguard import InvalidUrlError, validate_url
 from text_extraction.pii.fields import ANNOTATE_HTML_MESSAGE, fail_closed
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pii_dispatch import PiiDispatcher, PiiHandoff, pii_available
@@ -406,6 +407,11 @@ async def respond(
         body.structured, body.chunking, body.pii, body.format, settings, llm_key=llm_key
     )
     check_describe_request(body.describe_images, body.pii, body.metadata, settings, llm_key=llm_key)
+    if renders_first(body) and not _plain_url(body.url):
+        # An invalid URL fails at once with `invalid_url`, as in fast mode: no job, no wait for
+        # a browser worker (the fast pipeline refuses it before any fetch).
+        pipeline: Pipeline = state.pipeline
+        return await pipeline.run(body, principal)
     wait_seconds = request_wait_seconds(body, settings)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)
@@ -446,6 +452,14 @@ async def respond(
         chunking=body.chunking,
         describe=body.describe_images,
     )
+
+
+def _plain_url(url: str) -> bool:
+    try:
+        validate_url(url)
+    except InvalidUrlError:
+        return False
+    return True
 
 
 def handover_time(wait_seconds: float | None, settings: Settings) -> float | None:
