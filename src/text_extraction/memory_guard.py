@@ -19,7 +19,9 @@ A background task reads ``INFO memory`` every ``interval`` seconds (``used_memor
 stay and the outage is logged once. The values are exported as
 ``text_extraction_valkey_used_memory_bytes`` and ``text_extraction_valkey_max_memory_bytes`` from
 the first successful read on; API pods and workers export them alike (one Valkey: use
-``max()`` over the pods).
+``max()`` over the pods). ``text_extraction_valkey_up`` is 1 after a successful read and 0 after
+a failed one, from the first read on; the alert ``TextExtractionValkeyDown`` reads it, since
+``/ready`` does not look at Valkey.
 """
 
 import asyncio
@@ -47,6 +49,11 @@ _MAX: Final = (
     "Valkey's maxmemory (INFO memory maxmemory; 0: no limit), as last read by this pod.",
 )
 
+_UP: Final = (
+    "text_extraction_valkey_up",
+    "1 when this pod's last read of Valkey (INFO memory, every 5 s) succeeded, 0 when it failed.",
+)
+
 
 class MemoryGuard(Collector):
     """Whether Valkey is nearly full (``high``), fed by a background task; also the collector of
@@ -67,6 +74,7 @@ class MemoryGuard(Collector):
         self._max: int | None = None
         self._high = False
         self._down = False
+        self._read = False
         self._task: asyncio.Task[None] | None = None
         registry.register(self)
 
@@ -82,9 +90,11 @@ class MemoryGuard(Collector):
         return self._task is not None and not self._task.done()
 
     def describe(self) -> Iterable[GaugeMetricFamily]:
-        return [GaugeMetricFamily(*_USED), GaugeMetricFamily(*_MAX)]
+        return [GaugeMetricFamily(*_USED), GaugeMetricFamily(*_MAX), GaugeMetricFamily(*_UP)]
 
     def collect(self) -> Iterator[GaugeMetricFamily]:
+        if self._read:
+            yield GaugeMetricFamily(*_UP, value=0 if self._down else 1)
         if self._used is None or self._max is None:
             return
         yield GaugeMetricFamily(*_USED, value=self._used)
@@ -98,12 +108,14 @@ class MemoryGuard(Collector):
             info = await self._valkey.info("memory")
             used, maximum = int(info["used_memory"]), int(info["maxmemory"])
         except Exception as error:  # a failing read must never end the loop
+            self._read = True
             if not self._down:
                 self._down = True
                 _log.warning(
                     "valkey_memory_unavailable", error_type=type(error).__name__, error=str(error)
                 )
             return
+        self._read = True
         if self._down:
             self._down = False
             _log.info("valkey_memory_recovered")

@@ -251,17 +251,17 @@ def test_health_and_ready_ok(internal: TestClient) -> None:
     assert ready.json() == {"status": "ready"}
 
 
-def test_ready_503_when_valkey_down(registry: CollectorRegistry) -> None:
+def test_ready_200_when_valkey_down(registry: CollectorRegistry) -> None:
     with internal_client(FakeAsyncRedis(connected=False), registry) as client:
         response = client.get("/ready")
 
-    assert response.status_code == 503
-    assert response.json() == {"status": "not_ready"}
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
 
 
-def test_ready_503_with_real_client_on_closed_port(registry: CollectorRegistry) -> None:
+def test_ready_does_not_wait_for_a_closed_valkey_port(registry: CollectorRegistry) -> None:
     with internal_client(create_valkey(DOWN_URL), registry) as client:
-        assert client.get("/ready").status_code == 503
+        assert client.get("/ready").status_code == 200
 
 
 def test_health_200_when_valkey_down(registry: CollectorRegistry) -> None:

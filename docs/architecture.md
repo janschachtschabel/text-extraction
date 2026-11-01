@@ -283,7 +283,11 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
 | `/ui` | Playground (optional, `UI_ENABLED`, Helm `ui.enabled`): server-rendered pages with htmx 2.0.11 served from `/ui/static`, no Node build, no CDN; every form forwards to a `/v1` route in-process (see "MCP and UI"); not in OpenAPI | sync pages and fragments; job views refresh every 3 s |
 
-Internal port 9090: `/health`, `/ready`, `/metrics` (not in OpenAPI).
+Internal port 9090: `/health`, `/ready`, `/metrics` (not in OpenAPI). `/ready` does not look at
+Valkey (audit ruling D1, 2026-11-01): without Valkey no pod can help, so the pods stay in the
+Service and answer 503 `internal_error` with the trace id instead of the ingress's bare 503; the
+gauge `text_extraction_valkey_up` (from the memory guard's read every 5 s) and the alert
+`TextExtractionValkeyDown` report the outage.
 
 Non-JSON content types to clear with operations: `multipart/form-data` (uploads, and the UI's
 file and batch-file forms), `application/x-www-form-urlencoded` (the UI's other forms), `image/png`

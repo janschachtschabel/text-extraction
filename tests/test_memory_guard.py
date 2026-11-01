@@ -144,6 +144,27 @@ async def test_guard_keeps_its_last_values_while_valkey_fails_and_logs_once() ->
 
 
 @scenario
+async def test_valkey_up_follows_the_last_read() -> None:
+    info = FakeInfo()
+    registry = CollectorRegistry()
+    guard = make_guard(info, registry)
+    up = "text_extraction_valkey_up"
+    assert registry.get_sample_value(up) is None  # nothing is known before the first read
+
+    info.down = True
+    await guard.refresh()
+    assert registry.get_sample_value(up) == 0  # a pod started during an outage says so
+
+    info.down = False
+    await guard.refresh()
+    assert registry.get_sample_value(up) == 1
+
+    info.down = True
+    await guard.refresh()
+    assert registry.get_sample_value(up) == 0
+
+
+@scenario
 async def test_guard_last_verdict_stays_during_an_outage() -> None:
     info = FakeInfo(used=95 * MiB)
     guard = make_guard(info)

@@ -254,6 +254,8 @@ for pool in extract browser; do
   expect_contains "backlog alert for pool $pool" "$rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"$pool\"}) > 1000"
   expect_contains "workers-down alert for pool $pool" "$rules" "deployment=\"$RELEASE-text-extraction-worker-$pool\""
 done
+expect_contains "Valkey-down alert" "$rules" "alert: TextExtractionValkeyDown"
+expect_contains "Valkey-down alert reads every pod" "$rules" "max(text_extraction_valkey_up{namespace=\"$NAMESPACE\", service=~\"$RELEASE-text-extraction-internal|"
 expect_absent "no browser alerts without browser workers" \
   "$(render --set metrics.prometheusRule.enabled=true --set workers.browser.enabled=false)" 'pool="browser"'
 

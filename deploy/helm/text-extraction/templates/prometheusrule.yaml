@@ -60,6 +60,18 @@ spec:
           annotations:
             summary: Valkey is nearly full
             description: Valkey of {{ $fullName }} in namespace {{ $ns }} has used more than {{ mulf .Values.alerts.valkeyMemoryRatio 100 }} % of its maxmemory for 10 minutes. New batches are refused (503) and result-cache writes are skipped until it drops; a full Valkey refuses every write.
+        # /ready does not look at Valkey (an outage leaves the pods in the Service, answering 503
+        # internal_error); this alert reports it. Every pod reads Valkey every 5 s, hence max():
+        # it fires only when no pod reaches Valkey. With no pod at all, TextExtractionDown fires.
+        - alert: TextExtractionValkeyDown
+          expr: |
+            max(text_extraction_valkey_up{namespace="{{ $ns }}", service=~"{{ $podServices }}"}) < 1
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: No text-extraction pod reaches Valkey
+            description: No API or worker pod of {{ $fullName }} in namespace {{ $ns }} has reached Valkey for 2 minutes. API requests answer 503 internal_error (retryable) meanwhile; the pods stay ready and recover by themselves when Valkey is back.
         {{- if $jobs }}
         {{- range $pool := splitList " " (include "text-extraction.workerPools" $) }}
         {{- /* The pools browser, docling, asr, nlp and llm have a queue only while BROWSER_ENABLED,

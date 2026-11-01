@@ -20,7 +20,7 @@ from text_extraction.ratelimit import (
     rate_limited,
 )
 from text_extraction.settings import Settings
-from text_extraction.valkey import create_valkey, valkey_ping
+from text_extraction.valkey import create_valkey
 
 # 20 s into a minute window: 40 s are left.
 NOW = 60 * 1_000_000 + 20.0
@@ -350,21 +350,6 @@ def test_authentication_runs_once_per_request() -> None:
 
     assert response.status_code == 200
     assert calls == 1
-
-
-def test_valkey_ping_true_when_reachable(fake: Redis) -> None:
-    assert asyncio.run(valkey_ping(fake)) is True
-
-
-@pytest.mark.parametrize("kind", ["fakeredis_disconnected", "closed_port"])
-def test_valkey_ping_false_on_connection_error(kind: str) -> None:
-    down: Redis = (
-        FakeAsyncRedis(connected=False)
-        if kind == "fakeredis_disconnected"
-        else create_valkey(DOWN_URL)
-    )
-
-    assert asyncio.run(valkey_ping(down)) is False
 
 
 def test_create_valkey_uses_short_socket_timeouts() -> None:

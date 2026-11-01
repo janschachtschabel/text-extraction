@@ -29,6 +29,10 @@ and
 
 ### Changed
 
+- `/ready` no longer fails while Valkey is down: the pods stay in the Service and answer 503
+  `internal_error` (retryable, with the trace id) instead of dropping out behind the ingress's
+  bare 503. The new gauge `text_extraction_valkey_up` and the Helm alert
+  `TextExtractionValkeyDown` (critical, 2 minutes) report the outage.
 - MCP tool answers are bounded as a whole by `MCP_MAX_ANSWER_CHARS` (new, 200,000 characters):
   a `get_job` page drops its trailing items, then a result's `chunks`, `links`,
   `structured.tables` and `site.links` are cut from the end, with the warning

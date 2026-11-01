@@ -148,13 +148,16 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
 
 - `/health` is the liveness probe. It never touches Valkey, so a Valkey outage does not restart pods.
 - `/ready` is the readiness probe. It answers 200 only when the public port listens (after the
-  start-up, which loads the language model), no shutdown has begun and Valkey answers. Pods
-  without Valkey leave the load balancer, and so does a pod as soon as it gets SIGTERM.
+  start-up, which loads the language model) and no shutdown has begun; a pod leaves the load
+  balancer as soon as it gets SIGTERM. It does not look at Valkey: without Valkey no pod can
+  help, so the pods stay in the Service and answer 503 `internal_error` (retryable, with the
+  trace id) instead of the ingress's bare 503. The gauge `text_extraction_valkey_up` and the
+  Helm alert `TextExtractionValkeyDown` report the outage.
 - `/metrics` is Prometheus text and is not reachable on 8080.
 
 The extract worker (`text-extraction-worker`) serves only port 9090, with the same three paths.
-Its `/ready` answers 200 once it has loaded the language model and its loops claim items, while
-Valkey answers. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
+Its `/ready` answers 200 once it has loaded the language model and its loops claim items; like
+the API's, it does not look at Valkey. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
 items in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds to finish; a claim already sent
 when the signal arrives counts as in flight, so its item is processed too. An item still running
 then is cancelled, and its lease expires so that another worker runs it. There is no drain wait,
@@ -1117,6 +1120,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
 | `text_extraction_valkey_used_memory_bytes` | gauge | none | API pods, workers | Valkey's `used_memory` (`INFO memory`), read every 5 s; exported from the first successful read on and left unchanged while Valkey fails. Every pod reads the same Valkey: use `max()`. |
 | `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
+| `text_extraction_valkey_up` | gauge | none | API pods, workers | 1 when the pod's last read of Valkey (the memory read every 5 s) succeeded, 0 when it failed; exported from the first read on. `/ready` does not look at Valkey; the Helm alert `TextExtractionValkeyDown` fires when `max()` over the pods stays below 1 for 2 minutes. |
 | `text_extraction_event_loop_lag_seconds` | histogram | none | extract workers | How much later than asked the worker's event loop woke from a 0.5 s sleep, sampled from start to shutdown: the time it ran other work without yielding (for example packing and encoding a large sitemap's parts). Buckets 1 ms to 30 s. |
 | `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`, `site`) | API pods | Jobs accepted by the pod: a batch or a site job counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser, Docling, nlp or llm worker answers 202 with that job, or one that needs a transcription answers 202 with its ASR job. |
 | `text_extraction_job_duration_seconds` | histogram | `kind` (`batch`, `extract`, `screenshot`, `file`, `site`) | workers of every pool, API pods | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result: a worker of whichever pool finishes the job, or the API pod for a slow `POST /v1/extract` or `/v1/extract/file` it handed to a job and finished itself. Buckets 1 s to 24 h. |

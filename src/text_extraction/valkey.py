@@ -8,7 +8,6 @@ from redis.asyncio.connection import AbstractConnection, Connection
 from redis.asyncio.retry import Retry
 from redis.backoff import NoBackoff
 from redis.exceptions import ConnectionError as ValkeyConnectionError
-from redis.exceptions import RedisError
 from redis.exceptions import TimeoutError as ValkeyTimeoutError
 
 # Short timeouts: a Valkey that is down must fail a request fast, not hang it.
@@ -79,11 +78,3 @@ def create_valkey(url: str) -> Redis:
 def reply_text(value: bytes | str) -> str:
     """A Valkey reply as text: the client hands out bytes, since it does not decode replies."""
     return value if isinstance(value, str) else value.decode()
-
-
-async def valkey_ping(client: Redis) -> bool:
-    """True when Valkey answers. Any connection problem is False; this never raises."""
-    try:
-        return bool(await client.ping())
-    except (RedisError, OSError):
-        return False
