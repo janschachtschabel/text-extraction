@@ -123,7 +123,14 @@ from text_extraction.fingerprint import compute_fingerprint
 from text_extraction.licenses import License, normalize_license
 from text_extraction.media.captions import CaptionError, Cue, parse_captions
 from text_extraction.media.html5 import PageTrack, page_media, track_format
-from text_extraction.media.panel import TRANSCRIPT_PANEL_UNAVAILABLE, PanelError, parse_panel
+from text_extraction.media.panel import (
+    SUBTITLES_BLOCKED_WARNING,
+    SUBTITLES_FAILED_WARNING,
+    TRANSCRIPT_PANEL_UNAVAILABLE,
+    UNREAD_SUBTITLES,
+    PanelError,
+    parse_panel,
+)
 from text_extraction.media.pool import FetchedTrack, MediaFetcher, MediaProbe
 from text_extraction.media.select import track_language
 from text_extraction.media.sites import MediaTarget
@@ -193,8 +200,6 @@ TRANSCRIPTION_NOT_HANDED_MESSAGE: Final = (
 )
 PLAYLIST_MESSAGE: Final = "The URL is a playlist, not one video. Extract the videos one by one."
 _LIVE_MESSAGE: Final = "The URL is a live stream that is still running."
-SUBTITLES_BLOCKED_WARNING: Final = "subtitles_blocked"
-SUBTITLES_FAILED_WARNING: Final = "subtitles_failed"
 ASR_UNAVAILABLE_WARNING: Final = "asr_unavailable"
 # The speech recognition ran and heard no speech: the answer is final (also for the cache).
 NO_SPEECH_WARNING: Final = "no_speech"
@@ -626,7 +631,6 @@ def asr_failed(
 
 # --- YouTube's transcript view (P13-S5) -------------------------------------------------------
 
-_UNREAD_SUBTITLES: Final = frozenset({SUBTITLES_BLOCKED_WARNING, SUBTITLES_FAILED_WARNING})
 _PanelOutcome = Literal["transcript", "unavailable", "empty"]
 
 
@@ -680,7 +684,7 @@ def panel_result(
                 else None
             ),
             "fingerprint": compute_fingerprint(raw, content),
-            "warnings": [w for w in data.warnings if w not in _UNREAD_SUBTITLES],
+            "warnings": [w for w in data.warnings if w not in UNREAD_SUBTITLES],
             "media": media.model_copy(
                 update={"transcript_source": "transcript_panel", "transcript_language": language}
             ),

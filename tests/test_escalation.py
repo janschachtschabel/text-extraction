@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from typing import Any, Literal
 
 import pytest
@@ -402,3 +404,18 @@ def test_the_panel_applies_with_its_switch_and_without_transcribe(
 
     assert transcript_panel_applies(answer, switch, transcribe=transcribe) is expected
     assert not transcript_panel_applies(video(warnings=[]), switch, transcribe=transcribe)
+
+
+def test_the_rules_load_without_the_media_steps() -> None:
+    """The escalation rules are light: they name the subtitles warnings without importing the
+    media steps (``pipeline_media``)."""
+    script = (
+        "import sys\n"
+        "import text_extraction.escalation\n"
+        "print('text_extraction.pipeline_media' in sys.modules)\n"
+    )
+    result = subprocess.run(  # noqa: S603 - our own interpreter and script
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=120
+    )
+
+    assert result.stdout.strip() == "False"

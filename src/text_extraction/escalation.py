@@ -13,7 +13,7 @@ from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult
-from text_extraction.pipeline_media import SUBTITLES_BLOCKED_WARNING, SUBTITLES_FAILED_WARNING
+from text_extraction.media.panel import UNREAD_SUBTITLES
 from text_extraction.settings import Settings
 
 # Added to a fast result that stays as the answer because the browser could not be used.
@@ -22,9 +22,6 @@ BROWSER_UNAVAILABLE_WARNING = "browser_unavailable"
 # Statuses a site refuses a fetch with that unblock mode tries again in the browser (P12-S1):
 # a bot wall's 403, a rate limit's 429, a protection's 503. Their bodies may be a challenge.
 REFUSAL_STATUSES: Final[frozenset[int]] = frozenset({403, 429, 503})
-
-# The warnings of a video's details whose subtitles were there but could not be read (P13-S1).
-_UNREAD_SUBTITLES: Final = frozenset({SUBTITLES_BLOCKED_WARNING, SUBTITLES_FAILED_WARNING})
 
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
@@ -100,7 +97,7 @@ def needs_transcript_panel(envelope: Envelope[ExtractResult]) -> bool:
         result.media.platform == "youtube"
         and result.media.transcript_source == "metadata_only"
         and result.cache not in ("hit", "revalidated")
-        and not _UNREAD_SUBTITLES.isdisjoint(result.warnings)
+        and not UNREAD_SUBTITLES.isdisjoint(result.warnings)
     )
 
 
