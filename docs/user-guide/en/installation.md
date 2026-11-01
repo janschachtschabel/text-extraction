@@ -18,7 +18,8 @@ uv run text-extraction-worker                               # extract worker: ba
 ```
 
 `AUTH_MODE=none` lets anyone who reaches the port use the service: use it on your own machine
-only. The browser worker needs the extra `browser` and Chromium (`uv sync --extra browser`, then
+only, and only while you need it. A web page open in your browser can reach it too, through DNS
+rebinding, with the admin role. The browser worker needs the extra `browser` and Chromium (`uv sync --extra browser`, then
 `uv run playwright install chromium`); start it with `uv run text-extraction-browser-worker`
 and set `BROWSER_ENABLED=true` on the API, the extract worker and the browser worker.
 
