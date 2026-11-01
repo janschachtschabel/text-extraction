@@ -16,6 +16,9 @@ and
 
 ### Added
 
+- `tests/e2e/audit_probes.py`: hostile probes against a running service, run by hand before a
+  release (a redirect loop, a 30 MB body, a gzip bomb, a slow drip, binary and mis-declared
+  pages; with `--ssrf`, private addresses in their various spellings and forbidden schemes).
 - `docker-compose.release.yml`: runs the stack of `docker-compose.yml` with the published
   images of a release (`TEXT_EXTRACTION_VERSION`, default `0.1.0`) instead of building them.
 - The `release` workflow: a pushed tag `vX.Y.Z`, or a manual run for an existing tag, puts the
@@ -64,6 +67,13 @@ and
 
 ### Fixed
 
+- A host of digits that is no IPv4 literal (`0177.0.0.1`, `127.1`, `2130706433`) is
+  `invalid_url` now. `0177.0.0.1` failed its robots.txt as `blocked_by_robots` (retryable),
+  since the HTTP client refuses it; no such URL was ever fetched.
+- A gzip bomb in browser mode kept Chromium decompressing until the render timed out (`timeout`,
+  retryable, after about 27 s): the egress proxy counts the bytes on the wire. The renderer now
+  counts the decoded bytes too and ends the render with `too_large` once they pass twice
+  `BROWSER_MAX_BYTES`.
 - A page or upload declared UTF-8 whose bytes are not (a Latin-1 page behind a default UTF-8
   header) came out with every umlaut as U+FFFD; it is read as windows-1252 (or the legacy
   encoding its bytes fit) now, with the new warning `charset_mismatch`.

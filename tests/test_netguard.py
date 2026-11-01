@@ -119,6 +119,12 @@ def test_validate_url_rejects(url: str) -> None:
         "https://" + "a" * 64 + ".org/",
         "https://a..b/",
         "https://.example.org/",
+        # numbers that are no IPv4 literal: octal and short forms, one big number. The resolver
+        # would read them as an address (0177.0.0.1 is 127.0.0.1), the HTTP client refuses some
+        "http://0177.0.0.1/",
+        "http://127.1/",
+        "http://2130706433/",
+        "http://1.2.3.4.5/",
     ],
 )
 def test_validate_url_rejects_a_host_that_has_no_dns_form(url: str) -> None:
@@ -136,6 +142,9 @@ def test_validate_url_rejects_a_host_that_has_no_dns_form(url: str) -> None:
         "https://bücher.example/",
         "http://[::1]/",
         "http://127.0.0.1/",
+        "http://8.8.8.8/",
+        "https://3com.example/",
+        "https://123.example/",
     ],
 )
 def test_validate_url_accepts_a_host_with_a_dns_form(url: str) -> None:

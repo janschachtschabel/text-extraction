@@ -82,6 +82,10 @@ job. Batches and crawls are jobs from the start. The full picture is in
 - Further workflows: [`e2e.yml`](../.github/workflows/e2e.yml) (a 1,000-URL batch against a local
   site farm), [`live.yml`](../.github/workflows/live.yml) (the regression on real URLs, see
   item 4), [`load.yml`](../.github/workflows/load.yml) (the load test behind items 4 and 9).
+- By hand, before a release: [`tests/e2e/audit_probes.py`](../tests/e2e/audit_probes.py) runs
+  hostile probes against a running service (a redirect loop, a 30 MB body, a gzip bomb, a slow
+  drip, binary and mis-declared pages from its own site farm; with `--ssrf`, private addresses in
+  their various spellings and forbidden schemes) and exits 1 when an answer differs.
 
 ## 2. OpenAPI
 
@@ -237,7 +241,7 @@ The service runs without B-API today and is prepared for it.
   [configuration.md, Metrics](configuration.md#metrics).
   Query the queue gauges with `max()` over the API pods.
 - Alert rules: the PrometheusRule (`metrics.prometheusRule.enabled`) with service down, 5xx share,
-  Valkey memory, queue backlog and workers down per pool, job item failures and stale queue
+  Valkey down, Valkey memory, queue backlog and workers down per pool, job item failures and stale queue
   metrics: [Helm chart, Alerts](../deploy/helm/text-extraction/README.md#alerts).
 
 ## 7. Logs and trace headers

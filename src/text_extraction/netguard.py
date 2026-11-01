@@ -71,11 +71,16 @@ def validate_url(url: str, *, dns_form: bool = True) -> str:
 
 def _check_dns_form(host: str) -> None:
     """Raise ``InvalidUrlError`` for a host name the resolver cannot encode (an empty label, a
-    label over 63 characters): its IDNA codec would raise ``UnicodeError`` on the lookup."""
+    label over 63 characters): its IDNA codec would raise ``UnicodeError`` on the lookup; and
+    for one of digits only that is no IPv4 literal."""
     try:
         ip_address(host)
     except ValueError:
         labels = host.removesuffix(".").split(".")
+        # All digits but no IPv4 literal (octal, short or one-number forms): the resolver would
+        # read it as an address, the HTTP client refuses some of them (audit R7).
+        if all(label.isascii() and label.isdigit() for label in labels):
+            raise InvalidUrlError("URL host is not a valid IP address") from None
         # A label over 63 characters has no ASCII form (an IDN label only grows when encoded):
         # refused before the encode, which is slow on a long Unicode label.
         if any(not label or len(label) > 63 for label in labels):
