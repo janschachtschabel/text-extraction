@@ -63,7 +63,7 @@ from text_extraction.structured.checks import (
     llm_key_of,
     wants_llm,
 )
-from text_extraction.tracing import current_trace_id
+from text_extraction.tracing import current_trace_fields, current_trace_id
 from text_extraction.valkey import reply_text
 from text_extraction.vision.checks import check_describe_request
 
@@ -229,7 +229,14 @@ async def open_job(
     limit = settings.batch_max_open_per_client
     if await _open_count(valkey, store, principal.name) >= limit:
         raise _too_many_open(limit)
-    job_id = await store.create(kind, principal, options, urls, trace_id=current_trace_id())
+    job_id = await store.create(
+        kind,
+        principal,
+        options,
+        urls,
+        trace_id=current_trace_id(),
+        trace_fields=current_trace_fields(),
+    )
     try:
         # Counting again after the add keeps the limit under concurrent requests: of several
         # that passed the check above, those beyond the limit give their job back.

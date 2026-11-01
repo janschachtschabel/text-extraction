@@ -403,6 +403,7 @@ def _external(
         max_duration=max_duration,
         budget=float(payload["budget"]),
         user_agent=payload.get("user_agent"),
+        trace_headers=payload.get("trace_headers"),
         decode=lambda path: decode_audio(path, max_seconds=max_duration),
     )
     return {

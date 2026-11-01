@@ -19,12 +19,14 @@ from werkzeug import Request, Response
 
 from text_extraction.media import asr_external
 from text_extraction.media.asr_external import (
+    TRACE_NAMES,
     BudgetSpent,
     ExternalFailed,
     ExternalRejected,
     ExternalUnavailable,
     transcribe_external,
 )
+from text_extraction.tracing import B3_HEADERS, TRACE_HEADER
 
 SR = 16_000
 KEY = "sk-external-asr-key-7f3a9c"
@@ -76,6 +78,8 @@ class Endpoint:
                     "user_agent": request.headers.get("User-Agent"),
                     "organization": request.headers.get("OpenAI-Organization"),
                     "project": request.headers.get("OpenAI-Project"),
+                    "trace_id": request.headers.get("x-client-trace-id"),
+                    "b3_trace_id": request.headers.get("x-b3-traceid"),
                 }
             )
         return self.answer(index, request)
@@ -257,6 +261,17 @@ def test_header_key_wins(httpserver: HTTPServer) -> None:
     (request,) = endpoint.requests
     assert request["authorization"] == "Bearer caller-header-key"
     assert request["user_agent"] == "text-extraction/0.1.0"
+
+
+def test_the_callers_trace_headers_reach_the_endpoint(httpserver: HTTPServer) -> None:
+    # O4: the worker passes the job's trace headers into the child.
+    endpoint = Endpoint(httpserver)
+    trace = {"x-client-trace-id": "t-9", "x-b3-traceid": "80f198ee56343ba8"}
+
+    run(endpoint, tone(30), trace_headers=trace)
+
+    (request,) = endpoint.requests
+    assert (request["trace_id"], request["b3_trace_id"]) == ("t-9", "80f198ee56343ba8")
 
 
 def test_openai_environment_does_not_reach_the_endpoint(
@@ -465,3 +480,7 @@ def test_the_client_neither_follows_redirects_nor_reads_the_environment(
         assert http.trust_env is False
     finally:
         client.close()
+
+
+def test_the_trace_names_are_the_services() -> None:
+    assert {TRACE_HEADER, *B3_HEADERS} == TRACE_NAMES

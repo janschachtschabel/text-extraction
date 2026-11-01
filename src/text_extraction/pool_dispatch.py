@@ -99,7 +99,7 @@ from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
-from text_extraction.tracing import current_trace_id
+from text_extraction.tracing import current_trace_fields, current_trace_id
 
 _log = structlog.get_logger(__name__)
 
@@ -342,6 +342,7 @@ class PoolDispatcher:
                     options,
                     [url],
                     trace_id=current_trace_id(),
+                    trace_fields=current_trace_fields(),
                     secrets=secrets,
                 )
             except BACKEND_ERRORS:

@@ -251,10 +251,11 @@ The service runs without B-API today and is prepared for it.
   Each request writes one access line (`event: request`, method, path, status, `duration_ms`).
   Query strings and secrets are never logged.
 - Trace headers: `x-client-trace-id` becomes `trace_id` on every log line of the request and in
-  the response envelope (without one the service generates an id); the B3 headers (`b3`,
+  the response envelope (without one the B3 trace id, else a generated id); the B3 headers (`b3`,
   `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled`) are logged on every line.
-  A job keeps the trace id of the request that created it, so its items log under it on the
-  workers. Trace headers are never forwarded to target sites:
+  A job keeps the trace id and the B3 headers of the request that created it, so its items log
+  under them on the workers. The LLM and the external ASR endpoint receive them with every call;
+  trace headers are never forwarded to target sites:
   [configuration.md, Headers](configuration.md#headers).
 
 ## 8. State and horizontal scaling

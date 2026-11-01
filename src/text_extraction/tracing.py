@@ -34,6 +34,39 @@ def _first_header_values(scope: Scope) -> dict[str, str]:
     return values
 
 
+def _b3_trace_id(headers: dict[str, str]) -> str | None:
+    """The trace id of the B3 headers: ``x-b3-traceid``, else the first part of the single
+    ``b3`` header (``{traceid}-{spanid}[-{sampled}[-{parent}]]``), when valid (O4)."""
+    multi = _valid(headers.get("x-b3-traceid"))
+    if multi is not None:
+        return multi
+    single = _valid(headers.get("b3"))
+    first = single.split("-", 1)[0] if single is not None else ""
+    return first if len(first) in (16, 32) and _valid(first) else None
+
+
+def current_trace_fields() -> dict[str, str]:
+    """The B3 fields bound to the current context (as logged: ``x_b3_traceid``, ...), for a
+    job that keeps them for its workers (O4)."""
+    bound = structlog.contextvars.get_contextvars()
+    fields = (_log_field(name) for name in B3_HEADERS)
+    return {field: value for field in fields if isinstance(value := bound.get(field), str)}
+
+
+def outbound_trace_headers() -> dict[str, str]:
+    """The trace headers to pass on to an endpoint the service calls (the LLM, the external
+    ASR): ``x-client-trace-id`` with the bound trace id and the bound B3 headers (O4)."""
+    headers: dict[str, str] = {}
+    trace_id = current_trace_id()
+    if trace_id is not None:
+        headers[TRACE_HEADER] = trace_id
+    bound = current_trace_fields()
+    for name in B3_HEADERS:
+        if (value := bound.get(_log_field(name))) is not None:
+            headers[name] = value
+    return headers
+
+
 def current_trace_id() -> str | None:
     """Trace id bound to the current context, or None outside a traced request."""
     value = structlog.contextvars.get_contextvars().get("trace_id")
@@ -70,7 +103,7 @@ class TraceMiddleware:
             return
 
         headers = _first_header_values(scope)
-        trace_id = _valid(headers.get(TRACE_HEADER)) or uuid.uuid4().hex
+        trace_id = _valid(headers.get(TRACE_HEADER)) or _b3_trace_id(headers) or uuid.uuid4().hex
         b3_fields = {
             _log_field(name): value
             for name in B3_HEADERS

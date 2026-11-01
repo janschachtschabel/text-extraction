@@ -162,7 +162,7 @@ from text_extraction.structured.checks import (
 )
 from text_extraction.structured.post import LlmHop, post_at_finish
 from text_extraction.structured.types import StructuredOptions
-from text_extraction.tracing import current_trace_id
+from text_extraction.tracing import current_trace_fields, current_trace_id
 from text_extraction.vision.checks import check_describe_request
 from text_extraction.vision.types import DescribeImagesOptions
 
@@ -1150,7 +1150,14 @@ async def create_p1_job(
     cancelled, is deleted again, if that works."""
     job_id: str | None = None
     try:
-        job_id = await store.create(kind, principal, options, [url], trace_id=current_trace_id())
+        job_id = await store.create(
+            kind,
+            principal,
+            options,
+            [url],
+            trace_id=current_trace_id(),
+            trace_fields=current_trace_fields(),
+        )
         if upload is not None:
             body, meta = upload
             await store.put_input(job_id, 0, body, meta, settings.docling_input_ttl_seconds)

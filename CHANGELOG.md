@@ -60,6 +60,10 @@ and
 
 ### Fixed
 
+- B3 trace headers: a job keeps them with its trace id and its workers log them; without
+  `x-client-trace-id` the B3 trace id is the `trace_id`; the LLM and the external ASR endpoint
+  receive `x-client-trace-id` and the B3 headers. CLAUDE.md no longer names OpenTelemetry, which
+  the service does not use.
 - `POST /v1/screenshot` and a browser-mode `POST /v1/extract` with an invalid URL started a job
   (202); they fail at once with `invalid_url`, as fast mode does.
 - A host name without a DNS form (a label over 63 characters, an empty label) answered 500;

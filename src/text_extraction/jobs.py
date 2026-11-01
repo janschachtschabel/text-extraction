@@ -124,12 +124,13 @@ as numbers and handed out as UTC datetimes, except ``lease_until``, which stays 
 
 import asyncio
 import contextlib
+import json
 import math
 import re
 import time
 import uuid
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -379,6 +380,20 @@ class JobLost(Exception):  # noqa: N818 - public name fixed by the plan
         self.job_id = job_id
 
 
+def _trace_fields(raw: str | None) -> dict[str, str]:
+    """The stored B3 fields of a job; none when absent or unreadable (a job of an older
+    version has none)."""
+    if raw is None:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {k: v for k, v in value.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 @dataclass(frozen=True)
 class JobRecord:
     """What the meta hash holds. ``owner`` is the principal's name, ``lease_until`` the epoch
@@ -397,6 +412,8 @@ class JobRecord:
     progress: JobProgress
     lease_until: float | None
     trace_id: str | None = None
+    # The creating request's B3 fields, as logged (O4); workers bind them with ``trace_id``.
+    trace_fields: dict[str, str] = field(default_factory=dict)
     # The job was created with caller secrets (B6); it stays set after they are gone, so the
     # browser worker never renders the job without them.
     has_secrets: bool = False
@@ -574,10 +591,12 @@ class JobStore:
         urls: Sequence[str | None],
         *,
         trace_id: str | None = None,
+        trace_fields: Mapping[str, str] | None = None,
         secrets: BrowserSecrets | None = None,
     ) -> str:
         """Store a new job in state ``queued`` and return its id. ``urls`` has one entry per
-        item, None for an uploaded file. ``trace_id`` is the creating request's. ``secrets``
+        item, None for an uploaded file. ``trace_id`` is the creating request's, and
+        ``trace_fields`` its B3 fields (``tracing.current_trace_fields``, O4). ``secrets``
         (B6) are stored apart from the job, for a short time only."""
         if not urls:
             raise ValueError("A job needs at least one URL (None for an uploaded file)")
@@ -600,6 +619,8 @@ class JobStore:
         }
         if trace_id is not None:
             meta["trace_id"] = trace_id
+        if trace_fields:
+            meta["trace_fields"] = json.dumps(dict(trace_fields), separators=(",", ":"))
         stored_secrets = secrets if secrets is not None and not secrets.empty() else None
         if stored_secrets is not None:
             meta["secrets"] = "1"
@@ -877,6 +898,7 @@ class JobStore:
             ),
             lease_until=float(lease_until) if lease_until is not None else None,
             trace_id=meta.get("trace_id"),
+            trace_fields=_trace_fields(meta.get("trace_fields")),
             has_secrets=meta.get("secrets") == "1",
         )
 

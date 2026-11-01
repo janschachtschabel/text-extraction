@@ -49,7 +49,7 @@ import io
 import json
 import threading
 import time
-from collections.abc import Callable, Container
+from collections.abc import Callable, Container, Mapping
 from pathlib import Path
 from typing import Any, Final, TypeGuard
 
@@ -136,7 +136,21 @@ def _decoder(max_duration: float | None) -> Callable[[str], Audio]:
     return decode
 
 
-def _client(base_url: str, api_key: str, *, timeout: float, user_agent: str | None) -> Any:
+# The trace headers a transcription passes on: ``tracing.TRACE_HEADER`` and ``B3_HEADERS``,
+# spelt out so that the ASR child does not import the web stack (a test keeps them equal).
+TRACE_NAMES: Final = frozenset(
+    {"x-client-trace-id", "b3", "x-b3-traceid", "x-b3-spanid", "x-b3-parentspanid", "x-b3-sampled"}
+)
+
+
+def _client(
+    base_url: str,
+    api_key: str,
+    *,
+    timeout: float,
+    user_agent: str | None,
+    trace_headers: Mapping[str, str] | None = None,
+) -> Any:
     """The OpenAI client of one transcription; see the module docstring."""
     http = httpx2.Client(follow_redirects=False, trust_env=False, timeout=timeout)
     # Issue #19: the SDK would take these from OPENAI_ORG_ID, OPENAI_PROJECT_ID and an
@@ -148,6 +162,11 @@ def _client(base_url: str, api_key: str, *, timeout: float, user_agent: str | No
     }
     if user_agent:
         headers["User-Agent"] = user_agent
+    # The job's trace headers (O4): only the trace names, never a header that could replace the
+    # key or the user agent.
+    headers.update(
+        {name: value for name, value in (trace_headers or {}).items() if name in TRACE_NAMES}
+    )
     return openai.OpenAI(
         api_key=api_key,
         base_url=base_url,
@@ -171,6 +190,7 @@ def transcribe_external(
     max_duration: float | None = None,
     budget: float | None = None,
     user_agent: str | None = None,
+    trace_headers: Mapping[str, str] | None = None,
     decode: Callable[[str], Audio] | None = None,
     encode: Callable[[Audio], bytes] = encode_ogg_opus,
 ) -> Transcription:
@@ -183,7 +203,9 @@ def transcribe_external(
         raise BudgetSpent
     deadline = time.monotonic() + budget if budget is not None else None
     audio = (decode or _decoder(max_duration))(str(path))
-    client = _client(base_url, api_key, timeout=timeout, user_agent=user_agent)
+    client = _client(
+        base_url, api_key, timeout=timeout, user_agent=user_agent, trace_headers=trace_headers
+    )
     segments: list[Cue] = []
     chosen = language
     verbose = True

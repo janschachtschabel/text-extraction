@@ -188,6 +188,7 @@ from text_extraction.pipeline_media import MediaInputMeta, media_too_long_messag
 from text_extraction.scheduler import QueueItem
 from text_extraction.server import EXIT_CONFIG_ERROR, _Server, _server, configured_settings
 from text_extraction.settings import Settings
+from text_extraction.tracing import outbound_trace_headers
 from text_extraction.valkey import create_valkey
 from text_extraction.worker import Worker, _serve
 
@@ -807,6 +808,7 @@ class AsrRunner:
                 "timeout": settings.asr_external_timeout_seconds,
                 "budget": left,
                 "user_agent": USER_AGENT,
+                "trace_headers": outbound_trace_headers(),  # the job's (O4)
             }
             model = settings.asr_external_model
         else:

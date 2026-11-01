@@ -1233,7 +1233,14 @@ async def test_metrics_count_outcomes() -> None:
 async def test_worker_logs_and_stores_under_the_creators_trace_id() -> None:
     url = page("example.org")
     harness = Harness({url: fetched(url)})
-    job_id = await harness.store.create("batch", OWNER, OPTIONS, [url], trace_id="trace-batch-1")
+    job_id = await harness.store.create(
+        "batch",
+        OWNER,
+        OPTIONS,
+        [url],
+        trace_id="trace-batch-1",
+        trace_fields={"x_b3_traceid": "80f198ee56343ba8", "x_b3_sampled": "1"},
+    )
     await harness.queue.enqueue(job_id, OWNER.name, [url])
     claim = await harness.claim()
 
@@ -1242,6 +1249,9 @@ async def test_worker_logs_and_stores_under_the_creators_trace_id() -> None:
 
     done = [entry for entry in logs if entry["event"] == "job_item_done"]
     assert [entry.get("trace_id") for entry in done] == ["trace-batch-1"]
+    # O4: the creator's B3 fields too.
+    assert [entry.get("x_b3_traceid") for entry in done] == ["80f198ee56343ba8"]
+    assert [entry.get("x_b3_sampled") for entry in done] == ["1"]
     [item] = await harness.items(job_id)
     assert item.result is not None
     assert item.result.trace_id == "trace-batch-1"

@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import structlog
 from prometheus_client import CollectorRegistry
 from pydantic import BaseModel, ValidationError
 from pytest_httpserver import HTTPServer
@@ -329,6 +330,18 @@ def test_header_key_wins_over_env_key(httpserver: HTTPServer) -> None:
 
     (request,) = sent(httpserver)
     assert request.headers["Authorization"] == f"Bearer {HEADER_KEY}"
+
+
+def test_the_callers_trace_headers_reach_the_endpoint(httpserver: HTTPServer) -> None:
+    # O4: the LLM endpoint's logs can be joined with the service's.
+    serve_chat(httpserver, completion('{"title": null}'))
+
+    with structlog.contextvars.bound_contextvars(trace_id="t-7", x_b3_traceid="80f198ee56343ba8"):
+        chat(settings_for(httpserver), key=None)
+
+    (request,) = sent(httpserver)
+    assert request.headers["x-client-trace-id"] == "t-7"
+    assert request.headers["x-b3-traceid"] == "80f198ee56343ba8"
 
 
 def test_env_key_used_without_header(httpserver: HTTPServer) -> None:

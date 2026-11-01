@@ -65,7 +65,8 @@ Python 3.13, uv, FastAPI, pydantic-settings, httpx, Playwright (Chromium), Trafi
 extruct, MarkItDown, Docling, Presidio + spaCy, youtube-transcript-api, yt-dlp,
 faster-whisper, own fair job queue on Valkey (Lua, leases), OpenAI SDK
 (OpenAI-compatible endpoints), FastMCP,
-structlog, prometheus-fastapi-instrumentator, OpenTelemetry (B3 propagator).
+structlog, prometheus-fastapi-instrumentator. Trace headers (`x-client-trace-id`, B3) are read and
+passed on by hand (`tracing.py`); OpenTelemetry is not used.
 Quality: ruff, mypy, pytest.
 
 ## Commands

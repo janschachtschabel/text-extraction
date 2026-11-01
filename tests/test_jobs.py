@@ -511,7 +511,10 @@ async def test_all_job_keys_share_one_hash_tag() -> None:
 @scenario
 async def test_create_keeps_the_creators_trace_id() -> None:
     store = make_store(FakeAsyncRedis())
-    traced = await store.create("batch", OWNER, OPTIONS, URLS[:1], trace_id="trace-42")
+    fields = {"x_b3_traceid": "80f198ee56343ba8", "b3": "80f198ee56343ba8-e457b5a2e4d86bd1"}
+    traced = await store.create(
+        "batch", OWNER, OPTIONS, URLS[:1], trace_id="trace-42", trace_fields=fields
+    )
     plain = await create_job(store)
 
     traced_record = await store.get(traced)
@@ -519,8 +522,10 @@ async def test_create_keeps_the_creators_trace_id() -> None:
 
     assert traced_record is not None
     assert traced_record.trace_id == "trace-42"
+    assert traced_record.trace_fields == fields
     assert plain_record is not None
     assert plain_record.trace_id is None
+    assert plain_record.trace_fields == {}
 
 
 # --- browser jobs: secrets, drafts and artifacts -------------------------------------------------

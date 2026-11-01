@@ -543,7 +543,11 @@ class Worker:
         try:
             with structlog.contextvars.bound_contextvars(job_id=item.job_id, item=item.index):
                 job = await self._store.get(item.job_id)
-                trace = {"trace_id": job.trace_id} if job is not None and job.trace_id else {}
+                trace = (
+                    {"trace_id": job.trace_id, **job.trace_fields}
+                    if job is not None and job.trace_id
+                    else {}
+                )
                 with structlog.contextvars.bound_contextvars(**trace):
                     if exhausted:
                         outcome = await self._fail_exhausted(item, job)

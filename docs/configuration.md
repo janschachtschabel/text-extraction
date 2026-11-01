@@ -108,8 +108,8 @@ and counts as unavailable, like a timeout (cached at most 300 s). Every redirect
 target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
 `enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
 `report` its findings join the report. Client trace headers
-(`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
-variables are ignored.
+(`x-client-trace-id`, B3) are logged but never forwarded to target sites (only to the LLM and the
+external ASR endpoint, see Headers), and proxy environment variables are ignored.
 
 ## Secrets
 
@@ -892,8 +892,8 @@ Read from the request:
 | Header | Use |
 | --- | --- |
 | `Authorization` | `Bearer <key>` when `AUTH_MODE=api_key`. |
-| `x-client-trace-id` | Client trace id; logged on every line of the request and used as `trace_id` in the response envelope. A job keeps the trace id of the request that created it (batch or hand-over): the worker logs each of its items under it, and the items' result envelopes carry it. |
-| `b3`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled` | B3 trace context; logged on every line of the request. |
+| `x-client-trace-id` | Client trace id; logged on every line of the request and used as `trace_id` in the response envelope. Without it the B3 trace id (`x-b3-traceid`, else the first part of `b3`) is the `trace_id`, and without either the service generates one. A job keeps the trace id of the request that created it (batch or hand-over): the worker logs each of its items under it, and the items' result envelopes carry it. The LLM and the external ASR endpoint receive it with every call. |
+| `b3`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled` | B3 trace context; logged on every line of the request. A job keeps them too, its workers log them, and the LLM and the external ASR endpoint receive them unchanged (no new span). |
 | `X-ASR-Api-Key` | The caller's key of the external transcription endpoint (`POST /v1/extract`, `/v1/extract/file`, `/v1/batch`, `/v1/structured`, `/v1/chunk`); wins over `ASR_EXTERNAL_API_KEY`. A secret: kept with the job, never logged or shown. |
 | `X-LLM-Api-Key` | The caller's key of the LLM endpoint (`POST /v1/extract`, `/v1/extract/file`, `/v1/batch`, `/v1/structured`, `/v1/chunk`), 1 to 1,024 visible ASCII characters (else 400); wins over `LLM_API_KEY`. A secret: kept with the job (see [Job keys](#job-keys)), never logged or shown. |
 
