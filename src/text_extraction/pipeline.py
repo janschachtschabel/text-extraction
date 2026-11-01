@@ -176,7 +176,7 @@ from text_extraction.convert import (
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
-from text_extraction.documents.sniff import media_type, named_text_type, sniff
+from text_extraction.documents.sniff import media_type, named_text_type, not_text, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
@@ -1564,6 +1564,8 @@ class Pipeline:
             )
         kind = await self._kind(fetched)
         if kind is None:
+            if (label := await self._not_a_page(fetched.content, fetched.content_type)) is not None:
+                return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, label)
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
                 f"Content type {fetched.content_type or 'unknown'} is not supported in fast mode.",
@@ -1605,15 +1607,23 @@ class Pipeline:
         return await self._extract_content(run, fetched, kind, text)
 
     async def _kind(self, fetched: FetchResult) -> DocumentKind | Literal["html", "text"] | None:
-        """What the fetched body is (F1). A declared HTML type keeps the page path without a
-        look at the bytes; the URL's last path segment breaks the CSV tie, but not for a
-        declared ``text/plain`` body: that stays plain text unless it starts with a document's
-        signature (the package-2 answer)."""
+        """What the fetched body is (F1). A declared HTML type keeps the page path unless its
+        bytes are no text at all (B1: a document's or image's signature at the start, a NUL
+        byte in the first KiB), which is None; the URL's last path segment breaks the CSV tie,
+        but not for a declared ``text/plain`` body: that stays plain text unless it starts
+        with a document's signature (the package-2 answer)."""
         kind = _KINDS.get(fetched.content_type or "")
-        if kind == "html":
-            return "html"
-        name = None if kind == "text" else urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
+        name = None if kind is not None else urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
         return await self._pool.run(sniff, fetched.content, fetched.content_type, name)
+
+    async def _not_a_page(self, body: bytes, declared: str | None) -> str | None:
+        """The refusal of a body declared as HTML that is no text (B1), or None."""
+        if _KINDS.get(declared or "") != "html":
+            return None
+        what = await self._pool.run(not_text, body)
+        if what is None:  # pragma: no cover - sniff refused it for this reason only
+            return None
+        return f"The body is declared {declared} but is {what}, not a page."
 
     async def _document(
         self, run: _Run, fetched: FetchResult, kind: DocumentKind, stored: _Stored | None
@@ -2062,6 +2072,8 @@ class Pipeline:
         run.kind = kind
         if kind is None:
             run.content_type = declared
+            if (label := await self._not_a_page(body, declared)) is not None:
+                return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, label)
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
                 f"Content type {declared or 'unknown'} is not supported.",

@@ -20,6 +20,7 @@ __all__ = [
     "check_container",
     "media_type",
     "named_text_type",
+    "not_text",
     "sniff",
 ]
 
@@ -92,6 +93,27 @@ _OLE_END_OF_CHAIN: Final = 0xFFFFFFFE
 _OLE_MAX_SECTOR_ID: Final = 0xFFFFFFF9
 _OLE_WORKBOOK_STREAMS: Final = frozenset({"Workbook", "Book"})
 _BMP_DIB_SIZES: Final = frozenset({12, 40, 52, 56, 64, 108, 124})
+# A NUL byte in this many first bytes makes a body declared as HTML or text binary (B1).
+_BINARY_SAMPLE: Final = 1024
+# UTF-16 text without a byte order mark: at least this share of one byte lane is NUL.
+_UTF16_NUL_SHARE: Final = 0.8
+_LABELS: Final[dict[DocumentKind, str]] = {
+    "pdf": "a PDF document",
+    "docx": "a DOCX document",
+    "pptx": "a PPTX document",
+    "xlsx": "an XLSX document",
+    "xls": "an XLS document",
+    "epub": "an EPUB document",
+    "csv": "a CSV file",
+    "odt": "an ODT document",
+    "ods": "an ODS document",
+    "odp": "an ODP document",
+    "png": "a PNG image",
+    "jpeg": "a JPEG image",
+    "tiff": "a TIFF image",
+    "webp": "a WebP image",
+    "bmp": "a BMP image",
+}
 
 
 class DocumentTooLarge(Exception):  # noqa: N818 - the name is part of the task's interface
@@ -112,7 +134,9 @@ def sniff(
 ) -> DocumentKind | Literal["html", "text"] | None:
     """The kind of a body, or None when it is not supported.
 
-    A declared HTML or XHTML type is always "html" (the page path). For anything else the
+    A declared HTML or XHTML type is "html" (the page path) unless its bytes are not text
+    (``not_text``: a document's or image's signature at the start, or binary data): then None
+    (B1), so that the body is refused instead of read as mojibake. For anything else the
     bytes decide first; then an HTML page declared as a document type, as
     ``application/octet-stream`` or not at all ("html": an upload named report.pdf that is
     HTML); then CSV (declared, or a ``.csv`` name, with decodable text); then a declared
@@ -122,7 +146,7 @@ def sniff(
     """
     media = (declared or "").split(";", 1)[0].strip().lower()
     if media in _HTML_TYPES:
-        return "html"
+        return "html" if not_text(body) is None else None
     try:
         by_bytes = _sniff_bytes(body, at_start=media in TEXT_TYPES)
     except Exception:  # a parser boundary on hostile input: no kind is always safe
@@ -136,6 +160,36 @@ def sniff(
     if media in TEXT_TYPES:
         return "text"
     return None
+
+
+def not_text(body: bytes) -> str | None:
+    """What a body declared as HTML is when it is no text at all: "a PDF document",
+    "a PNG image" and so on by a signature at its start (after a byte order mark and
+    whitespace), "binary data" for a NUL byte in its first KiB (UTF-16 text excepted), else
+    None. A signature later in the body is quoted text, not the body's kind."""
+    try:
+        kind = _sniff_bytes(body, at_start=True)
+    except Exception:  # a parser boundary on hostile input: the NUL test still applies
+        kind = None
+    if kind is not None:
+        return _LABELS[kind]
+    return "binary data" if _binary(body) else None
+
+
+def _binary(body: bytes) -> bool:
+    """A NUL byte in the first KiB, unless the bytes are UTF-16: a UTF-16 or UTF-32 byte order
+    mark, or (without one) NULs in one byte lane only, filling most of it, as ASCII-range
+    text in UTF-16 has."""
+    sample = body[:_BINARY_SAMPLE]
+    if b"\x00" not in sample:
+        return False
+    if sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return False
+    even, odd = sample[0::2], sample[1::2]
+    for lane, other in ((even, odd), (odd, even)):
+        if b"\x00" not in other and lane.count(0) >= _UTF16_NUL_SHARE * len(lane):
+            return False
+    return True
 
 
 def named_text_type(body: bytes, declared: str | None, name: str | None) -> str | None:

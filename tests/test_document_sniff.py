@@ -13,6 +13,7 @@ from text_extraction.documents.sniff import (
     check_container,
     media_type,
     named_text_type,
+    not_text,
     sniff,
 )
 from text_extraction.documents.types import DocumentKind
@@ -88,9 +89,44 @@ def test_pdf_signature_within_first_kilobyte() -> None:
 
 def test_html_declared_stays_html() -> None:
     assert sniff(b"<html></html>", "text/html", None) == "html"
-    # The package 2 path is unchanged: a declared HTML page is HTML even with a PDF body.
-    assert sniff(PDF, "text/html", None) == "html"
-    assert sniff(PDF, "application/xhtml+xml", "x.pdf") == "html"
+    # A page that quotes a signature later on is still the page.
+    assert sniff(b"<p>A PDF starts with %PDF-1.7</p>", "text/html", None) == "html"
+    assert not_text(b"<p>A PDF starts with %PDF-1.7</p>") is None
+
+
+PNG_HEAD = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+
+@pytest.mark.parametrize(
+    ("body", "label"),
+    [
+        (PDF, "a PDF document"),
+        (b" \r\n" + PDF, "a PDF document"),
+        (PNG_HEAD + b"\x00" * 64, "a PNG image"),
+        (b"\xff\xd8\xff\xe0" + b"\x00" * 64, "a JPEG image"),
+        (b"\x1f\x8b\x08\x00" + b"\x00\xff" * 64, "binary data"),  # gzip, still packed
+        (b"<html>\x00\x01\x02 garbage", "binary data"),
+    ],
+)
+def test_a_binary_body_declared_as_html_is_not_a_page(body: bytes, label: str) -> None:
+    """B1: a declared HTML page whose bytes are binary (a NUL byte in the first KiB) or a
+    document or image is refused, not read as mojibake."""
+    assert not_text(body) == label
+    assert sniff(body, "text/html", None) is None
+    assert sniff(body, "application/xhtml+xml", "x.pdf") is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<html><body>Grüße</body></html>".encode("utf-16"),  # with a byte order mark
+        "<html><body>Grüße</body></html>".encode("utf-16-le"),
+        "<html><body>Grüße</body></html>".encode("utf-16-be"),
+    ],
+)
+def test_utf16_html_is_not_binary(body: bytes) -> None:
+    assert not_text(body) is None
+    assert sniff(body, "text/html", None) == "html"
 
 
 HTML_BODIES = [
@@ -187,7 +223,8 @@ def test_html_bytes_need_the_tag_at_the_start() -> None:
 
 
 def test_declared_type_with_parameters_and_case() -> None:
-    assert sniff(PDF, "Text/HTML; charset=UTF-8", None) == "html"
+    assert sniff(b"<p>Hi</p>", "Text/HTML; charset=UTF-8", None) == "html"
+    assert sniff(PDF, "Text/HTML; charset=UTF-8", None) is None  # B1: not a page
     assert sniff(PDF, "TEXT/PLAIN; charset=utf-8", None) == "pdf"
     assert sniff(b"a,b\n", "text/plain; charset=utf-8", None) == "text"
     assert sniff(b"a,b\n", "Text/CSV; charset=utf-8", None) == "csv"

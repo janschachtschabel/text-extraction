@@ -813,7 +813,11 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   | `png`, `jpeg`, `tiff`, `webp`, `bmp` | image signatures | Docling (OCR) |
   | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |
 
-  A body declared HTML or XHTML keeps its package-2 path. A body declared `text/plain` (or
+  A body declared HTML or XHTML keeps its package-2 path, unless its bytes are no text at all
+  (audit B1, 2026-11-01): a document's or image's signature at its start, or a NUL byte in its
+  first KiB (UTF-16 text excepted). Such a body answers `unsupported_content_type`, "The body is
+  declared text/html but is a PNG image, not a page." (or "binary data"), instead of a page of
+  U+FFFD characters. A body declared `text/plain` (or
   `text/markdown`, `text/x-markdown`, which take the same path as Markdown) is a document only when a signature starts it (offset 0 after an optional byte order mark and at
   most 1 KiB of whitespace); otherwise it stays plain text, also when its URL ends in `.csv` (the extension
   tie-break does not apply to a declared `text/plain`). Untyped bodies, `application/octet-stream`

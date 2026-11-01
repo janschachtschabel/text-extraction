@@ -275,6 +275,27 @@ def test_unsupported_content_type() -> None:
     assert data.content is None
 
 
+@pytest.mark.parametrize(
+    ("body", "label"),
+    [
+        (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 200, "a PNG image"),
+        (b"<html>\x00\x01\x02\x03 not a page", "binary data"),
+    ],
+    ids=["png", "nul"],
+)
+def test_a_binary_body_declared_as_html_is_unsupported(body: bytes, label: str) -> None:
+    """B1: not read as a page of U+FFFD characters (``partial``), refused with what it is."""
+    harness = Harness({PAGE: fetched(body=body, content_type="text/html")})
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert envelope.error.message == (f"The body is declared text/html but is {label}, not a page.")
+    assert data_of(envelope).content is None
+
+
 def test_plain_text_is_converted() -> None:
     text = (PARAGRAPH * 3).replace(". ", ".\r\n")
     harness = Harness({PAGE: fetched(body=text, content_type="text/plain")})

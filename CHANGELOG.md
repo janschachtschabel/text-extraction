@@ -64,6 +64,9 @@ and
 
 ### Fixed
 
+- A body declared `text/html` whose bytes are binary (a document's or image's signature at its
+  start, a NUL byte in its first KiB) answered `partial` with a page of U+FFFD characters; it is
+  `unsupported_content_type` now, and the message names what the bytes are.
 - A batch item moving to the Docling or ASR workers whose job was deleted between storing its
   bytes and its draft kept the bytes in Valkey and in `DOCLING_INPUT_BUDGET_BYTES` until their
   TTL; the move now gives them back at once.
