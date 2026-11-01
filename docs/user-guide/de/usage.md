@@ -25,8 +25,11 @@ Ein Schlüssel hat die Rolle `user` oder `admin`. Admins dürfen außerdem `comp
 Job lesen; ein Nutzer liest nur seine eigenen Jobs. Bei einem fehlenden oder falschen Schlüssel
 antwortet der Dienst mit 401 `unauthorized`, bei einer Anfrage, die die Rolle nicht stellen darf,
 mit 403 `forbidden`. Ausnahme ist ein XPath-Selektor mit einem Nutzerschlüssel: Darauf antwortet
-der Dienst wie bei jedem anderen ungültigen Feld mit 422 `invalid_request`. Jeder Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber
-antwortet eine Anfrage mit 429 `rate_limited` und `Retry-After`.
+der Dienst wie bei jedem anderen ungültigen Feld mit 422 `invalid_request`. Ein Body, der nicht als
+JSON gesendet wird (`Content-Type: application/json`), ergibt 415 `invalid_request`. Jeder
+Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber antwortet eine Anfrage mit 429
+`rate_limited` und `Retry-After`. Ein 503, bei dem sich ein neuer Versuch lohnt (der Zustandsspeicher
+des Dienstes ist kurz weg), trägt `Retry-After: 5`.
 
 Mit `AUTH_MODE=none` braucht der Dienst keinen Schlüssel, und jeder Aufrufer ist Admin. Verwenden
 Sie das nur auf Ihrem eigenen Rechner.
@@ -63,9 +66,12 @@ Jede Antwort hat dieselbe Form, das Ergebnis-Envelope:
   `target_http_error` oder `blocked_by_robots`, `error.message` ein englischer Text, und
   `error.retryable` sagt, ob dieselbe Anfrage später gelingen kann.
 - `data.upstream_status` ist der HTTP-Status der Seite, `data.mode_used` ist `fast`, `browser` oder
-  `upload`, und `data.timings` gibt die Zeit jedes Schritts in Millisekunden an.
+  `upload`, und `data.timings` gibt die Zeit jedes Schritts in Millisekunden an. Ein Job-Eintrag,
+  der durch einen Fehler des Dienstes scheiterte, bevor ein Schritt lief, hat `mode_used` und
+  `upstream_status` null, keinen Inhalt und Zeiten von 0.
 - `data.warnings` nennt, was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa
-  `browser_unavailable`.
+  `browser_unavailable`, oder `charset_mismatch` für eine als UTF-8 deklarierte Seite, deren
+  Bytes es nicht sind (sie wird dann als Windows-1252 gelesen).
 
 Wenn das Ziel scheitert (die Website antwortet mit 404, lehnt den Dienst ab oder ist nicht
 erreichbar), antwortet die API trotzdem mit HTTP 200, mit `status: failed`. Ein 4xx ist ein Problem
@@ -96,8 +102,8 @@ Anfrage, die länger als `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` au
 LLM-Worker wartet. Ein Upload wartet standardmäßig 25 s. Der `state` eines Jobs geht von `queued`
 über `running` zu `completed`, und `progress` zählt seine Einträge nach Status. Ein Job wird
 `JOB_TTL_SECONDS` (24 h) aufbewahrt, und nur sein Eigentümer (oder ein Admin) kann ihn lesen. Mit
-`JOBS_ENABLED=false` gibt es keine Jobs: `wait_seconds` wird ignoriert, und Batches und
-Website-Strukturen antworten mit 503.
+`JOBS_ENABLED=false` gibt es keine Jobs: `wait_seconds` wird ignoriert, und Batches,
+Website-Strukturen und die Job-Routen antworten mit 400 `invalid_request`.
 
 ### Batch
 
@@ -207,8 +213,9 @@ unter [Website-Regeln](site-rules.md).
 
 PDFs, Word-, PowerPoint- und Excel-Dateien (DOCX, PPTX, XLSX, XLS), EPUBs und CSVs werden wie
 Seiten umgewandelt: `POST /v1/extract` mit ihrer URL oder `POST /v1/batch`. Die Bytes entscheiden
-vor dem `Content-Type`, was eine Datei ist (ein PDF, das als `application/octet-stream` ausgeliefert
-wird, bleibt ein PDF). Um eine Datei umzuwandeln, die Sie haben, laden Sie sie als
+vor dem `Content-Type`, was eine Datei ist (ein PDF, das als `application/octet-stream` oder, wie
+oft bei einem `download.php`, als `text/html` ausgeliefert wird, bleibt ein PDF; als `text/html`
+deklarierte Binärdaten ergeben `unsupported_content_type`). Um eine Datei umzuwandeln, die Sie haben, laden Sie sie als
 `multipart/form-data` an `POST /v1/extract/file` hoch (höchstens `DOCUMENT_MAX_BYTES`, 20 MB):
 
 ```bash

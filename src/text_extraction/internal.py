@@ -7,12 +7,11 @@ from redis.asyncio import Redis
 from text_extraction.errors import install_error_handlers
 from text_extraction.settings import Settings
 from text_extraction.tracing import TraceMiddleware
-from text_extraction.valkey import valkey_ping
 
 
 class Readiness:
-    """Whether the pod may get traffic, apart from Valkey: the public server listens and the
-    shutdown has not begun. The server sets both; ``/ready`` reads them."""
+    """Whether the pod may get traffic: the public server listens and the shutdown has not
+    begun. The server sets both; ``/ready`` reads them."""
 
     def __init__(self) -> None:
         self._listening = False
@@ -52,9 +51,13 @@ def create_internal_app(
 
     @app.get("/ready")
     async def ready(response: Response) -> dict[str, str]:
-        """Readiness: 200 when the public server listens, no shutdown has begun and Valkey
-        answers; else 503."""
-        if readiness.ready and await valkey_ping(valkey):
+        """Readiness: 200 when the public server listens and no shutdown has begun; else 503.
+
+        Valkey is not part of it (ruling D1): without Valkey no pod can help, so taking every
+        pod out of the Service would only replace the API's 503 envelope (with its trace id)
+        by the ingress's bare 503. The metric ``text_extraction_valkey_up`` and the alert
+        ``TextExtractionValkeyDown`` report the outage instead."""
+        if readiness.ready:
             return {"status": "ready"}
         response.status_code = 503
         return {"status": "not_ready"}

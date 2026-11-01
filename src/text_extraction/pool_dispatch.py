@@ -92,14 +92,14 @@ from text_extraction.auth import Principal
 from text_extraction.browser_options import BrowserSecrets
 from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope
-from text_extraction.extract_models import ExtractRequest, ExtractResult
+from text_extraction.extract_models import ExtractRequest, ExtractResult, with_own_fault_data
 from text_extraction.job_models import JobKind, JobOptions
 from text_extraction.jobs import JobLost, JobRecord, JobStore
 from text_extraction.queue_metrics import dispatch_counter_for
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
 from text_extraction.settings import Settings
-from text_extraction.tracing import current_trace_id
+from text_extraction.tracing import current_trace_fields, current_trace_id
 
 _log = structlog.get_logger(__name__)
 
@@ -342,6 +342,7 @@ class PoolDispatcher:
                     options,
                     [url],
                     trace_id=current_trace_id(),
+                    trace_fields=current_trace_fields(),
                     secrets=secrets,
                 )
             except BACKEND_ERRORS:
@@ -417,6 +418,13 @@ class PoolDispatcher:
             if record.state == "completed":
                 items = await self._store.items(job_id, 0, 1)
                 result = items[0].result if items else None
+                if result is not None:  # an own fault has the envelope's fields too (C14)
+                    result = with_own_fault_data(
+                        result,
+                        items[0].url,
+                        format=record.options.format,
+                        compliance=record.options.compliance,
+                    )
                 return ("answered" if result is not None else "no_result"), result
             now = self._clock()
             if record.state == "running" and claimed_at is None:

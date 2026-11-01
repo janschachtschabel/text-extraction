@@ -57,7 +57,8 @@ must be listed in `MCP_ALLOWED_ORIGINS`; a request with any other `Origin` is re
 
 An MCP client authenticates with an API key of the service, exactly as a REST client does (see
 [API keys](usage.md#api-keys)). Every tool call runs the REST route's checks, with the key's role,
-and is counted against the key's rate limit. An admin key may also use `compliance: ignore`
+and is counted against the key's rate limit, as are `initialize` and `tools/list`; a `get_job`
+that waits counts one more call for each further 10 s. An admin key may also use `compliance: ignore`
 (see [Site rules](site-rules.md)) and XPath selectors. Under `AUTH_MODE=none` leave the header
 out.
 
@@ -104,6 +105,12 @@ the route's own limits, and `batch_extract`, `site_structure` and the job tools 
 A long `content` is cut to `max_chars` (`MCP_MAX_CONTENT_CHARS`, 50,000; shared by the items of a
 `get_job` page) with the warning `mcp_content_truncated`. The hint names the `content_offset` to
 call again with, and the next call returns the content from there.
+
+A whole answer is at most `MCP_MAX_ANSWER_CHARS` (200,000) characters of envelope JSON (the
+answer carries the envelope twice, as `structuredContent` and as its last text). A `get_job` page over it
+holds fewer items, and its `next_offset` names where the next page starts. In a single result the
+lists `chunks`, `links`, `structured.tables` and `site.links` are cut from the end, in that order,
+with the warning `mcp_answer_truncated`; the REST route returns them whole.
 
 ## Errors
 

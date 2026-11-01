@@ -4,7 +4,7 @@
 ``batch_extract`` and ``site_structure`` build their route's body as the extraction tools do
 (``options`` merged under the arguments, the route's body limit, the REST model) and always
 answer a job. The other three take a ``job_id`` and nothing else of a REST body. Every tool runs
-``check_jobs_enabled`` (503 ``internal_error`` as REST) before its route's core, and the cores
+``check_jobs_enabled`` (400 ``invalid_request`` as REST) before its route's core, and the cores
 answer 404 ``not_found`` for a job the caller may not see.
 
 ``get_job`` waits for the job, when asked, by reading its progress once a second until it is
@@ -13,6 +13,7 @@ items share ``max_chars`` of content.
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
@@ -35,7 +36,13 @@ from text_extraction.jobs_api import (
     start_batch,
 )
 from text_extraction.mcp_server.calls import ModelTool
-from text_extraction.mcp_server.results import payload_result, png_content, slice_items
+from text_extraction.mcp_server.results import (
+    fit_answer,
+    kept_item_hints,
+    payload_result,
+    png_content,
+    slice_items,
+)
 from text_extraction.mcp_server.tools_extract import (
     FORMAT_DESCRIPTION,
     Answer,
@@ -47,6 +54,7 @@ from text_extraction.mcp_server.tools_extract import (
     lean_schema,
     options_argument,
 )
+from text_extraction.ratelimit import count_used
 from text_extraction.screenshot_api import read_artifact
 from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
@@ -172,6 +180,10 @@ def _read_only() -> ToolAnnotations:
     return ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
 
+# The seconds of a get_job wait that one rate-limit hit covers (M4).
+WAIT_SECONDS_PER_HIT = 10
+
+
 async def _wait_until_completed(
     state: State,
     principal: Principal,
@@ -217,16 +229,22 @@ class GetJobTool(ModelTool):
         check_jobs_enabled(settings)
         wait = min(args.wait_seconds, settings.mcp_wait_seconds)
         request = get_http_request()  # the call guard has read the caller from it
+        started = time.monotonic()
         gone = await _wait_until_completed(
             state, principal, args.job_id, wait, request.is_disconnected
         )
+        # The call's own hit covers the first step of the wait; each further one counts (M4).
+        steps = math.ceil((time.monotonic() - started) / WAIT_SECONDS_PER_HIT)
+        await count_used(state, principal, steps - 1)
         if gone is not None:
             _log.info("mcp_client_disconnected", tool=self.name, job_id=args.job_id)
             return payload_result(gone.model_dump(mode="json"), is_error=False)
         envelope = await read_job(state, principal, args.job_id, args.offset, args.limit)
         payload = envelope.model_dump(mode="json")
         max_chars = args.max_chars or settings.mcp_max_content_chars
-        hints = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
+        sliced = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
+        cut = fit_answer(payload, max_chars=settings.mcp_max_answer_chars)
+        hints = [*kept_item_hints(payload, sliced), *cut]
         return payload_result(payload, is_error=False, hints=hints)
 
 

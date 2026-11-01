@@ -23,7 +23,8 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `INTERNAL_PORT` | `9090` | Port of the internal listener (`/health`, `/ready`, `/metrics`). Fixed to 9090 by the Helm chart. Workers serve it too: an API and a worker run on one host (outside compose and Helm, which give each its own container) need distinct values, e.g. `INTERNAL_PORT=9091` for the worker. 1 to 65535. |
 | `LOG_LEVEL` | `INFO` | Log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` (case-insensitive). Anything else makes the service exit with code 2. |
 | `LOG_FORMAT` | `json` | `json` (stdout, one object per line) or `console` (plain text for local development). |
-| `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. `none` checks no `Host` header either, so even on `localhost` a web page open in a browser of the same machine can reach the API and the UI as admin through DNS rebinding (its own domain resolved to 127.0.0.1). Use `none` only while you need it, and `api_key` on any machine that also browses the web. |
+| `AUTH_MODE` | `api_key` | `api_key` requires a key on every public request; `none` disables authentication and gives every caller the `admin` role. With `api_key` the service exits with code 2 at start-up when no key is configured. `none` answers only requests whose `Host` is in `ALLOWED_HOSTS`, so a web page that resolves its own domain to 127.0.0.1 (DNS rebinding) is refused; anyone who reaches the port under an allowed name is still an admin. Use `none` only while you need it, and `api_key` on any machine that others can reach. |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1],api` | Under `AUTH_MODE=none` only: the host names of the `Host` header the public port answers (REST, `/mcp` and `/ui`), as a comma list of names, IPv4 addresses and bracketed IPv6 addresses (the port is ignored, case too). Any other `Host` answers 400 `invalid_request`. `*` switches the check off. `api` is the service name in docker compose; add the name your clients use, such as a Kubernetes Service. Unused under `api_key`. An entry with a scheme, port or path, or an empty list under `AUTH_MODE=none`, makes the service exit with code 2. |
 | `API_KEYS` | empty | **Secret**, see [Secrets](#secrets): the API keys, a JSON list of hashed entries with name and role. |
 | `API_KEYS_FILE` | unset | Path to a JSON file of further keys in the shape of `API_KEYS`, merged with it; its content is a secret, see [Secrets](#secrets). |
 | `RATE_LIMIT_ENABLED` | `true` | Switch the inbound rate limit on or off. The counters live in Valkey: while it is unreachable every call answers 503; while it is full (`maxmemory`, noeviction) calls go through uncounted (log event `rate_limit_backend_full`), so job reads and `DELETE` still work. That holds for every route, extractions too: the memory guard (`VALKEY_MEMORY_GUARD_RATIO`) refuses new jobs meanwhile, and the alert `TextExtractionValkeyMemoryHigh` fires. |
@@ -62,7 +63,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `WORKER_CONCURRENCY` | `8` | Job items one extract worker pod (`text-extraction-worker`) processes at once. Conversions are still capped by `CONVERT_CONCURRENCY` in that pod, and requests to one host by `OUTBOUND_MAX_CONCURRENCY_PER_HOST` across all pods. Minimum 1. Helm: `workers.extract.concurrency`. |
 | `BATCH_MAX_URLS` | `1000` | Most URLs one `POST /v1/batch` may carry. More answers 422 `invalid_request`. A body over `BATCH_MAX_URLS` × (`MAX_URL_LENGTH` (2048) + 8) bytes plus 4 KiB answers 413 `invalid_request` before it is read whole or parsed (see `REQUEST_MAX_BODY_BYTES`). A batch must finish within `JOB_TTL_SECONDS`, which is not renewed while it runs. Minimum 1, maximum 100000. |
 | `BATCH_MAX_OPEN_PER_CLIENT` | `5` | Batches and site jobs (`POST /v1/site-structure`) one API key may have unfinished (queued or running) at a time, both kinds counted together. The next `POST /v1/batch` or `POST /v1/site-structure` answers 429 `rate_limited` (retryable, `Retry-After: 60`) until one completes or expires. With `AUTH_MODE=none` all callers share one anonymous owner, so the limit applies to the whole deployment, and every caller can read every job. Minimum 1. |
-| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch`, `POST /v1/site-structure`, `GET /v1/jobs/{id}` and `DELETE /v1/jobs/{id}` answer 503 `internal_error` ("Jobs are disabled on this deployment."), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
+| `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch`, `POST /v1/site-structure`, `GET /v1/jobs/{id}` and `DELETE /v1/jobs/{id}` answer 400 `invalid_request` ("Jobs are disabled on this deployment."; 503 `internal_error` until v0.1.0), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
 | `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `BROWSER_ENABLED` | `false` | Switch browser mode on: pages are rendered by the browser workers (`text-extraction-browser-worker`, pool `browser`); the API pods queue them and wait. Off, `mode: browser`, `screenshot: true`, `actions`, `cookies`, `headers`, `POST /v1/screenshot` and a batch with `mode: browser` answer 400 `invalid_request` ("Browser mode is not enabled on this service."), and `mode: auto` never uses a browser (its answers are those of fast mode). The image of an API pod has no browser; the browser worker image has. On, the graceful shutdown of the API covers a sync request that waits for the browser: the fast phase of an escalating `auto` request (`EXTRACT_TIMEOUT_SECONDS`) + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 s, that is 75 s by default and 105 s with unblock mode. The Kubernetes `terminationGracePeriodSeconds` of the API pods must cover `SHUTDOWN_DRAIN_SECONDS` plus that plus a margin: the Helm chart sets it to 90 s (120 s with unblock mode) unless you set it, and docker compose stops the API with a 120 s grace period. Extract workers keep their own bound; browser workers have theirs (see Ports and probes). Helm: `workers.browser.enabled` (default true) deploys the browser workers and renders this variable into the API, extract worker and browser worker pods. docker compose always starts a browser worker and sets it to true for every service. |
 | `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. 5 to 120. |
@@ -70,7 +71,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `BROWSER_CONCURRENCY` | `4` | Pages one browser worker pod (`text-extraction-browser-worker`) renders at the same time, standard and unblock mode together; also its number of job slots (`WORKER_CONCURRENCY` does not apply there). Minimum 1. Helm: `workers.browser.concurrency`; the pod resources (`workers.browser.resources`) are sized for 4. |
 | `BROWSER_IDLE_WAIT_SECONDS` | `8` | Longest time a page is given to become quiet (no network traffic) after it has loaded, in seconds. 0 to 30. |
 | `BROWSER_RECYCLE_AFTER_PAGES` | `200` | Pages a browser process renders before it is restarted, to bound its memory. Minimum 1. |
-| `BROWSER_MAX_BYTES` | `50000000` | Largest total of all responses one page may load, in bytes. Minimum 1000000. |
+| `BROWSER_MAX_BYTES` | `50000000` | Largest total of all responses one page may load, in bytes, as the egress proxy counts them on the wire; past it the proxy refuses new connections and the page answers what it has, with the warning `browser_bytes_capped`. The page's decoded response bytes (after `Content-Encoding`, which the proxy cannot see) may reach twice this: past that the render ends at once with `too_large`, not retryable (a gzip bomb). Minimum 1000000. |
 | `BROWSER_BLOCKED_RESOURCES` | `image,media,font` | Comma-separated Playwright resource types that the browser does not load: `document`, `stylesheet`, `image`, `media`, `font`, `script`, `texttrack`, `xhr`, `fetch`, `eventsource`, `websocket`, `manifest`, `other`. `document` cannot be blocked. Empty blocks nothing. Anything else makes the service exit with code 2. |
 | `BROWSER_AUTOCONSENT` | `true` | Opt out of cookie banners automatically (decline what is optional) before the text is read; a cookie dialog that is still in the way is removed from the page (warning `consent_overlay_removed`). |
 | `BROWSER_EXECUTABLE_PATH` | none | Path of a local Chromium. For development only; deployments use the browser the image ships. |
@@ -82,7 +83,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `BROWSER_UNBLOCK_COOKIE_TTL_SECONDS` | `1800` | How long the cookies of a cleared challenge are reused for the same host, in seconds. 0 means no reuse. Minimum 0. |
 | `SCREENSHOT_MAX_BYTES` | `10485760` | Largest screenshot file, in bytes (10 MiB). Minimum 1. |
 | `SCREENSHOT_MAX_HEIGHT_PX` | `16384` | Tallest screenshot, in pixels; a longer page is cut. 1080 to 32768. |
-| `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download (`GET /v1/jobs/{id}/artifacts/screenshot.png`), in seconds. The download is a job route: it needs `JOBS_ENABLED=true` (otherwise 503), so a deployment that takes screenshots keeps jobs on. Minimum 60. |
+| `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download (`GET /v1/jobs/{id}/artifacts/screenshot.png`), in seconds. The download is a job route: it needs `JOBS_ENABLED=true` (otherwise 400), so a deployment that takes screenshots keeps jobs on. Minimum 60. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default, 55 s with OCR only, 80 s with browser mode, 110 s with unblock mode) must stay below the API pods' `terminationGracePeriodSeconds` minus a 10 s margin; the Helm chart computes it from both unless you set it (45, 65, 90 or 120 s), see Response times. Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -107,8 +108,8 @@ and counts as unavailable, like a timeout (cached at most 300 s). Every redirect
 target is checked like the requested URL (robots.txt is path-specific) before it is fetched; under
 `enforce` a disallowed target ends the request with `blocked_by_robots` or `tdm_reserved`, under
 `report` its findings join the report. Client trace headers
-(`x-client-trace-id`, B3) are logged but never forwarded to target sites, and proxy environment
-variables are ignored.
+(`x-client-trace-id`, B3) are logged but never forwarded to target sites (only to the LLM and the
+external ASR endpoint, see Headers), and proxy environment variables are ignored.
 
 ## Secrets
 
@@ -147,13 +148,16 @@ Generate a key with `openssl rand -hex 32` and compute its hash with
 
 - `/health` is the liveness probe. It never touches Valkey, so a Valkey outage does not restart pods.
 - `/ready` is the readiness probe. It answers 200 only when the public port listens (after the
-  start-up, which loads the language model), no shutdown has begun and Valkey answers. Pods
-  without Valkey leave the load balancer, and so does a pod as soon as it gets SIGTERM.
+  start-up, which loads the language model) and no shutdown has begun; a pod leaves the load
+  balancer as soon as it gets SIGTERM. It does not look at Valkey: without Valkey no pod can
+  help, so the pods stay in the Service and answer 503 `internal_error` (retryable, with the
+  trace id) instead of the ingress's bare 503. The gauge `text_extraction_valkey_up` and the
+  Helm alert `TextExtractionValkeyDown` report the outage.
 - `/metrics` is Prometheus text and is not reachable on 8080.
 
 The extract worker (`text-extraction-worker`) serves only port 9090, with the same three paths.
-Its `/ready` answers 200 once it has loaded the language model and its loops claim items, while
-Valkey answers. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
+Its `/ready` answers 200 once it has loaded the language model and its loops claim items; like
+the API's, it does not look at Valkey. On SIGTERM `/ready` turns 503 at once, the worker stops claiming and gives the
 items in flight `max(30, EXTRACT_TIMEOUT_SECONDS + 5)` seconds to finish; a claim already sent
 when the signal arrives counts as in flight, so its item is processed too. An item still running
 then is cancelled, and its lease expires so that another worker runs it. There is no drain wait,
@@ -678,8 +682,10 @@ Every request to `/mcp` passes the same checks as a REST request, in this order:
    REST 401 envelope with `WWW-Authenticate: Bearer`. Under `AUTH_MODE=none` every caller is the
    anonymous admin, as for REST.
 
-Each `tools/call` counts once against the caller's rate limit, the bucket REST calls share;
-`initialize`, `tools/list` and notifications are free. A refused or failed call is a tool result
+Each `tools/call` counts once against the caller's rate limit, the bucket REST calls share, and
+so do `initialize` and `tools/list` (a refusal is their JSON-RPC error); notifications are free.
+A `get_job` that waits counts one more hit for each further 10 s it waited, after the wait, so
+the answer it waited for is never refused. A refused or failed call is a tool result
 with `isError: true` whose `structuredContent` is the REST error envelope (`rate_limited` with
 `retryable`, `invalid_request` with the validation `details`, `internal_error` for our own faults,
 without a traceback); a target's `failed` is a normal result, as it is a 200 in REST. Each call
@@ -702,6 +708,7 @@ annotations for ingress-nginx.
 | `MCP_ALLOWED_ORIGINS` | empty | Browser origins that may call `/mcp`, as a comma list of `http(s)://host[:port]` (exact match on scheme, host and port, in any case; a trailing slash and a default port, `:443` for https and `:80` for http, are dropped, in the setting and in the `Origin` header). Empty: a request with any `Origin` header is refused. Anything else makes the service exit with code 2. |
 | `MCP_WAIT_SECONDS` | `25` | What a tool that may become a job (`extract_url`, `extract_file`, `screenshot_url`, `extract_structured`, `chunk`) waits for its result when the caller gives no `wait_seconds`, and the longest wait of these tools and of `get_job` (a larger `wait_seconds` is cut to it). 0 to 60. |
 | `MCP_MAX_CONTENT_CHARS` | `50000` | Most characters of `content` in one tool answer (shared by the items of a job page); the rest is fetched with `content_offset`. 1000 to 10000000. |
+| `MCP_MAX_ANSWER_CHARS` | `200000` | Most characters of the envelope JSON of one tool answer. The answer carries that JSON twice (as `structuredContent` and as its last text), plus the hints and a screenshot, so the message is about twice this size. Over it, a `get_job` page drops its trailing items (its `next_offset` names the first) and then the lists `chunks`, `links`, `structured.tables` and `site.links` of a result are cut from the end, in that order, with the warning `mcp_answer_truncated` and a hint; REST returns them whole. `content` is bounded by `MCP_MAX_CONTENT_CHARS` alone, so with `MCP_ENABLED=true` this setting must be larger than it, or the service exits with code 2. 10000 to 50000000. |
 | `MCP_IMAGE_MAX_BYTES` | `5000000` | Largest screenshot attached to a tool answer as an image; a larger one is only linked. 0 to 20000000; 0 never attaches one. |
 
 ## UI
@@ -735,7 +742,11 @@ only (no cookie, no other header) and with `x-client-trace-id` set to the outer 
 id, so both access lines carry one id. The outer `/ui/run/...` access line has no `principal`
 (the view does not authenticate a forwarded call itself); the inner `/v1/...` line carries it. The REST route runs every check (body limit, validation,
 auth, roles, rate limit, the hand-over to a job), and each forwarded call counts once against the
-caller's rate limit. Views that combine several reads count one hit per view.
+caller's rate limit. Views that combine several reads count one hit per view, with two
+exceptions that count by their work: the previews (one hit per image) and the site tree (one hit
+per 500 items, a page of `GET /v1/jobs/{id}`), each counted once the work is done. A screenshot's
+file is read without a hit of its own: the screenshot call (or the job read) that answered it
+counted already.
 
 Requests to `/ui/run/*` answer 403 (plain text) without `HX-Request: true`, and when their
 `Origin` names another host or port than the `Host` header (a default port counts as none; the
@@ -780,7 +791,7 @@ why it could not be read. A large content is bounded in the page: the source, th
 the chunks show at most 200,000 characters each (and only such a content is rendered as
 Markdown), with a note when cut; the download is the full copy, up to 10,000,000 characters.
 
-"Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit, then the
+"Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit per image, then the
 service fetches at most 20 of them (4 at once, 10 s each, 25 s for the whole view) itself, with the vision step's checks:
 the SSRF guard on the URL and every redirect, the caller's compliance mode, the host's outbound
 turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF or
@@ -884,15 +895,15 @@ Read from the request:
 | Header | Use |
 | --- | --- |
 | `Authorization` | `Bearer <key>` when `AUTH_MODE=api_key`. |
-| `x-client-trace-id` | Client trace id; logged on every line of the request and used as `trace_id` in the response envelope. A job keeps the trace id of the request that created it (batch or hand-over): the worker logs each of its items under it, and the items' result envelopes carry it. |
-| `b3`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled` | B3 trace context; logged on every line of the request. |
+| `x-client-trace-id` | Client trace id; logged on every line of the request and used as `trace_id` in the response envelope. Without it the B3 trace id (`x-b3-traceid`, else the first part of `b3`) is the `trace_id`, and without either the service generates one. A job keeps the trace id of the request that created it (batch or hand-over): the worker logs each of its items under it, and the items' result envelopes carry it. The LLM and the external ASR endpoint receive it with every call. |
+| `b3`, `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled` | B3 trace context; logged on every line of the request. A job keeps them too, its workers log them, and the LLM and the external ASR endpoint receive them unchanged (no new span). |
 | `X-ASR-Api-Key` | The caller's key of the external transcription endpoint (`POST /v1/extract`, `/v1/extract/file`, `/v1/batch`, `/v1/structured`, `/v1/chunk`); wins over `ASR_EXTERNAL_API_KEY`. A secret: kept with the job, never logged or shown. |
 | `X-LLM-Api-Key` | The caller's key of the LLM endpoint (`POST /v1/extract`, `/v1/extract/file`, `/v1/batch`, `/v1/structured`, `/v1/chunk`), 1 to 1,024 visible ASCII characters (else 400); wins over `LLM_API_KEY`. A secret: kept with the job (see [Job keys](#job-keys)), never logged or shown. |
 
 Query strings are never logged.
 
 Responses carry no custom headers. The only exceptions are `Retry-After` on 429 (seconds until the
-rate-limit window ends, or 60 when a key has too many unfinished batches and site jobs) and `WWW-Authenticate: Bearer` on 401. Trace headers are not echoed back.
+rate-limit window ends, or 60 when a key has too many unfinished batches and site jobs), `Retry-After: 5` on a retryable 503 (an unavailable Valkey or a busy pool) and `WWW-Authenticate: Bearer` on 401. Trace headers are not echoed back.
 
 ## Rate limit
 
@@ -1076,7 +1087,8 @@ A worker leases an item for `EXTRACT_TIMEOUT_SECONDS * 2 + 10` seconds (60 by de
 through the fast pipeline with the job's options, as the job's owner. When the outbound gate
 refuses the host (busy, or paused after errors or a 429), the item goes back to the front of its
 domain, which is not claimed before the gate's retry time; an item at `JOB_ITEM_MAX_ATTEMPTS` is
-stored with the gate's error (`rate_limited` or `connection_error`, retryable) instead. An item
+stored with the gate's error (`rate_limited`, retryable, with `retry_after_seconds` in
+`error.details`) instead. An item
 whose job has expired is dropped. While Valkey fails, a worker backs off for 1, 2, 4 … 30 s and
 then goes on; the item it held (an exhausted one too) is claimed again once its lease expires.
 
@@ -1108,6 +1120,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_queue_metrics_last_success_timestamp_seconds` | gauge | `pool` | API pods | Unix time of the pod's last successful read of the queue. Exported from the first success on and left unchanged while Valkey fails. |
 | `text_extraction_valkey_used_memory_bytes` | gauge | none | API pods, workers | Valkey's `used_memory` (`INFO memory`), read every 5 s; exported from the first successful read on and left unchanged while Valkey fails. Every pod reads the same Valkey: use `max()`. |
 | `text_extraction_valkey_max_memory_bytes` | gauge | none | API pods, workers | Valkey's `maxmemory` (0: no limit), read with the used memory. The Helm alert `TextExtractionValkeyMemoryHigh` fires when used / max stays above `alerts.valkeyMemoryRatio` (0.8) for 10 minutes. |
+| `text_extraction_valkey_up` | gauge | none | API pods, workers | 1 when the pod's last read of Valkey (`INFO memory`, every 5 s) succeeded, 0 when it failed; exported from the first read on. The service's Valkey user therefore needs the `INFO` command (an external Valkey whose ACL refuses it, or whose answer has no `maxmemory`, reads as down). `/ready` does not look at Valkey; the Helm alert `TextExtractionValkeyDown` fires when `max()` over the pods stays below 1 for 2 minutes, so a single pod that is cut off from Valkey shows in `min()` and in `TextExtractionHigh5xx`, not in this alert. |
 | `text_extraction_event_loop_lag_seconds` | histogram | none | extract workers | How much later than asked the worker's event loop woke from a 0.5 s sleep, sampled from start to shutdown: the time it ran other work without yielding (for example packing and encoding a large sitemap's parts). Buckets 1 ms to 30 s. |
 | `text_extraction_jobs_created_total` | counter | `kind` (`batch`, `extract`, `screenshot`, `file`, `site`) | API pods | Jobs accepted by the pod: a batch or a site job counts once it is enqueued and answered with 202 (a refused one, or one given back after a failed enqueue, does not); an `extract` job counts when a slow `POST /v1/extract` is handed over to a job, a `file` job when a slow `POST /v1/extract/file` is, and an `extract`, `screenshot` or `file` job when a sync request that waits for the browser, Docling, nlp or llm worker answers 202 with that job, or one that needs a transcription answers 202 with its ASR job. |
 | `text_extraction_job_duration_seconds` | histogram | `kind` (`batch`, `extract`, `screenshot`, `file`, `site`) | workers of every pool, API pods | Time from the creation of a job to its last result. Observed once per job, by the process that writes the last result: a worker of whichever pool finishes the job, or the API pod for a slow `POST /v1/extract` or `/v1/extract/file` it handed to a job and finished itself. Buckets 1 s to 24 h. |

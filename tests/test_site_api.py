@@ -193,14 +193,14 @@ def test_ignore_for_user_403_and_admin_ok(api: Api) -> None:
     assert api.run(compliance) == "ignore"
 
 
-def test_jobs_disabled_503(make_api: Callable[..., Api]) -> None:
+def test_jobs_disabled_400(make_api: Callable[..., Api]) -> None:
     api = make_api(jobs_enabled=False)
 
     response = site(api)
 
-    assert response.status_code == 503
+    assert response.status_code == 400
     body = response.json()
-    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["code"] == "invalid_request"
     assert body["error"]["message"] == "Jobs are disabled on this deployment."
     assert api.keys("job:*") == []
     # Authentication still comes first.

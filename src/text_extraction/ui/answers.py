@@ -11,7 +11,10 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, Response
 
+from text_extraction.auth import authenticate
 from text_extraction.errors import ServiceError
+from text_extraction.jobs_api import check_jobs_enabled
+from text_extraction.screenshot_api import read_artifact
 from text_extraction.ui.forms import OPERATIONS, OptionsError, error_control
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Language, Message
@@ -133,12 +136,24 @@ async def read_screenshot(request: Request, job_id: str, name: str) -> Screensho
 
 
 async def screenshot_of(request: Request, envelope: Mapping[str, Any] | None) -> Screenshot:
-    """The screenshot an answer's ``data.screenshot`` references (`read_screenshot`); all None
-    when the answer references none."""
+    """The screenshot an answer's ``data.screenshot`` references; all None when the answer
+    references none. The answer's own call counted its rate-limit hit, so the file is read
+    through the artifact core without another (M5); the key and the jobs switch are checked as
+    the route checks them."""
     found = artifact_of(envelope)
     if found is None:
         return None, None, None
-    return await read_screenshot(request, *found)
+    job_id, name = found
+    try:
+        principal = await authenticate(request)
+        check_jobs_enabled(request.app.state.settings)
+        content = await read_artifact(request.app.state, principal, job_id, name)
+    except ServiceError as error:
+        body = {"error": {"code": error.code.value, "message": error.message}}
+        return None, *screenshot_failure(body, error.http_status)
+    if sniff_image(content) != "image/png":
+        return None, Message("screenshot.not_png"), None
+    return data_url(content, "image/png"), None, None
 
 
 def refusal(error: ServiceError, language: Language) -> Response:

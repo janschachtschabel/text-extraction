@@ -16,7 +16,10 @@ A UTF-8 declaration (byte order mark, header or meta) is kept when a few bytes a
 UTF-8: the bad sequences become U+FFFD, as in browsers, and the rest of the page keeps its
 umlauts. A meta tag that contradicts a UTF-8 header wins only when the bytes are nothing like
 UTF-8 (see ``_mostly_utf8``); a Latin-1 family declaration yields to nearly-UTF-8 bytes just as
-it yields to valid ones.
+it yields to valid ones. A UTF-8 declaration (header or meta) whose bytes have fewer valid
+non-ASCII characters than invalid sequences is wrong (audit B2): such a page (a Latin-1 page
+behind a default UTF-8 header) is guessed instead, and ``decode_html_checked`` reports the
+mismatch, so that the pipeline can warn ``charset_mismatch``.
 
 The guess is strict UTF-8; then UTF-8 with replacement when the bytes are UTF-8 but for a few
 stray bytes (at most ``_MAX_STRAY_SEQUENCES`` invalid sequences, and at least
@@ -254,10 +257,39 @@ def _guess(data: bytes) -> str:
 
 def decode_html(data: bytes, content_type_charset: str | None) -> str:
     """The text of an HTML document; never raises."""
-    return _decode_html(data, content_type_charset).removeprefix("\ufeff")
+    return decode_html_checked(data, content_type_charset)[0]
 
 
-def _decode_html(data: bytes, content_type_charset: str | None) -> str:
+def decode_html_checked(data: bytes, content_type_charset: str | None) -> tuple[str, bool]:
+    """The text of an HTML document, and whether its UTF-8 declaration (header or meta) was
+    wrong, so that the bytes were guessed instead (B2); never raises."""
+    text, mismatch = _decode_html(data, content_type_charset)
+    return text.removeprefix("\ufeff"), mismatch
+
+
+def _not_utf8(data: bytes) -> bool:
+    """Whether bytes declared UTF-8 have fewer valid non-ASCII characters than invalid
+    sequences: a UTF-8 page with stray bytes keeps the declaration, a Latin-1 page does not."""
+    text = _utf8_replacing(data)
+    invalid = text.count(_REPLACEMENT) - data.count(_REPLACEMENT_BYTES)
+    if invalid <= 0:
+        return False
+    non_ascii = len(text) - len(text.encode("ascii", "ignore")) - text.count(_REPLACEMENT)
+    return non_ascii < invalid
+
+
+def _decode_html(data: bytes, content_type_charset: str | None) -> tuple[str, bool]:
+    text = _decode_html_text(data, content_type_charset)
+    if text is not None:
+        return text, False
+    if _not_utf8(data):
+        return _guess(data), True
+    return _utf8_replacing(data), False
+
+
+def _decode_html_text(data: bytes, content_type_charset: str | None) -> str | None:
+    """The text by the declarations and the guess; None for a UTF-8 declaration that the
+    bytes do not keep (``_decode_html`` decides between replacement and a guess)."""
     header = _codec(content_type_charset) if content_type_charset else None
     if header and (text := _declared(data, header)) is not None:
         return text
@@ -272,5 +304,5 @@ def _decode_html(data: bytes, content_type_charset: str | None) -> str:
     if meta and (text := _declared(data, meta)) is not None:
         return text
     if "utf-8" in (header, meta):
-        return _utf8_replacing(data)
+        return None
     return _guess(data)

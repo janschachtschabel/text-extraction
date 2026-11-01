@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import Depends, FastAPI
+from fastapi.routing import APIRoute
 from prometheus_client import REGISTRY, CollectorRegistry
 from prometheus_fastapi_instrumentator import Instrumentator
 from redis.asyncio import Redis
@@ -31,6 +32,7 @@ from text_extraction.fetch import Fetcher
 from text_extraction.file_api import PATH as UPLOAD_PATH
 from text_extraction.file_api import router as file_router
 from text_extraction.file_api import text_body_limit, upload_body_limit
+from text_extraction.host_guard import HostGuardMiddleware
 from text_extraction.info import InfoData, service_info
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
@@ -217,6 +219,10 @@ def _add_ui_headers(app: FastAPI) -> None:
     app.add_middleware(UiHeadersMiddleware)
 
 
+def _operation_id(route: APIRoute) -> str:
+    return route.name
+
+
 def create_public_app(
     settings: Settings,
     valkey: Redis,
@@ -261,6 +267,9 @@ def create_public_app(
         version=__version__,
         description=DESCRIPTION,
         lifespan=_lifespan,
+        # Plain operation ids (C13): a generated client gets `extract`, not
+        # `extract_v1_extract_post`. A route's name is its function's unless it sets one.
+        generate_unique_id_function=_operation_id,
     )
     app.state.settings = settings
     app.state.valkey = valkey
@@ -371,6 +380,9 @@ def create_public_app(
         default_limit=settings.request_max_body_bytes,
         path_limits=path_limits,
     )
+    if settings.auth_mode == "none" and "*" not in settings.allowed_hosts:
+        # Outside the body limit: a refused host's body is never read.
+        app.add_middleware(HostGuardMiddleware, allowed=settings.allowed_hosts)
     if settings.ui_enabled:
         _add_ui_headers(app)
     Instrumentator(registry=registry).instrument(app)

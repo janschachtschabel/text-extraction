@@ -32,6 +32,7 @@ from tests.test_jobs import success
 from text_extraction.app import create_public_app
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
+from text_extraction.mcp_server import tools_jobs
 from text_extraction.mcp_server.calls import outcome_of
 from text_extraction.mcp_server.results import TRUNCATED_WARNING, payload_result
 from text_extraction.mcp_server.server import TOOL_ROUTES
@@ -98,9 +99,20 @@ def start_batch(client: TestClient, urls: list[str] = URLS, **arguments: Any) ->
     return job_id
 
 
-def write(client: TestClient, job_id: str, index: int, content: str = "Hello world") -> None:
+def write(
+    client: TestClient,
+    job_id: str,
+    index: int,
+    content: str = "Hello world",
+    *,
+    title: str | None = None,
+) -> None:
     store = store_of(client)
-    portal(client).call(store.write_result, job_id, index, success(URLS[index], content))
+    envelope = success(URLS[index], content)
+    if title is not None:
+        assert envelope.data is not None
+        envelope.data.title = title
+    portal(client).call(store.write_result, job_id, index, envelope)
 
 
 def test_tools_list_job_tools(client: TestClient) -> None:
@@ -234,6 +246,33 @@ def test_get_job_wait_bounded(client: TestClient) -> None:
     view = envelope_of(result)["data"]
     assert view["state"] == "running"
     assert [item["state"] for item in view["items"]] == ["done", "pending", "pending"]
+
+
+def rate_hits(client: TestClient) -> int:
+    async def read() -> int:
+        app: Any = client.app
+        total = 0
+        for key in await app.state.valkey.keys("rl:alice:*"):
+            total += int(await app.state.valkey.get(key))
+        return total
+
+    hits: int = portal(client).call(read)
+    return hits
+
+
+def test_get_job_counts_one_hit_per_wait_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    # M4: a long wait is several calls' worth of work (one hit per 10 s, here per 1 s).
+    monkeypatch.setattr(tools_jobs, "WAIT_SECONDS_PER_HIT", 1)
+    with running() as client:
+        job_id = start_batch(client)
+        before = rate_hits(client)
+        call_tool(client, "get_job", {"job_id": job_id, "wait_seconds": 2.5}, headers=AUTH)
+        after_wait = rate_hits(client)
+        call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+        after_read = rate_hits(client)
+
+    assert after_wait - before == 3  # 2.5 s waited: three started steps
+    assert after_read - after_wait == 1
 
 
 def test_get_job_wait_cut_to_the_setting() -> None:
@@ -410,9 +449,48 @@ def test_refused_get_job_and_cancel_job_log_their_job_id() -> None:
         {"tool": "get_job", "outcome": "not_found", "job_id": unknown},
         {"tool": "cancel_job", "outcome": "not_found", "job_id": unknown},
         {"tool": "get_job", "outcome": "not_found", "job_id": None},
-        {"tool": "cancel_job", "outcome": "internal_error", "job_id": unknown},
+        {"tool": "cancel_job", "outcome": "invalid_request", "job_id": unknown},
     ]
     assert "not-a-job-id-77" not in repr([*logs, *off_logs])
+
+
+def test_get_job_keeps_a_page_within_the_answer_budget() -> None:
+    # M2: a page over MCP_MAX_ANSWER_CHARS drops its trailing items; the next page has them.
+    with running(mcp_max_content_chars=20_000, mcp_max_answer_chars=25_000) as client:
+        job_id = start_batch(client)
+        for index in range(3):
+            write(client, job_id, index, title="t" * 10_000)  # the content share cannot cut
+
+        result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+
+    view = envelope_of(result)["data"]
+    kept = len(view["items"])
+    assert 1 <= kept < 3
+    assert view["next_offset"] == kept
+    assert hints_of(result) == [
+        f"Page cut to {kept} items to fit MCP_MAX_ANSWER_CHARS; call get_job with offset={kept}."
+    ]
+
+
+def test_a_dropped_item_leaves_no_content_hint() -> None:
+    # Review: the hints of items the budget dropped would point at items the page no longer holds.
+    with running(mcp_max_content_chars=20_000, mcp_max_answer_chars=25_000) as client:
+        job_id = start_batch(client)
+        for index in range(3):
+            write(client, job_id, index, "w" * 9_000, title="t" * 6_000)
+
+        result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+
+    view = envelope_of(result)["data"]
+    kept = len(view["items"])
+    assert 1 <= kept < 3
+    assert hints_of(result) == [
+        *(
+            f"Item {index}: Cut at 6666 of 9000 characters; call again with content_offset=6666."
+            for index in range(kept)
+        ),
+        f"Page cut to {kept} items to fit MCP_MAX_ANSWER_CHARS; call get_job with offset={kept}.",
+    ]
 
 
 def test_get_job_slices_each_item(client: TestClient) -> None:
@@ -542,10 +620,10 @@ def test_cancel_job_then_not_found(client: TestClient) -> None:
 
 
 def test_jobs_disabled_tool_error() -> None:
-    """As REST's 503: ``internal_error`` with REST's message and ``retryable``."""
+    """As REST's 400: ``invalid_request`` with REST's message and ``retryable``."""
     with running(jobs_enabled=False) as client:
         rest = client.post("/v1/batch", json={"urls": URLS}, headers=AUTH)
-        assert rest.status_code == 503
+        assert rest.status_code == 400
         calls: list[tuple[str, dict[str, Any]]] = [
             ("batch_extract", {"urls": URLS}),
             ("site_structure", {"url": PAGE}),
@@ -555,7 +633,7 @@ def test_jobs_disabled_tool_error() -> None:
         ]
         for tool, arguments in calls:
             error = refusal(call_tool(client, tool, arguments, headers=AUTH))
-            assert error["code"] == "internal_error", tool
+            assert error["code"] == "invalid_request", tool
             assert error["message"] == "Jobs are disabled on this deployment.", tool
             assert error["retryable"] is rest.json()["error"]["retryable"], tool
 

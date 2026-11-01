@@ -33,7 +33,7 @@ def _compile(pattern: str, flags: int) -> "regex.Pattern[str]":
         raise ValueError("regex is not a valid regular expression") from None
 
 
-class SelectorRule(BaseModel, extra="forbid", hide_input_in_errors=True):
+class SelectorRule(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """Where on the page a field's value is: a CSS selector or an XPath expression."""
 
     css: str | None = Field(
@@ -87,7 +87,7 @@ class SelectorRule(BaseModel, extra="forbid", hide_input_in_errors=True):
         return self
 
 
-class PatternRule(BaseModel, extra="forbid", hide_input_in_errors=True):
+class PatternRule(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """A regular expression that finds a field's value in the content."""
 
     regex: str = Field(
@@ -135,7 +135,7 @@ class PatternRule(BaseModel, extra="forbid", hide_input_in_errors=True):
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message='Field name "schema"')
 
-    class StructuredOptions(BaseModel, extra="forbid", hide_input_in_errors=True):
+    class StructuredOptions(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
         """The ``structured`` option of a request."""
 
         schema: dict[str, Any] | None = Field(  # type: ignore[assignment]

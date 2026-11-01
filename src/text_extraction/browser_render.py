@@ -33,8 +33,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin, urlsplit
 
+import httpx
 import structlog
-from playwright.async_api import APIResponse, Download, Frame, Page, Request, Response, Route
+from playwright.async_api import (
+    CDPSession,
+    Download,
+    Frame,
+    Page,
+    Request,
+    Response,
+    Route,
+)
 
 from text_extraction.browser_actions import run_actions
 from text_extraction.browser_driver import (
@@ -77,6 +86,8 @@ _log = structlog.get_logger(__name__)
 
 VIEWPORT: Final = {"width": 1920, "height": 1080}
 CONSENT_SECONDS: Final = 3.0  # B11: best effort
+# The page's decoded response bytes may reach this many times its byte cap (audit B3).
+DECODED_BYTES_FACTOR: Final = 2
 # Of a render's deadline: what reading the DOM (and taking the screenshot) needs after the waits.
 _READ_RESERVE_SECONDS: Final = 1.0
 _SCREENSHOT_RESERVE_SECONDS: Final = 3.0
@@ -95,7 +106,11 @@ _NOT_FAILURES: Final = ("net::ERR_ABORTED", "net::ERR_BLOCKED_BY_CLIENT")
 # Redirects of a document that carries the caller's headers, followed one by one (as fetch does).
 _MAX_HOPS: Final = 10
 # Not passed on from a response fetched for the browser: its body arrives decoded and whole.
-_NOT_PASSED: Final = frozenset({"content-encoding", "content-length", "transfer-encoding"})
+_NOT_PASSED: Final = frozenset(
+    {"content-encoding", "content-length", "transfer-encoding", "connection", "keep-alive"}
+)
+# The encodings a request with caller headers accepts: those httpx decodes as it reads.
+_HEADER_FETCH_ENCODINGS: Final = ("gzip", "x-gzip", "deflate", "identity")
 # Values of the ``Sec-Purpose`` request header (``prefetch;anonymous-client-ip`` and the like).
 _SPECULATIVE_PURPOSES: Final = ("prefetch", "prerender")
 # The strings of a structured-field list, as in ``Speculation-Rules: "/a.json", "/b.json"``.
@@ -149,6 +164,14 @@ async def render_page(
         async with asyncio.timeout_at(deadline):
             await render.install()
             return await render.run(deadline)
+    except asyncio.CancelledError:
+        # The decoded bytes passed their cap (``_Render._on_data``): that cancel was ours.
+        task = asyncio.current_task()
+        if render.oversized and render.fault is not None and task is not None:
+            render.oversized = False
+            if task.uncancel() == 0:
+                raise render.fault from None
+        raise
     except TimeoutError:
         render.raise_kept()
         raise FetchError(
@@ -158,6 +181,11 @@ async def render_page(
             upstream_status=render.last_status(),
         ) from None
     finally:
+        render.task = None  # no cancel of the caller once the render is over
+        if render.oversized:  # passed after the render had its answer: the cancel is dropped
+            render.oversized = False
+            if (task := asyncio.current_task()) is not None:
+                task.uncancel()
         await render.end_checks()
 
 
@@ -305,8 +333,18 @@ class _Render:
         self.deadline = 0.0
         self.checks: set[asyncio.Task[None]] = set()
         self.transcript_panel: bytes | None = None  # the get_panel body (P13-S3)
+        # Decoded response bytes of the page (CDP ``Network.dataReceived``): the proxy counts
+        # the bytes on the wire, which a gzip bomb keeps small (audit B3).
+        cap = traffic.max_bytes if traffic is not None else settings.browser_max_bytes
+        self.decoded_cap = DECODED_BYTES_FACTOR * cap
+        self.decoded = 0
+        self.stopping: asyncio.Future[None] | None = None
+        self.session: CDPSession | None = None
+        self.task = asyncio.current_task()  # the render's, cancelled when the cap is passed
+        self.oversized = False
 
     async def install(self) -> None:
+        await self._count_decoded()
         self.page.on("response", self._on_response)
         self.page.on("requestfailed", self._on_request_failed)
         self.page.on("download", self._on_download)
@@ -320,6 +358,54 @@ class _Render:
         for task in self.checks:
             task.cancel()
         await asyncio.gather(*self.checks, return_exceptions=True)
+        if self.stopping is not None:
+            await asyncio.gather(self.stopping, return_exceptions=True)
+
+    async def _count_decoded(self) -> None:
+        """Count the page's decoded response bytes through a CDP session of its own; a driver
+        without CDP leaves the proxy's cap alone."""
+        try:
+            session = await self.page.context.new_cdp_session(self.page)
+            # Its own buffers stay empty: nothing reads response bodies through it.
+            await session.send(
+                "Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}
+            )
+        except DRIVER_ERRORS:
+            return
+        session.on("Network.dataReceived", self._on_data)
+        self.session = session
+
+    def _on_data(self, event: dict[str, object]) -> None:
+        size = event.get("dataLength")
+        self.decoded += size if isinstance(size, int) else 0
+        if self.decoded > self.decoded_cap:
+            self.over_cap()
+
+    def over_cap(self) -> None:
+        """The decoded bytes passed their cap: fail the render with ``too_large`` at once. Bytes
+        after the render (``task`` is None) change nothing."""
+        if self.stopping is not None or self.task is None:
+            return
+        if self.fault is None:
+            self.fault = FetchError(
+                ErrorCode.TOO_LARGE,
+                f"The page's responses decode to more than {self.decoded_cap} bytes "
+                "(twice BROWSER_MAX_BYTES).",
+                upstream_status=self.last_status(),
+            )
+        self.settled.set()
+        self.stopping = asyncio.ensure_future(self._stop_loading())
+        # End the render at once: it may be waiting for a load that the bomb keeps busy. Its
+        # task is cancelled (``render_page`` turns the cancel into the fault); after the render
+        # ``task`` is None, and the page's late bytes cancel nothing.
+        if self.task is not None and not self.oversized:
+            self.oversized = True
+            self.task.cancel()
+
+    async def _stop_loading(self) -> None:
+        if self.session is not None:
+            with contextlib.suppress(*DRIVER_ERRORS):
+                await self.session.send("Page.stopLoading")
 
     def raise_kept(self) -> None:
         """End the render with what went wrong in the page meanwhile: the check's refusal of a
@@ -771,26 +857,23 @@ class _Render:
         headers = {
             name: value
             for name, value in (await request.all_headers()).items()
-            if not name.startswith(":")
+            if not name.startswith(":") and name.lower() != "accept-encoding"
         }
         try:
-            answer = await route.fetch(
-                headers={**headers, **self.options.headers},
-                max_redirects=0,
-                timeout=max(self.left(), 0.1) * 1000,
-            )
-        except DRIVER_TIMEOUTS:
+            async with asyncio.timeout(max(self.left(), 0.1)):
+                answer = await self._fetch(request, {**headers, **self.options.headers})
+        except TimeoutError:
             await route.abort("timedout")
             return
-        except DRIVER_ERRORS:  # refused by the proxy, or the target did not answer
+        except (httpx.HTTPError, _NotDecodableError):  # refused by the proxy, the target failed
+            await route.abort("failed")
+            return
+        if answer is None:  # the decoded bytes passed their cap: the render fails
             await route.abort("failed")
             return
         target = _redirect_target(request.url, answer) if main else None
         if target is None:
-            await route.fulfill(
-                response=answer,
-                headers={k: v for k, v in answer.headers.items() if k not in _NOT_PASSED},
-            )
+            await route.fulfill(status=answer.status, headers=answer.headers, body=answer.body)
             return
         self.unanswered.add(request)
         if self.hop_count >= _MAX_HOPS:
@@ -802,6 +885,51 @@ class _Render:
         self.hops.append(request.url)
         self.settled.clear()
         await route.fulfill(status=200, content_type="text/html", body=_hop_page(target))
+
+    async def _fetch(self, request: Request, headers: dict[str, str]) -> "_Fetched | None":
+        """Fetch ``request`` with ``headers`` through the page's own proxy context (its SSRF
+        check, byte cap and hosts), redirects not followed, counting its decoded bytes with
+        the page's as they arrive (audit B3: the driver's ``route.fetch`` would decode a gzip
+        bomb whole in its own memory first). None once the decoded bytes pass their cap."""
+        traffic = self.traffic
+        if traffic is None or traffic.server is None:  # pragma: no cover - pages have one
+            raise httpx.ProxyError("the page has no proxy context")
+        port = urlsplit(traffic.server).port
+        proxy = httpx.Proxy(f"http://127.0.0.1:{port}", auth=(traffic.username, traffic.password))
+        async with (
+            httpx.AsyncClient(
+                proxy=proxy, trust_env=False, follow_redirects=False, timeout=max(self.left(), 0.1)
+            ) as client,
+            client.stream(
+                request.method,
+                request.url,
+                headers={**headers, "accept-encoding": "gzip, deflate"},
+                content=request.post_data_buffer,
+            ) as response,
+        ):
+            encoding = response.headers.get("content-encoding", "identity").lower()
+            if any(part.strip() not in _HEADER_FETCH_ENCODINGS for part in encoding.split(",")):
+                raise _NotDecodableError(encoding)
+            chunks: list[bytes] = []
+            seen = 0
+            async for chunk in response.aiter_bytes():
+                seen += len(chunk)
+                if self.decoded + seen > self.decoded_cap:
+                    self.over_cap()
+                    return None
+                chunks.append(chunk)
+        passed: dict[str, list[str]] = {}
+        for name, value in response.headers.multi_items():
+            if name.lower() not in _NOT_PASSED:
+                passed.setdefault(name.lower(), []).append(value)
+        return _Fetched(
+            status=response.status_code,
+            headers={
+                name: ("\n" if name == "set-cookie" else ", ").join(values)
+                for name, values in passed.items()
+            },
+            body=b"".join(chunks),
+        )
 
     async def _checked(self, url: str) -> bool:
         """Run the navigation check; False (and the error kept) when it refuses."""
@@ -904,7 +1032,20 @@ def _refusal_error(reasons: set[str], status: int | None = None) -> FetchError:
     )
 
 
-def _redirect_target(url: str, answer: APIResponse) -> str | None:
+class _NotDecodableError(Exception):
+    """A response with caller headers in an encoding that was not asked for."""
+
+
+@dataclass(frozen=True)
+class _Fetched:
+    """A response fetched for the browser (``_Render._fetch``), its body decoded and whole."""
+
+    status: int
+    headers: dict[str, str]
+    body: bytes
+
+
+def _redirect_target(url: str, answer: _Fetched) -> str | None:
     """The absolute http(s) URL a 3xx answer redirects to; None for any other answer."""
     location = answer.headers.get("location")
     if not 300 <= answer.status < 400 or not location:

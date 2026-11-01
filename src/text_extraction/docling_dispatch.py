@@ -468,7 +468,16 @@ class DoclingMove:
             self._count("input_budget")
             return ocr_fallback(needed, without, ErrorCode.RATE_LIMITED, OCR_BUSY_MESSAGE)
         if needed.draft is not None:
-            await self._store.put_draft(job_id, index, needed.draft)
+            try:
+                await self._store.put_draft(job_id, index, needed.draft)
+            except BaseException:
+                # Not queued (the job is gone, Valkey failed, a cancel): nobody else deletes
+                # the bytes (O11).
+                await asyncio.shield(self._store.discard_input(job_id, index))
+                raise
+        # An enqueue that fails may still have run (its reply lost), and the pool's worker then
+        # needs the bytes: they stay, until their TTL at worst. A queued item of a job deleted
+        # meanwhile is dropped by that worker, with its bytes (``Worker._drop``).
         await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
         self.moved = True
         return without  # not stored: the item is completed without a result

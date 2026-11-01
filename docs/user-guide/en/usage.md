@@ -23,8 +23,10 @@ A key has the role `user` or `admin`. Admins may also choose `compliance: ignore
 maximum extraction), use XPath selectors and the `evaluate` action, and read every job; a user reads
 only their own jobs. A missing or wrong key answers 401 `unauthorized`, and a request that the role
 may not make 403 `forbidden`. An XPath selector with a user key is the exception: like any other
-invalid field it answers 422 `invalid_request`. Each key has a rate limit (`RATE_LIMIT_PER_MINUTE`); over it a request
-answers 429 `rate_limited` with `Retry-After`.
+invalid field it answers 422 `invalid_request`. A body that is not sent as JSON
+(`Content-Type: application/json`) answers 415 `invalid_request`. Each key has a rate limit
+(`RATE_LIMIT_PER_MINUTE`); over it a request answers 429 `rate_limited` with `Retry-After`. A
+503 that is worth retrying (the service's state store is briefly away) carries `Retry-After: 5`.
 
 With `AUTH_MODE=none` the service needs no key and every caller is an admin. Use it on your own
 machine only.
@@ -61,9 +63,12 @@ Every answer has the same shape, the result envelope:
   `target_http_error` or `blocked_by_robots`, `error.message` is an English text, and
   `error.retryable` says whether the same request may succeed later.
 - `data.upstream_status` is the HTTP status of the page, `data.mode_used` is `fast`, `browser` or
-  `upload`, and `data.timings` gives the time of each step in milliseconds.
+  `upload`, and `data.timings` gives the time of each step in milliseconds. A job item that
+  failed through a fault of the service before any step ran has `mode_used` and
+  `upstream_status` null, no content and zero timings.
 - `data.warnings` names what did not go as asked, although a result is returned, such as
-  `browser_unavailable`.
+  `browser_unavailable`, or `charset_mismatch` for a page declared UTF-8 whose bytes are not
+  (it is read as Windows-1252 then).
 
 When the target fails (the site answers 404, refuses the service or is down), the API still
 answers HTTP 200, with `status: failed`. A 4xx is a problem of your request (a bad field, the key,
@@ -93,7 +98,7 @@ longer for the NLP or LLM worker than `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_
 upload waits 25 s by default. A job's `state` goes from `queued` to `running` to `completed`, and
 `progress` counts its items by status. A job is kept for `JOB_TTL_SECONDS` (24 h), and only its
 owner (or an admin) can read it. With `JOBS_ENABLED=false` there are no jobs: `wait_seconds` is
-ignored, and batches and site structures answer 503.
+ignored, and batches, site structures and the job routes answer 400 `invalid_request`.
 
 ### Batch
 
@@ -198,7 +203,9 @@ that you send with `headers`, or an exemption for the service's egress IP.
 
 PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
 `POST /v1/extract` with their URL, or `POST /v1/batch`. The bytes decide what a file is before its
-`Content-Type` does (a PDF served as `application/octet-stream` is still a PDF). To convert a file
+`Content-Type` does (a PDF served as `application/octet-stream` or as `text/html`, as a
+`download.php` often does, is still a PDF; binary data declared `text/html` answers
+`unsupported_content_type`). To convert a file
 you have, upload it to `POST /v1/extract/file` as `multipart/form-data` (at most
 `DOCUMENT_MAX_BYTES`, 20 MB):
 

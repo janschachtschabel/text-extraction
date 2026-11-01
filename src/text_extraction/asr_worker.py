@@ -143,6 +143,7 @@ library's message or transcript text.
 
 import argparse
 import asyncio
+import math
 import shutil
 import sys
 import tempfile
@@ -188,6 +189,7 @@ from text_extraction.pipeline_media import MediaInputMeta, media_too_long_messag
 from text_extraction.scheduler import QueueItem
 from text_extraction.server import EXIT_CONFIG_ERROR, _Server, _server, configured_settings
 from text_extraction.settings import Settings
+from text_extraction.tracing import outbound_trace_headers
 from text_extraction.valkey import create_valkey
 from text_extraction.worker import Worker, _serve
 
@@ -430,9 +432,12 @@ class _Failure:
     retryable: bool
     upstream_status: int | None = None
     final: bool = False
+    details: list[dict[str, Any]] | None = None  # a gate refusal's wait (C11)
 
     def envelope(self) -> Envelope[ExtractResult]:
-        return failed_extract(self.code, self.message, retryable=self.retryable)
+        return failed_extract(
+            self.code, self.message, retryable=self.retryable, details=self.details
+        )
 
 
 @dataclass(frozen=True)
@@ -598,9 +603,9 @@ class AsrRunner:
         except (OutboundBusy, CircuitOpen) as refusal:
             if gate_refusals == "raise":
                 raise
-            if isinstance(refusal, OutboundBusy):
-                return _Failure(ErrorCode.RATE_LIMITED, _BUSY_MESSAGE, True)
-            return _Failure(ErrorCode.CONNECTION_ERROR, _PAUSED_MESSAGE, True)
+            message = _BUSY_MESSAGE if isinstance(refusal, OutboundBusy) else _PAUSED_MESSAGE
+            wait = {"retry_after_seconds": max(math.ceil(refusal.retry_after), 1)}
+            return _Failure(ErrorCode.RATE_LIMITED, message, True, details=[wait])
 
     async def _download(
         self,
@@ -808,6 +813,7 @@ class AsrRunner:
                 "timeout": settings.asr_external_timeout_seconds,
                 "budget": left,
                 "user_agent": USER_AGENT,
+                "trace_headers": outbound_trace_headers(),  # the job's (O4)
             }
             model = settings.asr_external_model
         else:

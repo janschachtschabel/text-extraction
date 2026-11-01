@@ -254,6 +254,8 @@ for pool in extract browser; do
   expect_contains "backlog alert for pool $pool" "$rules" "text_extraction_queue_pending_items{namespace=\"$NAMESPACE\", pool=\"$pool\"}) > 1000"
   expect_contains "workers-down alert for pool $pool" "$rules" "deployment=\"$RELEASE-text-extraction-worker-$pool\""
 done
+expect_contains "Valkey-down alert" "$rules" "alert: TextExtractionValkeyDown"
+expect_contains "Valkey-down alert reads every pod" "$rules" "max(text_extraction_valkey_up{namespace=\"$NAMESPACE\", service=~\"$RELEASE-text-extraction-internal|"
 expect_absent "no browser alerts without browser workers" \
   "$(render --set metrics.prometheusRule.enabled=true --set workers.browser.enabled=false)" 'pool="browser"'
 
@@ -1004,7 +1006,9 @@ expect_absent "config.UI_ENABLED not in the ConfigMap" "$(document "$config_on" 
 
 # The settings of both, with their defaults, in the ConfigMap.
 configmap="$(document "$on" ConfigMap "$API")"
+expect_contains "ConfigMap default ALLOWED_HOSTS" "$configmap" 'ALLOWED_HOSTS: "localhost,127.0.0.1,[::1],api"'
 for entry in 'MCP_ALLOWED_ORIGINS: ""' 'MCP_WAIT_SECONDS: "25"' 'MCP_MAX_CONTENT_CHARS: "50000"' \
+  'MCP_MAX_ANSWER_CHARS: "200000"' \
   'MCP_IMAGE_MAX_BYTES: "5000000"' 'UI_TREE_MAX_URLS: "5000"' 'UI_BATCH_FILE_MAX_BYTES: "10485760"' \
   'UI_BATCH_FILE_MAX_ROWS: "100000"' 'UI_IMAGE_MAX_BYTES: "1000000"' 'UI_DEFAULT_LANGUAGE: "en"' \
   'UI_DOCS_BASE_URL: "https://github.com/janschachtschabel/text-extraction/blob/main/docs/user-guide"'; do
@@ -1041,6 +1045,12 @@ expect_absent "no open-UI warning under api_key" \
   "$(render_notes --set ui.enabled=true)" "$open_ui_warning"
 expect_absent "no open-UI warning while the UI is off" \
   "$(render_notes --set config.AUTH_MODE=none)" "$open_ui_warning"
+hosts_note="the API answers only the Host names in config.ALLOWED_HOSTS"
+expect_contains "notes name ALLOWED_HOSTS under AUTH_MODE=none" \
+  "$(render_notes --set config.AUTH_MODE=none)" "$hosts_note"
+expect_absent "no ALLOWED_HOSTS note under api_key" "$(render_notes)" "$hosts_note"
+expect_absent "no ALLOWED_HOSTS note with *" \
+  "$(render_notes --set config.AUTH_MODE=none --set 'config.ALLOWED_HOSTS=*')" "$hosts_note"
 
 # --- Measured resources --------------------------------------------------------------------------
 

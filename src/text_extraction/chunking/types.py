@@ -14,7 +14,7 @@ MIN_SIZE = 200
 MAX_SIZE = 20_000
 
 
-class ChunkingOptions(BaseModel, extra="forbid", hide_input_in_errors=True):
+class ChunkingOptions(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """The ``chunking`` option of a request. Sizes are characters (code points)."""
 
     strategy: ChunkStrategy = Field(

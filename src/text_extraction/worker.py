@@ -139,7 +139,7 @@ The process serves only the internal port (``/health``, ``/ready``, ``/metrics``
 loads the language model and starts the document pool's children (``DocumentPool``, which
 converts documents fetched by URL) and, with ``MEDIA_ENABLED``, the media fetcher's children and
 egress proxy (``media.pool``, subtitles of platform videos); ``/ready`` answers 200 once the
-loops run after it, while Valkey answers. On SIGTERM or SIGINT it turns 503, the
+loops run after it (it does not look at Valkey). On SIGTERM or SIGINT it turns 503, the
 loops stop claiming, the items in flight get ``extraction_graceful_seconds`` to finish (any still
 running then are cancelled; their leases expire and other workers take them over), and the
 internal server stops last. A worker built with ``give_back_on_cancel`` (the ASR worker, whose
@@ -543,7 +543,11 @@ class Worker:
         try:
             with structlog.contextvars.bound_contextvars(job_id=item.job_id, item=item.index):
                 job = await self._store.get(item.job_id)
-                trace = {"trace_id": job.trace_id} if job is not None and job.trace_id else {}
+                trace = (
+                    {"trace_id": job.trace_id, **job.trace_fields}
+                    if job is not None and job.trace_id
+                    else {}
+                )
                 with structlog.contextvars.bound_contextvars(**trace):
                     if exhausted:
                         outcome = await self._fail_exhausted(item, job)

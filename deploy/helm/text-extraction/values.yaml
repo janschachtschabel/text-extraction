@@ -34,6 +34,8 @@ config:
   LOG_LEVEL: INFO
   LOG_FORMAT: json
   AUTH_MODE: api_key
+  # Under AUTH_MODE=none: the Host names the API answers; add the Service's name, or "*".
+  ALLOWED_HOSTS: "localhost,127.0.0.1,[::1],api"
   RATE_LIMIT_ENABLED: "true"
   RATE_LIMIT_PER_MINUTE: "60"
   # Conversions at once per pod; the memory limit below is sized for it.
@@ -76,10 +78,12 @@ config:
   # list of http(s)://host[:port] (empty: a request with any Origin header is refused; MCP
   # clients outside a browser send none); what a tool that may become a job waits for its result
   # and get_job's longest wait (0-60 s); the most content characters of one tool answer; the
-  # largest screenshot attached to a tool answer (0: never attached, only linked).
+  # most characters of one tool answer's JSON (lists are cut to fit); the largest screenshot
+  # attached to a tool answer (0: never attached, only linked).
   MCP_ALLOWED_ORIGINS: ""
   MCP_WAIT_SECONDS: "25"
   MCP_MAX_CONTENT_CHARS: "50000"
+  MCP_MAX_ANSWER_CHARS: "200000"
   MCP_IMAGE_MAX_BYTES: "5000000"
   # Playground (/ui, switched by ui.enabled): the most URLs of one site tree, the largest batch
   # file (CSV or JSON of URLs) and its most rows, the largest preview image the UI fetches, and

@@ -40,7 +40,13 @@ from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pii.types import PiiOptions
-from text_extraction.pipeline import Pipeline, _cache_options, create_outbound, create_pipeline
+from text_extraction.pipeline import (
+    CHARSET_MISMATCH_WARNING,
+    Pipeline,
+    _cache_options,
+    create_outbound,
+    create_pipeline,
+)
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
@@ -273,6 +279,44 @@ def test_unsupported_content_type() -> None:
     assert data.content_type == "image/gif"
     assert data.upstream_status == 200
     assert data.content is None
+
+
+def test_a_binary_body_declared_as_html_is_unsupported() -> None:
+    """B1: not read as a page of U+FFFD characters (``partial``), refused with what it is."""
+    label = "binary data"
+    body = b"<html>\x00\x01\x02\x03 not a page"
+    harness = Harness({PAGE: fetched(body=body, content_type="text/html")})
+
+    envelope = harness.run_once()
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert envelope.error.message == (f"The body is declared text/html but is {label}, not a page.")
+    assert data_of(envelope).content is None
+
+
+def test_a_latin1_page_behind_a_utf8_header_is_read_and_warns() -> None:
+    """B2: no umlaut of the page is valid UTF-8, so the header is wrong; the page is read as
+    windows-1252, as a browser would fall back, with the warning ``charset_mismatch``."""
+    page = ARTICLE.replace("process", "Prozess für Größe, Käse und Übung")
+    assert page != ARTICLE
+    harness = Harness({PAGE: fetched(body=page.encode("cp1252"))})
+
+    envelope = harness.run_once()
+
+    data = data_of(envelope)
+    assert envelope.status == "success"
+    assert data.content is not None
+    assert "für Größe, Käse und Übung" in data.content
+    assert data.warnings == [CHARSET_MISMATCH_WARNING]
+
+
+def test_a_utf8_page_does_not_warn() -> None:
+    page = ARTICLE.replace("process", "Prozess für Größe, Käse und Übung")
+    harness = Harness({PAGE: fetched(body=page)})
+
+    assert CHARSET_MISMATCH_WARNING not in data_of(harness.run_once()).warnings
 
 
 def test_plain_text_is_converted() -> None:
@@ -557,23 +601,27 @@ def test_busy() -> None:
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.RATE_LIMITED
     assert envelope.error.retryable is True
+    assert envelope.error.details == [{"retry_after_seconds": 3}]
     assert data_of(envelope).attempts == 0
 
 
 def test_circuit_open() -> None:
-    harness = Harness({PAGE: fetched()}, gate=RefusingGate(CircuitOpen(30.0)))
+    # The service's own pause of a host is a rate limit of ours, not a connection fault (C11).
+    harness = Harness({PAGE: fetched()}, gate=RefusingGate(CircuitOpen(29.2)))
 
     envelope = harness.run_once()
 
     assert envelope.status == "failed"
     assert envelope.error is not None
-    assert envelope.error.code == ErrorCode.CONNECTION_ERROR
+    assert envelope.error.code == ErrorCode.RATE_LIMITED
     assert envelope.error.retryable is True
+    assert envelope.error.details == [{"retry_after_seconds": 30}]
+    assert "paused" in envelope.error.message
 
 
 @pytest.mark.parametrize(
     ("refusal", "code"),
-    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.CONNECTION_ERROR)],
+    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.RATE_LIMITED)],
 )
 def test_gate_refusals_raise_when_asked(refusal: Exception, code: ErrorCode) -> None:
     harness = Harness({PAGE: fetched()}, gate=RefusingGate(refusal))
@@ -998,7 +1046,7 @@ def test_redirect_to_a_paused_host_gives_every_lease_back() -> None:
     envelope = harness.run_once()
 
     assert envelope.error is not None
-    assert envelope.error.code == ErrorCode.CONNECTION_ERROR  # the circuit-open answer
+    assert envelope.error.code == ErrorCode.RATE_LIMITED  # the circuit-open answer
     assert target not in [url for url, _ in harness.fetcher.calls]
     assert gate.events == [("take", "example.org"), ("give back", "example.org")]
     assert leases(harness) == 0

@@ -5,7 +5,7 @@ FastAPI derives the document from the routes, but the routes read the key by han
 ``HTTPValidationError``. ``install_openapi`` corrects both once, when the document is first
 built: a ``bearerAuth`` security scheme (``AUTH_MODE=api_key``), an ``ErrorEnvelope`` schema,
 the 422 of every operation pointing at it, the error statuses every ``/v1`` operation can
-answer, and a tag per area.
+answer, a tag per area, and the examples of the upload's form.
 """
 
 from typing import Any
@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from text_extraction.api_examples import FILE_EXAMPLES
 from text_extraction.settings import Settings
 
 ERROR_ENVELOPE = "ErrorEnvelope"
@@ -30,16 +31,17 @@ _ERROR_SCHEMA: dict[str, Any] = {
     },
 }
 _DESCRIPTIONS = {
-    "400": "Bad request: an option needs a part of the service that is switched off, or a "
-    "header is invalid (`invalid_request`).",
+    "400": "Bad request: an option or route needs a part of the service that is switched off "
+    "(jobs too), or a header is invalid (`invalid_request`).",
     "401": "No API key, or an unknown one (`unauthorized`).",
     "403": "The option is for administrators only (`forbidden`).",
     "404": "No such job or artifact for this key (`not_found`).",
     "413": "The request body is too large (`invalid_request`).",
+    "415": "The body is not JSON (`invalid_request`); send `Content-Type: application/json`.",
     "422": "The request is invalid (`invalid_request`, `error.details` names the fields).",
     "429": "Too many requests or open jobs for this key (`rate_limited`), see `Retry-After`.",
     "503": "The service is busy or its state store is unavailable (`internal_error`, "
-    "usually retryable).",
+    "usually retryable; a retryable 503 carries `Retry-After`).",
 }
 _TAGS = (
     ("/v1/jobs", "jobs"),
@@ -62,8 +64,10 @@ def _statuses(path: str, method: str, settings: Settings) -> list[str]:
         statuses.append("429")
     if method == "post":
         statuses += ["400", "403", "413"]
+        if path != "/v1/extract/file":  # the upload is multipart
+            statuses.append("415")
     if "{job_id}" in path:
-        statuses.append("404")
+        statuses += ["400", "404"]  # 400 while jobs are off
     return statuses
 
 
@@ -100,6 +104,10 @@ def build_openapi(app: FastAPI, settings: Settings) -> dict[str, Any]:
                     response["description"] = _DESCRIPTIONS["422"]
             if (tag := _tag(path)) is not None:
                 operation["tags"] = [tag]
+    upload = spec.get("paths", {}).get("/v1/extract/file", {}).get("post")
+    if upload is not None:  # a form's examples cannot be set on the route (C13)
+        form = upload["requestBody"]["content"]["multipart/form-data"]
+        form["examples"] = FILE_EXAMPLES
     return spec
 
 

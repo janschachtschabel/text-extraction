@@ -1,6 +1,6 @@
 """Request and result models of ``POST /v1/extract``."""
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -35,7 +35,7 @@ from text_extraction.vision.types import DescribeImagesOptions, ImageDescription
 CacheState = Literal["miss", "hit", "revalidated", "bypass"]
 
 
-class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True):
+class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """Body of ``POST /v1/extract``."""
 
     url: str = Field(max_length=MAX_URL_LENGTH, description="The http(s) URL to extract.")
@@ -292,7 +292,8 @@ class ExtractResult(BaseModel):
     final_url: str | None
     upstream_status: int | None  # of the response the content came from
     content_type: str | None
-    mode_used: Literal["fast", "browser", "upload"]
+    # None: the service failed before a mode ran (an own fault of a job item, C14).
+    mode_used: Literal["fast", "browser", "upload"] | None
     attempts: int  # fetches of the target in this request
     language: str | None
     word_count: int
@@ -308,6 +309,8 @@ class ExtractResult(BaseModel):
     cache: CacheState
     warnings: list[str] = Field(
         description="What did not go as asked, while the result still answers: "
+        "`charset_mismatch` (the page was declared UTF-8 but is not: read as windows-1252, or "
+        "the legacy encoding its bytes fit) (pages); "
         "`browser_unavailable` (no browser worker took the page: the fast result), "
         "`action_<index>_failed` (a browser action, counted from 0), "
         "`navigation_refused_non_get`, `consent_overlay_removed`, `screenshot_clipped`, "
@@ -378,8 +381,58 @@ class ExtractResult(BaseModel):
     site: SiteInfo | None = None
 
 
-def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:
+def own_fault_result(
+    url: str | None, *, format: OutputFormat, compliance: ComplianceMode
+) -> ExtractResult:
+    """The ``data`` of a failure of the service's own that ran no step (C14, CLAUDE.md rule 4):
+    the item's URL, ``mode_used`` and ``upstream_status`` null, no fetch, no content, zero
+    timings, the compliance checks skipped."""
+    return ExtractResult(
+        url=url,
+        final_url=None,
+        upstream_status=None,
+        content_type=None,
+        mode_used=None,
+        attempts=0,
+        language=None,
+        word_count=0,
+        title=None,
+        format=format,
+        content=None,
+        quality=None,
+        timings=Timings(total_ms=0, compliance_ms=0, fetch_ms=0, convert_ms=0),
+        compliance=ComplianceReport(mode=compliance, decision="skipped"),
+        metadata=None,
+        links=None,
+        fingerprint=None,
+        cache="bypass",
+        warnings=[],
+    )
+
+
+def with_own_fault_data(
+    envelope: Envelope[ExtractResult],
+    url: str | None,
+    *,
+    format: OutputFormat,
+    compliance: ComplianceMode,
+) -> Envelope[ExtractResult]:
+    """``envelope`` with ``own_fault_result`` as its data when it failed without any (an item's
+    result as the API shows it); any other envelope unchanged."""
+    if envelope.status != "failed" or envelope.data is not None:
+        return envelope
+    data = own_fault_result(url, format=format, compliance=compliance)
+    return envelope.model_copy(update={"data": data})
+
+
+def failed_extract(
+    code: ErrorCode,
+    message: str,
+    *,
+    retryable: bool,
+    details: list[dict[str, Any]] | None = None,
+) -> Envelope[ExtractResult]:
     """A failed extraction envelope without data, with the trace id bound to the context (the
     request's, or in a worker the trace id of the job's creator)."""
-    error = ErrorInfo(code=code, message=message, retryable=retryable)
+    error = ErrorInfo(code=code, message=message, retryable=retryable, details=details)
     return Envelope[ExtractResult](status="failed", error=error, trace_id=current_trace_id())

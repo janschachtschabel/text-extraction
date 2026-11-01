@@ -68,6 +68,10 @@ def _forwarded_headers(request: Request) -> dict[str, str]:
     trace_id = _outer_trace_id(request)
     if trace_id is not None:
         headers[TRACE_HEADER] = trace_id
+    # The outer request's Host, which the Host allowlist has passed (M3/S4): the inner request
+    # meets the same check under AUTH_MODE=none.
+    if (host := request.headers.get("host")) is not None:
+        headers["host"] = host
     return headers
 
 

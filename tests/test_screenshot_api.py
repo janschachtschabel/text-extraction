@@ -132,12 +132,13 @@ def test_foreign_or_unknown_artifact_is_404(path: str) -> None:
         assert (body["status"], body["error"]["code"]) == ("failed", "not_found")
 
 
-def test_artifact_route_with_jobs_disabled_is_503() -> None:
+def test_artifact_route_with_jobs_disabled_is_400() -> None:
     case = BrowserCase(jobs_enabled=False)
     with TestClient(case.app) as client:
         response = client.get(f"/v1/jobs/{'f' * 32}/artifacts/screenshot.png", headers=AUTH)
 
-        assert response.status_code == 503
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
 
 
 def test_screenshot_disabled_is_400() -> None:
@@ -191,4 +192,38 @@ def test_screenshot_evaluate_by_user_is_403() -> None:
         response = take(client, actions=[{"type": "evaluate", "script": "1"}])
 
         assert response.status_code == 403
+        assert case.keys("job*") == []
+
+
+@pytest.mark.parametrize("url", ["ftp://example.org/", "example.org/page", "https://a..b/"])
+@pytest.mark.parametrize("wait", [None, 0])
+def test_screenshot_of_an_invalid_url_fails_at_once(url: str, wait: int | None) -> None:
+    # Like /v1/extract: the envelope with invalid_url, never a job or a wait for a worker.
+    case = BrowserCase(browser_queue_wait_seconds=0)
+    body: dict[str, Any] = {"url": url} if wait is None else {"url": url, "wait_seconds": wait}
+    with TestClient(case.app) as client:
+        response = client.post("/v1/screenshot", json=body, headers=AUTH)
+
+        assert response.status_code == 200
+        answer = response.json()
+        assert (answer["status"], answer["error"]["code"]) == ("failed", "invalid_url")
+        assert answer["error"]["retryable"] is False
+        assert answer["data"]["mode_used"] is None  # no mode ran
+        assert case.keys("job*") == []
+
+
+def test_browser_extract_of_an_invalid_url_fails_at_once() -> None:
+    case = BrowserCase(browser_queue_wait_seconds=0)
+    with TestClient(case.app) as client:
+        response = client.post(
+            "/v1/extract",
+            json={"url": "ftp://example.org/", "mode": "browser", "wait_seconds": 0},
+            headers=AUTH,
+        )
+
+        assert response.status_code == 200
+        assert response.json()["error"]["code"] == "invalid_url"
+        assert (
+            response.json()["data"]["mode_used"] is None
+        )  # not "fast": the caller asked for the browser
         assert case.keys("job*") == []

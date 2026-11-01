@@ -41,12 +41,14 @@ def test_ready_is_503_until_the_public_server_listens() -> None:
     assert ready_status(Readiness()) == 503
 
 
-def test_ready_is_200_while_the_public_server_listens_and_valkey_answers() -> None:
+def test_ready_is_200_while_the_public_server_listens_even_without_valkey() -> None:
     readiness = Readiness()
     readiness.mark_listening()
 
     assert ready_status(readiness) == 200
-    assert ready_status(readiness, FakeAsyncRedis(connected=False)) == 503
+    # without Valkey no pod can help: the pod stays in the Service and answers its 503
+    # envelope, and the alert TextExtractionValkeyDown reports the outage (ruling D1)
+    assert ready_status(readiness, FakeAsyncRedis(connected=False)) == 200
 
 
 def test_ready_is_503_once_shutdown_begins() -> None:

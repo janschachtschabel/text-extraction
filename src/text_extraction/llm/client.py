@@ -62,6 +62,7 @@ from pydantic import ValidationError
 from text_extraction.llm.basics import LlmError, truncate_input
 from text_extraction.llm.usage import LlmUsage
 from text_extraction.settings import Settings
+from text_extraction.tracing import outbound_trace_headers
 from text_extraction.vision.images import data_url
 
 __all__ = [
@@ -234,6 +235,7 @@ class LlmClient:
                     response_format=response_format,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
+                    extra_headers=outbound_trace_headers(),
                 ),
                 ChatCompletion,
                 kind=kind,
@@ -286,6 +288,7 @@ class LlmClient:
                     model=model,
                     input=batch,
                     encoding_format="float",
+                    extra_headers=outbound_trace_headers(),
                 ),
                 CreateEmbeddingResponse,
                 kind="embeddings",

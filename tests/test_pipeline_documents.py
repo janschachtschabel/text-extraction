@@ -260,7 +260,10 @@ def test_pdf_url_converts(loop: Loop, httpserver: HTTPServer) -> None:
     assert data.compliance.decision == "allowed"
 
 
-@pytest.mark.parametrize("content_type", ["application/octet-stream", "text/plain", None])
+@pytest.mark.parametrize(
+    "content_type",
+    ["application/octet-stream", "text/plain", None, "text/html", "text/html; charset=utf-8"],
+)
 def test_pdf_with_another_or_no_type_converts(loop: Loop, content_type: str | None) -> None:
     harness = Harness(loop, {DOC: pdf(content_type=content_type)})
 

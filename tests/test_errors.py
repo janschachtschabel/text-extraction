@@ -34,6 +34,16 @@ def build_app() -> FastAPI:
             headers={"Retry-After": "7"},
         )
 
+    @app.get("/unavailable/{retryable}")
+    def unavailable(retryable: bool) -> None:
+        raise ServiceError(ErrorCode.INTERNAL_ERROR, "backend down", 503, retryable=retryable)
+
+    @app.get("/unavailable-with-wait")
+    def unavailable_with_wait() -> None:
+        raise ServiceError(
+            ErrorCode.INTERNAL_ERROR, "busy", 503, retryable=True, headers={"Retry-After": "9"}
+        )
+
     @app.post("/validate")
     def validate(payload: Payload) -> Payload:
         return payload
@@ -73,6 +83,13 @@ def test_service_error_headers_and_retryable(client: TestClient) -> None:
     assert response.headers["retry-after"] == "7"
     assert response.json()["error"]["code"] == "rate_limited"
     assert response.json()["error"]["retryable"] is True
+
+
+def test_a_retryable_503_says_when_to_retry(client: TestClient) -> None:
+    # C12: a client that honours Retry-After waits 5 s instead of hammering the service.
+    assert client.get("/unavailable/true").headers["retry-after"] == "5"
+    assert "retry-after" not in client.get("/unavailable/false").headers
+    assert client.get("/unavailable-with-wait").headers["retry-after"] == "9"
 
 
 def test_validation_error_envelope_has_field_paths(client: TestClient) -> None:

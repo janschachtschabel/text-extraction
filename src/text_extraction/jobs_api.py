@@ -19,12 +19,13 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from starlette.datastructures import State
 
+from text_extraction.api_examples import BATCH_EXAMPLES
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
 from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
@@ -38,7 +39,7 @@ from text_extraction.extract_api import (
     check_pii_request,
     check_transcribe_request,
 )
-from text_extraction.extract_models import ExtractResult
+from text_extraction.extract_models import ExtractResult, with_own_fault_data
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
@@ -62,7 +63,7 @@ from text_extraction.structured.checks import (
     llm_key_of,
     wants_llm,
 )
-from text_extraction.tracing import current_trace_id
+from text_extraction.tracing import current_trace_fields, current_trace_id
 from text_extraction.valkey import reply_text
 from text_extraction.vision.checks import check_describe_request
 
@@ -98,14 +99,15 @@ def _open_key(owner: str) -> str:
 async def require_jobs_enabled(
     request: Request, _principal: Annotated[Principal, Depends(authenticate)]
 ) -> None:
-    """Dependency: 503 while ``JOBS_ENABLED`` is false (after authentication)."""
+    """Dependency: 400 while ``JOBS_ENABLED`` is false (after authentication)."""
     check_jobs_enabled(request.app.state.settings)
 
 
 def check_jobs_enabled(settings: Settings) -> None:
-    """503 while ``JOBS_ENABLED`` is false."""
+    """400 ``invalid_request`` while ``JOBS_ENABLED`` is false, as for every switch that is off
+    (C12): the deployment answers so until it is configured otherwise, which no retry changes."""
     if not settings.jobs_enabled:
-        raise ServiceError(ErrorCode.INTERNAL_ERROR, "Jobs are disabled on this deployment.", 503)
+        raise ServiceError(ErrorCode.INVALID_REQUEST, "Jobs are disabled on this deployment.", 400)
 
 
 def _unavailable() -> ServiceError:
@@ -227,7 +229,14 @@ async def open_job(
     limit = settings.batch_max_open_per_client
     if await _open_count(valkey, store, principal.name) >= limit:
         raise _too_many_open(limit)
-    job_id = await store.create(kind, principal, options, urls, trace_id=current_trace_id())
+    job_id = await store.create(
+        kind,
+        principal,
+        options,
+        urls,
+        trace_id=current_trace_id(),
+        trace_fields=current_trace_fields(),
+    )
     try:
         # Counting again after the add keeps the limit under concurrent requests: of several
         # that passed the check above, those beyond the limit give their job back.
@@ -258,7 +267,7 @@ async def discard_job(state: State, principal: Principal, job_id: str) -> None:
     ],
 )
 async def create_batch(
-    body: BatchRequest,
+    body: Annotated[BatchRequest, Body(openapi_examples=BATCH_EXAMPLES)],
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
     asr_key: Annotated[
@@ -276,9 +285,9 @@ async def create_batch(
     4xx answers: an invalid body or more URLs than `BATCH_MAX_URLS` (422), a body larger than
     `BATCH_MAX_URLS` URLs of the longest allowed length can take (413, before it is read whole),
     a compliance mode the caller may not choose (403), `BATCH_MAX_OPEN_PER_CLIENT` unfinished
-    batches and site jobs together (429, retryable).
-    503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
-    `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
+    batches and site jobs together (429, retryable), jobs disabled (400).
+    503 when Valkey is unavailable or Valkey's memory is at `VALKEY_MEMORY_GUARD_RATIO` of its
+    maximum (retryable).
 
     `mode: browser` queues the URLs for the browser workers (400 while browser mode is off);
     `ocr: always` answers 400 while the service has no OCR, `transcribe: true` while it has no
@@ -310,7 +319,7 @@ async def start_batch(
     values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     store: JobStore = state.job_store
     queue: FairQueue = state.job_queue
@@ -450,6 +459,20 @@ def _is_lost(record: JobRecord) -> bool:
     )
 
 
+def _shown(item: JobItem, record: JobRecord) -> JobItem:
+    """``item`` as the API shows it: a result that failed without data (a fault of the
+    service's own) gets the envelope's fields with nothing the run did not reach (C14)."""
+    if item.result is None:
+        return item
+    result = with_own_fault_data(
+        item.result,
+        item.url,
+        format=record.options.format,
+        compliance=record.options.compliance,
+    )
+    return item if result is item.result else item.model_copy(update={"result": result})
+
+
 def _lost_view(record: JobRecord, items: list[JobItem]) -> tuple[JobRecord, list[JobItem]]:
     """The record and items of a lost job as the API shows them (nothing is stored): every item
     without a result is done and failed with a retryable ``internal_error``, and the job is
@@ -511,7 +534,7 @@ async def read_job(
     checks them, other callers bound them themselves).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     store: JobStore = state.job_store
     try:
         record = await visible_job(store, job_id, principal)
@@ -524,6 +547,7 @@ async def read_job(
         lost = _is_lost(record)
         if lost:
             record, items = _lost_view(record, items)
+        items = [_shown(item, record) for item in items]
         status = _envelope_status(record)
         failure: ErrorInfo | None = None
         if status == "failed":
@@ -558,7 +582,9 @@ async def read_job(
 
 
 @router.delete(
-    "/v1/jobs/{job_id}", dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)]
+    "/v1/jobs/{job_id}",
+    name="delete_job",
+    dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)],
 )
 async def remove_job(
     job_id: str,
@@ -573,7 +599,7 @@ async def remove_job(
     still queued are dropped when a worker reaches them, and an item that is running finishes
     without its result being stored. Afterwards `GET /v1/jobs/{id}` and a second delete answer
     404. A job that does not exist, has expired or belongs to another caller (admins may delete
-    all) answers 404. 503 when jobs are disabled or Valkey is unavailable (retryable).
+    all) answers 404. 400 when jobs are disabled, 503 when Valkey is unavailable (retryable).
     """
     return await delete_job(request.app.state, principal, job_id)
 
@@ -587,7 +613,7 @@ async def delete_job(state: State, principal: Principal, job_id: str) -> Envelop
     request (P1), stores nothing once it ends (``JobLost``).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     valkey: Redis = state.valkey
     store: JobStore = state.job_store
     try:

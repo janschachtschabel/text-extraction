@@ -82,6 +82,10 @@ job. Batches and crawls are jobs from the start. The full picture is in
 - Further workflows: [`e2e.yml`](../.github/workflows/e2e.yml) (a 1,000-URL batch against a local
   site farm), [`live.yml`](../.github/workflows/live.yml) (the regression on real URLs, see
   item 4), [`load.yml`](../.github/workflows/load.yml) (the load test behind items 4 and 9).
+- By hand, before a release: [`tests/e2e/audit_probes.py`](../tests/e2e/audit_probes.py) runs
+  hostile probes against a running service (a redirect loop, a 30 MB body, a gzip bomb, a slow
+  drip, binary and mis-declared pages from its own site farm; with `--ssrf`, private addresses in
+  their various spellings and forbidden schemes) and exits 1 when an answer differs.
 
 ## 2. OpenAPI
 
@@ -237,7 +241,7 @@ The service runs without B-API today and is prepared for it.
   [configuration.md, Metrics](configuration.md#metrics).
   Query the queue gauges with `max()` over the API pods.
 - Alert rules: the PrometheusRule (`metrics.prometheusRule.enabled`) with service down, 5xx share,
-  Valkey memory, queue backlog and workers down per pool, job item failures and stale queue
+  Valkey down, Valkey memory, queue backlog and workers down per pool, job item failures and stale queue
   metrics: [Helm chart, Alerts](../deploy/helm/text-extraction/README.md#alerts).
 
 ## 7. Logs and trace headers
@@ -251,10 +255,11 @@ The service runs without B-API today and is prepared for it.
   Each request writes one access line (`event: request`, method, path, status, `duration_ms`).
   Query strings and secrets are never logged.
 - Trace headers: `x-client-trace-id` becomes `trace_id` on every log line of the request and in
-  the response envelope (without one the service generates an id); the B3 headers (`b3`,
+  the response envelope (without one the B3 trace id, else a generated id); the B3 headers (`b3`,
   `x-b3-traceid`, `x-b3-spanid`, `x-b3-parentspanid`, `x-b3-sampled`) are logged on every line.
-  A job keeps the trace id of the request that created it, so its items log under it on the
-  workers. Trace headers are never forwarded to target sites:
+  A job keeps the trace id and the B3 headers of the request that created it, so its items log
+  under them on the workers. The LLM and the external ASR endpoint receive them with every call;
+  trace headers are never forwarded to target sites:
   [configuration.md, Headers](configuration.md#headers).
 
 ## 8. State and horizontal scaling
@@ -279,6 +284,10 @@ The service runs without B-API today and is prepared for it.
   ([Helm chart, ASR
   workers](../deploy/helm/text-extraction/README.md#asr-workers-and-the-models-volume));
   the in-chart Valkey is a single replica.
+- After a Valkey restart the pods recover by themselves: a pooled connection idle for more than
+  5 s is checked with PING before its next command and opened again once if it is dead.
+  Commands are never retried, since one lost in flight may have run already (a Lua script, a
+  MULTI, a job claim); a request that meets the restart itself fails with a retryable 503.
 - The short architecture overview is [at the top of this document](#architecture-overview).
 
 ## 9. Resource baseline

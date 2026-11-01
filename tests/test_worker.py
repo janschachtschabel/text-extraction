@@ -21,6 +21,7 @@ from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from starlette.datastructures import State
 from structlog.testing import capture_logs
 
@@ -503,7 +504,7 @@ async def test_gate_refusal_defers_the_item() -> None:
 
 @pytest.mark.parametrize(
     ("refusal", "code"),
-    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.CONNECTION_ERROR)],
+    [(OutboundBusy(3.0), ErrorCode.RATE_LIMITED), (CircuitOpen(30.0), ErrorCode.RATE_LIMITED)],
 )
 @scenario
 async def test_item_deferred_too_often_fails_with_the_gate_code(
@@ -1233,7 +1234,14 @@ async def test_metrics_count_outcomes() -> None:
 async def test_worker_logs_and_stores_under_the_creators_trace_id() -> None:
     url = page("example.org")
     harness = Harness({url: fetched(url)})
-    job_id = await harness.store.create("batch", OWNER, OPTIONS, [url], trace_id="trace-batch-1")
+    job_id = await harness.store.create(
+        "batch",
+        OWNER,
+        OPTIONS,
+        [url],
+        trace_id="trace-batch-1",
+        trace_fields={"x_b3_traceid": "80f198ee56343ba8", "x_b3_sampled": "1"},
+    )
     await harness.queue.enqueue(job_id, OWNER.name, [url])
     claim = await harness.claim()
 
@@ -1242,6 +1250,9 @@ async def test_worker_logs_and_stores_under_the_creators_trace_id() -> None:
 
     done = [entry for entry in logs if entry["event"] == "job_item_done"]
     assert [entry.get("trace_id") for entry in done] == ["trace-batch-1"]
+    # O4: the creator's B3 fields too.
+    assert [entry.get("x_b3_traceid") for entry in done] == ["80f198ee56343ba8"]
+    assert [entry.get("x_b3_sampled") for entry in done] == ["1"]
     [item] = await harness.items(job_id)
     assert item.result is not None
     assert item.result.trace_id == "trace-batch-1"
@@ -1824,6 +1835,70 @@ async def test_batch_item_moves_to_docling() -> None:
     assert outcome_count(harness, "escalated") == 1
     # The draft is neither cached nor fingerprinted: the Docling worker stores the kept one.
     assert await harness.valkey.keys("res:*") == []
+
+
+@pytest.mark.parametrize("pool", ["docling", "asr"])
+@scenario
+async def test_a_job_deleted_during_a_move_keeps_no_input(pool: str) -> None:
+    """The job of a batch item is deleted after the item's bytes were stored for the pool but
+    before its draft: the move gives the bytes and their budget share back at once. Nobody
+    else would: the item never reaches the pool's queue, and ``JobStore.delete`` knows only
+    item 0's input (O11)."""
+    if pool == "docling":
+        harness = ocr_harness()
+        job_id = await harness.submit([SCAN_URL, SCAN_URL])
+    else:
+        harness = asr_harness()
+        job_id = await submit_transcription(harness, [YOUTUBE, YOUTUBE])
+    store = harness.store
+    # item 0 moves as usual
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    real_draft = store.put_draft
+
+    async def put_draft(job: str, index: int, envelope: Any) -> None:
+        await delete_job(api_state(harness), OWNER, job)  # the caller deletes the job meanwhile
+        await real_draft(job, index, envelope)
+
+    store.put_draft = put_draft  # type: ignore[method-assign, assignment]
+    claim = await harness.claim()
+    assert claim.item is not None
+    assert claim.item.index == 1
+
+    await harness.worker.process(claim.item)
+
+    assert await harness.valkey.keys(f"job:{{{job_id}}}:input:*") == []
+    assert await budget_members(harness, job_id) == []
+    assert await harness.valkey.get("inputs:{budget}:total") in (None, b"0")
+
+
+@pytest.mark.parametrize("pool", ["docling", "asr"])
+@scenario
+async def test_an_enqueue_whose_reply_is_lost_keeps_the_input(pool: str) -> None:
+    """Review of O11: the enqueue's script may have run before its reply was lost; the pool's
+    worker then claims the item and needs its bytes, so they stay."""
+    if pool == "docling":
+        harness = ocr_harness()
+        job_id = await harness.submit([SCAN_URL])
+        queue = harness.docling_queue
+    else:
+        harness = asr_harness()
+        job_id = await submit_transcription(harness, [YOUTUBE])
+        queue = harness.asr_queue
+    real_enqueue = queue.enqueue_items
+
+    async def enqueue_items(*args: Any, **kwargs: Any) -> None:
+        await real_enqueue(*args, **kwargs)
+        raise RedisTimeoutError("the reply was lost")
+
+    queue.enqueue_items = enqueue_items  # type: ignore[method-assign]
+
+    with pytest.raises(RedisTimeoutError):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert (await queue.counts()).pending == 1
+    assert await harness.valkey.keys(f"job:{{{job_id}}}:input:*") == [
+        f"job:{{{job_id}}}:input:0".encode()
+    ]
 
 
 @scenario

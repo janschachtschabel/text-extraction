@@ -7,11 +7,17 @@ import pytest
 from fakeredis import FakeAsyncRedis
 from fastapi.testclient import TestClient
 from prometheus_client import CollectorRegistry
+from pydantic import BaseModel
 from redis.asyncio import Redis
 
 from text_extraction import __version__
 from text_extraction.app import create_public_app
+from text_extraction.browser_models import ScreenshotRequest
+from text_extraction.envelope import ErrorCode
+from text_extraction.extract_models import ExtractRequest
+from text_extraction.file_models import FileForm
 from text_extraction.internal import Readiness, create_internal_app
+from text_extraction.job_models import BatchRequest
 from text_extraction.server import main
 from text_extraction.settings import Settings
 from text_extraction.valkey import create_valkey
@@ -137,9 +143,67 @@ def test_openapi_errors_are_the_envelope(public: TestClient) -> None:
             )
         if method == "post":
             assert {"400", "403", "413"} <= set(responses), (path, method)
+            assert ("415" in responses) is (path != "/v1/extract/file"), (path, method)
         if "{job_id}" in path:
             assert "404" in responses, (path, method)
         assert operation["tags"], (path, method)
+
+
+_OPERATION_IDS = {
+    ("post", "/v1/extract"): "extract",
+    ("post", "/v1/extract/file"): "extract_file",
+    ("post", "/v1/screenshot"): "screenshot",
+    ("get", "/v1/jobs/{job_id}/artifacts/{name}"): "get_job_artifact",
+    ("post", "/v1/structured"): "structured",
+    ("post", "/v1/chunk"): "chunk",
+    ("post", "/v1/batch"): "create_batch",
+    ("get", "/v1/jobs/{job_id}"): "get_job",
+    ("delete", "/v1/jobs/{job_id}"): "delete_job",
+    ("post", "/v1/site-structure"): "create_site_structure",
+    ("get", "/v1/info"): "info",
+}
+
+
+def test_openapi_operation_ids_are_plain_names(public: TestClient) -> None:
+    # C13: a generated client gets `extract`, not `extract_v1_extract_post`.
+    spec = public.get("/openapi.json").json()
+
+    ids = {(method, path): op["operationId"] for path, method, op in _operations(spec)}
+
+    assert ids == _OPERATION_IDS
+
+
+@pytest.mark.parametrize(
+    ("path", "media_type", "model"),
+    [
+        ("/v1/extract", "application/json", ExtractRequest),
+        ("/v1/screenshot", "application/json", ScreenshotRequest),
+        ("/v1/batch", "application/json", BatchRequest),
+        ("/v1/extract/file", "multipart/form-data", FileForm),
+    ],
+)
+def test_openapi_request_examples_are_valid_bodies(
+    public: TestClient, path: str, media_type: str, model: type[BaseModel]
+) -> None:
+    spec = public.get("/openapi.json").json()
+
+    examples = spec["paths"][path]["post"]["requestBody"]["content"][media_type]["examples"]
+
+    assert len(examples) >= 2, path
+    for name, example in examples.items():
+        assert example["summary"], (path, name)
+        value = dict(example["value"])
+        value.pop("file", None)  # the multipart file part
+        model.model_validate(value)
+
+
+def test_openapi_error_code_lists_every_code(public: TestClient) -> None:
+    description = public.get("/openapi.json").json()["components"]["schemas"]["ErrorCode"][
+        "description"
+    ]
+
+    for code in ErrorCode:
+        assert f"`{code.value}`" in description, code
 
 
 def test_openapi_without_keys_has_no_security_scheme(registry: CollectorRegistry) -> None:
@@ -187,17 +251,17 @@ def test_health_and_ready_ok(internal: TestClient) -> None:
     assert ready.json() == {"status": "ready"}
 
 
-def test_ready_503_when_valkey_down(registry: CollectorRegistry) -> None:
+def test_ready_200_when_valkey_down(registry: CollectorRegistry) -> None:
     with internal_client(FakeAsyncRedis(connected=False), registry) as client:
         response = client.get("/ready")
 
-    assert response.status_code == 503
-    assert response.json() == {"status": "not_ready"}
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
 
 
-def test_ready_503_with_real_client_on_closed_port(registry: CollectorRegistry) -> None:
+def test_ready_does_not_wait_for_a_closed_valkey_port(registry: CollectorRegistry) -> None:
     with internal_client(create_valkey(DOWN_URL), registry) as client:
-        assert client.get("/ready").status_code == 503
+        assert client.get("/ready").status_code == 200
 
 
 def test_health_200_when_valkey_down(registry: CollectorRegistry) -> None:

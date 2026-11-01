@@ -582,7 +582,13 @@ def fake_reads(
     held: list[weakref.ref[JobItem]] = []
 
     async def read_job(state_: Any, principal: Any, job_id: str, offset: int, limit: int) -> Any:
-        gc.collect()
+        # The executor thread of ``asyncio.to_thread`` drops its work item (and with it the
+        # page it was given) a moment after the awaiting coroutine resumes: allow it that.
+        for _ in range(100):
+            gc.collect()
+            if all(ref() is None for ref in held):
+                break
+            await asyncio.sleep(0.01)
         assert [ref for ref in held if ref() is not None] == [], "the page before is still held"
         reads.append((offset, limit))
         items = items_of(offset, min(limit, total - offset))
@@ -647,6 +653,30 @@ def test_tree_checkboxes_named_only_for_urls(
         "tree-all",
         "tree-none",
     }
+
+
+def test_tree_counts_one_hit_per_500_items(
+    monkeypatch: pytest.MonkeyPatch, hits: list[str]
+) -> None:
+    # M4: a tree of 1,100 items is three REST pages' worth of reads.
+    used: list[int] = []
+
+    async def count_used(state: Any, principal: Any, units: int) -> None:
+        used.append(units)
+
+    monkeypatch.setattr("text_extraction.ui.job_views.count_used", count_used)
+    fake_reads(
+        monkeypatch,
+        1_100,
+        lambda offset, limit: [
+            page_item(index, f"{ORIGIN}/p/{index}") for index in range(offset, offset + limit)
+        ],
+    )
+    with running(ui_tree_max_urls=5000) as client:
+        show_tree(client)
+
+    assert hits == ["alice"]
+    assert used == [2]
 
 
 def test_tree_caps_and_reads_in_pages(monkeypatch: pytest.MonkeyPatch, hits: list[str]) -> None:

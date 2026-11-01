@@ -1,7 +1,9 @@
 """Tool results (ruling P10-S6): the route's envelope as ``structuredContent``, the same JSON as
 the last text content, one-line hints (and a screenshot as an image) before it, and ``isError``
 only where REST answers 4xx or 5xx. A target's ``failed`` (REST 200) is a normal result.
-``content`` is cut to the caller's share (``slice_content``); no other field is cut."""
+``content`` is cut to the caller's share (``slice_content``); then the whole answer is bounded
+by ``MCP_MAX_ANSWER_CHARS`` (``fit_answer``, M2, which reverses ruling P10-S6 for the lists):
+a job page drops its trailing items, then the lists of a result are cut."""
 
 import base64
 import json
@@ -22,6 +24,17 @@ INTERNAL_MESSAGE = "Internal server error."
 INVALID_MESSAGE = "The request is invalid."
 # The warning of a result whose ``content`` an MCP answer returns in part (P10-S6).
 TRUNCATED_WARNING = "mcp_content_truncated"
+# The warning of a result whose lists an MCP answer returns in part (M2).
+ANSWER_TRUNCATED_WARNING = "mcp_answer_truncated"
+# Room for the warning in a result's ``warnings`` (its quotes and comma included).
+_WARNING_ROOM = len(ANSWER_TRUNCATED_WARNING) + 3
+# The lists of a result that ``fit_answer`` cuts, in this order (M2).
+_CUT_LISTS: tuple[tuple[str, ...], ...] = (
+    ("chunks",),
+    ("links",),
+    ("structured", "tables"),
+    ("site", "links"),
+)
 
 
 def payload_result(
@@ -130,24 +143,145 @@ def slice_content(envelope: dict[str, Any], *, offset: int, share: int) -> str |
     return f"Cut at {end} of {total} characters; call again with content_offset={end}."
 
 
-def slice_items(envelope: dict[str, Any], *, offset: int, max_chars: int) -> list[str]:
-    """Cut the ``content`` of each item's result of a job page (``data.items``, in place) to
-    an equal share of ``max_chars`` from ``offset`` (``slice_content``), so a page of many items
-    holds no more than one result. Returns the hints, one per item that has more to read."""
+def _page_items(envelope: dict[str, Any]) -> list[Any]:
     data = envelope.get("data")
     items = data.get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list) or not items:
+    return items if isinstance(items, list) else []
+
+
+def slice_items(envelope: dict[str, Any], *, offset: int, max_chars: int) -> list[tuple[Any, str]]:
+    """Cut the ``content`` of each item's result of a job page (``data.items``, in place) to
+    an equal share of ``max_chars`` from ``offset`` (``slice_content``), so a page of many items
+    holds no more than one result. Returns (item index, hint), one per item that has more to
+    read; ``kept_item_hints`` drops those of items the answer budget dropped later."""
+    items = _page_items(envelope)
+    if not items:
         return []
     share = max(1, max_chars // len(items))
-    hints: list[str] = []
+    hints: list[tuple[Any, str]] = []
     for item in items:
         result = item.get("result") if isinstance(item, dict) else None
         if not isinstance(result, dict):
             continue
         hint = slice_content(result, offset=offset, share=share)
         if hint is not None:
-            hints.append(f"Item {item.get('index')}: {hint}")
+            hints.append((item.get("index"), f"Item {item.get('index')}: {hint}"))
     return hints
+
+
+def kept_item_hints(envelope: dict[str, Any], hints: list[tuple[Any, str]]) -> list[str]:
+    """The hints of ``slice_items`` for the items the page still holds."""
+    kept = {item.get("index") for item in _page_items(envelope) if isinstance(item, dict)}
+    return [hint for index, hint in hints if index in kept]
+
+
+def _size(value: object) -> int:
+    """Characters of ``value`` as ``payload_result`` writes it."""
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _warn(data: dict[str, Any]) -> None:
+    warnings = data.get("warnings")
+    if not isinstance(warnings, list):
+        data["warnings"] = warnings = []
+    if ANSWER_TRUNCATED_WARNING not in warnings:
+        warnings.append(ANSWER_TRUNCATED_WARNING)
+
+
+def _list_at(data: dict[str, Any], path: tuple[str, ...]) -> list[Any] | None:
+    node: object = data
+    for key in path:
+        node = node.get(key) if isinstance(node, dict) else None
+    return node if isinstance(node, list) and node else None
+
+
+def _cut_list(
+    data: dict[str, Any], path: tuple[str, ...], over: int
+) -> tuple[int, tuple[int, int] | None]:
+    """Drop elements from the end of the list at ``path`` until ``over`` characters are gone
+    (or the list is empty). Returns the characters dropped and, when it cut, (kept, total)."""
+    values = _list_at(data, path)
+    if values is None:
+        return 0, None
+    total = len(values)
+    dropped = 0
+    while values and dropped < over:
+        dropped += _size(values.pop()) + 1  # the element and its comma
+    return dropped, (len(values), total)
+
+
+def _fit_result(result: dict[str, Any], over: int, prefix: str, rest: str) -> tuple[int, list[str]]:
+    """Cut the lists of one result (``_CUT_LISTS`` in order) by about ``over`` characters."""
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return 0, []
+    hints: list[str] = []
+    saved = 0
+    if ANSWER_TRUNCATED_WARNING not in (data.get("warnings") or []):
+        over += _WARNING_ROOM  # the warning a cut adds
+    for path in _CUT_LISTS:
+        if saved >= over:
+            break
+        dropped, cut = _cut_list(data, path, over - saved)
+        if cut is None:
+            continue
+        saved += dropped
+        _warn(data)
+        kept, total = cut
+        hints.append(
+            f"{prefix}{'.'.join(path)} cut to {kept} of {total} to fit MCP_MAX_ANSWER_CHARS; "
+            f"{rest} returns them all."
+        )
+    return saved, hints
+
+
+def _drop_items(data: dict[str, Any], items: list[Any], over: int) -> tuple[int, str | None]:
+    """Drop trailing items of a job page (one stays) by about ``over`` characters; the page's
+    ``next_offset`` then names the first dropped item."""
+    dropped = 0
+    while len(items) > 1 and dropped < over:
+        dropped += _size(items.pop()) + 1
+    if not dropped:
+        return 0, None
+    following = items[-1].get("index") if isinstance(items[-1], dict) else None
+    if not isinstance(following, int):  # pragma: no cover - a page's items have indexes
+        return dropped, None
+    data["next_offset"] = following + 1
+    return dropped, (
+        f"Page cut to {len(items)} items to fit MCP_MAX_ANSWER_CHARS; "
+        f"call get_job with offset={following + 1}."
+    )
+
+
+def fit_answer(payload: dict[str, Any], *, max_chars: int) -> list[str]:
+    """Bound ``payload`` (in place) to about ``max_chars`` characters of JSON
+    (``MCP_MAX_ANSWER_CHARS``, M2). A job page (``data.items``) drops trailing items first; then
+    the lists of each result are cut from the end in the order of ``_CUT_LISTS``, with the
+    warning ``mcp_answer_truncated``. ``content`` is never cut here (``slice_content`` has):
+    an answer of content alone may stay over. Returns the hints of what was cut."""
+    over = _size(payload) - max_chars
+    if over <= 0:
+        return []
+    hints: list[str] = []
+    data = payload.get("data")
+    items = data.get("items") if isinstance(data, dict) else None
+    if isinstance(data, dict) and isinstance(items, list) and items:
+        dropped, hint = _drop_items(data, items, over)
+        over -= dropped
+        if hint is not None:
+            hints.append(hint)
+        for item in items:
+            if over <= 0:
+                break
+            result = item.get("result") if isinstance(item, dict) else None
+            if isinstance(result, dict):
+                prefix = f"Item {item.get('index')}: "
+                saved, cut = _fit_result(result, over, prefix, "GET /v1/jobs/{id}")
+                over -= saved
+                hints.extend(cut)
+        return hints
+    _, cut = _fit_result(payload, over, "", "the REST route")
+    return cut
 
 
 def image_over_limit_hint(size: object, url: str) -> str:

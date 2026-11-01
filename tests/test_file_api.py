@@ -891,6 +891,17 @@ def test_unsupported_upload(client: TestClient) -> None:
     assert body["data"]["url"] is None
 
 
+def test_a_binary_upload_declared_as_html_is_unsupported(client: TestClient) -> None:
+    response = upload(client, b"<html>\x00\x01\x02\x03", "page.html", "text/html")
+
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "unsupported_content_type"
+    assert body["error"]["message"] == (
+        "The body is declared text/html but is binary data, not a page."
+    )
+
+
 def test_image_upload_without_ocr_is_unsupported(client: TestClient) -> None:
     response = upload(client, PNG, "scan.png", "image/png")
 

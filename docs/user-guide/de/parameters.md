@@ -5,7 +5,11 @@ English: [Parameters](../en/parameters.md)
 Diese Seite listet jedes Feld jedes Anfrage-Bodys, mit seinem Typ, seinem Standardwert und seiner
 Wirkung. Die OpenAPI-Spec unter `/docs` eines laufenden Dienstes hat dieselben Felder mit allen
 Einzelheiten und die verschachtelten Objekte vollständig. Ein Feld, das nicht gelistet ist,
-ergibt 422; ebenso ein Wert außerhalb des Bereichs. „nicht gesetzt“ heißt, dass das Feld
+ergibt 422; ebenso ein Wert außerhalb des Bereichs und ein Wert des falschen JSON-Typs (`"5"`
+ist keine Zahl und `"yes"` kein Boolean; eine ganze Zahl ist eine gültige Dezimalzahl). Eine
+ungültige URL ergibt 200 mit `status: failed` und `invalid_url` auf den Routen, die sofort
+antworten (auch im Browser-Modus und bei Screenshots), 422 bei `POST /v1/site-structure` und
+einen fehlgeschlagenen Eintrag in einem Batch. „nicht gesetzt“ heißt, dass das Feld
 fehlt (oder `null` ist); „Pflicht“ heißt, dass es keinen Standardwert hat.
 
 ## `POST /v1/extract`

@@ -1591,6 +1591,15 @@ def test_mcp_settings_defaults_and_bounds(monkeypatch: pytest.MonkeyPatch) -> No
         "http://b.example:443",
     ]
 
+    # With MCP on, the answer budget must exceed the content cut (M2): the content alone fills it.
+    monkeypatch.setenv("MCP_MAX_CONTENT_CHARS", "200000")
+    with pytest.raises(ConfigError, match="MCP_MAX_ANSWER_CHARS"):
+        load_settings()
+    monkeypatch.setenv("MCP_MAX_ANSWER_CHARS", "200001")
+    assert load_settings().mcp_max_answer_chars == 200_001
+    monkeypatch.delenv("MCP_MAX_CONTENT_CHARS")
+    monkeypatch.delenv("MCP_MAX_ANSWER_CHARS")
+
     monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "")
     assert load_settings().mcp_allowed_origins == []
     for wrong in ("app.example.org", "ftp://app.example.org", "https://a.example/path", "*"):

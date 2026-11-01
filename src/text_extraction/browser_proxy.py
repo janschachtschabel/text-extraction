@@ -87,9 +87,15 @@ def host_header(host: str, port: int) -> str:
 class ProxyContext:
     """What one browser page did through the proxy; created by ``EgressProxy.open_context``."""
 
-    def __init__(self, max_bytes: int, on_close: Callable[["ProxyContext"], None]) -> None:
+    def __init__(
+        self,
+        max_bytes: int,
+        on_close: Callable[["ProxyContext"], None],
+        server: str | None = None,
+    ) -> None:
         self.username = secrets.token_hex(8)
         self.password = secrets.token_urlsafe(24)
+        self.server = server  # the proxy's URL, without credentials
         self.bytes = 0  # relayed in both directions
         self.capped = False  # the byte limit was passed; new connections are refused
         self._max_bytes = max_bytes
@@ -97,6 +103,11 @@ class ProxyContext:
         self._hosts: set[str] = set()
         self._refused: list[tuple[str, str]] = []
         self._tasks: set[asyncio.Task[None]] = set()
+
+    @property
+    def max_bytes(self) -> int:
+        """The context's byte cap."""
+        return self._max_bytes
 
     @property
     def hosts(self) -> frozenset[str]:
@@ -349,7 +360,9 @@ class EgressProxy:
     def open_context(self, max_bytes: int | None = None) -> ProxyContext:
         """New credentials, new counters: one per browser page, or one per media child call.
         ``max_bytes`` caps the context's bytes (default ``BROWSER_MAX_BYTES``)."""
-        context = ProxyContext(self._max_bytes if max_bytes is None else max_bytes, self._forget)
+        context = ProxyContext(
+            self._max_bytes if max_bytes is None else max_bytes, self._forget, self.url
+        )
         self._contexts[context.username] = context
         return context
 

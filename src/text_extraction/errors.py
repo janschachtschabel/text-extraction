@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from fastapi import FastAPI, Request
@@ -59,12 +59,13 @@ def _trace_id(request: HTTPConnection) -> str | None:
     return request_log_context(request).get("trace_id") or current_trace_id()
 
 
-def _failed(
+def failed_response(
     request: HTTPConnection,
     http_status: int,
     error: ErrorInfo,
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
+    """The failed envelope of ``error`` with the request's trace id, as a JSON response."""
     envelope: Envelope[None] = Envelope(status="failed", error=error, trace_id=_trace_id(request))
     return JSONResponse(
         status_code=http_status,
@@ -73,14 +74,41 @@ def _failed(
     )
 
 
+# The Retry-After of a retryable 503 without a wait of its own (C12): an unavailable backend
+# usually comes back within seconds, and a client that honours the header does not hammer it.
+UNAVAILABLE_RETRY_AFTER_SECONDS: Final = 5
+
+
 async def _handle_service_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ServiceError)  # noqa: S101 - narrows the type for mypy
     error = ErrorInfo(code=exc.code, message=exc.message, retryable=exc.retryable)
-    return _failed(request, exc.http_status, error, exc.headers)
+    headers = dict(exc.headers or {})
+    waits = any(name.lower() == "retry-after" for name in headers)
+    if exc.http_status == HTTPStatus.SERVICE_UNAVAILABLE and exc.retryable and not waits:
+        headers["Retry-After"] = str(UNAVAILABLE_RETRY_AFTER_SECONDS)
+    return failed_response(request, exc.http_status, error, headers)
+
+
+def _not_json(request: Request, exc: RequestValidationError) -> bool:
+    """Whether the body as a whole failed because it was sent as something else than JSON: a
+    JSON route then answers 415, not a 422 that says the body is no object. A body without a
+    ``Content-Type`` is read as JSON (FastAPI), so its error stands as a 422."""
+    if not any(tuple(item["loc"]) == ("body",) for item in exc.errors()):
+        return False
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if not media_type:
+        return False
+    return media_type != "application/json" and not media_type.endswith("+json")
 
 
 async def _handle_validation_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, RequestValidationError)  # noqa: S101 - narrows the type for mypy
+    if _not_json(request, exc):
+        error = ErrorInfo(
+            code=ErrorCode.INVALID_REQUEST,
+            message="The body must be JSON (Content-Type: application/json).",
+        )
+        return failed_response(request, HTTPStatus.UNSUPPORTED_MEDIA_TYPE, error)
     details: list[dict[str, Any]] = [
         {"loc": list(item["loc"]), "msg": item["msg"]} for item in exc.errors()
     ]
@@ -89,13 +117,13 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
         message="The request is invalid.",
         details=details,
     )
-    return _failed(request, HTTPStatus.UNPROCESSABLE_ENTITY, error)
+    return failed_response(request, HTTPStatus.UNPROCESSABLE_ENTITY, error)
 
 
 def body_too_large_response(request: HTTPConnection, error: BodyTooLarge) -> JSONResponse:
     """413 ``invalid_request``; the connection is closed, since the rest of the body is unread."""
     info = ErrorInfo(code=ErrorCode.INVALID_REQUEST, message=error.detail)
-    return _failed(request, error.status_code, info, {"connection": "close"})
+    return failed_response(request, error.status_code, info, {"connection": "close"})
 
 
 async def _handle_body_too_large(request: Request, exc: Exception) -> JSONResponse:
@@ -113,7 +141,7 @@ async def _handle_http_exception(request: Request, exc: Exception) -> JSONRespon
     except ValueError:
         message = "Request failed."
     error = ErrorInfo(code=code, message=message)
-    return _failed(request, exc.status_code, error, exc.headers)
+    return failed_response(request, exc.status_code, error, exc.headers)
 
 
 async def _handle_unhandled(request: Request, exc: Exception) -> JSONResponse:
@@ -121,7 +149,7 @@ async def _handle_unhandled(request: Request, exc: Exception) -> JSONResponse:
     with structlog.contextvars.bound_contextvars(**request_log_context(request)):
         _log.error("unhandled_exception", exc_info=exc)
     error = ErrorInfo(code=ErrorCode.INTERNAL_ERROR, message=_GENERIC_INTERNAL_MESSAGE)
-    return _failed(request, HTTPStatus.INTERNAL_SERVER_ERROR, error)
+    return failed_response(request, HTTPStatus.INTERNAL_SERVER_ERROR, error)
 
 
 def install_error_handlers(app: FastAPI) -> None:

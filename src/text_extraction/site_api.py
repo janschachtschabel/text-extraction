@@ -114,8 +114,8 @@ async def create_site_structure(
 
     4xx answers: an invalid body, a URL that is no http(s) URL, or a `depth` or `max_pages` over
     the deployment's bounds (422), a compliance mode the caller may not choose (403),
-    `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together (429, retryable).
-    503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
+    `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together (429, retryable),
+    jobs disabled (400). 503 when Valkey is unavailable or Valkey's memory is at
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
     """
     return await start_site(request.app.state, principal, body)
@@ -127,7 +127,7 @@ async def start_site(
     """The core of ``POST /v1/site-structure`` (ruling P10-S1).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     sites: SiteStore = state.site_store
     queue: FairQueue = state.job_queue

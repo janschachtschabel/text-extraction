@@ -30,7 +30,7 @@ DESCRIPTION_MAX_CHARS: Final = 300  # of one description
 IMAGE_NOT_DESCRIBED_WARNING: Final = "image_not_described"
 
 
-class DescribeImagesOptions(BaseModel):
+class DescribeImagesOptions(BaseModel, strict=True):
     """The ``describe_images`` request option: describe the page's images (the first
     ``max_images`` of ``metadata.images``) or an uploaded image with the vision model. A post-stage
     option; never part of a cache key."""

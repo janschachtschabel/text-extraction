@@ -10,7 +10,7 @@ from structlog.testing import capture_logs
 
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError, install_error_handlers
-from text_extraction.tracing import TraceMiddleware, current_trace_id
+from text_extraction.tracing import TraceMiddleware, current_trace_id, outbound_trace_headers
 
 B3_FIELDS = {
     "b3": "80f198ee56343ba864fe8b2a57d3eff7-e457b5a2e4d86bd1-1",
@@ -183,3 +183,43 @@ def test_trace_header_not_echoed(client: TestClient) -> None:
     for response in responses:
         names = {name.lower() for name in response.headers}
         assert not names & {"x-client-trace-id", *B3_FIELDS}
+
+
+B3_TRACE = "80f198ee56343ba864fe8b2a57d3eff7"
+
+
+@pytest.mark.parametrize(
+    ("headers", "trace_id"),
+    [
+        ({"x-b3-traceid": "80f198ee56343ba864fe8b2a57d3eff7"}, "80f198ee56343ba864fe8b2a57d3eff7"),
+        (
+            {"b3": "80f198ee56343ba864fe8b2a57d3eff7-e457b5a2e4d86bd1-1"},
+            "80f198ee56343ba864fe8b2a57d3eff7",
+        ),
+        (
+            {"x-client-trace-id": "client-1", "x-b3-traceid": "80f198ee56343ba864fe8b2a57d3eff7"},
+            "client-1",
+        ),
+    ],
+)
+def test_b3_trace_id_is_the_fallback(
+    client: TestClient, headers: dict[str, str], trace_id: str
+) -> None:
+    # O4: a mesh that sends only B3 keeps one id across the service's log lines.
+    with capture_logs() as logs:
+        client.get("/ok", headers=headers)
+
+    (line,) = access_lines(logs)
+    assert line["trace_id"] == trace_id
+
+
+def test_outbound_trace_headers_are_the_bound_ones() -> None:
+    assert outbound_trace_headers() == {}
+    with structlog.contextvars.bound_contextvars(
+        trace_id="t-1", x_b3_traceid="80f198ee56343ba864fe8b2a57d3eff7", x_b3_sampled="1"
+    ):
+        assert outbound_trace_headers() == {
+            "x-client-trace-id": "t-1",
+            "x-b3-traceid": "80f198ee56343ba864fe8b2a57d3eff7",
+            "x-b3-sampled": "1",
+        }

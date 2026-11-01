@@ -62,7 +62,7 @@ class Span:
     score: float
 
 
-class PiiOptions(BaseModel, extra="forbid", hide_input_in_errors=True):
+class PiiOptions(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """The ``pii`` option of a request. A bare string is the mode: ``"pii": "mask"`` is
     ``{"mode": "mask"}``."""
 

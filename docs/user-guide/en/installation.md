@@ -19,8 +19,9 @@ INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extrac
 ```
 
 `AUTH_MODE=none` lets anyone who reaches the port use the service: use it on your own machine
-only, and only while you need it. A web page open in your browser can reach it too, through DNS
-rebinding, with the admin role. Every process reads the same settings, so each terminal needs
+only, and only while you need it. It answers only the host names of `ALLOWED_HOSTS` (`localhost`,
+`127.0.0.1`, `[::1]` and `api`), so a web page that points its own domain at your machine (DNS
+rebinding) is refused. Every process reads the same settings, so each terminal needs
 `AUTH_MODE=none` (or the same `API_KEYS`), and each serves its internal port: give every further
 process its own `INTERNAL_PORT`. The browser worker needs the extra `browser` and Chromium
 (`uv sync --extra browser`, then `uv run playwright install chromium`); start it with
@@ -118,6 +119,7 @@ operator touches most; the [configuration reference](../../configuration.md#envi
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `AUTH_MODE` | `api_key` | `api_key`: every request needs a key. `none`: no keys, every caller is an admin. |
+| `ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1],api` | With `AUTH_MODE=none`: the host names the service answers; `*` answers every one. |
 | `API_KEYS` | empty | Secret. The keys as a JSON list of `name`, `role` (`user` or `admin`) and `sha256`. |
 | `API_KEYS_FILE` | unset | A JSON file of the same shape, merged with `API_KEYS`. |
 | `VALKEY_URL` | `redis://localhost:6379/0` | The Valkey for the shared state; a secret when it holds a password. |

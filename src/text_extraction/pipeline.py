@@ -171,12 +171,13 @@ from text_extraction.convert import (
     convert_html,
     convert_plain,
     decode_html,
+    decode_html_checked,
     page_links,
 )
 from text_extraction.documents.formats import first_heading, from_markdown
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_available
-from text_extraction.documents.sniff import media_type, named_text_type, sniff
+from text_extraction.documents.sniff import media_type, named_text_type, not_text, sniff
 from text_extraction.documents.types import DocumentInfo, DocumentKind, OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
@@ -320,6 +321,8 @@ _DOCUMENT_TYPES = frozenset(
     {media_type(kind) for kind in get_args(DocumentKind)} | {"application/octet-stream"}
 )
 DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
+# A page declared UTF-8 (header or meta) whose bytes are not: read by the guess instead (B2).
+CHARSET_MISMATCH_WARNING = "charset_mismatch"
 # A page of a ``site_links`` run had more links than ``SITE_MAX_LINKS_PER_PAGE``: the first ones.
 LINKS_TRUNCATED_WARNING = "links_truncated"
 # Kinds Docling converts without OCR: OpenDocument files have their text.
@@ -411,14 +414,24 @@ def _ms(since: float) -> int:
 
 
 def _failed(
-    result: ExtractResult, code: ErrorCode, message: str, *, retryable: bool
+    result: ExtractResult,
+    code: ErrorCode,
+    message: str,
+    *,
+    retryable: bool,
+    details: list[dict[str, Any]] | None = None,
 ) -> Envelope[ExtractResult]:
     """A failed envelope with as much of the result as the run reached."""
     return Envelope(
         status="failed",
         data=result,
-        error=ErrorInfo(code=code, message=message, retryable=retryable),
+        error=ErrorInfo(code=code, message=message, retryable=retryable, details=details),
     )
+
+
+def _retry_after(seconds: float) -> list[dict[str, Any]]:
+    """The ``error.details`` of a gate refusal: the wait in whole seconds (C11)."""
+    return [{"retry_after_seconds": _seconds(seconds)}]
 
 
 @dataclass
@@ -512,9 +525,14 @@ class _Run:
         return ExtractResult(**values)
 
     def failed(
-        self, code: ErrorCode, message: str, *, retryable: bool = False
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: list[dict[str, Any]] | None = None,
     ) -> Envelope[ExtractResult]:
-        return _failed(self.result(), code, message, retryable=retryable)
+        return _failed(self.result(), code, message, retryable=retryable, details=details)
 
 
 @dataclass(frozen=True)
@@ -598,9 +616,14 @@ class _UploadRun:
         return ExtractResult(**values)
 
     def failed(
-        self, code: ErrorCode, message: str, *, retryable: bool = False
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        retryable: bool = False,
+        details: list[dict[str, Any]] | None = None,
     ) -> Envelope[ExtractResult]:
-        return _failed(self.result(), code, message, retryable=retryable)
+        return _failed(self.result(), code, message, retryable=retryable, details=details)
 
 
 @dataclass(frozen=True)
@@ -767,9 +790,10 @@ class Pipeline:
         """Extract ``req.url``. Raises ``ServiceError`` only for a refused compliance mode (403)
         and an unavailable Valkey (503).
 
-        A refusal of the outbound gate is a ``rate_limited`` (busy) or ``connection_error``
-        (paused) envelope, retryable. With ``gate_refusals="raise"`` the ``OutboundBusy`` or
-        ``CircuitOpen`` propagates unchanged instead; the metrics count it under the same code.
+        A refusal of the outbound gate (busy or paused) is a ``rate_limited`` envelope,
+        retryable, with the wait in ``error.details``. With ``gate_refusals="raise"`` the
+        ``OutboundBusy`` or ``CircuitOpen`` propagates unchanged instead; the metrics count it
+        under the same code.
 
         With a renderer: ``artifacts`` stores the screenshot of a ``screenshot`` request (it is
         required then), and ``draft`` is the fast result of an ``auto`` item, which the render is
@@ -831,7 +855,7 @@ class Pipeline:
             outcome = ErrorCode.RATE_LIMITED.value
             raise
         except CircuitOpen:
-            outcome = ErrorCode.CONNECTION_ERROR.value
+            outcome = ErrorCode.RATE_LIMITED.value
             raise
         finally:
             self._observe(run, outcome)
@@ -1367,15 +1391,17 @@ class Pipeline:
                 "Too many requests to this site are waiting; "
                 f"retry after {_seconds(busy.retry_after)} s.",
                 retryable=True,
+                details=_retry_after(busy.retry_after),
             )
         except CircuitOpen as paused:
             if run.raise_refusals:
                 raise
             return run.failed(
-                ErrorCode.CONNECTION_ERROR,
+                ErrorCode.RATE_LIMITED,
                 "Requests to this site are paused after errors or a rate limit; "
                 f"retry after {_seconds(paused.retry_after)} s.",
                 retryable=True,
+                details=_retry_after(paused.retry_after),
             )
         except RedisError as error:
             _log.warning("outbound_gate_unavailable", error_type=type(error).__name__)
@@ -1541,6 +1567,8 @@ class Pipeline:
             )
         kind = await self._kind(fetched)
         if kind is None:
+            if (label := await self._not_a_page(fetched.content, fetched.content_type)) is not None:
+                return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, label)
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
                 f"Content type {fetched.content_type or 'unknown'} is not supported in fast mode.",
@@ -1565,7 +1593,7 @@ class Pipeline:
             )
 
         started = time.perf_counter()
-        text = await self._pool.run(decode_html, fetched.content, fetched.charset)
+        text, mismatch = await self._pool.run(decode_html_checked, fetched.content, fetched.charset)
         run.convert_ms += _ms(started)
         started = time.perf_counter()
         page = text if kind == "html" else None
@@ -1579,18 +1607,28 @@ class Pipeline:
             and fetched.raw_sha256 == stored.entry.raw_sha256
         ):
             return await self._revalidated(run, stored, fetched)
-        return await self._extract_content(run, fetched, kind, text)
+        return await self._extract_content(
+            run, fetched, kind, text, warnings=[CHARSET_MISMATCH_WARNING] if mismatch else []
+        )
 
     async def _kind(self, fetched: FetchResult) -> DocumentKind | Literal["html", "text"] | None:
-        """What the fetched body is (F1). A declared HTML type keeps the page path without a
-        look at the bytes; the URL's last path segment breaks the CSV tie, but not for a
-        declared ``text/plain`` body: that stays plain text unless it starts with a document's
-        signature (the package-2 answer)."""
+        """What the fetched body is (F1). A declared HTML type keeps the page path unless its
+        bytes are no text at all (B1: a document's or image's signature at the start, a NUL
+        byte in the first KiB), which is None; the URL's last path segment breaks the CSV tie,
+        but not for a declared ``text/plain`` body: that stays plain text unless it starts
+        with a document's signature (the package-2 answer)."""
         kind = _KINDS.get(fetched.content_type or "")
-        if kind == "html":
-            return "html"
-        name = None if kind == "text" else urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
+        name = None if kind is not None else urlsplit(fetched.final_url).path.rsplit("/", 1)[-1]
         return await self._pool.run(sniff, fetched.content, fetched.content_type, name)
+
+    async def _not_a_page(self, body: bytes, declared: str | None) -> str | None:
+        """The refusal of a body declared as HTML that is no text (B1), or None."""
+        if _KINDS.get(declared or "") != "html":
+            return None
+        what = await self._pool.run(not_text, body, declared)
+        if what is None:  # pragma: no cover - sniff refused it for this reason only
+            return None
+        return f"The body is declared {declared} but is {what}, not a page."
 
     async def _document(
         self, run: _Run, fetched: FetchResult, kind: DocumentKind, stored: _Stored | None
@@ -1854,8 +1892,10 @@ class Pipeline:
         fetched: FetchResult,
         kind: Literal["html", "text"],
         text: str,
+        *,
+        warnings: list[str],
     ) -> Envelope[ExtractResult]:
-        processed = await self._converted(run, fetched, kind, text)
+        processed = await self._converted(run, fetched, kind, text, warnings=warnings)
         if isinstance(processed, Envelope):
             return processed
         run.validators = Validators.from_headers(fetched.headers)
@@ -1888,9 +1928,12 @@ class Pipeline:
         fetched: FetchResult,
         kind: Literal["html", "text"],
         text: str,
+        *,
+        warnings: list[str] | None = None,
     ) -> _Processed | Envelope[ExtractResult]:
         """``_process`` on the conversion pool, then the DOM stage of an HTML page
-        (``_dom_stage``), or the failed envelope of a page that broke them."""
+        (``_dom_stage``), or the failed envelope of a page that broke them. ``warnings`` (of
+        the decoding) come first in the result's."""
         started = time.perf_counter()
         learned = run.learned if isinstance(run, _Run) else {}
         site = isinstance(run, _Run) and run.site_links
@@ -1900,6 +1943,8 @@ class Pipeline:
             )
             if processed.dom is not None:
                 processed = await self._dom_stage(run, processed, processed.dom)
+            if warnings:
+                processed = replace(processed, warnings=[*warnings, *processed.warnings])
             return processed
         except Exception as error:  # a page that breaks a converter fails alone
             # Traceback without locals (see logging.py); the host only, never the URL.
@@ -2039,6 +2084,8 @@ class Pipeline:
         run.kind = kind
         if kind is None:
             run.content_type = declared
+            if (label := await self._not_a_page(body, declared)) is not None:
+                return run.failed(ErrorCode.UNSUPPORTED_CONTENT_TYPE, label)
             return run.failed(
                 ErrorCode.UNSUPPORTED_CONTENT_TYPE,
                 f"Content type {declared or 'unknown'} is not supported.",
@@ -2141,7 +2188,7 @@ class Pipeline:
         """An HTML or plain-text upload within ``CONVERT_MAX_BYTES``, converted like a fetched
         page without a URL."""
         started = time.perf_counter()
-        text = await self._pool.run(decode_html, body, charset)
+        text, mismatch = await self._pool.run(decode_html_checked, body, charset)
         run.convert_ms += _ms(started)
         page = FetchResult(
             url="",
@@ -2156,7 +2203,9 @@ class Pipeline:
             not_modified=False,
             raw_sha256=raw_sha256,
         )
-        processed = await self._converted(run, page, kind, text)
+        processed = await self._converted(
+            run, page, kind, text, warnings=[CHARSET_MISMATCH_WARNING] if mismatch else []
+        )
         if isinstance(processed, Envelope):
             return processed
         return self._envelope(

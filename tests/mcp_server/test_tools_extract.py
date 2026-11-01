@@ -25,7 +25,11 @@ from tests.test_extract_api import BrowserCase
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.fetch import Fetcher
-from text_extraction.mcp_server.results import TRUNCATED_WARNING, slice_content
+from text_extraction.mcp_server.results import (
+    ANSWER_TRUNCATED_WARNING,
+    TRUNCATED_WARNING,
+    slice_content,
+)
 from text_extraction.mcp_server.server import mcp_body_limit
 from text_extraction.mcp_server.tools_extract import ExtractFileArguments, ScreenshotUrlTool
 from text_extraction.pipeline import create_pipeline
@@ -609,6 +613,27 @@ def test_structured_and_chunk_tools(client: TestClient) -> None:
         call_tool(client, "chunk", {"url": PAGE, "chunking": chunking}, headers=AUTH)
     )
     assert url_chunks["data"]["chunks"]
+
+
+def test_an_answer_over_the_budget_has_its_chunks_cut() -> None:
+    # M2: the whole answer is bounded, not only `content`.
+    text = "\n\n".join(f"Paragraph {index:05d} " + "w" * 44 for index in range(400))
+    arguments = {"text": text, "chunking": {"strategy": "recursive", "size": 200}}
+    with running(mcp_max_content_chars=30_000, mcp_max_answer_chars=40_000) as client:
+        rest = client.post("/v1/chunk", json=arguments, headers=AUTH).json()["data"]["chunks"]
+        result = call_tool(client, "chunk", arguments, headers=AUTH)
+
+    data = envelope_of(result)["data"]
+    kept = len(data["chunks"])
+    assert 0 < kept < len(rest)
+    assert data["chunks"] == rest[:kept]
+    assert ANSWER_TRUNCATED_WARNING in data["warnings"]
+    assert hints_of(result) == [
+        f"chunks cut to {kept} of {len(rest)} to fit MCP_MAX_ANSWER_CHARS; "
+        "the REST route returns them all."
+    ]
+    answer = result["content"][-1]["text"]
+    assert len(answer) <= 40_000
 
 
 def test_chunk_text_over_the_limit() -> None:

@@ -163,6 +163,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
+| `config.ALLOWED_HOSTS` | `"localhost,127.0.0.1,[::1],api"` | Under `AUTH_MODE=none`: the `Host` names the API answers (others get 400); add the Service's name, or `*`. |
 | `config.RATE_LIMIT_ENABLED` | `"true"` | Inbound rate limit per API key. |
 | `config.RATE_LIMIT_PER_MINUTE` | `"60"` | Default limit per key. |
 | `config.CONVERT_CONCURRENCY` | `"2"` | Conversions at once per pod. The memory limit is sized for it. |
@@ -180,6 +181,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |
 | `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least 120 s, or this + 70 s if larger, see [MCP and playground](#mcp-and-playground). |
 | `config.MCP_MAX_CONTENT_CHARS` | `"50000"` | Most content characters of one tool answer; the rest is fetched with `content_offset`. |
+| `config.MCP_MAX_ANSWER_CHARS` | `"200000"` | Most characters of one tool answer's JSON; a job page holds fewer items and a result's lists are cut to fit. |
 | `config.MCP_IMAGE_MAX_BYTES` | `"5000000"` | Largest screenshot attached to a tool answer (0: never attached, only linked). |
 | `config.UI_TREE_MAX_URLS` | `"5000"` | Most URLs the site tree of one site job shows. |
 | `config.UI_BATCH_FILE_MAX_BYTES`, `config.UI_BATCH_FILE_MAX_ROWS` | `"10485760"`, `"100000"` | Largest batch file (CSV or JSON of URLs) and its most rows. |
@@ -195,7 +197,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
-| `jobs.enabled` | unset (true with extract workers, false without) | `JOBS_ENABLED` of the API pods. When `workers.extract.enabled` is false the chart renders `JOBS_ENABLED=false` so the batch and job routes answer 503 and `wait_seconds` is ignored, unless you set `jobs.enabled=true` (workers run elsewhere). `false` forces it off. Only API pods with `JOBS_ENABLED=true` export the queue gauges. |
+| `jobs.enabled` | unset (true with extract workers, false without) | `JOBS_ENABLED` of the API pods. When `workers.extract.enabled` is false the chart renders `JOBS_ENABLED=false` so the batch and job routes answer 400 `invalid_request` and `wait_seconds` is ignored, unless you set `jobs.enabled=true` (workers run elsewhere). `false` forces it off. Only API pods with `JOBS_ENABLED=true` export the queue gauges. |
 | `mcp.enabled` | `false` | Serve the MCP endpoint at `/mcp` on the API pods (`MCP_ENABLED`); see [MCP and playground](#mcp-and-playground). A `config.MCP_ENABLED` entry is ignored. |
 | `ui.enabled` | `false` | Serve the playground at `/ui` on the API pods (`UI_ENABLED`). Its password is an API key; under `config.AUTH_MODE=none` it is open to anyone who can reach the service, and the install notes warn. A `config.UI_ENABLED` entry is ignored. |
 | `workers.extract.enabled` | `true` | Deploy the extract workers. |
@@ -354,6 +356,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | --- | --- | --- |
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
+| `TextExtractionValkeyDown` | `max(text_extraction_valkey_up)` over the API and worker pods below 1: no pod reaches Valkey (`/ready` does not look at Valkey, so the pods stay in the Service and answer 503 `internal_error`). The gauge comes from `INFO memory`: an external Valkey must allow the service's user that command | 2 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
 | `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above the pool's backlog threshold (below the table) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |

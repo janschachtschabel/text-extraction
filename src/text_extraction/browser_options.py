@@ -23,7 +23,7 @@ MAX_HEADER_VALUE_LENGTH = 4096
 Selector = Annotated[str, Field(min_length=1, max_length=500)]
 
 
-class _Action(BaseModel):
+class _Action(BaseModel, strict=True):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
@@ -143,7 +143,7 @@ def _cookie_part_ok(text: str) -> bool:
     return _COOKIE_REFUSED.search(text) is None and text == text.strip(" ")
 
 
-class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True):
+class BrowserCookie(BaseModel, extra="forbid", hide_input_in_errors=True, strict=True):
     """A cookie to set before the page loads. ``domain`` defaults to the request URL's host.
     ``name`` and ``value`` are checked against what Chromium refuses, so such a cookie is a
     422 and not a failed render; an error message never shows the value."""

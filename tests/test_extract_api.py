@@ -99,6 +99,70 @@ def test_unknown_field_is_422_invalid_request(client: TestClient) -> None:
     assert body["error"]["code"] == "invalid_request"
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        {"wait_seconds": "5"},
+        {"wait_seconds": True},
+        {"cache": "yes"},
+        {"cache": "false"},
+        {"metadata": 0},
+        {"links": 1},
+        {"chunking": {"strategy": "fixed", "size": "200"}},
+    ],
+)
+def test_a_value_of_the_wrong_json_type_is_422(client: TestClient, field: dict[str, Any]) -> None:
+    # JSON types are taken as sent: "5" is no number and "yes" no boolean.
+    response = client.post("/v1/extract", json={"url": PAGE, **field}, headers=AUTH)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"content-type": "text/plain"}, {"content-type": "application/x-www-form-urlencoded"}],
+)
+def test_a_body_that_is_not_json_is_415(client: TestClient, headers: dict[str, str]) -> None:
+    response = client.post(
+        "/v1/extract", content=b'{"url": "https://example.org/"}', headers={**AUTH, **headers}
+    )
+
+    assert response.status_code == 415
+    body = response.json()
+    assert (body["status"], body["error"]["code"]) == ("failed", "invalid_request")
+
+
+def test_a_json_body_with_a_charset_is_fine(client: TestClient) -> None:
+    response = client.post(
+        "/v1/extract",
+        content=b'{"url": "https://example.org/"}',
+        headers={**AUTH, "content-type": "application/json; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_a_body_without_a_content_type_is_parsed_as_json(client: TestClient) -> None:
+    # FastAPI reads a body without Content-Type as JSON: an array is then a 422, not a 415.
+    response = client.post("/v1/extract", content=b"[1]", headers=AUTH)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_an_empty_body_is_still_422(client: TestClient) -> None:
+    response = client.post("/v1/extract", headers=AUTH)
+
+    assert response.status_code == 422
+
+
+def test_an_integer_is_a_valid_float(client: TestClient) -> None:
+    response = client.post("/v1/extract", json={"url": PAGE, "wait_seconds": 5}, headers=AUTH)
+
+    assert response.status_code == 200
+
+
 def test_overlong_url_is_422(client: TestClient) -> None:
     url = "https://example.org/" + "a" * 2048
     response = client.post("/v1/extract", json={"url": url}, headers=AUTH)

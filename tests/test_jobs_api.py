@@ -611,14 +611,16 @@ def test_enqueue_failure_deletes_the_job_and_is_503(make_api: Callable[..., Api]
     assert api.batch([PAGE]).status_code == 202
 
 
-def test_jobs_disabled_is_503(make_api: Callable[..., Api]) -> None:
+def test_jobs_disabled_is_400(make_api: Callable[..., Api]) -> None:
+    # C12: a switch that is off is the caller's 400, as for every other switch.
     api = make_api(jobs_enabled=False)
 
     for response in (api.batch([PAGE]), api.job("a" * 32)):
-        assert response.status_code == 503
+        assert response.status_code == 400
         body = response.json()
         assert body["status"] == "failed"
-        assert body["error"]["code"] == "internal_error"
+        assert body["error"]["code"] == "invalid_request"
+        assert body["error"]["retryable"] is False
         assert body["error"]["message"] == "Jobs are disabled on this deployment."
     assert api.keys("job:*") == []
     # Authentication still comes first.
@@ -783,7 +785,13 @@ def test_lost_running_job_reports_internal_error(api: Api) -> None:
     item = view["items"][0]
     assert (item["index"], item["url"], item["state"]) == (0, PAGE, "done")
     assert item["result"]["status"] == "failed"
-    assert item["result"]["data"] is None
+    # C14: an own fault still has the envelope's fields, with nothing the run did not reach.
+    data = item["result"]["data"]
+    assert (data["url"], data["mode_used"], data["upstream_status"]) == (PAGE, None, None)
+    assert (data["attempts"], data["content"], data["word_count"]) == (0, None, 0)
+    assert data["timings"]["total_ms"] == 0
+    assert data["compliance"]["decision"] == "skipped"
+    assert data["cache"] == "bypass"
     assert item["result"]["error"] == {
         "code": "internal_error",
         "message": LOST_MESSAGE,
@@ -1299,15 +1307,15 @@ def test_delete_counts_against_the_rate_limit(make_api: Callable[..., Api]) -> N
     assert refused.json()["error"]["code"] == "rate_limited"
 
 
-def test_delete_jobs_disabled_503(make_api: Callable[..., Api]) -> None:
+def test_delete_jobs_disabled_400(make_api: Callable[..., Api]) -> None:
     api = make_api(jobs_enabled=False)
 
     response = api.delete("a" * 32)
 
-    assert response.status_code == 503
+    assert response.status_code == 400
     body = response.json()
     assert body["status"] == "failed"
-    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["code"] == "invalid_request"
     assert body["error"]["message"] == "Jobs are disabled on this deployment."
     # Authentication still comes first.
     assert api.client.delete(f"/v1/jobs/{'a' * 32}").status_code == 401
