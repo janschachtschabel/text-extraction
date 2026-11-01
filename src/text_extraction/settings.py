@@ -368,6 +368,8 @@ class Settings(BaseSettings):
     # What a tool that may become a job waits for its result, unless the caller gives a time.
     mcp_wait_seconds: int = Field(default=25, ge=0, le=60)
     mcp_max_content_chars: int = Field(default=50_000, ge=1_000, le=10_000_000)  # one answer
+    # The whole JSON of one tool answer; its lists are cut to fit (M2).
+    mcp_max_answer_chars: int = Field(default=200_000, ge=10_000, le=50_000_000)
     mcp_image_max_bytes: int = Field(default=5_000_000, ge=0, le=20_000_000)  # 0: never attached
     # The UI (package 10, rulings P10-S9, P10-S12): the playground at /ui on the public port, off
     # by default. Its caps: URLs of one site tree, the size and the rows of one batch file, and

@@ -63,7 +63,9 @@ Every answer has the same shape, the result envelope:
   `target_http_error` or `blocked_by_robots`, `error.message` is an English text, and
   `error.retryable` says whether the same request may succeed later.
 - `data.upstream_status` is the HTTP status of the page, `data.mode_used` is `fast`, `browser` or
-  `upload`, and `data.timings` gives the time of each step in milliseconds.
+  `upload`, and `data.timings` gives the time of each step in milliseconds. A job item that
+  failed through a fault of the service before any step ran has `mode_used` and
+  `upstream_status` null, no content and zero timings.
 - `data.warnings` names what did not go as asked, although a result is returned, such as
   `browser_unavailable`.
 

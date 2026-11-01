@@ -292,7 +292,8 @@ class ExtractResult(BaseModel):
     final_url: str | None
     upstream_status: int | None  # of the response the content came from
     content_type: str | None
-    mode_used: Literal["fast", "browser", "upload"]
+    # None: the service failed before a mode ran (an own fault of a job item, C14).
+    mode_used: Literal["fast", "browser", "upload"] | None
     attempts: int  # fetches of the target in this request
     language: str | None
     word_count: int
@@ -376,6 +377,50 @@ class ExtractResult(BaseModel):
     # Items of a ``site`` job only (and pages fetched for one); the default keeps older results
     # valid.
     site: SiteInfo | None = None
+
+
+def own_fault_result(
+    url: str | None, *, format: OutputFormat, compliance: ComplianceMode
+) -> ExtractResult:
+    """The ``data`` of a failure of the service's own that ran no step (C14, CLAUDE.md rule 4):
+    the item's URL, ``mode_used`` and ``upstream_status`` null, no fetch, no content, zero
+    timings, the compliance checks skipped."""
+    return ExtractResult(
+        url=url,
+        final_url=None,
+        upstream_status=None,
+        content_type=None,
+        mode_used=None,
+        attempts=0,
+        language=None,
+        word_count=0,
+        title=None,
+        format=format,
+        content=None,
+        quality=None,
+        timings=Timings(total_ms=0, compliance_ms=0, fetch_ms=0, convert_ms=0),
+        compliance=ComplianceReport(mode=compliance, decision="skipped"),
+        metadata=None,
+        links=None,
+        fingerprint=None,
+        cache="bypass",
+        warnings=[],
+    )
+
+
+def with_own_fault_data(
+    envelope: Envelope[ExtractResult],
+    url: str | None,
+    *,
+    format: OutputFormat,
+    compliance: ComplianceMode,
+) -> Envelope[ExtractResult]:
+    """``envelope`` with ``own_fault_result`` as its data when it failed without any (an item's
+    result as the API shows it); any other envelope unchanged."""
+    if envelope.status != "failed" or envelope.data is not None:
+        return envelope
+    data = own_fault_result(url, format=format, compliance=compliance)
+    return envelope.model_copy(update={"data": data})
 
 
 def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:

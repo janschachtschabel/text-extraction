@@ -180,6 +180,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |
 | `config.MCP_WAIT_SECONDS` | `"25"` | What a tool that may become a job waits for its result, and the longest wait of `get_job` (0-60). The ingress read timeout must be at least 120 s, or this + 70 s if larger, see [MCP and playground](#mcp-and-playground). |
 | `config.MCP_MAX_CONTENT_CHARS` | `"50000"` | Most content characters of one tool answer; the rest is fetched with `content_offset`. |
+| `config.MCP_MAX_ANSWER_CHARS` | `"200000"` | Most characters of one tool answer's JSON; a job page holds fewer items and a result's lists are cut to fit. |
 | `config.MCP_IMAGE_MAX_BYTES` | `"5000000"` | Largest screenshot attached to a tool answer (0: never attached, only linked). |
 | `config.UI_TREE_MAX_URLS` | `"5000"` | Most URLs the site tree of one site job shows. |
 | `config.UI_BATCH_FILE_MAX_BYTES`, `config.UI_BATCH_FILE_MAX_ROWS` | `"10485760"`, `"100000"` | Largest batch file (CSV or JSON of URLs) and its most rows. |

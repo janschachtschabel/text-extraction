@@ -110,6 +110,12 @@ Ein langer `content` wird auf `max_chars` gekürzt (`MCP_MAX_CONTENT_CHARS`, 50.
 den Einträgen einer `get_job`-Seite), mit der Warnung `mcp_content_truncated`. Der Hinweis nennt
 den `content_offset` für den nächsten Aufruf, und dieser liefert den Inhalt ab dort.
 
+Eine ganze Antwort umfasst höchstens `MCP_MAX_ANSWER_CHARS` (200.000) Zeichen. Eine größere
+`get_job`-Seite enthält weniger Einträge, und ihr `next_offset` nennt den Beginn der nächsten Seite.
+In einem einzelnen Ergebnis werden die Listen `chunks`, `links`, `structured.tables` und
+`site.links` in dieser Reihenfolge vom Ende her gekürzt, mit der Warnung `mcp_answer_truncated`;
+die REST-Route liefert sie vollständig.
+
 ## Fehler
 
 - Was REST mit 4xx oder 5xx beantwortet (ein falsches Argument, eine abgelehnte Rolle, das

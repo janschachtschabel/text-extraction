@@ -415,6 +415,24 @@ def test_refused_get_job_and_cancel_job_log_their_job_id() -> None:
     assert "not-a-job-id-77" not in repr([*logs, *off_logs])
 
 
+def test_get_job_keeps_a_page_within_the_answer_budget() -> None:
+    # M2: a page over MCP_MAX_ANSWER_CHARS drops its trailing items; the next page has them.
+    with running(mcp_max_answer_chars=25_000) as client:
+        job_id = start_batch(client)
+        for index in range(3):
+            write(client, job_id, index, "w" * 10_000)
+
+        result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+
+    view = envelope_of(result)["data"]
+    kept = len(view["items"])
+    assert 1 <= kept < 3
+    assert view["next_offset"] == kept
+    assert hints_of(result) == [
+        f"Page cut to {kept} items to fit MCP_MAX_ANSWER_CHARS; call get_job with offset={kept}."
+    ]
+
+
 def test_get_job_slices_each_item(client: TestClient) -> None:
     """Review Focus 2: a page's share of max_chars is split between its items."""
     job_id = start_batch(client)

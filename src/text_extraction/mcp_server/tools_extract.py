@@ -44,6 +44,7 @@ from text_extraction.mcp_server.calls import ModelTool, call_header
 from text_extraction.mcp_server.files import MAX_CONTENT_TYPE_CHARS, decode_file
 from text_extraction.mcp_server.results import (
     answer_payload,
+    fit_answer,
     image_over_limit_hint,
     job_hint,
     payload_result,
@@ -303,6 +304,7 @@ class ExtractionTool(ModelTool):
                 cut = slice_content(payload, offset=args.content_offset, share=share)
                 if cut is not None:
                     hints.append(cut)
+            hints.extend(fit_answer(payload, max_chars=settings.mcp_max_answer_chars))
             await self.attach(state, principal, payload, hints, images)
         return payload_result(payload, is_error=is_error, hints=hints, images=images)
 

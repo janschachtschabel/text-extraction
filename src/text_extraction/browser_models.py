@@ -103,7 +103,7 @@ class ScreenshotResult(BaseModel):
     url: str
     final_url: str | None
     upstream_status: int | None
-    mode_used: Literal["fast", "browser"]
+    mode_used: Literal["fast", "browser"] | None  # None: an own fault before any mode ran
     unblocked: bool
     attempts: int
     title: str | None

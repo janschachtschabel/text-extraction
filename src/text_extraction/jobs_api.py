@@ -39,7 +39,7 @@ from text_extraction.extract_api import (
     check_pii_request,
     check_transcribe_request,
 )
-from text_extraction.extract_models import ExtractResult
+from text_extraction.extract_models import ExtractResult, with_own_fault_data
 from text_extraction.job_models import (
     BatchRequest,
     JobAccepted,
@@ -452,6 +452,20 @@ def _is_lost(record: JobRecord) -> bool:
     )
 
 
+def _shown(item: JobItem, record: JobRecord) -> JobItem:
+    """``item`` as the API shows it: a result that failed without data (a fault of the
+    service's own) gets the envelope's fields with nothing the run did not reach (C14)."""
+    if item.result is None:
+        return item
+    result = with_own_fault_data(
+        item.result,
+        item.url,
+        format=record.options.format,
+        compliance=record.options.compliance,
+    )
+    return item if result is item.result else item.model_copy(update={"result": result})
+
+
 def _lost_view(record: JobRecord, items: list[JobItem]) -> tuple[JobRecord, list[JobItem]]:
     """The record and items of a lost job as the API shows them (nothing is stored): every item
     without a result is done and failed with a retryable ``internal_error``, and the job is
@@ -526,6 +540,7 @@ async def read_job(
         lost = _is_lost(record)
         if lost:
             record, items = _lost_view(record, items)
+        items = [_shown(item, record) for item in items]
         status = _envelope_status(record)
         failure: ErrorInfo | None = None
         if status == "failed":

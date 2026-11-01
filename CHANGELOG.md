@@ -29,6 +29,10 @@ and
 
 ### Changed
 
+- MCP tool answers are bounded as a whole by `MCP_MAX_ANSWER_CHARS` (new, 200,000 characters):
+  a `get_job` page drops its trailing items, then a result's `chunks`, `links`,
+  `structured.tables` and `site.links` are cut from the end, with the warning
+  `mcp_answer_truncated`. Before, only `content` was cut and an answer could reach megabytes.
 - JSON request bodies are read strictly: a value of the wrong JSON type (`"5"` for a number,
   `"yes"` for a boolean) answers 422. The form fields of `POST /v1/extract/file` are unchanged.
 - A JSON route answers 415 `invalid_request` for a body sent with another `Content-Type`,
@@ -42,6 +46,10 @@ and
 - OpenAPI operation ids are plain names (`extract`, `extract_file`, `get_job`, `delete_job`,
   ...) instead of FastAPI's path-derived ones (`extract_v1_extract_post`); a client generated
   from the document gets new method names.
+- A job item that failed through a fault of the service before any step ran (a lost lease, an
+  expired input) had `data: null`; it has `data` now, with `mode_used` and `upstream_status`
+  null, `attempts` 0, no content and zero timings, so every item carries the envelope's fields.
+  `mode_used` may therefore be null.
 
 ### Fixed
 

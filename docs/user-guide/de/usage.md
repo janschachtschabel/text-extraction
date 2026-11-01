@@ -66,7 +66,9 @@ Jede Antwort hat dieselbe Form, das Ergebnis-Envelope:
   `target_http_error` oder `blocked_by_robots`, `error.message` ein englischer Text, und
   `error.retryable` sagt, ob dieselbe Anfrage später gelingen kann.
 - `data.upstream_status` ist der HTTP-Status der Seite, `data.mode_used` ist `fast`, `browser` oder
-  `upload`, und `data.timings` gibt die Zeit jedes Schritts in Millisekunden an.
+  `upload`, und `data.timings` gibt die Zeit jedes Schritts in Millisekunden an. Ein Job-Eintrag,
+  der durch einen Fehler des Dienstes scheiterte, bevor ein Schritt lief, hat `mode_used` und
+  `upstream_status` null, keinen Inhalt und Zeiten von 0.
 - `data.warnings` nennt, was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa
   `browser_unavailable`.
 

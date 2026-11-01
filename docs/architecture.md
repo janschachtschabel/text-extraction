@@ -132,7 +132,8 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
 ## Result envelope and errors
 
 Fields: `status` (`success|partial|failed`), `error.code`, `error.message`,
-`error.retryable`, `upstream_status`, `mode_used` (`fast|browser|upload`), `attempts`,
+`error.retryable`, `upstream_status`, `mode_used` (`fast|browser|upload`, null for a job item that
+failed through an own fault before any step ran, C14), `attempts`,
 `final_url`, `content_type`, `language`, `word_count`, `quality`, `timings` (`render_ms` is the
 time in the browser, 0 in fast mode), `compliance`, `metadata`, `fingerprint`, `warnings`, for
 browser results `unblocked` (unblock mode rendered the page) and `screenshot` (the artifact
@@ -205,7 +206,8 @@ add a note of its own):
   `structured.tables` too, R20).
 - MCP (tool answers only, never REST): `mcp_content_truncated` (the tool answer holds a slice of
   `content`, at most `max_chars` characters, from `content_offset`; the hint names the offset of
-  the rest, P10-S6).
+  the rest, P10-S6); `mcp_answer_truncated` (a list of the result was cut to fit
+  `MCP_MAX_ANSWER_CHARS`, M2).
 
 A licence in `metadata` names its `source`: `rel-license`, `json-ld`, `microdata`, `rdfa`,
 `meta`, `opengraph`, `text`, `xmp` (a PDF's XMP packet, F8), or `platform` (the licence a video
@@ -2598,8 +2600,12 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   job to poll, a cut content, a screenshot too large to attach), then a PNG `ImageContent` for a
   screenshot of at most `MCP_IMAGE_MAX_BYTES`, then the envelope as JSON text. `data.content` is cut
   to `max_chars` (`MCP_MAX_CONTENT_CHARS` by default; shared by the items of a `get_job` page) from
-  `content_offset`, with the warning `mcp_content_truncated` and a hint naming the next offset; no
-  other field is cut.
+  `content_offset`, with the warning `mcp_content_truncated` and a hint naming the next offset.
+  Since v0.1.1 (audit finding M2, reversing this ruling's "no other field is cut") the whole answer
+  is bounded by `MCP_MAX_ANSWER_CHARS` (200,000 characters of JSON): a `get_job` page drops its
+  trailing items first (`next_offset` names the first dropped), then the lists `chunks`, `links`,
+  `structured.tables` and `site.links` of a result are cut from the end, with the warning
+  `mcp_answer_truncated` and a hint; REST returns them whole.
 - **Long work (P10-S7).** The extraction tools pass `wait_seconds = MCP_WAIT_SECONDS` when the
   caller gives none (a larger one is cut to it), so a call ends within that time plus the route's
   own hand-over time, with a result or a job. `batch_extract` and `site_structure` always answer a

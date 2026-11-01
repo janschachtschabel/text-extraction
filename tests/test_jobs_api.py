@@ -785,7 +785,13 @@ def test_lost_running_job_reports_internal_error(api: Api) -> None:
     item = view["items"][0]
     assert (item["index"], item["url"], item["state"]) == (0, PAGE, "done")
     assert item["result"]["status"] == "failed"
-    assert item["result"]["data"] is None
+    # C14: an own fault still has the envelope's fields, with nothing the run did not reach.
+    data = item["result"]["data"]
+    assert (data["url"], data["mode_used"], data["upstream_status"]) == (PAGE, None, None)
+    assert (data["attempts"], data["content"], data["word_count"]) == (0, None, 0)
+    assert data["timings"]["total_ms"] == 0
+    assert data["compliance"]["decision"] == "skipped"
+    assert data["cache"] == "bypass"
     assert item["result"]["error"] == {
         "code": "internal_error",
         "message": LOST_MESSAGE,

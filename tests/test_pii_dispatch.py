@@ -674,7 +674,8 @@ def test_p1_task_raised_is_withheld() -> None:
         result = final["data"]["items"][0]["result"]
         assert result["status"] == "failed"
         assert result["error"]["code"] == "internal_error"
-        assert result["data"] is None
+        assert result["data"]["mode_used"] is None
+        assert result["data"]["content"] is None
         assert NAME not in str(final)
 
 

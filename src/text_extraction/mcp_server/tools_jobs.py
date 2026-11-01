@@ -35,7 +35,12 @@ from text_extraction.jobs_api import (
     start_batch,
 )
 from text_extraction.mcp_server.calls import ModelTool
-from text_extraction.mcp_server.results import payload_result, png_content, slice_items
+from text_extraction.mcp_server.results import (
+    fit_answer,
+    payload_result,
+    png_content,
+    slice_items,
+)
 from text_extraction.mcp_server.tools_extract import (
     FORMAT_DESCRIPTION,
     Answer,
@@ -227,6 +232,7 @@ class GetJobTool(ModelTool):
         payload = envelope.model_dump(mode="json")
         max_chars = args.max_chars or settings.mcp_max_content_chars
         hints = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
+        hints.extend(fit_answer(payload, max_chars=settings.mcp_max_answer_chars))
         return payload_result(payload, is_error=False, hints=hints)
 
 
