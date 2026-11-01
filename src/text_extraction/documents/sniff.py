@@ -93,10 +93,15 @@ _OLE_END_OF_CHAIN: Final = 0xFFFFFFFE
 _OLE_MAX_SECTOR_ID: Final = 0xFFFFFFF9
 _OLE_WORKBOOK_STREAMS: Final = frozenset({"Workbook", "Book"})
 _BMP_DIB_SIZES: Final = frozenset({12, 40, 52, 56, 64, 108, 124})
-# A NUL byte in this many first bytes makes a body declared as HTML or text binary (B1).
+# The first bytes the binary test of a body declared as HTML reads (B1).
 _BINARY_SAMPLE: Final = 1024
 # UTF-16 text without a byte order mark: at least this share of one byte lane is NUL.
 _UTF16_NUL_SHARE: Final = 0.8
+# The bytes no text has (WHATWG MIME sniffing's "binary data bytes") and the share of them in
+# the sample that makes a body declared as HTML binary: one stray NUL leaves a page a page.
+_BINARY_BYTES: Final = bytes([*range(0x00, 0x09), 0x0B, *range(0x0E, 0x1B), *range(0x1C, 0x20)])
+_BINARY_SHARE: Final = 0.02
+_WIDE_CHARSETS: Final = ("utf-16", "utf-32", "ucs-2", "ucs-4", "utf16", "utf32")
 _LABELS: Final[dict[DocumentKind, str]] = {
     "pdf": "a PDF document",
     "docx": "a DOCX document",
@@ -134,9 +139,10 @@ def sniff(
 ) -> DocumentKind | Literal["html", "text"] | None:
     """The kind of a body, or None when it is not supported.
 
-    A declared HTML or XHTML type is "html" (the page path) unless its bytes are not text
-    (``not_text``: a document's or image's signature at the start, or binary data): then None
-    (B1), so that the body is refused instead of read as mojibake. For anything else the
+    A declared HTML or XHTML type is "html" (the page path), unless a document's or image's
+    signature stands at the start (that kind, as for ``text/plain``: a ``download.php``
+    declares its PDF as PHP's default ``text/html``) or the bytes are binary (``not_text``):
+    then None (B1), so that the body is refused instead of read as mojibake. For anything else the
     bytes decide first; then an HTML page declared as a document type, as
     ``application/octet-stream`` or not at all ("html": an upload named report.pdf that is
     HTML); then CSV (declared, or a ``.csv`` name, with decodable text); then a declared
@@ -146,7 +152,13 @@ def sniff(
     """
     media = (declared or "").split(";", 1)[0].strip().lower()
     if media in _HTML_TYPES:
-        return "html" if not_text(body) is None else None
+        try:
+            by_signature = _sniff_bytes(body, at_start=True)
+        except Exception:  # a parser boundary on hostile input: the binary test still applies
+            by_signature = None
+        if by_signature is not None:
+            return by_signature
+        return None if _binary(body, _charset(declared)) else "html"
     try:
         by_bytes = _sniff_bytes(body, at_start=media in TEXT_TYPES)
     except Exception:  # a parser boundary on hostile input: no kind is always safe
@@ -162,28 +174,42 @@ def sniff(
     return None
 
 
-def not_text(body: bytes) -> str | None:
+def not_text(body: bytes, declared: str | None = None) -> str | None:
     """What a body declared as HTML is when it is no text at all: "a PDF document",
     "a PNG image" and so on by a signature at its start (after a byte order mark and
-    whitespace), "binary data" for a NUL byte in its first KiB (UTF-16 text excepted), else
-    None. A signature later in the body is quoted text, not the body's kind."""
+    whitespace), "binary data" by ``_binary``, else None. A signature later in the body is
+    quoted text, not the body's kind."""
     try:
         kind = _sniff_bytes(body, at_start=True)
-    except Exception:  # a parser boundary on hostile input: the NUL test still applies
+    except Exception:  # a parser boundary on hostile input: the binary test still applies
         kind = None
     if kind is not None:
         return _LABELS[kind]
-    return "binary data" if _binary(body) else None
+    return "binary data" if _binary(body, _charset(declared)) else None
 
 
-def _binary(body: bytes) -> bool:
-    """A NUL byte in the first KiB, unless the bytes are UTF-16: a UTF-16 or UTF-32 byte order
-    mark, or (without one) NULs in one byte lane only, filling most of it, as ASCII-range
-    text in UTF-16 has."""
+def _charset(declared: str | None) -> str | None:
+    """The ``charset`` parameter of a declared type, lower case, or None."""
+    for parameter in (declared or "").split(";")[1:]:
+        name, _, value = parameter.partition("=")
+        if name.strip().lower() == "charset":
+            return value.strip().strip("\"'").lower() or None
+    return None
+
+
+def _binary(body: bytes, charset: str | None = None) -> bool:
+    """More than ``_BINARY_SHARE`` of the first KiB are binary data bytes, unless the bytes
+    are wide text: a declared UTF-16 or UTF-32 charset, a UTF-16 or UTF-32 byte order mark,
+    or (without one) NULs in one byte lane only, filling most of it, as ASCII-range text in
+    UTF-16 has."""
     sample = body[:_BINARY_SAMPLE]
-    if b"\x00" not in sample:
+    if not sample:
         return False
-    if sample.startswith((b"\xff\xfe", b"\xfe\xff")):
+    if sum(1 for byte in sample if byte in _BINARY_BYTES) <= _BINARY_SHARE * len(sample):
+        return False
+    if charset is not None and charset.startswith(_WIDE_CHARSETS):
+        return False
+    if sample.startswith((b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")):
         return False
     even, odd = sample[0::2], sample[1::2]
     for lane, other in ((even, odd), (odd, even)):

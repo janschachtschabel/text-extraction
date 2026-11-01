@@ -622,8 +622,13 @@ while `BROWSER_ENABLED` is false, are unchanged.
   with 403 and counts bytes per page (cap `BROWSER_MAX_BYTES`). Those are the bytes on the wire;
   the renderer counts the decoded bytes too, from a CDP session of its own
   (`Network.dataReceived`), and past twice the cap it stops the page's loads and ends the render
-  with `too_large`, so a gzip bomb does not keep Chromium busy until the deadline (audit B3). It is a plain `CONNECT` tunnel
-  and relays plain `http://` requests, so TLS stays end to end and Chromium's own TLS
+  with `too_large`, so a gzip bomb does not keep Chromium busy until the deadline (audit B3).
+  A request with the caller's headers is fetched by the service itself (httpx through the
+  page's own proxy context, redirects not followed, `gzip` and `deflate` only) and counted as it
+  is decoded, since the driver's `route.fetch` would decode a bomb whole in its own memory
+  first. Not counted: out-of-process (cross-site) iframes and workers, which have CDP targets
+  of their own; their bytes on the wire still count, and the render's deadline bounds them.
+  The proxy is a plain `CONNECT` tunnel and relays plain `http://` requests, so TLS stays end to end and Chromium's own TLS
   fingerprint reaches the site. A connection lives at most the longer of `BROWSER_TIMEOUT_SECONDS`
   and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`, plus 5 s. Launch flags: `--proxy-server` with a bypass list that sends even
   loopback through the proxy, `--disable-quic`, WebRTC limited to proxied UDP,
@@ -819,11 +824,14 @@ Package 5: `documents/` (`sniff.py`, `pool.py`, `pool_child.py`, `pdf.py`, `rout
   | `png`, `jpeg`, `tiff`, `webp`, `bmp` | image signatures | Docling (OCR) |
   | anything else (`doc`, `ppt`, `rtf`, `msg`, `zip`, `gif`, ...) | none | `unsupported_content_type` |
 
-  A body declared HTML or XHTML keeps its package-2 path, unless its bytes are no text at all
-  (audit B1, 2026-11-01): a document's or image's signature at its start, or a NUL byte in its
-  first KiB (UTF-16 text excepted). Such a body answers `unsupported_content_type`, "The body is
-  declared text/html but is a PNG image, not a page." (or "binary data"), instead of a page of
-  U+FFFD characters. A body declared `text/plain` (or
+  A body declared HTML or XHTML keeps its package-2 path, unless its bytes are no page
+  (audit B1, 2026-11-01). A document's or image's signature at its start makes it that document,
+  as for `text/plain` (PHP's default type is `text/html`, so a `download.php` often declares its
+  PDF so). Binary data, more than 2 % of the first KiB being bytes no text has (WHATWG's binary
+  data bytes; UTF-16 and UTF-32 text by charset, byte order mark or byte lane excepted, and one
+  stray NUL leaves a page a page), answers `unsupported_content_type`, "The body is declared
+  text/html but is binary data, not a page.", instead of a page of U+FFFD characters. A body
+  declared `text/plain` (or
   `text/markdown`, `text/x-markdown`, which take the same path as Markdown) is a document only when a signature starts it (offset 0 after an optional byte order mark and at
   most 1 KiB of whitespace); otherwise it stays plain text, also when its URL ends in `.csv` (the extension
   tie-break does not apply to a declared `text/plain`). Untyped bodies, `application/octet-stream`

@@ -356,7 +356,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | --- | --- | --- |
 | `TextExtractionDown` | `sum(kube_deployment_status_replicas_available{...}) or vector(0)` is below 1 | 5 m |
 | `TextExtractionHigh5xx` | share of `http_requests_total{status="5xx"}` above 5 % | 10 m |
-| `TextExtractionValkeyDown` | `max(text_extraction_valkey_up)` over the API and worker pods below 1: no pod reaches Valkey (`/ready` does not look at Valkey, so the pods stay in the Service and answer 503 `internal_error`) | 2 m |
+| `TextExtractionValkeyDown` | `max(text_extraction_valkey_up)` over the API and worker pods below 1: no pod reaches Valkey (`/ready` does not look at Valkey, so the pods stay in the Service and answer 503 `internal_error`). The gauge comes from `INFO memory`: an external Valkey must allow the service's user that command | 2 m |
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
 | `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above the pool's backlog threshold (below the table) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |

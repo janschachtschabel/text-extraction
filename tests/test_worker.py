@@ -21,6 +21,7 @@ from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from pytest_httpserver import HTTPServer
 from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 from starlette.datastructures import State
 from structlog.testing import capture_logs
 
@@ -1868,6 +1869,36 @@ async def test_a_job_deleted_during_a_move_keeps_no_input(pool: str) -> None:
     assert await harness.valkey.keys(f"job:{{{job_id}}}:input:*") == []
     assert await budget_members(harness, job_id) == []
     assert await harness.valkey.get("inputs:{budget}:total") in (None, b"0")
+
+
+@pytest.mark.parametrize("pool", ["docling", "asr"])
+@scenario
+async def test_an_enqueue_whose_reply_is_lost_keeps_the_input(pool: str) -> None:
+    """Review of O11: the enqueue's script may have run before its reply was lost; the pool's
+    worker then claims the item and needs its bytes, so they stay."""
+    if pool == "docling":
+        harness = ocr_harness()
+        job_id = await harness.submit([SCAN_URL])
+        queue = harness.docling_queue
+    else:
+        harness = asr_harness()
+        job_id = await submit_transcription(harness, [YOUTUBE])
+        queue = harness.asr_queue
+    real_enqueue = queue.enqueue_items
+
+    async def enqueue_items(*args: Any, **kwargs: Any) -> None:
+        await real_enqueue(*args, **kwargs)
+        raise RedisTimeoutError("the reply was lost")
+
+    queue.enqueue_items = enqueue_items  # type: ignore[method-assign]
+
+    with pytest.raises(RedisTimeoutError):
+        await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+
+    assert (await queue.counts()).pending == 1
+    assert await harness.valkey.keys(f"job:{{{job_id}}}:input:*") == [
+        f"job:{{{job_id}}}:input:0".encode()
+    ]
 
 
 @scenario

@@ -67,7 +67,8 @@ Every answer has the same shape, the result envelope:
   failed through a fault of the service before any step ran has `mode_used` and
   `upstream_status` null, no content and zero timings.
 - `data.warnings` names what did not go as asked, although a result is returned, such as
-  `browser_unavailable`.
+  `browser_unavailable`, or `charset_mismatch` for a page declared UTF-8 whose bytes are not
+  (it is read as Windows-1252 then).
 
 When the target fails (the site answers 404, refuses the service or is down), the API still
 answers HTTP 200, with `status: failed`. A 4xx is a problem of your request (a bad field, the key,
@@ -202,7 +203,9 @@ that you send with `headers`, or an exemption for the service's egress IP.
 
 PDFs, Word, PowerPoint and Excel files (DOCX, PPTX, XLSX, XLS), EPUBs and CSVs convert like pages:
 `POST /v1/extract` with their URL, or `POST /v1/batch`. The bytes decide what a file is before its
-`Content-Type` does (a PDF served as `application/octet-stream` is still a PDF). To convert a file
+`Content-Type` does (a PDF served as `application/octet-stream` or as `text/html`, as a
+`download.php` often does, is still a PDF; binary data declared `text/html` answers
+`unsupported_content_type`). To convert a file
 you have, upload it to `POST /v1/extract/file` as `multipart/form-data` (at most
 `DOCUMENT_MAX_BYTES`, 20 MB):
 

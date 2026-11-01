@@ -69,25 +69,30 @@ and
   expired input) had `data: null`; it has `data` now, with `mode_used` and `upstream_status`
   null, `attempts` 0, no content and zero timings, so every item carries the envelope's fields.
   `mode_used` may therefore be null.
-
-### Fixed
-
 - A host of digits that is no IPv4 literal (`0177.0.0.1`, `127.1`, `2130706433`) is
   `invalid_url` now. `0177.0.0.1` failed its robots.txt as `blocked_by_robots` (retryable),
   since the HTTP client refuses it; no such URL was ever fetched.
 - A gzip bomb in browser mode kept Chromium decompressing until the render timed out (`timeout`,
   retryable, after about 27 s): the egress proxy counts the bytes on the wire. The renderer now
   counts the decoded bytes too and ends the render with `too_large` once they pass twice
-  `BROWSER_MAX_BYTES`.
+  `BROWSER_MAX_BYTES`. A request with the caller's `headers` was decoded whole in the browser
+  driver's memory first; the service fetches it itself now, through the page's proxy, and
+  counts as it reads.
 - A page or upload declared UTF-8 whose bytes are not (a Latin-1 page behind a default UTF-8
   header) came out with every umlaut as U+FFFD; it is read as windows-1252 (or the legacy
   encoding its bytes fit) now, with the new warning `charset_mismatch`.
-- A body declared `text/html` whose bytes are binary (a document's or image's signature at its
-  start, a NUL byte in its first KiB) answered `partial` with a page of U+FFFD characters; it is
-  `unsupported_content_type` now, and the message names what the bytes are.
+- A body declared `text/html` that starts with a document's or image's signature (a PDF behind
+  a `download.php`) answered `partial` with a page of U+FFFD characters; it is converted as that
+  document now, as a declared `text/plain` one is. A body declared `text/html` that is binary
+  data (more than 2 % of its first KiB are bytes no text has; UTF-16 and UTF-32 text excepted)
+  is `unsupported_content_type`, with a message that says so.
+
+### Fixed
+
 - A batch item moving to the Docling or ASR workers whose job was deleted between storing its
   bytes and its draft kept the bytes in Valkey and in `DOCLING_INPUT_BUDGET_BYTES` until their
-  TTL; the move now gives them back at once.
+  TTL; the move now gives them back at once. An enqueue whose reply is lost keeps them, since
+  the item may be queued.
 - Valkey: the client retried a command up to 10 times on a connection error, so a Lua script, a
   MULTI or a job claim lost in flight could run twice. Commands are no longer retried; instead a
   pooled connection idle for more than 5 s is checked with PING and opened again once.

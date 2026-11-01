@@ -702,6 +702,29 @@ def test_a_gzip_bomb_is_too_large_at_once(settings_for: SettingsFor, site: Site)
     scenario(settings_for, site, body)
 
 
+def test_an_endless_gzip_bomb_is_too_large_with_caller_headers_too(
+    settings_for: SettingsFor, site: Site
+) -> None:
+    """Review of B3: a request with caller headers was fetched by the driver (``route.fetch``),
+    which decodes the whole body in memory before the page sees a byte; now the service fetches
+    it through the page's proxy and counts the decoded bytes as it reads."""
+    url = f"{site.base}/endless-bomb"
+    with_headers = RenderOptions(headers={"x-partner-token": "s3cret"}, header_host=site_key(url))
+
+    async def body(stack: Stack) -> None:
+        stack.proxy._max_bytes = 10_000_000
+        for options in (with_headers, RenderOptions()):
+            started = time.monotonic()
+            with pytest.raises(FetchError) as caught:
+                await render(stack, url, options)
+            assert caught.value.code == ErrorCode.TOO_LARGE, options
+            assert time.monotonic() - started < 10, options
+        assert [s.headers.get("x-partner-token") for s in site.seen(site.base)] == ["s3cret", None]
+        assert ARTICLE_TEXT.split(".")[0] in (await render(stack, f"{site.base}/static")).html
+
+    scenario(settings_for, site, body)
+
+
 # --- the pool -------------------------------------------------------------------------------
 
 

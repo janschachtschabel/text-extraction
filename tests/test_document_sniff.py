@@ -98,22 +98,40 @@ PNG_HEAD = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
 
 
 @pytest.mark.parametrize(
-    ("body", "label"),
+    ("body", "kind"),
     [
-        (PDF, "a PDF document"),
-        (b" \r\n" + PDF, "a PDF document"),
-        (PNG_HEAD + b"\x00" * 64, "a PNG image"),
-        (b"\xff\xd8\xff\xe0" + b"\x00" * 64, "a JPEG image"),
-        (b"\x1f\x8b\x08\x00" + b"\x00\xff" * 64, "binary data"),  # gzip, still packed
-        (b"<html>\x00\x01\x02 garbage", "binary data"),
+        (PDF, "pdf"),
+        (b" \r\n" + PDF, "pdf"),
+        (PNG_HEAD + b"\x00" * 64, "png"),
+        (b"\xff\xd8\xff\xe0" + b"\x00" * 64, "jpeg"),
     ],
 )
-def test_a_binary_body_declared_as_html_is_not_a_page(body: bytes, label: str) -> None:
-    """B1: a declared HTML page whose bytes are binary (a NUL byte in the first KiB) or a
-    document or image is refused, not read as mojibake."""
-    assert not_text(body) == label
+def test_a_document_declared_as_html_is_the_document(body: bytes, kind: str) -> None:
+    """Review of B1: a signature at the start names the body, as for ``text/plain`` (PHP's
+    default type is ``text/html``, so a ``download.php`` often declares its PDF so)."""
+    assert sniff(body, "text/html", None) == kind
+    assert sniff(body, "application/xhtml+xml", "x.pdf") == kind
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"\x1f\x8b\x08\x00" + b"\x00\xff" * 64,  # gzip, still packed
+        b"<html>\x00\x01\x02 garbage",
+        bytes(range(256)) * 4,
+    ],
+)
+def test_a_binary_body_declared_as_html_is_not_a_page(body: bytes) -> None:
+    """B1: a declared HTML page whose first KiB is binary (more than 2 % of its bytes are
+    control bytes no text has) is refused, not read as mojibake."""
+    assert not_text(body) == "binary data"
     assert sniff(body, "text/html", None) is None
-    assert sniff(body, "application/xhtml+xml", "x.pdf") is None
+
+
+def test_a_stray_nul_byte_leaves_a_page_a_page() -> None:
+    body = b"<html><body><p>" + b"x" * 500 + b"\x00" + b"y" * 500 + b"</p></body></html>"
+    assert not_text(body) is None
+    assert sniff(body, "text/html", None) == "html"
 
 
 @pytest.mark.parametrize(
@@ -127,6 +145,14 @@ def test_a_binary_body_declared_as_html_is_not_a_page(body: bytes, label: str) -
 def test_utf16_html_is_not_binary(body: bytes) -> None:
     assert not_text(body) is None
     assert sniff(body, "text/html", None) == "html"
+
+
+def test_utf32_and_declared_utf16_html_is_not_binary() -> None:
+    page = "<html><body>漢字のページ、中文页面</body></html>" * 4
+    assert sniff(page.encode("utf-32"), "text/html", None) == "html"  # a byte order mark
+    assert sniff(page.encode("utf-32-be"), "text/html; charset=utf-32be", None) == "html"
+    # mostly CJK, no byte order mark: the declared charset says it is text
+    assert sniff(page.encode("utf-16-le"), "text/html; charset=UTF-16LE", None) == "html"
 
 
 HTML_BODIES = [
@@ -224,7 +250,7 @@ def test_html_bytes_need_the_tag_at_the_start() -> None:
 
 def test_declared_type_with_parameters_and_case() -> None:
     assert sniff(b"<p>Hi</p>", "Text/HTML; charset=UTF-8", None) == "html"
-    assert sniff(PDF, "Text/HTML; charset=UTF-8", None) is None  # B1: not a page
+    assert sniff(PDF, "Text/HTML; charset=UTF-8", None) == "pdf"  # B1: the signature decides
     assert sniff(PDF, "TEXT/PLAIN; charset=utf-8", None) == "pdf"
     assert sniff(b"a,b\n", "text/plain; charset=utf-8", None) == "text"
     assert sniff(b"a,b\n", "Text/CSV; charset=utf-8", None) == "csv"

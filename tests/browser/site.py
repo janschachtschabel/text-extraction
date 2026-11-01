@@ -353,6 +353,24 @@ class _Handler(BaseHTTPRequestHandler):
                 Seen(self.command, self.path, {k.lower(): v for k, v in self.headers.items()})
             )
 
+    def _endless_bomb(self) -> None:
+        """A gzip stream of whitespace that does not end within a render (100 GB decoded, a few
+        KB a second on the wire): only a counter of the decoded bytes stops it in time."""
+        import zlib
+
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        packer = zlib.compressobj(9, zlib.DEFLATED, 31)
+        chunk = b" " * 1_000_000
+        with contextlib.suppress(OSError):
+            self.wfile.write(packer.compress(b"<!doctype html><html><body><p>"))
+            for _ in range(100_000):
+                self.wfile.write(packer.compress(chunk) + packer.flush(zlib.Z_SYNC_FLUSH))
+
     def _send(
         self,
         body: bytes,
@@ -423,6 +441,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(article("<img src='/pixel.png' alt=''>", title="With an image"))
         elif path == "/bomb":
             self._send(_gzip_bomb(), headers={"Content-Encoding": "gzip"})
+        elif path == "/endless-bomb":
+            self._endless_bomb()
         elif path == "/heavy":
             self._send(article("<img src='/big.png' alt=''>", title="Heavy"))
         elif path == "/big.png":

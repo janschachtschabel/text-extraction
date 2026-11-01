@@ -1625,7 +1625,7 @@ class Pipeline:
         """The refusal of a body declared as HTML that is no text (B1), or None."""
         if _KINDS.get(declared or "") != "html":
             return None
-        what = await self._pool.run(not_text, body)
+        what = await self._pool.run(not_text, body, declared)
         if what is None:  # pragma: no cover - sniff refused it for this reason only
             return None
         return f"The body is declared {declared} but is {what}, not a page."

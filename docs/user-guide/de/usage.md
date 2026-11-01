@@ -70,7 +70,8 @@ Jede Antwort hat dieselbe Form, das Ergebnis-Envelope:
   der durch einen Fehler des Dienstes scheiterte, bevor ein Schritt lief, hat `mode_used` und
   `upstream_status` null, keinen Inhalt und Zeiten von 0.
 - `data.warnings` nennt, was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa
-  `browser_unavailable`.
+  `browser_unavailable`, oder `charset_mismatch` für eine als UTF-8 deklarierte Seite, deren
+  Bytes es nicht sind (sie wird dann als Windows-1252 gelesen).
 
 Wenn das Ziel scheitert (die Website antwortet mit 404, lehnt den Dienst ab oder ist nicht
 erreichbar), antwortet die API trotzdem mit HTTP 200, mit `status: failed`. Ein 4xx ist ein Problem
@@ -212,8 +213,9 @@ unter [Website-Regeln](site-rules.md).
 
 PDFs, Word-, PowerPoint- und Excel-Dateien (DOCX, PPTX, XLSX, XLS), EPUBs und CSVs werden wie
 Seiten umgewandelt: `POST /v1/extract` mit ihrer URL oder `POST /v1/batch`. Die Bytes entscheiden
-vor dem `Content-Type`, was eine Datei ist (ein PDF, das als `application/octet-stream` ausgeliefert
-wird, bleibt ein PDF). Um eine Datei umzuwandeln, die Sie haben, laden Sie sie als
+vor dem `Content-Type`, was eine Datei ist (ein PDF, das als `application/octet-stream` oder, wie
+oft bei einem `download.php`, als `text/html` ausgeliefert wird, bleibt ein PDF; als `text/html`
+deklarierte Binärdaten ergeben `unsupported_content_type`). Um eine Datei umzuwandeln, die Sie haben, laden Sie sie als
 `multipart/form-data` an `POST /v1/extract/file` hoch (höchstens `DOCUMENT_MAX_BYTES`, 20 MB):
 
 ```bash

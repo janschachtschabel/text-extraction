@@ -38,7 +38,7 @@
 - [x] **C14** a failed item or result for an own fault carries `data` with `mode_used: null`, `upstream_status: null` and `timings`.
 
 ### MCP and UI
-- [x] **M2** answer budget (D6).
+- [x] **M2** answer budget (D6). Built with two deviations (review): a `get_job` page drops its trailing items first, before any list is cut, and a cut list is reachable only through REST, since `get_job` applies the same cut. The budget counts the envelope JSON, which an answer carries twice.
 - [x] **M3/S4** Host allowlist under `AUTH_MODE=none` (D5), REST and UI; MCP keeps its origin list too.
 - [x] **M4** one counted call does at most one unit of work: `get_job` with `wait_seconds` counts one hit per 10 s waited; `/ui/run/images` counts one hit per image; `/ui/run/site-tree` one per page of 500 items; MCP `initialize` and `tools/list` count one hit.
 - [x] **M5** the UI reads a screenshot artifact uncounted (the forwarded `POST` counted already).
@@ -61,5 +61,5 @@
 
 ### Finish
 - [x] Docs en/de, `configuration.md`, Helm values for the new settings, CHANGELOG.
-- [ ] requesting-code-review, full checks, CI, `live` run, merge.
+- [ ] requesting-code-review (done: two reviewers, findings fixed in two commits), full checks, CI, `live` run, merge.
 - [ ] Tag `v0.1.1` per Jan's answer on the card.
