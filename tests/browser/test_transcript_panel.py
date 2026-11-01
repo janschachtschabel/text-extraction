@@ -161,6 +161,18 @@ def test_a_body_over_the_cap_is_a_warning(
     assert line.get("bytes") == (len(PANEL_BODY) if measured else None)
 
 
+def test_a_hidden_duplicate_reject_button_is_passed_over(
+    settings_for: SettingsFor, site: Site, watch: HTTPServer
+) -> None:
+    started = time.monotonic()
+    rendered = render(settings_for, site, watch, "/watch/hidden-reject")
+
+    assert rendered.transcript_panel == PANEL_BODY
+    assert clicks(rendered.html) == ["reject", "expand", "transcript"]
+    # The visible button was clicked at once, not after the consent step's 5 s.
+    assert time.monotonic() - started < 15
+
+
 def test_a_consent_dialog_that_stays_open_is_a_warning(
     settings_for: SettingsFor, site: Site, watch: HTTPServer
 ) -> None:

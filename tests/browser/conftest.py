@@ -6,8 +6,9 @@ shell under ``/opt/pw-browsers``; without one the tests are skipped. Patchright'
 unblock renderer's) is found the same way (``patchright_chromium``).
 
 The site is served on three loopback ports. The egress proxy of the tests admits 127.0.0.1 on
-the first two only (the site and its "third party"), so the private-address tests still see the
-third port and ``169.254.169.254`` refused.
+the first two (the site and its "third party") and on the ports of other local servers a test
+names (``open_stack(..., ports=...)``), never on the third, so the private-address tests still
+see the third port and ``169.254.169.254`` refused.
 """
 
 import asyncio

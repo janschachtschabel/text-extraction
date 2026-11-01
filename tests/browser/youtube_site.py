@@ -1,6 +1,6 @@
 """A local fake of a YouTube watch page, for the transcript panel steps (``browser_panel.py``).
 
-``serve_watch_site`` puts seven watch pages on a pytest-httpserver:
+``serve_watch_site`` puts eight watch pages on a pytest-httpserver:
 
 * ``/watch/new`` offers YouTube's new transcript view (``ytInitialData`` holds
   ``PAmodern_transcript_view``);
@@ -8,6 +8,8 @@
 * ``/watch/failing`` offers it, but its ``get_panel`` request answers 400;
 * ``/watch/chunked`` offers it, and its ``get_panel`` answer is the fixture sent in chunks,
   without a ``Content-Length``;
+* ``/watch/hidden-reject`` is ``/watch/new`` with a hidden duplicate "Alle ablehnen" first in
+  the consent dialog;
 * ``/watch/stuck`` offers it, but its consent dialog stays open whatever is clicked;
 * ``/watch/decoy`` offers it, but its click first asks ``get_panel`` for another panel, and that
   answer (``DECOY_BODY``) arrives first;
@@ -21,8 +23,8 @@ every click while the dialog is open. "Alle ablehnen" closes the dialog and sets
 ``ytd-video-description-transcript-section-renderer`` until ``tp-yt-paper-button#expand`` is
 clicked; its click lets the page ``fetch`` ``POST /youtubei/v1/get_panel`` with
 ``panelId: "PAmodern_transcript_view"`` in the body, answered with the fixture of the parser
-tests. Every click is noted in the root element's ``data-clicks``, so a
-test can read from the rendered HTML what was clicked, in order.
+tests. Every click is noted in the root element's ``data-clicks``, so a test can read from the
+rendered HTML what was clicked, in order.
 """
 
 import gzip as gzip_module
@@ -51,12 +53,14 @@ def _watch_page(
     consent_closes: bool = True,
     decoy: bool = False,
     gzip: bool = False,
+    hidden_reject: bool = False,
 ) -> str:
     panel_id = TRANSCRIPT_VIEW if new_view else "engagement-panel-searchable-transcript"
     panel = {"engagementPanelSectionListRenderer": {"panelIdentifier": panel_id}}
     initial_data = json.dumps({"engagementPanels": [panel]})
     panel_url = json.dumps(PANEL_PATH + panel_query)
     decoy_url = json.dumps(PANEL_PATH + "?decoy=1")
+    hidden = '<button style="display: none">Alle ablehnen</button>' if hidden_reject else ""
     closes = json.dumps(consent_closes)
     flags = json.dumps({"decoy": decoy, "gzip": gzip})
     ids = json.dumps({"view": panel_id, "decoy": _DECOY_PANEL})
@@ -69,6 +73,7 @@ def _watch_page(
   <tp-yt-paper-dialog opened style="position: fixed; top: 20%; left: 30%; width: 40%;
     z-index: 2002; background: white; display: block">
     <p>Bevor Sie zu YouTube weitergehen</p>
+    {hidden}
     <button id="accept">Alle akzeptieren</button>
     <button id="reject">Alle ablehnen</button>
   </tp-yt-paper-dialog>
@@ -133,6 +138,7 @@ def serve_watch_site(server: HTTPServer) -> None:
         ("/watch/old", _watch_page(new_view=False)),
         ("/watch/failing", _watch_page(new_view=True, panel_query="?fail=1")),
         ("/watch/chunked", _watch_page(new_view=True, panel_query="?chunked=1")),
+        ("/watch/hidden-reject", _watch_page(new_view=True, hidden_reject=True)),
         ("/watch/stuck", _watch_page(new_view=True, consent_closes=False)),
         ("/watch/decoy", _watch_page(new_view=True, decoy=True)),
         ("/watch/gzip", _watch_page(new_view=True, decoy=True, gzip=True)),

@@ -4,8 +4,8 @@
 after the load, the consent step and the idle wait, before the page is read:
 
 1. Consent: an open ``ytd-consent-bump-v2-lightbox tp-yt-paper-dialog`` is declined with its
-   first "Alle ablehnen" or "Reject all" button; the step waits until the dialog closes or a
-   ``SOCS`` cookie is set. Until then a backdrop takes every click. The outer lightbox is not
+   first visible "Alle ablehnen" or "Reject all" button; the step waits until the dialog closes
+   or a ``SOCS`` cookie is set. Until then a backdrop takes every click. The outer lightbox is not
    looked at: its own box is 0x0.
 2. Detect: without ``PAmodern_transcript_view`` in the page's HTML the video has no new view,
    and nothing is clicked.
@@ -111,7 +111,8 @@ async def _decline_consent(page: Page, end: float) -> None:
     """Decline an open consent dialog and wait until it closes or the choice is stored."""
     if not await page.evaluate(_DIALOG_OPEN, _CONSENT_DIALOG):
         return
-    reject = page.locator(_CONSENT_DIALOG).locator("button").filter(has_text=_REJECT).first
+    buttons = page.locator(_CONSENT_DIALOG).locator("button")
+    reject = buttons.filter(has_text=_REJECT).filter(visible=True).first
     try:
         await reject.click(timeout=_timeout_ms(end))
     except DRIVER_TIMEOUTS:
