@@ -44,8 +44,6 @@ Fixes from the audit of v0.1.0 (plan in
 - `partial` job items counted as failures in `TextExtractionJobItemFailures`.
 - A worker pool scaled to zero by KEDA with `countLeased: false` never took back the items of
   expired leases; at `minReplicaCount: 0` the scaler counts leased items too.
-- The first Valkey command after a Valkey restart failed on a stale connection; the client
-  retries a broken connection once (not a timeout, which may have run).
 - The 429 for too many unfinished batches and site jobs carries `Retry-After: 60`.
 - `.env.example` lacked `LLM_GRACEFUL_SECONDS`, `UI_DEFAULT_LANGUAGE` and `UI_DOCS_BASE_URL`; a
   test pins it to the settings now.
