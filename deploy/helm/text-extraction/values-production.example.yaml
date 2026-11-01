@@ -18,7 +18,7 @@
 image:
   repository: ghcr.io/janschachtschabel/text-extraction
   # A released version (Git tag vX.Y.Z on main publishes X.Y.Z); production never runs `latest`.
-  # Upgrades and rollbacks change this tag. No version is tagged yet: the first will be 0.1.0.
+  # Upgrades and rollbacks change this tag. The first release is 0.1.0 (Git tag v0.1.0).
   tag: "0.1.0"
 
 replicaCount: 2
