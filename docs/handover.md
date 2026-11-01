@@ -458,8 +458,8 @@ patches and models.
 **Releases and rollback.**
 
 - [`CHANGELOG.md`](../CHANGELOG.md) records each release (Keep a Changelog). The version is the
-  same in `pyproject.toml`, `src/text_extraction/__init__.py` and the chart's `Chart.yaml`
-  (`version`, `appVersion`); `tests/test_release.py` checks it.
+  same in `pyproject.toml` and the chart's `Chart.yaml` (`version`, `appVersion`);
+  `src/text_extraction/__init__.py` reads it from the package metadata; `tests/test_release.py` checks it.
 - A release is the Git tag `vX.Y.Z` on `main`. The image workflow then publishes `X.Y.Z` and
   `X.Y` for all five images; a deployment pins `image.tag` (and the workers' image tags) to
   `X.Y.Z`, as the example values do.

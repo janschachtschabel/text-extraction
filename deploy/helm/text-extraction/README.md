@@ -32,7 +32,7 @@ requests and limits, the PrometheusRule and ServiceMonitor on, MCP and the playg
 | Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`, `nlp`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
 | Secret `<release>-text-extraction-asr` | `workers.asr.backend: openai`, `workers.asr.external.apiKey` set and no `workers.asr.external.existingSecret` | Holds `ASR_EXTERNAL_API_KEY`. |
 | Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
-| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`). |
+| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`) or at `minReplicaCount: 0`. |
 | HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
 | Secret `<release>-text-extraction-valkey-auth` | `valkey.enabled`, `valkey.auth.enabled` and no `valkey.auth.existingSecret` | Holds `VALKEY_PASSWORD`, generated once (32 alphanumeric characters) and kept across upgrades. |
 | NetworkPolicy (Valkey, API, each worker pool) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
@@ -159,7 +159,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
 | `replicaCount` | `2` | Ignored when `autoscaling.enabled`. |
-| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). With Docling workers it is also at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` + 5 + 10 (a sync request waits for OCR after its fast phase). Unset, the chart computes it from `config.*` or the defaults: 45 without browser or Docling workers, 65 with Docling workers only, 90 with browser workers, 120 with unblock mode. A value set here that does not fit fails the render. |
+| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). With Docling workers it is also at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` + 5 + 10 (a sync request waits for OCR after its fast phase). Unset, the chart computes it from `config.*` or the defaults: 45 without browser or Docling workers, 65 with Docling workers only, 90 with browser workers, 120 with unblock mode. A value set here that does not fit fails the render. |
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
@@ -505,7 +505,8 @@ The LLM is off by default (`workers.llm.enabled: false`). With it on, a request 
 (strategy `llm` or `auto`, or `learn_selectors`), `chunking` `semantic` or `describe_images` has its
 last hop run in the pool `llm` (the page and its images are data for the model: no tool calls, its
 answer is validated against the caller's schema or the description's), and every pod gets
-`LLM_ENABLED=true`; without the workers such a request answers 400. A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
+`LLM_ENABLED=true`; without the workers a request with strategy `llm`, `learn_selectors`, `semantic`
+or `describe_images` answers 400, and `auto` keeps the values it found (`llm_unavailable`). A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
 
 - The workers run the API image (`text-extraction-llm-worker` as its args): no model, no volume,
   no init container. They call `workers.llm.baseUrl` (`/chat/completions`, and `/embeddings` with

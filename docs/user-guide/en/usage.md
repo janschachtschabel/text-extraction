@@ -140,7 +140,8 @@ it on), the browser worker renders them in Chromium. `mode` chooses the browser 
 `data.mode_used` says which mode produced the answer. When no browser worker takes the page
 within `BROWSER_QUEUE_WAIT_SECONDS` (10 s), `auto` keeps the HTTP result with the warning
 `browser_unavailable`, and `browser` fails with `timeout` (retryable). While browser mode is off,
-`browser` answers 400 and `auto` never uses the browser.
+`browser`, `POST /v1/screenshot` and `auto` with `actions`, `cookies`, `headers` or `screenshot`
+answer 400, and `auto` without them never uses the browser.
 
 `actions` (at most 20), `cookies` and `headers` (sent only to the requested site) work with `auto`
 and `browser`, not with `fast` and not in batches; the OpenAPI spec at `/docs` lists the actions.

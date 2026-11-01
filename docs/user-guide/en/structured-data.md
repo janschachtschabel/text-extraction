@@ -71,8 +71,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 The strategy `llm`, `learn_selectors` and the `semantic` chunking need the operator's LLM worker
 (`LLM_ENABLED`) and a key (`X-LLM-Api-Key` or the operator's `LLM_API_KEY`); `semantic` also
-needs `LLM_EMBEDDING_MODEL`. Without them they answer 400. `auto` then keeps the values it found,
-and the fields still missing come with the warning `llm_unavailable`.
+needs `LLM_EMBEDDING_MODEL`. Without them they answer 400. `auto` with a schema needs the key too
+once the service has an LLM (else 400); only on a service without one (`LLM_ENABLED=false`) does
+it keep the values it found, with the warning `llm_unavailable` for the fields still missing.
 
 - Your own key for the LLM endpoint goes into the header `X-LLM-Api-Key`. It wins over the
   operator's `LLM_API_KEY` and is never stored.

@@ -2,7 +2,8 @@
 # Start: cp .env.example .env, set API_KEYS and VALKEY_PASSWORD, then
 #   docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
 # The profiles work the same way (--profile docling, asr, nlp, llm). TEXT_EXTRACTION_VERSION in
-# .env or the shell picks the release (default 0.1.0; `0.1` follows the newest 0.1.x).
+# .env or the shell picks the release (default 0.1.0; `0.1` follows the newest 0.1.x
+# after `docker compose ... pull`: pull_policy missing does not pull an image already present).
 # `!reset` drops the build section of docker-compose.yml, so `--build` cannot build by mistake.
 # It stands in each service: some Compose versions lose it when it comes through a `<<` merge.
 

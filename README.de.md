@@ -43,7 +43,7 @@ cp .env.example .env                           # then set API_KEYS and VALKEY_PA
 KEY=$(openssl rand -hex 32)                    # your API key: keep it
 printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build                      # public API on http://localhost:8080
+docker compose up --build -d --wait          # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract

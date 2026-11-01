@@ -53,6 +53,11 @@ Fixes from the audit of v0.1.0 (plan in
   kinds of `text_extraction_job_duration_seconds` and every pool of `escalated`; the bounds of
   twelve settings; that `JOB_TTL_SECONDS` is not renewed while a job runs; the DNS-rebinding risk
   of `AUTH_MODE=none`.
+- User guide and Helm README: the local uv recipe gives each process `AUTH_MODE=none` and its own
+  `INTERNAL_PORT`; the quick start runs `docker compose up` detached; `auto` with a schema needs
+  an LLM key once the service has an LLM; the 400s of `describe_images`, `ocr: always` and the
+  browser options while their switch is off; the grace period of the API pods with browser
+  workers; and that a floating `0.1` tag needs a `pull`.
 
 ## [0.1.0] - 2026-11-01
 

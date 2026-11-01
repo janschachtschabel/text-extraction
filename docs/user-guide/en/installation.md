@@ -13,15 +13,19 @@ Requires Python 3.13, [uv](https://docs.astral.sh/uv/) and a Valkey on `localhos
 ```bash
 uv sync                                                     # install the dependencies into .venv
 docker run -d --name valkey -p 6379:6379 valkey/valkey:8.1-alpine
-AUTH_MODE=none UI_ENABLED=true uv run text-extraction       # API on http://localhost:8080
-uv run text-extraction-worker                               # extract worker: batches and jobs
+export AUTH_MODE=none                                       # in each terminal below
+UI_ENABLED=true uv run text-extraction                      # terminal 1: API on http://localhost:8080
+INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extract worker (jobs)
 ```
 
 `AUTH_MODE=none` lets anyone who reaches the port use the service: use it on your own machine
 only, and only while you need it. A web page open in your browser can reach it too, through DNS
-rebinding, with the admin role. The browser worker needs the extra `browser` and Chromium (`uv sync --extra browser`, then
-`uv run playwright install chromium`); start it with `uv run text-extraction-browser-worker`
-and set `BROWSER_ENABLED=true` on the API, the extract worker and the browser worker.
+rebinding, with the admin role. Every process reads the same settings, so each terminal needs
+`AUTH_MODE=none` (or the same `API_KEYS`), and each serves its internal port: give every further
+process its own `INTERNAL_PORT`. The browser worker needs the extra `browser` and Chromium
+(`uv sync --extra browser`, then `uv run playwright install chromium`); start it with
+`INTERNAL_PORT=9092 uv run text-extraction-browser-worker` and set `BROWSER_ENABLED=true` on the
+API, the extract worker and the browser worker.
 
 For development:
 
@@ -43,7 +47,7 @@ cp .env.example .env                           # then set API_KEYS and VALKEY_PA
 KEY=$(openssl rand -hex 32)                    # your API key: keep it
 printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build                      # public API on http://localhost:8080
+docker compose up --build -d --wait          # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
@@ -66,7 +70,8 @@ docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
 ```
 
 `TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.0`; `0.1`
-follows the newest `0.1.x`). The releases and their notes are on the
+follows the newest `0.1.x` after `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
+since an image already on the machine is not pulled again). The releases and their notes are on the
 [releases page](https://github.com/janschachtschabel/text-extraction/releases).
 
 ### Optional workers
@@ -91,8 +96,9 @@ extraction to it. For `pii: hash` with the same hash in every result, set `PII_H
 
 While a switch is off, a request that needs its worker answers 400: `pii` without
 `PII_ENABLED`, the strategy `llm`, `learn_selectors` and `semantic` chunking without
-`LLM_ENABLED`, `transcribe` without `ASR_ENABLED`. A scan without `DOCLING_ENABLED` answers its
-text layer with the warning `ocr_unavailable`.
+`LLM_ENABLED`, `describe_images` without `LLM_ENABLED`, `transcribe` without `ASR_ENABLED`, and
+`ocr: always` without `DOCLING_ENABLED`. With `ocr: auto` (the default) a scan without
+`DOCLING_ENABLED` answers its text layer with the warning `ocr_unavailable`.
 
 Maximum extraction (for sites that allowed extraction by contract) needs
 `BROWSER_UNBLOCK_ENABLED=true` in `.env`; see [Site rules](site-rules.md#maximum-extraction).

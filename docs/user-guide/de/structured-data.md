@@ -74,9 +74,10 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 Die Strategie `llm`, `learn_selectors` und das `semantic`-Chunking brauchen den LLM-Worker des
 Betreibers (`LLM_ENABLED`) und einen Schlüssel (`X-LLM-Api-Key` oder `LLM_API_KEY` des
-Betreibers); `semantic` braucht außerdem `LLM_EMBEDDING_MODEL`. Ohne sie ergeben sie 400. `auto`
-behält dann die gefundenen Werte, und für die Felder, die noch fehlen, kommt die Warnung
-`llm_unavailable`.
+Betreibers); `semantic` braucht außerdem `LLM_EMBEDDING_MODEL`. Ohne sie ergeben sie 400. `auto` mit Schema braucht den Schlüssel
+ebenfalls, sobald der Dienst ein LLM hat (sonst 400); nur bei einem Dienst ohne LLM
+(`LLM_ENABLED=false`) behält es die gefundenen Werte, und für die Felder, die noch fehlen, kommt
+die Warnung `llm_unavailable`.
 
 - Ihr eigener Schlüssel für den LLM-Endpunkt gehört in den Header `X-LLM-Api-Key`. Er hat Vorrang
   vor `LLM_API_KEY` des Betreibers und wird nie gespeichert.
