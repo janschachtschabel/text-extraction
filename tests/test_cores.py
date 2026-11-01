@@ -175,7 +175,8 @@ def test_check_jobs_enabled() -> None:
     check_jobs_enabled(make_settings())
     with pytest.raises(ServiceError) as caught:
         check_jobs_enabled(make_settings(jobs_enabled=False))
-    assert caught.value.http_status == 503
+    assert caught.value.http_status == 400
+    assert caught.value.code == ErrorCode.INVALID_REQUEST
     assert caught.value.message == "Jobs are disabled on this deployment."
 
 

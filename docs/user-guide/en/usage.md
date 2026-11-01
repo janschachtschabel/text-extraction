@@ -25,7 +25,8 @@ only their own jobs. A missing or wrong key answers 401 `unauthorized`, and a re
 may not make 403 `forbidden`. An XPath selector with a user key is the exception: like any other
 invalid field it answers 422 `invalid_request`. A body that is not sent as JSON
 (`Content-Type: application/json`) answers 415 `invalid_request`. Each key has a rate limit
-(`RATE_LIMIT_PER_MINUTE`); over it a request answers 429 `rate_limited` with `Retry-After`.
+(`RATE_LIMIT_PER_MINUTE`); over it a request answers 429 `rate_limited` with `Retry-After`. A
+503 that is worth retrying (the service's state store is briefly away) carries `Retry-After: 5`.
 
 With `AUTH_MODE=none` the service needs no key and every caller is an admin. Use it on your own
 machine only.
@@ -94,7 +95,7 @@ longer for the NLP or LLM worker than `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_
 upload waits 25 s by default. A job's `state` goes from `queued` to `running` to `completed`, and
 `progress` counts its items by status. A job is kept for `JOB_TTL_SECONDS` (24 h), and only its
 owner (or an admin) can read it. With `JOBS_ENABLED=false` there are no jobs: `wait_seconds` is
-ignored, and batches and site structures answer 503.
+ignored, and batches, site structures and the job routes answer 400 `invalid_request`.
 
 ### Batch
 

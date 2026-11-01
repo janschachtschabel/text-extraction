@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from http import HTTPStatus
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from fastapi import FastAPI, Request
@@ -73,10 +73,19 @@ def _failed(
     )
 
 
+# The Retry-After of a retryable 503 without a wait of its own (C12): an unavailable backend
+# usually comes back within seconds, and a client that honours the header does not hammer it.
+UNAVAILABLE_RETRY_AFTER_SECONDS: Final = 5
+
+
 async def _handle_service_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ServiceError)  # noqa: S101 - narrows the type for mypy
     error = ErrorInfo(code=exc.code, message=exc.message, retryable=exc.retryable)
-    return _failed(request, exc.http_status, error, exc.headers)
+    headers = dict(exc.headers or {})
+    waits = any(name.lower() == "retry-after" for name in headers)
+    if exc.http_status == HTTPStatus.SERVICE_UNAVAILABLE and exc.retryable and not waits:
+        headers["Retry-After"] = str(UNAVAILABLE_RETRY_AFTER_SECONDS)
+    return _failed(request, exc.http_status, error, headers)
 
 
 def _not_json(request: Request, exc: RequestValidationError) -> bool:

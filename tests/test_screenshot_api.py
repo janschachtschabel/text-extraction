@@ -132,12 +132,13 @@ def test_foreign_or_unknown_artifact_is_404(path: str) -> None:
         assert (body["status"], body["error"]["code"]) == ("failed", "not_found")
 
 
-def test_artifact_route_with_jobs_disabled_is_503() -> None:
+def test_artifact_route_with_jobs_disabled_is_400() -> None:
     case = BrowserCase(jobs_enabled=False)
     with TestClient(case.app) as client:
         response = client.get(f"/v1/jobs/{'f' * 32}/artifacts/screenshot.png", headers=AUTH)
 
-        assert response.status_code == 503
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
 
 
 def test_screenshot_disabled_is_400() -> None:

@@ -98,14 +98,15 @@ def _open_key(owner: str) -> str:
 async def require_jobs_enabled(
     request: Request, _principal: Annotated[Principal, Depends(authenticate)]
 ) -> None:
-    """Dependency: 503 while ``JOBS_ENABLED`` is false (after authentication)."""
+    """Dependency: 400 while ``JOBS_ENABLED`` is false (after authentication)."""
     check_jobs_enabled(request.app.state.settings)
 
 
 def check_jobs_enabled(settings: Settings) -> None:
-    """503 while ``JOBS_ENABLED`` is false."""
+    """400 ``invalid_request`` while ``JOBS_ENABLED`` is false, as for every switch that is off
+    (C12): the deployment answers so until it is configured otherwise, which no retry changes."""
     if not settings.jobs_enabled:
-        raise ServiceError(ErrorCode.INTERNAL_ERROR, "Jobs are disabled on this deployment.", 503)
+        raise ServiceError(ErrorCode.INVALID_REQUEST, "Jobs are disabled on this deployment.", 400)
 
 
 def _unavailable() -> ServiceError:
@@ -276,9 +277,9 @@ async def create_batch(
     4xx answers: an invalid body or more URLs than `BATCH_MAX_URLS` (422), a body larger than
     `BATCH_MAX_URLS` URLs of the longest allowed length can take (413, before it is read whole),
     a compliance mode the caller may not choose (403), `BATCH_MAX_OPEN_PER_CLIENT` unfinished
-    batches and site jobs together (429, retryable).
-    503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
-    `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
+    batches and site jobs together (429, retryable), jobs disabled (400).
+    503 when Valkey is unavailable or Valkey's memory is at `VALKEY_MEMORY_GUARD_RATIO` of its
+    maximum (retryable).
 
     `mode: browser` queues the URLs for the browser workers (400 while browser mode is off);
     `ocr: always` answers 400 while the service has no OCR, `transcribe: true` while it has no
@@ -573,7 +574,7 @@ async def remove_job(
     still queued are dropped when a worker reaches them, and an item that is running finishes
     without its result being stored. Afterwards `GET /v1/jobs/{id}` and a second delete answer
     404. A job that does not exist, has expired or belongs to another caller (admins may delete
-    all) answers 404. 503 when jobs are disabled or Valkey is unavailable (retryable).
+    all) answers 404. 400 when jobs are disabled, 503 when Valkey is unavailable (retryable).
     """
     return await delete_job(request.app.state, principal, job_id)
 

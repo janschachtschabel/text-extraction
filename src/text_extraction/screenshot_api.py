@@ -104,10 +104,13 @@ async def run_screenshot(
             "model": Envelope[None],
             "description": "No such job (or another caller's) or no such file, or it expired.",
         },
+        400: {
+            "model": Envelope[None],
+            "description": "Jobs are disabled (`JOBS_ENABLED=false`).",
+        },
         503: {
             "model": Envelope[None],
-            "description": "Jobs are disabled (`JOBS_ENABLED=false`), or the job backend is "
-            "unavailable (retryable).",
+            "description": "The job backend is unavailable (retryable).",
         },
     },
 )

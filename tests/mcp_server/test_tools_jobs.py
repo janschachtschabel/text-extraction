@@ -410,7 +410,7 @@ def test_refused_get_job_and_cancel_job_log_their_job_id() -> None:
         {"tool": "get_job", "outcome": "not_found", "job_id": unknown},
         {"tool": "cancel_job", "outcome": "not_found", "job_id": unknown},
         {"tool": "get_job", "outcome": "not_found", "job_id": None},
-        {"tool": "cancel_job", "outcome": "internal_error", "job_id": unknown},
+        {"tool": "cancel_job", "outcome": "invalid_request", "job_id": unknown},
     ]
     assert "not-a-job-id-77" not in repr([*logs, *off_logs])
 
@@ -542,10 +542,10 @@ def test_cancel_job_then_not_found(client: TestClient) -> None:
 
 
 def test_jobs_disabled_tool_error() -> None:
-    """As REST's 503: ``internal_error`` with REST's message and ``retryable``."""
+    """As REST's 400: ``invalid_request`` with REST's message and ``retryable``."""
     with running(jobs_enabled=False) as client:
         rest = client.post("/v1/batch", json={"urls": URLS}, headers=AUTH)
-        assert rest.status_code == 503
+        assert rest.status_code == 400
         calls: list[tuple[str, dict[str, Any]]] = [
             ("batch_extract", {"urls": URLS}),
             ("site_structure", {"url": PAGE}),
@@ -555,7 +555,7 @@ def test_jobs_disabled_tool_error() -> None:
         ]
         for tool, arguments in calls:
             error = refusal(call_tool(client, tool, arguments, headers=AUTH))
-            assert error["code"] == "internal_error", tool
+            assert error["code"] == "invalid_request", tool
             assert error["message"] == "Jobs are disabled on this deployment.", tool
             assert error["retryable"] is rest.json()["error"]["retryable"], tool
 

@@ -611,14 +611,16 @@ def test_enqueue_failure_deletes_the_job_and_is_503(make_api: Callable[..., Api]
     assert api.batch([PAGE]).status_code == 202
 
 
-def test_jobs_disabled_is_503(make_api: Callable[..., Api]) -> None:
+def test_jobs_disabled_is_400(make_api: Callable[..., Api]) -> None:
+    # C12: a switch that is off is the caller's 400, as for every other switch.
     api = make_api(jobs_enabled=False)
 
     for response in (api.batch([PAGE]), api.job("a" * 32)):
-        assert response.status_code == 503
+        assert response.status_code == 400
         body = response.json()
         assert body["status"] == "failed"
-        assert body["error"]["code"] == "internal_error"
+        assert body["error"]["code"] == "invalid_request"
+        assert body["error"]["retryable"] is False
         assert body["error"]["message"] == "Jobs are disabled on this deployment."
     assert api.keys("job:*") == []
     # Authentication still comes first.
@@ -1299,15 +1301,15 @@ def test_delete_counts_against_the_rate_limit(make_api: Callable[..., Api]) -> N
     assert refused.json()["error"]["code"] == "rate_limited"
 
 
-def test_delete_jobs_disabled_503(make_api: Callable[..., Api]) -> None:
+def test_delete_jobs_disabled_400(make_api: Callable[..., Api]) -> None:
     api = make_api(jobs_enabled=False)
 
     response = api.delete("a" * 32)
 
-    assert response.status_code == 503
+    assert response.status_code == 400
     body = response.json()
     assert body["status"] == "failed"
-    assert body["error"]["code"] == "internal_error"
+    assert body["error"]["code"] == "invalid_request"
     assert body["error"]["message"] == "Jobs are disabled on this deployment."
     # Authentication still comes first.
     assert api.client.delete(f"/v1/jobs/{'a' * 32}").status_code == 401

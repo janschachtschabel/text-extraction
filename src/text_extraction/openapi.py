@@ -30,8 +30,8 @@ _ERROR_SCHEMA: dict[str, Any] = {
     },
 }
 _DESCRIPTIONS = {
-    "400": "Bad request: an option needs a part of the service that is switched off, or a "
-    "header is invalid (`invalid_request`).",
+    "400": "Bad request: an option or route needs a part of the service that is switched off "
+    "(jobs too), or a header is invalid (`invalid_request`).",
     "401": "No API key, or an unknown one (`unauthorized`).",
     "403": "The option is for administrators only (`forbidden`).",
     "404": "No such job or artifact for this key (`not_found`).",
@@ -40,7 +40,7 @@ _DESCRIPTIONS = {
     "422": "The request is invalid (`invalid_request`, `error.details` names the fields).",
     "429": "Too many requests or open jobs for this key (`rate_limited`), see `Retry-After`.",
     "503": "The service is busy or its state store is unavailable (`internal_error`, "
-    "usually retryable).",
+    "usually retryable; a retryable 503 carries `Retry-After`).",
 }
 _TAGS = (
     ("/v1/jobs", "jobs"),
@@ -66,7 +66,7 @@ def _statuses(path: str, method: str, settings: Settings) -> list[str]:
         if path != "/v1/extract/file":  # the upload is multipart
             statuses.append("415")
     if "{job_id}" in path:
-        statuses.append("404")
+        statuses += ["400", "404"]  # 400 while jobs are off
     return statuses
 
 

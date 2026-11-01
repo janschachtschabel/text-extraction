@@ -114,8 +114,8 @@ async def create_site_structure(
 
     4xx answers: an invalid body, a URL that is no http(s) URL, or a `depth` or `max_pages` over
     the deployment's bounds (422), a compliance mode the caller may not choose (403),
-    `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together (429, retryable).
-    503 when Valkey is unavailable, jobs are disabled, or Valkey's memory is at
+    `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together (429, retryable),
+    jobs disabled (400). 503 when Valkey is unavailable or Valkey's memory is at
     `VALKEY_MEMORY_GUARD_RATIO` of its maximum (retryable).
     """
     return await start_site(request.app.state, principal, body)

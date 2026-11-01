@@ -34,6 +34,9 @@ and
 - The service's own pause of a host (after errors or a 429) answers `rate_limited` instead of
   `connection_error`, still retryable; a refusal of the outbound gate carries the wait in
   `error.details` (`retry_after_seconds`).
+- `JOBS_ENABLED=false` makes the job routes answer 400 `invalid_request` instead of 503
+  `internal_error`, like every other switch that is off. A retryable 503 carries
+  `Retry-After: 5`.
 
 ### Fixed
 

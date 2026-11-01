@@ -28,7 +28,8 @@ mit 403 `forbidden`. Ausnahme ist ein XPath-Selektor mit einem Nutzerschlüssel:
 der Dienst wie bei jedem anderen ungültigen Feld mit 422 `invalid_request`. Ein Body, der nicht als
 JSON gesendet wird (`Content-Type: application/json`), ergibt 415 `invalid_request`. Jeder
 Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber antwortet eine Anfrage mit 429
-`rate_limited` und `Retry-After`.
+`rate_limited` und `Retry-After`. Ein 503, bei dem sich ein neuer Versuch lohnt (der Zustandsspeicher
+des Dienstes ist kurz weg), trägt `Retry-After: 5`.
 
 Mit `AUTH_MODE=none` braucht der Dienst keinen Schlüssel, und jeder Aufrufer ist Admin. Verwenden
 Sie das nur auf Ihrem eigenen Rechner.
@@ -98,8 +99,8 @@ Anfrage, die länger als `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` au
 LLM-Worker wartet. Ein Upload wartet standardmäßig 25 s. Der `state` eines Jobs geht von `queued`
 über `running` zu `completed`, und `progress` zählt seine Einträge nach Status. Ein Job wird
 `JOB_TTL_SECONDS` (24 h) aufbewahrt, und nur sein Eigentümer (oder ein Admin) kann ihn lesen. Mit
-`JOBS_ENABLED=false` gibt es keine Jobs: `wait_seconds` wird ignoriert, und Batches und
-Website-Strukturen antworten mit 503.
+`JOBS_ENABLED=false` gibt es keine Jobs: `wait_seconds` wird ignoriert, und Batches,
+Website-Strukturen und die Job-Routen antworten mit 400 `invalid_request`.
 
 ### Batch
 
