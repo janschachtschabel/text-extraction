@@ -99,7 +99,7 @@ def test_the_module_imports_no_docling() -> None:
 
 
 def test_only_the_sniffed_image_formats_are_opened() -> None:
-    # Pillow 12 has open advisories in its rarer decoders; the check opens nothing but the five
+    # Pillow's rarer decoders have had advisories; the check opens nothing but the five
     # formats the sniffer routes here (PNG, JPEG, TIFF, WebP, BMP).
     buffer = io.BytesIO()
     Image.new("RGB", (4, 4)).save(buffer, format="GIF")

@@ -75,7 +75,7 @@ gleich, und die Profile funktionieren wie unten beschrieben.
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
 ```
 
-`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.1`; `0.1`
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.2`; `0.1`
 folgt der neuesten `0.1.x` nach `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
 denn ein Image, das schon auf dem Rechner liegt, wird nicht erneut geladen). Die Versionen und ihre Notizen stehen auf der
 [Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).

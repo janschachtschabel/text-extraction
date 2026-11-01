@@ -22,8 +22,8 @@ from text_extraction.documents.sniff import DocumentTooLarge, DocumentUnreadable
 MAX_IMAGE_PIXELS: Final = 89_478_485
 _TOO_LARGE: Final = "The image has too many pixels."
 # The formats the sniffer routes to OCR (documents/sniff.py); Pillow's other decoders are not
-# tried on hostile input. Pillow 12 has open advisories that 13 fixes; Docling pins it below 13
-# up to docling-slim 2.141 (follow-up: upgrade once docling-slim 2.142+ passes the 14-day rule).
+# tried on hostile input (defence in depth: Pillow 13 fixes the advisories of 12.3.0 in its
+# rarer decoders, and the next advisory may hit one of them again).
 _FORMATS: Final = ("PNG", "JPEG", "TIFF", "WEBP", "BMP")
 
 

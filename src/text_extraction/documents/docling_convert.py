@@ -37,7 +37,7 @@ One converter is built per set of options and kept for the child's life, so the 
 once (the start-up's self-check loads them for images); the pool replaces the child after 50
 conversions or a failure.
 
-Docling's API as used here, checked against ``docling-slim==2.137.0`` (``docling-core`` 2.x):
+Docling's API as used here, checked against ``docling-slim==2.142.1`` (``docling-core`` 2.x):
 ``docling.document_converter.DocumentConverter(allowed_formats, format_options)``,
 ``PdfFormatOption``, ``ImageFormatOption``, ``OdtFormatOption``, ``OdsFormatOption``,
 ``OdpFormatOption``; ``DocumentConverter.convert(DocumentStream, raises_on_error, page_range)``
