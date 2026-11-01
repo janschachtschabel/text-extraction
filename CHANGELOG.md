@@ -64,6 +64,9 @@ and
 
 ### Fixed
 
+- A batch item moving to the Docling or ASR workers whose job was deleted between storing its
+  bytes and its draft kept the bytes in Valkey and in `DOCLING_INPUT_BUDGET_BYTES` until their
+  TTL; the move now gives them back at once.
 - Valkey: the client retried a command up to 10 times on a connection error, so a Lua script, a
   MULTI or a job claim lost in flight could run twice. Commands are no longer retried; instead a
   pooled connection idle for more than 5 s is checked with PING and opened again once.

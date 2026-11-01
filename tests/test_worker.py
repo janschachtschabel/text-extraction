@@ -1836,6 +1836,40 @@ async def test_batch_item_moves_to_docling() -> None:
     assert await harness.valkey.keys("res:*") == []
 
 
+@pytest.mark.parametrize("pool", ["docling", "asr"])
+@scenario
+async def test_a_job_deleted_during_a_move_keeps_no_input(pool: str) -> None:
+    """The job of a batch item is deleted after the item's bytes were stored for the pool but
+    before its draft: the move gives the bytes and their budget share back at once. Nobody
+    else would: the item never reaches the pool's queue, and ``JobStore.delete`` knows only
+    item 0's input (O11)."""
+    if pool == "docling":
+        harness = ocr_harness()
+        job_id = await harness.submit([SCAN_URL, SCAN_URL])
+    else:
+        harness = asr_harness()
+        job_id = await submit_transcription(harness, [YOUTUBE, YOUTUBE])
+    store = harness.store
+    # item 0 moves as usual
+    await harness.worker.process((await harness.claim()).item)  # type: ignore[arg-type]
+    real_draft = store.put_draft
+
+    async def put_draft(job: str, index: int, envelope: Any) -> None:
+        await delete_job(api_state(harness), OWNER, job)  # the caller deletes the job meanwhile
+        await real_draft(job, index, envelope)
+
+    store.put_draft = put_draft  # type: ignore[method-assign]
+    claim = await harness.claim()
+    assert claim.item is not None
+    assert claim.item.index == 1
+
+    await harness.worker.process(claim.item)
+
+    assert await harness.valkey.keys(f"job:{{{job_id}}}:input:*") == []
+    assert await budget_members(harness, job_id) == []
+    assert await harness.valkey.get("inputs:{budget}:total") in (None, b"0")
+
+
 @scenario
 async def test_batch_item_keeps_its_draft_while_memory_is_high() -> None:
     harness = ocr_harness()

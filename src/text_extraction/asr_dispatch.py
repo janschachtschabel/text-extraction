@@ -462,9 +462,14 @@ class AsrMove:
         except InputBudgetExceeded:
             self._count("input_budget")
             return asr_fallback(needed, without, ErrorCode.RATE_LIMITED, ASR_BUSY_MESSAGE)
-        if needed.draft is not None:
-            await self._store.put_draft(job_id, index, needed.draft)
-        await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
+        try:
+            if needed.draft is not None:
+                await self._store.put_draft(job_id, index, needed.draft)
+            await self._queue.enqueue_items(job_id, self._item.client, [(index, self._url)])
+        except BaseException:
+            # Not queued (the job is gone, or Valkey failed): nobody else deletes the bytes.
+            await asyncio.shield(self._store.discard_input(job_id, index))
+            raise
         self.moved = True
         return without  # not stored: the item is completed without a result
 

@@ -800,6 +800,14 @@ class JobStore:
         await self._valkey.delete(_key(job_id, f"input:{index}"))
         await self._release(job_id, index)
 
+    async def discard_input(self, job_id: str, index: int) -> None:
+        """Best effort ``delete_input`` for a move that failed after the input was stored (the
+        job was deleted meanwhile, or Valkey failed): the item never reached the pool's queue,
+        so no worker would delete the bytes, and ``delete`` knows only item 0's. A Valkey
+        failure leaves them to their TTL."""
+        with contextlib.suppress(RedisError, OSError):
+            await self.delete_input(job_id, index)
+
     async def _release(self, job_id: str, index: int) -> None:
         """Give the reservation of an input back (after the input is gone). A Valkey failure
         leaves it to its expiry."""
