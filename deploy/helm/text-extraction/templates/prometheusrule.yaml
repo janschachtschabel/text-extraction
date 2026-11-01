@@ -116,10 +116,10 @@ spec:
         {{- end }}
         # The denominator counts the items that recorded a result (not deferred, not lost, not
         # escalated to the browser pool, where they record it). The numerator leaves out success and
-        # content_too_short: a partial result is not a failure.
+        # partial: a partial result (too short, no OCR, no LLM, ...) is not a failure.
         - alert: TextExtractionJobItemFailures
           expr: |
-            sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"success|content_too_short|deferred|lost|escalated"}[15m]))
+            sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"success|partial|deferred|lost|escalated"}[15m]))
               /
             sum(rate(text_extraction_job_items_total{namespace="{{ $ns }}", outcome!~"deferred|lost|escalated"}[15m]))
               > 0.5

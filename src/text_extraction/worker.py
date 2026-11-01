@@ -300,8 +300,10 @@ def _metrics_for(registry: CollectorRegistry) -> _Metrics:
 
 
 def _outcome(envelope: Envelope[ExtractResult]) -> str:
-    """Metric label: the envelope's error code, else its status (``success``)."""
-    return envelope.error.code.value if envelope.error is not None else envelope.status
+    """Metric label: ``success``, ``partial``, or the error code of a failed result."""
+    if envelope.status != "failed" or envelope.error is None:
+        return envelope.status
+    return envelope.error.code.value
 
 
 class ItemRunner(Protocol):

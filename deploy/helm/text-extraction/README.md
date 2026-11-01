@@ -208,7 +208,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
 | `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica (pending plus leased with `countLeased`). `null`: the pool's `concurrency`. Must be positive. |
-| `workers.extract.autoscaling.keda.countLeased` | `false` | Also count the items the workers hold (`text_extraction_queue_leased_items`), so the replicas busy with them are part of the target. |
+| `workers.extract.autoscaling.keda.countLeased` | `false` | Also count the items the workers hold (`text_extraction_queue_leased_items`), so the replicas busy with them are part of the target. Always on while `minReplicaCount` is `0`: only a running worker takes back the items of a lost one, so they must keep a replica up. |
 | `workers.extract.autoscaling.keda.minReplicaCount` / `maxReplicaCount` | `1` / `10` | |
 | `workers.extract.autoscaling.hpa.enabled` | `false` | CPU-based HorizontalPodAutoscaler of the workers. **Mutually exclusive with KEDA**: enabling both fails the render, because KEDA manages its own HPA. |
 | `workers.extract.autoscaling.hpa.minReplicas` / `maxReplicas` | `2` / `10` | |
@@ -357,7 +357,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
 | `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above the pool's backlog threshold (below the table) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
-| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
+| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `partial` (every partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
 The backlog thresholds are `alerts.queueBacklogItems` (1000) for `extract` and `browser`,

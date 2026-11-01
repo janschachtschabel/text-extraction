@@ -1934,6 +1934,9 @@ async def test_file_item_of_a_short_text_honours_short_ok(short_ok: bool, status
     if not short_ok:
         assert item.result.error is not None
         assert item.result.error.code == ErrorCode.CONTENT_TOO_SHORT
+    # A partial result counts as `partial`, not as its error code: the failure alert leaves it out.
+    assert outcome_count(harness, status) == 1
+    assert outcome_count(harness, "content_too_short") == 0
 
 
 @scenario

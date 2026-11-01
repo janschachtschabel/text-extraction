@@ -3,8 +3,9 @@
 {{- if and $worker.enabled $worker.autoscaling.keda.enabled }}
 {{- $keda := $worker.autoscaling.keda }}
 {{- $args := list $ $pool }}
+{{- $leased := or $keda.countLeased (eq (int $keda.minReplicaCount) 0) }}
 ---
-# Scales the {{ $pool }} workers on the length of their pool's queue{{ if $keda.countLeased }} plus the items in flight{{ end }}. The
+# Scales the {{ $pool }} workers on the length of their pool's queue{{ if $leased }} plus the items in flight{{ end }}. The
 # gauges come from the API pods (they stay up while the workers are scaled down) and need
 # JOBS_ENABLED=true there (for the pool browser also BROWSER_ENABLED=true, for docling
 # DOCLING_ENABLED=true, for asr ASR_ENABLED=true, for nlp PII_ENABLED=true, for llm LLM_ENABLED=true); max() because every API pod reports the same
@@ -34,7 +35,8 @@ spec:
         serverAddress: {{ required (printf "workers.%s.autoscaling.keda.serverAddress is required" $pool) $keda.serverAddress | quote }}
         {{- $selector := printf `{pool="%s", namespace="%s"}` $pool $.Release.Namespace }}
         {{- $query := printf "max(text_extraction_queue_pending_items%s)" $selector }}
-        {{- if $keda.countLeased }}
+        {{- /* At zero replicas expired leases are reclaimed by no one: count them too. */}}
+        {{- if $leased }}
         {{- $query = printf "%s + max(text_extraction_queue_leased_items%s)" $query $selector }}
         {{- end }}
         query: {{ $query | quote }}
