@@ -5,7 +5,7 @@ FastAPI derives the document from the routes, but the routes read the key by han
 ``HTTPValidationError``. ``install_openapi`` corrects both once, when the document is first
 built: a ``bearerAuth`` security scheme (``AUTH_MODE=api_key``), an ``ErrorEnvelope`` schema,
 the 422 of every operation pointing at it, the error statuses every ``/v1`` operation can
-answer, and a tag per area.
+answer, a tag per area, and the examples of the upload's form.
 """
 
 from typing import Any
@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from text_extraction.api_examples import FILE_EXAMPLES
 from text_extraction.settings import Settings
 
 ERROR_ENVELOPE = "ErrorEnvelope"
@@ -103,6 +104,10 @@ def build_openapi(app: FastAPI, settings: Settings) -> dict[str, Any]:
                     response["description"] = _DESCRIPTIONS["422"]
             if (tag := _tag(path)) is not None:
                 operation["tags"] = [tag]
+    upload = spec.get("paths", {}).get("/v1/extract/file", {}).get("post")
+    if upload is not None:  # a form's examples cannot be set on the route (C13)
+        form = upload["requestBody"]["content"]["multipart/form-data"]
+        form["examples"] = FILE_EXAMPLES
     return spec
 
 

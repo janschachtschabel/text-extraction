@@ -19,12 +19,13 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Body, Depends, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from starlette.datastructures import State
 
+from text_extraction.api_examples import BATCH_EXAMPLES
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, asr_key_of
 from text_extraction.auth import Principal, authenticate, require_role
 from text_extraction.compliance import resolve_mode
@@ -259,7 +260,7 @@ async def discard_job(state: State, principal: Principal, job_id: str) -> None:
     ],
 )
 async def create_batch(
-    body: BatchRequest,
+    body: Annotated[BatchRequest, Body(openapi_examples=BATCH_EXAMPLES)],
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
     asr_key: Annotated[
@@ -559,7 +560,9 @@ async def read_job(
 
 
 @router.delete(
-    "/v1/jobs/{job_id}", dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)]
+    "/v1/jobs/{job_id}",
+    name="delete_job",
+    dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)],
 )
 async def remove_job(
     job_id: str,

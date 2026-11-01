@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 import structlog
 from fastapi import Depends, FastAPI
+from fastapi.routing import APIRoute
 from prometheus_client import REGISTRY, CollectorRegistry
 from prometheus_fastapi_instrumentator import Instrumentator
 from redis.asyncio import Redis
@@ -217,6 +218,10 @@ def _add_ui_headers(app: FastAPI) -> None:
     app.add_middleware(UiHeadersMiddleware)
 
 
+def _operation_id(route: APIRoute) -> str:
+    return route.name
+
+
 def create_public_app(
     settings: Settings,
     valkey: Redis,
@@ -261,6 +266,9 @@ def create_public_app(
         version=__version__,
         description=DESCRIPTION,
         lifespan=_lifespan,
+        # Plain operation ids (C13): a generated client gets `extract`, not
+        # `extract_v1_extract_post`. A route's name is its function's unless it sets one.
+        generate_unique_id_function=_operation_id,
     )
     app.state.settings = settings
     app.state.valkey = valkey

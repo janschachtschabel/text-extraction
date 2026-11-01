@@ -9,11 +9,12 @@ and the artifact route serves it to the job's owner (and admins), like the job v
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from redis.exceptions import RedisError
 from starlette.datastructures import State
 
+from text_extraction.api_examples import SCREENSHOT_EXAMPLES
 from text_extraction.auth import Principal, require_role
 from text_extraction.browser_models import ScreenshotRequest, ScreenshotResult, screenshot_view
 from text_extraction.envelope import Envelope, ErrorCode
@@ -42,7 +43,7 @@ _MEDIA_TYPES = {".png": "image/png"}
     },
 )
 async def screenshot(
-    body: ScreenshotRequest,
+    body: Annotated[ScreenshotRequest, Body(openapi_examples=SCREENSHOT_EXAMPLES)],
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
 ) -> Envelope[ScreenshotResult] | JSONResponse:
@@ -93,6 +94,7 @@ async def run_screenshot(
 
 @router.get(
     "/v1/jobs/{job_id}/artifacts/{name}",
+    name="get_job_artifact",
     dependencies=[Depends(require_jobs_enabled), Depends(rate_limited)],
     response_class=Response,
     responses={

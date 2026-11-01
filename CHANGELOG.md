@@ -21,6 +21,8 @@ and
 - The `release` workflow: a pushed tag `vX.Y.Z`, or a manual run for an existing tag, puts the
   tag's section of this file on its GitHub release page, with the images and where to start
   (`scripts/release_notes.py`); a `0.x` release is marked as a pre-release.
+- The OpenAPI document has request examples for `POST /v1/extract`, `/v1/extract/file`,
+  `/v1/screenshot` and `/v1/batch`, and the description of `ErrorCode` explains every code.
 - The OpenAPI document declares the bearer key (`AUTH_MODE=api_key`), the error envelope of
   every error answer (instead of FastAPI's `HTTPValidationError`), the error statuses each
   operation can answer, and a tag per area.
@@ -37,6 +39,9 @@ and
 - `JOBS_ENABLED=false` makes the job routes answer 400 `invalid_request` instead of 503
   `internal_error`, like every other switch that is off. A retryable 503 carries
   `Retry-After: 5`.
+- OpenAPI operation ids are plain names (`extract`, `extract_file`, `get_job`, `delete_job`,
+  ...) instead of FastAPI's path-derived ones (`extract_v1_extract_post`); a client generated
+  from the document gets new method names.
 
 ### Fixed
 

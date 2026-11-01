@@ -97,12 +97,13 @@ from functools import partial
 from typing import Annotated, Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Body, Depends, Header, Request
 from fastapi.responses import JSONResponse
 from prometheus_client import CollectorRegistry
 from redis.exceptions import RedisError
 from starlette.datastructures import State
 
+from text_extraction.api_examples import EXTRACT_EXAMPLES
 from text_extraction.asr_dispatch import ASR_KEY_HEADER, AsrDispatcher, AsrHandoff, asr_key_of
 from text_extraction.auth import Principal, require_role
 from text_extraction.browser_dispatch import (
@@ -216,7 +217,7 @@ LLM_KEY_DESCRIPTION = (
     },
 )
 async def extract(
-    body: ExtractRequest,
+    body: Annotated[ExtractRequest, Body(openapi_examples=EXTRACT_EXAMPLES)],
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
     asr_key: Annotated[
