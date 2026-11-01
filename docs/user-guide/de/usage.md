@@ -24,7 +24,8 @@ Ein Schlüssel hat die Rolle `user` oder `admin`. Admins dürfen außerdem `comp
 (und damit die maximale Extraktion), XPath-Selektoren und die Aktion `evaluate` verwenden und jeden
 Job lesen; ein Nutzer liest nur seine eigenen Jobs. Bei einem fehlenden oder falschen Schlüssel
 antwortet der Dienst mit 401 `unauthorized`, bei einer Anfrage, die die Rolle nicht stellen darf,
-mit 403 `forbidden`. Jeder Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber
+mit 403 `forbidden`. Ausnahme ist ein XPath-Selektor mit einem Nutzerschlüssel: Darauf antwortet
+der Dienst wie bei jedem anderen ungültigen Feld mit 422 `invalid_request`. Jeder Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber
 antwortet eine Anfrage mit 429 `rate_limited` und `Retry-After`.
 
 Mit `AUTH_MODE=none` braucht der Dienst keinen Schlüssel, und jeder Aufrufer ist Admin. Verwenden
