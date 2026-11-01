@@ -261,7 +261,8 @@ result confirmed by a 304 or by identical bytes) or `bypass` (`cache: false`: no
 Only `success` and `partial` results are cached and fingerprinted (per URL and output format; a
 document also per `ocr` option, F10). `attempts` counts fetches of the target in this request (0
 for a cache hit or a refusal before the fetch). The outbound gate refusing a turn gives
-`rate_limited` (busy) or `connection_error` (host paused), both retryable.
+`rate_limited` (busy or host paused), retryable, with `retry_after_seconds` in `error.details`
+(`connection_error` for a paused host until v0.1.0).
 
 ## Public API (port 8080)
 
@@ -421,8 +422,8 @@ a queue key. Items are `<job>:<index>:<attempts>` in lists per client and domain
   a Valkey error it leaves it leased, so it comes back after the lease instead of vanishing
   without a result.
 - A gate refusal (busy, paused) defers the item: back to the front of its domain, the domain not
-  claimed before the gate's retry time. At the attempt limit the pipeline's own `rate_limited` or
-  `connection_error` envelope is stored instead.
+  claimed before the gate's retry time. At the attempt limit the pipeline's own `rate_limited`
+  envelope is stored instead.
 
 **Site jobs (package 9).** A job of kind `site` (`POST /v1/site-structure`) starts with one
 item, the start page, and grows while it runs: an item appends the pages, the robots.txt item, the
@@ -517,7 +518,7 @@ to each other's requests too.
 
 Taking the turn before the files changes two answers on a cold origin (one whose files are not
 cached). A busy host (no lease or no slot within `OUTBOUND_MAX_WAIT_SECONDS`, an open circuit or a
-pause) now answers `rate_limited` or `connection_error` before robots.txt is read, where package
+pause) now answers `rate_limited` before robots.txt is read, where package
 2 could answer `blocked_by_robots` first; a page that robots.txt disallows is still answered
 `blocked_by_robots` without its own request. A cross-host redirect to a cold origin takes a turn
 at the target for its files, so even a target that robots.txt then blocks has used one booked
