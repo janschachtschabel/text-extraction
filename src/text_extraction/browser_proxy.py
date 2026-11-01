@@ -99,6 +99,11 @@ class ProxyContext:
         self._tasks: set[asyncio.Task[None]] = set()
 
     @property
+    def max_bytes(self) -> int:
+        """The context's byte cap."""
+        return self._max_bytes
+
+    @property
     def hosts(self) -> frozenset[str]:
         """Hosts the context connected to, lower case (at most 200)."""
         return frozenset(self._hosts)

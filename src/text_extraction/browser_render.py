@@ -34,7 +34,16 @@ from typing import TYPE_CHECKING, Final
 from urllib.parse import urljoin, urlsplit
 
 import structlog
-from playwright.async_api import APIResponse, Download, Frame, Page, Request, Response, Route
+from playwright.async_api import (
+    APIResponse,
+    CDPSession,
+    Download,
+    Frame,
+    Page,
+    Request,
+    Response,
+    Route,
+)
 
 from text_extraction.browser_actions import run_actions
 from text_extraction.browser_driver import (
@@ -77,6 +86,8 @@ _log = structlog.get_logger(__name__)
 
 VIEWPORT: Final = {"width": 1920, "height": 1080}
 CONSENT_SECONDS: Final = 3.0  # B11: best effort
+# The page's decoded response bytes may reach this many times its byte cap (audit B3).
+DECODED_BYTES_FACTOR: Final = 2
 # Of a render's deadline: what reading the DOM (and taking the screenshot) needs after the waits.
 _READ_RESERVE_SECONDS: Final = 1.0
 _SCREENSHOT_RESERVE_SECONDS: Final = 3.0
@@ -149,6 +160,14 @@ async def render_page(
         async with asyncio.timeout_at(deadline):
             await render.install()
             return await render.run(deadline)
+    except asyncio.CancelledError:
+        # The decoded bytes passed their cap (``_Render._on_data``): that cancel was ours.
+        task = asyncio.current_task()
+        if render.oversized and render.fault is not None and task is not None:
+            render.oversized = False
+            if task.uncancel() == 0:
+                raise render.fault from None
+        raise
     except TimeoutError:
         render.raise_kept()
         raise FetchError(
@@ -158,6 +177,11 @@ async def render_page(
             upstream_status=render.last_status(),
         ) from None
     finally:
+        render.task = None  # no cancel of the caller once the render is over
+        if render.oversized:  # passed after the render had its answer: the cancel is dropped
+            render.oversized = False
+            if (task := asyncio.current_task()) is not None:
+                task.uncancel()
         await render.end_checks()
 
 
@@ -305,8 +329,18 @@ class _Render:
         self.deadline = 0.0
         self.checks: set[asyncio.Task[None]] = set()
         self.transcript_panel: bytes | None = None  # the get_panel body (P13-S3)
+        # Decoded response bytes of the page (CDP ``Network.dataReceived``): the proxy counts
+        # the bytes on the wire, which a gzip bomb keeps small (audit B3).
+        cap = traffic.max_bytes if traffic is not None else settings.browser_max_bytes
+        self.decoded_cap = DECODED_BYTES_FACTOR * cap
+        self.decoded = 0
+        self.stopping: asyncio.Future[None] | None = None
+        self.session: CDPSession | None = None
+        self.task = asyncio.current_task()  # the render's, cancelled when the cap is passed
+        self.oversized = False
 
     async def install(self) -> None:
+        await self._count_decoded()
         self.page.on("response", self._on_response)
         self.page.on("requestfailed", self._on_request_failed)
         self.page.on("download", self._on_download)
@@ -320,6 +354,48 @@ class _Render:
         for task in self.checks:
             task.cancel()
         await asyncio.gather(*self.checks, return_exceptions=True)
+        if self.stopping is not None:
+            await asyncio.gather(self.stopping, return_exceptions=True)
+
+    async def _count_decoded(self) -> None:
+        """Count the page's decoded response bytes through a CDP session of its own; a driver
+        without CDP leaves the proxy's cap alone."""
+        try:
+            session = await self.page.context.new_cdp_session(self.page)
+            # Its own buffers stay empty: nothing reads response bodies through it.
+            await session.send(
+                "Network.enable", {"maxTotalBufferSize": 0, "maxResourceBufferSize": 0}
+            )
+        except DRIVER_ERRORS:
+            return
+        session.on("Network.dataReceived", self._on_data)
+        self.session = session
+
+    def _on_data(self, event: dict[str, object]) -> None:
+        size = event.get("dataLength")
+        self.decoded += size if isinstance(size, int) else 0
+        if self.decoded <= self.decoded_cap or self.stopping is not None:
+            return
+        if self.fault is None:
+            self.fault = FetchError(
+                ErrorCode.TOO_LARGE,
+                f"The page's responses decode to more than {self.decoded_cap} bytes "
+                "(twice BROWSER_MAX_BYTES).",
+                upstream_status=self.last_status(),
+            )
+        self.settled.set()
+        self.stopping = asyncio.ensure_future(self._stop_loading())
+        # End the render at once: it may be waiting for a load that the bomb keeps busy. Its
+        # task is cancelled (``render_page`` turns the cancel into the fault); after the render
+        # ``task`` is None, and the page's late bytes cancel nothing.
+        if self.task is not None and not self.oversized:
+            self.oversized = True
+            self.task.cancel()
+
+    async def _stop_loading(self) -> None:
+        if self.session is not None:
+            with contextlib.suppress(*DRIVER_ERRORS):
+                await self.session.send("Page.stopLoading")
 
     def raise_kept(self) -> None:
         """End the render with what went wrong in the page meanwhile: the check's refusal of a

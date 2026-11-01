@@ -619,7 +619,10 @@ while `BROWSER_ENABLED` is false, are unchanged.
 - **B4, SSRF.** Every byte a browser sends goes through the in-process egress proxy
   (`browser_proxy.py`, 127.0.0.1, random port), in both modes: it resolves each host once with
   the fast mode's address check, dials the first allowed address, refuses non-public addresses
-  with 403 and counts bytes per page (cap `BROWSER_MAX_BYTES`). It is a plain `CONNECT` tunnel
+  with 403 and counts bytes per page (cap `BROWSER_MAX_BYTES`). Those are the bytes on the wire;
+  the renderer counts the decoded bytes too, from a CDP session of its own
+  (`Network.dataReceived`), and past twice the cap it stops the page's loads and ends the render
+  with `too_large`, so a gzip bomb does not keep Chromium busy until the deadline (audit B3). It is a plain `CONNECT` tunnel
   and relays plain `http://` requests, so TLS stays end to end and Chromium's own TLS
   fingerprint reaches the site. A connection lives at most the longer of `BROWSER_TIMEOUT_SECONDS`
   and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`, plus 5 s. Launch flags: `--proxy-server` with a bypass list that sends even

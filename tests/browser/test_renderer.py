@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -675,6 +676,28 @@ def test_byte_cap_ends_the_page_with_a_warning(settings_for: SettingsFor, site: 
         capped = await render(stack, f"{site.base}/heavy")
         assert "browser_bytes_capped" in capped.warnings
         assert ARTICLE_TEXT.split(".")[0] in capped.html
+
+    scenario(settings_for, site, body)
+
+
+def test_a_gzip_bomb_is_too_large_at_once(settings_for: SettingsFor, site: Site) -> None:
+    """B3: the proxy counts the bytes on the wire (about 200 KB here), so the decoded bytes
+    count too: past twice the byte cap the render ends with ``too_large``, not a timeout."""
+
+    async def body(stack: Stack) -> None:
+        stack.proxy._max_bytes = 10_000_000  # decoded, the bomb is 20 times as much
+        started = time.monotonic()
+        with pytest.raises(FetchError) as caught:
+            await render(stack, f"{site.base}/bomb")
+        assert caught.value.code == ErrorCode.TOO_LARGE
+        assert time.monotonic() - started < 10
+        # the same through the pipeline: an envelope, not retryable
+        envelope = await run_pipeline(stack, url=f"{site.base}/bomb")
+        assert envelope.error is not None
+        assert envelope.error.code == ErrorCode.TOO_LARGE
+        assert envelope.error.retryable is False
+        # the page after it renders as usual
+        assert ARTICLE_TEXT.split(".")[0] in (await render(stack, f"{site.base}/static")).html
 
     scenario(settings_for, site, body)
 

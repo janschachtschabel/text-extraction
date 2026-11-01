@@ -7,6 +7,7 @@ tell what the browser sent and to whom.
 """
 
 import contextlib
+import functools
 import json
 import threading
 import time
@@ -118,6 +119,23 @@ def _handler_for(site: Site) -> type[BaseHTTPRequestHandler]:
 
     Handler.site = site
     return Handler
+
+
+# A gzip bomb (audit B3): 200 MB of HTML whitespace, about 200 KB on the wire.
+BOMB_DECODED_BYTES = 200_000_000
+
+
+@functools.cache
+def _gzip_bomb() -> bytes:
+    import zlib
+
+    packer = zlib.compressobj(9, zlib.DEFLATED, 31)  # 31: a gzip header
+    chunk = b" " * 1_000_000
+    parts = [packer.compress(b"<!doctype html><html><body><p>")]
+    parts.extend(packer.compress(chunk) for _ in range(BOMB_DECODED_BYTES // len(chunk)))
+    parts.append(packer.compress(b"</p></body></html>"))
+    parts.append(packer.flush())
+    return b"".join(parts)
 
 
 def _js_text(text: str) -> str:
@@ -403,6 +421,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(article(extra, title="Private subresources"))
         elif path == "/image":
             self._send(article("<img src='/pixel.png' alt=''>", title="With an image"))
+        elif path == "/bomb":
+            self._send(_gzip_bomb(), headers={"Content-Encoding": "gzip"})
         elif path == "/heavy":
             self._send(article("<img src='/big.png' alt=''>", title="Heavy"))
         elif path == "/big.png":
