@@ -9,8 +9,9 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [0.1.0] - 2026-10-31
 
-The first release, a prototype: packages 0 to 12 of [docs/packages.md](docs/packages.md), tagged
-`v0.1.0` on the merge of the package 12 pull request; package 11 is merged without a tag.
+The first release, a prototype: packages 0 to 13 of [docs/packages.md](docs/packages.md), tagged
+`v0.1.0` on the merge of the package 13 pull request; packages 11 and 12 are merged without a
+tag.
 
 ### Added
 
@@ -55,6 +56,12 @@ The first release, a prototype: packages 0 to 12 of [docs/packages.md](docs/pack
   and checks for WCAG 2.2 A and AA with a vendored axe-core 4.14.0 and keyboard tests; and the
   READMEs and a user guide in German and English, kept in sync by tests and a pull request
   check.
+- Package 13, YouTube transcript panel: a YouTube video whose subtitles could not be read gets a
+  second try in the browser in `auto` mode, where YouTube serves its new transcript view
+  (`transcript_source: transcript_panel`, `mode_used: browser`); otherwise its details answer
+  with the warning `transcript_panel_unavailable`. The standard browser only, no request of its
+  own to YouTube; the switch `MEDIA_TRANSCRIPT_PANEL_ENABLED` (default true, needs
+  `BROWSER_ENABLED`) and the metric `text_extraction_media_transcript_panel_total`.
 
 ### Not in this release
 

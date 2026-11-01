@@ -89,7 +89,9 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    soft-404 page served without one), and neither does an error status or a non-HTML type.
    Under unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) it also escalates
    on `bot_protection`, on every 403, 429 or 503 answer (`escalation.REFUSAL_STATUSES`) whatever
-   its body or content type, and on any 2xx HTML result that is not `success` (B16). The render's
+   its body or content type, and on any 2xx HTML result that is not `success` (B16). A YouTube
+   video's details whose subtitles could not be read escalate too, to be tried in YouTube's
+   transcript view ("Audio and video", M19). The render's
    result and the fast result are compared and the better one is kept (higher status, then more
    words, on a tie the render). `auto` with `actions`, `cookies`, `headers` or `screenshot`
    skips the fast phase and always renders, like `browser`. `mode` is part of the result cache
@@ -737,6 +739,14 @@ while `BROWSER_ENABLED` is false, are unchanged.
     `wait_seconds` becomes a job that finishes after the pause. A render that gets past the
     refusal keeps it out of the host's backoff (`answers_for_gate`, B14 unchanged).
 
+**The transcript view option (package 13).** `RenderOptions.transcript_panel` asks a render to
+read YouTube's new transcript view (`browser_panel.py`): after the load, the consent handling and
+the idle wait, before the HTML is read, it declines YouTube's consent dialog, opens the view and
+keeps the body of the page's own `get_panel` answer as `Rendered.transcript_panel`. Only the
+pipeline sets it, for a YouTube video's details whose subtitles could not be read, always in the
+standard browser (never unblock mode) and without caller options; a failure is the warning
+`transcript_panel_unavailable`, never an error of the render. See "Audio and video", M19.
+
 **Caller headers (R10, R13).** Headers go only to requests on the requested URL's host and port.
 Playwright would re-apply them to the hops of a redirect, so while a render carries headers every
 request on that host is fetched by the route handler without following redirects. A redirect of
@@ -1102,6 +1112,9 @@ OpenAI-compatible endpoint): always a job, answered 202.
   400), and that only YouTube's new transcript view (`get_panel`) answers without one, served
   for one captioned video in four. Getting past the attestation is getting past a bot
   protection (rule 6), so (c) would rest on the new view only. Jan left out (b) for good.
+  Package 13 adds (c) on the new view only (Jan, 2026-10-31: "Fallback nur neues Panel bauen"):
+  a video whose subtitles could not be read gets a second try in the browser where YouTube
+  serves its new transcript view, never past an attestation or the classic panel (M19).
 - **D2, default Whisper model: `large-v3-turbo` (a).** CPU only, `int8`; about 1.6 GB on the
   volume. The spike measured a real-time factor of 0.88 on 4 threads (`small`: 0.43) and a peak
   RSS of 1.9 GB; Jan re-confirmed it after the spike. `small` stays selectable (`ASR_MODEL`).
@@ -1203,8 +1216,9 @@ OpenAI-compatible endpoint): always a job, answered 202.
   SSRF-checked and byte-capped by the proxy, not robots-checked or gated. A media file fetched by
   URL gets the header checks of a document (F10).
 - **M6, the result.** `data.media` (`MediaInfo`): `platform` (M1's, `file`, `upload` or
-  `html5`), `transcript_source` (`manual_subtitles`, `auto_subtitles`, `asr`, `metadata_only`;
-  null where there is no transcript at all: a page with embeds only, a file not transcribed),
+  `html5`), `transcript_source` (`manual_subtitles`, `auto_subtitles`, `asr`, `metadata_only`,
+  and since package 13 `transcript_panel`, M19; null where there is no transcript at all: a
+  page with embeds only, a file not transcribed),
   `transcript_language`, `available_languages` (the manual tracks), `duration_seconds`,
   `uploader`, `asr_model` and `embeds`; null for every result without media. `content` is the
   transcript as paragraphs (a new one after a pause of 2 s, after 6 sentences, or after 120
@@ -1348,6 +1362,74 @@ OpenAI-compatible endpoint): always a job, answered 202.
   player URL, and an embed-restricted video (player 403) can only answer its details; the
   extractor names are `IE_NAME`s; faster-whisper 1.2.1's own `decode_audio` breaks on PyAV 19,
   so the child always decodes itself and passes an array.
+- **M19, transcript panel** (package 13: `escalation.py`, `browser_panel.py`, `media/panel.py`,
+  `pipeline_media.py`, `pipeline.py`; plan
+  `docs/superpowers/plans/2026-10-31-package-13-youtube-transcript-panel.md`, spike
+  `docs/superpowers/plans/2026-10-31-youtube-transcript-panel-spike.md`). Jan's decisions
+  (2026-10-31, D1-D3 = a): the new value `transcript_source: transcript_panel`, as the new view
+  does not say whether a track is a person's or automatic; the try only for the case below, never
+  for `mode: browser`, which renders the watch page as a page; the switch
+  `MEDIA_TRANSCRIPT_PANEL_ENABLED` (default true), which does nothing without `BROWSER_ENABLED`.
+  - Trigger (P13-S1). `escalation.needs_transcript_panel` is true for a fast result
+    (`mode_used` `fast`) with `media.platform` `youtube`, `transcript_source` `metadata_only`,
+    `cache` neither `hit` nor `revalidated`, and the warning `subtitles_blocked` or
+    `subtitles_failed` (the track was there but could not be read). A video YouTube says has no
+    subtitles, another platform and a stored result never try. The API route, the extract
+    worker and the pipeline escalate when `needs_browser` is true or when
+    `transcript_panel_applies` is (the switch on, no `transcribe`, `needs_transcript_panel`
+    true), under the same `mode: auto` and `BROWSER_ENABLED` conditions as B5; `needs_browser`
+    itself is unchanged.
+  - The render (P13-S2). In the browser worker an `auto` item whose draft is such a result is
+    rendered by `Pipeline._panel_rendered` instead of the page path: the canonical watch URL
+    (`final_url`) with `RenderOptions(transcript_panel=True)` and otherwise the standard
+    options, never unblock mode and no caller options (an item with them never takes the media
+    path). The host's turn, the render and the gate's record of its document answers are those
+    of any render (B2). Compliance is that of the media path (M5): the origin checks
+    (robots.txt, TDMRep, ai.txt) of the canonical URL before the render and of any redirect hop
+    after it; the page-level checks of the rendered document (`after_fetch`: the TDM and `noai`
+    headers and meta of the fetched page) do not run, and neither does its conversion. With the
+    switch off on the worker the draft answers with the warning, without a render.
+  - The panel steps (P13-S3, `browser_panel.py`), after the load, the consent handling and the
+    idle wait, before the HTML is read. (1) Consent: an open
+    `ytd-consent-bump-v2-lightbox tp-yt-paper-dialog` is declined with its first "Alle
+    ablehnen" or "Reject all" button; the steps stop when the dialog does not close (or no
+    `SOCS` cookie is set) within 5 s. The outer lightbox's visibility is no test: its box is
+    0×0. (2) Detect: without `PAmodern_transcript_view` in the page's HTML the steps stop and
+    nothing is clicked. (3) Open: `tp-yt-paper-button#expand` when visible, then the first
+    visible `ytd-video-description-transcript-section-renderer button`; none visible within 5 s
+    stops. (4) Read: the page's own answer on the path `/youtubei/v1/get_panel`, status 200,
+    within 15 s, its body at most `MEDIA_SUBTITLE_MAX_BYTES`. Every step ends at its cap and at
+    the render's deadline. The render sends no request of its own to YouTube: the only request
+    is the page's, started by the click (rule 6), and no attestation is read or forged; the
+    classic panel (`get_transcript`) is not used. A stop, another status, no answer, a body over
+    the cap or a browser error is the warning `transcript_panel_unavailable`, never an error of
+    the render; the body goes to `Rendered.transcript_panel`.
+  - Parsing (P13-S4, `media/panel.py`, `parse_panel`). The segments are the
+    `transcriptSegmentViewModel` entries of the panel's section list, their text in
+    `simpleText`. Their times come from the parallel list `timedSyncDataList` (`videoTimeMs`,
+    `endTimeMs`, milliseconds) by index. The timestamp fallback is used when that list differs
+    in length or holds a non-numeric entry: a segment starts at its `timestamp` (`m:ss` or
+    `h:mm:ss`) and ends where the next one starts (the last one ends at its start), and a
+    segment whose timestamp cannot be read is dropped. Segments without text are skipped after
+    the pairing. Invalid JSON, a body over the cap or no segment list is `PanelError`; an empty
+    list is a valid "no text" answer.
+  - The answer (P13-S5, `pipeline_media.panel_result`). With cues that have text: the draft's
+    result with the transcript under the draft's title as `content` (built like any transcript,
+    M6), `content_type` `text/vtt`, `quality`, `word_count` and `language` read from that
+    content, `mode_used` `browser`, `unblocked` false, `transcript_source` `transcript_panel`,
+    `transcript_language` the detected language, the draft's warnings without
+    `subtitles_blocked` and `subtitles_failed`, and a fingerprint of the cues' text; it is
+    judged, cached and fingerprinted like any transcript (never revalidated, B10). Otherwise
+    (no body, no text, an unreadable body, the warning, or a panel render that fails as a whole:
+    a block, a failed render, a refused answer) the answer is the draft with the warning
+    `transcript_panel_unavailable`, without a fingerprint and never stored, as a refused draft.
+    The rendered page's own text is never converted, compared (`better` is not used) or answered.
+  - Attempts and timings (P13-S6). The render's document answers count in `attempts` on top of
+    the draft's; `render_ms` includes the panel steps.
+  - Metrics (P13-S7). `text_extraction_media_transcript_panel_total{outcome}` with `outcome`
+    `transcript`, `unavailable` (no body, an unreadable body or the warning) or `empty` (a body
+    without text): one count per panel render, a failed one included. Logs carry event names,
+    reasons, outcomes, statuses and sizes only, never a URL, video id, cookie or transcript text.
 
 **Scaling and shutdown.** A transcription runs for minutes to hours, and its lease lasts
 `2 × ASR_TIMEOUT_SECONDS + 10` s (about 6 h with D6). On SIGTERM the worker stops claiming,
@@ -1400,7 +1482,10 @@ the media set without gating it (D1).
 - **YouTube from data-centre IPs (D1).** From a cluster or a CI runner YouTube may refuse most
   requests (bot check, PO token, 429): the answer is then the video's details with
   `subtitles_blocked`, and `transcribe: true` may fail too, as the ASR worker downloads from the
-  same IPs. There is no proxy, no PO token and no browser fallback.
+  same IPs. There is no proxy and no PO token. The browser tries only YouTube's new transcript
+  view (M19), which most videos do not have yet (one captioned video in four in the spike), and
+  from such IPs it may meet the same bot wall: then the details answer with
+  `transcript_panel_unavailable`.
 - **Interrupted transcriptions.** A scale-down, rolling update or node drain restarts the
   transcriptions in flight elsewhere from the beginning; with the external backend the chunks
   already sent are billed again, and so is every retry of a retryable failure. A worker killed
