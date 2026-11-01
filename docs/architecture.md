@@ -163,9 +163,9 @@ add a note of its own):
   `subtitles_failed` (the subtitles could not be fetched or read; the metadata answers),
   `asr_unavailable` (the transcription could not be queued or failed; the metadata answers),
   `transcript_panel_unavailable` (YouTube's transcript view could not be read in the browser;
-  the metadata answers), `no_speech` (the speech recognition heard no speech; final, also for the cache),
-  `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed` (every `<track>` of
-  a page failed).
+  the metadata answers), `no_speech` (the speech recognition heard no speech; final, also for
+  the cache), `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed`
+  (every `<track>` of a page failed).
 - PII: `pii_language_unsupported` (the language is neither German nor English, so
   `PII_FALLBACK_LANGUAGE` found the names; the patterns work in any language, N8),
   `pii_entities_truncated` (`annotate` lists at most `PII_MAX_ENTITIES` items; the counts stay
@@ -1234,7 +1234,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
   failure of the probe (children, network, track, a limit) says what failed, mostly with the
   warning `subtitles_failed`, is retryable where it may pass, and is neither compared nor cached.
   A proxy refusal (a private address) is `failed`/`blocked_url`. Warnings: `subtitles_blocked`,
-  `subtitles_failed`, `asr_unavailable`, `no_speech`, `tracks_truncated`, `tracks_failed`.
+  `subtitles_failed`, `asr_unavailable`, `transcript_panel_unavailable` (M19), `no_speech`,
+  `tracks_truncated`, `tracks_failed`.
 - **M7, captions** (`media/captions.py`, `media/transcript.py`). WebVTT (cue settings, `NOTE`,
   `STYLE`, `REGION`, voice and class spans), SRT, TTML (defusedxml, any namespace prefix,
   absolute times) and YouTube's `json3` become cues; tags and entities go, a byte order mark and
@@ -1398,7 +1399,9 @@ OpenAI-compatible endpoint): always a job, answered 202.
     nothing is clicked. (3) Open: `tp-yt-paper-button#expand` when visible, then the first
     visible `ytd-video-description-transcript-section-renderer button`; none visible within 5 s
     stops. (4) Read: the page's own answer on the path `/youtubei/v1/get_panel`, status 200,
-    within 15 s, its body at most `MEDIA_SUBTITLE_MAX_BYTES`. Only the answer to a request whose
+    within 15 s, its body at most `MEDIA_SUBTITLE_MAX_BYTES` (an answer that declares a larger
+    `Content-Length` is not read; one without it is read within the browser's own byte limit,
+    `BROWSER_MAX_BYTES`, and dropped when it is over the cap). Only the answer to a request whose
     body names `PAmodern_transcript_view` is taken (the body gunzipped, at most 1 MB, when the
     page sent it with `Content-Encoding: gzip`, as YouTube does), so an answer for another panel
     is passed over; a request body that cannot be read or decoded is accepted, and

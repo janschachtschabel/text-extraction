@@ -627,6 +627,7 @@ def test_summary_has_a_media_table_by_platform_and_transcript_source() -> None:
         media_record("youtube", "manual_subtitles", "manual_subtitles"),
         media_record("youtube", "auto_subtitles", "manual_subtitles"),  # subtitles all the same
         media_record("youtube", "metadata_only", "auto_subtitles"),  # refused (D1)
+        media_record("youtube", "transcript_panel", "manual_subtitles"),  # read in the browser
         media_record("ard", "manual_subtitles", "manual_subtitles"),
         media_record("file", None, "asr", bucket="no_content"),
     ]
@@ -634,14 +635,14 @@ def test_summary_has_a_media_table_by_platform_and_transcript_source() -> None:
     text = summarize(records)
 
     section = text.split("### Media")[1].split("###")[0]
-    assert "Media rows as expected: 3 of 5" in section
+    assert "Media rows as expected: 4 of 6" in section
     assert (
-        "| Platform | URLs | manual_subtitles | auto_subtitles | asr | metadata_only | none "
-        "| As expected |" in section
+        "| Platform | URLs | manual_subtitles | auto_subtitles | transcript_panel | asr "
+        "| metadata_only | none | As expected |" in section
     )
-    assert "| ard | 1 | 1 | 0 | 0 | 0 | 0 | 1 of 1 |" in section
-    assert "| file | 1 | 0 | 0 | 0 | 0 | 1 | 0 of 1 |" in section
-    assert "| youtube | 3 | 1 | 1 | 0 | 1 | 0 | 2 of 3 |" in section
+    assert "| ard | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 1 of 1 |" in section
+    assert "| file | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 of 1 |" in section
+    assert "| youtube | 4 | 1 | 1 | 1 | 0 | 1 | 0 | 3 of 4 |" in section
     assert section.index("| ard |") < section.index("| file |") < section.index("| youtube |")
     assert "https://" not in section  # the URLs are in the table of URLs not ok and the JSONL
 

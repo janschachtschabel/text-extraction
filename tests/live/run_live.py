@@ -46,8 +46,15 @@ DEFAULT_MODE = "auto"
 DEFAULT_JOB_TIMEOUT_SECONDS = 3600.0
 DEFAULT_POLL_SECONDS = 5.0
 # The transcript sources of `data.media`, in the order of the media table.
-TRANSCRIPT_SOURCES = ("manual_subtitles", "auto_subtitles", "asr", "metadata_only")
-SUBTITLES = frozenset({"manual_subtitles", "auto_subtitles"})
+TRANSCRIPT_SOURCES = (
+    "manual_subtitles",
+    "auto_subtitles",
+    "transcript_panel",
+    "asr",
+    "metadata_only",
+)
+# The platform's own tracks; YouTube's transcript view (read in the browser) shows one of them.
+SUBTITLES = frozenset({"manual_subtitles", "auto_subtitles", "transcript_panel"})
 _TRUE = frozenset({"true", "yes", "1"})
 _FALSE = frozenset({"", "false", "no", "0"})
 
@@ -403,7 +410,8 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
 
 def as_expected(record: Record) -> bool:
     """Whether a row got the transcript source it expected; a row that expects subtitles takes
-    either kind (a platform moves a track between manual and automatic captions)."""
+    either kind (a platform moves a track between manual and automatic captions) and YouTube's
+    transcript view, which shows one of them."""
     expected, got = record.expected_source, record.transcript_source
     if expected in SUBTITLES:
         return got in SUBTITLES
