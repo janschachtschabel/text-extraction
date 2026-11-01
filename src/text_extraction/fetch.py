@@ -213,9 +213,17 @@ class _Inflater:
         return zlib.MAX_WBITS if zlib_header or len(first) < 2 else -zlib.MAX_WBITS
 
 
+# Most stacked encodings decoded, as urllib3 (CVE-2025-66418): each layer holds a zlib state.
+_MAX_ENCODINGS = 5
+
+
 def _inflaters(content_encoding: str | None) -> list[_Inflater]:
     """Decoders to apply to a body, in the order of application (last-applied encoding first)."""
     names = [part.strip().lower() for part in (content_encoding or "").split(",") if part.strip()]
+    if len([name for name in names if name != "identity"]) > _MAX_ENCODINGS:
+        raise FetchError(
+            ErrorCode.UNSUPPORTED_CONTENT_TYPE, "The response stacks too many encodings."
+        )
     inflaters: list[_Inflater] = []
     for name in reversed(names):
         if name in ("gzip", "x-gzip"):
@@ -230,6 +238,7 @@ def _inflaters(content_encoding: str | None) -> list[_Inflater]:
 
 
 def _decode(inflaters: list[_Inflater], data: bytes) -> Iterator[bytes]:
+    """``data`` run through every inflater in turn (at most ``_MAX_ENCODINGS`` deep)."""
     if not inflaters:
         yield data
         return
