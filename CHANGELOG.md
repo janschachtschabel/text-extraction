@@ -7,7 +7,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version 
 `pyproject.toml`, in `deploy/helm/text-extraction/Chart.yaml` (`version` and `appVersion`) and
 in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
-## [0.1.0] - 2026-10-31
+## [0.1.0] - 2026-11-01
 
 The first release, a prototype: packages 0 to 13 of [docs/packages.md](docs/packages.md), tagged
 `v0.1.0` on the merge of the package 13 pull request; packages 11 and 12 are merged without a
