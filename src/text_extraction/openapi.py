@@ -36,6 +36,7 @@ _DESCRIPTIONS = {
     "403": "The option is for administrators only (`forbidden`).",
     "404": "No such job or artifact for this key (`not_found`).",
     "413": "The request body is too large (`invalid_request`).",
+    "415": "The body is not JSON (`invalid_request`); send `Content-Type: application/json`.",
     "422": "The request is invalid (`invalid_request`, `error.details` names the fields).",
     "429": "Too many requests or open jobs for this key (`rate_limited`), see `Retry-After`.",
     "503": "The service is busy or its state store is unavailable (`internal_error`, "
@@ -62,6 +63,8 @@ def _statuses(path: str, method: str, settings: Settings) -> list[str]:
         statuses.append("429")
     if method == "post":
         statuses += ["400", "403", "413"]
+        if path != "/v1/extract/file":  # the upload is multipart
+            statuses.append("415")
     if "{job_id}" in path:
         statuses.append("404")
     return statuses

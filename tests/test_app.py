@@ -137,6 +137,7 @@ def test_openapi_errors_are_the_envelope(public: TestClient) -> None:
             )
         if method == "post":
             assert {"400", "403", "413"} <= set(responses), (path, method)
+            assert ("415" in responses) is (path != "/v1/extract/file"), (path, method)
         if "{job_id}" in path:
             assert "404" in responses, (path, method)
         assert operation["tags"], (path, method)

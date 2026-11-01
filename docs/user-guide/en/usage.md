@@ -23,8 +23,9 @@ A key has the role `user` or `admin`. Admins may also choose `compliance: ignore
 maximum extraction), use XPath selectors and the `evaluate` action, and read every job; a user reads
 only their own jobs. A missing or wrong key answers 401 `unauthorized`, and a request that the role
 may not make 403 `forbidden`. An XPath selector with a user key is the exception: like any other
-invalid field it answers 422 `invalid_request`. Each key has a rate limit (`RATE_LIMIT_PER_MINUTE`); over it a request
-answers 429 `rate_limited` with `Retry-After`.
+invalid field it answers 422 `invalid_request`. A body that is not sent as JSON
+(`Content-Type: application/json`) answers 415 `invalid_request`. Each key has a rate limit
+(`RATE_LIMIT_PER_MINUTE`); over it a request answers 429 `rate_limited` with `Retry-After`.
 
 With `AUTH_MODE=none` the service needs no key and every caller is an admin. Use it on your own
 machine only.

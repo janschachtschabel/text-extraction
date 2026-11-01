@@ -79,8 +79,25 @@ async def _handle_service_error(request: Request, exc: Exception) -> JSONRespons
     return _failed(request, exc.http_status, error, exc.headers)
 
 
+def _not_json(request: Request, exc: RequestValidationError) -> bool:
+    """Whether the body as a whole failed because it was sent as something else than JSON: a
+    JSON route then answers 415, not a 422 that says the body is no object."""
+    if not any(tuple(item["loc"]) == ("body",) for item in exc.errors()):
+        return False
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if not media_type:
+        return int(request.headers.get("content-length", "0") or 0) > 0
+    return media_type != "application/json" and not media_type.endswith("+json")
+
+
 async def _handle_validation_error(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, RequestValidationError)  # noqa: S101 - narrows the type for mypy
+    if _not_json(request, exc):
+        error = ErrorInfo(
+            code=ErrorCode.INVALID_REQUEST,
+            message="The body must be JSON (Content-Type: application/json).",
+        )
+        return _failed(request, HTTPStatus.UNSUPPORTED_MEDIA_TYPE, error)
     details: list[dict[str, Any]] = [
         {"loc": list(item["loc"]), "msg": item["msg"]} for item in exc.errors()
     ]
