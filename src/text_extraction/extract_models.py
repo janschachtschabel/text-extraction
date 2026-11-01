@@ -1,6 +1,6 @@
 """Request and result models of ``POST /v1/extract``."""
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -425,8 +425,14 @@ def with_own_fault_data(
     return envelope.model_copy(update={"data": data})
 
 
-def failed_extract(code: ErrorCode, message: str, *, retryable: bool) -> Envelope[ExtractResult]:
+def failed_extract(
+    code: ErrorCode,
+    message: str,
+    *,
+    retryable: bool,
+    details: list[dict[str, Any]] | None = None,
+) -> Envelope[ExtractResult]:
     """A failed extraction envelope without data, with the trace id bound to the context (the
     request's, or in a worker the trace id of the job's creator)."""
-    error = ErrorInfo(code=code, message=message, retryable=retryable)
+    error = ErrorInfo(code=code, message=message, retryable=retryable, details=details)
     return Envelope[ExtractResult](status="failed", error=error, trace_id=current_trace_id())

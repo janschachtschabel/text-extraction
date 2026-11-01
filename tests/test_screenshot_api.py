@@ -208,6 +208,7 @@ def test_screenshot_of_an_invalid_url_fails_at_once(url: str, wait: int | None) 
         answer = response.json()
         assert (answer["status"], answer["error"]["code"]) == ("failed", "invalid_url")
         assert answer["error"]["retryable"] is False
+        assert answer["data"]["mode_used"] is None  # no mode ran
         assert case.keys("job*") == []
 
 
@@ -222,4 +223,7 @@ def test_browser_extract_of_an_invalid_url_fails_at_once() -> None:
 
         assert response.status_code == 200
         assert response.json()["error"]["code"] == "invalid_url"
+        assert (
+            response.json()["data"]["mode_used"] is None
+        )  # not "fast": the caller asked for the browser
         assert case.keys("job*") == []

@@ -278,11 +278,11 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 | `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | `POST /v1/extract` with `structured` required (422 without; S15): strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`, and every option, check, header (`X-ASR-Api-Key`, `X-LLM-Api-Key`) and answer of `/v1/extract` | sync, job fallback (`wait_seconds`; 202 for a browser, nlp or llm job) |
 | `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
-| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 503 while jobs are off or Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
+| `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 400 `invalid_request` while jobs are off (`JOBS_ENABLED=false`), 503 while Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
 | `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
-| `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 503 while jobs are disabled or Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
+| `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 400 `invalid_request` while jobs are disabled, 503 while Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
 | `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
 | `/ui` | Playground (optional, `UI_ENABLED`, Helm `ui.enabled`): server-rendered pages with htmx 2.0.11 served from `/ui/static`, no Node build, no CDN; every form forwards to a `/v1` route in-process (see "MCP and UI"); not in OpenAPI | sync pages and fragments; job views refresh every 3 s |
 
@@ -2434,8 +2434,8 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   stored answer and appends nothing, and the runner queues those items again (a copy of a finished
   item is skipped). An exhausted item first queues its stored children again, then fails
   `internal_error`, so the job still completes. A gate refusal defers the item as in a batch.
-- **P9-S13, the route** (`site_api.py`). User role; 503 while jobs are off or Valkey's memory is at
-  the guard ratio; 422 for a URL that is no http(s) URL and for `depth` or `max_pages` over the
+- **P9-S13, the route** (`site_api.py`). User role; 400 `invalid_request` while jobs are off (503
+  before v0.1.1, audit C12); 503 while Valkey's memory is at the guard ratio; 422 for a URL that is no http(s) URL and for `depth` or `max_pages` over the
   settings; 403 for a compliance mode the caller may not choose; 429 at
   `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together (`jobs_api.open_job`, shared
   with `POST /v1/batch`); 202 `{"kind": "site", "total": 1, ...}`. The body limit is
@@ -2554,7 +2554,9 @@ nor `jinja2` is imported. Neither keeps state of its own: no MCP session, no UI 
   `/ui/run/<op>`, which forwards it in-process (httpx `ASGITransport`, no network) to the real
   `/v1` route with the browser's key headers, so every HTTP-layer check runs as for any client.
   Views that combine many reads (progress, site tree, previews, the batch file) call the route
-  cores with one rate-limit hit per view.
+  cores with one rate-limit hit per view; since v0.1.1 (audit M4) the image previews count one
+  hit per image and the site tree one per page of 500 items, and the read of a screenshot that
+  the forwarded call already counted is free (M5).
 - **D6, the key in the tab's `sessionStorage` (a, decided).** The UI's password is an API key of
   the service (Jan's requirement 1). The UI's own script keeps it in `sessionStorage` and sends it
   only as the `Authorization` header to `/ui/run/*`, never as a cookie (so there is no CSRF), and
@@ -2592,7 +2594,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   `WWW-Authenticate: Bearer`, the REST envelope). The principal goes into the request scope (for
   the tools and the access line) and the log context.
 - **Each tool call (P10-S4).** A FastMCP middleware counts one `check_rate` hit per `tools/call`
-  (`initialize`, `tools/list` and notifications are free), runs the tool and logs `mcp_tool_call`
+  (since v0.1.1, audit M4 reversing this ruling's "free" calls, `initialize` and `tools/list`
+  count one hit each too; notifications stay free), runs the tool and logs `mcp_tool_call`
   (`tool`, `outcome`, `duration_ms`, `job_id` when a job answered or a refused `get_job` or
   `cancel_job` was asked for a job id). No exception reaches the
   client: a `ServiceError` becomes its code, message and `retryable`; a validation error becomes
@@ -2616,15 +2619,20 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   to `max_chars` (`MCP_MAX_CONTENT_CHARS` by default; shared by the items of a `get_job` page) from
   `content_offset`, with the warning `mcp_content_truncated` and a hint naming the next offset.
   Since v0.1.1 (audit finding M2, reversing this ruling's "no other field is cut") the whole answer
-  is bounded by `MCP_MAX_ANSWER_CHARS` (200,000 characters of JSON): a `get_job` page drops its
-  trailing items first (`next_offset` names the first dropped), then the lists `chunks`, `links`,
+  is bounded by `MCP_MAX_ANSWER_CHARS` (200,000 characters of the envelope JSON, which the answer
+  carries twice): a `get_job` page drops its trailing items first (`next_offset` names the first
+  dropped, and the content hints of dropped items go too), then the lists `chunks`, `links`,
   `structured.tables` and `site.links` of a result are cut from the end, with the warning
-  `mcp_answer_truncated` and a hint; REST returns them whole.
+  `mcp_answer_truncated` and a hint; REST returns them whole. Two deviations from plan D6: items
+  go first (a page that drops items keeps its kept results whole), and a list that was cut is
+  reachable only through REST, since `get_job` applies the same cut. With MCP on, start-up refuses
+  an answer budget at or below `MCP_MAX_CONTENT_CHARS`.
 - **Long work (P10-S7).** The extraction tools pass `wait_seconds = MCP_WAIT_SECONDS` when the
   caller gives none (a larger one is cut to it), so a call ends within that time plus the route's
   own hand-over time, with a result or a job. `batch_extract` and `site_structure` always answer a
   job. `get_job` with `wait_seconds` reads the job once a second until it is `completed`, the time
-  is up or the client went away, and counts as one rate-limit hit.
+  is up or the client went away; it counts one rate-limit hit, and since v0.1.1 (audit M4) one
+  more per further 10 s waited.
 - **Headers (P10-S8).** `X-LLM-Api-Key` and `X-ASR-Api-Key` are read from the call's HTTP request,
   never from tool arguments. `TraceMiddleware` covers `/mcp`, so the access line, every log line of
   the call and the envelope's `trace_id` carry `x-client-trace-id` and B3. Tool arguments are never

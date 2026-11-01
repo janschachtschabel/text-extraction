@@ -201,7 +201,7 @@ class Settings(BaseSettings):
     # Batch API: URLs in one batch, and unfinished batches one API key may have at a time.
     batch_max_urls: int = Field(default=1000, ge=1, le=100_000)
     batch_max_open_per_client: int = Field(default=5, ge=1)
-    # False: POST /v1/batch and GET /v1/jobs/{id} answer 503 (API pods without workers).
+    # False: POST /v1/batch and GET /v1/jobs/{id} answer 400 (API pods without workers).
     jobs_enabled: bool = True
     # Extractions one pod keeps running after their request got a 202 (and requests waiting for
     # theirs); above it a request keeps waiting inline.
@@ -545,6 +545,19 @@ class Settings(BaseSettings):
         # The LLM hop is a job of pool llm (D5): without jobs nothing could be processed.
         if self.llm_enabled and not self.jobs_enabled:
             raise ValueError("LLM_ENABLED needs JOBS_ENABLED=true")
+        return self
+
+    @model_validator(mode="after")
+    def _guards_are_usable(self) -> Self:
+        """An empty ``ALLOWED_HOSTS`` under ``AUTH_MODE=none`` would refuse every request (an
+        empty Helm value, say); with MCP on, an answer budget at or below the content cut would
+        be filled by the content alone (M2)."""
+        if self.auth_mode == "none" and not self.allowed_hosts:
+            raise ValueError(
+                "ALLOWED_HOSTS must name at least one host (or '*') under AUTH_MODE=none"
+            )
+        if self.mcp_enabled and self.mcp_max_answer_chars <= self.mcp_max_content_chars:
+            raise ValueError("MCP_MAX_ANSWER_CHARS must be larger than MCP_MAX_CONTENT_CHARS")
         return self
 
     @model_validator(mode="after")

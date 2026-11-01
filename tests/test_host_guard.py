@@ -81,6 +81,22 @@ def test_an_invalid_entry_is_refused(entry: str) -> None:
         Settings(auth_mode="none", allowed_hosts=entry)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("value", ["", " , "])
+def test_an_empty_list_is_refused_under_auth_none(value: str) -> None:
+    # An empty Helm value would otherwise answer 400 to every request, with no start-up error.
+    with pytest.raises(ValidationError, match="ALLOWED_HOSTS"):
+        Settings(auth_mode="none", allowed_hosts=value)  # type: ignore[arg-type]
+
+
+def test_an_empty_list_is_unused_under_api_key() -> None:
+    settings = Settings(
+        auth_mode="api_key",
+        api_keys=[{"name": "a", "role": "user", "sha256": "0" * 64}],  # type: ignore[list-item]
+        allowed_hosts="",  # type: ignore[arg-type]
+    )
+    assert settings.allowed_hosts == []
+
+
 def test_the_ui_reaches_the_api_through_the_guard() -> None:
     # The UI forwards to the API in-process; the inner request carries the checked Host.
     with client_for(auth_mode="none", allowed_hosts="localhost", ui_enabled=True) as client:

@@ -619,7 +619,7 @@ def test_an_answer_over_the_budget_has_its_chunks_cut() -> None:
     # M2: the whole answer is bounded, not only `content`.
     text = "\n\n".join(f"Paragraph {index:05d} " + "w" * 44 for index in range(400))
     arguments = {"text": text, "chunking": {"strategy": "recursive", "size": 200}}
-    with running(mcp_max_answer_chars=40_000) as client:
+    with running(mcp_max_content_chars=30_000, mcp_max_answer_chars=40_000) as client:
         rest = client.post("/v1/chunk", json=arguments, headers=AUTH).json()["data"]["chunks"]
         result = call_tool(client, "chunk", arguments, headers=AUTH)
 

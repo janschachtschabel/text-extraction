@@ -1026,9 +1026,8 @@ def test_transcribe_400_while_asr_off(asr: bool, jobs: bool) -> None:
     body = response.json()
     assert body["error"]["code"] == "invalid_request"
     assert body["error"]["message"] == "Transcription is not enabled on this service."
-    assert batch.status_code in (400, 503)  # 503: jobs disabled answers first
+    assert batch.status_code == 400  # jobs disabled answers 400 too (C12), with its own message
     if jobs:
-        assert batch.status_code == 400
         assert batch.json()["error"]["message"] == body["error"]["message"]
     assert plain.status_code == 200
 

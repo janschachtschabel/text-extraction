@@ -143,24 +143,36 @@ def slice_content(envelope: dict[str, Any], *, offset: int, share: int) -> str |
     return f"Cut at {end} of {total} characters; call again with content_offset={end}."
 
 
-def slice_items(envelope: dict[str, Any], *, offset: int, max_chars: int) -> list[str]:
-    """Cut the ``content`` of each item's result of a job page (``data.items``, in place) to
-    an equal share of ``max_chars`` from ``offset`` (``slice_content``), so a page of many items
-    holds no more than one result. Returns the hints, one per item that has more to read."""
+def _page_items(envelope: dict[str, Any]) -> list[Any]:
     data = envelope.get("data")
     items = data.get("items") if isinstance(data, dict) else None
-    if not isinstance(items, list) or not items:
+    return items if isinstance(items, list) else []
+
+
+def slice_items(envelope: dict[str, Any], *, offset: int, max_chars: int) -> list[tuple[Any, str]]:
+    """Cut the ``content`` of each item's result of a job page (``data.items``, in place) to
+    an equal share of ``max_chars`` from ``offset`` (``slice_content``), so a page of many items
+    holds no more than one result. Returns (item index, hint), one per item that has more to
+    read; ``kept_item_hints`` drops those of items the answer budget dropped later."""
+    items = _page_items(envelope)
+    if not items:
         return []
     share = max(1, max_chars // len(items))
-    hints: list[str] = []
+    hints: list[tuple[Any, str]] = []
     for item in items:
         result = item.get("result") if isinstance(item, dict) else None
         if not isinstance(result, dict):
             continue
         hint = slice_content(result, offset=offset, share=share)
         if hint is not None:
-            hints.append(f"Item {item.get('index')}: {hint}")
+            hints.append((item.get("index"), f"Item {item.get('index')}: {hint}"))
     return hints
+
+
+def kept_item_hints(envelope: dict[str, Any], hints: list[tuple[Any, str]]) -> list[str]:
+    """The hints of ``slice_items`` for the items the page still holds."""
+    kept = {item.get("index") for item in _page_items(envelope) if isinstance(item, dict)}
+    return [hint for index, hint in hints if index in kept]
 
 
 def _size(value: object) -> int:

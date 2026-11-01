@@ -4,7 +4,7 @@
 ``batch_extract`` and ``site_structure`` build their route's body as the extraction tools do
 (``options`` merged under the arguments, the route's body limit, the REST model) and always
 answer a job. The other three take a ``job_id`` and nothing else of a REST body. Every tool runs
-``check_jobs_enabled`` (503 ``internal_error`` as REST) before its route's core, and the cores
+``check_jobs_enabled`` (400 ``invalid_request`` as REST) before its route's core, and the cores
 answer 404 ``not_found`` for a job the caller may not see.
 
 ``get_job`` waits for the job, when asked, by reading its progress once a second until it is
@@ -38,6 +38,7 @@ from text_extraction.jobs_api import (
 from text_extraction.mcp_server.calls import ModelTool
 from text_extraction.mcp_server.results import (
     fit_answer,
+    kept_item_hints,
     payload_result,
     png_content,
     slice_items,
@@ -241,8 +242,9 @@ class GetJobTool(ModelTool):
         envelope = await read_job(state, principal, args.job_id, args.offset, args.limit)
         payload = envelope.model_dump(mode="json")
         max_chars = args.max_chars or settings.mcp_max_content_chars
-        hints = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
-        hints.extend(fit_answer(payload, max_chars=settings.mcp_max_answer_chars))
+        sliced = slice_items(payload, offset=args.content_offset, max_chars=max_chars)
+        cut = fit_answer(payload, max_chars=settings.mcp_max_answer_chars)
+        hints = [*kept_item_hints(payload, sliced), *cut]
         return payload_result(payload, is_error=False, hints=hints)
 
 

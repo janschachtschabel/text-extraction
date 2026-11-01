@@ -197,7 +197,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `autoscaling.enabled` | `false` | HorizontalPodAutoscaler of the API pods. |
 | `autoscaling.minReplicas` / `maxReplicas` | `2` / `10` | |
 | `autoscaling.targetCPUUtilizationPercentage` | `70` | |
-| `jobs.enabled` | unset (true with extract workers, false without) | `JOBS_ENABLED` of the API pods. When `workers.extract.enabled` is false the chart renders `JOBS_ENABLED=false` so the batch and job routes answer 503 and `wait_seconds` is ignored, unless you set `jobs.enabled=true` (workers run elsewhere). `false` forces it off. Only API pods with `JOBS_ENABLED=true` export the queue gauges. |
+| `jobs.enabled` | unset (true with extract workers, false without) | `JOBS_ENABLED` of the API pods. When `workers.extract.enabled` is false the chart renders `JOBS_ENABLED=false` so the batch and job routes answer 400 `invalid_request` and `wait_seconds` is ignored, unless you set `jobs.enabled=true` (workers run elsewhere). `false` forces it off. Only API pods with `JOBS_ENABLED=true` export the queue gauges. |
 | `mcp.enabled` | `false` | Serve the MCP endpoint at `/mcp` on the API pods (`MCP_ENABLED`); see [MCP and playground](#mcp-and-playground). A `config.MCP_ENABLED` entry is ignored. |
 | `ui.enabled` | `false` | Serve the playground at `/ui` on the API pods (`UI_ENABLED`). Its password is an API key; under `config.AUTH_MODE=none` it is open to anyone who can reach the service, and the install notes warn. A `config.UI_ENABLED` entry is ignored. |
 | `workers.extract.enabled` | `true` | Deploy the extract workers. |

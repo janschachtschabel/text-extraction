@@ -319,7 +319,7 @@ async def start_batch(
     values of the ``X-ASR-Api-Key`` and ``X-LLM-Api-Key`` headers (None without them).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     settings: Settings = state.settings
     store: JobStore = state.job_store
     queue: FairQueue = state.job_queue
@@ -534,7 +534,7 @@ async def read_job(
     checks them, other callers bound them themselves).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     store: JobStore = state.job_store
     try:
         record = await visible_job(store, job_id, principal)
@@ -613,7 +613,7 @@ async def delete_job(state: State, principal: Principal, job_id: str) -> Envelop
     request (P1), stores nothing once it ends (``JobLost``).
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     valkey: Redis = state.valkey
     store: JobStore = state.job_store
     try:

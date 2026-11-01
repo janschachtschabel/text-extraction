@@ -626,7 +626,7 @@ def asr_failed(
         )
     media = MediaInfo(platform=meta.platform, transcript_source=None)
     result = run.result(media=media, upstream_status=upstream_status)
-    return _failed(result, error.code, error.message, error.retryable)
+    return Envelope(status="failed", data=result, error=error)  # its details too (C11)
 
 
 # --- YouTube's transcript view (P13-S5) -------------------------------------------------------

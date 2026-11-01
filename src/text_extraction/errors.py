@@ -91,12 +91,13 @@ async def _handle_service_error(request: Request, exc: Exception) -> JSONRespons
 
 def _not_json(request: Request, exc: RequestValidationError) -> bool:
     """Whether the body as a whole failed because it was sent as something else than JSON: a
-    JSON route then answers 415, not a 422 that says the body is no object."""
+    JSON route then answers 415, not a 422 that says the body is no object. A body without a
+    ``Content-Type`` is read as JSON (FastAPI), so its error stands as a 422."""
     if not any(tuple(item["loc"]) == ("body",) for item in exc.errors()):
         return False
     media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if not media_type:
-        return int(request.headers.get("content-length", "0") or 0) > 0
+        return False
     return media_type != "application/json" and not media_type.endswith("+json")
 
 

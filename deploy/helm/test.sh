@@ -1006,6 +1006,7 @@ expect_absent "config.UI_ENABLED not in the ConfigMap" "$(document "$config_on" 
 
 # The settings of both, with their defaults, in the ConfigMap.
 configmap="$(document "$on" ConfigMap "$API")"
+expect_contains "ConfigMap default ALLOWED_HOSTS" "$configmap" 'ALLOWED_HOSTS: "localhost,127.0.0.1,[::1],api"'
 for entry in 'MCP_ALLOWED_ORIGINS: ""' 'MCP_WAIT_SECONDS: "25"' 'MCP_MAX_CONTENT_CHARS: "50000"' \
   'MCP_MAX_ANSWER_CHARS: "200000"' \
   'MCP_IMAGE_MAX_BYTES: "5000000"' 'UI_TREE_MAX_URLS: "5000"' 'UI_BATCH_FILE_MAX_BYTES: "10485760"' \
@@ -1044,6 +1045,12 @@ expect_absent "no open-UI warning under api_key" \
   "$(render_notes --set ui.enabled=true)" "$open_ui_warning"
 expect_absent "no open-UI warning while the UI is off" \
   "$(render_notes --set config.AUTH_MODE=none)" "$open_ui_warning"
+hosts_note="the API answers only the Host names in config.ALLOWED_HOSTS"
+expect_contains "notes name ALLOWED_HOSTS under AUTH_MODE=none" \
+  "$(render_notes --set config.AUTH_MODE=none)" "$hosts_note"
+expect_absent "no ALLOWED_HOSTS note under api_key" "$(render_notes)" "$hosts_note"
+expect_absent "no ALLOWED_HOSTS note with *" \
+  "$(render_notes --set config.AUTH_MODE=none --set 'config.ALLOWED_HOSTS=*')" "$hosts_note"
 
 # --- Measured resources --------------------------------------------------------------------------
 

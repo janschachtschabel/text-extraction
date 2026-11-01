@@ -143,6 +143,14 @@ def test_a_json_body_with_a_charset_is_fine(client: TestClient) -> None:
     assert response.status_code == 200
 
 
+def test_a_body_without_a_content_type_is_parsed_as_json(client: TestClient) -> None:
+    # FastAPI reads a body without Content-Type as JSON: an array is then a 422, not a 415.
+    response = client.post("/v1/extract", content=b"[1]", headers=AUTH)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
 def test_an_empty_body_is_still_422(client: TestClient) -> None:
     response = client.post("/v1/extract", headers=AUTH)
 

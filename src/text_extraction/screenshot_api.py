@@ -51,7 +51,7 @@ async def screenshot(
 
     `data.screenshot` references the file: download it from its `url`
     (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`; the download
-    needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise 503). The page's
+    needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise 400). The page's
     `quality` is reported but does not fail a stored screenshot. Outcomes of the target answer
     200 with `status: failed`, as for `/v1/extract`; without a browser worker in time the
     answer is `failed`/`timeout`, retryable. 400 while browser mode is off, 403 for an
@@ -140,7 +140,7 @@ async def read_artifact(state: State, principal: Principal, job_id: str, name: s
     is unavailable. Artifacts belong to jobs, so ``check_jobs_enabled`` applies here too.
 
     Caller's checks (this core runs none of them): ``principal_for`` (the user role, which every
-    key has), ``check_jobs_enabled`` (503), then one ``check_rate`` hit."""
+    key has), ``check_jobs_enabled`` (400), then one ``check_rate`` hit."""
     store: JobStore = state.job_store
     if not valid_artifact_name(name):
         raise _no_file()

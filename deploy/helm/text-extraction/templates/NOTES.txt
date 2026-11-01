@@ -39,6 +39,13 @@ WARNING: ui.enabled is true while config.AUTH_MODE is none: anyone who can reach
   the API and the playground at /ui{{ if .Values.mcp.enabled }} (and the MCP endpoint){{ end }}. For a shared deployment set
   config.AUTH_MODE=api_key or ui.enabled=false.
 {{- end }}
+{{- $hosts := toString (get .Values.config "ALLOWED_HOSTS") }}
+{{- if and $open (ne (trim $hosts) "*") }}
+
+NOTE: config.AUTH_MODE is none, so the API answers only the Host names in config.ALLOWED_HOSTS
+  ({{ $hosts }}); any other Host gets 400. Add the names your clients use, such as the Service
+  {{ include "text-extraction.fullname" . }} and the ingress hosts, or set "*".
+{{- end }}
 {{- if and (eq (toString (get .Values.config "AUTH_MODE" | default "api_key")) "api_key") (not (include "text-extraction.hasApiKeys" .)) }}
 
 WARNING: AUTH_MODE is api_key but no API keys are configured. The pods will refuse to start.

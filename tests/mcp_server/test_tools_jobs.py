@@ -99,9 +99,20 @@ def start_batch(client: TestClient, urls: list[str] = URLS, **arguments: Any) ->
     return job_id
 
 
-def write(client: TestClient, job_id: str, index: int, content: str = "Hello world") -> None:
+def write(
+    client: TestClient,
+    job_id: str,
+    index: int,
+    content: str = "Hello world",
+    *,
+    title: str | None = None,
+) -> None:
     store = store_of(client)
-    portal(client).call(store.write_result, job_id, index, success(URLS[index], content))
+    envelope = success(URLS[index], content)
+    if title is not None:
+        assert envelope.data is not None
+        envelope.data.title = title
+    portal(client).call(store.write_result, job_id, index, envelope)
 
 
 def test_tools_list_job_tools(client: TestClient) -> None:
@@ -445,10 +456,10 @@ def test_refused_get_job_and_cancel_job_log_their_job_id() -> None:
 
 def test_get_job_keeps_a_page_within_the_answer_budget() -> None:
     # M2: a page over MCP_MAX_ANSWER_CHARS drops its trailing items; the next page has them.
-    with running(mcp_max_answer_chars=25_000) as client:
+    with running(mcp_max_content_chars=20_000, mcp_max_answer_chars=25_000) as client:
         job_id = start_batch(client)
         for index in range(3):
-            write(client, job_id, index, "w" * 10_000)
+            write(client, job_id, index, title="t" * 10_000)  # the content share cannot cut
 
         result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
 
@@ -458,6 +469,27 @@ def test_get_job_keeps_a_page_within_the_answer_budget() -> None:
     assert view["next_offset"] == kept
     assert hints_of(result) == [
         f"Page cut to {kept} items to fit MCP_MAX_ANSWER_CHARS; call get_job with offset={kept}."
+    ]
+
+
+def test_a_dropped_item_leaves_no_content_hint() -> None:
+    # Review: the hints of items the budget dropped would point at items the page no longer holds.
+    with running(mcp_max_content_chars=20_000, mcp_max_answer_chars=25_000) as client:
+        job_id = start_batch(client)
+        for index in range(3):
+            write(client, job_id, index, "w" * 9_000, title="t" * 6_000)
+
+        result = call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+
+    view = envelope_of(result)["data"]
+    kept = len(view["items"])
+    assert 1 <= kept < 3
+    assert hints_of(result) == [
+        *(
+            f"Item {index}: Cut at 6666 of 9000 characters; call again with content_offset=6666."
+            for index in range(kept)
+        ),
+        f"Page cut to {kept} items to fit MCP_MAX_ANSWER_CHARS; call get_job with offset={kept}.",
     ]
 
 

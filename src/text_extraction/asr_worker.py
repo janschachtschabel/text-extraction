@@ -143,6 +143,7 @@ library's message or transcript text.
 
 import argparse
 import asyncio
+import math
 import shutil
 import sys
 import tempfile
@@ -431,9 +432,12 @@ class _Failure:
     retryable: bool
     upstream_status: int | None = None
     final: bool = False
+    details: list[dict[str, Any]] | None = None  # a gate refusal's wait (C11)
 
     def envelope(self) -> Envelope[ExtractResult]:
-        return failed_extract(self.code, self.message, retryable=self.retryable)
+        return failed_extract(
+            self.code, self.message, retryable=self.retryable, details=self.details
+        )
 
 
 @dataclass(frozen=True)
@@ -600,7 +604,8 @@ class AsrRunner:
             if gate_refusals == "raise":
                 raise
             message = _BUSY_MESSAGE if isinstance(refusal, OutboundBusy) else _PAUSED_MESSAGE
-            return _Failure(ErrorCode.RATE_LIMITED, message, True)
+            wait = {"retry_after_seconds": max(math.ceil(refusal.retry_after), 1)}
+            return _Failure(ErrorCode.RATE_LIMITED, message, True, details=[wait])
 
     async def _download(
         self,

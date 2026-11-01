@@ -48,7 +48,7 @@ from text_extraction.documents.pool import (
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.job_models import JobItem, JobOptions
 from text_extraction.jobs import asr_lease_seconds
-from text_extraction.outbound import DomainGate, lease_ttl_seconds
+from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy, lease_ttl_seconds
 from text_extraction.pipeline_media import ASR_UNAVAILABLE_WARNING
 from text_extraction.settings import Settings
 from text_extraction.worker import Worker
@@ -926,6 +926,45 @@ class ResultWritingGate(SpyGate):
             await self.write()
         async with super().slot(host, crawl_delay):
             yield
+
+
+class RefusingGate(DomainGate):
+    """A gate that refuses every turn with ``refusal``."""
+
+    refusal: Exception = OutboundBusy(3.0)
+
+    @asynccontextmanager
+    async def slot(self, host: str, crawl_delay: float | None = None) -> AsyncIterator[None]:
+        raise self.refusal
+        yield  # pragma: no cover - makes this a generator
+
+
+@pytest.mark.parametrize(
+    ("refusal", "seconds"),
+    [(OutboundBusy(2.2), 3), (CircuitOpen(30.0), 30)],
+    ids=["busy", "paused"],
+)
+@scenario
+async def test_a_gate_refusal_at_the_limit_names_the_wait(
+    tmp_path: Path, refusal: Exception, seconds: int
+) -> None:
+    # Review: like the extract pool (C11), the refusal carries the wait in error.details.
+    harness = file_harness(tmp_path, job_item_max_attempts=1)
+    asr = Asr(harness)
+    gate = RefusingGate(harness.valkey, harness.settings)
+    gate.refusal = refusal
+    asr.runner._gate = gate
+    job_id = await moved(harness, [FILE_URL])
+
+    for _ in range(2):  # deferred once, then at the limit
+        await asr.process_next()
+        harness.clock.now += 60  # past the not-before of the deferral
+
+    item = await only_item(harness, job_id)
+    assert error_of(item)[:2] == (ErrorCode.RATE_LIMITED, True)
+    assert item.result is not None
+    assert item.result.error is not None
+    assert item.result.error.details == [{"retry_after_seconds": seconds}]
 
 
 @scenario

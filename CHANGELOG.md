@@ -40,16 +40,21 @@ and
   a `get_job` page drops its trailing items, then a result's `chunks`, `links`,
   `structured.tables` and `site.links` are cut from the end, with the warning
   `mcp_answer_truncated`. Before, only `content` was cut and an answer could reach megabytes.
+  The budget counts the envelope JSON, which an answer carries twice; with MCP on, the service
+  refuses to start when it is not larger than `MCP_MAX_CONTENT_CHARS`.
 - JSON request bodies are read strictly: a value of the wrong JSON type (`"5"` for a number,
   `"yes"` for a boolean) answers 422. The form fields of `POST /v1/extract/file` are unchanged.
 - A JSON route answers 415 `invalid_request` for a body sent with another `Content-Type`,
-  instead of a 422 about a missing body.
+  instead of a 422 about a missing body. A body without a `Content-Type` is read as JSON, as
+  before.
 - The service's own pause of a host (after errors or a 429) answers `rate_limited` instead of
   `connection_error`, still retryable; a refusal of the outbound gate carries the wait in
-  `error.details` (`retry_after_seconds`).
+  `error.details` (`retry_after_seconds`), in the extract and the ASR workers alike.
 - Under `AUTH_MODE=none` the public port answers only requests whose `Host` is in
   `ALLOWED_HOSTS` (new; `localhost,127.0.0.1,[::1],api` by default, `*` switches the check off),
   so a web page cannot reach the service through DNS rebinding. Add the host name your clients use.
+  An empty list under `AUTH_MODE=none` stops the start (exit code 2); the Helm notes name the
+  setting.
 - One counted call does about one unit of work: MCP `initialize` and `tools/list` count one
   rate-limit hit each, a waiting `get_job` one more per further 10 s, the UI's image previews
   one per image and its site tree one per 500 items; the UI reads a screenshot's file without a
@@ -91,7 +96,7 @@ and
   receive `x-client-trace-id` and the B3 headers. CLAUDE.md no longer names OpenTelemetry, which
   the service does not use.
 - `POST /v1/screenshot` and a browser-mode `POST /v1/extract` with an invalid URL started a job
-  (202); they fail at once with `invalid_url`, as fast mode does.
+  (202); they fail at once with `invalid_url`, as fast mode does, with `mode_used` null.
 - A host name without a DNS form (a label over 63 characters, an empty label) answered 500;
   it is `invalid_url` now.
 - Under `compliance: enforce`, a robots.txt that could not be fetched because of the host (DNS,
