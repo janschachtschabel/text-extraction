@@ -32,7 +32,7 @@ requests and limits, the PrometheusRule and ServiceMonitor on, MCP and the playg
 | Job `<release>-text-extraction-worker-<pool>-models` (Helm hook) | `workers.<pool>.models.downloadMode: job` (pools `docling`, `asr`, `nlp`) with the download on | Fills the pool's models volume after each install and upgrade instead of an init container in every worker pod. Deleted when it succeeded. |
 | Secret `<release>-text-extraction-asr` | `workers.asr.backend: openai`, `workers.asr.external.apiKey` set and no `workers.asr.external.existingSecret` | Holds `ASR_EXTERNAL_API_KEY`. |
 | Service `<release>-text-extraction-worker-<pool>-internal` | `workers.<pool>.enabled` | Port `internal` 9090 of the workers of the pool, for the ServiceMonitor. Cluster-internal only. |
-| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`). |
+| ScaledObject (KEDA) `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.keda.enabled` | Scales the workers on `max(text_extraction_queue_pending_items{pool="<pool>", namespace="<release namespace>"})`, plus `max(text_extraction_queue_leased_items{…})` with `keda.countLeased` (the pool `asr`) or at `minReplicaCount: 0`. |
 | HorizontalPodAutoscaler `<release>-text-extraction-worker-<pool>` | `workers.<pool>.autoscaling.hpa.enabled` | CPU utilisation of the workers. Mutually exclusive with KEDA. |
 | Secret `<release>-text-extraction-valkey-auth` | `valkey.enabled`, `valkey.auth.enabled` and no `valkey.auth.existingSecret` | Holds `VALKEY_PASSWORD`, generated once (32 alphanumeric characters) and kept across upgrades. |
 | NetworkPolicy (Valkey, API, each worker pool) | `networkPolicy.enabled` | Ingress only. See [Network policies](#network-policies). |
@@ -159,7 +159,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `image.pullPolicy` | `IfNotPresent` | |
 | `imagePullSecrets` | `[]` | |
 | `replicaCount` | `2` | Ignored when `autoscaling.enabled`. |
-| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). With Docling workers it is also at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` + 5 + 10 (a sync request waits for OCR after its fast phase). Unset, the chart computes it from `config.*` or the defaults: 45 without browser or Docling workers, 65 with Docling workers only, 90 with browser workers, 120 with unblock mode. A value set here that does not fit fails the render. |
+| `terminationGracePeriodSeconds` | unset (computed) | Time between SIGTERM and kill of the API pods. It must cover the drain plus the graceful shutdown plus a 10 s margin: `SHUTDOWN_DRAIN_SECONDS` + `max(30, EXTRACT_TIMEOUT_SECONDS + 5)`, and with browser workers at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 + 10 (the deadline is `BROWSER_TIMEOUT_SECONDS`, with unblock mode the larger of it and `BROWSER_UNBLOCK_TIMEOUT_SECONDS`). With Docling workers it is also at least `SHUTDOWN_DRAIN_SECONDS` + `EXTRACT_TIMEOUT_SECONDS` + `DOCLING_SYNC_WAIT_SECONDS` + 5 + 10 (a sync request waits for OCR after its fast phase). Unset, the chart computes it from `config.*` or the defaults: 45 without browser or Docling workers, 65 with Docling workers only, 90 with browser workers, 120 with unblock mode. A value set here that does not fit fails the render. |
 | `config.LOG_LEVEL` | `INFO` | Log level. |
 | `config.LOG_FORMAT` | `json` | `json` or `console`. |
 | `config.AUTH_MODE` | `api_key` | `api_key` or `none`. |
@@ -208,7 +208,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `workers.extract.autoscaling.keda.enabled` | `false` | Needs the KEDA operator and Prometheus scraping the API pods. The scaler reads the queue gauges that only API pods with `JOBS_ENABLED=true` export (see `jobs.enabled`); the render fails when `jobs.enabled=false`. The workers may scale down to `minReplicaCount` because the gauges come from the API pods. |
 | `workers.extract.autoscaling.keda.serverAddress` | `http://prometheus-operated.monitoring.svc:9090` | Prometheus that KEDA queries. |
 | `workers.extract.autoscaling.keda.threshold` | `50` | Pending items per replica (pending plus leased with `countLeased`). `null`: the pool's `concurrency`. Must be positive. |
-| `workers.extract.autoscaling.keda.countLeased` | `false` | Also count the items the workers hold (`text_extraction_queue_leased_items`), so the replicas busy with them are part of the target. |
+| `workers.extract.autoscaling.keda.countLeased` | `false` | Also count the items the workers hold (`text_extraction_queue_leased_items`), so the replicas busy with them are part of the target. Always on while `minReplicaCount` is `0`: only a running worker takes back the items of a lost one, so they must keep a replica up. |
 | `workers.extract.autoscaling.keda.minReplicaCount` / `maxReplicaCount` | `1` / `10` | |
 | `workers.extract.autoscaling.hpa.enabled` | `false` | CPU-based HorizontalPodAutoscaler of the workers. **Mutually exclusive with KEDA**: enabling both fails the render, because KEDA manages its own HPA. |
 | `workers.extract.autoscaling.hpa.minReplicas` / `maxReplicas` | `2` / `10` | |
@@ -357,7 +357,7 @@ With `valkey.enabled=false`, the render fails unless `externalValkey.url` or
 | `TextExtractionValkeyMemoryHigh` | `max(text_extraction_valkey_used_memory_bytes) / max(text_extraction_valkey_max_memory_bytes > 0)` over the API and worker pods, above `alerts.valkeyMemoryRatio` (0.8); no alert without a maxmemory | 10 m |
 | `TextExtractionQueueBacklog` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"})` above the pool's backlog threshold (below the table) while `sum(increase(text_extraction_job_items_total{<the pool's workers>, outcome!~"deferred\|lost\|escalated"}[15m])) or vector(0)` is 0 | 15 m |
 | `TextExtractionWorkersDown` (label `pool`) | per pool: `max(text_extraction_queue_pending_items{pool="<pool>"}) > 0` and no available replica of the pool's worker Deployment (`kube_deployment_status_replicas_available`, `or vector(0)`) | 5 m |
-| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `content_too_short` (a partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
+| `TextExtractionJobItemFailures` | failed share of `text_extraction_job_items_total` above 50 %: the numerator leaves out `success`, `partial` (every partial result) and `deferred`/`lost`/`escalated`; the denominator is every item that recorded a result (all but `deferred`/`lost`/`escalated`; an escalated item records its result in the browser pool) | 15 m |
 | `TextExtractionQueueMetricsStale` | `time() - (max(text_extraction_queue_metrics_last_success_timestamp_seconds) or vector(0)) > 120` | 5 m |
 
 The backlog thresholds are `alerts.queueBacklogItems` (1000) for `extract` and `browser`,
@@ -505,7 +505,8 @@ The LLM is off by default (`workers.llm.enabled: false`). With it on, a request 
 (strategy `llm` or `auto`, or `learn_selectors`), `chunking` `semantic` or `describe_images` has its
 last hop run in the pool `llm` (the page and its images are data for the model: no tool calls, its
 answer is validated against the caller's schema or the description's), and every pod gets
-`LLM_ENABLED=true`; without the workers such a request answers 400. A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
+`LLM_ENABLED=true`; without the workers a request with strategy `llm`, `learn_selectors`, `semantic`
+or `describe_images` answers 400, and `auto` keeps the values it found (`llm_unavailable`). A sync request waits `LLM_SYNC_WAIT_SECONDS` (30) for a worker, then it becomes a job (202).
 
 - The workers run the API image (`text-extraction-llm-worker` as its args): no model, no volume,
   no init container. They call `workers.llm.baseUrl` (`/chat/completions`, and `/embeddings` with

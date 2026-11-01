@@ -18,6 +18,8 @@ from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
 from tests.fakes import ARTICLE, ORIGIN, PAGE, Answer, FakeFetcher, fetched
+from tests.test_jobs import success
+from text_extraction import jobs_api
 from text_extraction.app import create_public_app
 from text_extraction.auth import Principal
 from text_extraction.chunking.types import ChunkingOptions
@@ -437,6 +439,28 @@ def test_paging_and_next_offset(api: Api) -> None:
     assert page(limit=500)["next_offset"] is None
 
 
+def test_a_page_stops_at_its_byte_budget_and_next_offset_follows(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(jobs_api, "PAGE_MAX_BYTES", 12_000)
+    urls = [f"{ORIGIN}/page-{n}" for n in range(5)]
+    job_id = api.batch(urls).json()["data"]["id"]
+
+    async def write(valkey: FakeAsyncRedis) -> None:
+        store = JobStore(valkey, api.settings)
+        for index, url in enumerate(urls):
+            await store.write_result(job_id, index, success(url, content="x" * 5_000))
+
+    api.run(write)
+
+    first = api.job(job_id, limit=10).json()["data"]
+    assert [item["index"] for item in first["items"]] == [0, 1]
+    assert first["next_offset"] == 2
+    rest = api.job(job_id, offset=4, limit=10).json()["data"]
+    assert [item["index"] for item in rest["items"]] == [4]
+    assert rest["next_offset"] is None
+
+
 @pytest.mark.parametrize("query", ["limit=0", "limit=501", "offset=-1", "limit=x", "offset=x"])
 def test_bad_paging_is_422(api: Api, query: str) -> None:
     job_id = api.batch([PAGE]).json()["data"]["id"]
@@ -455,6 +479,7 @@ def test_open_batch_limit_is_429(make_api: Callable[..., Api]) -> None:
     refused = api.batch([PAGE])
 
     assert refused.status_code == 429
+    assert refused.headers["Retry-After"] == str(jobs_api.OPEN_RETRY_AFTER_SECONDS)
     body = refused.json()
     assert body["status"] == "failed"
     assert body["error"]["code"] == "rate_limited"

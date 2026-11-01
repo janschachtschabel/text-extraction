@@ -336,10 +336,10 @@ def test_target_failure_is_not_tool_error() -> None:
 
 
 def test_private_url_blocked() -> None:
-    """The SSRF guard of the real fetcher: under ``enforce`` its robots.txt cannot be read
-    (``blocked_by_robots``), under ``report`` the page itself is refused (``blocked_url``)."""
+    """The SSRF guard of the real fetcher: under ``enforce`` its robots.txt is refused, under
+    ``report`` the page itself; both answer ``blocked_url``."""
     private = "http://169.254.169.254/"
-    for mode, code in (("enforce", "blocked_by_robots"), ("report", "blocked_url")):
+    for mode, code in (("enforce", "blocked_url"), ("report", "blocked_url")):
         with running(real_fetcher=True, compliance_default=mode) as client:
             rest = client.post("/v1/extract", json={"url": private}, headers=AUTH).json()
             result = call_tool(client, "extract_url", {"url": private}, headers=AUTH)
@@ -486,6 +486,23 @@ def test_llm_key_from_header_only() -> None:
 
 def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
+
+
+def test_extract_file_over_the_sdk_default_of_4_mib() -> None:
+    """A file of about 5 MB (about 6.7 MB as base64) reaches the tool, as it reaches REST: the
+    MCP SDK's own body cap of 4 MiB answered a plain-text 413 before."""
+    text = ("A line of plain text for the upload. " * 30 + "\n").encode() * 4500
+    assert len(base64.b64encode(text)) > 4 * 1024 * 1024
+    with running() as client:
+        result = call_tool(
+            client,
+            "extract_file",
+            {"content_base64": b64(text), "file_name": "big.txt"},
+            headers=AUTH,
+        )
+
+    assert result["isError"] is False, result
+    assert envelope_of(result)["status"] in ("success", "partial")
 
 
 def test_extract_file_base64() -> None:

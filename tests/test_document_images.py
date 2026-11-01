@@ -96,3 +96,14 @@ def test_the_module_imports_no_docling() -> None:
         "assert not any(name.split('.')[0] in ('docling', 'torch') for name in sys.modules)\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)  # noqa: S603 - our own code
+
+
+def test_only_the_sniffed_image_formats_are_opened() -> None:
+    # Pillow 12 has open advisories in its rarer decoders; the check opens nothing but the five
+    # formats the sniffer routes here (PNG, JPEG, TIFF, WebP, BMP).
+    buffer = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(buffer, format="GIF")
+    gif = buffer.getvalue()
+
+    with pytest.raises(DocumentUnreadable):
+        check_image(gif, max_frames=1)

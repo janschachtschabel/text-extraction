@@ -1,4 +1,5 @@
 # Reference setup for local runs. Production uses the Helm chart, not this file.
+# This file builds the images; docker-compose.release.yml on top runs the published ones instead.
 # Start: cp .env.example .env, set API_KEYS and VALKEY_PASSWORD, then `docker compose up -d --wait`.
 # VALKEY_PASSWORD has no default: compose stops with an error while it is empty or missing.
 # The browser worker image (target `browser`) holds Chromium and Google Chrome (linux/amd64 only).

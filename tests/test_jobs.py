@@ -269,6 +269,27 @@ async def test_items_past_the_end_are_absent() -> None:
 
 
 @scenario
+async def test_items_stop_at_the_byte_budget_of_a_page() -> None:
+    # 500 items of up to 2 MB each made one page about 1 GB in the API pod (and a Valkey read
+    # past its 2 s timeout, a 503 forever); a page stops once its results reach the budget.
+    store = make_store(FakeAsyncRedis())
+    job_id = await create_job(store, URLS)
+    for index in range(len(URLS)):
+        await store.write_result(job_id, index, success(URLS[index], content="x" * 5_000))
+
+    items = await store.items(job_id, 0, 10, max_bytes=12_000)
+
+    assert [item.index for item in items] == [0, 1]  # the third would pass 12,000 bytes
+    # The first item always comes, however large: the page moves on.
+    [first] = await store.items(job_id, 3, 10, max_bytes=100)
+    assert first.index == 3
+    assert first.result is not None
+    # Pending items cost nothing and fill the page up to the limit.
+    fresh = await create_job(store, URLS)
+    assert len(await store.items(fresh, 0, 10, max_bytes=100)) == len(URLS)
+
+
+@scenario
 async def test_large_batches_are_stored_completely() -> None:
     store = make_store(FakeAsyncRedis())
     urls = [f"https://example.org/{n}" for n in range(2500)]

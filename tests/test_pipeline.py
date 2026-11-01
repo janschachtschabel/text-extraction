@@ -607,6 +607,18 @@ def test_invalid_url_is_a_failed_envelope() -> None:
     assert harness.fetcher.calls == []
 
 
+@pytest.mark.parametrize("url", ["https://" + "a" * 70 + ".org/", "https://a..b/"])
+def test_a_host_without_a_dns_form_is_invalid_url_not_an_internal_error(url: str) -> None:
+    harness = Harness({})
+
+    envelope = harness.run_once(url=url)
+
+    assert envelope.status == "failed"
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.INVALID_URL
+    assert harness.fetcher.calls == []
+
+
 def test_links_on_request() -> None:
     harness = Harness({PAGE: fetched()})
 

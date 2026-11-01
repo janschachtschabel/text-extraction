@@ -7,6 +7,56 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version 
 `pyproject.toml`, in `deploy/helm/text-extraction/Chart.yaml` (`version` and `appVersion`) and
 in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
+## [Unreleased]
+
+Fixes from the audit of v0.1.0 (plan in
+[docs/superpowers/plans/2026-11-01-api-audit-docs-release.md](docs/superpowers/plans/2026-11-01-api-audit-docs-release.md)).
+
+### Added
+
+- `docker-compose.release.yml`: runs the stack of `docker-compose.yml` with the published
+  images of a release (`TEXT_EXTRACTION_VERSION`, default `0.1.0`) instead of building them.
+- The `release` workflow: a pushed tag `vX.Y.Z`, or a manual run for an existing tag, puts the
+  tag's section of this file on its GitHub release page, with the images and where to start
+  (`scripts/release_notes.py`); a `0.x` release is marked as a pre-release.
+- The OpenAPI document declares the bearer key (`AUTH_MODE=api_key`), the error envelope of
+  every error answer (instead of FastAPI's `HTTPValidationError`), the error statuses each
+  operation can answer, and a tag per area.
+
+### Fixed
+
+- A host name without a DNS form (a label over 63 characters, an empty label) answered 500;
+  it is `invalid_url` now.
+- Under `compliance: enforce`, a robots.txt that could not be fetched because of the host (DNS,
+  connection, timeout, a blocked address) answered `blocked_by_robots`, not retryable; the page
+  now fails with that error and its own retryable flag.
+- More than five stacked `Content-Encoding`s answered 500; they are `unsupported_content_type`.
+- Tables nested more than 16 deep held a conversion thread for half a minute; deeper tables are
+  flattened before Trafilatura.
+- The image check of uploads opens only the formats it sniffs (PNG, JPEG, TIFF, WebP, BMP), so
+  Pillow's other decoders are not reachable.
+- MCP refused request bodies over the SDK's 4 MiB with a plain-text 413, below the advertised
+  upload limit; it takes bodies up to its own limit now.
+- A page of job results read up to 500 stored items whole (about 1 GB); it stops at 20 MB and
+  `next_offset` continues from there.
+- A full Valkey (`noeviction`) made the rate limit answer 503 to every route, `DELETE` of a job
+  included; the limit lets calls through uncounted then and logs `rate_limit_backend_full`.
+- `partial` job items counted as failures in `TextExtractionJobItemFailures`.
+- A worker pool scaled to zero by KEDA with `countLeased: false` never took back the items of
+  expired leases; at `minReplicaCount: 0` the scaler counts leased items too.
+- The 429 for too many unfinished batches and site jobs carries `Retry-After: 60`.
+- `.env.example` lacked `LLM_GRACEFUL_SECONDS`, `UI_DEFAULT_LANGUAGE` and `UI_DOCS_BASE_URL`; a
+  test pins it to the settings now.
+- Documentation: an XPath selector of a user answers 422, not 403; the extraction metrics, the
+  kinds of `text_extraction_job_duration_seconds` and every pool of `escalated`; the bounds of
+  twelve settings; that `JOB_TTL_SECONDS` is not renewed while a job runs; the DNS-rebinding risk
+  of `AUTH_MODE=none`.
+- User guide and Helm README: the local uv recipe gives each process `AUTH_MODE=none` and its own
+  `INTERNAL_PORT`; the quick start runs `docker compose up` detached; `auto` with a schema needs
+  an LLM key once the service has an LLM; the 400s of `describe_images`, `ocr: always` and the
+  browser options while their switch is off; the grace period of the API pods with browser
+  workers; and that a floating `0.1` tag needs a `pull`.
+
 ## [0.1.0] - 2026-11-01
 
 The first release, a prototype: packages 0 to 13 of [docs/packages.md](docs/packages.md), tagged

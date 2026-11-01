@@ -1,0 +1,53 @@
+# Runs a released version from the published images instead of building them (linux/amd64).
+# Start: cp .env.example .env, set API_KEYS and VALKEY_PASSWORD, then
+#   docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
+# The profiles work the same way (--profile docling, asr, nlp, llm). TEXT_EXTRACTION_VERSION in
+# .env or the shell picks the release (default 0.1.0; `0.1` follows the newest 0.1.x
+# after `docker compose ... pull`: pull_policy missing does not pull an image already present).
+# `!reset` drops the build section of docker-compose.yml, so `--build` cannot build by mistake.
+# It stands in each service: some Compose versions lose it when it comes through a `<<` merge.
+
+x-release: &release
+  pull_policy: missing
+
+services:
+  api:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  worker:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  llm-worker:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  browser-worker:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-browser:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  docling-models:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-docling:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  docling-worker:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-docling:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  asr-models:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-asr:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  asr-worker:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-asr:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  nlp-models:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-nlp:${TEXT_EXTRACTION_VERSION:-0.1.0}
+  nlp-worker:
+    <<: *release
+    build: !reset null
+    image: ghcr.io/janschachtschabel/text-extraction-nlp:${TEXT_EXTRACTION_VERSION:-0.1.0}

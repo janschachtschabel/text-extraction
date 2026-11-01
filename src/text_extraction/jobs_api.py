@@ -72,6 +72,13 @@ router = APIRouter()
 
 # The most items one page of a job may have: the most ``JobStore.items`` is asked for.
 MAX_PAGE_SIZE = 500
+# Most bytes of stored results one page reads: 500 items of up to JOB_ITEM_MAX_BYTES (2 MB) made
+# one page about 1 GB in the API pod. A page stops before the item that would pass it (the first
+# item always comes), and `next_offset` continues from there.
+PAGE_MAX_BYTES = 20_000_000
+# The Retry-After of the 429 for too many unfinished batches and site jobs. When one completes
+# is not known; a minute keeps a waiting client from polling hard.
+OPEN_RETRY_AFTER_SECONDS = 60
 DEFAULT_PAGE_SIZE = 100
 
 # What a batch body may take besides its URLs (the options, JSON syntax), in bytes.
@@ -131,6 +138,7 @@ def _too_many_open(limit: int) -> ServiceError:
         "Retry when one has completed.",
         429,
         retryable=True,
+        headers={"Retry-After": str(OPEN_RETRY_AFTER_SECONDS)},
     )
 
 
@@ -482,7 +490,8 @@ async def get_job(
     The envelope `status` is `success` while the job is queued or running and when all items
     succeeded, `partial` when the finished job has failed or partial items, and `failed` when
     every item failed; `error` then has the most frequent error code among the first items and
-    the message "All N items failed.". `next_offset` is set while more items follow. A `site`
+    the message "All N items failed.". `next_offset` is set while more items follow; a page also
+    stops early once its results reach about 20 MB, and `next_offset` then continues it. A `site`
     job (`POST /v1/site-structure`) grows while it runs: each page, robots.txt and sitemap it
     finds becomes an item, so its `total` rises until it is completed. Each item's `run` is its
     last claim by a worker: the pool (`extract`, `browser`, `docling`, `asr`, `nlp`, `llm`), the
@@ -507,7 +516,11 @@ async def read_job(
     try:
         record = await visible_job(store, job_id, principal)
         total = record.progress.total
-        items = await store.items(job_id, offset, limit) if offset < total else []
+        items = (
+            await store.items(job_id, offset, limit, max_bytes=PAGE_MAX_BYTES)
+            if offset < total
+            else []
+        )
         lost = _is_lost(record)
         if lost:
             record, items = _lost_view(record, items)
@@ -534,7 +547,7 @@ async def read_job(
         finished_at=record.finished_at,
         progress=record.progress,
         items=items,
-        next_offset=offset + limit if offset + limit < total else None,
+        next_offset=end if (end := offset + (len(items) or limit)) < total else None,
     )
     return Envelope(
         status=status,

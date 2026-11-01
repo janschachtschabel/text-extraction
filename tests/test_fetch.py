@@ -281,6 +281,36 @@ def test_corrupt_gzip_is_a_connection_error(httpserver: HTTPServer) -> None:
     assert error.retryable is True
 
 
+def _stacked_gzip(body: bytes, layers: int) -> bytes:
+    for _ in range(layers):
+        body = gzip.compress(body, compresslevel=1)
+    return body
+
+
+def test_two_stacked_encodings_are_decoded(httpserver: HTTPServer) -> None:
+    httpserver.expect_request("/two").respond_with_data(
+        _stacked_gzip(b"hello twice", 2), headers={"Content-Encoding": "gzip, gzip"}
+    )
+
+    assert fetch(httpserver.url_for("/two")).content == b"hello twice"
+
+
+@pytest.mark.parametrize("layers", [6, 1500])
+def test_more_than_five_stacked_encodings_are_unsupported(
+    httpserver: HTTPServer, layers: int
+) -> None:
+    # A deep stack recursed once per layer: 1500 raised RecursionError, a 500 (as urllib3,
+    # CVE-2025-66418, at most 5 are decoded).
+    httpserver.expect_request("/stack").respond_with_data(
+        _stacked_gzip(b"deep", layers), headers={"Content-Encoding": ",".join(["gzip"] * layers)}
+    )
+
+    error = fetch_error(httpserver.url_for("/stack"))
+
+    assert error.code is ErrorCode.UNSUPPORTED_CONTENT_TYPE
+    assert error.retryable is False
+
+
 def test_unknown_content_encoding_is_unsupported(httpserver: HTTPServer) -> None:
     httpserver.expect_request("/br").respond_with_data(b"zzz", headers={"Content-Encoding": "br"})
 

@@ -458,11 +458,15 @@ patches and models.
 **Releases and rollback.**
 
 - [`CHANGELOG.md`](../CHANGELOG.md) records each release (Keep a Changelog). The version is the
-  same in `pyproject.toml`, `src/text_extraction/__init__.py` and the chart's `Chart.yaml`
-  (`version`, `appVersion`); `tests/test_release.py` checks it.
+  same in `pyproject.toml` and the chart's `Chart.yaml` (`version`, `appVersion`);
+  `src/text_extraction/__init__.py` reads it from the package metadata; `tests/test_release.py` checks it.
 - A release is the Git tag `vX.Y.Z` on `main`. The image workflow then publishes `X.Y.Z` and
   `X.Y` for all five images; a deployment pins `image.tag` (and the workers' image tags) to
   `X.Y.Z`, as the example values do.
+- The `release` workflow then creates the GitHub release page of the tag, with the tag's
+  section of the changelog as its notes (a 0.x version is marked as a pre-release);
+  `docker-compose.release.yml` runs the published images with Compose, and its default version
+  moves with each release (`tests/test_release.py`).
 - Rollback: `helm rollback <release> <revision>`, or `helm upgrade` with the previous tag.
 - The first release is `v0.1.0`, a prototype, tagged on the merge of package 13 (YouTube
   transcript panel; [packages.md](packages.md#status)). Packages 11 and 12 are merged without a

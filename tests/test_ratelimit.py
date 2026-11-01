@@ -1,13 +1,14 @@
 import asyncio
 import hashlib
 from collections.abc import Iterator
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 from redis.asyncio import Redis
+from redis.exceptions import OutOfMemoryError
 from structlog.testing import capture_logs
 
 from text_extraction.auth import Principal, require_role
@@ -384,3 +385,39 @@ def test_per_key_limit_is_not_replaced_by_the_default_when_falsy(fake: Redis, cl
         response = client.get("/limited")
 
     assert response.status_code == 429
+
+
+class _FullValkey(FakeAsyncRedis):
+    """A Valkey at maxmemory under noeviction: every write is refused with OOM."""
+
+    def pipeline(self, *args: Any, **kwargs: Any) -> Any:
+        raise OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
+
+
+class _FullOnExecute(FakeAsyncRedis):
+    """The same Valkey, refusing at EXEC as a real one does: the queued INCR's OOM comes back
+    from the pipeline's ``execute`` (redis-py re-raises it in place of EXECABORT)."""
+
+    def pipeline(self, *args: Any, **kwargs: Any) -> Any:
+        pipe = super().pipeline(*args, **kwargs)
+
+        async def execute(*_args: Any, **_kwargs: Any) -> Any:
+            raise OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
+
+        pipe.execute = execute  # type: ignore[method-assign]
+        return pipe
+
+
+@pytest.mark.parametrize("valkey_class", [_FullValkey, _FullOnExecute])
+def test_a_full_valkey_lets_calls_through_uncounted(
+    clock: Clock, valkey_class: type[FakeAsyncRedis]
+) -> None:
+    # Valkey at maxmemory refuses the counter's write. Every route answered 503 then, DELETE of
+    # a job too, the one call that frees memory; the memory guard refuses new jobs anyway.
+    app = build_app(make_settings(), valkey_class(), clock, default_per_minute=1)
+    with TestClient(app) as client, capture_logs() as logs:
+        statuses = [client.get("/limited", headers=bearer("alice")).status_code for _ in range(3)]
+
+    assert statuses == [200, 200, 200]
+    events = [entry["event"] for entry in logs if entry["log_level"] == "warning"]
+    assert events == ["rate_limit_backend_full"] * 3

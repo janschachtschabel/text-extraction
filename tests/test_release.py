@@ -69,3 +69,12 @@ def test_dependabot_watches_uv_actions_docker_and_compose() -> None:
         assert groups, "minor and patch updates are grouped"
         for group in groups.values():
             assert set(group["update-types"]) == {"minor", "patch"}
+
+
+def test_the_release_compose_file_defaults_to_the_version() -> None:
+    # docker-compose.release.yml runs the published images; a release moves its default along.
+    text = (ROOT / "docker-compose.release.yml").read_text(encoding="utf-8")
+    defaults = set(re.findall(r"\$\{TEXT_EXTRACTION_VERSION:-([^}]*)\}", text))
+    assert defaults == {_project_version()}
+    services = yaml.safe_load(text.replace("!reset ", ""))["services"]
+    assert len(services) == 10

@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fakeredis import FakeAsyncRedis
@@ -100,6 +101,56 @@ def test_openapi_title_and_description(public: TestClient) -> None:
     assert info["title"] == "Text Extraction API"
     assert info["version"] == __version__
     assert "clean text or Markdown" in info["description"]
+
+
+def _operations(spec: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    return [
+        (path, method, operation)
+        for path, operations in spec["paths"].items()
+        for method, operation in operations.items()
+    ]
+
+
+def test_openapi_declares_the_bearer_key(public: TestClient) -> None:
+    spec = public.get("/openapi.json").json()
+
+    assert spec["components"]["securitySchemes"]["bearerAuth"]["scheme"] == "bearer"
+    assert spec["security"] == [{"bearerAuth": []}]
+
+
+def test_openapi_errors_are_the_envelope(public: TestClient) -> None:
+    spec = public.get("/openapi.json").json()
+    envelope = {"$ref": "#/components/schemas/ErrorEnvelope"}
+
+    assert "HTTPValidationError" not in spec["components"]["schemas"]
+    assert spec["components"]["schemas"]["ErrorEnvelope"]["properties"]["status"] == {
+        "const": "failed",
+        "title": "Status",
+    }
+    for path, method, operation in _operations(spec):
+        responses = operation["responses"]
+        for status in ("401", "422", "429", "503"):
+            assert responses[status]["content"]["application/json"]["schema"] == envelope, (
+                path,
+                method,
+                status,
+            )
+        if method == "post":
+            assert {"400", "403", "413"} <= set(responses), (path, method)
+        if "{job_id}" in path:
+            assert "404" in responses, (path, method)
+        assert operation["tags"], (path, method)
+
+
+def test_openapi_without_keys_has_no_security_scheme(registry: CollectorRegistry) -> None:
+    app = create_public_app(Settings(auth_mode="none"), FakeAsyncRedis(), registry)
+
+    spec = app.openapi()
+
+    assert "securitySchemes" not in spec["components"]
+    assert "security" not in spec
+    for path, method, operation in _operations(spec):
+        assert "401" not in operation["responses"], (path, method)
 
 
 def test_metrics_not_on_public_app(public: TestClient) -> None:

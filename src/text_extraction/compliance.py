@@ -106,6 +106,29 @@ _BOT_NAME = re.compile(r"[a-z0-9_.*-]+")
 
 _CacheState = Literal["found", "absent", "unavailable"]
 _CACHE_STATES: frozenset[str] = frozenset({"found", "absent", "unavailable"})
+# Fetch errors of robots.txt that say the host cannot be reached at all (or is a forbidden
+# address): the page would fail the same way, so a block reports this error, not the robots rule.
+_HOST_ERRORS: dict[ErrorCode, bool] = {  # the code -> retryable
+    ErrorCode.DNS_ERROR: True,
+    ErrorCode.CONNECTION_ERROR: True,
+    ErrorCode.TIMEOUT: True,
+    ErrorCode.BLOCKED_URL: False,
+}
+_HOST_ERROR_MESSAGES = {
+    ErrorCode.DNS_ERROR: "The site's host name does not resolve (robots.txt could not be fetched).",
+    ErrorCode.CONNECTION_ERROR: "The site cannot be reached (robots.txt could not be fetched).",
+    ErrorCode.TIMEOUT: "The site did not answer in time (robots.txt could not be fetched).",
+    ErrorCode.BLOCKED_URL: (
+        "robots.txt could not be fetched: its address, or one it redirects to, is not allowed."
+    ),
+}
+_BLOCK_MESSAGES = {
+    ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",
+    ErrorCode.TDM_RESERVED: "The site reserves text and data mining rights for this URL.",
+}
+_ROBOTS_UNAVAILABLE_MESSAGE = (
+    "The site's robots.txt could not be retrieved, so access cannot be confirmed."
+)
 
 
 class RobotsSitemaps(BaseModel):
@@ -132,6 +155,19 @@ class ComplianceReport(BaseModel):
     tdm_source: Literal["tdmrep.json", "header", "meta"] | None = None
     noai: bool = False
     reasons: list[str] = Field(default_factory=list)
+    # Why robots.txt is "unavailable" when its fetch could not reach the host: one of
+    # ``_HOST_ERRORS``. Internal (``compliance_block`` reads it), never in the envelope.
+    robots_error: ErrorCode | None = Field(default=None, exclude=True)
+
+
+@dataclass(frozen=True)
+class ComplianceBlock:
+    """How a request that ``enforce`` blocks fails: the code, a message for the caller, and
+    whether trying again later may help."""
+
+    code: ErrorCode
+    message: str
+    retryable: bool
 
 
 def resolve_mode(
@@ -169,6 +205,22 @@ def _violation(report: ComplianceReport) -> ErrorCode | None:
 def blocking_code(report: ComplianceReport) -> ErrorCode | None:
     """The error code to fail with, or ``None``. Only ``enforce`` blocks."""
     return _violation(report) if report.mode == "enforce" else None
+
+
+def compliance_block(report: ComplianceReport) -> ComplianceBlock | None:
+    """How ``report`` blocks the request, or ``None``. A robots.txt that could not be fetched
+    because the host is unreachable fails with that fetch error (the page would too); one that
+    could not be retrieved otherwise (a 5xx or 429 answer) is ``blocked_by_robots`` but
+    retryable; a rule or a reservation blocks for good."""
+    code = blocking_code(report)
+    if code is None:
+        return None
+    if code is ErrorCode.BLOCKED_BY_ROBOTS and report.robots == "unavailable":
+        error = report.robots_error
+        if error is not None and error in _HOST_ERRORS:
+            return ComplianceBlock(error, _HOST_ERROR_MESSAGES[error], _HOST_ERRORS[error])
+        return ComplianceBlock(code, _ROBOTS_UNAVAILABLE_MESSAGE, retryable=True)
+    return ComplianceBlock(code, _BLOCK_MESSAGES[code], retryable=False)
 
 
 def with_page_findings(report: ComplianceReport, previous: ComplianceReport) -> ComplianceReport:
@@ -218,6 +270,7 @@ def with_redirect_findings(report: ComplianceReport, hop: ComplianceReport) -> C
     """
     update: dict[str, object] = {
         "robots": max(report.robots, hop.robots, key=_ROBOTS_RANK.__getitem__),
+        "robots_error": report.robots_error or hop.robots_error,
         "ai_txt": max(report.ai_txt, hop.ai_txt, key=_AI_TXT_RANK.__getitem__),
         "crawl_delay": hop.crawl_delay,
         "noai": report.noai or hop.noai,
@@ -256,6 +309,7 @@ class _Entry:
 
     state: _CacheState
     body: str = ""
+    error: ErrorCode | None = None  # unavailable: the fetch error, one of _HOST_ERRORS
 
 
 class ComplianceChecker:
@@ -384,7 +438,9 @@ class ComplianceChecker:
         reasons = list(report.reasons)
         if rules is None:
             reasons.append("robots.txt could not be retrieved, so access cannot be confirmed.")
-            return report.model_copy(update={"robots": "unavailable", "reasons": reasons})
+            return report.model_copy(
+                update={"robots": "unavailable", "reasons": reasons, "robots_error": entry.error}
+            )
         allowed = rules.can_fetch(url, PRODUCT_TOKEN)
         if not allowed:
             reasons.append(f"robots.txt disallows this URL for {PRODUCT_TOKEN}.")
@@ -510,7 +566,7 @@ class ComplianceChecker:
                 host=urlsplit(file_url).hostname,
                 code=str(error.code),
             )
-            return _Entry("unavailable")
+            return _Entry("unavailable", error=error.code if error.code in _HOST_ERRORS else None)
         if 200 <= fetched.status < 300:
             text = fetched.content.decode("utf-8-sig", errors="replace")
             if fetched.truncated:
@@ -536,7 +592,10 @@ class ComplianceChecker:
             ttl = min(ttl, _UNAVAILABLE_TTL_SECONDS)
         if ttl <= 0:
             return
-        payload = json.dumps({"state": entry.state, "body": entry.body})
+        stored: dict[str, str] = {"state": entry.state, "body": entry.body}
+        if entry.error is not None:
+            stored["error"] = entry.error.value
+        payload = json.dumps(stored)
         try:
             await self._valkey.set(key, payload, ex=ttl)
         except (RedisError, OSError) as error:
@@ -561,7 +620,11 @@ def _parse_entry(raw: bytes | str | None) -> _Entry | None:
     if not isinstance(data, dict) or data.get("state") not in _CACHE_STATES:
         return None
     body = data.get("body", "")
-    return _Entry(data["state"], body) if isinstance(body, str) else None
+    try:
+        error = ErrorCode(data["error"]) if "error" in data else None
+    except ValueError:
+        error = None  # a code this version does not know: the plain "unavailable"
+    return _Entry(data["state"], body, error) if isinstance(body, str) else None
 
 
 def _origin(url: str) -> _Origin:

@@ -44,8 +44,11 @@ class BlockedAddressError(OSError):
     """
 
 
-def validate_url(url: str) -> str:
-    """Return ``url`` unchanged when it is a plain http(s) URL, else raise ``InvalidUrlError``."""
+def validate_url(url: str, *, dns_form: bool = True) -> str:
+    """Return ``url`` unchanged when it is a plain http(s) URL, else raise ``InvalidUrlError``.
+
+    With ``dns_form`` (the default, for every fetch) the host must also have a DNS form;
+    ``site.urls`` leaves it out, so a link graph keeps a link to a host that has none."""
     if len(url) > MAX_URL_LENGTH:
         raise InvalidUrlError(f"URL is longer than {MAX_URL_LENGTH} characters")
     try:
@@ -61,7 +64,26 @@ def validate_url(url: str) -> str:
         raise InvalidUrlError("URL must not contain user information")
     if port is not None and not 1 <= port <= 65535:
         raise InvalidUrlError("URL port must be between 1 and 65535")
+    if dns_form:
+        _check_dns_form(parts.hostname)
     return url
+
+
+def _check_dns_form(host: str) -> None:
+    """Raise ``InvalidUrlError`` for a host name the resolver cannot encode (an empty label, a
+    label over 63 characters): its IDNA codec would raise ``UnicodeError`` on the lookup."""
+    try:
+        ip_address(host)
+    except ValueError:
+        labels = host.removesuffix(".").split(".")
+        # A label over 63 characters has no ASCII form (an IDN label only grows when encoded):
+        # refused before the encode, which is slow on a long Unicode label.
+        if any(not label or len(label) > 63 for label in labels):
+            raise InvalidUrlError("URL host is not a valid host name") from None
+        try:
+            host.encode("idna")
+        except UnicodeError:
+            raise InvalidUrlError("URL host is not a valid host name") from None
 
 
 _NAT64 = ip_network("64:ff9b::/96")  # well-known prefix; embeds an IPv4 address in the last 32 bits

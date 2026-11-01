@@ -42,6 +42,7 @@ from text_extraction.mcp_server.server import McpMount, build_mcp, mcp_body_limi
 from text_extraction.media.pool import MediaFetcher, create_media_fetcher
 from text_extraction.memory_guard import MemoryGuard
 from text_extraction.metadata import load_language_model
+from text_extraction.openapi import install_openapi
 from text_extraction.pii_dispatch import PiiDispatcher, nlp_queue, pii_available
 from text_extraction.pipeline import create_outbound, create_pipeline
 from text_extraction.pipeline_documents import create_document_pool
@@ -336,6 +337,7 @@ def create_public_app(
     app.state.background = set()
     app.state.graceful_shutdown = GracefulShutdown()
     install_error_handlers(app)
+    install_openapi(app, settings)
     app.include_router(extract_router)
     app.include_router(file_router)
     app.include_router(screenshot_router)

@@ -158,6 +158,7 @@ from text_extraction.compliance import (
     ComplianceReport,
     RobotsSitemaps,
     blocking_code,
+    compliance_block,
     resolve_mode,
     with_page_findings,
     with_redirect_findings,
@@ -364,10 +365,6 @@ type TranscriptionHandoff = Callable[
     [AsrNeeded, Envelope[ExtractResult]], Awaitable[Envelope[ExtractResult]]
 ]
 
-_BLOCK_MESSAGES = {
-    ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",
-    ErrorCode.TDM_RESERVED: "The site reserves text and data mining rights for this URL.",
-}
 _QUALITY_MESSAGES = {
     ErrorCode.BOT_PROTECTION: "The page is a bot challenge, not the content.",
     ErrorCode.LIKELY_ERROR_PAGE: "The page looks like an error page.",
@@ -1223,8 +1220,8 @@ class Pipeline:
             turn = HostTurn(self._gate)
             try:
                 run.report = await self._check_origin(run, run.target, turn)
-                if (code := blocking_code(run.report)) is not None:
-                    return run.failed(code, _BLOCK_MESSAGES[code])
+                if (block := compliance_block(run.report)) is not None:
+                    return run.failed(block.code, block.message, retryable=block.retryable)
                 return await self._fetch(run, None, turn, max_bytes=max_bytes, truncate=truncate)
             finally:
                 await turn.give_back()  # `_fetch` gives it back as soon as the fetch ends
@@ -1235,8 +1232,8 @@ class Pipeline:
         started = time.perf_counter()
         run.report = self._checker.after_fetch(run.report, outcome, None)  # the headers only
         run.compliance_ms += _ms(started)
-        if (code := blocking_code(run.report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
+        if (block := compliance_block(run.report)) is not None:
+            return run.failed(block.code, block.message, retryable=block.retryable)
         return outcome
 
     async def robots_sitemaps(
@@ -1415,8 +1412,8 @@ class Pipeline:
         turn = HostTurn(self._gate)
         try:
             run.report = await self._check_origin(run, target.canonical_url, turn)
-            if (code := blocking_code(run.report)) is not None:
-                return run.failed(code, _BLOCK_MESSAGES[code])
+            if (block := compliance_block(run.report)) is not None:
+                return run.failed(block.code, block.message, retryable=block.retryable)
             waited = time.perf_counter()
             await turn.take(urlsplit(target.canonical_url).hostname or "", run.report.crawl_delay)
             run.fetch_ms += _ms(waited)
@@ -1442,8 +1439,8 @@ class Pipeline:
         started = time.perf_counter()
         run.report = await self._pool.run(self._checker.after_fetch, run.report, fetched, None)
         run.compliance_ms += _ms(started)
-        if (code := blocking_code(run.report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
+        if (block := compliance_block(run.report)) is not None:
+            return run.failed(block.code, block.message, retryable=block.retryable)
         outcome = await self._media.media_file(run, fetched, kind)
         if isinstance(outcome, AsrNeeded):
             return self._without_asr(run, outcome)
@@ -1503,8 +1500,8 @@ class Pipeline:
         turn = HostTurn(self._gate)
         try:
             run.report = await self._check_origin(run, run.target, turn)
-            if (code := blocking_code(run.report)) is not None:
-                return run.failed(code, _BLOCK_MESSAGES[code])
+            if (block := compliance_block(run.report)) is not None:
+                return run.failed(block.code, block.message, retryable=block.retryable)
             fetched = await self._fetch(run, stored.entry.validators if stored else None, turn)
         finally:
             await turn.give_back()  # `_fetch` gives it back as soon as the fetch ends
@@ -1518,8 +1515,8 @@ class Pipeline:
             run.report = self._checker.after_fetch(
                 with_page_findings(run.report, stored.result.compliance), fetched, None
             )
-            if (code := blocking_code(run.report)) is not None:
-                return run.failed(code, _BLOCK_MESSAGES[code])
+            if (block := compliance_block(run.report)) is not None:
+                return run.failed(block.code, block.message, retryable=block.retryable)
             return await self._revalidated(run, stored, fetched)
         if not 200 <= fetched.status < 300:  # also a 3xx the fetcher could not follow
             failed = run.failed(
@@ -1574,8 +1571,8 @@ class Pipeline:
         page = text if kind == "html" else None
         run.report = await self._pool.run(self._checker.after_fetch, run.report, fetched, page)
         run.compliance_ms += _ms(started)
-        if (code := blocking_code(run.report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
+        if (block := compliance_block(run.report)) is not None:
+            return run.failed(block.code, block.message, retryable=block.retryable)
         if (
             stored is not None
             and 200 <= fetched.status < 300
@@ -1611,8 +1608,8 @@ class Pipeline:
         started = time.perf_counter()
         run.report = await self._pool.run(self._checker.after_fetch, run.report, fetched, None)
         run.compliance_ms += _ms(started)
-        if (code := blocking_code(run.report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
+        if (block := compliance_block(run.report)) is not None:
+            return run.failed(block.code, block.message, retryable=block.retryable)
         if stored is not None and fetched.raw_sha256 == stored.entry.raw_sha256:
             return await self._revalidated(run, stored, fetched)
         when = run.deadline.when() if run.deadline is not None else None
@@ -1737,8 +1734,8 @@ class Pipeline:
                 hop_checks += time.perf_counter() - check_started - waited
                 run.compliance_ms, run.fetch_ms = compliance_before, fetch_before
                 run.report = with_redirect_findings(run.report, hop)
-                if (code := blocking_code(run.report)) is not None:
-                    raise FetchError(code, _BLOCK_MESSAGES[code])
+                if (block := compliance_block(run.report)) is not None:
+                    raise FetchError(block.code, block.message, retryable=block.retryable)
             await turn.take(host, run.report.crawl_delay)
             # The hop starts now. It gets what is left of the fetcher's deadline for the whole
             # chain (hook time included), capped as any fetch is by the request's own deadline.
@@ -2246,8 +2243,8 @@ class Pipeline:
         checked = {req.url}
         try:
             run.report = await self._check_origin(run, req.url, turn)
-            if (code := blocking_code(run.report)) is not None:
-                return run.failed(code, _BLOCK_MESSAGES[code])
+            if (block := compliance_block(run.report)) is not None:
+                return run.failed(block.code, block.message, retryable=block.retryable)
             options = await self._render_options(run, unblock)
             rendered = await self._render(run, renderer, options, turn, checked)
             refused = await self._check_answers(run, rendered, turn, checked)
@@ -2328,8 +2325,8 @@ class Pipeline:
         checked = {url}
         try:
             run.report = await self._check_origin(run, url, turn)
-            if (code := blocking_code(run.report)) is not None:
-                return run.failed(code, _BLOCK_MESSAGES[code])
+            if (block := compliance_block(run.report)) is not None:
+                return run.failed(block.code, block.message, retryable=block.retryable)
             options = replace(await self._render_options(run, False), transcript_panel=True)
             rendered = await self._render(run, renderer, options, turn, checked, url=url)
             refused = await self._check_answers(run, rendered, turn, checked)
@@ -2400,8 +2397,8 @@ class Pipeline:
                 hop = await self._check_origin(run, url, turn)
                 run.compliance_ms, run.fetch_ms = compliance_ms, fetch_ms
                 run.report = with_redirect_findings(run.report, hop)
-                if (code := blocking_code(run.report)) is not None:
-                    raise FetchError(code, _BLOCK_MESSAGES[code])
+                if (block := compliance_block(run.report)) is not None:
+                    raise FetchError(block.code, block.message, retryable=block.retryable)
                 crawl_delays[normalize_host(target)] = hop.crawl_delay
             await turn.take(target, crawl_delays.get(normalize_host(target)))
 
@@ -2442,8 +2439,8 @@ class Pipeline:
                 run.report = with_redirect_findings(
                     run.report, await self._check_origin(run, url, turn)
                 )
-                if (code := blocking_code(run.report)) is not None:
-                    return run.failed(code, _BLOCK_MESSAGES[code])
+                if (block := compliance_block(run.report)) is not None:
+                    return run.failed(block.code, block.message, retryable=block.retryable)
         return None
 
     async def _extract_rendered(
@@ -2491,8 +2488,8 @@ class Pipeline:
             self._checker.after_fetch, run.report, fetched, rendered.html
         )
         run.compliance_ms += _ms(started)
-        if (code := blocking_code(run.report)) is not None:
-            return run.failed(code, _BLOCK_MESSAGES[code])
+        if (block := compliance_block(run.report)) is not None:
+            return run.failed(block.code, block.message, retryable=block.retryable)
 
         processed = await self._converted(run, fetched, "html", rendered.html)
         if isinstance(processed, Envelope):

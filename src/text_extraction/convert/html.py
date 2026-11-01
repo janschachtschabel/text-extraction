@@ -249,6 +249,27 @@ def _as_format(text: str, fmt: OutputFormat) -> str:
     return f"<html><body>{paragraphs}</body></html>"
 
 
+# Deepest table nesting handed to Trafilatura: its table handling is quadratic in the nesting
+# (2000 nested tables, 30 KB, took about 35 s of CPU). Real pages nest a handful of levels.
+MAX_TABLE_NESTING = 16
+
+
+def flatten_deep_tables(soup: BeautifulSoup) -> None:
+    """Rename every ``<table>`` nested more than ``MAX_TABLE_NESTING`` deep to ``<div>``: its
+    text stays, its table structure goes. One pass in document order; each table looks up
+    only its nearest table ancestor."""
+    depth: dict[int, int] = {}
+    deep = []
+    for table in soup.find_all("table"):
+        parent = table.find_parent("table")
+        level = 1 if parent is None else depth[id(parent)] + 1
+        depth[id(table)] = level
+        if level > MAX_TABLE_NESTING:
+            deep.append(table)
+    for table in deep:
+        table.name = "div"
+
+
 def _tree(html: str) -> lxml.html.HtmlElement | str:
     """The page parsed for Trafilatura, with ``huge_tree``: Trafilatura's own parse stops at
     libxml2's depth limit of 255 elements and silently drops everything nested deeper. The
@@ -302,6 +323,7 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     for navigation in soup.select('nav, [role="navigation"]'):
         if not navigation.decomposed:
             navigation.decompose()
+    flatten_deep_tables(soup)
     equations = protect_equations(soup)
     markup = fmt == "html"
     warnings: list[str] = []

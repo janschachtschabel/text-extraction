@@ -21,6 +21,10 @@ from text_extraction.documents.sniff import DocumentTooLarge, DocumentUnreadable
 # pixels), far above a 600 dpi A4 scan (about 5,000 by 7,000).
 MAX_IMAGE_PIXELS: Final = 89_478_485
 _TOO_LARGE: Final = "The image has too many pixels."
+# The formats the sniffer routes to OCR (documents/sniff.py); Pillow's other decoders are not
+# tried on hostile input. Pillow 12 has open advisories that 13 fixes; Docling pins it below 13
+# up to docling-slim 2.141 (follow-up: upgrade once docling-slim 2.142+ passes the 14-day rule).
+_FORMATS: Final = ("PNG", "JPEG", "TIFF", "WEBP", "BMP")
 
 
 def check_image(body: bytes, *, max_frames: int) -> None:
@@ -30,7 +34,7 @@ def check_image(body: bytes, *, max_frames: int) -> None:
         with warnings.catch_warnings():
             # Pillow only warns between its limit and twice it: refused here as well.
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(body)) as image:
+            with Image.open(io.BytesIO(body), formats=_FORMATS) as image:
                 for frame in range(max_frames):
                     if frame:
                         try:

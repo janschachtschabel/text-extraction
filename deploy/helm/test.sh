@@ -191,6 +191,11 @@ expect_absent "browser Deployment leaves replicas to KEDA" "$(document "$keda" D
 extract_keda="$(document "$(render --set workers.extract.autoscaling.keda.enabled=true)" ScaledObject "$EXTRACT")"
 expect_contains "extract KEDA keeps pool extract" "$extract_keda" 'pool=\"extract\"'
 expect_absent "extract KEDA counts only pending items" "$extract_keda" "leased_items"
+# Scaled to zero, a pool reclaims expired leases only when a worker claims: it counts leased items
+# whatever countLeased says, so a lost worker's items keep a replica up until they run again.
+expect_contains "a pool that may scale to zero counts its leased items" \
+  "$(document "$(render --set workers.extract.autoscaling.keda.enabled=true --set workers.extract.autoscaling.keda.minReplicaCount=0)" ScaledObject "$EXTRACT")" \
+  'max(text_extraction_queue_leased_items{pool=\"extract\"'
 expect_absent "extract KEDA keeps the default scale-down behaviour" "$extract_keda" "horizontalPodAutoscalerConfig"
 expect_absent "extract HPA keeps the default scale-down behaviour" \
   "$(document "$(render --set workers.extract.autoscaling.hpa.enabled=true)" HorizontalPodAutoscaler "$EXTRACT")" "behavior:"

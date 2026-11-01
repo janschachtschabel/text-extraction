@@ -1,0 +1,56 @@
+name: release
+
+# The GitHub release page of a tag vX.Y.Z, with the tag's section of CHANGELOG.md as its notes
+# (scripts/release_notes.py) and the published images. Runs on every release tag, and by hand for
+# a tag that already exists (Actions, "release", "Run workflow"). A second run only updates the
+# text. A 0.x version is a prototype and is marked as a pre-release.
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag vX.Y.Z
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The notes come from the changelog on main, so a fix to a section reaches its page.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Create or update the release page
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "not a release tag: $TAG" >&2
+            exit 1
+          fi
+          version="${TAG#v}"
+          python3 scripts/release_notes.py "$version" > notes.md
+          flags=()
+          if [[ "$version" == 0.* ]]; then
+            flags=(--prerelease)
+          fi
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file notes.md "${flags[@]}"
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md "${flags[@]}"
+          fi
+          gh release view "$TAG" --json url --jq .url

@@ -24,7 +24,8 @@ Ein Schlüssel hat die Rolle `user` oder `admin`. Admins dürfen außerdem `comp
 (und damit die maximale Extraktion), XPath-Selektoren und die Aktion `evaluate` verwenden und jeden
 Job lesen; ein Nutzer liest nur seine eigenen Jobs. Bei einem fehlenden oder falschen Schlüssel
 antwortet der Dienst mit 401 `unauthorized`, bei einer Anfrage, die die Rolle nicht stellen darf,
-mit 403 `forbidden`. Jeder Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber
+mit 403 `forbidden`. Ausnahme ist ein XPath-Selektor mit einem Nutzerschlüssel: Darauf antwortet
+der Dienst wie bei jedem anderen ungültigen Feld mit 422 `invalid_request`. Jeder Schlüssel hat ein Ratenlimit (`RATE_LIMIT_PER_MINUTE`); darüber
 antwortet eine Anfrage mit 429 `rate_limited` und `Retry-After`.
 
 Mit `AUTH_MODE=none` braucht der Dienst keinen Schlüssel, und jeder Aufrufer ist Admin. Verwenden
@@ -145,7 +146,8 @@ Browser-Fallback:
 `data.mode_used` sagt, welcher Modus die Antwort erzeugt hat. Übernimmt kein Browser-Worker die
 Seite innerhalb von `BROWSER_QUEUE_WAIT_SECONDS` (10 s), behält `auto` das HTTP-Ergebnis mit der
 Warnung `browser_unavailable`, und `browser` schlägt mit `timeout` fehl (wiederholbar). Solange der
-Browsermodus aus ist, antwortet `browser` mit 400, und `auto` nutzt den Browser nie.
+Browsermodus aus ist, antworten `browser`, `POST /v1/screenshot` und `auto` mit `actions`,
+`cookies`, `headers` oder `screenshot` mit 400, und `auto` ohne sie nutzt den Browser nie.
 
 `actions` (höchstens 20), `cookies` und `headers` (nur an die angefragte Website gesendet)
 funktionieren mit `auto` und `browser`, nicht mit `fast` und nicht in Batches; die OpenAPI-Spec

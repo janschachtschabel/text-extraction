@@ -15,15 +15,20 @@ Voraussetzung sind Python 3.13, [uv](https://docs.astral.sh/uv/) und ein Valkey 
 ```bash
 uv sync                                                     # install the dependencies into .venv
 docker run -d --name valkey -p 6379:6379 valkey/valkey:8.1-alpine
-AUTH_MODE=none UI_ENABLED=true uv run text-extraction       # API on http://localhost:8080
-uv run text-extraction-worker                               # extract worker: batches and jobs
+export AUTH_MODE=none                                       # in each terminal below
+UI_ENABLED=true uv run text-extraction                      # terminal 1: API on http://localhost:8080
+INTERNAL_PORT=9091 uv run text-extraction-worker            # terminal 2: extract worker (jobs)
 ```
 
 `AUTH_MODE=none` lässt jeden, der den Port erreicht, den Dienst nutzen: Verwenden Sie es nur auf
-Ihrem eigenen Rechner. Der Browser-Worker braucht das Extra `browser` und Chromium
+Ihrem eigenen Rechner und nur, solange Sie es brauchen. Auch eine Webseite, die in Ihrem Browser
+offen ist, kann ihn über DNS-Rebinding erreichen, mit der Rolle Admin. Jeder Prozess liest
+dieselben Einstellungen, also braucht jedes Terminal `AUTH_MODE=none` (oder dieselben
+`API_KEYS`), und jeder bedient seinen internen Port: Geben Sie jedem weiteren Prozess einen
+eigenen `INTERNAL_PORT`. Der Browser-Worker braucht das Extra `browser` und Chromium
 (`uv sync --extra browser`, dann `uv run playwright install chromium`); starten Sie ihn mit
-`uv run text-extraction-browser-worker` und setzen Sie `BROWSER_ENABLED=true` für die API, den
-Extract-Worker und den Browser-Worker.
+`INTERNAL_PORT=9092 uv run text-extraction-browser-worker` und setzen Sie `BROWSER_ENABLED=true`
+für die API, den Extract-Worker und den Browser-Worker.
 
 Für die Entwicklung:
 
@@ -46,7 +51,7 @@ cp .env.example .env                           # then set API_KEYS and VALKEY_PA
 KEY=$(openssl rand -hex 32)                    # your API key: keep it
 printf %s "$KEY" | sha256sum | cut -d' ' -f1   # its sha256: replace the zeros in API_KEYS with it
 openssl rand -hex 24                           # a VALKEY_PASSWORD
-docker compose up --build                      # public API on http://localhost:8080
+docker compose up --build -d --wait          # public API on http://localhost:8080
 curl -H "Authorization: Bearer $KEY" http://localhost:8080/v1/info
 curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d '{"url": "https://example.org/"}' http://localhost:8080/v1/extract
@@ -57,6 +62,22 @@ Admin-Schlüssel namens `local`, dessen SHA-256 Sie ersetzen; [API-Schlüssel](u
 erklärt die Schlüssel und ihre Rollen. Der interne Port 9090 (`/health`, `/ready`, `/metrics`)
 wird nicht veröffentlicht. Die Spielwiese liegt unter http://localhost:8080/ui und der
 MCP-Endpunkt unter http://localhost:8080/mcp.
+
+### Veröffentlichte Images
+
+Statt die Images selbst zu bauen, kann Compose eine veröffentlichte Version von
+`ghcr.io/janschachtschabel/text-extraction` starten (linux/amd64). Die Datei
+`docker-compose.release.yml` ersetzt jeden Build durch das veröffentlichte Image; `.env` bleibt
+gleich, und die Profile funktionieren wie unten beschrieben.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
+```
+
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.0`; `0.1`
+folgt der neuesten `0.1.x` nach `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
+denn ein Image, das schon auf dem Rechner liegt, wird nicht erneut geladen). Die Versionen und ihre Notizen stehen auf der
+[Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
 
 ### Optionale Worker
 
@@ -80,8 +101,9 @@ Extraktion. Für `pii: hash` mit demselben Hash in jedem Ergebnis setzen Sie `PI
 
 Solange ein Schalter aus ist, antwortet eine Anfrage, die seinen Worker braucht, mit 400: `pii`
 ohne `PII_ENABLED`, die Strategie `llm`, `learn_selectors` und `semantic`-Chunking ohne
-`LLM_ENABLED`, `transcribe` ohne `ASR_ENABLED`. Ein Scan ohne `DOCLING_ENABLED` liefert nur seine
-Textebene, mit der Warnung `ocr_unavailable`.
+`LLM_ENABLED`, `describe_images` ohne `LLM_ENABLED`, `transcribe` ohne `ASR_ENABLED` und
+`ocr: always` ohne `DOCLING_ENABLED`. Mit `ocr: auto` (der Vorgabe) liefert ein Scan ohne
+`DOCLING_ENABLED` nur seine Textebene, mit der Warnung `ocr_unavailable`.
 
 Die maximale Extraktion (für Websites, die die Extraktion vertraglich erlaubt haben) braucht
 `BROWSER_UNBLOCK_ENABLED=true` in `.env`; siehe [Website-Regeln](site-rules.md#maximale-extraktion).

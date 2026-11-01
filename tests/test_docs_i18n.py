@@ -70,9 +70,11 @@ REQUEST_MODELS: Mapping[str, type[BaseModel]] = {
     "POST /v1/extract/file": FileForm,
 }
 
-# Backticked UPPER_SNAKE names that are not settings: shell variables of the examples, and the
-# PII entity types.
-NOT_SETTINGS = frozenset({"API_KEY", "AUTH_HEADER"}) | frozenset(ENTITY_TYPES)
+# Backticked UPPER_SNAKE names that are not settings: shell variables of the examples, variables
+# that only docker compose reads, and the PII entity types.
+NOT_SETTINGS = frozenset(
+    {"API_KEY", "AUTH_HEADER", "VALKEY_PASSWORD", "TEXT_EXTRACTION_VERSION"}
+) | frozenset(ENTITY_TYPES)
 
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 _HEADING = re.compile(r"^(#{1,6}) \S")

@@ -22,7 +22,8 @@ printf %s "$KEY" | sha256sum | cut -d' ' -f1      # the sha256 for API_KEYS
 A key has the role `user` or `admin`. Admins may also choose `compliance: ignore` (and with it
 maximum extraction), use XPath selectors and the `evaluate` action, and read every job; a user reads
 only their own jobs. A missing or wrong key answers 401 `unauthorized`, and a request that the role
-may not make 403 `forbidden`. Each key has a rate limit (`RATE_LIMIT_PER_MINUTE`); over it a request
+may not make 403 `forbidden`. An XPath selector with a user key is the exception: like any other
+invalid field it answers 422 `invalid_request`. Each key has a rate limit (`RATE_LIMIT_PER_MINUTE`); over it a request
 answers 429 `rate_limited` with `Retry-After`.
 
 With `AUTH_MODE=none` the service needs no key and every caller is an admin. Use it on your own
@@ -139,7 +140,8 @@ it on), the browser worker renders them in Chromium. `mode` chooses the browser 
 `data.mode_used` says which mode produced the answer. When no browser worker takes the page
 within `BROWSER_QUEUE_WAIT_SECONDS` (10 s), `auto` keeps the HTTP result with the warning
 `browser_unavailable`, and `browser` fails with `timeout` (retryable). While browser mode is off,
-`browser` answers 400 and `auto` never uses the browser.
+`browser`, `POST /v1/screenshot` and `auto` with `actions`, `cookies`, `headers` or `screenshot`
+answer 400, and `auto` without them never uses the browser.
 
 `actions` (at most 20), `cookies` and `headers` (sent only to the requested site) work with `auto`
 and `browser`, not with `fast` and not in batches; the OpenAPI spec at `/docs` lists the actions.
