@@ -112,6 +112,28 @@ def build_mcp(state: State, settings: Settings, registry: CollectorRegistry) -> 
     @asynccontextmanager
     async def lifespan() -> AsyncIterator[None]:
         async with http.router.lifespan_context(http):
+            _raise_sdk_body_cap(http, mcp_body_limit(settings))
             yield
 
     return McpMount(app=http, lifespan=lifespan, server=server)
+
+
+def _raise_sdk_body_cap(http: Any, limit: int) -> None:
+    """Hold the MCP SDK's own body cap to ``limit``, the one ``BodyLimitMiddleware`` already
+    enforces with the envelope. The SDK caps every body at 4 MiB (``RequestBodyLimitMiddleware``,
+    a plain-text 413) and FastMCP passes no other size, so an upload of more than about 3 MB
+    never reached its tool. The session manager exists only once the lifespan has started."""
+    from mcp.server.transport_security import RequestBodyLimitMiddleware
+
+    for route in http.routes:
+        manager = getattr(getattr(route, "endpoint", None), "session_manager", None)
+        if manager is None:
+            manager = getattr(getattr(route, "app", None), "session_manager", None)
+        if manager is None:
+            continue
+        if manager.max_request_body_size < limit:
+            handler = manager._handle_request  # what the SDK's cap wraps
+            manager.max_request_body_size = limit
+            manager.asgi_app = RequestBodyLimitMiddleware(handler, limit)
+        return
+    raise RuntimeError("the MCP session manager was not found")

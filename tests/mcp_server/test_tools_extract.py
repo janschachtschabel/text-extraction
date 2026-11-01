@@ -488,6 +488,23 @@ def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
+def test_extract_file_over_the_sdk_default_of_4_mib() -> None:
+    """A file of about 5 MB (about 6.7 MB as base64) reaches the tool, as it reaches REST: the
+    MCP SDK's own body cap of 4 MiB answered a plain-text 413 before."""
+    text = ("A line of plain text for the upload. " * 30 + "\n").encode() * 4500
+    assert len(base64.b64encode(text)) > 4 * 1024 * 1024
+    with running() as client:
+        result = call_tool(
+            client,
+            "extract_file",
+            {"content_base64": b64(text), "file_name": "big.txt"},
+            headers=AUTH,
+        )
+
+    assert result["isError"] is False, result
+    assert envelope_of(result)["status"] in ("success", "partial")
+
+
 def test_extract_file_base64() -> None:
     """Review Focus 2: base64 with line breaks, a data: prefix, broken, one byte over."""
     pdf = (CORPUS / "text.pdf").read_bytes()
