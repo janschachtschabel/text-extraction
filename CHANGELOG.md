@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-01
+
 Fixes from the audit of v0.1.0 (plans in
 [docs/superpowers/plans/2026-11-01-api-audit-docs-release.md](docs/superpowers/plans/2026-11-01-api-audit-docs-release.md)
 and
@@ -133,6 +135,11 @@ and
   an LLM key once the service has an LLM; the 400s of `describe_images`, `ocr: always` and the
   browser options while their switch is off; the grace period of the API pods with browser
   workers; and that a floating `0.1` tag needs a `pull`.
+
+### Not in this release
+
+- fastmcp 4.1.2 and Pillow 13 (with docling-slim 2.142): they wait for the 14-day rule for new
+  dependency versions and come in v0.1.2.
 
 ## [0.1.0] - 2026-11-01
 

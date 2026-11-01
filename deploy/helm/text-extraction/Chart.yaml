@@ -2,6 +2,6 @@ apiVersion: v2
 name: text-extraction
 description: Text extraction service that turns web pages, files, audio and video into clean text or Markdown.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.1.1"
 license: Apache-2.0

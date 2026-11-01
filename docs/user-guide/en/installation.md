@@ -70,7 +70,7 @@ swaps every build for the published image; `.env` stays the same, and the profil
 docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
 ```
 
-`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.0`; `0.1`
+`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.1`; `0.1`
 follows the newest `0.1.x` after `docker compose -f docker-compose.yml -f docker-compose.release.yml pull`,
 since an image already on the machine is not pulled again). The releases and their notes are on the
 [releases page](https://github.com/janschachtschabel/text-extraction/releases).
