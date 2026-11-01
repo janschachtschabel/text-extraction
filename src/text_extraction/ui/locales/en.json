@@ -183,6 +183,7 @@
   "warning.ocr_unavailable": "The document needed OCR, which was not available: its text layer only.",
   "warning.pages_truncated": "Pages after the page limit were cut.",
   "warning.pages_partial": "OCR stopped at its time limit or skipped a page: the pages it read.",
+  "warning.charset_mismatch": "The page said it was UTF-8 but is not: it was read as Windows-1252 (or the encoding its bytes fit).",
   "warning.document_fetched_directly": "The render ended on a file, which was fetched and converted.",
   "warning.subtitles_blocked": "The platform refused the subtitles: the metadata answers.",
   "warning.subtitles_failed": "The subtitles could not be read this time: the metadata answers.",

@@ -183,6 +183,7 @@
   "warning.ocr_unavailable": "Das Dokument brauchte OCR, die nicht verfügbar war: nur seine Textebene.",
   "warning.pages_truncated": "Seiten nach der Seitengrenze wurden weggelassen.",
   "warning.pages_partial": "Die OCR hat an ihrer Zeitgrenze aufgehört oder eine Seite übersprungen: die gelesenen Seiten.",
+  "warning.charset_mismatch": "Die Seite gab UTF-8 an, ist es aber nicht: Sie wurde als Windows-1252 gelesen (oder in der Kodierung, zu der ihre Bytes passen).",
   "warning.document_fetched_directly": "Das Rendern endete bei einer Datei, die abgerufen und umgewandelt wurde.",
   "warning.subtitles_blocked": "Die Plattform hat die Untertitel verweigert: Das Ergebnis enthält nur die Metadaten.",
   "warning.subtitles_failed": "Die Untertitel konnten diesmal nicht gelesen werden: Das Ergebnis enthält nur die Metadaten.",

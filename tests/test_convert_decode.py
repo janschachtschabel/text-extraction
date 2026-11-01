@@ -4,6 +4,7 @@ import codecs
 import pytest
 
 from text_extraction.convert import decode_html
+from text_extraction.convert.decode import decode_html_checked
 
 GERMAN = "Größe und Maße: Für Übungen gibt es äußerst schöne Lösungen. "
 
@@ -265,3 +266,42 @@ def test_decode_latin1_meta_still_wins_over_a_wrong_utf8_header() -> None:
     page = '<meta charset="iso-8859-1"><p>Größe, Käse, Übung, schön, Straße, Köln</p>'
 
     assert decode_html(page.encode("cp1252"), "utf-8") == page
+
+
+LATIN1_PAGE = "<html><body><p>Größe, Käse, Übung, schön, Straße, Köln, süß, Bär.</p></body></html>"
+
+
+@pytest.mark.parametrize(
+    ("data", "header"),
+    [
+        (LATIN1_PAGE.encode("cp1252"), "utf-8"),
+        (('<meta charset="utf-8">' + LATIN1_PAGE).encode("cp1252"), None),
+    ],
+    ids=["header", "meta"],
+)
+def test_decode_declared_utf8_that_is_nothing_like_it_is_read_as_windows_1252(
+    data: bytes, header: str | None
+) -> None:
+    """B2: no umlaut is valid UTF-8 here, so the declaration is wrong; the page is read as a
+    browser's fallback would and the mismatch is reported."""
+    text, mismatch = decode_html_checked(data, header)
+
+    assert "Größe, Käse, Übung" in text
+    assert "�" not in text
+    assert mismatch is True
+    assert decode_html(data, header) == text
+
+
+@pytest.mark.parametrize("count", [1, 9, 30])
+def test_decode_declared_utf8_with_stray_bytes_is_no_mismatch(count: int) -> None:
+    # Ten paragraphs of valid umlauts outweigh the stray windows-1252 bytes.
+    text, mismatch = decode_html_checked(_utf8_page_with_stray_bytes(count, meta=False), "utf-8")
+
+    assert "Größe und Maße" in text
+    assert mismatch is False
+
+
+def test_decode_matching_declarations_are_no_mismatch() -> None:
+    assert decode_html_checked("<p>Größe</p>".encode(), "utf-8") == ("<p>Größe</p>", False)
+    assert decode_html_checked(LATIN1_PAGE.encode("cp1252"), "iso-8859-1")[1] is False
+    assert decode_html_checked(LATIN1_PAGE.encode("cp1252"), None)[1] is False

@@ -64,6 +64,9 @@ and
 
 ### Fixed
 
+- A page or upload declared UTF-8 whose bytes are not (a Latin-1 page behind a default UTF-8
+  header) came out with every umlaut as U+FFFD; it is read as windows-1252 (or the legacy
+  encoding its bytes fit) now, with the new warning `charset_mismatch`.
 - A body declared `text/html` whose bytes are binary (a document's or image's signature at its
   start, a NUL byte in its first KiB) answered `partial` with a page of U+FFFD characters; it is
   `unsupported_content_type` now, and the message names what the bytes are.

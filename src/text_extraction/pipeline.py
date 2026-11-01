@@ -171,6 +171,7 @@ from text_extraction.convert import (
     convert_html,
     convert_plain,
     decode_html,
+    decode_html_checked,
     page_links,
 )
 from text_extraction.documents.formats import first_heading, from_markdown
@@ -320,6 +321,8 @@ _DOCUMENT_TYPES = frozenset(
     {media_type(kind) for kind in get_args(DocumentKind)} | {"application/octet-stream"}
 )
 DOCUMENT_FETCHED_DIRECTLY_WARNING = "document_fetched_directly"
+# A page declared UTF-8 (header or meta) whose bytes are not: read by the guess instead (B2).
+CHARSET_MISMATCH_WARNING = "charset_mismatch"
 # A page of a ``site_links`` run had more links than ``SITE_MAX_LINKS_PER_PAGE``: the first ones.
 LINKS_TRUNCATED_WARNING = "links_truncated"
 # Kinds Docling converts without OCR: OpenDocument files have their text.
@@ -1590,7 +1593,7 @@ class Pipeline:
             )
 
         started = time.perf_counter()
-        text = await self._pool.run(decode_html, fetched.content, fetched.charset)
+        text, mismatch = await self._pool.run(decode_html_checked, fetched.content, fetched.charset)
         run.convert_ms += _ms(started)
         started = time.perf_counter()
         page = text if kind == "html" else None
@@ -1604,7 +1607,9 @@ class Pipeline:
             and fetched.raw_sha256 == stored.entry.raw_sha256
         ):
             return await self._revalidated(run, stored, fetched)
-        return await self._extract_content(run, fetched, kind, text)
+        return await self._extract_content(
+            run, fetched, kind, text, warnings=[CHARSET_MISMATCH_WARNING] if mismatch else []
+        )
 
     async def _kind(self, fetched: FetchResult) -> DocumentKind | Literal["html", "text"] | None:
         """What the fetched body is (F1). A declared HTML type keeps the page path unless its
@@ -1887,8 +1892,10 @@ class Pipeline:
         fetched: FetchResult,
         kind: Literal["html", "text"],
         text: str,
+        *,
+        warnings: list[str],
     ) -> Envelope[ExtractResult]:
-        processed = await self._converted(run, fetched, kind, text)
+        processed = await self._converted(run, fetched, kind, text, warnings=warnings)
         if isinstance(processed, Envelope):
             return processed
         run.validators = Validators.from_headers(fetched.headers)
@@ -1921,9 +1928,12 @@ class Pipeline:
         fetched: FetchResult,
         kind: Literal["html", "text"],
         text: str,
+        *,
+        warnings: list[str] | None = None,
     ) -> _Processed | Envelope[ExtractResult]:
         """``_process`` on the conversion pool, then the DOM stage of an HTML page
-        (``_dom_stage``), or the failed envelope of a page that broke them."""
+        (``_dom_stage``), or the failed envelope of a page that broke them. ``warnings`` (of
+        the decoding) come first in the result's."""
         started = time.perf_counter()
         learned = run.learned if isinstance(run, _Run) else {}
         site = isinstance(run, _Run) and run.site_links
@@ -1933,6 +1943,8 @@ class Pipeline:
             )
             if processed.dom is not None:
                 processed = await self._dom_stage(run, processed, processed.dom)
+            if warnings:
+                processed = replace(processed, warnings=[*warnings, *processed.warnings])
             return processed
         except Exception as error:  # a page that breaks a converter fails alone
             # Traceback without locals (see logging.py); the host only, never the URL.
@@ -2176,7 +2188,7 @@ class Pipeline:
         """An HTML or plain-text upload within ``CONVERT_MAX_BYTES``, converted like a fetched
         page without a URL."""
         started = time.perf_counter()
-        text = await self._pool.run(decode_html, body, charset)
+        text, mismatch = await self._pool.run(decode_html_checked, body, charset)
         run.convert_ms += _ms(started)
         page = FetchResult(
             url="",
@@ -2191,7 +2203,9 @@ class Pipeline:
             not_modified=False,
             raw_sha256=raw_sha256,
         )
-        processed = await self._converted(run, page, kind, text)
+        processed = await self._converted(
+            run, page, kind, text, warnings=[CHARSET_MISMATCH_WARNING] if mismatch else []
+        )
         if isinstance(processed, Envelope):
             return processed
         return self._envelope(

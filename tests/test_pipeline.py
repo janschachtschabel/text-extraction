@@ -40,7 +40,13 @@ from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import FingerprintStore
 from text_extraction.outbound import CircuitOpen, DomainGate, OutboundBusy
 from text_extraction.pii.types import PiiOptions
-from text_extraction.pipeline import Pipeline, _cache_options, create_outbound, create_pipeline
+from text_extraction.pipeline import (
+    CHARSET_MISMATCH_WARNING,
+    Pipeline,
+    _cache_options,
+    create_outbound,
+    create_pipeline,
+)
 from text_extraction.render import Renderer
 from text_extraction.result_cache import ResultCache, cache_key
 from text_extraction.settings import Settings
@@ -294,6 +300,29 @@ def test_a_binary_body_declared_as_html_is_unsupported(body: bytes, label: str) 
     assert envelope.error.code == ErrorCode.UNSUPPORTED_CONTENT_TYPE
     assert envelope.error.message == (f"The body is declared text/html but is {label}, not a page.")
     assert data_of(envelope).content is None
+
+
+def test_a_latin1_page_behind_a_utf8_header_is_read_and_warns() -> None:
+    """B2: no umlaut of the page is valid UTF-8, so the header is wrong; the page is read as
+    windows-1252, as a browser would fall back, with the warning ``charset_mismatch``."""
+    page = ARTICLE.replace("process", "Prozess für Größe, Käse und Übung")
+    assert page != ARTICLE
+    harness = Harness({PAGE: fetched(body=page.encode("cp1252"))})
+
+    envelope = harness.run_once()
+
+    data = data_of(envelope)
+    assert envelope.status == "success"
+    assert data.content is not None
+    assert "für Größe, Käse und Übung" in data.content
+    assert data.warnings == [CHARSET_MISMATCH_WARNING]
+
+
+def test_a_utf8_page_does_not_warn() -> None:
+    page = ARTICLE.replace("process", "Prozess für Größe, Käse und Übung")
+    harness = Harness({PAGE: fetched(body=page)})
+
+    assert CHARSET_MISMATCH_WARNING not in data_of(harness.run_once()).warnings
 
 
 def test_plain_text_is_converted() -> None:

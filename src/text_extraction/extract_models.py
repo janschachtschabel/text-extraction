@@ -309,6 +309,8 @@ class ExtractResult(BaseModel):
     cache: CacheState
     warnings: list[str] = Field(
         description="What did not go as asked, while the result still answers: "
+        "`charset_mismatch` (the page was declared UTF-8 but is not: read as windows-1252, or "
+        "the legacy encoding its bytes fit) (pages); "
         "`browser_unavailable` (no browser worker took the page: the fast result), "
         "`action_<index>_failed` (a browser action, counted from 0), "
         "`navigation_refused_non_get`, `consent_overlay_removed`, `screenshot_clipped`, "
