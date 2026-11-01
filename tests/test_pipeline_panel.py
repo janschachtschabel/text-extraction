@@ -16,7 +16,7 @@ from fakeredis import FakeAsyncRedis
 from prometheus_client import CollectorRegistry
 from structlog.testing import capture_logs
 
-from tests.fakes import FakeFetcher, FakeRenderer, RecordingGate, rendered, response
+from tests.fakes import FakeFetcher, FakeRenderer, RecordingGate, fetched, rendered, response
 from tests.test_pipeline_media import SENTENCES, YT, YT_ID, YT_SHORT, FakeMediaFetcher, Probe, probe
 from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceChecker, ComplianceReport
@@ -372,6 +372,62 @@ def test_without_a_transcript_the_answer_is_the_draft_with_the_warning(
     assert harness.keys("res:*") == []
     assert harness.keys("fp:*") == []
     assert harness.panel_count(outcome) == 1
+
+
+BLOCKED_HOST = "https://blocked.example"
+DISALLOW_ALL = "User-agent: *\nDisallow: /\n"
+
+
+def disallow(harness: Harness, origin: str) -> None:
+    """``origin``'s robots.txt forbids everything (compliance ``enforce`` blocks it)."""
+    robots = f"{origin}/robots.txt"
+    harness.fake.answers[robots] = fetched(robots, DISALLOW_ALL, content_type="text/plain")
+
+
+@pytest.mark.parametrize(
+    "case", ["origin_blocked", "redirect_blocked", "refused_403", "no_document"]
+)
+def test_a_refused_panel_render_is_the_draft_with_the_warning(case: str) -> None:
+    draft, valkey = draft_of()
+    if case == "origin_blocked":  # the canonical URL's own origin forbids it
+        renderer = watch()
+    elif case == "redirect_blocked":  # the watch page redirected to a forbidden origin
+        landed = f"{BLOCKED_HOST}/watch"
+        renderer = FakeRenderer(
+            rendered(
+                WATCH_PAGE,
+                url=landed,
+                responses=[response(landed, redirects=[CANONICAL])],
+                transcript_panel=PANEL,
+            )
+        )
+    else:  # the watch page itself was refused (or not reported), whatever the panel answered
+        answers = [response(CANONICAL, status=403)] if case == "refused_403" else []
+        renderer = FakeRenderer(
+            rendered(WATCH_PAGE, url=CANONICAL, responses=answers, transcript_panel=PANEL)
+        )
+    # The drafting pod cached YouTube's files as allowing: the origin's block needs its own
+    # Valkey, where YouTube's files are loaded again.
+    shared = FakeAsyncRedis() if case == "origin_blocked" else valkey
+    harness = Harness(renderer=renderer, valkey=shared)
+    disallow(harness, "https://www.youtube.com" if case == "origin_blocked" else BLOCKED_HOST)
+
+    envelope = harness.run(draft=draft)
+
+    assert envelope.status == draft.status
+    assert envelope.error == draft.error
+    data = data_of(envelope)
+    assert data.mode_used == "fast"
+    assert data.warnings == [*data_of(draft).warnings, TRANSCRIPT_PANEL_UNAVAILABLE]
+    assert data.content == data_of(draft).content
+    assert PAGE_TEXT not in (data.content or "")
+    assert PANEL_TEXT not in (data.content or "")
+    assert data.fingerprint is None
+    assert harness.keys("res:*") == []
+    assert harness.keys("fp:*") == []
+    assert harness.panel_count("unavailable") == 1
+    if case == "origin_blocked":
+        assert renderer.calls == []  # never rendered
 
 
 def test_an_unblock_admin_still_gets_the_standard_browser() -> None:

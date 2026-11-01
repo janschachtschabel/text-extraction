@@ -2297,7 +2297,9 @@ class Pipeline:
         """The watch page at ``url`` (the canonical URL) rendered with ``transcript_panel`` and
         otherwise the standard options: never unblock mode, no caller options (a request with
         them never takes the media path). As any render (B2): the origin's compliance check,
-        the host's turn held during the render, every document answer checked afterwards."""
+        the host's turn held during the render, every document answer checked afterwards. A
+        watch page answered with a status other than 2xx is a failed render, whatever the
+        transcript view steps read."""
         run.mode_used, run.unblocked = "browser", False
         run.host = urlsplit(url).hostname
         turn = HostTurn(self._gate)
@@ -2313,6 +2315,17 @@ class Pipeline:
                 return refused
         finally:
             await turn.give_back()
+        if not rendered.responses:
+            return run.failed(
+                ErrorCode.INTERNAL_ERROR, "The browser reported no document.", retryable=True
+            )
+        status = rendered.responses[-1].status
+        if not 200 <= status < 300:  # a refused watch page: whatever the panel answered
+            return run.failed(
+                ErrorCode.TARGET_HTTP_ERROR,
+                f"The target answered with HTTP status {status}.",
+                retryable=status in _RETRYABLE_STATUSES or status >= 500,
+            )
         return rendered
 
     async def _render_options(self, run: _Run, unblock: bool) -> RenderOptions:
