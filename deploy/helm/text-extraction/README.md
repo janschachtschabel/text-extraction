@@ -174,6 +174,7 @@ helm install text-extraction ./deploy/helm/text-extraction \
 | `config.SITE_MAX_SITEMAP_FILES`, `config.SITE_MAX_SITEMAP_URLS` | `"500"`, `"200000"` | Sitemap files and sitemap entries one crawl reads at most. A crawl's items live in Valkey with its job: size `valkey.maxmemory` for the open crawls (each page item with up to `SITE_MAX_LINKS_PER_PAGE` links, each sitemap entry about 100 bytes). |
 | `config.SITE_SITEMAP_MAX_BYTES` | `"52428800"` | Largest sitemap file, as fetched and after a gzip inflate (the protocol's 50 MiB). |
 | `config.SITE_MAX_LINKS_PER_PAGE` | `"1000"` | Most links kept of one crawled page. |
+| `config.MEDIA_TRANSCRIPT_PANEL_ENABLED` | `"true"` | Use YouTube's new transcript view in the browser when the subtitles could not be read (`auto` requests, needs browser workers). |
 | `config.SHUTDOWN_DRAIN_SECONDS` | `"5"` | Seconds the pod reports not ready but keeps serving after SIGTERM, before the graceful shutdown. |
 | `config.FETCH_MAX_BYTES`, `config.DOCUMENT_MAX_BYTES` | unset (20000000 each) | Lower them together: `DOCUMENT_MAX_BYTES` must not exceed `FETCH_MAX_BYTES`, or the pods exit with code 2. |
 | `config.MCP_ALLOWED_ORIGINS` | `""` | Browser origins that may call `/mcp`, a comma list of `http(s)://host[:port]`; empty: a request with any `Origin` header is refused (MCP clients outside a browser send none). |

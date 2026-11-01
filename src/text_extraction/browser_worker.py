@@ -18,8 +18,9 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    ``browser`` mode with ``screenshot`` and without metadata. The job's owner is the principal,
    so an admin owner's ``evaluate`` actions run, and unblock mode applies only to an admin's
    ``compliance: ignore`` job while ``BROWSER_UNBLOCK_ENABLED`` (B14, R9). An ``auto`` request
-   with secrets always renders (R8), one with a draft is compared with it, one without either
-   runs the fast step first;
+   with secrets always renders (R8), one with a draft is compared with it (a YouTube video's
+   details whose subtitles could not be read try its transcript view instead, P13-S2), one
+   without either runs the fast step first;
 3. runs the pipeline with an ``ArtifactSink`` bound to the job: the screenshot is stored as
    ``job:{<id>}:artifact:screenshot.png`` for ``ARTIFACT_TTL_SECONDS`` and served at
    ``/v1/jobs/<id>/artifacts/screenshot.png``. While Valkey's memory guard is high, or when the

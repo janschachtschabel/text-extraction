@@ -20,6 +20,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
+from tests.test_pipeline_media import YT, FakeMediaFetcher, probe
 from text_extraction.app import _wait_for, create_public_app
 from text_extraction.auth import Principal
 from text_extraction.browser_dispatch import Handover as BrowserHandover
@@ -27,7 +28,7 @@ from text_extraction.browser_options import ArtifactRef, BrowserSecrets, Evaluat
 from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
-from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING
+from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING, needs_transcript_panel
 from text_extraction.extract_api import (
     _in_browser,
     _store_result,
@@ -40,6 +41,7 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import Fetcher, FetchResult, Validators
 from text_extraction.job_models import JobOptions
 from text_extraction.jobs import SCREENSHOT_ARTIFACT, JobRecord, JobStore
+from text_extraction.media.pool import MediaFetcher
 from text_extraction.pipeline import Pipeline, _cache_options, create_pipeline
 from text_extraction.pool_dispatch import GracefulShutdown
 from text_extraction.pool_dispatch import Handover as PoolHandover
@@ -1294,6 +1296,89 @@ def test_auto_without_worker_returns_fast_with_browser_unavailable() -> None:
         assert case.keys("job*") == []  # the job is gone
         assert case.keys("fp:*") == []
         assert case.keys("res:*") == []
+
+
+# --- YouTube's transcript view (P13-S1) -------------------------------------------------------
+
+
+def youtube_case(**overrides: Any) -> BrowserCase:
+    """A ``BrowserCase`` whose pipeline reads a YouTube video whose subtitles were refused."""
+    case = BrowserCase(**overrides)
+    media = FakeMediaFetcher(
+        probe(manual={}, automatic={}, track=None, blocked=True, error="blocked")
+    )
+    case.app.state.pipeline = create_pipeline(
+        case.settings,
+        FakeAsyncRedis(server=case.server),
+        cast(Fetcher, case.fetcher),
+        CollectorRegistry(),
+        media_fetcher=cast(MediaFetcher, media),
+    )
+    return case
+
+
+def test_auto_hands_a_video_whose_subtitles_were_refused_to_the_browser() -> None:
+    case = youtube_case()
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": YT}, headers=AUTH)
+
+        assert response.status_code == 200
+        assert response.json()["data"]["mode_used"] == "browser"
+        seen = worker.seen[0]
+        assert seen.job.options.mode == "auto"
+        assert seen.draft is not None
+        assert seen.draft.data is not None
+        assert seen.draft.data.media is not None
+        assert seen.draft.data.media.transcript_source == "metadata_only"
+        assert "subtitles_blocked" in seen.draft.data.warnings
+
+
+@pytest.mark.parametrize(
+    ("options", "overrides"),
+    [
+        ({"mode": "fast"}, {}),
+        ({}, {"media_transcript_panel_enabled": False}),
+        ({}, {"browser_enabled": False}),
+    ],
+    ids=["fast", "switch_off", "browser_off"],
+)
+def test_a_video_whose_subtitles_were_refused_stays_fast_without_its_conditions(
+    options: dict[str, Any], overrides: dict[str, Any]
+) -> None:
+    case = youtube_case(**overrides)
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post("/v1/extract", json={"url": YT, **options}, headers=AUTH)
+
+        data = response.json()["data"]
+        assert data["mode_used"] == "fast"
+        assert data["media"]["transcript_source"] == "metadata_only"
+        assert BROWSER_UNAVAILABLE_WARNING not in data["warnings"]
+        assert worker.seen == []
+        assert case.keys("job*") == []
+
+
+class CannedPipeline:
+    """Answers every extraction with ``answer`` and hands nothing over."""
+
+    def __init__(self, answer: Envelope[ExtractResult]) -> None:
+        self.answer = answer
+
+    async def run(self, *_args: Any, **_kwargs: Any) -> Envelope[ExtractResult]:
+        return self.answer
+
+
+def test_a_transcription_request_is_not_handed_to_the_browser() -> None:
+    case = youtube_case(asr_enabled=True)
+    draft = asyncio.run(case.app.state.pipeline.run(ExtractRequest(url=YT), USER))
+    assert needs_transcript_panel(draft)
+    case.app.state.pipeline = CannedPipeline(draft)  # as if the ASR handoff did not take it
+    with TestClient(case.app) as client, case.worker() as worker:
+        response = client.post(
+            "/v1/extract", json={"url": YT, "transcribe": True, "wait_seconds": 1}, headers=AUTH
+        )
+
+        assert response.json()["data"]["mode_used"] == "fast"
+        assert worker.seen == []
 
 
 @pytest.mark.parametrize(

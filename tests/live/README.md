@@ -78,7 +78,8 @@ codes" table: the `error.code` of every failed or partial answer and of every
 `connection_error`, most frequent first, with the three domains that gave it most, for a list with
 an `expected_source` column (the media set) a "Media" table (per platform: the URLs, how many got
 each `transcript_source` or none, and how many got the expected one; a row expecting subtitles
-counts with manual or automatic ones, as platforms move tracks between the two), and a "URLs
+counts with manual or automatic ones, as platforms move tracks between the two, and with
+`transcript_panel`, YouTube's transcript view read in the browser, which shows one of them), and a "URLs
 not ok" table with each URL whose bucket is not `ok` (bucket, code, mode used, words). To see where the browser helps, run a set in `fast` and in
 `browser` mode and compare the domains, as the 2026-09-28 baseline did.
 

@@ -3,7 +3,8 @@
 ``render_page`` loads a page in the steps of B2 within one deadline: ``goto`` until ``load``,
 up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle, the consent opt-out (B11,
 ``run_consent``; the ``accept_cookies`` action opts in instead), the request's actions
-(``browser_actions.run_actions``), then cookie dialogs left over are removed
+(``browser_actions.run_actions``), the transcript panel steps when asked for
+(``browser_panel.read_transcript_panel``), then cookie dialogs left over are removed
 (``strip_consent_overlays``), hidden elements are removed (``strip_hidden``) and the
 DOM is read; the screenshot comes last. A renderer can add a step after the load
 (``after_load``: the unblock renderer waits out a bot challenge there).
@@ -44,6 +45,7 @@ from text_extraction.browser_driver import (
     evaluate_in_main_world,
 )
 from text_extraction.browser_options import AcceptCookiesAction, Action
+from text_extraction.browser_panel import TRANSCRIPT_PANEL_UNAVAILABLE, read_transcript_panel
 from text_extraction.browser_proxy import ProxyContext
 from text_extraction.browser_scripts import (
     CONSENT_RELAY,
@@ -302,6 +304,7 @@ class _Render:
         self.moving: set[Request] = set()
         self.deadline = 0.0
         self.checks: set[asyncio.Task[None]] = set()
+        self.transcript_panel: bytes | None = None  # the get_panel body (P13-S3)
 
     async def install(self) -> None:
         self.page.on("response", self._on_response)
@@ -368,6 +371,8 @@ class _Render:
             await self._run_actions(actions, reserve)
             if self.downloads > downloads:
                 return self._ended_on_download()
+        if self.options.transcript_panel:
+            await self._transcript_panel(reserve)
         if self.settings.browser_autoconsent and await strip_consent_overlays(self.page):
             self.warnings.append("consent_overlay_removed")
         await strip_hidden(self.page)
@@ -420,6 +425,18 @@ class _Render:
         self.denied = False
         self.raise_kept()
         await self._idle(reserve)
+        self.raise_kept()
+
+    async def _transcript_panel(self, reserve: float) -> None:
+        """Read YouTube's new transcript view (P13-S3) before the reserve for reading the page.
+        Its failure is a warning, never an error of the render."""
+        self.transcript_panel = await read_transcript_panel(
+            self.page,
+            deadline=self.deadline - reserve,
+            max_bytes=self.settings.media_subtitle_max_bytes,
+        )
+        if self.transcript_panel is None:
+            self.warnings.append(TRANSCRIPT_PANEL_UNAVAILABLE)
         self.raise_kept()
 
     async def _navigations_done(self, may_navigate: bool) -> None:
@@ -556,6 +573,7 @@ class _Render:
             hosts=self.traffic.hosts if self.traffic is not None else frozenset(),
             cookies=cookies,
             download_url=self._download_url(responses) if download else None,
+            transcript_panel=None if download else self.transcript_panel,
         )
 
     def _download_url(self, responses: list[MainResponse]) -> str | None:

@@ -228,9 +228,14 @@ description, duration and licence. The page itself is not fetched:
 
 A video without subtitles answers its details only (`"transcript_source": "metadata_only"`,
 `status: partial`, `error.code: no_transcript_available`); so does a video whose platform refused
-the service (warning `subtitles_blocked`: YouTube blocks many data-centre IPs). An HTML page whose
-`<video>` or `<audio>` has a `<track>` gets that text after its own, under `## Transcript`, and
-`data.media.embeds` lists the players a page embeds, for you to extract one by one.
+the service (warning `subtitles_blocked`: YouTube blocks many data-centre IPs). With browser mode
+on, a YouTube video whose subtitles the service could not read (warning `subtitles_blocked` or
+`subtitles_failed`) gets a second try in the browser in `auto` mode without `transcribe`: where
+YouTube offers its new transcript view, the answer is that transcript
+(`"transcript_source": "transcript_panel"`, `"mode_used": "browser"`); otherwise it is the
+details with the warning `transcript_panel_unavailable`. An HTML page whose `<video>` or `<audio>`
+has a `<track>` gets that text after its own, under `## Transcript`, and `data.media.embeds` lists
+the players a page embeds, for you to extract one by one.
 
 With the ASR worker, `"transcribe": true` transcribes a video without subtitles or an audio or
 video file URL. A video with subtitles still answers at once; a transcription is always a job,

@@ -2,6 +2,9 @@
 
 ``needs_browser`` and ``better`` are pure rules over result envelopes; the pipeline that runs
 the browser calls them. ``unblock_applies`` says whether unblock mode may be used at all.
+``needs_transcript_panel`` says when a YouTube video whose subtitles could not be read gets a
+second try in YouTube's new transcript view (P13-S1); ``transcript_panel_applies`` adds the
+switch and the request's ``transcribe``.
 """
 
 from typing import Final, Literal
@@ -10,6 +13,7 @@ from text_extraction.auth import Principal
 from text_extraction.compliance import ComplianceMode
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.extract_models import ExtractResult
+from text_extraction.media.panel import UNREAD_SUBTITLES
 from text_extraction.settings import Settings
 
 # Added to a fast result that stays as the answer because the browser could not be used.
@@ -79,6 +83,35 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     )
     unfinished = envelope.status != "success" and _is_ok_html(result)
     return is_bot_protection or unfinished or result.quality.challenge_status
+
+
+def needs_transcript_panel(envelope: Envelope[ExtractResult]) -> bool:
+    """Whether a fast result is a YouTube video's details whose subtitles could not be read
+    (``subtitles_blocked`` or ``subtitles_failed``), to be tried in YouTube's transcript view in
+    the browser (P13-S1). A video YouTube says has no subtitles, another platform, a transcript
+    and a stored result (``cache`` ``hit`` or ``revalidated``) are not."""
+    result = envelope.data
+    if result is None or result.mode_used != "fast" or result.media is None:
+        return False
+    return (
+        result.media.platform == "youtube"
+        and result.media.transcript_source == "metadata_only"
+        and result.cache not in ("hit", "revalidated")
+        and not UNREAD_SUBTITLES.isdisjoint(result.warnings)
+    )
+
+
+def transcript_panel_applies(
+    envelope: Envelope[ExtractResult], settings: Settings, *, transcribe: bool
+) -> bool:
+    """``needs_transcript_panel`` while ``MEDIA_TRANSCRIPT_PANEL_ENABLED`` is on, for a request
+    without ``transcribe`` (a transcription does better). The callers add ``mode: auto`` and
+    ``BROWSER_ENABLED``, as for ``needs_browser``."""
+    return (
+        settings.media_transcript_panel_enabled
+        and not transcribe
+        and needs_transcript_panel(envelope)
+    )
 
 
 def _score(envelope: Envelope[ExtractResult]) -> tuple[int, int]:

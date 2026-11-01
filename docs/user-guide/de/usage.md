@@ -239,9 +239,14 @@ Titel, seine Beschreibung, Dauer und Lizenz. Die Seite selbst wird nicht geholt:
 Für ein Video ohne Untertitel enthält die Antwort nur seine Angaben
 (`"transcript_source": "metadata_only"`, `status: partial`, `error.code: no_transcript_available`);
 ebenso ein Video, dessen Plattform den Dienst abgelehnt hat (Warnung `subtitles_blocked`: YouTube
-sperrt viele IPs von Rechenzentren). Eine HTML-Seite, deren `<video>` oder `<audio>` ein `<track>`
-hat, bekommt dessen Text nach ihrem eigenen, unter `## Transcript`, und `data.media.embeds` listet
-die Player, die eine Seite einbettet, damit Sie sie einzeln extrahieren.
+sperrt viele IPs von Rechenzentren). Ist der Browser-Modus an, bekommt ein YouTube-Video, dessen
+Untertitel der Dienst nicht lesen konnte (Warnung `subtitles_blocked` oder `subtitles_failed`),
+im Modus `auto` ohne `transcribe` einen zweiten Versuch im Browser: Wo YouTube seine neue
+Transkriptansicht anbietet, enthält die Antwort dieses Transkript
+(`"transcript_source": "transcript_panel"`, `"mode_used": "browser"`); sonst enthält sie die
+Angaben mit der Warnung `transcript_panel_unavailable`. Eine HTML-Seite, deren `<video>` oder
+`<audio>` ein `<track>` hat, bekommt dessen Text nach ihrem eigenen, unter `## Transcript`, und
+`data.media.embeds` listet die Player, die eine Seite einbettet, damit Sie sie einzeln extrahieren.
 
 Mit dem ASR-Worker transkribiert `"transcribe": true` ein Video ohne Untertitel oder die URL einer
 Audio- oder Videodatei. Für ein Video mit Untertiteln kommt die Antwort weiterhin sofort; eine

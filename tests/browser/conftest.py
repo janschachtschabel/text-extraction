@@ -6,14 +6,15 @@ shell under ``/opt/pw-browsers``; without one the tests are skipped. Patchright'
 unblock renderer's) is found the same way (``patchright_chromium``).
 
 The site is served on three loopback ports. The egress proxy of the tests admits 127.0.0.1 on
-the first two only (the site and its "third party"), so the private-address tests still see the
-third port and ``169.254.169.254`` refused.
+the first two (the site and its "third party") and on the ports of other local servers a test
+names (``open_stack(..., ports=...)``), never on the third, so the private-address tests still
+see the third port and ``169.254.169.254`` refused.
 """
 
 import asyncio
 import glob
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv6Address
@@ -194,11 +195,14 @@ def settings_for(chromium: Path | None) -> Any:
 
 
 @asynccontextmanager
-async def open_stack(settings: Settings, site: Site) -> AsyncIterator[Stack]:
-    """A proxy, a pool with a launched browser and the renderer, all stopped afterwards."""
+async def open_stack(
+    settings: Settings, site: Site, *, ports: Iterable[int] = ()
+) -> AsyncIterator[Stack]:
+    """A proxy, a pool with a launched browser and the renderer, all stopped afterwards. The
+    proxy admits the site's two ports and ``ports`` (other local servers of a test)."""
     registry = CollectorRegistry()
-    ports = {urlsplit(site.base).port or 0, urlsplit(site.third).port or 0}
-    proxy = SiteProxy(settings, ports, registry)
+    admitted = {urlsplit(site.base).port or 0, urlsplit(site.third).port or 0, *ports}
+    proxy = SiteProxy(settings, admitted, registry)
     await proxy.start()
     launcher = RecordingLauncher(settings)
     pool = BrowserPool(settings, proxy, registry, launcher=launcher)

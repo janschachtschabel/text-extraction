@@ -13,7 +13,10 @@ workers.
 3. Otherwise the fast pipeline runs. An ``auto`` result that needs the browser
    (``escalation.needs_browser``, in unblock mode for admins also a bot wall or a refusal; R9,
    B16) goes to the browser workers with the fast result as its draft, and the worker keeps the
-   better of both.
+   better of both. So does a YouTube video's details whose subtitles could not be read, while
+   ``MEDIA_TRANSCRIPT_PANEL_ENABLED`` is on and the request has no ``transcribe``
+   (``escalation.transcript_panel_applies``, P13-S1): the worker tries the video's transcript
+   view.
 4. If no browser worker answers in time, ``auto`` answers its fast result with the warning
    ``browser_unavailable``, without its fingerprint (it was never compared or stored, and the
    browser may answer the next request), and ``browser`` answers ``failed``/``timeout``,
@@ -118,7 +121,12 @@ from text_extraction.documents.routing import OCR_DISABLED_MESSAGE, ocr_availabl
 from text_extraction.documents.types import OcrOption
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.errors import ServiceError
-from text_extraction.escalation import BROWSER_UNAVAILABLE_WARNING, needs_browser, unblock_for
+from text_extraction.escalation import (
+    BROWSER_UNAVAILABLE_WARNING,
+    needs_browser,
+    transcript_panel_applies,
+    unblock_for,
+)
 from text_extraction.extract_models import (
     ExtractRequest,
     ExtractResult,
@@ -836,11 +844,10 @@ async def _extraction(
         return None  # the Docling or ASR worker writes the job's result
     settings: Settings = state.settings
     unblock = unblock_for(principal, compliance, settings)
-    if (
-        body.mode != "auto"
-        or not settings.browser_enabled
-        or not needs_browser(fast, unblock=unblock)
-    ):
+    escalates = needs_browser(fast, unblock=unblock) or transcript_panel_applies(
+        fast, settings, transcribe=body.transcribe
+    )
+    if body.mode != "auto" or not settings.browser_enabled or not escalates:
         return fast
     return await _in_browser(
         state, body, principal, compliance, handover, kind, fast, started, llm_key=llm_key

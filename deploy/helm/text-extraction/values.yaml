@@ -59,6 +59,9 @@ config:
   SITE_MAX_SITEMAP_URLS: "200000"
   SITE_SITEMAP_MAX_BYTES: "52428800"
   SITE_MAX_LINKS_PER_PAGE: "1000"
+  # A YouTube video whose subtitles could not be read gets a second try in the browser where
+  # YouTube offers its new transcript view (auto requests; nothing happens without browser workers).
+  MEDIA_TRANSCRIPT_PANEL_ENABLED: "true"
   # Not ready, but still serving, this long after SIGTERM; see terminationGracePeriodSeconds.
   SHUTDOWN_DRAIN_SECONDS: "5"
   # FETCH_MAX_BYTES (download limit) and DOCUMENT_MAX_BYTES (largest document and upload) are both

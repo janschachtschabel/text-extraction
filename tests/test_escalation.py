@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from typing import Any, Literal
 
 import pytest
@@ -10,10 +12,12 @@ from text_extraction.escalation import (
     REFUSAL_STATUSES,
     better,
     needs_browser,
+    needs_transcript_panel,
+    transcript_panel_applies,
     unblock_applies,
 )
 from text_extraction.extract_models import ExtractResult, Timings
-from text_extraction.media.types import MediaInfo
+from text_extraction.media.types import MediaInfo, Platform, TranscriptSource
 from text_extraction.quality import Quality
 from text_extraction.settings import Settings
 
@@ -321,3 +325,97 @@ def test_unblock_applies_only_with_ignore_and_switch(
 
 def test_warning_name() -> None:
     assert BROWSER_UNAVAILABLE_WARNING == "browser_unavailable"
+
+
+# --- the transcript panel (P13-S1) ------------------------------------------------------------
+
+
+def video(
+    *,
+    warnings: list[str],
+    platform: Platform = "youtube",
+    source: TranscriptSource = "metadata_only",
+    mode_used: Literal["fast", "browser"] = "fast",
+    cache: str = "miss",
+) -> Envelope[ExtractResult]:
+    """A platform video's answer: its details only (``metadata_only``) by default."""
+    answer = envelope(
+        status="partial",
+        code=ErrorCode.NO_TRANSCRIPT_AVAILABLE,
+        mode_used=mode_used,
+        q=quality(word_count=20),
+        upstream_status=None,
+        media=MediaInfo(platform=platform, transcript_source=source),
+    )
+    assert answer.data is not None
+    data = answer.data.model_copy(update={"warnings": warnings, "cache": cache})
+    return answer.model_copy(update={"data": data})
+
+
+@pytest.mark.parametrize("warning", ["subtitles_blocked", "subtitles_failed"])
+def test_a_youtube_video_whose_subtitles_could_not_be_read_needs_the_panel(warning: str) -> None:
+    assert needs_transcript_panel(video(warnings=[warning]))
+
+
+def test_a_video_youtube_says_has_no_subtitles_needs_no_panel() -> None:
+    assert not needs_transcript_panel(video(warnings=[]))
+    assert not needs_transcript_panel(video(warnings=["asr_unavailable"]))
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        video(warnings=["subtitles_blocked"], platform="vimeo"),
+        video(warnings=["subtitles_blocked"], mode_used="browser"),
+        video(warnings=["subtitles_blocked"], cache="hit"),
+        video(warnings=["subtitles_blocked"], cache="revalidated"),
+        video(warnings=["subtitles_failed"], source="auto_subtitles"),
+        video(warnings=["subtitles_failed"], source="transcript_panel"),
+    ],
+    ids=["vimeo", "browser", "hit", "revalidated", "transcript", "panel"],
+)
+def test_other_answers_need_no_panel(answer: Envelope[ExtractResult]) -> None:
+    assert not needs_transcript_panel(answer)
+
+
+def test_a_page_or_nothing_needs_no_panel() -> None:
+    page = envelope()
+    assert page.data is not None
+    page = page.model_copy(
+        update={"data": page.data.model_copy(update={"warnings": ["subtitles_blocked"]})}
+    )
+    assert not needs_transcript_panel(page)
+    assert not needs_transcript_panel(Envelope(status="failed", data=None))
+
+
+def test_needs_browser_stays_false_for_a_panel_answer() -> None:
+    assert not needs_browser(video(warnings=["subtitles_blocked"]), unblock=True)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "transcribe", "expected"),
+    [(True, False, True), (False, False, False), (True, True, False)],
+)
+def test_the_panel_applies_with_its_switch_and_without_transcribe(
+    enabled: bool, transcribe: bool, expected: bool
+) -> None:
+    answer = video(warnings=["subtitles_blocked"])
+    switch = settings(media_transcript_panel_enabled=enabled)
+
+    assert transcript_panel_applies(answer, switch, transcribe=transcribe) is expected
+    assert not transcript_panel_applies(video(warnings=[]), switch, transcribe=transcribe)
+
+
+def test_the_rules_load_without_the_media_steps() -> None:
+    """The escalation rules are light: they name the subtitles warnings without importing the
+    media steps (``pipeline_media``)."""
+    script = (
+        "import sys\n"
+        "import text_extraction.escalation\n"
+        "print('text_extraction.pipeline_media' in sys.modules)\n"
+    )
+    result = subprocess.run(  # noqa: S603 - our own interpreter and script
+        [sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=120
+    )
+
+    assert result.stdout.strip() == "False"

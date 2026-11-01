@@ -187,6 +187,7 @@
   "warning.subtitles_blocked": "Die Plattform hat die Untertitel verweigert: Das Ergebnis enthält nur die Metadaten.",
   "warning.subtitles_failed": "Die Untertitel konnten diesmal nicht gelesen werden: Das Ergebnis enthält nur die Metadaten.",
   "warning.asr_unavailable": "Keine Transkription rechtzeitig, oder sie ist fehlgeschlagen: Das Ergebnis enthält nur die Metadaten.",
+  "warning.transcript_panel_unavailable": "Die Transkriptansicht von YouTube konnte im Browser nicht gelesen werden: Das Ergebnis enthält nur die Metadaten.",
   "warning.tracks_truncated": "Mehr Spuren als erlaubt: die ersten.",
   "warning.tracks_failed": "Keine Spur der Seite konnte gelesen werden.",
   "warning.no_speech": "Die Transkription hat keine Sprache gefunden.",

@@ -86,6 +86,7 @@ SETTING_ENV_VARS = (
     "MEDIA_MAX_BYTES",
     "MEDIA_UPLOAD_MAX_BYTES",
     "MEDIA_DOWNLOAD_TIMEOUT_SECONDS",
+    "MEDIA_TRANSCRIPT_PANEL_ENABLED",
     "ASR_ENABLED",
     "ASR_BACKEND",
     "ASR_MODEL",
@@ -961,6 +962,7 @@ def test_media_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.media_max_bytes == 500_000_000
     assert settings.media_upload_max_bytes == 25_000_000
     assert settings.media_download_timeout_seconds == 600
+    assert settings.media_transcript_panel_enabled is True
     assert settings.asr_enabled is False
     assert settings.asr_backend == "local"
     assert settings.asr_model == "large-v3-turbo"
@@ -977,6 +979,13 @@ def test_media_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.asr_external_model == "whisper-1"
     assert settings.asr_external_api_key is None
     assert settings.asr_external_timeout_seconds == 300
+
+
+def test_media_transcript_panel_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AUTH_MODE", "none")
+    monkeypatch.setenv("MEDIA_TRANSCRIPT_PANEL_ENABLED", "false")
+
+    assert load_settings().media_transcript_panel_enabled is False
 
 
 @pytest.mark.parametrize(
