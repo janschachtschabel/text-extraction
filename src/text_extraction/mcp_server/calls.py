@@ -10,7 +10,7 @@ import logging
 import re
 import time
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, ClassVar
 
 import structlog
@@ -20,7 +20,13 @@ from fastmcp.exceptions import FastMCPError, NotFoundError
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import Tool, ToolResult
-from mcp_types import CallToolRequestParams
+from mcp.shared.exceptions import MCPError
+from mcp_types import (
+    CallToolRequestParams,
+    InitializeRequest,
+    InitializeResult,
+    ListToolsRequest,
+)
 from prometheus_client import CollectorRegistry, Counter, Histogram
 from pydantic import BaseModel, PrivateAttr, ValidationError
 from starlette.datastructures import State
@@ -40,6 +46,9 @@ _log = structlog.get_logger(__name__)
 # label.
 UNKNOWN_TOOL = "unknown"
 _OUTCOMES = ("success", "partial", "failed")
+# The JSON-RPC error code of a refused ``initialize`` or ``tools/list`` (the rate limit): a
+# server error of the implementation-defined range.
+_RPC_REFUSED = -32000
 # The tools that take a job id: a refused call logs the id it was asked for. Only a job id, as
 # `jobs_api.visible_job` checks it, is logged; any other text of the caller's never is.
 _JOB_ID_TOOLS = frozenset({"get_job", "cancel_job"})
@@ -176,13 +185,37 @@ def outcome_of(result: ToolResult) -> tuple[str, str | None]:
 
 
 class CallGuard(Middleware):
-    """FastMCP middleware around every ``tools/call``: one ``check_rate`` hit (``initialize``,
-    ``tools/list`` and notifications are free), the tool, the log line ``mcp_tool_call`` and the
-    metrics. Every error becomes an error result (``error_result``)."""
+    """FastMCP middleware around every ``tools/call``: one ``check_rate`` hit, the tool, the
+    log line ``mcp_tool_call`` and the metrics. Every error becomes an error result
+    (``error_result``). ``initialize`` and ``tools/list`` count one hit each too (M4): a
+    refusal is their JSON-RPC error; notifications are free."""
 
     def __init__(self, state: State, metrics: ToolMetrics) -> None:
         self._state = state
         self._metrics = metrics
+
+    async def on_initialize(
+        self,
+        context: MiddlewareContext[InitializeRequest],
+        call_next: CallNext[InitializeRequest, InitializeResult | None],
+    ) -> InitializeResult | None:
+        await self._count()
+        return await call_next(context)
+
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[ListToolsRequest],
+        call_next: CallNext[ListToolsRequest, Sequence[Tool]],
+    ) -> Sequence[Tool]:
+        await self._count()
+        return await call_next(context)
+
+    async def _count(self) -> None:
+        """One hit of the caller; a refusal (429, 503) is a JSON-RPC error with its message."""
+        try:
+            await check_rate(self._state, call_principal())
+        except ServiceError as error:
+            raise MCPError(_RPC_REFUSED, error.message) from None
 
     async def on_call_tool(
         self,

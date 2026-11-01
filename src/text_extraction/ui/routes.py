@@ -20,7 +20,7 @@ from text_extraction.auth import authenticate, principal_for
 from text_extraction.compliance import ComplianceMode, resolve_mode
 from text_extraction.errors import ServiceError
 from text_extraction.file_models import FILE_PART
-from text_extraction.ratelimit import check_rate_left
+from text_extraction.ratelimit import check_rate_left, count_used
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     envelope_error,
@@ -221,7 +221,8 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
 async def _preview_view(request: Request, settings: Settings) -> Response:
     """Fetch the posted image URLs (``url``, with their ``alt`` texts) through the UI's
     ``ImageFetcher`` with the caller's resolved compliance mode (``compliance``) and show them
-    as ``data:`` images (P10-S16). One rate-limit hit, whatever the number of images."""
+    as ``data:`` images (P10-S16). One rate-limit hit per image (M4): the view's own, and one
+    more for each further image, counted once they are fetched."""
     try:
         principal = await ui_principal(request)
         form = await read_form(request, max_files=0)
@@ -242,6 +243,7 @@ async def _preview_view(request: Request, settings: Settings) -> Response:
     previews = await load_previews(
         urls, fetcher=fetcher, mode=mode, max_bytes=settings.ui_image_max_bytes
     )
+    await count_used(request.app.state, principal, len(previews) - 1)
     entries = []
     for preview in previews:
         counter.labels(preview.skipped or SHOWN).inc()

@@ -32,6 +32,7 @@ from tests.test_jobs import success
 from text_extraction.app import create_public_app
 from text_extraction.jobs import JobStore
 from text_extraction.jobs_api import batch_body_limit
+from text_extraction.mcp_server import tools_jobs
 from text_extraction.mcp_server.calls import outcome_of
 from text_extraction.mcp_server.results import TRUNCATED_WARNING, payload_result
 from text_extraction.mcp_server.server import TOOL_ROUTES
@@ -234,6 +235,33 @@ def test_get_job_wait_bounded(client: TestClient) -> None:
     view = envelope_of(result)["data"]
     assert view["state"] == "running"
     assert [item["state"] for item in view["items"]] == ["done", "pending", "pending"]
+
+
+def rate_hits(client: TestClient) -> int:
+    async def read() -> int:
+        app: Any = client.app
+        total = 0
+        for key in await app.state.valkey.keys("rl:alice:*"):
+            total += int(await app.state.valkey.get(key))
+        return total
+
+    hits: int = portal(client).call(read)
+    return hits
+
+
+def test_get_job_counts_one_hit_per_wait_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    # M4: a long wait is several calls' worth of work (one hit per 10 s, here per 1 s).
+    monkeypatch.setattr(tools_jobs, "WAIT_SECONDS_PER_HIT", 1)
+    with running() as client:
+        job_id = start_batch(client)
+        before = rate_hits(client)
+        call_tool(client, "get_job", {"job_id": job_id, "wait_seconds": 2.5}, headers=AUTH)
+        after_wait = rate_hits(client)
+        call_tool(client, "get_job", {"job_id": job_id}, headers=AUTH)
+        after_read = rate_hits(client)
+
+    assert after_wait - before == 3  # 2.5 s waited: three started steps
+    assert after_read - after_wait == 1
 
 
 def test_get_job_wait_cut_to_the_setting() -> None:

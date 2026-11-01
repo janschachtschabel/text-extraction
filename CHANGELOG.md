@@ -43,6 +43,10 @@ and
 - Under `AUTH_MODE=none` the public port answers only requests whose `Host` is in
   `ALLOWED_HOSTS` (new; `localhost,127.0.0.1,[::1],api` by default, `*` switches the check off),
   so a web page cannot reach the service through DNS rebinding. Add the host name your clients use.
+- One counted call does about one unit of work: MCP `initialize` and `tools/list` count one
+  rate-limit hit each, a waiting `get_job` one more per further 10 s, the UI's image previews
+  one per image and its site tree one per 500 items; the UI reads a screenshot's file without a
+  second hit.
 - `JOBS_ENABLED=false` makes the job routes answer 400 `invalid_request` instead of 503
   `internal_error`, like every other switch that is off. A retryable 503 carries
   `Retry-After: 5`.

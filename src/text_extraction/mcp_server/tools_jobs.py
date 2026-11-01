@@ -13,6 +13,7 @@ items share ``max_chars`` of content.
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Literal
@@ -52,6 +53,7 @@ from text_extraction.mcp_server.tools_extract import (
     lean_schema,
     options_argument,
 )
+from text_extraction.ratelimit import count_used
 from text_extraction.screenshot_api import read_artifact
 from text_extraction.settings import Settings
 from text_extraction.site.types import SiteStructureRequest
@@ -177,6 +179,10 @@ def _read_only() -> ToolAnnotations:
     return ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
 
+# The seconds of a get_job wait that one rate-limit hit covers (M4).
+WAIT_SECONDS_PER_HIT = 10
+
+
 async def _wait_until_completed(
     state: State,
     principal: Principal,
@@ -222,9 +228,13 @@ class GetJobTool(ModelTool):
         check_jobs_enabled(settings)
         wait = min(args.wait_seconds, settings.mcp_wait_seconds)
         request = get_http_request()  # the call guard has read the caller from it
+        started = time.monotonic()
         gone = await _wait_until_completed(
             state, principal, args.job_id, wait, request.is_disconnected
         )
+        # The call's own hit covers the first step of the wait; each further one counts (M4).
+        steps = math.ceil((time.monotonic() - started) / WAIT_SECONDS_PER_HIT)
+        await count_used(state, principal, steps - 1)
         if gone is not None:
             _log.info("mcp_client_disconnected", tool=self.name, job_id=args.job_id)
             return payload_result(gone.model_dump(mode="json"), is_error=False)

@@ -33,6 +33,7 @@ from text_extraction import jobs_api
 from text_extraction.auth import Principal, authenticate
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobAccepted, JobItem, JobView
+from text_extraction.ratelimit import count_used
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
     artifact_of,
@@ -69,6 +70,8 @@ _log = structlog.get_logger(__name__)
 
 # Items per page of the progress view and per read of the site tree.
 PAGE_ITEMS: Final = 20
+# The items of a site tree that one rate-limit hit covers: a page of GET /v1/jobs/{id} (M4).
+TREE_ITEMS_PER_HIT: Final = 500
 # One progress view reads at most this many items in all (at least MIN_PAGE_ITEMS per job), and
 # at most READS_AT_ONCE jobs at a time: an item may be up to JOB_ITEM_MAX_BYTES.
 ITEMS_PER_VIEW: Final = 100
@@ -633,10 +636,11 @@ async def site_structure_view(request: Request) -> Response:
 
 @dataclass
 class _TreeRead:
-    """What the reads of a site job found besides its items."""
+    """What the reads of a site job found besides its items, and how many items they read."""
 
     kind: str | None = None
     state: str | None = None
+    items: int = 0
 
 
 async def _read_tree_page(
@@ -653,6 +657,7 @@ async def _read_tree_page(
     view = envelope.data
     assert view is not None  # noqa: S101 - read_job always answers its view
     read.kind, read.state = view.kind, view.state
+    read.items += len(view.items)
     if view.kind != "site":
         return None
     await asyncio.to_thread(_add_all, builder, view.items)
@@ -666,9 +671,9 @@ def _add_all(builder: TreeBuilder, items: Iterable[JobItem]) -> None:
 
 async def site_tree_view(request: Request, settings: Settings) -> Response:
     """``GET /ui/run/site-tree?id=`` (P10-S20): the site job read through ``read_job`` in
-    pages of 20 items (one rate-limit hit for the view) until ``next_offset`` is null, kept as
-    the tree's fields only, and shown as a tree of checkboxes; while the job runs, as a
-    snapshot."""
+    pages of 20 items until ``next_offset`` is null, kept as the tree's fields only, and shown
+    as a tree of checkboxes; while the job runs, as a snapshot. One rate-limit hit per 500
+    items read (``TREE_ITEMS_PER_HIT``, a REST page, M4)."""
     job_id = request.query_params.get("id") or ""
     if not job_id:
         return _form_error(request, NO_JOB)
@@ -684,6 +689,8 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
             )
     except ServiceError as error:
         return refusal(error, request_language(request))
+    pages = math.ceil(read.items / TREE_ITEMS_PER_HIT)
+    await count_used(request.app.state, principal, pages - 1)  # the view's own hit is the first
     if read.kind != "site":
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)

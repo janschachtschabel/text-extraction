@@ -60,8 +60,9 @@ wird abgelehnt.
 
 Ein MCP-Client meldet sich mit einem API-Schlüssel des Dienstes an, genau wie ein REST-Client
 (siehe [API-Schlüssel](usage.md#api-schlüssel)). Jeder Tool-Aufruf durchläuft die Prüfungen der
-REST-Route, mit der Rolle des Schlüssels, und wird auf das Ratenlimit des Schlüssels angerechnet.
-Ein Admin-Schlüssel darf außerdem `compliance: ignore` (siehe [Website-Regeln](site-rules.md))
+REST-Route, mit der Rolle des Schlüssels, und wird auf das Ratenlimit des Schlüssels angerechnet,
+ebenso `initialize` und `tools/list`; ein wartendes `get_job` zählt für jede weitere 10 s einen
+Aufruf mehr. Ein Admin-Schlüssel darf außerdem `compliance: ignore` (siehe [Website-Regeln](site-rules.md))
 und XPath-Selektoren verwenden. Unter `AUTH_MODE=none` lassen Sie den Header weg.
 
 Ein eigener LLM- oder ASR-Schlüssel wird auf dieselbe Weise übergeben, als Header `X-LLM-Api-Key`

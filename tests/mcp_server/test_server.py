@@ -192,13 +192,19 @@ def test_rate_limit_shared_with_rest() -> None:
                 "name": "alice",
                 "role": "user",
                 "sha256": hashlib.sha256(USER_KEY.encode()).hexdigest(),
-                "rate_limit_per_minute": 2,
+                "rate_limit_per_minute": 4,
             }
         ]
     )
     with running(settings) as client:
-        for _ in range(3):  # free: no tool runs
-            rpc(client, "tools/list", headers=AUTH)
+        # M4: initialize and tools/list are one call each, as a tool call is.
+        initialize = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"},
+        }
+        assert "result" in rpc(client, "initialize", initialize, headers=AUTH)
+        assert "result" in rpc(client, "tools/list", headers=AUTH)
         assert client.get("/v1/info", headers=AUTH).status_code == 200
         assert call_tool(client, "service_info", headers=AUTH)["isError"] is False
 
@@ -210,6 +216,9 @@ def test_rate_limit_shared_with_rest() -> None:
         assert envelope["error"]["code"] == "rate_limited"
         assert envelope["error"]["retryable"] is True
         assert client.get("/v1/info", headers=AUTH).status_code == 429
+        listed = rpc(client, "tools/list", headers=AUTH)
+        assert "result" not in listed
+        assert "Rate limit exceeded" in listed["error"]["message"]
 
 
 def json_lines_of(out: str) -> list[dict[str, Any]]:

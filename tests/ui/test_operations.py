@@ -16,6 +16,7 @@ from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from tests.test_extract_api import BrowserCase
 from tests.ui.conftest import USER_KEY, run, running
 from text_extraction.envelope import ErrorCode, ErrorInfo
+from text_extraction.errors import ServiceError
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import ItemRun, JobItem
 from text_extraction.structured.types import StructuredOptions
@@ -688,9 +689,21 @@ def test_large_content_copies_are_capped(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
 
-def test_screenshot_read_failure_is_noted() -> None:
-    # One call a minute: the screenshot call takes it, the read of the artifact gets a 429.
+def test_a_screenshot_counts_one_hit() -> None:
+    # M5: one call a minute is enough: the read of the artifact is part of the screenshot call.
     case = BrowserCase(ui_enabled=True, rate_limit_per_minute=1)
+    with TestClient(case.app) as client, case.worker(artifact=PNG):
+        html = run(client, "screenshot", url=PAGE, full_page="on", wait_seconds="25").text
+
+    assert len(tree(html).xpath("//img[@class='screenshot']")) == 1
+
+
+def test_screenshot_read_failure_is_noted(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def gone(*_: object) -> bytes:
+        raise ServiceError(ErrorCode.NOT_FOUND, "File not found.", 404)
+
+    monkeypatch.setattr("text_extraction.ui.answers.read_artifact", gone)
+    case = BrowserCase(ui_enabled=True)
     with TestClient(case.app) as client, case.worker(artifact=PNG):
         html = run(client, "screenshot", url=PAGE, full_page="on", wait_seconds="25").text
 
@@ -698,7 +711,7 @@ def test_screenshot_read_failure_is_noted() -> None:
     assert root.xpath("//img[@class='screenshot']") == []
     notes = texts(root, "//*[@class='screenshot-note']")
     assert notes == [
-        "The screenshot could not be read: HTTP 429 " + translate("en", "error.rate_limited")
+        "The screenshot could not be read: HTTP 404 " + translate("en", "error.not_found")
     ]
     # The API's own English message below it (P12-S5).
     details = texts(

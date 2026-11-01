@@ -57,7 +57,8 @@ must be listed in `MCP_ALLOWED_ORIGINS`; a request with any other `Origin` is re
 
 An MCP client authenticates with an API key of the service, exactly as a REST client does (see
 [API keys](usage.md#api-keys)). Every tool call runs the REST route's checks, with the key's role,
-and is counted against the key's rate limit. An admin key may also use `compliance: ignore`
+and is counted against the key's rate limit, as are `initialize` and `tools/list`; a `get_job`
+that waits counts one more call for each further 10 s. An admin key may also use `compliance: ignore`
 (see [Site rules](site-rules.md)) and XPath selectors. Under `AUTH_MODE=none` leave the header
 out.
 

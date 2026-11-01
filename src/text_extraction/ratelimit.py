@@ -45,12 +45,13 @@ class RateLimiter:
         self.default_per_minute = default_per_minute
         self._clock = clock
 
-    async def hit(self, principal_name: str, limit: int) -> RateDecision:
+    async def hit(self, principal_name: str, limit: int, units: int = 1) -> RateDecision:
+        """Count ``units`` calls (1 by default) and say whether the last one may pass."""
         now = self._clock()
         window = int(now // _WINDOW_SECONDS)
         key = f"rl:{principal_name}:{window}"
         async with self._client.pipeline(transaction=True) as pipe:
-            pipe.incr(key)
+            pipe.incrby(key, units)
             pipe.expire(key, _WINDOW_SECONDS)
             count, _ = await pipe.execute()
         seconds_left = (window + 1) * _WINDOW_SECONDS - now
@@ -102,6 +103,25 @@ async def check_rate(state: State, principal: Principal) -> None:
     The caller has authenticated ``principal`` (``principal_for``) and checks its role; one call
     of a door (a request, an MCP tool call, a UI view) counts exactly once."""
     await _decide(state, principal, count=True)
+
+
+async def count_used(state: State, principal: Principal, units: int) -> None:
+    """Count ``units`` more calls of ``principal`` for work it has already had (a long wait, a
+    page of many images, M4), without refusing it: the next call meets the limit. A Valkey error
+    is logged and ignored."""
+    settings: Settings = state.settings
+    if not settings.rate_limit_enabled or units <= 0:
+        return
+    limiter: RateLimiter = state.rate_limiter
+    limit = (
+        principal.rate_limit_per_minute
+        if principal.rate_limit_per_minute is not None
+        else limiter.default_per_minute
+    )
+    try:
+        await limiter.hit(principal.name, limit, units)
+    except (RedisError, OSError) as error:  # OutOfMemoryError too: uncounted, as in `_decide`
+        _log.warning("rate_limit_not_counted", error_type=type(error).__name__)
 
 
 async def check_rate_left(state: State, principal: Principal) -> None:

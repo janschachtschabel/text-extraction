@@ -40,9 +40,9 @@ class CountingLimiter(RateLimiter):
 
     hits = 0
 
-    async def hit(self, principal_name: str, limit: int) -> RateDecision:
-        CountingLimiter.hits += 1
-        return await super().hit(principal_name, limit)
+    async def hit(self, principal_name: str, limit: int, units: int = 1) -> RateDecision:
+        CountingLimiter.hits += units
+        return await super().hit(principal_name, limit, units)
 
 
 @pytest.fixture
@@ -103,7 +103,7 @@ def test_previews_guarded(httpserver: HTTPServer, connects: list[str]) -> None:
         answer = run(client, "images", url=urls, alt=alts, compliance="enforce")
 
     assert answer.status_code == 200
-    assert CountingLimiter.hits == 1
+    assert CountingLimiter.hits == len(urls)  # M4: one hit per image fetched
     root = lxml.html.fragment_fromstring(answer.text, create_parent="div")
     figures = root.xpath("//figure[@class='preview']")
     assert [figure.get("data-url") for figure in figures] == urls

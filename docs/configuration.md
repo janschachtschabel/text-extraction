@@ -679,8 +679,10 @@ Every request to `/mcp` passes the same checks as a REST request, in this order:
    REST 401 envelope with `WWW-Authenticate: Bearer`. Under `AUTH_MODE=none` every caller is the
    anonymous admin, as for REST.
 
-Each `tools/call` counts once against the caller's rate limit, the bucket REST calls share;
-`initialize`, `tools/list` and notifications are free. A refused or failed call is a tool result
+Each `tools/call` counts once against the caller's rate limit, the bucket REST calls share, and
+so do `initialize` and `tools/list` (a refusal is their JSON-RPC error); notifications are free.
+A `get_job` that waits counts one more hit for each further 10 s it waited, after the wait, so
+the answer it waited for is never refused. A refused or failed call is a tool result
 with `isError: true` whose `structuredContent` is the REST error envelope (`rate_limited` with
 `retryable`, `invalid_request` with the validation `details`, `internal_error` for our own faults,
 without a traceback); a target's `failed` is a normal result, as it is a 200 in REST. Each call
@@ -737,7 +739,11 @@ only (no cookie, no other header) and with `x-client-trace-id` set to the outer 
 id, so both access lines carry one id. The outer `/ui/run/...` access line has no `principal`
 (the view does not authenticate a forwarded call itself); the inner `/v1/...` line carries it. The REST route runs every check (body limit, validation,
 auth, roles, rate limit, the hand-over to a job), and each forwarded call counts once against the
-caller's rate limit. Views that combine several reads count one hit per view.
+caller's rate limit. Views that combine several reads count one hit per view, with two
+exceptions that count by their work: the previews (one hit per image) and the site tree (one hit
+per 500 items, a page of `GET /v1/jobs/{id}`), each counted once the work is done. A screenshot's
+file is read without a hit of its own: the screenshot call (or the job read) that answered it
+counted already.
 
 Requests to `/ui/run/*` answer 403 (plain text) without `HX-Request: true`, and when their
 `Origin` names another host or port than the `Host` header (a default port counts as none; the
@@ -782,7 +788,7 @@ why it could not be read. A large content is bounded in the page: the source, th
 the chunks show at most 200,000 characters each (and only such a content is rendered as
 Markdown), with a note when cut; the download is the full copy, up to 10,000,000 characters.
 
-"Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit, then the
+"Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit per image, then the
 service fetches at most 20 of them (4 at once, 10 s each, 25 s for the whole view) itself, with the vision step's checks:
 the SSRF guard on the URL and every redirect, the caller's compliance mode, the host's outbound
 turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF or
