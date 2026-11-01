@@ -295,6 +295,7 @@
   "urls.user_info": "URL must not contain user information",
   "urls.port": "URL port must be between 1 and 65535",
   "urls.bad_host": "URL host is not a valid host name",
+  "urls.bad_ip": "URL host is not a valid IP address",
   "urls.list_too_long": "The list has more than {max} URLs.",
   "urls.file_too_long": "The file has more than {max} rows.",
   "urls.select_at_most": "Select at most {max} URLs at once.",

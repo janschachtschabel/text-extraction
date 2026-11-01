@@ -582,7 +582,13 @@ def fake_reads(
     held: list[weakref.ref[JobItem]] = []
 
     async def read_job(state_: Any, principal: Any, job_id: str, offset: int, limit: int) -> Any:
-        gc.collect()
+        # The executor thread of ``asyncio.to_thread`` drops its work item (and with it the
+        # page it was given) a moment after the awaiting coroutine resumes: allow it that.
+        for _ in range(100):
+            gc.collect()
+            if all(ref() is None for ref in held):
+                break
+            await asyncio.sleep(0.01)
         assert [ref for ref in held if ref() is not None] == [], "the page before is still held"
         reads.append((offset, limit))
         items = items_of(offset, min(limit, total - offset))
