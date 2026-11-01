@@ -47,7 +47,8 @@ def normalize_url(url: str) -> str | None:
     if not parts.query and "?" in url.partition("#")[0]:
         normal += "?"  # an empty query is kept as given (urlunsplit drops it)
     try:
-        return validate_url(normal)  # the same rules as a fetch (length, port range)
+        # The same rules as a fetch (length, port range); a host without a DNS form stays a link.
+        return validate_url(normal, dns_form=False)
     except InvalidUrlError:
         return None
 

@@ -19,7 +19,9 @@ from text_extraction.compliance import (
     ComplianceMode,
     ComplianceReport,
     blocking_code,
+    compliance_block,
     resolve_mode,
+    with_redirect_findings,
 )
 from text_extraction.envelope import ErrorCode
 from text_extraction.errors import ServiceError
@@ -172,6 +174,87 @@ def test_robots_fetch_error_is_unavailable_and_only_reported_in_report_mode() ->
     assert blocking_code(enforced) is ErrorCode.BLOCKED_BY_ROBOTS
     assert reported.decision == "reported"
     assert blocking_code(reported) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "retryable"),
+    [
+        (ErrorCode.DNS_ERROR, True),
+        (ErrorCode.CONNECTION_ERROR, True),
+        (ErrorCode.TIMEOUT, True),
+        (ErrorCode.BLOCKED_URL, False),
+    ],
+)
+def test_a_robots_fetch_that_cannot_reach_the_host_blocks_with_its_own_error(
+    code: ErrorCode, retryable: bool
+) -> None:
+    # The page would fail the same way: the caller learns that the host is unreachable (or a
+    # forbidden address), not that robots.txt forbids the URL.
+    report = check({ROBOTS: FetchError(code, "unreachable", retryable=retryable)})
+
+    block = compliance_block(report)
+
+    assert report.robots == "unavailable"
+    assert blocking_code(report) is ErrorCode.BLOCKED_BY_ROBOTS
+    assert block is not None
+    assert block.code is code
+    assert block.retryable is retryable
+    assert "robots.txt" in block.message
+
+
+def test_a_robots_answer_of_503_blocks_as_robots_but_retryable() -> None:
+    block = compliance_block(check(robots_answer("down", status=503)))
+
+    assert block is not None
+    assert block.code is ErrorCode.BLOCKED_BY_ROBOTS
+    assert block.retryable is True
+    assert "could not be retrieved" in block.message
+
+
+def test_a_robots_disallow_blocks_for_good() -> None:
+    block = compliance_block(check(robots_answer("User-agent: *\nDisallow: /docs/\n")))
+
+    assert block is not None
+    assert block.code is ErrorCode.BLOCKED_BY_ROBOTS
+    assert block.retryable is False
+    assert block.message == "The site's robots.txt does not allow fetching this URL."
+
+
+def test_no_block_outside_enforce_or_without_a_violation() -> None:
+    unreachable: dict[str, FetchResult | FetchError] = {
+        ROBOTS: FetchError(ErrorCode.DNS_ERROR, "no such host", retryable=True)
+    }
+
+    assert compliance_block(check(unreachable, mode="report")) is None
+    assert compliance_block(check(robots_answer("User-agent: *\nAllow: /\n"))) is None
+
+
+def test_the_robots_error_survives_the_cache_and_stays_out_of_the_envelope() -> None:
+    answers: dict[str, FetchResult | FetchError] = {
+        ROBOTS: FetchError(ErrorCode.CONNECTION_ERROR, "refused", retryable=True)
+    }
+    checker, fetcher, _ = make_checker(answers)
+    asyncio.run(checker.before_fetch(PAGE, "enforce"))
+    calls = len(fetcher.calls)
+
+    cached = asyncio.run(checker.before_fetch(PAGE, "enforce"))
+
+    assert len(fetcher.calls) == calls  # answered from the cache
+    block = compliance_block(cached)
+    assert block is not None
+    assert block.code is ErrorCode.CONNECTION_ERROR
+    assert "robots_error" not in cached.model_dump()
+    assert "robots_error" not in cached.model_dump_json()
+
+
+def test_a_redirect_target_whose_robots_is_unreachable_blocks_with_its_error() -> None:
+    first = check(robots_answer("User-agent: *\nAllow: /\n"))
+    hop = check({ROBOTS: FetchError(ErrorCode.DNS_ERROR, "no such host", retryable=True)})
+
+    block = compliance_block(with_redirect_findings(first, hop))
+
+    assert block is not None
+    assert block.code is ErrorCode.DNS_ERROR
 
 
 def test_robots_too_large_404_page_is_absent_not_unavailable() -> None:
