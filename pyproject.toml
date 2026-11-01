@@ -12,9 +12,9 @@ dependencies = [
     "defusedxml>=0.7.1",
     "extruct>=0.18.0",
     "fastapi>=0.162.0",
-    # The MCP endpoint (MCP_ENABLED), imported only when it is on. Newest release at least 14
-    # days old when added (ruling R16).
-    "fastmcp==4.1.0",  # Apache-2.0
+    # The MCP endpoint (MCP_ENABLED), imported only when it is on. 4.1.2 (2026-10-20) fixes
+    # advisories; Jan waived the 14-day rule for it on 2026-11-01 (release v0.1.2).
+    "fastmcp==4.1.2",  # Apache-2.0
     "httpcore>=1.0.9",
     "httpx[http2]>=0.28.1",
     # The UI's templates (UI_ENABLED), imported only when it is on. Newest release at least 14
@@ -70,9 +70,11 @@ browser = [
 ]
 # The Docling worker (text-extraction-docling-worker): Docling with only the parts it uses (PDF and
 # image pipeline, OpenDocument, local layout and table models), and torch and torchvision from the
-# PyTorch CPU index (no CUDA). Each pinned to a release at least 14 days old (ruling R16).
+# PyTorch CPU index (no CUDA). Each pinned to a release at least 14 days old (ruling R16), except
+# docling-slim 2.142.1 (2026-10-23): the first that allows Pillow 13, which fixes the TIFF
+# advisories; Jan waived the 14-day rule for it on 2026-11-01 (release v0.1.2).
 docling = [
-    "docling-slim[convert-core,format-pdf,format-opendocument,models-local]==2.137.0",
+    "docling-slim[convert-core,format-pdf,format-opendocument,models-local]==2.142.1",
     # TableFormer (docling-ibm-models) imports cv2 but leaves OpenCV to an extra of its own.
     "opencv-python-headless==4.14.0.94",
     "torch==2.14.1",
@@ -115,7 +117,10 @@ build-backend = "uv_build"
 # The 14-day rule (CONTRIBUTING.md) for transitive packages that uv.lock holds back: a later
 # `uv lock --upgrade` takes only their releases that are at least 14 days old. A relative span
 # does not outdate the lock as time passes; it is re-evaluated when uv resolves again.
-exclude-newer-package = { thinc = "14 days", blis = "14 days", confection = "14 days", cymem = "14 days", murmurhash = "14 days", phonenumbers = "14 days", preshed = "14 days", smart-open = "14 days", srsly = "14 days", weasel = "14 days", wrapt = "14 days", pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "14 days", docling-parse = "14 days", docling-ibm-models = "14 days", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days", cachetools = "14 days", caio = "14 days", cyclopts = "14 days", dnspython = "14 days", griffelib = "14 days", joserfc = "14 days", sse-starlette = "14 days" }
+# docling-core, docling-parse and docling-ibm-models: the releases that allow Pillow 13 (2.104.0,
+# 7.23.0, 4.0.4, 2026-10-21/22) are younger than 14 days. Jan waived the rule for them on
+# 2026-11-01 (release v0.1.2); the fixed date holds them there. Back to "14 days" from 2026-11-06.
+exclude-newer-package = { thinc = "14 days", blis = "14 days", confection = "14 days", cymem = "14 days", murmurhash = "14 days", phonenumbers = "14 days", preshed = "14 days", smart-open = "14 days", srsly = "14 days", weasel = "14 days", wrapt = "14 days", pandas = "14 days", pycparser = "14 days", xlsxwriter = "14 days", docling-core = "2026-10-23T00:00:00Z", docling-parse = "2026-10-23T00:00:00Z", docling-ibm-models = "2026-10-23T00:00:00Z", odfdo = "14 days", transformers = "14 days", doclang = "14 days", pluggy = "14 days", setuptools = "14 days", jiter = "14 days", cachetools = "14 days", caio = "14 days", cyclopts = "14 days", dnspython = "14 days", griffelib = "14 days", joserfc = "14 days", sse-starlette = "14 days" }
 
 # torch and torchvision only from the PyTorch CPU index: its wheels carry no CUDA libraries.
 [tool.uv.sources]
@@ -147,7 +152,7 @@ dev = [
     "python-docx==1.2.0",
     "python-pptx==1.0.2",  # also in markitdown's extras
     "openpyxl==3.1.5",  # also in markitdown's extras
-    "pillow==12.3.0",
+    "pillow==13.0.0",  # as in uv.lock; 14-day rule waived as for docling-slim
     "xlwt==1.3.0",
     "pyyaml==6.0.3",  # parses workflow and Helm YAML in tests
 ]
