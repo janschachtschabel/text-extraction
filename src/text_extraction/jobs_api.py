@@ -76,6 +76,9 @@ MAX_PAGE_SIZE = 500
 # one page about 1 GB in the API pod. A page stops before the item that would pass it (the first
 # item always comes), and `next_offset` continues from there.
 PAGE_MAX_BYTES = 20_000_000
+# The Retry-After of the 429 for too many unfinished batches and site jobs. When one completes
+# is not known; a minute keeps a waiting client from polling hard.
+OPEN_RETRY_AFTER_SECONDS = 60
 DEFAULT_PAGE_SIZE = 100
 
 # What a batch body may take besides its URLs (the options, JSON syntax), in bytes.
@@ -135,6 +138,7 @@ def _too_many_open(limit: int) -> ServiceError:
         "Retry when one has completed.",
         429,
         retryable=True,
+        headers={"Retry-After": str(OPEN_RETRY_AFTER_SECONDS)},
     )
 
 

@@ -479,6 +479,7 @@ def test_open_batch_limit_is_429(make_api: Callable[..., Api]) -> None:
     refused = api.batch([PAGE])
 
     assert refused.status_code == 429
+    assert refused.headers["Retry-After"] == str(jobs_api.OPEN_RETRY_AFTER_SECONDS)
     body = refused.json()
     assert body["status"] == "failed"
     assert body["error"]["code"] == "rate_limited"
