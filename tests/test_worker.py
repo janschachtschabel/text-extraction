@@ -1858,7 +1858,7 @@ async def test_a_job_deleted_during_a_move_keeps_no_input(pool: str) -> None:
         await delete_job(api_state(harness), OWNER, job)  # the caller deletes the job meanwhile
         await real_draft(job, index, envelope)
 
-    store.put_draft = put_draft  # type: ignore[method-assign]
+    store.put_draft = put_draft  # type: ignore[method-assign, assignment]
     claim = await harness.claim()
     assert claim.item is not None
     assert claim.item.index == 1
