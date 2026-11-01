@@ -1391,14 +1391,18 @@ OpenAI-compatible endpoint): always a job, answered 202.
     switch off on the worker the draft answers with the warning, without a render.
   - The panel steps (P13-S3, `browser_panel.py`), after the load, the consent handling and the
     idle wait, before the HTML is read. (1) Consent: an open
-    `ytd-consent-bump-v2-lightbox tp-yt-paper-dialog` is declined with its first "Alle
+    `ytd-consent-bump-v2-lightbox tp-yt-paper-dialog` is declined with its first visible "Alle
     ablehnen" or "Reject all" button; the steps stop when the dialog does not close (or no
     `SOCS` cookie is set) within 5 s. The outer lightbox's visibility is no test: its box is
     0×0. (2) Detect: without `PAmodern_transcript_view` in the page's HTML the steps stop and
     nothing is clicked. (3) Open: `tp-yt-paper-button#expand` when visible, then the first
     visible `ytd-video-description-transcript-section-renderer button`; none visible within 5 s
     stops. (4) Read: the page's own answer on the path `/youtubei/v1/get_panel`, status 200,
-    within 15 s, its body at most `MEDIA_SUBTITLE_MAX_BYTES`. Every step ends at its cap and at
+    within 15 s, its body at most `MEDIA_SUBTITLE_MAX_BYTES`. Only the answer to a request whose
+    body names `PAmodern_transcript_view` is taken (the body gunzipped, at most 1 MB, when the
+    page sent it with `Content-Encoding: gzip`, as YouTube does), so an answer for another panel
+    is passed over; a request body that cannot be read or decoded is accepted, and
+    `parse_panel` still guards the content. Every step ends at its cap and at
     the render's deadline. The render sends no request of its own to YouTube: the only request
     is the page's, started by the click (rule 6), and no attestation is read or forged; the
     classic panel (`get_transcript`) is not used. A stop, another status, no answer, a body over
@@ -1421,7 +1425,9 @@ OpenAI-compatible endpoint): always a job, answered 202.
     `subtitles_blocked` and `subtitles_failed`, and a fingerprint of the cues' text; it is
     judged, cached and fingerprinted like any transcript (never revalidated, B10). Otherwise
     (no body, no text, an unreadable body, the warning, or a panel render that fails as a whole:
-    a block, a failed render, a refused answer) the answer is the draft with the warning
+    a block, a failed render, a refused answer, a watch page answered with a status other than
+    2xx, or a render still running a second before the run's deadline, which is cut off there)
+    the answer is the draft with the warning
     `transcript_panel_unavailable`, without a fingerprint and never stored, as a refused draft.
     The rendered page's own text is never converted, compared (`better` is not used) or answered.
   - Attempts and timings (P13-S6). The render's document answers count in `attempts` on top of
