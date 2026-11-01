@@ -3,6 +3,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from bs4 import BeautifulSoup
 
 from text_extraction.convert import OutputFormat, convert_html, convert_plain, page_links
 from text_extraction.convert import html as html_module
@@ -359,3 +360,38 @@ def test_the_heading_check_takes_linear_time(text: str) -> None:
     html_module._compact(text)
 
     assert time.perf_counter() - started < 5
+
+
+def _nested_tables(depth: int) -> str:
+    intro = "<p>" + "intro text " * 200 + "</p>"
+    return (
+        f"<html><head><title>t</title></head><body><main>{intro}"
+        + "<table>" * depth
+        + "deep"
+        + "</table>" * depth
+        + "</main></body></html>"
+    )
+
+
+def test_deeply_nested_tables_convert_in_bounded_time() -> None:
+    # Trafilatura's table handling is quadratic in the nesting: 2000 nested tables (30 KB) held
+    # a conversion thread for about 35 s, past every request's deadline.
+    started = time.perf_counter()
+
+    result = convert_html(_nested_tables(2000), "https://example.org/", "markdown")
+
+    assert time.perf_counter() - started < 10
+    assert "intro text" in result.content
+
+
+def test_only_tables_nested_deeper_than_the_cap_lose_their_table_tag() -> None:
+    cap = html_module.MAX_TABLE_NESTING
+    soup = BeautifulSoup(_nested_tables(cap + 5), "html.parser")
+
+    html_module.flatten_deep_tables(soup)
+
+    assert len(soup.find_all("table")) == cap
+    assert "deep" in soup.get_text()
+    shallow = BeautifulSoup(_nested_tables(cap), "html.parser")
+    html_module.flatten_deep_tables(shallow)
+    assert len(shallow.find_all("table")) == cap
