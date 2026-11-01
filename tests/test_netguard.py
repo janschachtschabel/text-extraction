@@ -113,6 +113,35 @@ def test_validate_url_rejects(url: str) -> None:
         validate_url(url)
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://" + "a" * 64 + ".org/",
+        "https://a..b/",
+        "https://.example.org/",
+    ],
+)
+def test_validate_url_rejects_a_host_that_has_no_dns_form(url: str) -> None:
+    # The resolver's IDNA codec raises UnicodeError for these; the request must fail as
+    # invalid_url, not as an internal error.
+    with pytest.raises(InvalidUrlError):
+        validate_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://" + "a" * 63 + ".org/",
+        "https://example.org./",
+        "https://bücher.example/",
+        "http://[::1]/",
+        "http://127.0.0.1/",
+    ],
+)
+def test_validate_url_accepts_a_host_with_a_dns_form(url: str) -> None:
+    assert validate_url(url) == url
+
+
 def test_the_2049_character_url_of_the_brief_is_rejected() -> None:
     url = "http://x.org/" + "a" * (2049 - len("http://x.org/"))
     assert len(url) == 2049

@@ -61,7 +61,20 @@ def validate_url(url: str) -> str:
         raise InvalidUrlError("URL must not contain user information")
     if port is not None and not 1 <= port <= 65535:
         raise InvalidUrlError("URL port must be between 1 and 65535")
+    _check_dns_form(parts.hostname)
     return url
+
+
+def _check_dns_form(host: str) -> None:
+    """Raise ``InvalidUrlError`` for a host name the resolver cannot encode (an empty label, a
+    label over 63 characters): its IDNA codec would raise ``UnicodeError`` on the lookup."""
+    try:
+        ip_address(host)
+    except ValueError:
+        try:
+            host.encode("idna")
+        except UnicodeError:
+            raise InvalidUrlError("URL host is not a valid host name") from None
 
 
 _NAT64 = ip_network("64:ff9b::/96")  # well-known prefix; embeds an IPv4 address in the last 32 bits
