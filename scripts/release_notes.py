@@ -77,8 +77,9 @@ Five images, each tagged `{version}` and `{minor}` (linux/amd64):
 
 ### Start
 
-- Docker Compose with these images: `{compose}` ([installation guide]({guide}/en/installation.md),
-  [German]({guide}/de/installation.md)).
+- Docker Compose with these images, from a checkout of the tag, or of `main` for a
+  tag without `docker-compose.release.yml`: `{compose}`
+  ([installation guide]({guide}/en/installation.md), [German]({guide}/de/installation.md)).
 - Kubernetes: the Helm chart with `image.tag: "{version}"` ([chart README]({chart})).
 """
 

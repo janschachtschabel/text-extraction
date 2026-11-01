@@ -118,7 +118,9 @@ _HOST_ERROR_MESSAGES = {
     ErrorCode.DNS_ERROR: "The site's host name does not resolve (robots.txt could not be fetched).",
     ErrorCode.CONNECTION_ERROR: "The site cannot be reached (robots.txt could not be fetched).",
     ErrorCode.TIMEOUT: "The site did not answer in time (robots.txt could not be fetched).",
-    ErrorCode.BLOCKED_URL: "The site's address is not allowed (robots.txt could not be fetched).",
+    ErrorCode.BLOCKED_URL: (
+        "robots.txt could not be fetched: its address, or one it redirects to, is not allowed."
+    ),
 }
 _BLOCK_MESSAGES = {
     ErrorCode.BLOCKED_BY_ROBOTS: "The site's robots.txt does not allow fetching this URL.",

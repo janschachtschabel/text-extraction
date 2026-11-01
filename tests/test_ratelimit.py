@@ -394,10 +394,27 @@ class _FullValkey(FakeAsyncRedis):
         raise OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
 
 
-def test_a_full_valkey_lets_calls_through_uncounted(clock: Clock) -> None:
+class _FullOnExecute(FakeAsyncRedis):
+    """The same Valkey, refusing at EXEC as a real one does: the queued INCR's OOM comes back
+    from the pipeline's ``execute`` (redis-py re-raises it in place of EXECABORT)."""
+
+    def pipeline(self, *args: Any, **kwargs: Any) -> Any:
+        pipe = super().pipeline(*args, **kwargs)
+
+        async def execute(*_args: Any, **_kwargs: Any) -> Any:
+            raise OutOfMemoryError("OOM command not allowed when used memory > 'maxmemory'.")
+
+        pipe.execute = execute  # type: ignore[method-assign]
+        return pipe
+
+
+@pytest.mark.parametrize("valkey_class", [_FullValkey, _FullOnExecute])
+def test_a_full_valkey_lets_calls_through_uncounted(
+    clock: Clock, valkey_class: type[FakeAsyncRedis]
+) -> None:
     # Valkey at maxmemory refuses the counter's write. Every route answered 503 then, DELETE of
     # a job too, the one call that frees memory; the memory guard refuses new jobs anyway.
-    app = build_app(make_settings(), _FullValkey(), clock, default_per_minute=1)
+    app = build_app(make_settings(), valkey_class(), clock, default_per_minute=1)
     with TestClient(app) as client, capture_logs() as logs:
         statuses = [client.get("/limited", headers=bearer("alice")).status_code for _ in range(3)]
 

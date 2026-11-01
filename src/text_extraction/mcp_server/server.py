@@ -122,7 +122,10 @@ def _raise_sdk_body_cap(http: Any, limit: int) -> None:
     """Hold the MCP SDK's own body cap to ``limit``, the one ``BodyLimitMiddleware`` already
     enforces with the envelope. The SDK caps every body at 4 MiB (``RequestBodyLimitMiddleware``,
     a plain-text 413) and FastMCP passes no other size, so an upload of more than about 3 MB
-    never reached its tool. The session manager exists only once the lifespan has started."""
+    never reached its tool. The session manager exists only once the lifespan has started.
+    It reaches into the SDK (``session_manager``, ``_handle_request``), checked with mcp 2.3 and
+    fastmcp 4.1: a change there fails the lifespan loudly, and
+    ``test_extract_file_over_the_sdk_default_of_4_mib`` catches a silent one."""
     from mcp.server.transport_security import RequestBodyLimitMiddleware
 
     for route in http.routes:
