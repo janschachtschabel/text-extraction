@@ -57,7 +57,14 @@ class MediaInfo(BaseModel):
     read (only ``embeds``), or a media file that was not transcribed."""
 
     platform: Platform
-    transcript_source: TranscriptSource | None
+    transcript_source: TranscriptSource | None = Field(
+        description="Where the transcript comes from: `manual_subtitles`, `auto_subtitles` "
+        "(the platform's automatic captions), `asr` (speech recognition), `transcript_panel` "
+        "(YouTube's transcript view, read in the browser when the subtitles could not be: it "
+        "does not say whether a person or a machine wrote it), `metadata_only` (no transcript: "
+        "the video's details); null without any (a page's players without a readable track, "
+        "an untranscribed media file)."
+    )
     transcript_language: str | None = None
     available_languages: list[str] = []  # the manual subtitle tracks
     duration_seconds: float | None = None

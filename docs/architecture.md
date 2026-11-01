@@ -160,7 +160,8 @@ add a note of its own):
 - Media: `subtitles_blocked` (the platform refused the subtitles; the metadata answers),
   `subtitles_failed` (the subtitles could not be fetched or read; the metadata answers),
   `asr_unavailable` (the transcription could not be queued or failed; the metadata answers),
-  `no_speech` (the speech recognition heard no speech; final, also for the cache),
+  `transcript_panel_unavailable` (YouTube's transcript view could not be read in the browser;
+  the metadata answers), `no_speech` (the speech recognition heard no speech; final, also for the cache),
   `tracks_truncated` (more tracks than `MEDIA_MAX_TRACKS`), `tracks_failed` (every `<track>` of
   a page failed).
 - PII: `pii_language_unsupported` (the language is neither German nor English, so
