@@ -12,7 +12,10 @@ after the load, the consent step and the idle wait, before the page is read:
 3. Open: ``tp-yt-paper-button#expand`` (when visible) shows the description, then the first
    visible transcript button is clicked.
 4. Read: the page's own ``POST /youtubei/v1/get_panel`` answer, status 200, at most
-   ``max_bytes``.
+   ``max_bytes``. Only an answer to a request for ``PAmodern_transcript_view`` is taken: its
+   body (gunzipped when the page sent it with ``Content-Encoding: gzip``, at most 1 MB) must
+   name the panel. A body that cannot be read or decoded is accepted; ``parse_panel`` still
+   guards the content.
 
 The render sends no request of its own to YouTube: the only request is the page's, started by
 the click (CLAUDE.md rule 6). Every wait ends at the step's cap and at ``deadline``. Any failure,
@@ -23,11 +26,12 @@ URL, cookie or text.
 
 import asyncio
 import re
+import zlib
 from typing import Final
 from urllib.parse import urlsplit
 
 import structlog
-from playwright.async_api import Locator, Page, Response
+from playwright.async_api import Locator, Page, Request, Response
 
 from text_extraction.browser_driver import DRIVER_ERRORS, DRIVER_TIMEOUTS
 from text_extraction.media.panel import TRANSCRIPT_PANEL_UNAVAILABLE
@@ -48,6 +52,10 @@ _CONSENT_SECONDS: Final = 5.0
 _BUTTON_SECONDS: Final = 5.0
 _ANSWER_SECONDS: Final = 15.0
 _POLL_SECONDS: Final = 0.1
+# Reading a request's body or headers: a driver error, or a body that is not base64.
+_BODY_ERRORS: Final[tuple[type[Exception], ...]] = (*DRIVER_ERRORS, ValueError)
+# A request body larger than this, decompressed, is not looked into.
+_MAX_REQUEST_BYTES: Final = 1024 * 1024
 # A Content-Length longer than this is over any cap (and too long for a quick ``int``).
 _MAX_LENGTH_DIGITS: Final = 15
 # True while the consent dialog is in the page and open.
@@ -155,4 +163,38 @@ async def _panel_answer(page: Page, button: Locator, end: float, max_bytes: int)
 
 
 def _is_panel_answer(response: Response) -> bool:
-    return urlsplit(response.url).path == _PANEL_PATH
+    """A ``get_panel`` answer to a request for the transcript view (or one whose body cannot be
+    read: then the path decides)."""
+    if urlsplit(response.url).path != _PANEL_PATH:
+        return False
+    body = _request_body(response.request)
+    return body is None or _NEW_VIEW.encode() in body
+
+
+def _request_body(request: Request) -> bytes | None:
+    """The request's body, decoded; None when it cannot be read or decoded."""
+    try:
+        body = request.post_data_buffer
+        encoding = request.headers.get("content-encoding", "").strip().lower()
+    except _BODY_ERRORS:
+        return None
+    return decode_request_body(body, encoding)
+
+
+def decode_request_body(body: bytes | None, encoding: str) -> bytes | None:
+    """``body`` without its ``Content-Encoding`` (identity or gzip), at most
+    ``_MAX_REQUEST_BYTES``; None when there is none, the encoding is another or decoding fails."""
+    if body is None:
+        return None
+    if encoding in ("", "identity"):
+        return body
+    if encoding != "gzip":
+        return None
+    inflate = zlib.decompressobj(wbits=zlib.MAX_WBITS | 16)
+    try:
+        decoded = inflate.decompress(body, _MAX_REQUEST_BYTES + 1)
+    except zlib.error:
+        return None
+    if len(decoded) > _MAX_REQUEST_BYTES or not inflate.eof:
+        return None
+    return decoded
