@@ -58,6 +58,21 @@ erklärt die Schlüssel und ihre Rollen. Der interne Port 9090 (`/health`, `/rea
 wird nicht veröffentlicht. Die Spielwiese liegt unter http://localhost:8080/ui und der
 MCP-Endpunkt unter http://localhost:8080/mcp.
 
+### Veröffentlichte Images
+
+Statt die Images selbst zu bauen, kann Compose eine veröffentlichte Version von
+`ghcr.io/janschachtschabel/text-extraction` starten (linux/amd64). Die Datei
+`docker-compose.release.yml` ersetzt jeden Build durch das veröffentlichte Image; `.env` bleibt
+gleich, und die Profile funktionieren wie unten beschrieben.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
+```
+
+`TEXT_EXTRACTION_VERSION` in `.env` oder in der Shell wählt die Version (Standard `0.1.0`; `0.1`
+folgt der neuesten `0.1.x`). Die Versionen und ihre Notizen stehen auf der
+[Release-Seite](https://github.com/janschachtschabel/text-extraction/releases).
+
 ### Optionale Worker
 
 Die schwereren Teile laufen in eigenen Workern, die standardmäßig aus sind. Jeder hat ein

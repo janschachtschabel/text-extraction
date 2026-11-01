@@ -55,6 +55,9 @@ http://localhost:8080/ui und der MCP-Endpunkt unter http://localhost:8080/mcp.
 [Installation](docs/user-guide/de/installation.md) beschreibt die lokale Einrichtung mit uv, die
 optionalen Worker (OCR, personenbezogene Daten, LLM, Spracherkennung), Kubernetes und die
 wichtigsten Einstellungen.
+Ohne Build startet `docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait`
+die veröffentlichten Images: siehe
+[Veröffentlichte Images](docs/user-guide/de/installation.md#veröffentlichte-images).
 
 ## Anwendungsfälle
 

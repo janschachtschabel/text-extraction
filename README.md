@@ -52,6 +52,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 and the MCP endpoint at http://localhost:8080/mcp.
 [Installation](docs/user-guide/en/installation.md) covers the local setup with uv, the optional
 workers (OCR, personal data, LLM, speech recognition), Kubernetes and the key settings.
+Without a build, `docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait`
+runs the released images: see
+[Released images](docs/user-guide/en/installation.md#released-images).
 
 ## Use cases
 

@@ -54,6 +54,20 @@ their roles. The internal port 9090 (`/health`, `/ready`, `/metrics`) is not
 published. The playground is at http://localhost:8080/ui and the MCP endpoint at
 http://localhost:8080/mcp.
 
+### Released images
+
+Instead of building the images, Compose can run a released version from
+`ghcr.io/janschachtschabel/text-extraction` (linux/amd64). The file `docker-compose.release.yml`
+swaps every build for the published image; `.env` stays the same, and the profiles work as below.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.release.yml up -d --wait
+```
+
+`TEXT_EXTRACTION_VERSION` in `.env` or the shell picks the release (default `0.1.0`; `0.1`
+follows the newest `0.1.x`). The releases and their notes are on the
+[releases page](https://github.com/janschachtschabel/text-extraction/releases).
+
 ### Optional workers
 
 The heavier parts run in workers of their own, which are off by default. Each has a Compose
