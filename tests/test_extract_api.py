@@ -1488,8 +1488,8 @@ def test_a_result_read_while_the_route_hands_over_keeps_the_job(
     store: JobStore = case.app.state.job_store
     real_items = store.items
 
-    async def slow_items(job_id: str, offset: int, limit: int) -> Any:
-        found = await real_items(job_id, offset, limit)
+    async def slow_items(job_id: str, offset: int, limit: int, **kwargs: Any) -> Any:
+        found = await real_items(job_id, offset, limit, **kwargs)
         await asyncio.sleep(0.6)  # the route detaches meanwhile
         return found
 
