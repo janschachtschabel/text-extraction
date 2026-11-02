@@ -167,7 +167,7 @@ A PNG of a page, rendered in the browser.
 | --- | --- | --- | --- |
 | `url` | string | required | The page to capture. |
 | `full_page` | boolean | `true` | The whole page (up to `SCREENSHOT_MAX_HEIGHT_PX`); `false`: the first viewport. |
-| `viewport` | object | unset | The browser window, `{"width": 320 to 3840, "height": 240 to 2160}`; a narrow one gets the page's mobile layout. Default 1920×1080. |
+| `viewport` | object | unset | The browser window, `{"width": 320 to 3840, "height": 240 to 2160}`; a narrow one gets the page's mobile layout. Default 1920×1080. A full-page capture holds at most 1920 × `SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its height is cut at `SCREENSHOT_MAX_HEIGHT_PX` × 1920 / viewport width). |
 | `format` | `png`, `jpeg` or `webp` | `png` | The image format. |
 | `quality` | integer, 1 to 100 | `80` | Quality of a `jpeg` or `webp` image. Not with `png` (422). |
 | `width` | integer, 16 to 3840 | unset | Scale the image down to this width, keeping the aspect ratio; at most the viewport's width (422), never scaled up. |

@@ -49,7 +49,9 @@ async def screenshot(
     principal: Annotated[Principal, Depends(require_role("user"))],
 ) -> Envelope[ScreenshotResult] | JSONResponse:
     """Render a URL in the browser and capture it as an image: a 1920x1080 PNG unless `viewport`,
-    `format`, `quality` and `width` say otherwise.
+    `format`, `quality` and `width` say otherwise. A full-page capture holds at most 1920 x
+    `SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its height is
+    cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport width).
 
     `data.screenshot` references the file: download it from its `url`
     (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`; the download

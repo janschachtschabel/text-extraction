@@ -594,3 +594,17 @@ def test_extract_request_refuses_options_in_fast_mode_with_a_screenshot() -> Non
                 "screenshot_options": {"format": "jpeg"},
             }
         )
+
+
+def test_screenshot_request_schema_shows_the_bounds_and_the_pixel_cap() -> None:
+    properties = ScreenshotRequest.model_json_schema()["properties"]
+    quality = next(o for o in properties["quality"]["anyOf"] if o["type"] == "integer")
+    width = next(o for o in properties["width"]["anyOf"] if o["type"] == "integer")
+
+    assert (quality["minimum"], quality["maximum"]) == (1, 100)
+    assert (width["minimum"], width["maximum"]) == (16, 3840)
+    for description in (
+        properties["viewport"]["description"],
+        ScreenshotOptions.model_fields["viewport"].description or "",
+    ):
+        assert "1920 x `SCREENSHOT_MAX_HEIGHT_PX`" in description

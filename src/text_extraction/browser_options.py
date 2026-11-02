@@ -297,7 +297,9 @@ class ScreenshotOptions(BaseModel, extra="forbid", strict=True):
     viewport: Viewport = Field(
         default=DEFAULT_VIEWPORT,
         description="The browser window the page is rendered in; a narrow one gets the page's "
-        "mobile layout. Default 1920x1080.",
+        "mobile layout. Default 1920x1080. A full-page capture holds at most 1920 x "
+        "`SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its "
+        "height is cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport width).",
     )
     format: ScreenshotFormat = Field(
         default="png", description="Image format: `png` (default, lossless), `jpeg` or `webp`."
