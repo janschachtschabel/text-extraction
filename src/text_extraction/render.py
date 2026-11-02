@@ -74,7 +74,9 @@ class RenderOptions:
     checked like any other (with the headers again only on that site), and any other redirect
     is followed by the browser without them. Resource types in ``blocked_resources`` are not
     loaded (B3). ``transcript_panel`` runs the steps that read YouTube's new transcript view
-    (``browser_panel.py``) before the page is read."""
+    (``browser_panel.py``) before the page is read. ``viewport`` is the window the page is
+    rendered in (a screenshot request's, else 1920 by 1080); a narrow one gets the page's mobile
+    layout."""
 
     actions: tuple[Action, ...] = field(default=(), repr=False)
     cookies: tuple[CookieData, ...] = field(default=(), repr=False)
@@ -86,6 +88,7 @@ class RenderOptions:
     unblock: bool = False
     blocked_resources: frozenset[str] = frozenset()
     transcript_panel: bool = False
+    viewport: tuple[int, int] = (1920, 1080)  # width, height of the browser window in CSS pixels
 
 
 @dataclass(frozen=True)

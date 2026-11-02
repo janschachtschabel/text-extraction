@@ -720,6 +720,22 @@ def test_screenshot_is_stored_in_the_requested_format_and_width() -> None:
     assert ref.bytes == len(stored.data)
 
 
+def test_the_renderer_gets_the_requests_viewport() -> None:
+    png = real_png(390, 844)
+    renderer = FakeRenderer(rendered(screenshot=png, screenshot_size=(390, 844)))
+    harness = RenderHarness(renderer=renderer)
+    options = {"viewport": {"width": 390, "height": 844}}
+
+    harness.run_once(
+        mode="browser", screenshot=True, screenshot_options=options, artifacts=FakeArtifacts()
+    )
+    harness.run_once(mode="browser", screenshot=True, artifacts=FakeArtifacts())
+    harness.run_once(mode="browser", artifacts=FakeArtifacts())
+
+    sizes = [call.options.viewport for call in renderer.calls]
+    assert sizes == [(390, 844), (1920, 1080), (1920, 1080)]
+
+
 def test_the_byte_limit_applies_to_the_encoded_file() -> None:
     png = real_png(800, 600)
     options = {"format": "webp", "quality": 95}
