@@ -50,22 +50,34 @@ def page_item(
     *,
     title: str | None = None,
     depth: int = 1,
-    links: tuple[tuple[str, str], ...] = (),
+    links: tuple[tuple[str, str] | tuple[str, str, str | None], ...] = (),
     error: ErrorCode | None = None,
+    page_type: str | None = None,
 ) -> JobItem:
-    """A crawled page; ``links`` are (url, crawl) pairs."""
+    """A crawled page; ``links`` are (url, crawl) pairs or (url, crawl, category) triples (a
+    pair, like an item stored before link categories, has no category); ``page_type`` is the
+    page's type (None: like a failed page or an item stored before page types)."""
     site = {
         "role": "page",
         "depth": depth,
         "parent": None if index == 0 else 0,
         "links": [
-            {"url": link, "text": "", "kind": "internal", "source": "a", "rel": [], "crawl": crawl}
-            for link, crawl in links
+            {
+                "url": link[0],
+                "text": "",
+                "kind": "internal",
+                "source": "a",
+                "rel": [],
+                "crawl": link[1],
+                "category": link[2] if len(link) == 3 else None,
+            }
+            for link in links
         ],
     }
+    typed = {"type": page_type, "signals": []} if page_type is not None else None
     envelope: dict[str, Any] = {
         "status": "failed" if error else "success",
-        "data": result_data(url, title=title, site=site),
+        "data": result_data(url, title=title, site=site, page_type=typed),
     }
     if error is not None:
         envelope["error"] = ErrorInfo(code=error, message="x", retryable=False).model_dump()

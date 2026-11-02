@@ -180,7 +180,7 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         site = page.locator("#result section.job", has=page.locator("button.tree-button"))
         expect(site.locator(".state")).to_have_attribute("data-value", "completed")
         site.locator("button.tree-button").click()
-        expect(page.locator("#result .tree-view input[name=url]")).to_have_count(4)
+        expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
         found += _axe(page, "site tree")
 
     assert found == [], "\n".join(found)
@@ -449,7 +449,7 @@ def _open_tree(page: Page, origin: str) -> str:
     site = page.locator("#result section.job", has=page.locator("button.tree-button"))
     expect(site.locator(".state")).to_have_attribute("data-value", "completed")
     site.locator("button.tree-button").click()
-    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(4)
+    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
     job_id: str = site.get_attribute("data-job") or ""
     return job_id
 

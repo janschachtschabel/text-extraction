@@ -240,6 +240,8 @@
       writeKey(KEYS.asr, valueOf("keys-asr"));
     } else if (action === "tree-all" || action === "tree-none") {
       selectAll(button.closest("form"), action === "tree-all");
+    } else if (action === "tree-content") {
+      selectContent(button.closest("form"), button.getAttribute("data-exclude") || "");
     }
   });
 
@@ -259,22 +261,44 @@
     }
   }
 
+  // A section's box from its children's: checked when all are, indeterminate when some are.
+  function settle(item) {
+    var boxes = Array.prototype.map.call(
+      item.querySelectorAll(":scope > ul > li"),
+      nodeBox
+    ).filter(Boolean);
+    var own = nodeBox(item);
+    if (!own || boxes.length === 0) {
+      return;
+    }
+    var checked = boxes.filter(function (box) { return box.checked; }).length;
+    var partly = boxes.some(function (box) { return box.indeterminate; });
+    own.checked = checked === boxes.length;
+    own.indeterminate = partly || (checked > 0 && checked < boxes.length);
+  }
+
   function settleParents(item) {
     var parent = item.parentElement ? item.parentElement.closest("li") : null;
     while (parent && parent.closest(".tree")) {
-      var boxes = Array.prototype.map.call(
-        parent.querySelectorAll(":scope > ul > li"),
-        nodeBox
-      ).filter(Boolean);
-      var checked = boxes.filter(function (box) { return box.checked; }).length;
-      var partly = boxes.some(function (box) { return box.indeterminate; });
-      var own = nodeBox(parent);
-      if (own) {
-        own.checked = boxes.length > 0 && checked === boxes.length;
-        own.indeterminate = partly || (checked > 0 && checked < boxes.length);
-      }
+      settle(parent);
       parent = parent.parentElement ? parent.parentElement.closest("li") : null;
     }
+  }
+
+  // "Select content pages" (package 14): ticks every URL whose page type is not one of
+  // ``excluded`` (a space-separated list), a URL without a type too, and unticks the others.
+  function selectContent(form, excluded) {
+    var skip = excluded.split(/\s+/).filter(Boolean);
+    form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
+      box.checked = skip.indexOf(box.getAttribute("data-page-type") || "") < 0;
+      box.indeterminate = false;
+    });
+    // Children before their parents: the reverse of document order.
+    var items = form.querySelectorAll(".tree li");
+    for (var index = items.length - 1; index >= 0; index -= 1) {
+      settle(items[index]);
+    }
+    countSelected(form);
   }
 
   function selectAll(form, value) {

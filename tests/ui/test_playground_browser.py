@@ -31,12 +31,13 @@ expect.set_options(timeout=45_000)  # a job's view refreshes every 3 s
 
 USER_KEY = "user-key-0123456789-raw-secret"
 WAIT_MS = 45_000
-# The site: a start page that links three pages, two of them under /docs/.
+# The site: a start page that links four pages, two of them under /docs/, and an imprint.
 PAGES = {
-    "/": ("Start page", ["/docs/a.html", "/docs/b.html", "/about.html"]),
+    "/": ("Start page", ["/docs/a.html", "/docs/b.html", "/about.html", "/impressum.html"]),
     "/docs/a.html": ("Docs A", []),
     "/docs/b.html": ("Docs B", []),
     "/about.html": ("About us", []),
+    "/impressum.html": ("Impressum", []),
 }
 
 
@@ -169,7 +170,7 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         expect(job.locator(".state")).to_have_text("completed")
         job.locator("button.tree-button").click()
         view = page.locator("#result .tree-view")
-        expect(view.locator("input[name=url]")).to_have_count(4)
+        expect(view.locator("input[name=url]")).to_have_count(5)
 
         root = view.locator("ul.tree > li > label > input")
         label = page.locator(":scope > label > span.label", has_text=re.compile("^docs/$"))
@@ -181,9 +182,29 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         assert not root.is_checked()
         expect(view.locator(".tree-counter")).to_have_text("2 selected")
         view.locator("[data-action=tree-all]").click()
-        expect(view.locator(".tree-counter")).to_have_text("4 selected")
+        expect(view.locator(".tree-counter")).to_have_text("5 selected")
         assert root.evaluate("box => box.indeterminate") is False
         assert root.is_checked()
+
+        # Page types: badges, the counts over the tree, and "Select content pages", which
+        # leaves the imprint unticked (package 14).
+        imprint = view.locator(f"input[name=url][value='{origin}/impressum.html']")
+        expect(imprint).to_have_attribute("data-page-type", "imprint")
+        badge = imprint.locator("xpath=ancestor::li[1]/span[contains(@class, 'page-type')]")
+        expect(badge).to_have_text("Imprint")
+        expect(view.locator(".tree-types")).to_contain_text("Imprint 1")
+        view.locator("[data-action=tree-content]").click()
+        expect(view.locator(".tree-counter")).to_have_text("4 selected")
+        assert not imprint.is_checked()
+        checked = view.locator("input[name=url]:checked")
+        assert sorted(checked.nth(n).get_attribute("value") or "" for n in range(4)) == [
+            f"{origin}/",
+            f"{origin}/about.html",
+            f"{origin}/docs/a.html",
+            f"{origin}/docs/b.html",
+        ]
+        assert root.evaluate("box => box.indeterminate") is True
+        assert docs.locator(":scope > label > input").is_checked()
         view.locator("[data-action=tree-none]").click()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
         docs.locator(":scope > label > input").check()

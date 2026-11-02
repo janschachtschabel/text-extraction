@@ -158,3 +158,88 @@ def _leaves(tree: SiteTree) -> list[TreeNode]:
             found.append(node)
         stack.extend(node.children)
     return found
+
+
+def test_tree_page_types_of_crawled_sitemap_and_linked_leaves() -> None:
+    """A crawled page has its own type; a sitemap entry the type its URL says, guessed; a
+    linked-only URL its link's category when that is a page type, else what its URL says,
+    guessed. A page without a type (failed, or stored before page types) stays without one,
+    even when its URL says something (ruling P14-R7)."""
+    items = [
+        # Listed before the pages: the pages that move up keep their own verdict.
+        sitemap_item(0, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/login"}]),
+        page_item(
+            1,
+            f"{ORIGIN}/",
+            depth=0,
+            page_type="home",
+            links=(
+                (f"{ORIGIN}/impressum", "depth", "imprint"),
+                (f"{ORIGIN}/docs/x", "max_pages", "content"),
+                (f"{ORIGIN}/start", "depth", "nav"),  # not a page type; the URL says nothing
+                (f"{ORIGIN}/kontakt", "depth"),  # stored before link categories
+            ),
+        ),
+        page_item(2, f"{ORIGIN}/docs/a", page_type="content"),
+        page_item(3, f"{ORIGIN}/docs/b", page_type="content"),
+        page_item(4, f"{ORIGIN}/login", error=ErrorCode.TARGET_HTTP_ERROR),
+        page_item(5, f"{ORIGIN}/datenschutz", page_type="privacy"),
+        # Listed after the pages: merged into them, which keep their own verdict.
+        sitemap_item(
+            6,
+            f"{ORIGIN}/sitemap.xml",
+            [
+                {"loc": f"{ORIGIN}/datenschutz"},
+                {"loc": f"{ORIGIN}/docs/a"},
+                {"loc": f"{ORIGIN}/agb"},
+                {"loc": f"{ORIGIN}/news/2026"},
+            ],
+            part=2,
+        ),
+    ]
+
+    tree = build_tree(items, max_urls=100)
+
+    assert {node.url: (node.kind, node.page_type, node.type_guessed) for node in _leaves(tree)} == {
+        f"{ORIGIN}/": ("page", "home", False),
+        f"{ORIGIN}/docs/a": ("page", "content", False),
+        f"{ORIGIN}/docs/b": ("page", "content", False),
+        f"{ORIGIN}/login": ("page", None, False),
+        f"{ORIGIN}/datenschutz": ("page", "privacy", False),
+        f"{ORIGIN}/agb": ("sitemap", "legal", True),
+        f"{ORIGIN}/news/2026": ("sitemap", None, False),
+        f"{ORIGIN}/impressum": ("linked", "imprint", True),
+        f"{ORIGIN}/docs/x": ("linked", "content", True),
+        f"{ORIGIN}/start": ("linked", None, False),
+        f"{ORIGIN}/kontakt": ("linked", "contact", True),
+    }
+    # Most first, then in the order of the types; leaves without a type are not counted.
+    assert list(tree.type_counts.items()) == [
+        ("content", 3),
+        ("home", 1),
+        ("imprint", 1),
+        ("privacy", 1),
+        ("legal", 1),
+        ("contact", 1),
+    ]
+
+
+def test_tree_counts_only_the_shown_leaves() -> None:
+    items = [
+        page_item(0, f"{ORIGIN}/a", page_type="content"),
+        page_item(1, f"{ORIGIN}/impressum", page_type="imprint"),
+        sitemap_item(2, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/agb"}]),
+    ]
+
+    tree = build_tree(items, max_urls=2)
+
+    assert (tree.urls, tree.hidden) == (2, 1)
+    assert dict(tree.type_counts) == {"content": 1, "imprint": 1}
+
+
+def test_an_old_jobs_items_have_no_page_type() -> None:
+    tree = build_tree([page_item(0, f"{ORIGIN}/impressum")], max_urls=10)
+
+    [node] = _leaves(tree)
+    assert (node.page_type, node.type_guessed) == (None, False)
+    assert dict(tree.type_counts) == {}

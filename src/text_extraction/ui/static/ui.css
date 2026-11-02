@@ -531,6 +531,25 @@ ul.tree .title {
   color: var(--muted);
 }
 
+/* A leaf's page type; a type guessed from the URL has a dashed border and says so. */
+.page-type {
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 0.85em;
+}
+
+.page-type-guessed {
+  border-style: dashed;
+}
+
+.page-type .type-guessed,
+.tree-types {
+  color: var(--muted);
+}
+
 .batch-preview textarea[readonly] {
   background: var(--wash);
 }
