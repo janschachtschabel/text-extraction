@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Literal
 
 import pytest
@@ -68,7 +69,16 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/INDEX.PHP", "home"),
     ("https://example.org/?utm_source=x", "home"),
     ("https://example.org/index.html#top", "home"),
-    # imprint
+    ("https://example.org/de", "home"),
+    ("https://example.org/en/", "home"),
+    ("https://example.org/de-at/", "home"),
+    ("https://example.org/en-GB/", "home"),
+    ("https://example.org/de/index.html", "home"),
+    ("https://example.org/de/impressum", "imprint"),
+    ("https://example.org/deindex.html", None),
+    ("https://example.org/deu/", None),
+    ("https://example.org/imprint\u0301", None),
+    ("https://example.org/datenschutzerkla\u0308rung", "privacy"),
     ("https://example.org/impressum", "imprint"),
     ("https://example.org/impressum/", "imprint"),
     ("https://example.org/Impressum.html", "imprint"),
@@ -198,6 +208,8 @@ LinkKind = Literal["internal", "external", "file"]
 
 LINK_CATEGORIES: list[tuple[str, str, LinkKind, str]] = [
     ("https://example.org/", "Startseite", "internal", "home"),
+    ("https://example.org/en/", "English", "internal", "home"),
+    ("https://example.org/de-at", "Deutsch", "internal", "home"),
     ("https://example.org/index.html", "Home", "internal", "home"),
     ("https://example.org/impressum", "Impressum", "internal", "imprint"),
     ("https://example.org/datenschutz", "Datenschutz", "internal", "privacy"),
@@ -273,6 +285,11 @@ def test_status_and_soft_404_are_both_listed() -> None:
 def test_status_below_400_and_unknown_status_are_no_error() -> None:
     assert classify(doc(), status=301, words=100)[0] == "content"
     assert classify(doc(), status=None, words=100)[0] == "content"
+
+
+def test_language_root_is_home() -> None:
+    assert classify(doc(title="Kontakt"), "https://example.org/en/") == ("home", ["root_path"])
+    assert classify(doc(), "https://example.org/de-AT", words=900)[0] == "home"
 
 
 def test_root_path_is_home_even_with_a_contact_page_title() -> None:
@@ -451,9 +468,46 @@ def test_title_and_first_h1_name_the_type(heading: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("heading", "expected"),
+    [
+        ("Firma | Impressum", "imprint"),
+        ("ACME \u2013 Kontakt", "contact"),
+        ("ACME - Kontakt", "contact"),
+        ("Firma GmbH: Datenschutzerkl\u00e4rung", "privacy"),
+        ("Firma \u00b7 Privacy Policy", "privacy"),
+        ("Firma | Shop | Impressum", "imprint"),
+        ("Acme Corp | About us", "about"),
+        ("Acme Corp \u2014 Login", "auth"),
+        ("Acme | Suche", "search"),
+        ("Acme | Search results", "search"),
+        ("Acme | Terms of Use", "legal"),
+        ("Acme | AGB ", "legal"),
+        ("Impressum | Kontakt", "imprint"),
+    ],
+)
+def test_title_and_h1_may_end_with_the_type_word(heading: str, expected: str) -> None:
+    assert classify(doc(title=heading)) == (expected, ["title"])
+    assert classify(doc(body=f"<h1>{heading}</h1>")) == (expected, ["h1"])
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["Firma | Impressionen", "Firma Impressum", "Acme-Kontakt", "Firma | Kontakt aufnehmen"],
+)
+def test_the_type_word_at_the_end_needs_a_separator_before_it(heading: str) -> None:
+    assert classify(doc(title=heading))[0] == "other"
+
+
+def test_url_and_schema_org_still_beat_a_title_suffix() -> None:
+    assert classify(doc(title="Firma | Impressum"), "https://example.org/kontakt")[0] == "contact"
+    schema = '<script type="application/ld+json">{"@type": "AboutPage"}</script>'
+    assert classify(doc(title="Firma | Impressum", head=schema))[0] == "about"
+
+
+@pytest.mark.parametrize(
     "heading",
     [
-        "Firma GmbH | Impressum",
+        "Firma GmbH Impressum",
         "Kontaktlinsen günstig",
         "Contact lenses | Shop",
         "Login-Seite der Zukunft",
@@ -590,3 +644,23 @@ def test_garbage_html_does_not_raise() -> None:
     assert classify("")[0] == "other"
     assert classify("<<<>>>&&& \x00 <a href=")[0] == "other"
     assert classify("not html at all", words=MIN_WORDS)[0] == "content"
+
+
+def test_microdata_scan_is_linear_on_nested_scopes() -> None:
+    depth = 5000
+    html = doc(
+        body='<div itemscope itemtype="https://schema.org/ContactPage">'
+        + '<div itemscope itemtype="https://schema.org/WebPage">' * depth
+        + "</div>" * depth
+        + "</div>"
+    )
+    started = time.perf_counter()
+    result = classify(html)
+    assert time.perf_counter() - started < 1.0
+    assert result == ("contact", ["schema_org"])
+
+
+def test_microdata_scan_stops_after_the_scope_limit() -> None:
+    scopes = '<div itemscope itemtype="https://schema.org/WebPage"></div>' * 60
+    late = '<div itemscope itemtype="https://schema.org/ContactPage"></div>'
+    assert classify(doc(body=scopes + late))[0] == "other"

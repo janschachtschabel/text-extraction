@@ -32,6 +32,7 @@ imported for typing only): ``convert.links`` imports ``LinkCategory`` from here,
 
 import json
 import re
+import unicodedata
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -114,7 +115,13 @@ _URL_ORDER: Final[tuple[PageType, ...]] = (
 
 def _fold(text: str) -> str:
     """Case-folded, umlauts as ``ae oe ue``, whitespace collapsed."""
-    folded = text.casefold().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+    folded = (
+        unicodedata.normalize("NFC", text)
+        .casefold()
+        .replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+    )
     return " ".join(folded.split())
 
 
@@ -210,7 +217,10 @@ _SEARCH_PARAMETERS: Final = frozenset({"q", "query", "search", "suche", "s", "ke
 _PAGE_PARAMETERS: Final = frozenset({"page", "seite"})
 _PAGE_SEGMENTS: Final = frozenset({"page", "seite"})
 _FILE_EXTENSION = re.compile(r"\.(?:html?|php|aspx?)$")
-_HOME_PATH = re.compile(r"^/?(?:index\.(?:html?|php))?$", re.IGNORECASE)
+# Empty, ``/``, ``/index.html``, and a language code in front (``/de``, ``/en/``, ``/de-at/``).
+_HOME_PATH = re.compile(
+    r"^/?(?:[a-z]{2}(?:[-_][a-z]{2})?(?:/|$))?(?:index\.(?:html?|php))?$", re.IGNORECASE
+)
 
 
 def _segment_stem(segment: str) -> str:
@@ -229,7 +239,7 @@ def url_type(url: str) -> PageType | None:
         query = parse_qsl(parts.query)
     except ValueError:
         return None
-    path = unquote(parts.path)
+    path = unicodedata.normalize("NFC", unquote(parts.path))
     segments = [segment for segment in path.split("/") if segment]
     stems = [_segment_stem(segment) for segment in segments]
 
@@ -358,11 +368,16 @@ _HEADING_TYPE: Final[dict[str, PageType]] = {
     for page_type_name, words in _HEADING_WORDS.items()
     for word in words
 }
-# The name, then nothing or a separator (a hyphen only with a space before or after it).
-_HEADING = re.compile(
-    r"^(?P<word>"
-    + "|".join(re.escape(word) for word in sorted(_HEADING_TYPE, key=len, reverse=True))
-    + r")(?=\s*$|\s*[|\u2013\u2014:\u00b7]|\s+-|-\s)"
+_HEADING_WORDS_PATTERN = "|".join(
+    re.escape(word) for word in sorted(_HEADING_TYPE, key=len, reverse=True)
+)
+# The name first, then nothing or a separator (a hyphen only with a space before or after it).
+_HEADING_START = re.compile(
+    rf"^(?P<word>{_HEADING_WORDS_PATTERN})(?=\s*$|\s*[|\u2013\u2014:\u00b7]|\s+-|-\s)"
+)
+# Or the name last, after a separator (a hyphen only with a space before or after it).
+_HEADING_END = re.compile(
+    rf"(?:[|\u2013\u2014:\u00b7]|\s-|-\s)\s*(?P<word>{_HEADING_WORDS_PATTERN})$"
 )
 
 _SCHEMA_TYPES: Final[tuple[tuple[str, PageType], ...]] = (
@@ -404,6 +419,22 @@ def _json_ld_nodes(data: object) -> list[object]:
     return nodes
 
 
+def _microdata_scopes(tree: HtmlElement) -> list[HtmlElement]:
+    """The outermost ``itemscope`` elements in document order, at most ``_MAX_MICRODATA_SCOPES``;
+    a walk that does not descend into a scope, so deep nesting costs nothing extra."""
+    scopes: list[HtmlElement] = []
+    stack = [tree]
+    while stack and len(scopes) < _MAX_MICRODATA_SCOPES:
+        element = stack.pop()
+        if not isinstance(element.tag, str):  # a comment or a processing instruction
+            continue
+        if element.get("itemscope") is not None:
+            scopes.append(element)
+            continue
+        stack.extend(reversed(element))
+    return scopes
+
+
 def _schema_type_names(tree: HtmlElement) -> set[str]:
     names: set[str] = set()
     scripts = 0
@@ -422,11 +453,7 @@ def _schema_type_names(tree: HtmlElement) -> set[str]:
             continue
         for node in _json_ld_nodes(data):
             names.update(_json_ld_types(node))
-    try:
-        scopes = tree.xpath("//*[@itemscope][not(ancestor::*[@itemscope])]")
-    except Exception:  # an xpath that lxml gives up on is no signal
-        scopes = []
-    for scope in scopes[:_MAX_MICRODATA_SCOPES]:
+    for scope in _microdata_scopes(tree):
         names.update(_schema_name(item) for item in (scope.get("itemtype") or "").split())
     return names
 
@@ -440,7 +467,8 @@ def _schema_page_type(tree: HtmlElement) -> PageType | None:
 
 
 def _heading_type(text: str | None) -> PageType | None:
-    match = _HEADING.match(_fold((text or "")[:_MAX_HEADING_CHARS]))
+    folded = _fold((text or "")[:_MAX_HEADING_CHARS])
+    match = _HEADING_START.match(folded) or _HEADING_END.search(folded)
     return _HEADING_TYPE[match.group("word")] if match else None
 
 
