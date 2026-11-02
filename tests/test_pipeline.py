@@ -678,6 +678,132 @@ def test_links_on_request() -> None:
     assert kinds[f"{ORIGIN}/learn/respiration.html"] == "internal"
     assert kinds["https://other.example/plants"] == "external"
     assert kinds[f"{ORIGIN}/files/worksheet.pdf"] == "file"
+    categories = {link.url: link.category for link in links}
+    assert categories == {
+        f"{ORIGIN}/": "home",
+        f"{ORIGIN}/learn/respiration.html": "content",
+        "https://other.example/plants": "content",
+        f"{ORIGIN}/files/worksheet.pdf": "download",
+    }
+
+
+IMPRINT = f"{ORIGIN}/impressum"
+IMPRINT_PAGE = f"""<!doctype html><html lang="de"><head><title>Impressum</title></head>
+<body><main><h1>Impressum</h1><p>{PARAGRAPH * 3}</p></main></body></html>"""
+
+
+def test_a_fast_html_page_has_a_page_type() -> None:
+    harness = Harness({IMPRINT: fetched(IMPRINT, IMPRINT_PAGE), PAGE: fetched()})
+
+    imprint, article = harness.run_all({"url": IMPRINT}, {"url": PAGE})
+
+    imprint_type = data_of(imprint).page_type
+    assert imprint_type is not None
+    assert (imprint_type.type, imprint_type.signals) == ("imprint", ["url", "title", "h1"])
+    article_type = data_of(article).page_type
+    assert article_type is not None
+    assert (article_type.type, article_type.signals) == ("content", ["word_count"])
+
+
+def test_a_login_wall_keeps_its_page_type() -> None:
+    """A thin page with a password field fails as ``login_required``; its type says why."""
+    login = f"{ORIGIN}/login"
+    page = """<!doctype html><html lang="de"><head><title>Login</title></head><body><main>
+    <h1>Login</h1><form><input name="user"><input type="password" name="pw"></form>
+    </main></body></html>"""
+    harness = Harness({login: fetched(login, page)})
+
+    envelope = harness.run_once(url=login)
+
+    assert envelope.error is not None
+    assert envelope.error.code == ErrorCode.LOGIN_REQUIRED
+    found = data_of(envelope).page_type
+    assert found is not None
+    assert (found.type, found.signals) == ("auth", ["url", "title", "h1", "password_field"])
+
+
+def test_a_rendered_page_has_a_page_type() -> None:
+    valkey = FakeAsyncRedis()
+    settings = make_settings(browser_enabled=True)
+    fetcher = cast(Fetcher, FakeFetcher({}))
+    browser = Pipeline(
+        fetcher,
+        DomainGate(valkey, settings),
+        ComplianceChecker(fetcher, valkey, settings),
+        ResultCache(valkey, settings),
+        FingerprintStore(valkey, settings),
+        settings,
+        CollectorRegistry(),
+        renderer=cast(Renderer, FakeRenderer(rendered(IMPRINT_PAGE, url=IMPRINT))),
+    )
+    request = ExtractRequest.model_validate({"url": IMPRINT, "mode": "browser"})
+
+    shown = data_of(asyncio.run(browser.run(request, USER)))
+
+    assert shown.mode_used == "browser"
+    assert shown.page_type is not None
+    assert shown.page_type.type == "imprint"
+
+
+def test_only_html_pages_have_a_page_type() -> None:
+    plain = Harness({PAGE: fetched(body=PARAGRAPH * 3, content_type="text/plain")})
+    markdown = Harness(
+        {PAGE: fetched(body=f"# Impressum\n\n{PARAGRAPH * 3}", content_type="text/markdown")}
+    )
+    for harness in (plain, markdown):
+        envelope = harness.run_once()
+        assert envelope.status == "success"
+        assert data_of(envelope).page_type is None
+
+    uploaded = data_of(
+        asyncio.run(
+            Harness({}).pipeline.extract_upload(
+                IMPRINT_PAGE.encode(), "impressum.html", FileForm(), USER, content_type="text/html"
+            )
+        )
+    )
+    assert uploaded.content
+    assert uploaded.page_type is None
+
+
+def test_a_document_has_no_page_type() -> None:
+    valkey = FakeAsyncRedis()
+    settings = make_settings()
+    pdf = b"%PDF-1.7\n" + b"0" * 64
+    fetcher = cast(
+        Fetcher, FakeFetcher({IMPRINT: fetched(IMPRINT, pdf, content_type="application/pdf")})
+    )
+    documents = Pipeline(
+        fetcher,
+        DomainGate(valkey, settings),
+        ComplianceChecker(fetcher, valkey, settings),
+        ResultCache(valkey, settings),
+        FingerprintStore(valkey, settings),
+        settings,
+        CollectorRegistry(),
+        document_pool=cast(DocumentPool, _AnsweringDocumentPool()),
+    )
+
+    document = data_of(asyncio.run(documents.run(ExtractRequest(url=IMPRINT), USER)))
+
+    assert document.document is not None
+    assert document.page_type is None
+
+
+def test_a_result_cached_before_page_types_loads() -> None:
+    """Review Focus 5: a stored result without ``page_type`` and with links without
+    ``category`` still loads."""
+    harness = Harness({PAGE: fetched()})
+    stored = data_of(harness.run_once(links=True)).model_dump(mode="json")
+    del stored["page_type"]
+    for found in stored["links"]:
+        del found["category"]
+
+    old = ExtractResult.model_validate(stored)
+
+    assert old.page_type is None
+    assert old.links is not None
+    assert {found.category for found in old.links} == {None}
 
 
 def test_metadata_off() -> None:

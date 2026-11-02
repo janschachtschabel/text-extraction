@@ -247,10 +247,12 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "chunks",
         "image_descriptions",
         "site",
+        "page_type",
     }
     assert data["structured"] is None
     assert data["chunks"] is None
     assert data["site"] is None  # package 9: the only new field of the existing routes
+    assert data["page_type"]["type"] == "content"  # package 14: an HTML page's type
     assert data["timings"]["llm_ms"] == 0
     assert data["format"] == "text"
     assert data["mode_used"] == "fast"
@@ -265,7 +267,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "llm_ms",
     }
     assert data["compliance"]["decision"] == "allowed"
-    assert {"url", "text", "kind"} <= set(data["links"][0])
+    assert {"url", "text", "kind", "category"} <= set(data["links"][0])
 
 
 def test_target_failure_is_200_failed(client: TestClient) -> None:
@@ -323,6 +325,20 @@ def test_openapi_pii_description_names_every_field_it_applies_to(client: TestCli
 
     for field in ("content", "title", "metadata", "links", "media uploader", "document.file_name"):
         assert field in description, field
+
+
+def test_openapi_describes_page_type_and_link_category(client: TestClient) -> None:
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+
+    page_type = schemas["ExtractResult"]["properties"]["page_type"]
+    assert "HTML pages only; null otherwise" in page_type["description"]
+    info = schemas["PageTypeInfo"]["properties"]
+    for name in ("home", "content", "listing", "imprint", "error", "other"):
+        assert f"`{name}`" in info["type"]["description"], name
+    assert "`word_count`" in info["signals"]["description"]
+    category = schemas["Link"]["properties"]["category"]
+    for name in ("social", "download", "nav"):
+        assert f"`{name}`" in category["description"], name
 
 
 def test_extract_200_schema_is_the_plain_envelope(client: TestClient) -> None:

@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from lxml.html import HtmlElement
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from text_extraction.structured.rules import parse_page
 
@@ -392,8 +392,21 @@ _NON_VISIBLE: Final = ("script", "style", "noscript", "template")
 class PageTypeInfo(BaseModel):
     """The type of a page and the signals that agree with it."""
 
-    type: PageType
-    signals: list[PageSignal]
+    type: PageType = Field(
+        description="What kind of page this is, by rules: `home`, `content` (an article or "
+        "another page with enough text), `listing` (an index of other pages: a category, a tag, "
+        "an archive, a page of a paged list), `imprint`, `privacy`, `legal` (terms, cookies, "
+        "disclaimer, accessibility statement), `contact`, `about`, `auth` (login, sign-up, "
+        "account), `search` (search results), `error` (an error page, such as a soft 404) or "
+        "`other`."
+    )
+    signals: list[PageSignal] = Field(
+        description="Every signal that agrees with `type`, strongest first: `status`, "
+        "`soft_404`, `root_path`, `schema_org` (JSON-LD or microdata), `og_type` (`og:type` is "
+        "`article`; never decides), `url` (the path or the query), `title`, `h1`, "
+        "`password_field`, `pagination` (`rel=next|prev`), `link_density` (mostly links), "
+        "`word_count`. Empty for `other`."
+    )
 
 
 def _schema_name(value: str) -> str:

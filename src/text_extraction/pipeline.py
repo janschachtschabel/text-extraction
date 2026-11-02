@@ -42,11 +42,12 @@ One request runs these steps (docs/architecture.md, "Extraction pipeline"):
    audio or video type to that head only) passes the header checks and goes to
    ``MediaSteps.media_file``. A cut body that is no media is ``unsupported_content_type``, as is
    anything else.
-8. Quality verdict, language, metadata, links, fingerprint and cache. A document's result is
-   final: it never goes to the browser, and a cached one is served even with ``ocr_unavailable``.
-   An HTML page that does not escalate (fast) or was rendered gets the transcripts of its
-   players' ``<track>`` elements appended and its embeds listed (``MediaSteps.tracks``), before
-   its verdict.
+8. Quality verdict, language, metadata, links (each with its category), the page type of a
+   fetched or rendered HTML page (``page_types.page_type``), fingerprint and cache. A
+   document's result is final: it never goes to the browser, and a cached one is served even
+   with ``ocr_unavailable``. An HTML page that does not escalate (fast) or was rendered gets
+   the transcripts of its players' ``<track>`` elements appended and its embeds listed
+   (``MediaSteps.tracks``), before its verdict.
 
 Media that needs speech recognition (``transcribe: true``) becomes an ``AsrNeeded`` for
 ``asr_handoff``, which ``run`` calls once the deadline's steps are done, with the answer without
@@ -218,6 +219,8 @@ from text_extraction.outbound import (
     parse_retry_after,
     record_fetch_failure,
 )
+from text_extraction.page_types import PageTypeInfo
+from text_extraction.page_types import page_type as classify_page
 from text_extraction.pii.types import PiiOptions
 from text_extraction.pipeline_documents import (
     OCR_NOT_HANDED_MESSAGE,
@@ -648,6 +651,7 @@ class _Processed:
     structured: StructuredResult | None = None  # the DOM stage's (S3), for HTML only
     dom: "_DomWork | None" = None  # the DOM stage still to run, once ``_process`` is done
     site: SiteInfo | None = None  # the page's typed links, for a ``site_links`` run
+    page_type: PageTypeInfo | None = None  # a fetched or rendered HTML page's (package 14)
 
 
 @dataclass(frozen=True)
@@ -1912,6 +1916,7 @@ class Pipeline:
             warnings=processed.warnings,
             structured=processed.structured,
             site=processed.site,
+            page_type=processed.page_type,
         )
         envelope = self._envelope(result)
         if self._escalates(run, envelope):
@@ -1938,9 +1943,10 @@ class Pipeline:
         started = time.perf_counter()
         learned = run.learned if isinstance(run, _Run) else {}
         site = isinstance(run, _Run) and run.site_links
+        typed = isinstance(run, _Run)  # an upload has no URL to read a page type from
         try:
             processed = await self._pool.run(
-                self._process, run.req, fetched, kind, text, learned, site
+                self._process, run.req, fetched, kind, text, learned, site, typed
             )
             if processed.dom is not None:
                 processed = await self._dom_stage(run, processed, processed.dom)
@@ -2566,6 +2572,7 @@ class Pipeline:
             screenshot=screenshot,
             structured=processed.structured,
             site=processed.site,
+            page_type=processed.page_type,
         )
         if self._media is not None and screenshot is None:
             result = await self._media.tracks(
@@ -2669,13 +2676,15 @@ class Pipeline:
         text: str,
         learned: Mapping[str, SelectorRule] | None = None,
         site_links: bool = False,
+        typed: bool = False,
     ) -> _Processed:
         """Convert and judge the decoded page, and prepare the DOM stage of ``structured`` on an
         HTML page (S3) with the ``learned`` selectors (``_DomWork``: ``_dom_stage`` runs it).
         CPU-bound: runs on the conversion pool. The page is parsed once for the metadata and
         the DOM stage. With ``site_links`` the page's typed links become its ``site`` (P9-S10):
         an HTML page's (at most ``SITE_MAX_LINKS_PER_PAGE``, else ``links_truncated``), none
-        for plain text."""
+        for plain text. With ``typed`` (a fetched or rendered page, not an upload) an HTML
+        page gets its ``page_type``; plain text and Markdown get none."""
         final_url = fetched.final_url
         metadata: PageMetadata | None = None
         links: list[Link] | None = None
@@ -2684,6 +2693,7 @@ class Pipeline:
         dom_warnings: list[str] = []
         site: SiteInfo | None = None
         site_warnings: list[str] = []
+        found_type: PageTypeInfo | None = None
         if kind == "html":
             conversion = convert_html(text, final_url, req.format)
             host = urlsplit(final_url).hostname or ""
@@ -2719,6 +2729,14 @@ class Pipeline:
                 )
                 if found.truncated:
                     site_warnings.append(LINKS_TRUNCATED_WARNING)
+            if typed:  # the fetch's status is the result's ``upstream_status``
+                found_type = classify_page(
+                    text,
+                    final_url,
+                    status=fetched.status,
+                    quality=quality,
+                    min_words=self._settings.quality_min_words,
+                )
         else:
             if fetched.content_type in _MARKDOWN_TYPES:
                 conversion = Conversion(
@@ -2751,6 +2769,7 @@ class Pipeline:
             fingerprint=None if failed else compute_fingerprint(fetched.raw_sha256, content),
             dom=dom_work,
             site=site,
+            page_type=found_type,
         )
 
     def _envelope(

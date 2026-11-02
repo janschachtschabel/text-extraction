@@ -26,6 +26,7 @@ from text_extraction.fingerprint import Fingerprint
 from text_extraction.media.types import MAX_LANGUAGES, LanguageCode, MediaInfo
 from text_extraction.metadata import PageMetadata
 from text_extraction.netguard import MAX_URL_LENGTH
+from text_extraction.page_types import PageTypeInfo
 from text_extraction.pii.types import BareModeOrObject, PiiOptions, PiiReport
 from text_extraction.quality import Quality
 from text_extraction.site.types import SiteInfo
@@ -396,6 +397,13 @@ class ExtractResult(BaseModel):
     # Items of a ``site`` job only (and pages fetched for one); the default keeps older results
     # valid.
     site: SiteInfo | None = None
+    # HTML pages only; the default keeps results cached before page types valid.
+    page_type: PageTypeInfo | None = Field(
+        default=None,
+        description="The page's type and the signals that say so, by rules (no LLM). HTML pages "
+        "only; null otherwise (documents, media, plain text, Markdown, uploads, a page that "
+        "was not converted) and in results stored before page types.",
+    )
 
 
 def own_fault_result(

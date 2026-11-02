@@ -105,6 +105,45 @@ def test_sources_and_head_rels() -> None:
     assert all(link.crawl == "listed" and link.target is None for link in links)
 
 
+@pytest.mark.parametrize(
+    ("url", "source", "category"),
+    [
+        (f"{ORIGIN}/", "a", "home"),
+        (f"{ORIGIN}/suche", "a", "search"),
+        (f"{ORIGIN}/mathe/", "a", "content"),
+        (f"{ORIGIN}/start", "a", "nav"),  # its text is "Start"
+        (f"{ORIGIN}/kurs/bruchrechnung?seite=2", "a", "listing"),
+        (f"{ORIGIN}/kurs/bruchrechnung?seite=2", "link", "listing"),
+        (f"{ORIGIN}/en/fractions", "link", "content"),
+        (f"{ORIGIN}/material/arbeitsblatt.pdf", "a", "download"),
+        ("https://forum.example.com/t/42", "a", "content"),
+        ("https://h5p.example.net/h5p/embed/1234", "iframe", "content"),
+        (f"{ORIGIN}/orte/berlin", "area", "content"),
+        (f"{ORIGIN}/impressum", "a", "imprint"),
+        ("https://partner.example.com/", "a", "content"),  # another site's root
+    ],
+)
+def test_categories_per_link(url: str, source: str, category: str) -> None:
+    assert by_url(fixture_links().links, source)[url].category == category
+
+
+def test_every_link_has_a_category_and_social_hosts_are_social() -> None:
+    footer = (
+        '<footer><a href="https://mastodon.social/@lernwerkstatt">Mastodon</a>'
+        '<a href="https://www.youtube.com/@lernwerkstatt">YouTube</a></footer>'
+    )
+
+    assert [link.category for link in links_of(footer)] == ["social", "social"]
+    assert all(link.category is not None for link in fixture_links().links)
+
+
+def test_a_stored_link_without_a_category_loads() -> None:
+    """Items of site jobs stored before link categories."""
+    stored = {"url": f"{ORIGIN}/", "text": "", "kind": "internal", "source": "a", "rel": []}
+
+    assert SiteLink.model_validate({**stored, "crawl": "listed"}).category is None
+
+
 def test_document_order_and_first_occurrence_per_source() -> None:
     links = fixture_links().links
     urls = [(link.source, link.url) for link in links]

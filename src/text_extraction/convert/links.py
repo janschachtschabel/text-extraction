@@ -4,12 +4,23 @@ Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 """
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urldefrag, urljoin, urlsplit
 
 from bs4 import BeautifulSoup
+from pydantic import Field
 
 from text_extraction.convert.markup import attr, parse_html
+from text_extraction.page_types import LinkCategory, link_category
+
+# The description of a link's ``category`` in the OpenAPI spec (``links`` and ``site.links``).
+LINK_CATEGORY_DESCRIPTION = (
+    "What the link leads to, by rules: `download` (a file); `social` (a social network or "
+    "video platform); for a link on the page's own site the type its URL says (`home`, "
+    "`listing`, `imprint`, `privacy`, `legal`, `contact`, `about`, `auth`, `search`), else "
+    '`nav` (a navigation helper such as "Back to top") or `content`. Any other external link '
+    "is `content`. Null in results stored before link categories."
+)
 
 DOWNLOAD_EXTS = frozenset(
     {
@@ -50,6 +61,8 @@ class Link:
     url: str
     text: str
     kind: Literal["internal", "external", "file"]
+    # None only in results cached before link categories.
+    category: Annotated[LinkCategory | None, Field(description=LINK_CATEGORY_DESCRIPTION)] = None
 
 
 def absolute_url(base: str, href: str) -> str | None:
@@ -91,7 +104,8 @@ def page_links(html: str, base_url: str) -> list[Link]:
     A link to a path ending in one of ``DOWNLOAD_EXTS`` is a ``file``; any other link is
     ``internal`` when it stays on the page's host (ignoring a leading ``www.``). The
     fragment is dropped (``page#a`` and ``page`` are one link); links that only point into the
-    page and non-http schemes (``mailto:``, ``javascript:``, ...) are left out.
+    page and non-http schemes (``mailto:``, ``javascript:``, ...) are left out. Each link has its
+    ``page_types.link_category``.
     """
     soup = parse_html(html)
     base = base_url_of(soup, base_url)
@@ -123,5 +137,7 @@ def page_links(html: str, base_url: str) -> list[Link]:
             kind = "internal"
         else:
             kind = "external"
-        links.append(Link(url=target, text=text, kind=kind))
+        links.append(
+            Link(url=target, text=text, kind=kind, category=link_category(target, text, kind))
+        )
     return links

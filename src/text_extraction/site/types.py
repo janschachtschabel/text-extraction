@@ -16,7 +16,9 @@ from pydantic import (
 )
 
 from text_extraction.compliance import ComplianceMode
+from text_extraction.convert.links import LINK_CATEGORY_DESCRIPTION
 from text_extraction.netguard import MAX_URL_LENGTH
+from text_extraction.page_types import LinkCategory
 
 __all__ = [
     "LASTMOD_MAX_CHARS",
@@ -183,6 +185,8 @@ class SiteLink(BaseModel):
     target: int | None = Field(
         default=None, description="The index of the item of the linked page, when it has one."
     )
+    # None only in items stored before link categories.
+    category: LinkCategory | None = Field(default=None, description=LINK_CATEGORY_DESCRIPTION)
 
 
 class SitemapEntry(BaseModel):

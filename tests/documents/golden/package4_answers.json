@@ -24,6 +24,12 @@
       "chunks": null,
       "image_descriptions": null,
       "site": null,
+      "page_type": {
+        "signals": [
+          "word_count"
+        ],
+        "type": "content"
+      },
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": {
         "changed": null,
@@ -37,21 +43,25 @@
       "links": [
         {
           "kind": "internal",
+          "category": "home",
           "text": "Home",
           "url": "https://example.org/"
         },
         {
           "kind": "internal",
+          "category": "content",
           "text": "respiration",
           "url": "https://example.org/learn/respiration.html"
         },
         {
           "kind": "external",
+          "category": "content",
           "text": "plant atlas",
           "url": "https://other.example/plants"
         },
         {
           "kind": "file",
+          "category": "download",
           "text": "worksheet",
           "url": "https://example.org/files/worksheet.pdf"
         }
@@ -133,6 +143,7 @@
       "chunks": null,
       "image_descriptions": null,
       "site": null,
+      "page_type": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": {
         "changed": null,
@@ -193,6 +204,7 @@
       "chunks": null,
       "image_descriptions": null,
       "site": null,
+      "page_type": null,
       "final_url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "fingerprint": null,
       "format": "markdown",
