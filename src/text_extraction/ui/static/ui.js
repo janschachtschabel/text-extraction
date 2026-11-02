@@ -13,6 +13,9 @@
  * from the page's data-text-* attributes, the texts of the API's error codes from its
  * <template id="ui-error-texts">.
  *
+ * Screenshot form: its "custom capture" fields are enabled only with the preset "custom" (without
+ * this script they stay usable and the service ignores them for any other preset).
+ *
  * Tabs: the WAI-ARIA tabs pattern, with a roving tabindex; the arrow keys, Home and End move the
  * focus and the selection.
  *
@@ -296,6 +299,33 @@
     settleParents(item);
     countSelected(box.closest("form"));
   });
+
+  // The screenshot form's custom fields apply only with the preset "custom".
+  function syncCapture(form) {
+    var preset = form.querySelector("#screenshot-preset");
+    var group = form.querySelector("#screenshot-custom");
+    if (preset && group) {
+      group.disabled = preset.value !== "custom";
+    }
+  }
+
+  document.addEventListener("change", function (event) {
+    var select = event.target;
+    if (select instanceof HTMLSelectElement && select.id === "screenshot-preset") {
+      syncCapture(select.form);
+    }
+  });
+
+  // The form is on the page at load, or swapped in after the login (htmx:load).
+  function initCapture() {
+    var form = document.getElementById("screenshot-form");
+    if (form) {
+      syncCapture(form);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", initCapture);
+  document.addEventListener("htmx:load", initCapture);
 
   // The page's status line (ruling P12-S9).
   function announce(message) {

@@ -8,7 +8,7 @@ a job page drops its trailing items, then the lists of a result are cut."""
 import base64
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Final
 
 from fastapi.exceptions import RequestValidationError
 from fastmcp.tools import ToolResult
@@ -289,9 +289,22 @@ def image_over_limit_hint(size: object, url: str) -> str:
     return f"The screenshot ({size} bytes) is over MCP_IMAGE_MAX_BYTES; download it from {url}."
 
 
-def png_content(data: bytes, *, limit: int, url: str) -> ImageContent | str:
-    """A screenshot as image content when it is at most ``limit`` bytes
-    (``MCP_IMAGE_MAX_BYTES``), else the hint to download it from ``url``."""
+# The media types of a screenshot (``screenshot_options.format``), by file extension.
+IMAGE_TYPES: Final = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
+def image_type(name: str, declared: object = None) -> str:
+    """The media type of the screenshot artifact ``name``: ``declared`` (the artifact
+    reference's ``content_type``) when it is an image type of a screenshot, else the one of the
+    file extension (PNG for an unknown one)."""
+    if isinstance(declared, str) and declared in IMAGE_TYPES.values():
+        return declared
+    return IMAGE_TYPES.get(name.rpartition(".")[2].lower(), "image/png")
+
+
+def image_content(data: bytes, *, content_type: str, limit: int, url: str) -> ImageContent | str:
+    """A screenshot (PNG, JPEG or WebP, as ``content_type`` says) as image content when it is at
+    most ``limit`` bytes (``MCP_IMAGE_MAX_BYTES``), else the hint to download it from ``url``."""
     if len(data) > limit:
         return image_over_limit_hint(len(data), url)
-    return ImageContent(type="image", data=base64.b64encode(data).decode(), mime_type="image/png")
+    return ImageContent(type="image", data=base64.b64encode(data).decode(), mime_type=content_type)

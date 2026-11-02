@@ -30,6 +30,8 @@ ALLOWED_LITERALS = {
     "API",
     "MCP",
     "PNG",
+    "JPEG",
+    "WebP",
     "CSV",
     "LLM",
     "ASR",

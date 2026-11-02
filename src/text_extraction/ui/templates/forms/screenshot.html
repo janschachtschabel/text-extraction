@@ -5,9 +5,36 @@
   <p class="hint" id="screenshot-url-hint">{{ t("hint.url") }}</p>
   {% set access_variant = "screenshot" %}
   {% include "forms/access.html" %}
-  <fieldset class="choice">
-    <legend>{{ t("form.capture") }}</legend>
-    <label class="inline"><input type="checkbox" name="full_page" value="on" checked aria-describedby="screenshot-full-page-hint"> {{ t("form.full_page") }}</label>
+  <label for="screenshot-preset">{{ t("form.capture") }}</label>
+  <select id="screenshot-preset" name="preset" aria-describedby="screenshot-preset-hint">
+    {%- for preset in ("page", "viewport", "social", "thumb", "mobile", "custom") %}
+    <option value="{{ preset }}"{% if preset == "page" %} selected{% endif %}>{{ t("preset." ~ preset) }}</option>
+    {%- endfor %}
+  </select>
+  <p class="hint" id="screenshot-preset-hint">{{ t("hint.preset") }}</p>
+  <fieldset class="choice custom-capture" id="screenshot-custom" aria-describedby="screenshot-custom-hint">
+    <legend>{{ t("form.custom_capture") }}</legend>
+    <p class="hint" id="screenshot-custom-hint">{{ t("hint.custom_capture") }}</p>
+    <label for="screenshot-viewport-width">{{ t("form.viewport_width") }}</label>
+    <input id="screenshot-viewport-width" name="viewport_width" type="number" min="320" max="3840" step="1" value="1920" aria-describedby="screenshot-viewport-width-hint">
+    <p class="hint" id="screenshot-viewport-width-hint">{{ t("hint.viewport_width") }}</p>
+    <label for="screenshot-viewport-height">{{ t("form.viewport_height") }}</label>
+    <input id="screenshot-viewport-height" name="viewport_height" type="number" min="240" max="2160" step="1" value="1080" aria-describedby="screenshot-viewport-height-hint">
+    <p class="hint" id="screenshot-viewport-height-hint">{{ t("hint.viewport_height") }}</p>
+    <label for="screenshot-format">{{ t("form.image_format") }}</label>
+    <select id="screenshot-format" name="format" aria-describedby="screenshot-format-hint">
+      <option value="png" selected>PNG</option>
+      <option value="jpeg">JPEG</option>
+      <option value="webp">WebP</option>
+    </select>
+    <p class="hint" id="screenshot-format-hint">{{ t("hint.image_format") }}</p>
+    <label for="screenshot-quality">{{ t("form.quality") }}</label>
+    <input id="screenshot-quality" name="quality" type="number" min="1" max="100" step="1" aria-describedby="screenshot-quality-hint">
+    <p class="hint" id="screenshot-quality-hint">{{ t("hint.quality") }}</p>
+    <label for="screenshot-width">{{ t("form.image_width") }}</label>
+    <input id="screenshot-width" name="width" type="number" min="16" max="3840" step="1" aria-describedby="screenshot-width-hint">
+    <p class="hint" id="screenshot-width-hint">{{ t("hint.image_width") }}</p>
+    <label class="inline"><input type="checkbox" id="screenshot-full-page" name="full_page" value="on" checked aria-describedby="screenshot-full-page-hint"> {{ t("form.full_page") }}</label>
     <p class="hint" id="screenshot-full-page-hint">{{ t("hint.full_page") }}</p>
   </fieldset>
   {% include "forms/common.html" %}

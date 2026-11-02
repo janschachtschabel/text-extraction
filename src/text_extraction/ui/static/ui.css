@@ -258,6 +258,10 @@ fieldset.choice {
   border-radius: 6px;
 }
 
+fieldset.custom-capture:disabled {
+  border-style: dashed;
+}
+
 label.inline {
   display: inline-flex;
   gap: 0.35rem;

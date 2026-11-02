@@ -1079,9 +1079,14 @@ class Seen:
     llm_key: str | None = None
 
 
+# The media type of a screenshot artifact by its extension.
+ARTIFACT_TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}
+
+
 class FakeBrowserWorker:
-    """Claims items of pool ``browser`` and writes ``respond(seen)`` as their result. While
-    ``hold`` is clear it claims but does not write yet."""
+    """Claims items of pool ``browser`` and writes ``respond(seen)`` as their result (with
+    ``artifact`` stored as the screenshot ``artifact_name``). While ``hold`` is clear it claims
+    but does not write yet."""
 
     def __init__(
         self,
@@ -1090,11 +1095,13 @@ class FakeBrowserWorker:
         respond: Callable[[Seen], Envelope[ExtractResult]] | None = None,
         *,
         artifact: bytes | None = None,
+        artifact_name: str = SCREENSHOT_ARTIFACT,
     ) -> None:
         self.server = server
         self.settings = settings
         self.respond = respond or (lambda seen: rendered_envelope())
         self.artifact = artifact
+        self.artifact_name = artifact_name
         self.seen: list[Seen] = []
         self.hold = threading.Event()
         self.hold.set()
@@ -1140,12 +1147,13 @@ class FakeBrowserWorker:
                 await asyncio.sleep(0.01)
             envelope = self.respond(seen)
             if self.artifact is not None:
-                expires = await store.put_artifact(job.id, SCREENSHOT_ARTIFACT, self.artifact)
+                name = self.artifact_name
+                expires = await store.put_artifact(job.id, name, self.artifact)
                 assert envelope.data is not None
                 envelope.data.screenshot = ArtifactRef(
-                    name=SCREENSHOT_ARTIFACT,
-                    url=f"/v1/jobs/{job.id}/artifacts/{SCREENSHOT_ARTIFACT}",
-                    content_type="image/png",
+                    name=name,
+                    url=f"/v1/jobs/{job.id}/artifacts/{name}",
+                    content_type=ARTIFACT_TYPES[name.rsplit(".", 1)[1]],
                     bytes=len(self.artifact),
                     width=1920,
                     height=1080,

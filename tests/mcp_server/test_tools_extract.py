@@ -44,6 +44,8 @@ TEXT = "# Notes\n\nPlants turn light into sugar.\n\n## Roots\n\nRoots take up wa
 EXTRACTION_TOOLS = {"extract_url", "extract_file", "screenshot_url", "extract_structured", "chunk"}
 LLM_KEY = "sk-llm-caller-key-mcp-41"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x01" * (1024 - 8)
+JPEG = b"\xff\xd8\xff\xe0" + b"\x02" * 300
+WEBP = b"RIFF\x24\x00\x00\x00WEBP" + b"\x03" * 300
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -682,6 +684,35 @@ def test_screenshot_image_attached_and_capped(limit: int) -> None:
             f"The screenshot ({len(PNG)} bytes) is over MCP_IMAGE_MAX_BYTES; download it from "
             f"{shot['url']}."
         ]
+
+
+@pytest.mark.parametrize(
+    ("options", "name", "content", "media_type"),
+    [
+        ({"format": "webp", "width": 400}, "screenshot.webp", WEBP, "image/webp"),
+        ({"format": "jpeg", "quality": 70}, "screenshot.jpg", JPEG, "image/jpeg"),
+    ],
+)
+def test_screenshot_image_has_the_media_type_of_its_format(
+    options: dict[str, Any], name: str, content: bytes, media_type: str
+) -> None:
+    case = BrowserCase(mcp_enabled=True)
+    with TestClient(case.app) as client, case.worker(artifact=content, artifact_name=name):
+        arguments = {"url": PAGE, "options": options}
+        result = call_tool(client, "screenshot_url", arguments, headers=AUTH)
+
+    assert result["isError"] is False
+    images = [block for block in result["content"] if block["type"] == "image"]
+    assert [image["mimeType"] for image in images] == [media_type]
+    assert base64.b64decode(images[0]["data"]) == content
+    assert envelope_of(result)["data"]["screenshot"]["name"] == name
+
+
+def test_screenshot_tool_describes_the_formats() -> None:
+    description = ScreenshotUrlTool().description or ""
+
+    assert "PNG, JPEG or WebP" in description
+    assert "1920 px wide" not in description
 
 
 def test_screenshot_hint_without_a_size() -> None:
