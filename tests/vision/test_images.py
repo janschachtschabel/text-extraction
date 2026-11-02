@@ -10,6 +10,7 @@ from text_extraction.vision.images import (
     append_description,
     clean_description,
     data_url,
+    is_svg,
     sniff_image,
 )
 from text_extraction.vision.types import DESCRIPTION_MAX_CHARS
@@ -35,6 +36,61 @@ from text_extraction.vision.types import DESCRIPTION_MAX_CHARS
 )
 def test_sniff_image_by_magic_bytes(body: bytes, expected: str | None) -> None:
     assert sniff_image(body) == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        b"<svg>",
+        b"<svg/>",
+        b"\n  \t<svg\nwidth='1'></svg>",
+        b'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg"/>',
+        b'\xef\xbb\xbf<svg xmlns="http://www.w3.org/2000/svg"/>',
+        b'\xef\xbb\xbf<?xml version="1.0"?><svg/>',
+        b'<?xml version="1.0"?>\n<!-- made by hand -->\n'
+        b'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" '
+        b'"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">\n<svg/>',
+        b"<!-- a --><!-- b --><svg/>",
+        b'<svg:svg xmlns:svg="http://www.w3.org/2000/svg"/>',
+        b'<x:svg xmlns:x="http://www.w3.org/2000/svg"></x:svg>',
+    ],
+)
+def test_is_svg_true(body: bytes) -> None:
+    assert is_svg(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'<!doctype html><html><body><svg xmlns="http://www.w3.org/2000/svg"></svg></body></html>',
+        b"<html><svg></svg></html>",
+        b"<svgfoo></svgfoo>",
+        b"<svg-icon></svg-icon>",
+        b"<x:svgfoo/>",
+        b"<!-- unterminated <svg/>",
+        b"<?xml version='1.0'?><html/>",
+        b"<!DOCTYPE html><svg/>",
+        b"text before <svg/>",
+        b"\x89PNG\r\n\x1a\n" + b"\x00" * 8,
+        b"%PDF-1.7\n",
+        b"<svg",
+        b"",
+        b"   ",
+    ],
+)
+def test_is_svg_false(body: bytes) -> None:
+    assert is_svg(body) is False
+
+
+def test_is_svg_reads_only_the_first_4096_bytes() -> None:
+    padding = b"<!--" + b" " * 5000 + b"-->"
+    assert is_svg(padding + b"<svg/>") is False
+    assert is_svg(b"<svg/>" + b"\xff" * 5000) is True
+
+
+def test_sniff_image_still_ignores_svg() -> None:
+    assert sniff_image(b"<svg/>") is None
 
 
 def test_data_url_is_base64_of_the_bytes() -> None:

@@ -1,8 +1,10 @@
 """Preview images of a result (ruling P10-S16, D7 a): the server fetches them through the vision
 ``ImageFetcher`` (the SSRF guard on the URL and every redirect, the caller's compliance mode, the
-host's outbound turn, the service's user agent, the type sniffed from the bytes, at most
-``UI_IMAGE_MAX_BYTES``) and the page shows them as ``data:`` URIs, so third-party hosts never
-see the viewer and the CSP stays ``img-src 'self' data:``."""
+host's outbound turn, the service's user agent, the type sniffed from the bytes, SVG
+included, at most ``UI_IMAGE_MAX_BYTES``) and the page shows them as ``data:`` URIs, so
+third-party hosts never see the viewer and the CSP stays ``img-src 'self' data:``. An SVG shown
+through ``<img>`` runs no script and loads no sub-resource; the markup is only ever the
+base64 payload of ``src``."""
 
 import asyncio
 from collections.abc import Mapping, Sequence
@@ -111,7 +113,9 @@ async def load_previews(
             if left <= 0:
                 return None
             timeout = min(PREVIEW_TIMEOUT_SECONDS, left)
-            return await fetcher.get(url, mode, timeout=timeout, max_bytes=max_bytes)
+            return await fetcher.get(
+                url, mode, timeout=timeout, max_bytes=max_bytes, allow_svg=True
+            )
 
     async def one(url: str) -> Preview:
         image: ImageBytes | ImageSkipped | None

@@ -17,7 +17,8 @@ page, and answers its bytes or why it was skipped; it never raises for the targe
   most ``max_bytes`` (default ``LLM_VISION_MAX_IMAGE_BYTES``; the UI's previews pass
   ``UI_IMAGE_MAX_BYTES``), within ``timeout`` seconds for the whole call.
 
-The type comes from the body's magic bytes (``sniff_image``), never from ``Content-Type``.
+The type comes from the body's magic bytes (``sniff_image``, and ``is_svg`` for an SVG when the
+caller allows it), never from ``Content-Type``.
 Logs carry the host and the reason only, never the URL.
 """
 
@@ -56,7 +57,7 @@ from text_extraction.outbound import (
     record_fetch_failure,
 )
 from text_extraction.settings import Settings
-from text_extraction.vision.images import sniff_image
+from text_extraction.vision.images import is_svg, sniff_image
 from text_extraction.vision.types import VisionMediaType
 
 __all__ = [
@@ -82,7 +83,7 @@ class ImageBytes:
     """An image as fetched: its bytes and the type its magic bytes say."""
 
     data: bytes
-    media_type: VisionMediaType
+    media_type: VisionMediaType | Literal["image/svg+xml"]
 
     def __repr__(self) -> str:  # never the bytes in a log or a traceback
         return f"ImageBytes(media_type={self.media_type!r}, size={len(self.data)})"
@@ -136,13 +137,16 @@ class ImageFetcher:
         *,
         timeout: float,  # noqa: ASYNC109 - fixed by the plan's interface
         max_bytes: int | None = None,
+        allow_svg: bool = False,
     ) -> ImageBytes | ImageSkipped:
         """The image at ``url``, or why it was skipped, within ``timeout`` seconds and at most
-        ``max_bytes`` (default ``LLM_VISION_MAX_IMAGE_BYTES``)."""
+        ``max_bytes`` (default ``LLM_VISION_MAX_IMAGE_BYTES``). An SVG body is returned (as
+        ``image/svg+xml``) only with ``allow_svg`` (the UI's previews); otherwise it is
+        ``unsupported``, as the vision step needs."""
         host = _host_of(url)
         cap = self._settings.llm_vision_max_image_bytes if max_bytes is None else max_bytes
         try:
-            outcome = await self._get(url, mode, timeout, cap)
+            outcome = await self._get(url, mode, timeout, cap, allow_svg)
         except (OutboundBusy, CircuitOpen):
             outcome = ImageSkipped("busy")
         if isinstance(outcome, ImageSkipped):
@@ -150,7 +154,7 @@ class ImageFetcher:
         return outcome
 
     async def _get(
-        self, url: str, mode: ComplianceMode, seconds: float, max_bytes: int
+        self, url: str, mode: ComplianceMode, seconds: float, max_bytes: int, allow_svg: bool
     ) -> ImageBytes | ImageSkipped:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + seconds
@@ -183,9 +187,11 @@ class ImageFetcher:
         if fetched.truncated:  # a body declared as audio or video is cut, not refused
             return ImageSkipped("too_large")
         media_type = sniff_image(fetched.content)
-        if media_type is None:
-            return ImageSkipped("unsupported")
-        return ImageBytes(data=fetched.content, media_type=media_type)
+        if media_type is not None:
+            return ImageBytes(data=fetched.content, media_type=media_type)
+        if allow_svg and is_svg(fetched.content):
+            return ImageBytes(data=fetched.content, media_type="image/svg+xml")
+        return ImageSkipped("unsupported")
 
     async def _fetch(
         self,

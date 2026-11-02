@@ -32,6 +32,13 @@ PUBLIC_ADDRESS = "93.184.216.34"
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x02" * 200
 JPEG_2MB = b"\xff\xd8\xff\xe0" + b"\x00" * (2_000_000 - 4)
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>'
+ACTIVE_SVG = (
+    b'<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
+    b'xmlns:xlink="http://www.w3.org/1999/xlink">'
+    b"<script>alert(1)</script>"
+    b'<image href="http://tracker.example.net/pixel.png" width="1" height="1"/>'
+    b"</svg>"
+)
 PRIVATE = "http://127.0.0.1:6379/"
 
 
@@ -109,17 +116,16 @@ def test_previews_guarded(httpserver: HTTPServer, connects: list[str]) -> None:
     assert [figure.get("data-url") for figure in figures] == urls
     images = root.xpath("//figure[@class='preview']//img")
     assert [(image.get("src"), image.get("alt")) for image in images] == [
-        ("data:image/png;base64," + base64.b64encode(PNG).decode(), "A <b>png</b>")
+        ("data:image/png;base64," + base64.b64encode(PNG).decode(), "A <b>png</b>"),
+        ("data:image/svg+xml;base64," + base64.b64encode(SVG).decode(), "An svg"),
     ]
     skipped = root.xpath("//figure[@class='preview']//*[@class='skipped']")
     assert [node.get("data-reason") for node in skipped] == [
-        "unsupported",
         "too_large",
         "refused",
         "refused",
     ]
     assert [node.text_content() for node in skipped] == [
-        "not a supported image",
         "too large",
         "address not allowed",
         "address not allowed",
@@ -142,10 +148,67 @@ def test_previews_guarded(httpserver: HTTPServer, connects: list[str]) -> None:
         )
 
     assert (counted("shown"), counted("unsupported"), counted("too_large"), counted("refused")) == (
-        1.0,
-        1.0,
+        2.0,
+        0.0,
         1.0,
         2.0,
+    )
+
+
+def test_svg_preview_is_a_data_uri_in_an_img_tag_only(
+    httpserver: HTTPServer, connects: list[str]
+) -> None:
+    for name in ("/robots.txt", "/.well-known/tdmrep.json", "/ai.txt"):
+        httpserver.expect_request(name).respond_with_data("", status=404)
+    httpserver.expect_request("/active.svg").respond_with_data(
+        ACTIVE_SVG, content_type="image/svg+xml"
+    )
+    url = public(httpserver, "/active.svg")
+
+    with running(fetch_allow_private_networks=False, ui_image_max_bytes=1_000_000) as client:
+        answer = run(client, "images", url=[url], alt=["Active svg"], compliance="enforce")
+
+    assert answer.status_code == 200
+    expected = "data:image/svg+xml;base64," + base64.b64encode(ACTIVE_SVG).decode()
+    root = lxml.html.fragment_fromstring(answer.text, create_parent="div")
+    assert [image.get("src") for image in root.xpath("//img")] == [expected]
+    # The SVG's markup is only inside the base64 payload: no element of it reaches the fragment.
+    assert not root.xpath("//script | //svg | //image | //object | //embed | //iframe")
+    assert "alert(1)" not in answer.text
+    assert "tracker.example.net" not in answer.text
+    assert answer.text.count(expected) == 1
+
+
+def test_load_previews_asks_for_svg() -> None:
+    class SvgSource:
+        def __init__(self) -> None:
+            self.calls: list[bool] = []
+
+        async def get(
+            self,
+            url: str,
+            mode: ComplianceMode,
+            *,
+            timeout: float,  # noqa: ASYNC109 - the ImageFetcher's interface
+            max_bytes: int | None = None,
+            allow_svg: bool = False,
+        ) -> ImageBytes | ImageSkipped:
+            self.calls.append(allow_svg)
+            return ImageBytes(data=ACTIVE_SVG, media_type="image/svg+xml")
+
+    source = SvgSource()
+    previews = asyncio.run(
+        load_previews(
+            ["https://example.org/a.svg"],
+            fetcher=source,  # type: ignore[arg-type]
+            mode="enforce",
+            max_bytes=10_000,
+        )
+    )
+
+    assert source.calls == [True]
+    assert previews[0].data_uri == (
+        "data:image/svg+xml;base64," + base64.b64encode(ACTIVE_SVG).decode()
     )
 
 
@@ -165,6 +228,7 @@ class FakeSource:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, ComplianceMode, float, int | None]] = []
+        self.svg: list[bool] = []
         self.running = 0
         self.most = 0
 
@@ -175,8 +239,10 @@ class FakeSource:
         *,
         timeout: float,  # noqa: ASYNC109 - the ImageFetcher's interface
         max_bytes: int | None = None,
+        allow_svg: bool = False,
     ) -> ImageBytes | ImageSkipped:
         self.calls.append((url, mode, timeout, max_bytes))
+        self.svg.append(allow_svg)
         self.running += 1
         self.most = max(self.most, self.running)
         await asyncio.sleep(0.01)
@@ -208,6 +274,7 @@ def test_load_previews_bounds() -> None:
     assert len(source.calls) == 20
     assert {call[1:] for call in source.calls} == {("report", 10.0, 123_456)}
     assert source.most == 4
+    assert source.svg == [True] * 20  # the preview shows SVG
 
 
 def test_load_previews_reports_skips() -> None:
@@ -247,8 +314,10 @@ class FlakySource(FakeSource):
         *,
         timeout: float,  # noqa: ASYNC109 - the ImageFetcher's interface
         max_bytes: int | None = None,
+        allow_svg: bool = False,
     ) -> ImageBytes | ImageSkipped:
         self.calls.append((url, mode, timeout, max_bytes))
+        self.svg.append(allow_svg)
         await asyncio.sleep(self.delay)
         if "boom" in url:
             raise RuntimeError("the gate's Valkey is gone")
