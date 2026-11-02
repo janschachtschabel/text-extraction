@@ -107,26 +107,40 @@ BeautifulSoup, Jinja2/htmx, pytest.
 
 ```python
 def test_screenshot_request_builds_options():
-    body = ScreenshotRequest(url="https://example.org/", viewport={"width": 1200, "height": 630},
-                             format="webp", quality=70, width=600)
+    body = ScreenshotRequest(
+        url="https://example.org/",
+        viewport={"width": 1200, "height": 630},
+        format="webp",
+        quality=70,
+        width=600,
+    )
     opts = screenshot_options_of(body)  # helper in screenshot_api, used by run_screenshot
-    assert opts == ScreenshotOptions(viewport=Viewport(width=1200, height=630), format="webp",
-                                     quality=70, width=600)
+    assert opts == ScreenshotOptions(
+        viewport=Viewport(width=1200, height=630), format="webp", quality=70, width=600
+    )
+
 
 def test_screenshot_request_defaults_send_no_options():
     assert screenshot_options_of(ScreenshotRequest(url="https://example.org/")) is None
 
-@pytest.mark.parametrize("body, message", [
-    ({"format": "png", "quality": 50}, "quality needs format jpeg or webp"),
-    ({"viewport": {"width": 800, "height": 600}, "width": 801}, "larger than the viewport"),
-    ({"viewport": {"width": 319, "height": 600}}, "greater than or equal to 320"),
-    ({"width": 15}, "greater than or equal to 16"),
-])
+
+@pytest.mark.parametrize(
+    "body, message",
+    [
+        ({"format": "png", "quality": 50}, "quality needs format jpeg or webp"),
+        ({"viewport": {"width": 800, "height": 600}, "width": 801}, "larger than the viewport"),
+        ({"viewport": {"width": 319, "height": 600}}, "greater than or equal to 320"),
+        ({"width": 15}, "greater than or equal to 16"),
+    ],
+)
 def test_screenshot_options_refused(body, message): ...  # ValidationError containing message
+
 
 def test_extract_request_refuses_options_without_screenshot(): ...
 def test_job_options_dump_has_no_screenshot_options_when_unset():
     assert "screenshot_options" not in JobOptions(compliance="enforce").model_dump()
+
+
 def test_job_options_round_trip_with_screenshot_options(): ...  # JobStore stores and reads it
 ```
 
@@ -182,16 +196,24 @@ def test_png_without_width_is_passed_through():
     assert out.data is png and (out.width, out.height) == (800, 600)
     assert (out.content_type, out.name) == ("image/png", "screenshot.png")
 
-@pytest.mark.parametrize("fmt, mime, name, magic", [
-    ("jpeg", "image/jpeg", "screenshot.jpg", b"\xff\xd8\xff"),
-    ("webp", "image/webp", "screenshot.webp", b"RIFF"),
-])
+
+@pytest.mark.parametrize(
+    "fmt, mime, name, magic",
+    [
+        ("jpeg", "image/jpeg", "screenshot.jpg", b"\xff\xd8\xff"),
+        ("webp", "image/webp", "screenshot.webp", b"RIFF"),
+    ],
+)
 def test_formats(fmt, mime, name, magic): ...  # data starts with magic; Pillow reopens it
 
+
 def test_width_scales_down_keeping_ratio():
-    out = encode_screenshot(_png(1200, 630), ScreenshotOptions(
-        viewport=Viewport(width=1200, height=630), format="webp", width=600))
+    out = encode_screenshot(
+        _png(1200, 630),
+        ScreenshotOptions(viewport=Viewport(width=1200, height=630), format="webp", width=600),
+    )
     assert (out.width, out.height) == (600, 315)
+
 
 def test_quality_changes_size(): ...  # quality 20 file smaller than quality 95
 ```
