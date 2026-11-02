@@ -663,7 +663,11 @@ TYPED_SITE = [
         f"{ORIGIN}/",
         depth=0,
         page_type="home",
-        links=((f"{ORIGIN}/agb", "depth", "legal"), (f"{ORIGIN}/start", "depth", "nav")),
+        links=(
+            (f"{ORIGIN}/agb", "depth", "legal"),
+            (f"{ORIGIN}/start", "depth", "nav"),
+            (f"{ORIGIN}/docs/c", "depth", "content"),  # the URL says nothing: no type
+        ),
     ),
     page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
     page_item(2, f"{ORIGIN}/docs/b", page_type="content"),
@@ -714,7 +718,7 @@ def test_tree_shows_page_types(
         for leaf in root.xpath("//li[./label/input[@name='url']]")
         if leaf.xpath("./span[contains(@class, 'page-type')]")
     }
-    assert badges == expected["badges"]  # no badge for /kaputt (failed) nor /start (nav)
+    assert badges == expected["badges"]  # none for /kaputt (failed), /start and /docs/c
     boxes = {
         box.get("value").removeprefix(ORIGIN): box.get("data-page-type")
         for box in root.xpath("//input[@name='url']")
@@ -727,6 +731,7 @@ def test_tree_shows_page_types(
         "/kaputt": None,
         "/agb": "legal",
         "/start": None,
+        "/docs/c": None,
     }
     assert texts(root, "//p[@class='tree-types']") == [expected["types"]]
     [button] = root.xpath("//button[@data-action='tree-content']")

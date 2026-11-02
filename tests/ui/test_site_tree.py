@@ -161,9 +161,9 @@ def _leaves(tree: SiteTree) -> list[TreeNode]:
 
 
 def test_tree_page_types_of_crawled_sitemap_and_linked_leaves() -> None:
-    """A crawled page has its own type; a sitemap entry the type its URL says, guessed; a
-    linked-only URL its link's category when that is a page type, else what its URL says,
-    guessed. A page without a type (failed, or stored before page types) stays without one,
+    """A crawled page has its own type; a sitemap entry and a linked-only URL the type their URL
+    says, guessed, and none when it says nothing: a link's category is not used (ruling
+    P14-R8). A page without a type (failed, or stored before page types) stays without one,
     even when its URL says something (ruling P14-R7)."""
     items = [
         # Listed before the pages: the pages that move up keep their own verdict.
@@ -175,8 +175,9 @@ def test_tree_page_types_of_crawled_sitemap_and_linked_leaves() -> None:
             page_type="home",
             links=(
                 (f"{ORIGIN}/impressum", "depth", "imprint"),
-                (f"{ORIGIN}/docs/x", "max_pages", "content"),
-                (f"{ORIGIN}/start", "depth", "nav"),  # not a page type; the URL says nothing
+                (f"{ORIGIN}/docs/x", "max_pages", "content"),  # the URL says nothing: no type
+                (f"{ORIGIN}/ueber-uns/team", "depth", "content"),  # the URL wins: about
+                (f"{ORIGIN}/start", "depth", "nav"),
                 (f"{ORIGIN}/kontakt", "depth"),  # stored before link categories
             ),
         ),
@@ -192,6 +193,7 @@ def test_tree_page_types_of_crawled_sitemap_and_linked_leaves() -> None:
                 {"loc": f"{ORIGIN}/datenschutz"},
                 {"loc": f"{ORIGIN}/docs/a"},
                 {"loc": f"{ORIGIN}/agb"},
+                {"loc": f"{ORIGIN}/de/kontakt"},
                 {"loc": f"{ORIGIN}/news/2026"},
             ],
             part=2,
@@ -207,21 +209,26 @@ def test_tree_page_types_of_crawled_sitemap_and_linked_leaves() -> None:
         f"{ORIGIN}/login": ("page", None, False),
         f"{ORIGIN}/datenschutz": ("page", "privacy", False),
         f"{ORIGIN}/agb": ("sitemap", "legal", True),
+        f"{ORIGIN}/de/kontakt": ("sitemap", "contact", True),
         f"{ORIGIN}/news/2026": ("sitemap", None, False),
         f"{ORIGIN}/impressum": ("linked", "imprint", True),
-        f"{ORIGIN}/docs/x": ("linked", "content", True),
+        f"{ORIGIN}/docs/x": ("linked", None, False),
+        f"{ORIGIN}/ueber-uns/team": ("linked", "about", True),
         f"{ORIGIN}/start": ("linked", None, False),
         f"{ORIGIN}/kontakt": ("linked", "contact", True),
     }
-    # Most first, then in the order of the types; leaves without a type are not counted.
+    # Most first, then in the order of the types; guessed types count, leaves without a type
+    # do not (/login, /news/2026, /docs/x, /start).
     assert list(tree.type_counts.items()) == [
-        ("content", 3),
+        ("content", 2),
+        ("contact", 2),
         ("home", 1),
         ("imprint", 1),
         ("privacy", 1),
         ("legal", 1),
-        ("contact", 1),
+        ("about", 1),
     ]
+    assert sum(tree.type_counts.values()) == tree.urls - 4
 
 
 def test_tree_counts_only_the_shown_leaves() -> None:

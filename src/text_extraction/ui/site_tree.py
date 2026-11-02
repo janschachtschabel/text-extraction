@@ -16,9 +16,9 @@ items are taken one at a time (`TreeBuilder.add`), so a reader can feed them pag
 
 Each URL leaf has a page type (package 14): a crawled page its result's ``page_type`` (none
 when the page failed or its item was stored before page types, ruling P14-R7); a sitemap entry
-the type its URL says (``page_types.url_type``); a linked-only URL its link's ``category`` when
-that is a page type, else the type its URL says. A type from the URL is ``type_guessed``.
-``SiteTree.type_counts`` counts the types of the URLs shown.
+or a linked-only URL the type its URL says (``page_types.url_type``), ``type_guessed``, and none
+when the URL says nothing (ruling P14-R8: a link's ``category`` is not used; it defaults to
+``content``). ``SiteTree.type_counts`` counts the types of the URLs shown that have one.
 
 Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a directory
 (its label ends in ``/``) and has no URL of its own; every URL is a leaf: a directory's own
@@ -169,8 +169,7 @@ class TreeBuilder:
             self._add(_PAGE, found)
             for link in site.links or []:
                 if link.crawl in LINKED_ONLY:
-                    by_link = link.category if link.category in _PAGE_TYPES else None
-                    self._add(_LINKED, _guessed(link.url, by_link))
+                    self._add(_LINKED, _guessed(link.url))
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
             for entry in site.sitemap.entries:
                 found = _guessed(entry.loc)
@@ -224,10 +223,10 @@ class TreeBuilder:
         )
 
 
-def _guessed(url: str, page_type: PageType | None = None) -> _Found:
-    """A URL that was not crawled, with ``page_type`` (a link's category) or else the type its
-    URL says, as guessed."""
-    guess = page_type or url_type(url)
+def _guessed(url: str) -> _Found:
+    """A URL that was not crawled, with the type its URL says, as guessed (none if it says
+    nothing)."""
+    guess = url_type(url)
     return _Found(url, page_type=guess, type_guessed=guess is not None)
 
 
