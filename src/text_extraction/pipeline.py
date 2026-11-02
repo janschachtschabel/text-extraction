@@ -272,6 +272,7 @@ from text_extraction.render import (
     RenderOptions,
 )
 from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
+from text_extraction.screenshot_image import ScreenshotEncodeError, encode_screenshot
 from text_extraction.settings import Settings
 from text_extraction.site.links import site_links as typed_links
 from text_extraction.site.types import SiteInfo
@@ -2638,14 +2639,21 @@ class Pipeline:
             return run.failed(
                 ErrorCode.INTERNAL_ERROR, "The browser took no screenshot.", retryable=True
             )
+        try:
+            image = await asyncio.to_thread(encode_screenshot, png, run.req.screenshot_options)
+        except ScreenshotEncodeError:
+            return run.failed(
+                ErrorCode.INTERNAL_ERROR, "The screenshot could not be encoded.", retryable=True
+            )
         limit = self._settings.screenshot_max_bytes
-        if len(png) > limit:
+        if len(image.data) > limit:
             return run.failed(
                 ErrorCode.TOO_LARGE,
-                f"The screenshot has {len(png)} bytes, more than the {limit} bytes that are kept.",
+                f"The screenshot has {len(image.data)} bytes, more than the {limit} bytes that "
+                "are kept.",
             )
         try:
-            return await run.artifacts.put_screenshot(png, *size)
+            return await run.artifacts.put_screenshot(image)
         except ArtifactUnavailable:
             return run.failed(
                 ErrorCode.INTERNAL_ERROR,

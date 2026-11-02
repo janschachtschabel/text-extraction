@@ -24,6 +24,9 @@ from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import ItemRun, JobOptions, JobProgress
 from text_extraction.jobs import (
+    ARTIFACT_NAMES,
+    SCREENSHOT_ARTIFACT,
+    SCREENSHOT_ARTIFACTS,
     InputBudgetExceeded,
     JobLost,
     JobStore,
@@ -664,6 +667,29 @@ async def test_artifact_round_trip_and_ttl() -> None:
     assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:screenshot.png") <= 3600
     assert expires_at.timestamp() == START + 3600
     assert expires_at.utcoffset() is not None
+
+
+@scenario
+@pytest.mark.parametrize("name", SCREENSHOT_ARTIFACTS)
+async def test_every_screenshot_format_is_an_artifact(name: str) -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400, artifact_ttl_seconds=3600)
+    job_id = await create_job(store, kind="screenshot")
+
+    await store.put_artifact(job_id, name, PNG)
+
+    assert await store.artifact(job_id, name) == PNG
+    assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:{name}") <= 3600
+    await store.shorten(job_id, 600)  # the expiry covers it
+    assert 595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:{name}") <= 600
+    await store.delete(job_id)  # and so does the deletion
+    assert [key async for key in valkey.scan_iter(match="job:*")] == []
+
+
+def test_screenshot_artifacts_are_the_three_formats() -> None:
+    assert SCREENSHOT_ARTIFACTS == ("screenshot.png", "screenshot.jpg", "screenshot.webp")
+    assert ARTIFACT_NAMES == SCREENSHOT_ARTIFACTS
+    assert SCREENSHOT_ARTIFACT == "screenshot.png"
 
 
 @scenario

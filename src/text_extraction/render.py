@@ -16,6 +16,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from text_extraction.browser_options import Action, ArtifactRef
+from text_extraction.screenshot_image import EncodedScreenshot
 
 # Called with the URL of a main-frame navigation after the first, before it is sent. Raises
 # ``FetchError`` (a block, an invalid or private URL) or a gate refusal (``OutboundBusy``,
@@ -141,8 +142,9 @@ class ArtifactUnavailable(Exception):  # noqa: N818 - the sink's refusal, not a 
 class ArtifactSink(Protocol):
     """Stores the files of a job's item (the screenshot) for a while."""
 
-    async def put_screenshot(self, png: bytes, width: int, height: int) -> ArtifactRef:
-        """Store ``png`` and return where it can be fetched; raises ``ArtifactUnavailable``."""
+    async def put_screenshot(self, image: EncodedScreenshot) -> ArtifactRef:
+        """Store ``image`` under its name and return where it can be fetched; raises
+        ``ArtifactUnavailable``."""
         ...
 
 

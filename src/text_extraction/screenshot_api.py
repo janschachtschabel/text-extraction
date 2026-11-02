@@ -29,7 +29,7 @@ from text_extraction.ratelimit import rate_limited
 
 router = APIRouter()
 
-_MEDIA_TYPES = {".png": "image/png"}
+_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
 
 
 @router.post(
@@ -54,7 +54,8 @@ async def screenshot(
     cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport width).
 
     `data.screenshot` references the file: download it from its `url`
-    (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`; the download
+    (`GET /v1/jobs/{id}/artifacts/screenshot.png`, `.jpg` or `.webp` by `format`) within
+    `ARTIFACT_TTL_SECONDS`; the download
     needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise 400). The page's
     `quality` is reported but does not fail a stored screenshot. Outcomes of the target answer
     200 with `status: failed`, as for `/v1/extract`; without a browser worker in time the
@@ -109,8 +110,12 @@ async def run_screenshot(
     response_class=Response,
     responses={
         200: {
-            "content": {"image/png": {"schema": {"type": "string", "format": "binary"}}},
-            "description": "The file (a screenshot is `screenshot.png`).",
+            "content": {
+                media_type: {"schema": {"type": "string", "format": "binary"}}
+                for media_type in _MEDIA_TYPES.values()
+            },
+            "description": "The file (a screenshot is `screenshot.png`, `screenshot.jpg` or "
+            "`screenshot.webp`, by `screenshot_options.format`).",
         },
         404: {
             "model": Envelope[None],

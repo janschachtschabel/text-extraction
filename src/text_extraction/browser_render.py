@@ -27,7 +27,6 @@ import contextlib
 import contextvars
 import json
 import re
-import struct
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -77,6 +76,7 @@ from text_extraction.render import (
     RenderOptions,
     site,
 )
+from text_extraction.screenshot_image import png_size
 from text_extraction.settings import Settings
 
 if TYPE_CHECKING:
@@ -260,12 +260,6 @@ def cookie_data(cookie: "Cookie") -> CookieData:
         http_only=cookie.get("httpOnly", False),
         expires=expires if expires > 0 else None,
     )
-
-
-def png_size(png: bytes) -> tuple[int, int]:
-    """Width and height from a PNG's header."""
-    width, height = struct.unpack(">II", png[16:24])
-    return int(width), int(height)
 
 
 class _Render:

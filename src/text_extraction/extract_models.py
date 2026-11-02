@@ -86,7 +86,9 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, stric
         default=False,
         description="Also capture a screenshot (by default a PNG, 1920 px wide; see "
         "`screenshot_options`): `data.screenshot` then "
-        "references it for `GET /v1/jobs/{id}/artifacts/screenshot.png` (`ARTIFACT_TTL_SECONDS`). "
+        "references it for `GET /v1/jobs/{id}/artifacts/{name}` (`ARTIFACT_TTL_SECONDS`); the "
+        "file is `screenshot.png`, `screenshot.jpg` or `screenshot.webp` by "
+        "`screenshot_options.format`. "
         "Not with `mode: fast`.",
     )
     full_page: bool = Field(

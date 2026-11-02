@@ -3,6 +3,7 @@ pool ``browser``, with fakeredis (Lua), a fake renderer and a fake fetcher, and 
 start-up with the browser pools faked."""
 
 import asyncio
+import io
 import os
 import signal
 from collections.abc import Callable, Coroutine, Iterator
@@ -11,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from PIL import Image
 from prometheus_client import CollectorRegistry
 from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
@@ -22,6 +24,7 @@ from tests.fakes import (
     FakeFetcher,
     FakeRenderer,
     RefusingGate,
+    fake_png,
     fetched,
     rendered,
 )
@@ -34,6 +37,8 @@ from text_extraction.browser_options import (
     BrowserSecrets,
     ClickAction,
     EvaluateAction,
+    ScreenshotOptions,
+    Viewport,
 )
 from text_extraction.browser_proxy import EgressProxy
 from text_extraction.browser_unblock import Xvfb
@@ -65,7 +70,7 @@ from text_extraction.worker import Worker
 START = 1_000_000.0
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
 ADMIN = Principal(name="root", role="admin", rate_limit_per_minute=None)
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+PNG = fake_png(1920, 3000)
 LOST_MESSAGE = "The item was lost by a worker too often."
 SECRETS = BrowserSecrets(
     actions=[ClickAction(type="click", selector="#more")],
@@ -238,6 +243,38 @@ async def test_screenshot_job_stores_artifact_and_result() -> None:
     [call] = harness.renderer.calls
     assert (call.options.screenshot, call.options.full_page) == (True, False)
     assert harness.outcome("success") == 1
+
+
+@scenario
+async def test_screenshot_options_decide_the_stored_file() -> None:
+    buffer = io.BytesIO()
+    Image.effect_noise((1200, 630), 64).convert("RGB").save(buffer, format="PNG")
+    harness = Harness(
+        FakeRenderer(rendered(screenshot=buffer.getvalue(), screenshot_size=(1200, 630)))
+    )
+    options = JobOptions(
+        mode="browser",
+        screenshot=True,
+        compliance="enforce",
+        screenshot_options=ScreenshotOptions(
+            viewport=Viewport(width=1200, height=630), format="webp", width=600
+        ),
+    )
+    job_id = await harness.submit(options, kind="screenshot")
+
+    await harness.process_next()
+
+    stored = await harness.store.artifact(job_id, "screenshot.webp")
+    assert stored is not None
+    assert stored.startswith(b"RIFF")
+    assert await harness.store.artifact(job_id, "screenshot.png") is None
+    data = (await harness.result(job_id)).data
+    assert data is not None
+    ref = data.screenshot
+    assert ref is not None
+    assert ref.url == f"/v1/jobs/{job_id}/artifacts/screenshot.webp"
+    assert (ref.name, ref.content_type) == ("screenshot.webp", "image/webp")
+    assert (ref.bytes, ref.width, ref.height) == (len(stored), 600, 315)
 
 
 @scenario

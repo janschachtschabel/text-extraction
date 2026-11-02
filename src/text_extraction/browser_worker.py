@@ -75,7 +75,6 @@ from text_extraction.extract_models import ExtractRequest, ExtractResult, failed
 from text_extraction.fetch import Fetcher
 from text_extraction.internal import Readiness, create_internal_app
 from text_extraction.jobs import (
-    SCREENSHOT_ARTIFACT,
     JobLost,
     JobRecord,
     JobStore,
@@ -92,6 +91,7 @@ from text_extraction.pipeline_documents import create_document_pool
 from text_extraction.render import ArtifactUnavailable
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import FairQueue, QueueItem
+from text_extraction.screenshot_image import EncodedScreenshot
 from text_extraction.server import (
     _Server,
     _server,
@@ -128,21 +128,21 @@ class JobArtifacts:
         self._job_id = job_id
         self._guard = guard
 
-    async def put_screenshot(self, png: bytes, width: int, height: int) -> ArtifactRef:
+    async def put_screenshot(self, image: EncodedScreenshot) -> ArtifactRef:
         if self._guard is not None and self._guard.high:
             raise ArtifactUnavailable("Valkey's memory is nearly full")
         try:
-            expires_at = await self._store.put_artifact(self._job_id, SCREENSHOT_ARTIFACT, png)
+            expires_at = await self._store.put_artifact(self._job_id, image.name, image.data)
         except (RedisError, OSError, JobLost) as error:
             _log.warning("artifact_not_stored", error_type=type(error).__name__)
             raise ArtifactUnavailable("The screenshot could not be stored") from error
         return ArtifactRef(
-            name=SCREENSHOT_ARTIFACT,
-            url=artifact_url(self._job_id, SCREENSHOT_ARTIFACT),
-            content_type="image/png",
-            bytes=len(png),
-            width=width,
-            height=height,
+            name=image.name,
+            url=artifact_url(self._job_id, image.name),
+            content_type=image.content_type,
+            bytes=len(image.data),
+            width=image.width,
+            height=image.height,
             expires_at=expires_at,
         )
 

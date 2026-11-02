@@ -1,6 +1,7 @@
 """The pipeline with a renderer: browser mode, auto escalation, screenshots and unblock mode."""
 
 import asyncio
+import io
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -8,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 from fakeredis import FakeAsyncRedis
+from PIL import Image
 from prometheus_client import CollectorRegistry
 
 from tests.fakes import (
@@ -22,11 +24,13 @@ from tests.fakes import (
     FakeFetcher,
     FakeRenderer,
     RecordingGate,
+    fake_png,
     fetched,
     rendered,
     response,
 )
 from text_extraction.auth import Principal
+from text_extraction.browser_options import ScreenshotOptions
 from text_extraction.compliance import ComplianceChecker
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.escalation import needs_browser
@@ -38,6 +42,7 @@ from text_extraction.outbound import CircuitOpen, DomainGate
 from text_extraction.pipeline import Pipeline
 from text_extraction.render import ArtifactSink, ClearanceStore, CookieData, Renderer
 from text_extraction.result_cache import ResultCache
+from text_extraction.screenshot_image import encode_screenshot
 from text_extraction.settings import Settings
 
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -62,7 +67,7 @@ FORBIDDEN_PAGE = "<html><body><p>Forbidden</p></body></html>"
 CHALLENGE_PAGE = """<!doctype html><html><head><title>Just a moment...</title></head>
 <body><p>Checking your browser before accessing the site.</p></body></html>"""
 NOAI_PAGE = ARTICLE.replace("<head>", '<head>\n<meta name="robots" content="noai">', 1)
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+PNG = fake_png(1920, 3000)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -647,9 +652,10 @@ def test_screenshot_is_stored_and_referenced() -> None:
     assert data.screenshot.url == "/v1/jobs/job-1/artifacts/screenshot.png"
     assert data.screenshot.bytes == len(PNG)
     assert (data.screenshot.width, data.screenshot.height) == (1920, 3000)
+    assert (data.screenshot.name, data.screenshot.content_type) == ("screenshot.png", "image/png")
     assert data.quality is not None
     assert data.quality.word_count < 50
-    assert artifacts.screenshots == [(PNG, 1920, 3000)]
+    assert [shot.data for shot in artifacts.screenshots] == [PNG]  # passed through untouched
     (call,) = renderer.calls
     assert call.options.screenshot is True
     assert call.options.full_page is True
@@ -681,6 +687,80 @@ def test_screenshot_over_the_byte_limit_is_too_large() -> None:
     artifacts = FakeArtifacts()
 
     envelope = harness.run_once(mode="browser", screenshot=True, artifacts=artifacts)
+
+    assert code_of(envelope) == ErrorCode.TOO_LARGE
+    assert artifacts.screenshots == []
+
+
+def real_png(width: int, height: int) -> bytes:
+    buffer = io.BytesIO()
+    Image.effect_noise((width, height), 64).convert("RGB").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_screenshot_is_stored_in_the_requested_format_and_width() -> None:
+    png = real_png(1200, 630)
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(screenshot=png, screenshot_size=(1200, 630)))
+    )
+    artifacts = FakeArtifacts()
+    options = {"viewport": {"width": 1200, "height": 630}, "format": "jpeg", "width": 600}
+
+    envelope = harness.run_once(
+        mode="browser", screenshot=True, screenshot_options=options, artifacts=artifacts
+    )
+
+    assert envelope.status == "success", envelope.error
+    ref = data_of(envelope).screenshot
+    assert ref is not None
+    assert (ref.name, ref.content_type) == ("screenshot.jpg", "image/jpeg")
+    assert (ref.width, ref.height) == (600, 315)
+    [stored] = artifacts.screenshots
+    assert stored.data.startswith(b"\xff\xd8\xff")
+    assert ref.bytes == len(stored.data)
+
+
+def test_the_byte_limit_applies_to_the_encoded_file() -> None:
+    png = real_png(800, 600)
+    options = {"format": "webp", "quality": 95}
+    # The PNG is over the limit; the webp is under it, so it is stored.
+    webp_size = len(encode_screenshot(png, ScreenshotOptions.model_validate(options)).data)
+    assert webp_size < len(png)
+    limit = (webp_size + len(png)) // 2
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(screenshot=png, screenshot_size=(800, 600))),
+        screenshot_max_bytes=limit,
+    )
+    stored = FakeArtifacts()
+
+    envelope = harness.run_once(
+        mode="browser", screenshot=True, screenshot_options=options, artifacts=stored
+    )
+
+    assert envelope.status == "success", envelope.error
+    assert len(stored.screenshots) == 1
+
+    # The same limit refuses the unencoded PNG.
+    refused = FakeArtifacts()
+    envelope = harness.run_once(mode="browser", screenshot=True, artifacts=refused)
+    assert code_of(envelope) == ErrorCode.TOO_LARGE
+    assert refused.screenshots == []
+
+
+def test_an_encoded_screenshot_over_the_byte_limit_is_too_large() -> None:
+    png = real_png(800, 600)
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(screenshot=png, screenshot_size=(800, 600))),
+        screenshot_max_bytes=1024,
+    )
+    artifacts = FakeArtifacts()
+
+    envelope = harness.run_once(
+        mode="browser",
+        screenshot=True,
+        screenshot_options={"format": "jpeg", "quality": 100},
+        artifacts=artifacts,
+    )
 
     assert code_of(envelope) == ErrorCode.TOO_LARGE
     assert artifacts.screenshots == []

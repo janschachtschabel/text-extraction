@@ -132,7 +132,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
@@ -191,7 +191,9 @@ _OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
 
 # The files a job can have; ``delete`` removes them by name.
 SCREENSHOT_ARTIFACT = "screenshot.png"
-ARTIFACT_NAMES = (SCREENSHOT_ARTIFACT,)
+# A screenshot is stored in the format its request asked for (``screenshot_options.format``).
+SCREENSHOT_ARTIFACTS: Final = ("screenshot.png", "screenshot.jpg", "screenshot.webp")
+ARTIFACT_NAMES = SCREENSHOT_ARTIFACTS
 _ARTIFACT_NAME = re.compile(r"[a-z0-9_.-]{1,64}", re.ASCII)
 
 _NOT_FOUND = -1
