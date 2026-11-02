@@ -51,6 +51,16 @@ SCREENSHOT_EXAMPLES: Final[dict[str, Any]] = {
         "summary": "The whole page as a PNG",
         "value": {"url": _ARTICLE, "full_page": True},
     },
+    "preview": {
+        "summary": "A small WebP preview of the first screen, rendered at 1200x630",
+        "value": {
+            "url": _ARTICLE,
+            "full_page": False,
+            "viewport": {"width": 1200, "height": 630},
+            "format": "webp",
+            "width": 600,
+        },
+    },
     "after_wait": {
         "summary": "The first screen once the main content shows, as a job after 30 s",
         "value": {

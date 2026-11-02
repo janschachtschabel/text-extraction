@@ -11,7 +11,13 @@ from fakeredis import FakeAsyncRedis
 from pydantic import BaseModel
 
 from text_extraction.auth import Principal
-from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
+from text_extraction.browser_options import (
+    BrowserCookie,
+    BrowserSecrets,
+    ClickAction,
+    ScreenshotOptions,
+    Viewport,
+)
 from text_extraction.chunking.types import Chunk
 from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -1329,3 +1335,38 @@ async def test_items_show_run() -> None:
     assert third.run is None
     [only] = await store.items(job_id, 1, 1)
     assert only.run == second.run
+
+
+def test_job_options_dump_has_no_screenshot_options_when_unset() -> None:
+    options = JobOptions(compliance="enforce")
+
+    assert "screenshot_options" not in options.model_dump()
+    assert "screenshot_options" not in options.model_dump_json()
+
+
+@scenario
+async def test_job_options_round_trip_with_screenshot_options() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    shot = ScreenshotOptions(
+        viewport=Viewport(width=1200, height=630), format="webp", quality=70, width=600
+    )
+    options = JobOptions(
+        mode="browser", compliance="enforce", screenshot=True, screenshot_options=shot
+    )
+    job_id = await store.create("screenshot", OWNER, options, URLS[:1])
+
+    assert (await stored_options(valkey, job_id))["screenshot_options"]["format"] == "webp"
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options == options
+    assert record.options.screenshot_options == shot
+
+
+@scenario
+async def test_unset_screenshot_options_are_not_stored_so_older_pods_read_the_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("batch", OWNER, JobOptions(compliance="enforce"), URLS[:1])
+
+    assert "screenshot_options" not in await stored_options(valkey, job_id)

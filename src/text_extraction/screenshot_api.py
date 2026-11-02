@@ -17,6 +17,7 @@ from starlette.datastructures import State
 from text_extraction.api_examples import SCREENSHOT_EXAMPLES
 from text_extraction.auth import Principal, require_role
 from text_extraction.browser_models import ScreenshotRequest, ScreenshotResult, screenshot_view
+from text_extraction.browser_options import ScreenshotOptions
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import respond
@@ -47,7 +48,8 @@ async def screenshot(
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
 ) -> Envelope[ScreenshotResult] | JSONResponse:
-    """Render a URL in the browser and capture it as a PNG, 1920 px wide.
+    """Render a URL in the browser and capture it as an image: a 1920x1080 PNG unless `viewport`,
+    `format`, `quality` and `width` say otherwise.
 
     `data.screenshot` references the file: download it from its `url`
     (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`; the download
@@ -59,6 +61,11 @@ async def screenshot(
     `wait_seconds`: 202 with the job (kind `screenshot`), whose item holds the result.
     """
     return await run_screenshot(request.app.state, principal, body)
+
+
+def screenshot_options_of(body: ScreenshotRequest) -> ScreenshotOptions | None:
+    """The screenshot options of a request; None when it asks for none (a 1920x1080 PNG)."""
+    return body.screenshot_options()
 
 
 async def run_screenshot(
@@ -75,6 +82,7 @@ async def run_screenshot(
         metadata=False,
         screenshot=True,
         full_page=body.full_page,
+        screenshot_options=screenshot_options_of(body),
         actions=body.actions,
         cookies=body.cookies,
         headers=body.headers,

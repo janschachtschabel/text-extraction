@@ -13,6 +13,7 @@ from text_extraction.browser_options import (
     BrowserSecrets,
     CookieList,
     Headers,
+    ScreenshotOptions,
     WaitSeconds,
     check_cookie_domains,
 )
@@ -83,13 +84,20 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, stric
     )
     screenshot: bool = Field(
         default=False,
-        description="Also capture a PNG screenshot (1920 px wide): `data.screenshot` then "
+        description="Also capture a screenshot (by default a PNG, 1920 px wide; see "
+        "`screenshot_options`): `data.screenshot` then "
         "references it for `GET /v1/jobs/{id}/artifacts/screenshot.png` (`ARTIFACT_TTL_SECONDS`). "
         "Not with `mode: fast`.",
     )
     full_page: bool = Field(
         default=True,
         description="Screenshot of the whole page; `false`: the first viewport only. Not with "
+        "`mode: fast`.",
+    )
+    screenshot_options: ScreenshotOptions | None = Field(
+        default=None,
+        description="Viewport size, image `format` (`png`, `jpeg`, `webp`), `quality` and "
+        "`width` of the screenshot; default: a 1920x1080 PNG. Needs `screenshot`, so not with "
         "`mode: fast`.",
     )
     ocr: OcrOption = Field(
@@ -161,6 +169,12 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, stric
         check_cookie_domains(self.url, self.cookies)
         return self
 
+    @model_validator(mode="after")
+    def _screenshot_options_need_screenshot(self) -> Self:
+        if self.screenshot_options is not None and not self.screenshot:
+            raise ValueError("screenshot_options needs screenshot")
+        return self
+
     def secrets(self) -> BrowserSecrets:
         """The options that may carry secrets."""
         return BrowserSecrets(actions=self.actions, cookies=self.cookies, headers=self.headers)
@@ -187,6 +201,7 @@ _URL_ONLY_OPTIONS = (
     "headers",
     "screenshot",
     "full_page",
+    "screenshot_options",
     "ocr",
     "transcribe",
     "languages",
@@ -212,8 +227,8 @@ class ChunkRequest(ExtractRequest):
         "is handled as an upload of `text/markdown` or `text/plain` (`text_type`), as by "
         "`POST /v1/extract/file`: `mode_used: upload`, no fetch, no cache. With `text` the "
         "options that belong to a page (`mode`, `links`, `compliance`, `cache`, `actions`, "
-        "`cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, "
-        "`describe_images`) are 422. Exactly one of `url` and `text`.",
+        "`cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, "
+        "`transcribe`, `languages`, `describe_images`) are 422. Exactly one of `url` and `text`.",
     )
     text_type: Literal["markdown", "plain"] = Field(
         default="markdown",

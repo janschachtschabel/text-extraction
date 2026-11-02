@@ -22,9 +22,11 @@ from text_extraction.browser_models import (
     screenshot_view,
     validate_headers,
 )
+from text_extraction.browser_options import DEFAULT_VIEWPORT, ScreenshotOptions, Viewport
 from text_extraction.compliance import ComplianceReport
 from text_extraction.extract_models import ExtractRequest, ExtractResult, Timings
 from text_extraction.job_models import JobOptions
+from text_extraction.screenshot_api import screenshot_options_of
 
 ACTIONS = TypeAdapter(list[Action])
 URL = "https://www.example.org/page"
@@ -484,3 +486,111 @@ def test_extract_and_screenshot_requests_share_the_option_limits() -> None:
         assert fields["actions"].repr is False
         assert fields["cookies"].repr is False
         assert fields["headers"].repr is False
+
+
+def test_screenshot_options_defaults() -> None:
+    options = ScreenshotOptions()
+
+    assert options.viewport == DEFAULT_VIEWPORT == Viewport(width=1920, height=1080)
+    assert (options.format, options.quality, options.width) == ("png", None, None)
+    assert options.effective_quality() == 80
+    assert ScreenshotOptions(format="jpeg", quality=55).effective_quality() == 55
+
+
+def test_screenshot_request_builds_options() -> None:
+    body = ScreenshotRequest.model_validate(
+        {
+            "url": URL,
+            "viewport": {"width": 1200, "height": 630},
+            "format": "webp",
+            "quality": 70,
+            "width": 600,
+        }
+    )
+
+    assert screenshot_options_of(body) == ScreenshotOptions(
+        viewport=Viewport(width=1200, height=630), format="webp", quality=70, width=600
+    )
+
+
+def test_screenshot_request_defaults_send_no_options() -> None:
+    assert screenshot_options_of(ScreenshotRequest(url=URL)) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [{"format": "jpeg"}, {"width": 600}, {"viewport": {"width": 800, "height": 600}}],
+)
+def test_screenshot_request_with_any_option_sends_options(body: dict[str, Any]) -> None:
+    options = screenshot_options_of(ScreenshotRequest.model_validate({"url": URL, **body}))
+
+    assert options is not None
+    assert options == ScreenshotOptions.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        ({"format": "png", "quality": 50}, "quality needs format jpeg or webp"),
+        ({"quality": 50}, "quality needs format jpeg or webp"),
+        (
+            {"viewport": {"width": 800, "height": 600}, "width": 801},
+            "width cannot be larger than the viewport's width",
+        ),
+        ({"width": 1921}, "width cannot be larger than the viewport's width"),
+        ({"viewport": {"width": 319, "height": 600}}, "greater than or equal to 320"),
+        ({"viewport": {"width": 3841, "height": 600}}, "less than or equal to 3840"),
+        ({"viewport": {"width": 800, "height": 239}}, "greater than or equal to 240"),
+        ({"viewport": {"width": 800, "height": 2161}}, "less than or equal to 2160"),
+        ({"width": 15}, "greater than or equal to 16"),
+        ({"format": "jpeg", "quality": 0}, "greater than or equal to 1"),
+        ({"format": "jpeg", "quality": 101}, "less than or equal to 100"),
+        ({"format": "gif"}, "png"),
+        ({"dpi": 2}, "Extra inputs are not permitted"),
+        ({"viewport": {"width": "800", "height": 600}}, "valid integer"),
+    ],
+)
+def test_screenshot_options_refused(body: dict[str, Any], message: str) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ScreenshotOptions.model_validate(body)
+    with pytest.raises(ValidationError, match=message):
+        ScreenshotRequest.model_validate({"url": URL, **body})
+
+
+def test_screenshot_options_accept_the_limits() -> None:
+    ScreenshotOptions(viewport=Viewport(width=320, height=240), width=16)
+    options = ScreenshotOptions(
+        viewport=Viewport(width=3840, height=2160), format="webp", quality=100, width=3840
+    )
+
+    assert options.width == 3840
+
+
+def test_extract_request_takes_screenshot_options_with_a_screenshot() -> None:
+    options = {"format": "webp", "quality": 60, "width": 800}
+    request = ExtractRequest.model_validate(
+        {"url": URL, "screenshot": True, "screenshot_options": options}
+    )
+
+    assert request.screenshot_options == ScreenshotOptions.model_validate(options)
+    assert ExtractRequest(url=URL).screenshot_options is None
+
+
+@pytest.mark.parametrize("mode", ["auto", "browser", "fast"])
+def test_extract_request_refuses_options_without_screenshot(mode: str) -> None:
+    with pytest.raises(ValidationError, match="screenshot_options needs screenshot"):
+        ExtractRequest.model_validate(
+            {"url": URL, "mode": mode, "screenshot_options": {"format": "jpeg"}}
+        )
+
+
+def test_extract_request_refuses_options_in_fast_mode_with_a_screenshot() -> None:
+    with pytest.raises(ValidationError, match="mode fast cannot take"):
+        ExtractRequest.model_validate(
+            {
+                "url": URL,
+                "mode": "fast",
+                "screenshot": True,
+                "screenshot_options": {"format": "jpeg"},
+            }
+        )

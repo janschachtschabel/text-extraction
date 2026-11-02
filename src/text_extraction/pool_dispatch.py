@@ -130,6 +130,7 @@ def job_options(req: ExtractRequest, compliance: ComplianceMode) -> JobOptions:
         cache=req.cache,
         screenshot=req.screenshot,
         full_page=req.full_page,
+        screenshot_options=req.screenshot_options,
         ocr=req.ocr,
         transcribe=req.transcribe,
         languages=req.languages,

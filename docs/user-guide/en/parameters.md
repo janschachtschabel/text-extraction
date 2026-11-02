@@ -29,6 +29,7 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `headers` | object | empty | Request headers for the requested site. Not with `mode: fast`. |
 | `screenshot` | boolean | `false` | Also capture a PNG screenshot. Not with `mode: fast`. |
 | `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. `false` is refused with `mode: fast`. |
+| `screenshot_options` | object | unset | Viewport size, image format and size of the screenshot: `viewport` (`{"width", "height"}`, default 1920×1080), `format` (`png`, `jpeg` or `webp`), `quality` (1 to 100, only for `jpeg` and `webp`) and `width` (scales down, at most the viewport's width). Needs `screenshot`, so it is refused with `mode: fast`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | OCR of documents: `auto` reads scans and images with OCR where the service has it. |
 | `transcribe` | boolean | `false` | Transcribe audio and video without subtitles (always a job). |
 | `languages` | list of language codes | empty | Preferred subtitle and transcription languages, at most 5, such as `["de", "en"]`. |
@@ -62,6 +63,7 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `headers` | object | empty | As for `POST /v1/extract`. |
 | `screenshot` | boolean | `false` | As for `POST /v1/extract`. |
 | `full_page` | boolean | `true` | As for `POST /v1/extract`. |
+| `screenshot_options` | object | unset | As for `POST /v1/extract`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | As for `POST /v1/extract`. |
 | `transcribe` | boolean | `false` | As for `POST /v1/extract`. |
 | `languages` | list of language codes | empty | As for `POST /v1/extract`. |
@@ -81,7 +83,7 @@ A page by its URL, or your own text, split into chunks. Exactly one of `url` and
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | string | unset | The page to extract and chunk, with the options of `POST /v1/extract`. |
-| `text` | string | unset | Your own text to chunk, at most `DOCUMENT_MAX_BYTES`. With `text` the fields of a page (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, `describe_images`) answer 422. |
+| `text` | string | unset | Your own text to chunk, at most `DOCUMENT_MAX_BYTES`. With `text` the fields of a page (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) answer 422. |
 | `text_type` | `markdown` or `plain` | `markdown` | What `text` is; Markdown chunks carry their heading path. |
 | `chunking` | object | required | How to split. See [`chunking`](#chunking). |
 | `format` | `markdown` or `text` | `markdown` | The format of `content` and of the chunks. |
@@ -96,6 +98,7 @@ A page by its URL, or your own text, split into chunks. Exactly one of `url` and
 | `headers` | object | empty | As for `POST /v1/extract`. |
 | `screenshot` | boolean | `false` | As for `POST /v1/extract`. |
 | `full_page` | boolean | `true` | As for `POST /v1/extract`. |
+| `screenshot_options` | object | unset | As for `POST /v1/extract`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | As for `POST /v1/extract`. |
 | `transcribe` | boolean | `false` | As for `POST /v1/extract`. |
 | `languages` | list of language codes | empty | As for `POST /v1/extract`. |
@@ -163,7 +166,11 @@ A PNG of a page, rendered in the browser.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | string | required | The page to capture. |
-| `full_page` | boolean | `true` | The whole page (up to `SCREENSHOT_MAX_HEIGHT_PX`); `false`: the first 1920×1080. |
+| `full_page` | boolean | `true` | The whole page (up to `SCREENSHOT_MAX_HEIGHT_PX`); `false`: the first viewport. |
+| `viewport` | object | unset | The browser window, `{"width": 320 to 3840, "height": 240 to 2160}`; a narrow one gets the page's mobile layout. Default 1920×1080. |
+| `format` | `png`, `jpeg` or `webp` | `png` | The image format. |
+| `quality` | integer, 1 to 100 | `80` | Quality of a `jpeg` or `webp` image. Not with `png` (422). |
+| `width` | integer, 16 to 3840 | unset | Scale the image down to this width, keeping the aspect ratio; at most the viewport's width (422), never scaled up. |
 | `actions` | list of objects | empty | Page actions before the capture, as for `POST /v1/extract`. |
 | `cookies` | list of objects | empty | As for `POST /v1/extract`. |
 | `headers` | object | empty | As for `POST /v1/extract`. |

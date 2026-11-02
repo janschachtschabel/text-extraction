@@ -4,7 +4,7 @@ The request options (actions, cookies, headers) are defined in ``browser_options
 re-exported here, since ``extract_models`` needs them and this module needs ``extract_models``.
 """
 
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -26,9 +26,12 @@ from text_extraction.browser_options import (
     Headers,
     InfiniteScrollAction,
     PressAction,
+    ScreenshotFormat,
+    ScreenshotOptions,
     ScrollAction,
     SelectAction,
     TypeAction,
+    Viewport,
     WaitForAction,
     WaitSeconds,
     check_cookie_domains,
@@ -69,7 +72,26 @@ class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True, st
     full_page: bool = Field(
         default=True,
         description="Capture the whole page (cut at `SCREENSHOT_MAX_HEIGHT_PX`, with the warning "
-        "`screenshot_clipped`); `false` the first viewport (1920x1080) only.",
+        "`screenshot_clipped`); `false` the first viewport only.",
+    )
+    viewport: Viewport | None = Field(
+        default=None,
+        description="The browser window the page is rendered in (width 320 to 3840, height 240 "
+        "to 2160); a narrow one gets the page's mobile layout. Default 1920x1080.",
+    )
+    format: ScreenshotFormat = Field(
+        default="png", description="Image format: `png` (default, lossless), `jpeg` or `webp`."
+    )
+    quality: int | None = Field(
+        default=None,
+        description="Quality of a `jpeg` or `webp` image, 1 to 100 (default 80). Not with "
+        "`format: png` (422).",
+    )
+    width: int | None = Field(
+        default=None,
+        description="Scale the image down to this width in pixels (16 to 3840, at most the "
+        "viewport's width, else 422; it is never scaled up), keeping the aspect ratio. "
+        "Default: the viewport's width.",
     )
     actions: ActionList = Field(
         default=[], repr=False, description=f"{ACTIONS_DESCRIPTION} They run before the capture."
@@ -92,6 +114,25 @@ class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True, st
     def _cookie_domains(self) -> Self:
         check_cookie_domains(self.url, self.cookies)
         return self
+
+    @model_validator(mode="after")
+    def _screenshot_options_valid(self) -> Self:
+        self.screenshot_options()  # the limits and combinations of ScreenshotOptions: else 422
+        return self
+
+    def screenshot_options(self) -> ScreenshotOptions | None:
+        """The screenshot options these fields make; None while all four are at their defaults,
+        so the extraction request stays the one it was before they existed."""
+        if (self.viewport, self.format, self.quality, self.width) == (None, "png", None, None):
+            return None
+        fields: dict[str, Any] = {
+            "format": self.format,
+            "quality": self.quality,
+            "width": self.width,
+        }
+        if self.viewport is not None:
+            fields["viewport"] = self.viewport
+        return ScreenshotOptions(**fields)
 
     def secrets(self) -> BrowserSecrets:
         return BrowserSecrets(actions=self.actions, cookies=self.cookies, headers=self.headers)

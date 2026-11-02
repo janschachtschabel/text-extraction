@@ -31,6 +31,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
 | `screenshot` | Boolean | `false` | Auch einen Screenshot als PNG aufnehmen. Nicht mit `mode: fast`. |
 | `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. `false` wird mit `mode: fast` abgelehnt. |
+| `screenshot_options` | Objekt | nicht gesetzt | Viewport-Größe, Bildformat und -größe des Screenshots: `viewport` (`{"width", "height"}`, Standard 1920×1080), `format` (`png`, `jpeg` oder `webp`), `quality` (1 bis 100, nur für `jpeg` und `webp`) und `width` (skaliert herunter, höchstens die Breite des Viewports). Braucht `screenshot`, wird also mit `mode: fast` abgelehnt. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | OCR für Dokumente: `auto` liest Scans und Bilder mit OCR, wo der Dienst sie hat. |
 | `transcribe` | Boolean | `false` | Audio und Video ohne Untertitel transkribieren (immer ein Job). |
 | `languages` | Liste von Sprachcodes | leer | Bevorzugte Sprachen für Untertitel und Transkription, höchstens 5, etwa `["de", "en"]`. |
@@ -64,6 +65,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |
 | `screenshot` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `full_page` | Boolean | `true` | Wie bei `POST /v1/extract`. |
+| `screenshot_options` | Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
 | `transcribe` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `languages` | Liste von Sprachcodes | leer | Wie bei `POST /v1/extract`. |
@@ -83,7 +85,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `url` | String | nicht gesetzt | Die Seite, die extrahiert und zerlegt wird, mit den Optionen von `POST /v1/extract`. |
-| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
+| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
 | `text_type` | `markdown` oder `plain` | `markdown` | Was `text` ist; Markdown-Chunks tragen ihren Überschriftenpfad. |
 | `chunking` | Objekt | Pflicht | Wie zerlegt wird. Siehe [`chunking`](#chunking). |
 | `format` | `markdown` oder `text` | `markdown` | Das Format von `content` und der Chunks. |
@@ -98,6 +100,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |
 | `screenshot` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `full_page` | Boolean | `true` | Wie bei `POST /v1/extract`. |
+| `screenshot_options` | Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
 | `transcribe` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `languages` | Liste von Sprachcodes | leer | Wie bei `POST /v1/extract`. |
@@ -165,7 +168,11 @@ Ein PNG einer Seite, im Browser gerendert.
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `url` | String | Pflicht | Die Seite, die aufgenommen wird. |
-| `full_page` | Boolean | `true` | Die ganze Seite (bis `SCREENSHOT_MAX_HEIGHT_PX`); `false`: die ersten 1920×1080. |
+| `full_page` | Boolean | `true` | Die ganze Seite (bis `SCREENSHOT_MAX_HEIGHT_PX`); `false`: den ersten Viewport. |
+| `viewport` | Objekt | nicht gesetzt | Das Browserfenster, `{"width": 320 bis 3840, "height": 240 bis 2160}`; ein schmales zeigt das mobile Layout der Seite. Standard 1920×1080. |
+| `format` | `png`, `jpeg` oder `webp` | `png` | Das Bildformat. |
+| `quality` | Ganzzahl, 1 bis 100 | `80` | Qualität eines `jpeg`- oder `webp`-Bilds. Nicht mit `png` (422). |
+| `width` | Ganzzahl, 16 bis 3840 | nicht gesetzt | Skaliert das Bild auf diese Breite herunter, das Seitenverhältnis bleibt; höchstens die Breite des Viewports (422), nie hochskaliert. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen vor der Aufnahme, wie bei `POST /v1/extract`. |
 | `cookies` | Liste von Objekten | leer | Wie bei `POST /v1/extract`. |
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |

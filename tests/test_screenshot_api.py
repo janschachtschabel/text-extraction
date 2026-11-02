@@ -195,6 +195,25 @@ def test_screenshot_evaluate_by_user_is_403() -> None:
         assert case.keys("job*") == []
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"format": "png", "quality": 50},
+        {"quality": 50},
+        {"width": 15},
+        {"viewport": {"width": 800, "height": 600}, "width": 801},
+        {"viewport": {"width": 319, "height": 600}},
+    ],
+)
+def test_screenshot_with_bad_options_is_422(body: dict[str, Any]) -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client:
+        response = take(client, **body)
+
+        assert response.status_code == 422
+        assert case.keys("job*") == []
+
+
 @pytest.mark.parametrize("url", ["ftp://example.org/", "example.org/page", "https://a..b/"])
 @pytest.mark.parametrize("wait", [None, 0])
 def test_screenshot_of_an_invalid_url_fails_at_once(url: str, wait: int | None) -> None:
