@@ -167,7 +167,8 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
    "Show tree now" shows a snapshot. Each URL shows its page type, and "Types:" above the tree
    counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
-   privacy, legal, contact, login, search and error pages; or check the sections you want.
+   privacy, legal, contact, login, search and error pages and pages that failed; or check the
+   sections you want.
 3. Leave "Metadata" on, and for the schema.org and LRMI fields put a `structured` request into
    "Options (JSON)", for example
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.

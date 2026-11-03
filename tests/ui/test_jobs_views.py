@@ -713,10 +713,10 @@ def test_tree_shows_page_types(
 
     badges = {
         leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): " ".join(
-            leaf.xpath("./span[contains(@class, 'page-type')]")[0].text_content().split()
+            leaf.xpath("./label/span[contains(@class, 'page-type')]")[0].text_content().split()
         )
         for leaf in root.xpath("//li[./label/input[@name='url']]")
-        if leaf.xpath("./span[contains(@class, 'page-type')]")
+        if leaf.xpath("./label/span[contains(@class, 'page-type')]")
     }
     assert badges == expected["badges"]  # none for /kaputt (failed), /start and /docs/c
     boxes = {
@@ -733,6 +733,11 @@ def test_tree_shows_page_types(
         "/start": None,
         "/docs/c": None,
     }
+    # A failed page is left out by "Select content pages" (ruling P14-R9).
+    failed = root.xpath("//input[@name='url'][@data-failed]")
+    assert [box.get("value").removeprefix(ORIGIN) for box in failed] == ["/kaputt"]
+    # The badge is part of the checkbox's label, so a screen reader names it.
+    assert root.xpath("//li/span[contains(@class, 'page-type')]") == []
     assert texts(root, "//p[@class='tree-types']") == [expected["types"]]
     [button] = root.xpath("//button[@data-action='tree-content']")
     assert " ".join(button.text_content().split()) == expected["button"]

@@ -35,7 +35,7 @@ The labels of the playground, as the English and the German playground show them
 | crawled | gecrawlt | A page of the tree that the crawl fetched. |
 | linked only | nur verlinkt | A URL of the tree that a page links but the crawl did not fetch. |
 | guessed from the URL | aus der URL geschätzt | A page type of the tree read from a URL alone, for a URL the crawl did not fetch. |
-| Select content pages | Inhaltsseiten auswählen | Checks every URL of the tree but imprint, privacy, legal, contact, login, search and error pages. |
+| Select content pages | Inhaltsseiten auswählen | Checks every URL of the tree but imprint, privacy, legal, contact, login, search and error pages and pages that failed. |
 | Capture | Aufnahme | The choice of size and image format on the Screenshot tab. |
 | Principal | Konto | The key's name and role in a result. |
 | What happened | Ablauf | The timeline of a result: claims, checks, fetch, render, conversion and outcome. |

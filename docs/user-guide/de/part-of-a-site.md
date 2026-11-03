@@ -86,8 +86,8 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   eine nur verlinkte URL wurde nicht gelesen; deshalb wird ihr Typ allein aus ihrer URL geschätzt
   und als „aus der URL geschätzt“ markiert. Eine URL, die nichts sagt, zeigt keinen Typ.
   „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
-  Anmeldung, Suche und Fehlerseiten und entfernt bei diesen das Häkchen; eine URL ohne Typ wird
-  markiert.
+  Anmeldung, Suche und Fehlerseiten und entfernt bei diesen und bei jeder gescheiterten Seite
+  das Häkchen; eine URL ohne Typ wird markiert, außer ihre Seite ist gescheitert.
 - **Batch**: Fügen Sie die URLs ein, eine pro Zeile, und klicken Sie auf „Batch starten“. Mehr
   URLs, als ein Batch fasst, werden als mehrere Batches gesendet.
 - **Batch-Datei**: Wählen Sie eine CSV- oder JSON-Datei und klicken Sie auf „Datei prüfen“. Eine

@@ -2611,7 +2611,10 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   nothing has no badge. A crawled page's own verdict, even none, wins over a guess for the same
   URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
   leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
-  (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those.
+  (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and
+  every crawled page whose item failed (`data-failed` on its checkbox; ruling P14-R9: a hard 404
+  has no type, but it is no content page). The type badge sits inside the checkbox's `<label>`,
+  so a screen reader names it with the URL.
 - **Known limits.** Rules miss what a page does not say in its URL, schema, title or shape: a
   contact form at `/service` without a schema type or a telling title is `content` or `other`.
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`

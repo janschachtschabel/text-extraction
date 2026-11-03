@@ -286,11 +286,14 @@
   }
 
   // "Select content pages" (package 14): ticks every URL whose page type is not one of
-  // ``excluded`` (a space-separated list), a URL without a type too, and unticks the others.
+  // ``excluded`` (a space-separated list), a URL without a type too, and unticks the others
+  // and every crawled page that failed (``data-failed``, ruling P14-R9).
   function selectContent(form, excluded) {
     var skip = excluded.split(/\s+/).filter(Boolean);
     form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
-      box.checked = skip.indexOf(box.getAttribute("data-page-type") || "") < 0;
+      box.checked =
+        !box.hasAttribute("data-failed") &&
+        skip.indexOf(box.getAttribute("data-page-type") || "") < 0;
       box.indeterminate = false;
     });
     // Children before their parents: the reverse of document order.

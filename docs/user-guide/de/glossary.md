@@ -35,7 +35,7 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | crawled | gecrawlt | Eine Seite des Baums, die der Crawl geholt hat. |
 | linked only | nur verlinkt | Eine URL des Baums, die eine Seite verlinkt, die der Crawl aber nicht geholt hat. |
 | guessed from the URL | aus der URL geschätzt | Ein Seitentyp im Baum, allein aus der URL gelesen, für eine URL, die der Crawl nicht geholt hat. |
-| Select content pages | Inhaltsseiten auswählen | Markiert jede URL des Baums außer Impressum, Datenschutz, Rechtlichem, Kontakt, Anmeldung, Suche und Fehlerseiten. |
+| Select content pages | Inhaltsseiten auswählen | Markiert jede URL des Baums außer Impressum, Datenschutz, Rechtlichem, Kontakt, Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten. |
 | Capture | Aufnahme | Die Wahl von Größe und Bildformat im Tab Screenshot. |
 | Principal | Konto | Name und Rolle des Schlüssels in einem Ergebnis. |
 | What happened | Ablauf | Die Zeitleiste eines Ergebnisses: Zuteilungen, Prüfungen, Abruf, Rendern, Umwandlung und Ergebnis. |

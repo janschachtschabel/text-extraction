@@ -49,9 +49,18 @@ def _page(title: str, links: list[str]) -> bytes:
     ).encode()
 
 
-def serve_site(httpserver: HTTPServer) -> str:
+# A site with a broken link (a failed page) and a link one level too deep (a linked-only URL
+# whose path says nothing, so it has no page type).
+FAILING_PAGES = {
+    "/": ("Start page", ["/docs/a.html", "/impressum.html", "/broken.html"]),
+    "/docs/a.html": ("Docs A", ["/docs/deeper.html"]),
+    "/impressum.html": ("Impressum", []),
+}
+
+
+def serve_site(httpserver: HTTPServer, pages: dict[str, tuple[str, list[str]]] = PAGES) -> str:
     def handle(request: Request) -> Response:
-        found = PAGES.get(request.path)
+        found = pages.get(request.path)
         if found is None:
             return Response("Not found", status=404, content_type="text/plain")
         return Response(_page(*found), content_type="text/html; charset=utf-8")
@@ -90,7 +99,20 @@ def serving(settings: Settings) -> Iterator[str]:
 def ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
     """The /ui URL and the site's origin."""
     origin = serve_site(httpserver)
-    settings = Settings(
+    with serving(_settings()) as url:
+        yield url, origin
+
+
+@pytest.fixture
+def failing_ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
+    """The /ui URL and the origin of ``FAILING_PAGES``."""
+    origin = serve_site(httpserver, FAILING_PAGES)
+    with serving(_settings()) as url:
+        yield url, origin
+
+
+def _settings() -> Settings:
+    return Settings(
         auth_mode="api_key",
         ui_enabled=True,
         rate_limit_per_minute=10_000,
@@ -100,8 +122,6 @@ def ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
             ApiKey(name="alice", role="user", sha256=hashlib.sha256(USER_KEY.encode()).hexdigest())
         ],
     )
-    with serving(settings) as url:
-        yield url, origin
 
 
 @contextlib.contextmanager
@@ -190,7 +210,7 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         # leaves the imprint unticked (package 14).
         imprint = view.locator(f"input[name=url][value='{origin}/impressum.html']")
         expect(imprint).to_have_attribute("data-page-type", "imprint")
-        badge = imprint.locator("xpath=ancestor::li[1]/span[contains(@class, 'page-type')]")
+        badge = imprint.locator("xpath=ancestor::label[1]/span[contains(@class, 'page-type')]")
         expect(badge).to_have_text("Imprint")
         expect(view.locator(".tree-types")).to_contain_text("Imprint 1")
         view.locator("[data-action=tree-content]").click()
@@ -218,6 +238,47 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         expect(started.locator(".state")).to_have_text("completed")
         expect(started.locator(".done")).to_have_text("2/2")
         expect(started.locator(".success")).to_have_text("2")
+    assert console == []
+
+
+def test_select_content_pages_leaves_failed_pages_out(failing_ui: tuple[str, str]) -> None:
+    """Ruling P14-R9: "Select content pages" unticks a crawled page that failed (it has no
+    type, like a URL that says nothing) and keeps an untyped URL that did not fail."""
+    url, origin = failing_ui
+    with browsing(url) as (page, console):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "site-structure")
+        panel = page.locator("#panel-site-structure")
+        panel.locator("input[name=url]").fill(f"{origin}/")
+        panel.locator("input[name=depth]").fill("1")
+        panel.locator("button[type=submit]").click()
+
+        job = page.locator("#result section.job")
+        expect(job.locator(".state")).to_have_text("completed")
+        job.locator("button.tree-button").click()
+        view = page.locator("#result .tree-view")
+        expect(view.locator("input[name=url]")).to_have_count(5)
+        broken = view.locator(f"input[name=url][value='{origin}/broken.html']")
+        deeper = view.locator(f"input[name=url][value='{origin}/docs/deeper.html']")
+        expect(broken).to_have_attribute("data-failed", "")
+        assert broken.get_attribute("data-page-type") is None
+        assert deeper.get_attribute("data-page-type") is None
+        assert deeper.get_attribute("data-failed") is None
+        # The type badge is read with its checkbox.
+        expect(view.get_by_role("checkbox", name=re.compile("Imprint"))).to_have_count(1)
+
+        view.locator("[data-action=tree-all]").click()
+        expect(view.locator(".tree-counter")).to_have_text("5 selected")
+        view.locator("[data-action=tree-content]").click()
+        expect(view.locator(".tree-counter")).to_have_text("3 selected")
+        checked = view.locator("input[name=url]:checked")
+        assert sorted(checked.nth(n).get_attribute("value") or "" for n in range(3)) == [
+            f"{origin}/",
+            f"{origin}/docs/a.html",
+            f"{origin}/docs/deeper.html",
+        ]
+        assert not broken.is_checked()
     assert console == []
 
 
