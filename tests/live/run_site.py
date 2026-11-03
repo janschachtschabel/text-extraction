@@ -36,7 +36,9 @@ DEFAULT_MAX_PAGES = 25
 DEFAULT_CLIENT_TIMEOUT_SECONDS = 60.0
 # A crawl of 25 pages takes minutes at the default per-host spacing; large sitemaps add to it.
 DEFAULT_JOB_TIMEOUT_SECONDS = 1800.0
-DEFAULT_POLL_SECONDS = 5.0
+# Below uvicorn's keep-alive of 5 s: a poll every 5 s raced the server closing the idle
+# connection and ended a site run with `client ReadError` (live run 41549966609).
+DEFAULT_POLL_SECONDS = 3.0
 # Items per page of ``GET /v1/jobs/{id}`` (its maximum).
 PAGE_SIZE = 500
 # The column orders of the histograms: the API's own (``LinkRegion`` and ``Crawl`` in

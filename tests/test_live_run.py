@@ -217,6 +217,7 @@ def record(
     status: str | None = "success",
     error_code: str | None = None,
     warnings: tuple[str, ...] = (),
+    elapsed_ms: int = 1,
 ) -> Record:
     return Record(
         url=f"https://{domain}/",
@@ -229,7 +230,7 @@ def record(
         compliance_decision=decision,
         mode_used=mode_used,
         warnings=list(warnings),
-        elapsed_ms=1,
+        elapsed_ms=elapsed_ms,
     )
 
 
@@ -292,6 +293,25 @@ def test_summary_counts_browser_unavailable_and_error_codes() -> None:
     assert "| dns_error | 1 | c.example 1 |" in section
     assert section.index("| timeout |") < section.index("| content_too_short |")
     assert "client_ReadTimeout" not in section  # no answer, no envelope: counted as a bucket
+
+
+def test_summary_reports_the_time_per_url() -> None:
+    # P14 Task 9: the A/B rule compares the median time per URL of two runs.
+    records = [
+        record("a.example", "ok", elapsed_ms=1000),
+        record("a.example", "ok", elapsed_ms=2000),
+        record("b.example", "too_short", mode_used="browser", elapsed_ms=9000),
+        record("c.example", "ok", elapsed_ms=3000),
+        record("c.example", "ok", elapsed_ms=4000),
+    ]
+
+    text = summarize(records)
+
+    assert "Time per URL: median 3.0 s, p90 9.0 s, total 19.0 s" in text
+
+
+def test_summary_without_records_has_no_time_line() -> None:
+    assert "Time per URL" not in summarize([])
 
 
 def test_summary_without_error_codes_has_no_error_table() -> None:
