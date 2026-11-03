@@ -20,14 +20,14 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `mode` | `fast`, `auto` or `browser` | `auto` | The browser fallback: `auto` uses the browser when the page needs it, `fast` never, `browser` always. See [Browser fallback](usage.md#browser-fallback). |
 | `format` | `markdown`, `text` or `html` | `markdown` | The format of `content`. |
 | `metadata` | boolean | `true` | Include the page's metadata (title, authors, licence, dates, images, schema.org and LRMI fields). |
-| `links` | boolean | `false` | Include the page's links. |
+| `links` | boolean | `false` | Include the page's links, each with its `kind` and its `category` (what it leads to, such as `imprint` or `social`). |
 | `compliance` | `enforce`, `report` or `ignore` | unset | The site rules: `enforce` refuses what robots.txt or a TDM opt-out forbids, `report` only reports it, `ignore` (admins only) skips the checks and allows maximum extraction. Unset: the operator's `COMPLIANCE_DEFAULT`. |
 | `cache` | boolean | `true` | Use the result cache; `false` neither reads nor stores. |
 | `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202); `0`: a job at once. Unset: the request waits for its answer, with three exceptions: with `transcribe: true` the default is 20, and a request that waits for the NLP or the LLM worker answers 202 after `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_SECONDS`. |
 | `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. |
 | `cookies` | list of objects | empty | Cookies for the requested site. Not with `mode: fast`. |
 | `headers` | object | empty | Request headers for the requested site. Not with `mode: fast`. |
-| `screenshot` | boolean | `false` | Also capture a PNG screenshot. Not with `mode: fast`. |
+| `screenshot` | boolean | `false` | Also capture a screenshot, a PNG unless `screenshot_options` says otherwise. Not with `mode: fast`. |
 | `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. `false` is refused with `mode: fast`. |
 | `screenshot_options` | object | unset | Viewport size, image format and size of the screenshot: `viewport` (`{"width", "height"}`, default 1920×1080), `format` (`png`, `jpeg` or `webp`), `quality` (1 to 100, only for `jpeg` and `webp`) and `width` (scales down, at most the viewport's width). Needs `screenshot`, so it is refused with `mode: fast`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | OCR of documents: `auto` reads scans and images with OCR where the service has it. |
@@ -161,7 +161,8 @@ over HTTP only, without their text.
 
 ## `POST /v1/screenshot`
 
-A PNG of a page, rendered in the browser.
+An image of a page, rendered in the browser: a PNG in a window of 1920×1080 unless `viewport`,
+`format`, `quality` and `width` say otherwise.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |

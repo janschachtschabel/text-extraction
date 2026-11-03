@@ -74,13 +74,13 @@ und `X-ASR-Api-Key` (je ein weiteres `--header`); er ist nie ein Argument eines 
 | --- | --- | --- | --- |
 | `extract_url` | Eine Seite oder ein Dokument als Markdown oder Text, mit Metadaten. | `POST /v1/extract` | `url`, `format` (`markdown`), `mode` (`auto`), `wait_seconds`, `content_offset`, `max_chars` |
 | `extract_file` | Eine eigene Datei, etwa ein PDF, als Text. | `POST /v1/extract/file` | `content_base64` (ein Präfix als `data:`-URL ist erlaubt), `file_name`, `content_type`, `format`, `wait_seconds`, `content_offset`, `max_chars` |
-| `screenshot_url` | Ein PNG einer Seite. | `POST /v1/screenshot` | `url`, `full_page` (true), `wait_seconds`; das PNG wird bis zu `MCP_IMAGE_MAX_BYTES` angehängt |
+| `screenshot_url` | Ein Bild einer Seite (standardmäßig ein PNG). | `POST /v1/screenshot` | `url`, `full_page` (true), `wait_seconds`; `viewport`, `format`, `quality` und `width` gehören in `options`; das Bild wird bis zu `MCP_IMAGE_MAX_BYTES` angehängt |
 | `extract_structured` | Die Felder eines JSON-Schemas aus einer Seite. | `POST /v1/structured` | `url`, `structured` (Pflicht), `format`, `wait_seconds`, `content_offset`, `max_chars` |
 | `chunk` | Eine Seite oder ein Text, in Chunks zerlegt. | `POST /v1/chunk` | `url` oder `text`, `chunking` (Pflicht), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
 | `batch_extract` | Viele URLs als ein Job. | `POST /v1/batch` | `urls`, `format`, `mode`; antwortet mit einem Job |
 | `site_structure` | Die Karte einer Website, als Job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`); antwortet mit einem Job |
 | `get_job` | Der Zustand eines Jobs und eine Seite seiner Einträge. | `GET /v1/jobs/{id}` | `job_id`, `offset`, `limit` (5, 1-50), `wait_seconds` (0, bis `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; keine `options` |
-| `get_job_screenshot` | Das PNG eines Screenshot-Jobs. | `GET /v1/jobs/{id}/artifacts/screenshot.png` | `job_id`; keine `options` |
+| `get_job_screenshot` | Das Bild eines Screenshot-Jobs (PNG, JPEG oder WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; keine `options` |
 | `cancel_job` | Einen Job abbrechen und mit seinen Ergebnissen löschen. | `DELETE /v1/jobs/{id}` | `job_id`; keine `options` |
 | `service_info` | Name und Version des Dienstes sowie Name und Rolle des Schlüssels. | `GET /v1/info` | keine |
 

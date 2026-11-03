@@ -34,9 +34,15 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 #   "title": "Start", "content": null, "site": {"role": "page", "depth": 0, "parent": null,
 #   "links": [
 #    {"url": "https://example.org/mathe/", "text": "Mathe", "kind": "internal", "source": "a",
-#     "rel": [], "hreflang": null, "region": "nav", "crawl": "queued", "target": 2},
+#     "rel": [], "hreflang": null, "region": "nav", "crawl": "queued", "target": 2,
+#     "category": "content"},
 #    {"url": "https://example.org/intern/", "text": "Intern", "kind": "internal", "source": "a",
-#     "rel": [], "hreflang": null, "region": "main", "crawl": "blocked", "target": null}, ...]}}}},
+#     "rel": [], "hreflang": null, "region": "main", "crawl": "blocked", "target": null,
+#     "category": "content"},
+#    {"url": "https://example.org/impressum", "text": "Impressum", "kind": "internal",
+#     "source": "a", "rel": [], "hreflang": null, "region": "footer", "crawl": "queued",
+#     "target": 4, "category": "imprint"}, ...]},
+#   "page_type": {"type": "home", "signals": ["root_path"]}}}},
 #  {"index": 1, "url": "https://example.org/robots.txt", "result": {"data": {"site": {
 #   "role": "robots", "depth": 0, "parent": 0,
 #   "sitemaps": ["https://example.org/sitemap.xml"]}, ...}, ...}},
@@ -61,8 +67,9 @@ Read the graph from the items: each item's `data.site.role` is `page`, `robots`,
 `sitemap_part`, and `parent` is the index of the item that found it. A page's `links` are its
 outgoing links in document order: `kind` (`internal`, `external`, `file`), `source` (`a`, `area`,
 a head `link` such as `canonical` or `alternate`, `iframe`), `rel`, `hreflang`, `region` (`nav`,
-`header`, `footer`, `aside`, `main`, `breadcrumb`, `pagination`, or null) and `crawl`, what the
-crawl did with it.
+`header`, `footer`, `aside`, `main`, `breadcrumb`, `pagination`, or null), `crawl`, what the
+crawl did with it, and `category`, what it leads to (see
+[Page types and link categories](#page-types-and-link-categories)).
 
 - `queued` and `seen` lead to a page item, whose index is `target`: an edge of the graph (a link
   deeper than `depth` to a page that is an item anyway says `seen` too).
@@ -75,6 +82,41 @@ A sitemap's entries are in `sitemap.entries`; a large one continues in `sitemap_
 the same URL (`part` of `parts`), and an index lists its sitemaps in `children`, each with the
 item it became. An item whose `final_url` is another item's URL is a redirect to that page (its
 links repeat the page's): dedupe the graph by `final_url`.
+
+### Page types and link categories
+
+Every HTML page that the crawl reads gets a `page_type`, and so does a page from
+`POST /v1/extract`: its `type` and the `signals` that say so. Rules decide, without an LLM. They
+are checked in this order, and the first that applies wins:
+
+1. `error`: the page answered 2xx but is an error page (a soft 404, `quality.soft_404`). A page
+   that failed with an HTTP error (4xx or 5xx) is not converted and has no type
+   (`page_type: null`); its status says what happened.
+2. `home`: the path is empty, `/`, `/index.html`, or only a language code such as `/de/`.
+3. schema.org: the page's JSON-LD or microdata says `ContactPage` (`contact`), `AboutPage`
+   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`).
+4. The URL: a whole path segment such as `impressum` or `imprint` (`imprint`), `datenschutz` or
+   `privacy` (`privacy`), `agb`, `terms`, `cookies` or `barrierefreiheit` (`legal`), `login`,
+   `registrieren` or `konto` (`auth`), `suche` or `search`, or a search query such as `?q=...`
+   (`search`), `kontakt` or `contact` (`contact`), `ueber-uns`, `about` or `team` (`about`),
+   `kategorie`, `tag`, `archiv` or `page/2` (`listing`). `/impressum.html` is an imprint,
+   `/impressum-archiv-2019` is not.
+5. The title or the first heading begins or ends with a type's name, such as "Impressum",
+   "Kontakt", "Login" or "Suchergebnisse" ("Firma | Impressum" too).
+6. `auth`: a password field on a page with little text.
+7. `listing`: a link to the next or previous page (`rel="next"`), or a page that is mostly links
+   (at least 20 links that hold 60 % of its text).
+8. `content` when the page has at least `QUALITY_MIN_WORDS` (50) words, else `other`.
+
+`signals` lists every rule that agrees with the type, in this order, also those after the one
+that decided: `/impressum` titled "Impressum" has `["url", "title"]`.
+
+Each link (`site.links` here, `links` of `POST /v1/extract`) has a `category`: `download` for a
+file, `social` for a social network or video platform (such as Mastodon, YouTube, Instagram or
+LinkedIn), and for a link within the site the type its URL says (`home`, `listing`, `imprint`,
+`privacy`, `legal`, `contact`, `about`, `auth`, `search`). Otherwise it is `nav` for a navigation
+helper such as "Back to top" or "Menu", and `content` for anything else, every other link to
+another site included. Results stored before page types have neither field (null).
 
 ## Extract every page with its metadata
 
@@ -121,8 +163,9 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
    the host, and press "Read the site structure".
 2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
-   "Show tree now" shows a snapshot. "Select all" checks every URL; or check the sections you
-   want.
+   "Show tree now" shows a snapshot. Each URL shows its page type, and "Types:" above the tree
+   counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
+   privacy, legal, contact, login, search and error pages; or check the sections you want.
 3. Leave "Metadata" on, and for the schema.org and LRMI fields put a `structured` request into
    "Options (JSON)", for example
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.

@@ -166,9 +166,10 @@ unter `/docs` listet die Aktionen.
 
 ### Screenshots
 
-Ein Screenshot ist ein PNG, 1920 px breit, der ganzen Seite (`full_page: false`: die ersten
-1920×1080). `POST /v1/screenshot` antwortet mit den Daten der Seite und einem Verweis auf die
-Datei, die Sie aus dem Job laden, der sie hält:
+Ein Screenshot ist ein Bild der Seite, wie der Browser sie zeigt. Standardmäßig ist er ein PNG der
+ganzen Seite in einem Fenster von 1920×1080 (`full_page: false`: nur der erste Bildschirm).
+`POST /v1/screenshot` antwortet mit den Daten der Seite und einem Verweis auf die Datei, die Sie
+aus dem Job laden, der sie hält:
 
 <!-- request: POST /v1/screenshot -->
 ```json
@@ -184,8 +185,34 @@ curl -H "Authorization: Bearer $KEY" -o page.png \
   http://localhost:8080/v1/jobs/<job id>/artifacts/screenshot.png
 ```
 
-`POST /v1/extract` nimmt `"screenshot": true` ebenfalls. Die Datei wird `ARTIFACT_TTL_SECONDS`
-(eine Stunde) aufbewahrt, und nur ihr Eigentümer (oder ein Admin) kann sie abrufen.
+Vier Felder ändern das Bild. `viewport` ist das Browserfenster, `{"width": 320 bis 3840,
+"height": 240 bis 2160}`; ein schmales Fenster zeigt die mobile Ansicht der Seite. `format` ist
+`png`, `jpeg` oder `webp`, und `quality` (1 bis 100, Standard 80) gilt nur für `jpeg` und `webp`.
+`width` verkleinert das Bild auf so viele Pixel und behält sein Seitenverhältnis; der Wert ist
+höchstens die Fensterbreite, und ein Bild wird nie vergrößert. Ein Vorschaubild für soziale
+Medien, 600 px breit:
+
+<!-- request: POST /v1/screenshot -->
+```json
+{"url": "https://example.org/", "full_page": false, "viewport": {"width": 1200, "height": 630}, "format": "webp", "width": 600}
+```
+
+`data.screenshot` nennt die Datei (`screenshot.png`, `screenshot.jpg` oder `screenshot.webp`),
+ihren `content_type`, ihre `width` und ihre `height`. Eine ganze Seite wird bei
+`SCREENSHOT_MAX_HEIGHT_PX` (16.384 px) abgeschnitten, mit der Warnung `screenshot_clipped`. Ein
+Fenster, das breiter als 1920 px ist, wird früher abgeschnitten, damit ein Bild nie mehr Pixel hat
+als eines von 1920 px Breite.
+
+`POST /v1/extract` nimmt `"screenshot": true` ebenfalls, und dieselben vier Felder in
+`screenshot_options`. Die Datei wird `ARTIFACT_TTL_SECONDS` (eine Stunde) aufbewahrt, und nur ihr
+Eigentümer (oder ein Admin) kann sie abrufen.
+
+Der Tab **Screenshot** der Spielwiese bietet unter „Aufnahme“ fertige Aufnahmen an: „Die ganze
+Seite, 1920 px breit (PNG)“ (der Standard), „Erster Bildschirm, 1920 x 1080 (PNG)“,
+„Social-Vorschau, 1200 x 630 (WebP)“, „Vorschaubild, 400 px breit (WebP)“ (ein erster Bildschirm
+von 1280×800, verkleinert) und „Smartphone, 390 px breit, die ganze Seite (PNG)“. „Eigene Werte:
+die Felder darunter setzen“ liest die Felder von „Eigene Aufnahme“: Fensterbreite und -höhe,
+Bildformat, Qualität, Bildbreite und „Die ganze Seite“.
 
 ### Maximale Extraktion
 

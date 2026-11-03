@@ -72,6 +72,15 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   runs, "Show tree now" shows a snapshot. Check the pages you want, or a section to check all
   its pages, and press "Extract selected": the checked URLs become batches, with the format,
   the browser fallback, the metadata and the options you set below the tree.
+
+  Each URL of the tree shows its page type, such as "Content", "Listing" or "Imprint" (see
+  [Page types and link categories](whole-site-and-metadata.md#page-types-and-link-categories)),
+  and "Types:" above the tree counts them. A crawled page shows the type of its result; a page
+  that failed with an HTTP error has none. A sitemap entry or a linked-only URL was not read, so
+  its type is guessed from its URL alone and marked "guessed from the URL". A URL that says
+  nothing shows no type. "Select content pages" checks every URL but the imprint, privacy,
+  legal, contact, login, search and error pages, and unchecks those; a URL without a type is
+  checked.
 - **Batch**: paste the URLs, one per line, and press "Start batch". More URLs than one batch
   takes are sent as several batches.
 - **Batch file**: choose a CSV or JSON file and press "Check the file". A CSV has a `url` column

@@ -15,7 +15,7 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | --- | --- | --- |
 | Extract | Extrahieren | Der Tab für eine Seite über ihre URL. |
 | File | Datei | Der Tab für einen Upload. |
-| Screenshot | Screenshot | Der Tab für ein PNG einer Seite. |
+| Screenshot | Screenshot | Der Tab für ein Bild einer Seite. |
 | Structured | Strukturiert | Der Tab für strukturierte Daten aus einer Seite. |
 | Chunk | Chunks | Der Tab, der eine Seite oder einen Text in Chunks zerlegt. |
 | Batch | Batch | Der Tab für viele URLs als ein Job. |
@@ -34,6 +34,9 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | Site tree | Website-Baum | Die Seiten einer Website-Struktur, nach Host und Pfad. |
 | crawled | gecrawlt | Eine Seite des Baums, die der Crawl geholt hat. |
 | linked only | nur verlinkt | Eine URL des Baums, die eine Seite verlinkt, die der Crawl aber nicht geholt hat. |
+| guessed from the URL | aus der URL geschätzt | Ein Seitentyp im Baum, allein aus der URL gelesen, für eine URL, die der Crawl nicht geholt hat. |
+| Select content pages | Inhaltsseiten auswählen | Markiert jede URL des Baums außer Impressum, Datenschutz, Rechtlichem, Kontakt, Anmeldung, Suche und Fehlerseiten. |
+| Capture | Aufnahme | Die Wahl von Größe und Bildformat im Tab Screenshot. |
 | Principal | Konto | Name und Rolle des Schlüssels in einem Ergebnis. |
 | What happened | Ablauf | Die Zeitleiste eines Ergebnisses: Zuteilungen, Prüfungen, Abruf, Rendern, Umwandlung und Ergebnis. |
 | Claim | Zuteilung | Ein Worker übernimmt einen Job-Eintrag; eine zweite Zuteilung ist eine Wiederholung. |
@@ -69,6 +72,8 @@ Begriffe der API und dieser Anleitung.
 | maximum extraction | maximale Extraktion | `compliance: ignore` mit Entsperrmodus, für Vertragspartner. |
 | unblock browser | Entsperr-Browser | Der getarnte Chrome des Entsperrmodus. |
 | TDM opt-out | TDM-Nutzungsvorbehalt | Der Vorbehalt einer Website gegen Text- und Data-Mining. |
+| page type | Seitentyp | Die Art einer Seite (`page_type`), etwa Inhalt, Übersicht oder Impressum; nach Regeln bestimmt. |
+| link category | Linkkategorie | Wohin ein Link führt (`category`), etwa zum Impressum, zu einem sozialen Netzwerk oder zu einem Download. |
 | entity | Treffer | Ein personenbezogenes Datum, das `pii` gefunden hat („Funde“ wird nicht verwendet). |
 | chunk | Chunk | Ein Stück zerlegten Inhalts. |
 | rate limit | Ratenlimit | Die höchste Zahl der Anfragen pro Minute eines Schlüssels. |

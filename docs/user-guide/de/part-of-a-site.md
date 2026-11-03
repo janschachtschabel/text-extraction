@@ -78,6 +78,16 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   die Sie möchten, oder einen Abschnitt für alle seine Seiten, und klicken Sie auf „Auswahl
   extrahieren“: Die markierten URLs werden zu Batches, mit dem Format, dem Browser-Fallback, den
   Metadaten und den Optionen, die Sie unter dem Baum setzen.
+
+  Jede URL des Baums zeigt ihren Seitentyp, etwa „Inhalt“, „Übersicht“ oder „Impressum“ (siehe
+  [Seitentypen und Linkkategorien](whole-site-and-metadata.md#seitentypen-und-linkkategorien)),
+  und „Typen:“ über dem Baum zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
+  eine Seite, die mit einem HTTP-Fehler gescheitert ist, hat keinen. Ein Sitemap-Eintrag oder
+  eine nur verlinkte URL wurde nicht gelesen; deshalb wird ihr Typ allein aus ihrer URL geschätzt
+  und als „aus der URL geschätzt“ markiert. Eine URL, die nichts sagt, zeigt keinen Typ.
+  „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
+  Anmeldung, Suche und Fehlerseiten und entfernt bei diesen das Häkchen; eine URL ohne Typ wird
+  markiert.
 - **Batch**: Fügen Sie die URLs ein, eine pro Zeile, und klicken Sie auf „Batch starten“. Mehr
   URLs, als ein Batch fasst, werden als mehrere Batches gesendet.
 - **Batch-Datei**: Wählen Sie eine CSV- oder JSON-Datei und klicken Sie auf „Datei prüfen“. Eine

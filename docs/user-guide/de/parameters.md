@@ -22,14 +22,14 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `mode` | `fast`, `auto` oder `browser` | `auto` | Der Browser-Fallback: `auto` nutzt den Browser, wenn die Seite ihn braucht, `fast` nie, `browser` immer. Siehe [Browser-Fallback](usage.md#browser-fallback). |
 | `format` | `markdown`, `text` oder `html` | `markdown` | Das Format von `content`. |
 | `metadata` | Boolean | `true` | Die Metadaten der Seite mitliefern (Titel, Autoren, Lizenz, Datumsangaben, Bilder, schema.org- und LRMI-Felder). |
-| `links` | Boolean | `false` | Die Links der Seite mitliefern. |
+| `links` | Boolean | `false` | Die Links der Seite mitliefern, jeden mit `kind` und `category` (wohin er führt, etwa `imprint` oder `social`). |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Website-Regeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion zu einem Job (202); `0`: sofort ein Job. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. |
 | `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website. Nicht mit `mode: fast`. |
 | `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
-| `screenshot` | Boolean | `false` | Auch einen Screenshot als PNG aufnehmen. Nicht mit `mode: fast`. |
+| `screenshot` | Boolean | `false` | Auch einen Screenshot aufnehmen, ein PNG, wenn `screenshot_options` nichts anderes sagt. Nicht mit `mode: fast`. |
 | `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. `false` wird mit `mode: fast` abgelehnt. |
 | `screenshot_options` | Objekt | nicht gesetzt | Viewport-Größe, Bildformat und -größe des Screenshots: `viewport` (`{"width", "height"}`, Standard 1920×1080), `format` (`png`, `jpeg` oder `webp`), `quality` (1 bis 100, nur für `jpeg` und `webp`) und `width` (skaliert herunter, höchstens die Breite des Viewports). Braucht `screenshot`, wird also mit `mode: fast` abgelehnt. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | OCR für Dokumente: `auto` liest Scans und Bilder mit OCR, wo der Dienst sie hat. |
@@ -163,7 +163,8 @@ nur über HTTP gelesen, ohne ihren Text.
 
 ## `POST /v1/screenshot`
 
-Ein PNG einer Seite, im Browser gerendert.
+Ein Bild einer Seite, im Browser gerendert: ein PNG in einem Fenster von 1920×1080, wenn
+`viewport`, `format`, `quality` und `width` nichts anderes sagen.
 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
