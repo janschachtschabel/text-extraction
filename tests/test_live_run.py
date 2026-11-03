@@ -669,3 +669,56 @@ def test_summary_has_a_media_table_by_platform_and_transcript_source() -> None:
 
 def test_summary_without_media_has_no_media_table() -> None:
     assert "### Media" not in summarize([record("a.example", "ok")])
+
+
+def flaky(transport: httpx.MockTransport, failures: int) -> httpx.MockTransport:
+    """``transport`` whose first ``failures`` GETs end in a ``ReadError``, as when the server
+    closes an idle keep-alive connection while the poll is sent."""
+    left = failures
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal left
+        if request.method == "GET" and left > 0:
+            left -= 1
+            raise httpx.ReadError("connection closed", request=request)
+        return transport.handle_request(request)
+
+    return httpx.MockTransport(handler)
+
+
+def test_a_job_poll_is_retried_once_on_a_transport_error() -> None:
+    transport, seen = job_service(TRANSCRIBED, polls_before_done=1)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    (only,), _ = run_rows(flaky(transport, 1), [row])
+
+    assert (only.bucket, only.http_status, only.error_code) == ("ok", 200, None)
+    assert [entry[:2] for entry in seen[1:]] == [("GET", "/v1/jobs/j1")] * 2
+
+
+def test_a_job_poll_fails_after_a_second_transport_error() -> None:
+    transport, _ = job_service(TRANSCRIBED, polls_before_done=1)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    (only,), _ = run_rows(flaky(transport, 2), [row])
+
+    assert only.error_code == "client_ReadError"
+
+
+def test_get_job_retries_only_transport_errors() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503)
+
+    async def scenario() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://service"
+        ) as client:
+            return await run_live.get_job(client, "/v1/jobs/j1", params={"limit": 1})
+
+    response = asyncio.run(scenario())
+
+    assert (response.status_code, calls) == (503, 1)  # an answer is not retried

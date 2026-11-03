@@ -334,3 +334,20 @@ def test_main_writes_the_summary_and_never_fails(
     [line] = out.read_text(encoding="utf-8").splitlines()
     assert json.loads(line)["url"] == START
     assert json.loads(line)["pages"] == 3
+
+
+def test_a_poll_is_retried_once_on_a_transport_error() -> None:
+    transport, _ = fake_service(ITEMS, states=["running", "completed"])
+    left = 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal left
+        if request.method == "GET" and left > 0:
+            left -= 1
+            raise httpx.ReadError("connection closed", request=request)
+        return transport.handle_request(request)
+
+    report = crawl_with(httpx.MockTransport(handler))
+
+    assert report == tally(START, JOB, ITEMS)
+    assert report.error is None

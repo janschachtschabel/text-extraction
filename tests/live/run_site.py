@@ -27,7 +27,7 @@ from typing import Any
 
 import httpx
 
-from tests.live.run_live import domain_of, read_urls
+from tests.live.run_live import domain_of, get_job, read_urls
 
 DEFAULT_URLS = Path(__file__).parent / "urls" / "sites.csv"
 DEFAULT_DEPTH = 1
@@ -175,7 +175,7 @@ async def _items(
     offset: int | None = 0
     job: dict[str, Any] = {}
     while offset is not None:
-        response = await client.get(status_url, params={"offset": offset, "limit": page_size})
+        response = await get_job(client, status_url, {"offset": offset, "limit": page_size})
         response.raise_for_status()
         job = response.json()["data"]
         items += job.get("items") or []
@@ -212,7 +212,7 @@ async def crawl(
         status_url = response.json()["data"]["status_url"]
         error: str | None = None
         while True:
-            polled = await client.get(status_url, params={"limit": 1})
+            polled = await get_job(client, status_url, {"limit": 1})
             polled.raise_for_status()
             if polled.json()["data"]["state"] == "completed":
                 break

@@ -254,10 +254,22 @@ def _status_url(http_status: int, payload: object) -> str | None:
     return status_url if http_status == 202 and isinstance(status_url, str) else None
 
 
+async def get_job(
+    client: httpx.AsyncClient, status_url: str, params: dict[str, int] | None = None
+) -> httpx.Response:
+    """``GET`` of a job's ``status_url``, sent once more after a transport error: a reused
+    keep-alive connection the server closed meanwhile fails the first try (a read of a job
+    changes nothing, so a second send is safe). Any answer, also an error status, is returned."""
+    try:
+        return await client.get(status_url, params=params)
+    except httpx.TransportError:
+        return await client.get(status_url, params=params)
+
+
 async def _job_result(client: httpx.AsyncClient, status_url: str, poll_seconds: float) -> object:
     """The first item's result envelope once the job is ``completed``."""
     while True:
-        response = await client.get(status_url)
+        response = await get_job(client, status_url)
         response.raise_for_status()
         data = response.json().get("data") or {}
         if data.get("state") == "completed":

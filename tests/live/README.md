@@ -56,7 +56,8 @@ Every request is `POST /v1/extract` with the `--mode` (default `auto`), `format=
 plus `transcribe: true` where the row says so (unless `--no-transcribe`); an upload is
 `POST /v1/extract/file` with `format=text`. An answer that is a job (202 with a `status_url`: a
 transcription is always one) is read every `--poll-seconds` until its state is `completed`, and
-its item's result is recorded with `http_status` 200. Each domain
+its item's result is recorded with `http_status` 200. A read of a job that ends in a transport
+error (the server closed the idle connection) is sent once more. Each domain
 has its own queue and at most one request in flight (a job holds its domain's turn until it
 completes); the domains take turns under the global
 `--concurrency`. A domain with many URLs (GeoGebra is about a quarter of the corpus) therefore
@@ -130,7 +131,8 @@ uv run python -m tests.live.run_site --urls tests/live/urls/sites.csv --depth 1 
 
 Each site is one request (`depth`, `max_pages`, `compliance` as given, `cache: false`); all sites
 run at once (each is a host of its own, so the per-host limits keep them apart). The harness reads
-the job every `--poll-seconds` until it is `completed`, then all its items in pages of 500, and
+the job every `--poll-seconds` until it is `completed` (a read that ends in a transport error is
+sent once more), then all its items in pages of 500, and
 prints a Markdown summary: per site the job's state and duration (created to finished), its items,
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
 sitemap entries; a histogram of the pages' links by `region` and one by `crawl` decision; and the
