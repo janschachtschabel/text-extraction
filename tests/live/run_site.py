@@ -7,8 +7,9 @@ Needs a started service with an extract worker (the crawl runs as a ``site`` job
 site it sends one request, waits for the job to complete, reads all its items from
 ``GET /v1/jobs/{id}`` and prints a Markdown summary: the job's state and duration, its items,
 page items, sitemap files, further parts and entries, and histograms of the pages' links by
-``region`` and by ``crawl`` decision, with the warnings and error codes. A report, never a gate:
-the exit code is 0 whatever the sites answer. See `tests/live/README.md`.
+``region`` and by ``crawl`` decision, a table of the pages by page type, with the warnings and
+error codes. A report, never a gate: the exit code is 0 whatever the sites answer.
+See `tests/live/README.md`.
 """
 
 import argparse
@@ -74,6 +75,7 @@ class SiteReport:
     entries: int = 0  # sitemap entries in the sitemap items and their further parts
     regions: dict[str, int] = field(default_factory=dict)
     crawls: dict[str, int] = field(default_factory=dict)
+    page_types: dict[str, int] = field(default_factory=dict)  # page items by `data.page_type.type`
     warnings: dict[str, int] = field(default_factory=dict)
     error_codes: dict[str, int] = field(default_factory=dict)
 
@@ -107,6 +109,7 @@ def tally(
     roles: Counter[str] = Counter()
     regions: Counter[str] = Counter()
     crawls: Counter[str] = Counter()
+    page_types: Counter[str] = Counter()
     warnings: Counter[str] = Counter()
     codes: Counter[str] = Counter()
     pages_ok = failed = entries = 0
@@ -121,6 +124,9 @@ def tally(
             failed += 1
         if role == "page" and status == "success":
             pages_ok += 1
+        if role == "page":
+            page_type = data.get("page_type") or {}
+            page_types[page_type.get("type") or "none"] += 1
         if error_info := result.get("error"):
             codes[error_info.get("code") or "unknown"] += 1
         warnings.update(data.get("warnings") or [])
@@ -144,6 +150,7 @@ def tally(
         entries=entries,
         regions=dict(regions),
         crawls=dict(crawls),
+        page_types=dict(page_types),
         warnings=dict(warnings),
         error_codes=dict(codes),
     )
@@ -283,6 +290,19 @@ def _listing(counts: dict[str, int]) -> str:
     return ", ".join(f"{name} {count}" for name, count in ranked) or "-"
 
 
+def _page_types_table(reports: Sequence[SiteReport]) -> list[str]:
+    """Per site, the page types (`data.page_type.type`) and their number of pages, most frequent
+    first; a page without a type counts as ``none``."""
+    rows = [
+        [domain_of(report.url), page_type, count]
+        for report in reports
+        for page_type, count in sorted(report.page_types.items(), key=lambda p: (-p[1], p[0]))
+    ]
+    if not rows:
+        return ["### Page types", "", "No pages.", ""]
+    return ["### Page types", "", *_table(["Site", "Type", "Pages"], rows), ""]
+
+
 def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, compliance: str) -> str:
     """The Markdown summary: a row per site, then the link histograms and the warnings."""
     sites = f"{len(reports)} site{'' if len(reports) == 1 else 's'}"
@@ -321,6 +341,7 @@ def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, comp
     lines += [*_table(header, rows), ""]
     lines += _histogram("Links by region", REGIONS, reports, [r.regions for r in reports])
     lines += _histogram("Links by crawl decision", CRAWLS, reports, [r.crawls for r in reports])
+    lines += _page_types_table(reports)
     notes = [
         [domain_of(report.url), _listing(report.warnings), _listing(report.error_codes)]
         for report in reports

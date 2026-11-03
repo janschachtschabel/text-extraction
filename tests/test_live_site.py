@@ -24,8 +24,15 @@ SITES = [
 START = "https://lernen.example.org/"
 
 
-def page(index: int, links: list[tuple[str | None, str]], *, depth: int = 0, **result: Any) -> Any:
-    """A page item with links of the given (region, crawl)."""
+def page(
+    index: int,
+    links: list[tuple[str | None, str]],
+    *,
+    depth: int = 0,
+    page_type: str | None = None,
+    **result: Any,
+) -> Any:
+    """A page item with links of the given (region, crawl) and, if given, a page type."""
     return {
         "index": index,
         "url": f"{START}p{index}",
@@ -35,6 +42,7 @@ def page(index: int, links: list[tuple[str | None, str]], *, depth: int = 0, **r
             "error": result.get("error"),
             "data": {
                 "warnings": result.get("warnings", []),
+                "page_type": {"type": page_type, "signals": ["x"]} if page_type else None,
                 "site": {
                     "role": "page",
                     "depth": depth,
@@ -83,9 +91,13 @@ def robots(index: int) -> Any:
 
 
 ITEMS = [
-    page(0, [("nav", "queued"), ("nav", "queued"), (None, "listed"), ("footer", "out_of_scope")]),
+    page(
+        0,
+        [("nav", "queued"), ("nav", "queued"), (None, "listed"), ("footer", "out_of_scope")],
+        page_type="home",
+    ),
     robots(1),
-    page(2, [("nav", "seen"), ("main", "depth")], depth=1),
+    page(2, [("nav", "seen"), ("main", "depth")], depth=1, page_type="content"),
     sitemap(3, 4, warnings=["sitemap_urls_truncated"]),
     sitemap(4, 2, role="sitemap_part"),
     page(
@@ -132,6 +144,7 @@ def test_tally_counts_items_entries_regions_and_crawl_decisions() -> None:
         entries=6,
         regions={"nav": 3, "main": 1, "footer": 1, "none": 1},
         crawls={"queued": 2, "seen": 1, "depth": 1, "listed": 1, "out_of_scope": 1},
+        page_types={"home": 1, "content": 1, "none": 1},
         warnings={"sitemap_urls_truncated": 1},
         error_codes={"target_http_error": 1},
     )
@@ -162,6 +175,12 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     assert "| Site | listed | out_of_scope | depth | queued | seen |" in lines
     assert "| lernen.example.org | 1 | 1 | 1 | 2 | 1 |" in lines
     assert "| down.example | 0 | 0 | 0 | 0 | 0 |" in lines
+    # The page types: a row per site and type, the most frequent first; no type is `none`.
+    assert "### Page types" in lines
+    assert "| Site | Type | Pages |" in lines
+    assert "| lernen.example.org | content | 1 |" in lines
+    assert "| lernen.example.org | home | 1 |" in lines
+    assert "| lernen.example.org | none | 1 |" in lines
     assert "### Warnings and error codes" in lines
     assert "| lernen.example.org | sitemap_urls_truncated 1 | target_http_error 1 |" in lines
     assert summary.endswith("\n")
