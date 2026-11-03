@@ -40,7 +40,7 @@ Package 14: screenshot formats, SVG previews and page types (plan
 
 - `auto` mode also tries the browser on a 2xx HTML page that is too short or empty
   (`content_too_short`, `empty_content`) when the page has a script. In A/B live runs on
-  `wlo_200` the usable share rose from 83.0 % to 83.5 % and 84.5 % at the same median time per
+  `wlo_200` the usable share rose from 83.0 % to 83.5 % and 84.5 % with no higher median time per
   URL; such pages take longer.
 - A full-page screenshot in a window wider than 1920 px is cut at `SCREENSHOT_MAX_HEIGHT_PX` ×
   1920 / the window's width, so it never holds more pixels than a 1920 px wide one.
