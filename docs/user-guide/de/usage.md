@@ -201,7 +201,9 @@ Medien, 600 px breit:
 ihren `content_type`, ihre `width` und ihre `height`. Eine ganze Seite wird bei
 `SCREENSHOT_MAX_HEIGHT_PX` (16.384 px) abgeschnitten, mit der Warnung `screenshot_clipped`. Ein
 Fenster, das breiter als 1920 px ist, wird früher abgeschnitten, damit ein Bild nie mehr Pixel hat
-als eines von 1920 px Breite.
+als eines von 1920 px Breite. WebP fasst höchstens 16.383 px je Seite, darum verliert ein
+`webp`-Bild, das (nach dem Verkleinern mit `width`) höher ist, seine unteren Zeilen, mit derselben
+Warnung.
 
 `POST /v1/extract` nimmt `"screenshot": true` ebenfalls, und dieselben vier Felder in
 `screenshot_options`. Die Datei wird `ARTIFACT_TTL_SECONDS` (eine Stunde) aufbewahrt, und nur ihr

@@ -11,6 +11,7 @@ import pytest
 from fakeredis import FakeAsyncRedis
 from PIL import Image
 from prometheus_client import CollectorRegistry
+from structlog.testing import capture_logs
 
 from tests.fakes import (
     ARTICLE,
@@ -780,6 +781,68 @@ def test_an_encoded_screenshot_over_the_byte_limit_is_too_large() -> None:
 
     assert code_of(envelope) == ErrorCode.TOO_LARGE
     assert artifacts.screenshots == []
+
+
+def test_a_webp_cut_at_the_webp_limit_warns_screenshot_clipped() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (1920, 16384), (10, 120, 200)).save(buffer, format="PNG")
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(screenshot=buffer.getvalue(), screenshot_size=(1920, 16384)))
+    )
+    artifacts = FakeArtifacts()
+
+    envelope = harness.run_once(
+        mode="browser", screenshot=True, screenshot_options={"format": "webp"}, artifacts=artifacts
+    )
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.screenshot is not None
+    assert (data.screenshot.width, data.screenshot.height) == (1920, 16383)
+    assert data.warnings.count("screenshot_clipped") == 1
+
+
+def test_a_webp_cut_keeps_one_clipped_warning() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (1920, 16384), (10, 120, 200)).save(buffer, format="PNG")
+    page = rendered(
+        screenshot=buffer.getvalue(),
+        screenshot_size=(1920, 16384),
+        warnings=["screenshot_clipped"],  # the page was taller than the capture, too
+    )
+    harness = RenderHarness(renderer=FakeRenderer(page))
+
+    envelope = harness.run_once(
+        mode="browser",
+        screenshot=True,
+        screenshot_options={"format": "webp"},
+        artifacts=FakeArtifacts(),
+    )
+
+    assert data_of(envelope).warnings.count("screenshot_clipped") == 1
+
+
+def test_a_screenshot_that_cannot_be_encoded_fails_for_good_and_is_logged() -> None:
+    # A damaged PNG fails the same way every time: retrying cannot help.
+    harness = RenderHarness(
+        renderer=FakeRenderer(rendered(screenshot=PNG, screenshot_size=(1920, 3000)))
+    )
+
+    with capture_logs() as logs:
+        envelope = harness.run_once(
+            mode="browser",
+            screenshot=True,
+            screenshot_options={"format": "jpeg"},
+            artifacts=FakeArtifacts(),
+        )
+
+    assert code_of(envelope) == ErrorCode.INTERNAL_ERROR
+    assert envelope.error is not None
+    assert envelope.error.retryable is False
+    [line] = [log for log in logs if log["event"] == "screenshot_encode_failed"]
+    assert line["error_type"] == "UnidentifiedImageError"
+    assert (line["width"], line["height"], line["format"]) == (1920, 3000, "jpeg")
+    assert "example" not in json.dumps(line, default=str)  # never the URL
 
 
 def test_screenshot_needs_an_artifact_sink() -> None:

@@ -171,7 +171,7 @@ Ein Bild einer Seite, im Browser gerendert: ein PNG in einem Fenster von 1920×1
 | `url` | String | Pflicht | Die Seite, die aufgenommen wird. |
 | `full_page` | Boolean | `true` | Die ganze Seite (bis `SCREENSHOT_MAX_HEIGHT_PX`); `false`: den ersten Viewport. |
 | `viewport` | Objekt | nicht gesetzt | Das Browserfenster, `{"width": 320 bis 3840, "height": 240 bis 2160}`; ein schmales zeigt das mobile Layout der Seite. Standard 1920×1080. Eine Ganzseiten-Aufnahme fasst höchstens 1920 × `SCREENSHOT_MAX_HEIGHT_PX` Pixel, ein breiterer Viewport ergibt also eine kürzere Aufnahme (die Höhe wird bei `SCREENSHOT_MAX_HEIGHT_PX` × 1920 / Viewport-Breite abgeschnitten). |
-| `format` | `png`, `jpeg` oder `webp` | `png` | Das Bildformat. |
+| `format` | `png`, `jpeg` oder `webp` | `png` | Das Bildformat. Ein `webp`-Bild ist höchstens 16.383 px hoch (die Grenze von WebP): einem höheren fehlen die unteren Zeilen, mit der Warnung `screenshot_clipped`. |
 | `quality` | Ganzzahl, 1 bis 100 | `80` | Qualität eines `jpeg`- oder `webp`-Bilds. Nicht mit `png` (422). |
 | `width` | Ganzzahl, 16 bis 3840 | nicht gesetzt | Skaliert das Bild auf diese Breite herunter, das Seitenverhältnis bleibt; höchstens die Breite des Viewports (422), nie hochskaliert. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen vor der Aufnahme, wie bei `POST /v1/extract`. |

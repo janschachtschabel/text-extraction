@@ -83,7 +83,10 @@ class ScreenshotRequest(BaseModel, extra="forbid", hide_input_in_errors=True, st
         "viewport width).",
     )
     format: ScreenshotFormat = Field(
-        default="png", description="Image format: `png` (default, lossless), `jpeg` or `webp`."
+        default="png",
+        description="Image format: `png` (default, lossless), `jpeg` or `webp`. A `webp` image "
+        "is at most 16,383 px high (the WebP limit): a taller one loses its bottom rows, with "
+        "the warning `screenshot_clipped`.",
     )
     quality: int | None = Field(
         default=None,

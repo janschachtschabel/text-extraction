@@ -76,7 +76,7 @@ from text_extraction.render import (
     RenderOptions,
     site,
 )
-from text_extraction.screenshot_image import png_size
+from text_extraction.screenshot_image import SCREENSHOT_CLIPPED_WARNING, png_size
 from text_extraction.settings import Settings
 
 if TYPE_CHECKING:
@@ -625,7 +625,7 @@ class _Render:
         rows = min(limit, limit * VIEWPORT["width"] // width)
         height = int(await self.page.evaluate(PAGE_HEIGHT) or 0)
         if height > rows:
-            self.warnings.append("screenshot_clipped")
+            self.warnings.append(SCREENSHOT_CLIPPED_WARNING)
         # A clip on a full-page capture is trimmed to the document: viewport wide, `rows` high.
         png = await self.page.screenshot(
             type="png",

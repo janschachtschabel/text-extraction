@@ -40,7 +40,8 @@ Package 14: screenshot formats, SVG previews and page types (plan
 
 - A full-page screenshot in a window wider than 1920 px is cut at `SCREENSHOT_MAX_HEIGHT_PX` ×
   1920 / the window's width, so it never holds more pixels than a 1920 px wide one.
-  `SCREENSHOT_MAX_BYTES` applies to the encoded file.
+  `SCREENSHOT_MAX_BYTES` applies to the encoded file. A `webp` image is at most 16,383 px high
+  (the WebP limit): a taller one loses its bottom rows, with the warning `screenshot_clipped`.
 - `GET /v1/jobs/{id}/artifacts/{name}` also serves `screenshot.jpg` (`image/jpeg`) and
   `screenshot.webp` (`image/webp`); `get_job_screenshot` reads the file's name from the job's
   result instead of assuming `screenshot.png`.

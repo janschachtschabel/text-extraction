@@ -679,8 +679,15 @@ while `BROWSER_ENABLED` is false, are unchanged.
   encodes it with Pillow on a thread (`screenshot_image.encode_screenshot`): a PNG without
   `width` passes through untouched; otherwise the image is scaled down to `width` (16 to 3840,
   at most the viewport's width, else 422; never up) with Lanczos, keeping the ratio, and saved as
-  PNG, JPEG (`quality`, default 80, progressive, RGB) or WebP (`quality`, method 4). `quality`
-  with `png` is 422. An image Pillow cannot decode fails `internal_error`, retryable. The
+  PNG, JPEG (`quality`, default 80, progressive, RGB) or WebP (`quality`, method 4). libwebp
+  encodes at most 16,383 px a side, one row less than the default full-page height: a WebP
+  image taller than that after scaling keeps its top 16,383 rows and the result gets the warning
+  `screenshot_clipped` (once, also when the capture was cut already; ruling P14-R10); PNG and
+  JPEG keep all rows. `quality` with `png` is 422. At most two images are encoded at once in a
+  process (`screenshot_image.ENCODE_CONCURRENCY`; one 1920 × 16,384 JPEG needs about 180 MB
+  while it is encoded). An image Pillow cannot decode or encode fails `internal_error`, not
+  retryable (the same bytes fail again), and logs `screenshot_encode_failed` with the error type,
+  the image size and the format (never the URL). The
   encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores it
   as `job:{<id>}:artifact:screenshot.png`, `screenshot.jpg` or `screenshot.webp` for
   `ARTIFACT_TTL_SECONDS` (expiry and deletion cover all three names); `data.screenshot` names it

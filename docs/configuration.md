@@ -1272,6 +1272,10 @@ of every pool (the load ran one pod per pool), its memory request equals its lim
 and its limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at
 once, not for this load.
 
+Screenshot encoding was not part of the load: a browser worker encodes at most two screenshots at
+once (fixed in code), and one 1920 × 16,384 JPEG needs about 180 MB while it is encoded, so long
+full-page captures can add up to about 360 MB to the browser worker's peak above.
+
 **Selector processes (P11-S5, issue #19).** The selector scenario on fresh containers per value:
 
 | `STRUCTURED_SELECTOR_PROCESSES` | Requests/s, run 4 / 6 | p95 ms, run 4 / 6 | API memory p95 MiB, run 4 / 6 | API memory idle MiB, run 4 / 6 |

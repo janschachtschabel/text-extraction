@@ -275,7 +275,11 @@ from text_extraction.render import (
     RenderOptions,
 )
 from text_extraction.result_cache import CachedEntry, MemoryPressure, ResultCache, cache_key
-from text_extraction.screenshot_image import ScreenshotEncodeError, encode_screenshot
+from text_extraction.screenshot_image import (
+    SCREENSHOT_CLIPPED_WARNING,
+    ScreenshotEncodeError,
+    encode_screenshot_limited,
+)
 from text_extraction.settings import Settings
 from text_extraction.site.links import site_links as typed_links
 from text_extraction.site.types import SiteInfo
@@ -2556,7 +2560,10 @@ class Pipeline:
                 update={"bot_challenge": True, "browser_recommended": True}
             )
             fingerprint = None
-        screenshot = await self._store_screenshot(run, rendered) if req.screenshot else None
+        warnings = [*processed.warnings, *rendered.warnings]
+        screenshot = (
+            await self._store_screenshot(run, rendered, warnings) if req.screenshot else None
+        )
         if isinstance(screenshot, Envelope):
             return screenshot
         result = run.result(
@@ -2568,7 +2575,7 @@ class Pipeline:
             metadata=processed.metadata,
             links=processed.links,
             fingerprint=fingerprint,
-            warnings=[*processed.warnings, *rendered.warnings],
+            warnings=warnings,
             screenshot=screenshot,
             structured=processed.structured,
             site=processed.site,
@@ -2638,20 +2645,30 @@ class Pipeline:
         return await self._guarded(run, fetch_and_extract())
 
     async def _store_screenshot(
-        self, run: _Run, rendered: Rendered
+        self, run: _Run, rendered: Rendered, warnings: list[str]
     ) -> ArtifactRef | Envelope[ExtractResult]:
-        """Store the render's screenshot (B7): its reference, or the failed envelope."""
+        """Store the render's screenshot (B7): its reference, or the failed envelope. A WebP
+        cut at its height limit adds ``screenshot_clipped`` to ``warnings`` (P14-R10)."""
         png, size = rendered.screenshot, rendered.screenshot_size
         if png is None or size is None or run.artifacts is None:
             return run.failed(
                 ErrorCode.INTERNAL_ERROR, "The browser took no screenshot.", retryable=True
             )
+        options = run.req.screenshot_options
         try:
-            image = await asyncio.to_thread(encode_screenshot, png, run.req.screenshot_options)
-        except ScreenshotEncodeError:
-            return run.failed(
-                ErrorCode.INTERNAL_ERROR, "The screenshot could not be encoded.", retryable=True
+            image = await encode_screenshot_limited(png, options)
+        except ScreenshotEncodeError as error:
+            # The same PNG fails the same way again: not retryable.
+            _log.warning(
+                "screenshot_encode_failed",
+                error_type=type(error.__cause__ or error).__name__,
+                width=size[0],
+                height=size[1],
+                format=options.format if options is not None else "png",
             )
+            return run.failed(ErrorCode.INTERNAL_ERROR, "The screenshot could not be encoded.")
+        if image.clipped and SCREENSHOT_CLIPPED_WARNING not in warnings:
+            warnings.append(SCREENSHOT_CLIPPED_WARNING)
         limit = self._settings.screenshot_max_bytes
         if len(image.data) > limit:
             return run.failed(

@@ -1,12 +1,16 @@
 """``encode_screenshot`` (``screenshot_image.py``): the stored file in its format and width."""
 
+import asyncio
 import io
+import threading
+import time
 
 import pytest
 from PIL import Image
 
+from text_extraction import screenshot_image
 from text_extraction.browser_options import ScreenshotOptions, Viewport
-from text_extraction.screenshot_image import EncodedScreenshot, encode_screenshot
+from text_extraction.screenshot_image import WEBP_MAX_SIDE_PX, EncodedScreenshot, encode_screenshot
 
 
 def _png(width: int, height: int) -> bytes:
@@ -104,3 +108,66 @@ def test_repr_does_not_show_the_bytes() -> None:
     assert isinstance(out, EncodedScreenshot)
     assert "x89PNG" not in repr(out)
     assert "20" in repr(out)
+
+
+def _flat_png(width: int, height: int) -> bytes:
+    """A one-colour PNG: small and fast to encode, even 16,384 rows high."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (200, 30, 30)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_webp_is_cut_to_the_webp_height_limit() -> None:
+    # libwebp encodes at most 16,383 pixels a side; the full-page capture can be 16,384 rows.
+    out = encode_screenshot(_flat_png(1920, 16384), _options(format="webp"))
+
+    assert (out.width, out.height) == (1920, WEBP_MAX_SIDE_PX)
+    assert out.clipped is True
+    with Image.open(io.BytesIO(out.data)) as reopened:
+        assert reopened.size == (1920, 16383)
+
+
+def test_webp_scaled_below_the_limit_is_not_cut() -> None:
+    out = encode_screenshot(_flat_png(1920, 16384), _options(format="webp", width=960))
+
+    assert (out.width, out.height) == (960, 8192)
+    assert out.clipped is False
+
+
+@pytest.mark.parametrize("fmt", ["png", "jpeg"])
+def test_other_formats_keep_all_rows(fmt: str) -> None:
+    out = encode_screenshot(_flat_png(64, 16384), _options(format=fmt, width=32))
+
+    assert (out.width, out.height) == (32, 8192)
+    assert out.clipped is False
+    tall = encode_screenshot(_flat_png(16, 16500), _options(format=fmt, width=16))
+    assert (tall.height, tall.clipped) == (16500, False)
+
+
+def test_encodes_run_at_most_encode_concurrency_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Each encode holds a full image in memory (~180 MB for a 1920x16384 JPEG): a process runs
+    # at most ENCODE_CONCURRENCY of them, however many renders finish together.
+    running = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def slow_encode(png: bytes, options: ScreenshotOptions | None) -> str:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return "encoded"
+
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", slow_encode)
+
+    async def main() -> list[object]:
+        return await asyncio.gather(
+            *(screenshot_image.encode_screenshot_limited(b"", None) for _ in range(6))
+        )
+
+    assert asyncio.run(main()) == ["encoded"] * 6
+    assert peak == screenshot_image.ENCODE_CONCURRENCY == 2
+    assert asyncio.run(main()) == ["encoded"] * 6  # a new event loop gets its own slots

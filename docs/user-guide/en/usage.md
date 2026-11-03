@@ -191,7 +191,9 @@ an image is never scaled up. A preview image for social media, 600 px wide:
 `data.screenshot` names the file (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`), its
 `content_type`, `width` and `height`. A whole page is cut at `SCREENSHOT_MAX_HEIGHT_PX` (16,384 px)
 with the warning `screenshot_clipped`. A window wider than 1920 px is cut sooner, so that an image
-never holds more pixels than a 1920 px wide one.
+never holds more pixels than a 1920 px wide one. WebP cannot hold more than 16,383 px a side, so a
+`webp` image taller than that (after `width` has scaled it) loses its bottom rows, with the same
+warning.
 
 `POST /v1/extract` takes `"screenshot": true` as well, and the same four fields in
 `screenshot_options`. The file is kept for `ARTIFACT_TTL_SECONDS` (one hour), and only its owner
