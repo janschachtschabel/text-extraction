@@ -22,8 +22,9 @@ BROWSER_UNBLOCK_TIMEOUT_SECONDS) + 10`` seconds. For each item it:
    details whose subtitles could not be read try its transcript view instead, P13-S2), one
    without either runs the fast step first;
 3. runs the pipeline with an ``ArtifactSink`` bound to the job: the screenshot is stored as
-   ``job:{<id>}:artifact:screenshot.png`` for ``ARTIFACT_TTL_SECONDS`` and served at
-   ``/v1/jobs/<id>/artifacts/screenshot.png``. While Valkey's memory guard is high, or when the
+   ``job:{<id>}:artifact:<name>`` (``screenshot.png``, ``screenshot.jpg`` or
+   ``screenshot.webp``) for ``ARTIFACT_TTL_SECONDS`` and served at
+   ``/v1/jobs/<id>/artifacts/<name>``. While Valkey's memory guard is high, or when the
    write fails, nothing is stored and the item fails ``internal_error``, retryable (B7);
 4. deletes the secrets and the item's draft once the item has its outcome, also when the run
    failed. An item that is given back to run again (a gate refusal it is deferred for, a Valkey

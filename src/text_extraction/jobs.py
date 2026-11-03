@@ -37,7 +37,8 @@ Browser jobs (package 4) may have these as well:
                           deleted by the browser worker once the item has its outcome. The nlp
                           worker's items have one too: the unprocessed envelope, deleted once
                           the item has its outcome
-- ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
+- ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``,
+                          ``screenshot.jpg`` or ``screenshot.webp``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
 Jobs that wait for a transcription (package 6, M11) may have:
