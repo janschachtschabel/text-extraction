@@ -49,7 +49,7 @@ after `BROWSER_QUEUE_WAIT_SECONDS`, and `browser` fails with `timeout`.
 | `--out` | `results/live_<UTC time>.jsonl` | One JSON line per URL. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
 | `--job-timeout` | 3600 | Seconds to wait for a job (a transcription answered 202) to complete; longer is `client_TimeoutError`. |
-| `--poll-seconds` | 5 | Seconds between two reads of a job. |
+| `--poll-seconds` | 3 | Seconds between two reads of a job (below the server's 5 s keep-alive). |
 | `--timeout` | 90 | Total client deadline per request in seconds (a slower answer is recorded as `client_TimeoutError`); keep it above the longest answer: `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + `BROWSER_TIMEOUT_SECONDS` + 5 s for an escalating `auto` request (70 s by default; the live workflow sets the queue wait to 30 s and passes 120). |
 
 Every request is `POST /v1/extract` with the `--mode` (default `auto`), `format=text` and `cache=false`,
@@ -148,7 +148,7 @@ so far. The exit code is always 0: the run is a report.
 | `--compliance` | `enforce` | The request's `compliance`. A crawler follows links, so it respects robots.txt and TDM opt-outs (CLAUDE.md rule 6, decision D4): what they exclude is not fetched and its link says `blocked`, counted in the crawl histogram. `report` fetches it anyway; use it only against a site you run. |
 | `--timeout` | 60 | Deadline of one HTTP request in seconds. |
 | `--job-timeout` | 1800 | Seconds to wait for a site's job to complete. |
-| `--poll-seconds` | 5 | Seconds between two reads of a job. |
+| `--poll-seconds` | 3 | Seconds between two reads of a job (below the server's 5 s keep-alive). |
 | `--out` | `results/site_<UTC time>.jsonl` | One JSON line per site, the numbers of the summary. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
 
