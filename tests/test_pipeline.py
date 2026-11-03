@@ -705,6 +705,31 @@ def test_a_fast_html_page_has_a_page_type() -> None:
     assert (article_type.type, article_type.signals) == ("content", ["word_count"])
 
 
+def test_a_page_type_failure_does_not_fail_the_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page type is an extra: a bug in its rules leaves it null and logs
+    ``page_type_failed`` with the host and the error type only."""
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("rules broke on secret-token")
+
+    monkeypatch.setattr("text_extraction.pipeline.classify_page", broken)
+    harness = Harness({PAGE: fetched()})
+
+    with capture_logs() as logs:
+        envelope = harness.run_once()
+
+    assert envelope.status == "success", envelope.error
+    data = data_of(envelope)
+    assert data.page_type is None
+    assert data.content
+    (line,) = [entry for entry in logs if entry["event"] == "page_type_failed"]
+    assert line["host"] == "example.org"
+    assert line["error_type"] == "RuntimeError"
+    assert "secret-token" not in repr(line)
+
+
 def test_a_login_wall_keeps_its_page_type() -> None:
     """A thin page with a password field fails as ``login_required``; its type says why."""
     login = f"{ORIGIN}/login"

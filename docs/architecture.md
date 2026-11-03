@@ -2561,7 +2561,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   `content`, `listing`, `imprint`, `privacy`, `legal`, `contact`, `about`, `auth`, `search`,
   `error`, `other`) and `signals`, every signal that agrees with it in the order of `PageSignal`,
   those after the deciding one included. Precedence, first that applies (ruling P14-S4):
-  1. `error`: `status` >= 400 or `quality.soft_404` (`status`, `soft_404`);
+  1. `error`: `status` >= 400 or `quality.soft_404` (`status`, `soft_404`) (in practice only
+     soft 404s: hard 4xx/5xx pages are not converted, P14-R7);
   2. `home`: the path is empty, `/`, `/index.(html|htm|php)` or only a language code (`/de`,
      `/en/`, `/de-at/`; ruling P14-R5) (`root_path`);
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
@@ -2584,7 +2585,9 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
 
   `og:type` `article` only ever agrees with `content` (`og_type`) and never decides (ruling
   P14-R6). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML
-  or a bad URL. The status passed is `upstream_status`.
+  or a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
+  raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
+  `page_type: null` instead of failing.
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
   (ruling P14-R7): the status and the error already say it failed, and the tree shows it as
   failed. In results `error` therefore comes from soft 404s (`soft_404`).

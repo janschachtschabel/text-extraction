@@ -2747,13 +2747,16 @@ class Pipeline:
                 if found.truncated:
                     site_warnings.append(LINKS_TRUNCATED_WARNING)
             if typed:  # the fetch's status is the result's ``upstream_status``
-                found_type = classify_page(
-                    text,
-                    final_url,
-                    status=fetched.status,
-                    quality=quality,
-                    min_words=self._settings.quality_min_words,
-                )
+                try:
+                    found_type = classify_page(
+                        text,
+                        final_url,
+                        status=fetched.status,
+                        quality=quality,
+                        min_words=self._settings.quality_min_words,
+                    )
+                except Exception as error:  # an extra: a bug in its rules leaves it null
+                    _log.warning("page_type_failed", host=host, error_type=type(error).__name__)
         else:
             if fetched.content_type in _MARKDOWN_TYPES:
                 conversion = Conversion(
