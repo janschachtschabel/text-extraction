@@ -1,18 +1,38 @@
-/* The UI's styles. No inline styles anywhere (CSP style-src 'self'). */
+/* The UI's styles. No inline styles anywhere (CSP style-src 'self').
+   Every colour, radius and font stack is a token on :root (package 15); tests/ui/test_palette.py
+   holds the colours to the approved mockup and to their contrast ratios. */
 :root {
-  --ink: #1d2433;
-  --muted: #5b6475;
-  --line: #d5dae3;
+  --page: #f3f4f6;
   --paper: #ffffff;
-  --wash: #f4f6f9;
-  --accent: #1f5fbf;
+  --line: #dde1e6; /* card borders: decorative, a card's text identifies it */
+  --field-line: #8a939d; /* field and outlined button borders: 3:1 on --paper (P15-R3) */
+  --ink: #1f2328;
+  --muted: #59636e;
+  --accent: #1d6f6a;
+  --accent-strong: #155a56;
+  --accent-wash: #e6f2f0;
   --accent-ink: #ffffff;
-  --warn: #8a5a00;
-  --warn-wash: #fff4dc;
+  --neutral-wash: #eef0f3;
+  --warn: #7a4d00;
+  --warn-wash: #fdf3d7;
   --error: #a3222b;
   --error-wash: #fde8ea;
-  --focus: #1f5fbf; /* at least 3:1 against --paper and --wash */
+  --focus: #1d6f6a; /* at least 3:1 against --page and --paper */
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-read: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+  --font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius-card: 12px;
+  --radius-field: 8px;
+  --control: 44px;
+  --gutter: 24px;
+  --content-max: 1440px;
   color-scheme: light;
+}
+
+@media (max-width: 599.98px) {
+  :root {
+    --gutter: 16px;
+  }
 }
 
 * {
@@ -21,9 +41,17 @@
 
 body {
   margin: 0;
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 16px/1.5 var(--font-ui);
   color: var(--ink);
-  background: var(--wash);
+  background: var(--page);
+}
+
+a {
+  color: var(--accent);
+}
+
+a:hover {
+  color: var(--accent-strong);
 }
 
 [hidden] {
@@ -57,7 +85,7 @@ body {
   z-index: 10;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--paper);
   color: var(--accent);
 }
@@ -80,37 +108,121 @@ body {
 code,
 pre,
 textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.9em;
 }
 
+/* The building blocks: the centred bar, cards, pill badges and section labels. */
+.bar-inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.pill-success {
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.pill-partial {
+  background: var(--warn-wash);
+  color: var(--warn);
+}
+
+.pill-failed {
+  background: var(--error-wash);
+  color: var(--error);
+}
+
+.pill-neutral {
+  background: var(--neutral-wash);
+  color: var(--ink);
+}
+
+.section-label,
+legend {
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The masthead: the logo, the name and the intro, on white. */
 .masthead {
-  padding: 1rem 1.5rem;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
 
-.masthead h1 {
-  margin: 0;
-  font-size: 1.4rem;
+.brand {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+  min-height: 60px;
+  padding-block: 10px;
 }
 
-.masthead p {
-  margin: 0.25rem 0 0;
+.logo {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.masthead-intro {
+  margin: 0;
+  font-size: 14px;
   color: var(--muted);
 }
 
 main {
-  max-width: 72rem;
-  margin: 1.5rem auto;
-  padding: 0 1rem;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--gutter);
+}
+
+/* The login is a centred card (class card); the app's shell is a card until the header bar
+   and the two columns come. */
+.shell {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
 }
 
 .login,
 .shell {
-  background: var(--paper);
-  border: 1px solid var(--line);
-  border-radius: 8px;
   padding: 1.25rem 1.5rem;
 }
 
@@ -119,6 +231,12 @@ main {
   margin: 0 auto;
 }
 
+.login h2 {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 1.25rem;
+}
+
+/* Fields: 44 px high, 8 px radius, a border of 3:1 (P15-R3). */
 label {
   display: block;
   margin: 0.75rem 0 0.25rem;
@@ -129,10 +247,25 @@ input,
 select,
 textarea {
   width: 100%;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius-field);
+  background: var(--paper);
+  color: var(--ink);
   font: inherit;
+}
+
+input:not([type="checkbox"], [type="radio"]),
+select {
+  min-height: var(--control);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 details {
@@ -144,26 +277,43 @@ summary {
   color: var(--muted);
 }
 
+/* Buttons: the primary one petrol on white text, the secondary one outlined. */
 button {
+  min-height: var(--control);
   margin-top: 1rem;
-  padding: 0.5rem 1rem;
+  padding: 0 1rem;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--accent);
   color: var(--accent-ink);
   font: inherit;
+  font-weight: 600;
   cursor: pointer;
 }
 
+button:hover {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
 button.secondary {
+  min-height: 40px;
   margin-top: 0;
+  padding: 0 14px;
+  border-color: var(--field-line);
   background: var(--paper);
-  color: var(--accent);
+  color: var(--ink);
+  font-weight: 400;
+}
+
+button.secondary:hover {
+  border-color: var(--ink);
+  background: var(--neutral-wash);
 }
 
 .error {
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--error-wash);
   color: var(--error);
 }
@@ -171,7 +321,7 @@ button.secondary {
 .banner {
   margin: 0 0 1rem;
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--warn-wash);
   color: var(--warn);
 }
@@ -201,10 +351,6 @@ button.secondary {
   margin-bottom: 0.5rem;
 }
 
-.language-switch a {
-  color: var(--accent);
-}
-
 .language-switch a[aria-current="true"] {
   color: var(--ink);
   font-weight: 600;
@@ -227,15 +373,17 @@ button.secondary {
   margin: 0;
   border: 1px solid transparent;
   border-bottom: none;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-field) var(--radius-field) 0 0;
   background: transparent;
   color: var(--muted);
+  font-weight: 400;
 }
 
 .tabs button[aria-selected="true"] {
   border-color: var(--line);
   background: var(--paper);
   color: var(--ink);
+  font-weight: 600;
 }
 
 .panel {
@@ -255,7 +403,7 @@ fieldset.choice {
   margin: 0.75rem 0 0;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
 }
 
 fieldset.custom-capture:disabled {
@@ -297,13 +445,13 @@ label.inline input {
 .badge {
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
-  background: var(--wash);
+  background: var(--neutral-wash);
   border: 1px solid var(--line);
   font-size: 0.85em;
 }
 
 .badge-success {
-  color: #1d6b35;
+  color: var(--accent-strong);
 }
 
 .badge-partial {
@@ -322,13 +470,13 @@ label.inline input {
 .request-status {
   margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--error-wash);
   color: var(--error);
 }
 
 .error-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-weight: 600;
 }
 
@@ -337,8 +485,8 @@ pre {
   max-height: 32rem;
   padding: 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--wash);
+  border-radius: var(--radius-field);
+  background: var(--neutral-wash);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -415,7 +563,7 @@ img.screenshot {
 .skipped {
   display: inline-block;
   padding: 0.25rem 0.5rem;
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--warn-wash);
   color: var(--warn);
 }
@@ -425,7 +573,7 @@ img.screenshot {
   margin: 0 0 1rem;
   padding: 0.75rem 1rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
 }
 
 .jobs-view h4 {
@@ -451,12 +599,12 @@ progress {
   padding: 0.05rem 0.4rem;
   border-radius: 999px;
   border: 1px solid var(--line);
-  background: var(--wash);
+  background: var(--neutral-wash);
   font-size: 0.85em;
 }
 
 .state-completed {
-  color: #1d6b35;
+  color: var(--accent-strong);
 }
 
 .elapsed,
@@ -473,12 +621,18 @@ table.items td.url {
 }
 
 button.link {
+  min-height: 0;
   margin: 0;
   padding: 0;
   border: none;
   background: none;
   color: var(--accent);
+  font-weight: 400;
   text-decoration: underline;
+}
+
+button.link:hover {
+  color: var(--accent-strong);
 }
 
 .pager,
@@ -496,8 +650,8 @@ form.cancel button {
 
 .cancelled {
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  background: var(--wash);
+  border-radius: var(--radius-field);
+  background: var(--neutral-wash);
 }
 
 ul.tree,
@@ -512,7 +666,7 @@ ul.tree {
   overflow: auto;
   padding: 0.5rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
 }
 
 ul.tree li {
@@ -551,5 +705,5 @@ ul.tree .title {
 }
 
 .batch-preview textarea[readonly] {
-  background: var(--wash);
+  background: var(--neutral-wash);
 }
