@@ -87,7 +87,12 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    `browser_recommended` is set (`escalation.needs_browser`). A page served without a
    `Content-Type` therefore never escalates, whatever its quality verdict (this includes a
    soft-404 page served without one), and neither does an error status or a non-HTML type.
-   <!-- P14-T9: escalation rule pending A/B -->
+   It also escalates a 2xx HTML result that ended `content_too_short` or `empty_content` while
+   the page has an executable script (`quality.script_count >= 1`; package 14, D5): such a page
+   may fill its main text with JavaScript, and `escalation.better` keeps the fast result when the
+   render is not better. The A/B live runs on `wlo_200` kept the rule: auto 84.5 % and 83.5 %
+   against 83.0 % on `main`, median time per URL 1.0 s against 1.1 s; the cost is a slower tail
+   (p90 11.6 s against 7.2 s, about twice as many renders), all of it on pages that fail anyway.
    Under unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) it also escalates
    on `bot_protection`, on every 403, 429 or 503 answer (`escalation.REFUSAL_STATUSES`) whatever
    its body or content type, and on any 2xx HTML result that is not `success` (B16). A YouTube

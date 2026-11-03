@@ -138,7 +138,7 @@ it on), the browser worker renders them in Chromium. `mode` chooses the browser 
 
 | `mode` | In the playground | What happens |
 | --- | --- | --- |
-| `auto` | when the page needs it | HTTP first; the browser when the page needs it (a JavaScript shell, a challenge, a soft 404). The default. |
+| `auto` | when the page needs it | HTTP first; the browser when the page needs it (a JavaScript shell, a challenge, a soft 404, or a page with a script whose text is too short). The default. |
 | `fast` | never | HTTP only. |
 | `browser` | always | Always the browser. |
 

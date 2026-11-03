@@ -145,7 +145,7 @@ Browser-Fallback:
 
 | `mode` | In der Spielwiese | Was passiert |
 | --- | --- | --- |
-| `auto` | wenn die Seite ihn braucht | Erst HTTP; der Browser, wenn die Seite ihn braucht (eine JavaScript-Hülle, eine Bot-Prüfung, ein Soft-404). Der Standard. |
+| `auto` | wenn die Seite ihn braucht | Erst HTTP; der Browser, wenn die Seite ihn braucht (eine JavaScript-Hülle, eine Bot-Prüfung, ein Soft-404 oder eine Seite mit Skript, deren Text zu kurz ist). Der Standard. |
 | `fast` | nie | Nur HTTP. |
 | `browser` | immer | Immer der Browser. |
 
