@@ -95,7 +95,9 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
 1. `error`: Die Seite hat mit 2xx geantwortet, ist aber eine Fehlerseite (eine weiche 404,
    `quality.soft_404`). Eine Seite, die mit einem HTTP-Fehler (4xx oder 5xx) gescheitert ist,
    wird nicht umgewandelt und hat keinen Typ (`page_type: null`); ihr Status sagt, was geschah.
-2. `home`: Der Pfad ist leer, `/`, `/index.html` oder nur ein Sprachkürzel wie `/de/`.
+2. `home`: Der Pfad ist leer, `/`, `/index.html` oder nur ein Sprachkürzel wie `/de/` oder
+   `/en-gb/`. Es zählen nur Sprachen, die Websites üblicherweise nutzen, darum ist ein Bereich
+   wie `/ki/` oder `/ui/` keine Startseite.
 3. schema.org: Das JSON-LD oder die Microdata der Seite sagen `ContactPage` (`contact`),
    `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`).
 4. Die URL: ein ganzes Pfadsegment wie `impressum` oder `imprint` (`imprint`), `datenschutz`

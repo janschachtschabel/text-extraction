@@ -92,7 +92,9 @@ are checked in this order, and the first that applies wins:
 1. `error`: the page answered 2xx but is an error page (a soft 404, `quality.soft_404`). A page
    that failed with an HTTP error (4xx or 5xx) is not converted and has no type
    (`page_type: null`); its status says what happened.
-2. `home`: the path is empty, `/`, `/index.html`, or only a language code such as `/de/`.
+2. `home`: the path is empty, `/`, `/index.html`, or only a language code such as `/de/` or
+   `/en-gb/`. Only languages that sites commonly use count, so a section such as `/ki/` or
+   `/ui/` is no start page.
 3. schema.org: the page's JSON-LD or microdata says `ContactPage` (`contact`), `AboutPage`
    (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`).
 4. The URL: a whole path segment such as `impressum` or `imprint` (`imprint`), `datenschutz` or

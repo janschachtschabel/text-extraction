@@ -219,7 +219,25 @@ _PAGE_SEGMENTS: Final = frozenset({"page", "seite"})
 _FILE_EXTENSION = re.compile(r"\.(?:html?|php|aspx?)$")
 # Empty, ``/``, ``/index.html``, and a language code in front (``/de``, ``/en/``, ``/de-at/``).
 _HOME_PATH = re.compile(
-    r"^/?(?:[a-z]{2}(?:[-_][a-z]{2})?(?:/|$))?(?:index\.(?:html?|php))?$", re.IGNORECASE
+    r"^/?(?:(?P<language>[a-z]{2})(?:[-_][a-z]{2})?(?:/|$))?(?:index\.(?:html?|php))?$",
+    re.IGNORECASE,
+)
+# The languages a site realistically puts in front of its paths: the 24 official languages of
+# the EU, the other languages of Europe and its neighbours, and the large languages elsewhere.
+# Deliberately not all 184 ISO 639-1 codes: some of them are common section names (``/ki/`` is
+# Kikuyu, but on a German site it is the AI section), and two letters that are no language at
+# all (``/ai/``, ``/ui/``) are no start page either. The region after the language (``de-at``,
+# ``en_GB``) is not checked.
+_SITE_LANGUAGES: Final = frozenset(
+    {
+        # EU official languages
+        *("bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "ga", "hr", "hu"),
+        *("it", "lt", "lv", "mt", "nl", "pl", "pt", "ro", "sk", "sl", "sv"),
+        # other European and neighbouring languages
+        *("ca", "is", "lb", "no", "nb", "nn", "sq", "sr", "bs", "mk", "ru", "uk", "tr"),
+        # large languages elsewhere
+        *("ar", "he", "fa", "hi", "zh", "ja", "ko", "vi", "th", "id", "ms"),
+    }
 )
 
 
@@ -256,7 +274,8 @@ def url_type(url: str) -> PageType | None:
     for candidate in _URL_ORDER:
         if candidate in found:
             return candidate
-    if _HOME_PATH.match(path):
+    home = _HOME_PATH.match(path)
+    if home is not None and (home["language"] or "en").lower() in _SITE_LANGUAGES:
         return "home"
     return None
 

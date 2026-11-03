@@ -2564,7 +2564,10 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   1. `error`: `status` >= 400 or `quality.soft_404` (`status`, `soft_404`) (in practice only
      soft 404s: hard 4xx/5xx pages are not converted, P14-R7);
   2. `home`: the path is empty, `/`, `/index.(html|htm|php)` or only a language code (`/de`,
-     `/en/`, `/de-at/`; ruling P14-R5) (`root_path`);
+     `/en/`, `/de-at/`; ruling P14-R5) (`root_path`). The language is one of a curated list
+     (`_SITE_LANGUAGES`: the 24 EU languages and about 25 more that sites use), not any ISO
+     639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/` and `/ui/` are no home;
+     the region after it is not checked;
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
      `itemtype` is `ContactPage`, `AboutPage`, `SearchResultsPage` or `CollectionPage`
      (`schema_org`);
@@ -2612,7 +2615,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
 - **Known limits.** Rules miss what a page does not say in its URL, schema, title or shape: a
   contact form at `/service` without a schema type or a telling title is `content` or `other`.
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
-  (P14-R4), and a path of only two letters (`/hr/`, `/ui/`) counts as a language home.
+  (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
+  home.
 
 ## MCP and UI
 

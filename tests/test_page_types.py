@@ -74,6 +74,14 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/de-at/", "home"),
     ("https://example.org/en-GB/", "home"),
     ("https://example.org/de/index.html", "home"),
+    ("https://example.org/uk/", "home"),  # Ukrainian
+    ("https://example.org/hr", "home"),  # Croatian
+    ("https://example.org/pt_BR/", "home"),
+    # two letters that are not a site language (P14 final review)
+    ("https://example.org/ki/", None),
+    ("https://example.org/ai/", None),
+    ("https://example.org/ui/", None),
+    ("https://example.org/xx-de/", None),
     ("https://example.org/de/impressum", "imprint"),
     ("https://example.org/deindex.html", None),
     ("https://example.org/deu/", None),
