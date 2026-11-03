@@ -2,12 +2,16 @@
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
   {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
   <p class="tree-counts">{{ t("tree.urls", count=tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ t("tree.hidden", count=tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
+  {%- if tree.type_counts %}
+  <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {%- endif %}
   {% if tree.roots %}
   {% set prefix = "tree" %}
   <form id="tree-form" class="tree-form" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
     <p class="tree-tools">
       <button type="button" class="secondary" data-action="tree-all">{{ t("tree.select_all") }}</button>
       <button type="button" class="secondary" data-action="tree-none">{{ t("tree.select_none") }}</button>
+      <button type="button" class="secondary" data-action="tree-content" data-exclude="{{ non_content_types | join(' ') }}">{{ t("tree.select_content") }}</button>
       <span class="tree-counter" aria-live="polite">{{ t("status.selected", count=0) }}</span>
     </p>
     {#- A keyboard user need not tab through every checkbox (ruling R-P12-9): this link leads to
@@ -16,7 +20,10 @@
     <ul class="tree">
       {%- for node in tree.roots recursive %}
       <li class="node node-{{ node.kind }}">
-        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}> <span class="label">{{ node.label }}</span></label>
+        {#- The type badge sits in the label, so a screen reader names it with the checkbox. A
+        failed page is marked, so "Select content pages" leaves it out (ruling P14-R9). #}
+        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.status == "failed" %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
+        {%- if node.url and node.page_type %} <span class="page-type{% if node.type_guessed %} page-type-guessed{% endif %}">{{ t("page_type." ~ node.page_type) }}{% if node.type_guessed %} <span class="type-guessed">({{ t("tree.type_guessed") }})</span>{% endif %}</span>{% endif %}</label>
         {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
         {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
         {%- if node.depth is not none %} <span class="depth">{{ t("tree.depth", depth=node.depth) }}</span>{% endif %}

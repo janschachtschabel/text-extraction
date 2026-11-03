@@ -126,6 +126,64 @@ def test_only_2xx_html_escalates_on_a_recommendation() -> None:
         assert not needs_browser(error_status, unblock=unblock)
 
 
+SHORT_CODES = [ErrorCode.CONTENT_TOO_SHORT, ErrorCode.EMPTY_CONTENT]
+
+
+def short_page(
+    code: ErrorCode, *, scripts: int = 2, cache: str = "miss", **extra: Any
+) -> Envelope[ExtractResult]:
+    """A fast 2xx HTML result the gate did not recommend the browser for: short, with scripts."""
+    answer = envelope(
+        status="partial" if code == ErrorCode.CONTENT_TOO_SHORT else "failed",
+        code=code,
+        words=12,
+        q=quality(script_count=scripts, word_count=12, browser_recommended=False),
+        **extra,
+    )
+    assert answer.data is not None
+    return answer.model_copy(update={"data": answer.data.model_copy(update={"cache": cache})})
+
+
+@pytest.mark.parametrize("code", SHORT_CODES)
+def test_a_short_2xx_html_page_with_a_script_escalates(code: ErrorCode) -> None:
+    for unblock in (False, True):
+        assert needs_browser(short_page(code), unblock=unblock)
+        assert needs_browser(short_page(code, scripts=1), unblock=unblock)
+
+
+@pytest.mark.parametrize("code", SHORT_CODES)
+def test_a_short_page_without_a_script_does_not_escalate(code: ErrorCode) -> None:
+    # Under unblock mode every unfinished 2xx HTML page escalates anyway, so only the default
+    # mode shows the script condition.
+    assert not needs_browser(short_page(code, scripts=0), unblock=False)
+
+
+@pytest.mark.parametrize("code", SHORT_CODES)
+def test_a_short_non_html_or_error_status_result_does_not_escalate(code: ErrorCode) -> None:
+    text = short_page(code, content_type="text/plain")
+    not_found = short_page(code, upstream_status=404)
+
+    assert not needs_browser(text, unblock=False)
+    assert not needs_browser(not_found, unblock=False)
+
+
+@pytest.mark.parametrize("cache", ["hit", "revalidated"])
+def test_a_stored_short_page_does_not_escalate(cache: str) -> None:
+    for code in SHORT_CODES:
+        assert not needs_browser(short_page(code, cache=cache), unblock=False)
+
+
+def test_other_error_codes_of_a_page_with_scripts_do_not_escalate() -> None:
+    other = envelope(
+        status="partial",
+        code=ErrorCode.CONVERSION_FAILED,
+        words=12,
+        q=quality(script_count=2, browser_recommended=False),
+    )
+
+    assert not needs_browser(other, unblock=False)
+
+
 @pytest.mark.parametrize("cache", ["hit", "revalidated"])
 def test_a_stored_result_never_escalates(cache: str) -> None:
     # B5: only the better of fast and rendered is stored, so a stored result is final; a fast
@@ -244,17 +302,18 @@ def test_refusal_of_a_document_media_or_cached_result_does_not_escalate() -> Non
 
 
 def test_non_success_html_escalates_under_unblock() -> None:
+    # Without a script (script_count 0), so only unblock mode escalates these.
     short = envelope(
         status="partial",
         code=ErrorCode.CONTENT_TOO_SHORT,
         words=12,
-        q=quality(word_count=12, browser_recommended=False),
+        q=quality(word_count=12, script_count=0, browser_recommended=False),
     )
     empty = envelope(
         status="failed",
         code=ErrorCode.EMPTY_CONTENT,
         words=0,
-        q=quality(word_count=0, browser_recommended=False),
+        q=quality(word_count=0, script_count=0, browser_recommended=False),
     )
     plain = envelope(
         status="partial",

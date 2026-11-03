@@ -38,9 +38,10 @@ from text_extraction.jobs_api import (
 from text_extraction.mcp_server.calls import ModelTool
 from text_extraction.mcp_server.results import (
     fit_answer,
+    image_content,
+    image_type,
     kept_item_hints,
     payload_result,
-    png_content,
     slice_items,
 )
 from text_extraction.mcp_server.tools_extract import (
@@ -249,15 +250,16 @@ class GetJobTool(ModelTool):
 
 
 class GetJobScreenshotTool(ModelTool):
-    """A job's screenshot (``GET /v1/jobs/{id}/artifacts/screenshot.png``) as an image."""
+    """A job's screenshot (``GET /v1/jobs/{id}/artifacts/{name}``) as an image."""
 
     args_model = JobIdArguments
 
     def __init__(self) -> None:
         super().__init__(
             name="get_job_screenshot",
-            description="The PNG screenshot of a screenshot job "
-            "(GET /v1/jobs/{id}/artifacts/screenshot.png), attached as an image.",
+            description="The screenshot of a screenshot job (PNG, JPEG or WebP, as its request "
+            "asked; GET /v1/jobs/{id}/artifacts/screenshot.png, .jpg or .webp), attached as an "
+            "image.",
             parameters=lean_schema(JobIdArguments),
             annotations=_read_only(),
         )
@@ -266,10 +268,14 @@ class GetJobScreenshotTool(ModelTool):
         assert isinstance(args, JobIdArguments)  # noqa: S101 - narrows the type
         settings: Settings = state.settings
         check_jobs_enabled(settings)
-        png = await read_artifact(state, principal, args.job_id, SCREENSHOT_ARTIFACT)
-        url = f"/v1/jobs/{args.job_id}/artifacts/{SCREENSHOT_ARTIFACT}"
-        content = png_content(png, limit=settings.mcp_image_max_bytes, url=url)
-        file: dict[str, Any] = {"url": url, "bytes": len(png), "content_type": "image/png"}
+        name, declared = await self._screenshot_of(state, principal, args.job_id)
+        image = await read_artifact(state, principal, args.job_id, name)
+        url = f"/v1/jobs/{args.job_id}/artifacts/{name}"
+        media_type = image_type(name, declared)
+        content = image_content(
+            image, content_type=media_type, limit=settings.mcp_image_max_bytes, url=url
+        )
+        file: dict[str, Any] = {"url": url, "bytes": len(image), "content_type": media_type}
         envelope = Envelope[dict[str, Any]](
             status="success", data=file, trace_id=current_trace_id()
         )
@@ -278,6 +284,20 @@ class GetJobScreenshotTool(ModelTool):
         return payload_result(
             envelope.model_dump(mode="json"), is_error=False, hints=hints, images=images
         )
+
+    @staticmethod
+    async def _screenshot_of(
+        state: State, principal: Principal, job_id: str
+    ) -> tuple[str, str | None]:
+        """The artifact name and media type the job's result names (its format decides them);
+        ``screenshot.png`` for a job whose result names none."""
+        view = (await read_job(state, principal, job_id, 0, 1)).data
+        item = view.items[0] if view is not None and view.items else None
+        data = item.result.data if item is not None and item.result is not None else None
+        ref = data.screenshot if data is not None else None
+        if ref is None:
+            return SCREENSHOT_ARTIFACT, None
+        return ref.name, ref.content_type
 
 
 class CancelJobTool(ModelTool):

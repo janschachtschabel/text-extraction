@@ -87,6 +87,12 @@ LLM makes its last hop through that worker, after the nlp worker when it has `pi
    `browser_recommended` is set (`escalation.needs_browser`). A page served without a
    `Content-Type` therefore never escalates, whatever its quality verdict (this includes a
    soft-404 page served without one), and neither does an error status or a non-HTML type.
+   It also escalates a 2xx HTML result that ended `content_too_short` or `empty_content` while
+   the page has an executable script (`quality.script_count >= 1`; package 14, D5): such a page
+   may fill its main text with JavaScript, and `escalation.better` keeps the fast result when the
+   render is not better. The A/B live runs on `wlo_200` kept the rule: auto 84.5 % and 83.5 %
+   against 83.0 % on `main`, median time per URL 1.0 s against 1.1 s; the cost is a slower tail
+   (p90 11.6 s against 7.2 s, about twice as many renders), all of it on pages that fail anyway.
    Under unblock mode (admin, `compliance: ignore`, `BROWSER_UNBLOCK_ENABLED`) it also escalates
    on `bot_protection`, on every 403, 429 or 503 answer (`escalation.REFUSAL_STATUSES`) whatever
    its body or content type, and on any 2xx HTML result that is not `success` (B16). A YouTube
@@ -145,7 +151,9 @@ reference), for documents `document` (`kind`, `converter`, `pages`, `pages_conve
 `missing`, `tables`, `learned`, `llm`, `stage`; S11) and `chunks` (`index`, `text`, `start`,
 `end`, `headings`; S10) with `timings.llm_ms`, and for requests with `describe_images`
 `image_descriptions` (`asked`, `described`, `skipped`, `failed`, `llm`) and a `description` on each
-entry of `metadata.images` (null when not described or not asked for; V-S3). For a browser result `attempts` counts the main-frame document
+entry of `metadata.images` (null when not described or not asked for; V-S3), and for a fetched or
+rendered HTML page `page_type` (`type` and `signals`; package 14, see "Site structure"; null for
+every other result and in results stored before it). For a browser result `attempts` counts the main-frame document
 responses of the render, redirect hops included.
 
 `warnings` names what did not go as asked while the result still answers (the HTML converter may
@@ -273,15 +281,15 @@ for a cache hit or a refusal before the fetch). The outbound gate refusing a tur
 
 | Endpoint | Purpose | Mode |
 | --- | --- | --- |
-| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii` (`mask`, `redact`, `hash` or `annotate`, with `entities`, `language` and `score_threshold`: see "PII"; 400 `invalid_request` while the service has no PII, 422 with `screenshot` and for `annotate` with `format: html`, and without `wait_seconds` it waits `PII_SYNC_WAIT_SECONDS`, 20 s), `links`, `metadata`, `screenshot`, `full_page`, `structured` and `chunking` (see "Structured output and chunking"; 400 `invalid_request` for LLM work while the service has no LLM, 422 for chunking with `format: html`, for `pii` with what reads the raw page, and for an XPath rule of a non-admin key), `describe_images` (`max_images`, 1 to 20, default 5: a vision LLM describes the page's images in `metadata.images`; 400 `invalid_request` while the service has no LLM, 422 with `pii` or with `metadata: false`; see "Image descriptions (issue #20)"), `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The header `X-LLM-Api-Key` (the caller's key of the LLM endpoint, a secret; on the same three routes) goes with `structured`, `chunking` and `describe_images` work that calls the LLM; without `wait_seconds` such a request waits `LLM_SYNC_WAIT_SECONDS`, 30 s (the largest default of `transcribe`, `pii` and the LLM wins). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9); a result with `pii` goes through the pool `nlp` and waits up to `PII_SYNC_WAIT_SECONDS` (D4) |
+| `POST /v1/extract` | URL → text/Markdown/HTML; options `mode` (`fast`, `auto`, `browser`), `format`, `actions`, `cookies`, `headers`, `pii` (`mask`, `redact`, `hash` or `annotate`, with `entities`, `language` and `score_threshold`: see "PII"; 400 `invalid_request` while the service has no PII, 422 with `screenshot` and for `annotate` with `format: html`, and without `wait_seconds` it waits `PII_SYNC_WAIT_SECONDS`, 20 s), `links` (each with its `category`, see "Site structure"), `metadata`, `screenshot`, `full_page`, `screenshot_options` (see B7), `structured` and `chunking` (see "Structured output and chunking"; 400 `invalid_request` for LLM work while the service has no LLM, 422 for chunking with `format: html`, for `pii` with what reads the raw page, and for an XPath rule of a non-admin key), `describe_images` (`max_images`, 1 to 20, default 5: a vision LLM describes the page's images in `metadata.images`; 400 `invalid_request` while the service has no LLM, 422 with `pii` or with `metadata: false`; see "Image descriptions (issue #20)"), `compliance`, `ocr` (`auto`, `never`, `always`; F11), `transcribe` and `languages` (M9; `transcribe: true` answers 400 `invalid_request` while the service has no ASR, and without `wait_seconds` it waits 20 s), and the header `X-ASR-Api-Key` (the caller's key of an external transcription endpoint, a secret, M11; also on `/v1/extract/file` and `/v1/batch`). The header `X-LLM-Api-Key` (the caller's key of the LLM endpoint, a secret; on the same three routes) goes with `structured`, `chunking` and `describe_images` work that calls the LLM; without `wait_seconds` such a request waits `LLM_SYNC_WAIT_SECONDS`, 30 s (the largest default of `transcribe`, `pii` and the LLM wins). The browser options (`mode: browser`, `actions`, `cookies`, `headers`, `screenshot`) answer 400 `invalid_request` while `BROWSER_ENABLED` is false, and `mode: fast` refuses them (422 `invalid_request`) | sync; with `wait_seconds` (0-60, default none) a slower extraction becomes a job: 202 with the job (P1); media that needs a transcription is a job on the ASR pool, answered 202 at once (M9); a result with `pii` goes through the pool `nlp` and waits up to `PII_SYNC_WAIT_SECONDS` (D4) |
 | `POST /v1/extract/file` | Upload → text/Markdown/HTML (F17): `multipart/form-data` with one file part `file` (at most `DOCUMENT_MAX_BYTES`) and the fields `format`, `metadata`, `ocr`, `pii` (a bare mode or a JSON object as a string), `structured`, `chunking` and `describe_images` (JSON objects as strings; `describe_images` describes a PNG, JPEG or WebP upload), `wait_seconds` (default 25); at most one file and 8 fields of at most 1 KiB each, `structured` and `chunking` at most 64 KiB each (R18; over it 422), unknown fields 422; a body over `DOCUMENT_MAX_BYTES` + 192 KiB is 413 before it is parsed, and the key and the rate limit are checked before a byte of it is read. The bytes decide the kind (the part's type only where they do not; a body that starts with `<!doctype html` or `<html` under a document type, `application/octet-stream` or none is HTML, for URLs too; a part named `*.md` or `*.markdown`, any case, sent as `application/octet-stream` or without a type, whose bytes look like text, is an upload of `text/markdown` and reports that content type, issue #17, one named `*.txt` of `text/plain`: it is sniffed as that type, so only a signature at its start makes it a document and an HTML start does not make it a page; a declared real type is never overridden); HTML and plain text convert as pages with relative links kept, documents as for URLs. `mode_used: upload`, `url`/`final_url` null, `attempts` 0, `cache: bypass`, `compliance.decision: skipped`, a fingerprint that is never stored, `document.file_name` the part's base name (never logged). A part whose bytes are audio or video (decided by the bytes, no form field needed) is transcribed (`media.platform: upload`, a job on the ASR pool, M14) up to `MEDIA_UPLOAD_MAX_BYTES` (25 MB); over it `too_large`; while the service has no ASR `failed`/`unsupported_content_type` ("Transcription is not enabled on this service."). `ocr: always` while the service has no OCR is 400 | sync; `wait_seconds` (default 25): a slower upload becomes a job of kind `file` (202), whose item keeps the bytes as its input (F12) |
-| `POST /v1/screenshot` | Full page (default) or first-viewport PNG, 1920 px wide; options `full_page`, `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
+| `POST /v1/screenshot` | Full page (default) or first-viewport image, by default a PNG of a 1920×1080 window; options `full_page`, `viewport`, `format` (`png`, `jpeg`, `webp`), `quality`, `width` (see B7), `actions`, `cookies`, `headers`, `compliance`, `wait_seconds`. The answer is the extraction result without the text, with `screenshot` pointing at the artifact | sync (`wait_seconds`: 202 with a job of kind `screenshot`) |
 | `POST /v1/structured` | `POST /v1/extract` with `structured` required (422 without; S15): strategies `metadata`, `selectors`, `patterns`, `llm`, `auto`, and every option, check, header (`X-ASR-Api-Key`, `X-LLM-Api-Key`) and answer of `/v1/extract` | sync, job fallback (`wait_seconds`; 202 for a browser, nlp or llm job) |
 | `POST /v1/chunk` | Exactly one of `url` (then `/v1/extract` with `chunking` required and its options) or `text` (at most `DOCUMENT_MAX_BYTES` as UTF-8, else 413; `text_type` `markdown` (default) or `plain`; handled as an upload of `text/markdown` or `text/plain` through `Pipeline.extract_upload`: `mode_used: upload`, no cache, a job of kind `file` when handed over; a `plain` text is `format: text`, so its chunks have no headings; a short text is `success` (the word-count gate does not apply to a `text`, R15; no words at all is `failed`/`empty_content`, an empty `text` 422); the page options are 422 with `text`; the key and the rate limit are checked before a byte of the body is read, as for the upload, R16), `chunking` required (`fixed`, `recursive`, `markdown`, `sentence`, `semantic`), `format` `markdown` or `text` (`html` 422), `pii`, `structured`, `wait_seconds`, the headers of `/v1/extract`. The body limit of the route is the upload's file limit + 64 KiB (`DOCUMENT_MAX_BYTES`, or the media limit while uploads are transcribed; a `text` over `DOCUMENT_MAX_BYTES` is 413 in any case, R14) | sync, job fallback; `semantic` waits `LLM_SYNC_WAIT_SECONDS` for the llm worker |
 | `POST /v1/site-structure` | Sitemaps + typed link graph to a set depth (package 9, see "Site structure"): `url`, `depth` (default 2, at most `SITE_MAX_DEPTH`), `max_pages` (default 100, at most `SITE_MAX_PAGES`), `sitemaps`, `scope` (`host` or `path`), `metadata`, `compliance`, `cache`; over a bound 422, `compliance: ignore` for a user 403, 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs, 400 `invalid_request` while jobs are off (`JOBS_ENABLED=false`), 503 while Valkey is nearly full. Every page, robots.txt and sitemap file becomes an item of the job, with `data.site` (role, depth, parent, typed links with `crawl` and `target`, or the sitemap's entries); `content` is null | job (202 at once, `total` grows while it runs) |
 | `POST /v1/batch` | Many URLs (`urls`, at most `BATCH_MAX_URLS`; a body over `BATCH_MAX_URLS` × 2056 bytes plus 4 KiB is 413 before it is parsed; options `mode`, `format`, `metadata`, `links`, `compliance`, `cache`, `ocr`, `pii`, `transcribe`, `languages` as for `/v1/extract`; headers `X-ASR-Api-Key` and `X-LLM-Api-Key` as for it; `structured`, `chunking` and `describe_images` as well), fair per-domain scheduling. 202 with the job; 429 at `BATCH_MAX_OPEN_PER_CLIENT` unfinished batches and site jobs together | job |
 | `GET /v1/jobs/{id}` | Status, progress, paged results (`offset`, `limit` 1-500); each item carries `run` (`pool`, `attempts`, `claimed_at` of its last claim by a worker, null before the first claim and for an item that runs in the API pod; package 10, D8). Own jobs only (admins: all); unknown, expired and foreign ids are 404. Envelope `success` while running or when every item succeeded, `partial` when a finished job has failed or partial items, `failed` when every item failed (then `error` carries the most frequent item error code among the first 500 items, "All N items failed.", retryable if any of them is). 400 when jobs are disabled (`JOBS_ENABLED=false`), 503 when Valkey is down | — |
-| `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `image/png`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
+| `GET /v1/jobs/{id}/artifacts/{name}` | A job's screenshot (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`, as `image/png`, `image/jpeg` or `image/webp`) or, later, a large result. Own jobs only (admins: all), otherwise 404; 404 once `ARTIFACT_TTL_SECONDS` have passed. It is a job route: it needs `JOBS_ENABLED=true`, so screenshots need jobs on | — |
 | `DELETE /v1/jobs/{id}` | Cancels a job and deletes it with all its keys, results and files (package 10, D4): the owner or an admin, else 404 (unknown, expired and foreign ids alike); user role, rate limited, 400 `invalid_request` while jobs are disabled, 503 while Valkey fails. Answers 200 `success` with `data` `{id, kind}` and frees the owner's open-job slot. Workers drop the job's queued items (`job_item_dropped`, reason `job_gone`; a queued OCR or media input is deleted with it), and items in flight finish without being stored | — |
 | `/mcp` | MCP server (optional, `MCP_ENABLED`, Helm `mcp.enabled`): 11 tools in front of the routes above (see "MCP and UI"); the API's keys, roles, rate limit and body limits; not in OpenAPI | streamable HTTP, stateless, JSON answers (no SSE); `GET /mcp` 405 |
 | `/ui` | Playground (optional, `UI_ENABLED`, Helm `ui.enabled`): server-rendered pages with htmx 2.0.11 served from `/ui/static`, no Node build, no CDN; every form forwards to a `/v1` route in-process (see "MCP and UI"); not in OpenAPI | sync pages and fragments; job views refresh every 3 s |
@@ -293,10 +301,10 @@ gauge `text_extraction_valkey_up` (from the memory guard's read every 5 s) and t
 `TextExtractionValkeyDown` report the outage.
 
 Non-JSON content types to clear with operations: `multipart/form-data` (uploads, and the UI's
-file and batch-file forms), `application/x-www-form-urlencoded` (the UI's other forms), `image/png`
-(artifact download), `text/html` (the UI's pages and fragments), `text/javascript` and `text/css`
-(the UI's static files). `/mcp` answers `application/json` only (FastMCP's `json_response`): no
-server-sent events, so a client posts with `Accept: application/json, text/event-stream` and gets
+file and batch-file forms), `application/x-www-form-urlencoded` (the UI's other forms),
+`image/png`, `image/jpeg` and `image/webp` (artifact download), `text/html` (the UI's pages and
+fragments), `text/javascript` and `text/css` (the UI's static files). `/mcp` answers
+`application/json` only (FastMCP's `json_response`): no server-sent events, so a client posts with `Accept: application/json, text/event-stream` and gets
 JSON; `GET /mcp` (the event stream of a stateful server) answers 405.
 
 ## Auth
@@ -661,13 +669,38 @@ while `BROWSER_ENABLED` is false, are unchanged.
   `timeout`, retryable, instead of rendering without them. Requests carrying any of them bypass
   the result cache and fingerprints. `cookies` may only name the URL's host or a parent domain.
   `evaluate` is admin-only (403 `forbidden`).
-- **B7, screenshots.** PNG, 1920 px wide, viewport 1920×1080. `full_page` (default true) is
-  clipped at `SCREENSHOT_MAX_HEIGHT_PX` with the warning `screenshot_clipped`; a PNG over
-  `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores it as
-  `job:{<id>}:artifact:screenshot.png` for `ARTIFACT_TTL_SECONDS`; the API serves it at
-  `GET /v1/jobs/{id}/artifacts/screenshot.png`. While Valkey's memory guard is high, or the
-  write fails, the item fails `internal_error`, retryable. A screenshot is `success` once stored;
-  its `quality` is reported but does not fail it. Screenshot requests bypass the result cache.
+- **B7, screenshots.** By default a PNG of a 1920×1080 window. `full_page` (default true) is
+  clipped at `SCREENSHOT_MAX_HEIGHT_PX` rows with the warning `screenshot_clipped`. Package 14
+  added `screenshot_options` (`ExtractRequest`; on `POST /v1/screenshot` the fields `viewport`,
+  `format`, `quality` and `width`, which make `screenshot_options` only when one of them is not
+  at its default, so a plain request is the one it was before): `viewport` (width 320 to 3840,
+  height 240 to 2160) is set on the page with `set_viewport_size` before the first navigation,
+  in the standard and the unblock browser alike (the unblock window stays 1920×1080; its
+  context has `no_viewport`), so the page lays itself out for that window. The browser always
+  captures a lossless PNG at the viewport's width. A full page holds at most the pixels of a
+  1920 px wide capture (ruling P14-S1): it is cut at
+  `min(SCREENSHOT_MAX_HEIGHT_PX, SCREENSHOT_MAX_HEIGHT_PX × 1920 // viewport width)` rows, so a
+  3840 px window gets 8,192 rows at the default limit. The browser worker's pipeline then
+  encodes it with Pillow on a thread (`screenshot_image.encode_screenshot`): a PNG without
+  `width` passes through untouched; otherwise the image is scaled down to `width` (16 to 3840,
+  at most the viewport's width, else 422; never up) with Lanczos, keeping the ratio, and saved as
+  PNG, JPEG (`quality`, default 80, progressive, RGB) or WebP (`quality`, method 4). libwebp
+  encodes at most 16,383 px a side, one row less than the default full-page height: a WebP
+  image taller than that after scaling keeps its top 16,383 rows and the result gets the warning
+  `screenshot_clipped` (once, also when the capture was cut already; ruling P14-R10); PNG and
+  JPEG keep all rows. `quality` with `png` is 422. At most two images are encoded at once in a
+  process (`screenshot_image.ENCODE_CONCURRENCY`; one 1920 × 16,384 JPEG needs about 180 MB
+  while it is encoded). An image Pillow cannot decode or encode fails `internal_error`, not
+  retryable (the same bytes fail again), and logs `screenshot_encode_failed` with the error type,
+  the image size and the format (never the URL). The
+  encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores it
+  as `job:{<id>}:artifact:screenshot.png`, `screenshot.jpg` or `screenshot.webp` for
+  `ARTIFACT_TTL_SECONDS` (expiry and deletion cover all three names); `data.screenshot` names it
+  with its `content_type`, `width` and `height`, and the API serves it at
+  `GET /v1/jobs/{id}/artifacts/{name}` as `image/png`, `image/jpeg` or `image/webp`. While
+  Valkey's memory guard is high, or the write fails, the item fails `internal_error`, retryable.
+  A screenshot is `success` once stored; its `quality` is reported but does not fail it.
+  Screenshot requests bypass the result cache.
 - **B8, user agent.** Standard mode sends Chromium's own user agent plus
   `text-extraction/<version> (+https://github.com/janschachtschabel/text-extraction)`; the robots
   token is unchanged. Unblock mode sends Chrome's unmodified user agent (see the exception to
@@ -2525,6 +2558,74 @@ a report-only step of the live workflow.
 - **Not in this package:** browser rendering, page content, sitemap extensions (`image:`,
   `video:`, `news:`, `xhtml:link` alternates), an MCP tool (package 10).
 
+**Page types and link categories (package 14).** `page_types.py` is pure (no I/O, no model, no
+LLM; Jan's D4). The extract pipeline (`Pipeline._process`) and so the site crawl call it for every
+fetched or rendered HTML page; documents, media, plain text, Markdown and uploads get none.
+
+- **`page_type(html, url, status, quality, min_words)`** answers `PageTypeInfo`: `type` (`home`,
+  `content`, `listing`, `imprint`, `privacy`, `legal`, `contact`, `about`, `auth`, `search`,
+  `error`, `other`) and `signals`, every signal that agrees with it in the order of `PageSignal`,
+  those after the deciding one included. Precedence, first that applies (ruling P14-S4):
+  1. `error`: `status` >= 400 or `quality.soft_404` (`status`, `soft_404`) (in practice only
+     soft 404s: hard 4xx/5xx pages are not converted, P14-R7);
+  2. `home`: the path is empty, `/`, `/index.(html|htm|php)` or only a language code (`/de`,
+     `/en/`, `/de-at/`; ruling P14-R5) (`root_path`). The language is one of a curated list
+     (`_SITE_LANGUAGES`: the 24 EU languages and about 25 more that sites use), not any ISO
+     639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/` and `/ui/` are no home;
+     the region after it is not checked;
+  3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
+     `itemtype` is `ContactPage`, `AboutPage`, `SearchResultsPage` or `CollectionPage`
+     (`schema_org`);
+  4. `url_type` (`url`): whole path segments or their stem before `.html`/`.htm`/`.php`,
+     case-folded, umlauts also as `ae`/`oe`/`ue` (German and English names per type, in the order
+     `imprint`, `privacy`, `legal`, `auth`, `search`, `contact`, `about`, `listing`), a search
+     query parameter with a value (`q`, `query`, `search`, `suche`, `s`, `keyword`), a page
+     number (`page/<n>`, `seite/<n>`, `?page=<n>`);
+  5. the `<title>` or the first `<h1>` starts with a type's name followed by nothing or a
+     separator, or ends with one after a separator ("Firma | Impressum"; ruling P14-R4)
+     (`title`, `h1`);
+  6. `auth`: a password input and fewer than `THIN_PAGE_BELOW_WORDS` (100) words
+     (`password_field`);
+  7. `listing`: `rel="next|prev"` on a `<link>` or `<a>` (`pagination`), or at least
+     `LISTING_MIN_LINKS` (20) links holding at least `LISTING_LINK_SHARE` (60 %) of the visible
+     text (`link_density`);
+  8. `content` with at least `QUALITY_MIN_WORDS` words (`word_count`), else `other` (no signals).
+
+  `og:type` `article` only ever agrees with `content` (`og_type`) and never decides (ruling
+  P14-R6). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML
+  or a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
+  raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
+  `page_type: null` instead of failing.
+- **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
+  (ruling P14-R7): the status and the error already say it failed, and the tree shows it as
+  failed. In results `error` therefore comes from soft 404s (`soft_404`).
+- **`link_category(url, text, kind)`** gives every entry of `links` (`/v1/extract`) and
+  `site.links` a `category`: `download` for `kind: file`; for an external link `social` when its
+  host is, or is below, a social network or video platform (`facebook.com`, `instagram.com`,
+  `x.com`, `linkedin.com`, `youtube.com`, `mastodon.social`, `bsky.app` and others), else
+  `content` (ruling P14-R2: another site's root or imprint says nothing about this one); for an
+  internal link the type `url_type` gives (`home`, `listing`, `imprint`, `privacy`, `legal`,
+  `contact`, `about`, `auth`, `search`), else `nav` when the collapsed, case-folded text is a
+  navigation helper of the old service ("home", "startseite", "nach oben", "back to top", "menu",
+  arrows and the like), else `content`.
+- **Older results.** `page_type` and `category` default to null, so results cached and items
+  stored before package 14 load unchanged.
+- **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
+  linked-only URL was not read, so its leaf guesses the type from `url_type(url)` alone, never
+  from the link's `category` (ruling P14-R8), marked "guessed from the URL"; a URL that says
+  nothing has no badge. A crawled page's own verdict, even none, wins over a guess for the same
+  URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
+  leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
+  (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and
+  every crawled page whose item failed (`data-failed` on its checkbox; ruling P14-R9: a hard 404
+  has no type, but it is no content page). The type badge sits inside the checkbox's `<label>`,
+  so a screen reader names it with the URL.
+- **Known limits.** Rules miss what a page does not say in its URL, schema, title or shape: a
+  contact form at `/service` without a schema type or a telling title is `content` or `other`.
+  A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
+  (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
+  home.
+
 ## MCP and UI
 
 Package 10: `mcp_server/` (`server.py`, `gate.py`, `calls.py`, `tools_extract.py`, `tools_jobs.py`,
@@ -2622,8 +2723,10 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
 - **Results (P10-S6).** `structuredContent` is the route's envelope (a 202's job included), with
   no `outputSchema` (it would double `tools/list`); `isError` is true exactly where REST answers
   4xx or 5xx, so a target's `failed` is a normal result. `content` holds one-line hints first (a
-  job to poll, a cut content, a screenshot too large to attach), then a PNG `ImageContent` for a
-  screenshot of at most `MCP_IMAGE_MAX_BYTES`, then the envelope as JSON text. `data.content` is cut
+  job to poll, a cut content, a screenshot too large to attach), then an `ImageContent` for a
+  screenshot of at most `MCP_IMAGE_MAX_BYTES` (`image/png`, `image/jpeg` or `image/webp`, from the
+  artifact reference's `content_type`; `get_job_screenshot` reads the file name from the job's
+  result, package 14), then the envelope as JSON text. `data.content` is cut
   to `max_chars` (`MCP_MAX_CONTENT_CHARS` by default; shared by the items of a `get_job` page) from
   `content_offset`, with the warning `mcp_content_truncated` and a hint naming the next offset.
   Since v0.1.1 (audit finding M2, reversing this ruling's "no other field is cut") the whole answer
@@ -2683,6 +2786,20 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
   catalogues). Previews follow
   D7: at most 20 images, 4 at once, 10 s each and 25 s per view; a skipped one shows its reason.
+  Since package 14 a preview may be an SVG (`vision.images.is_svg`: an XML document whose root
+  is `<svg>`, also after an XML declaration, a BOM, comments, a doctype or with a namespace
+  prefix; an HTML page with an inline `<svg>` is not one). The fetcher returns it only with
+  `allow_svg` (the previews); the vision step keeps skipping SVG. It is shown only as
+  `<img src="data:image/svg+xml;base64,...">`, where the browser runs no script in it and loads
+  nothing it names, never inlined, and the CSP stays `img-src 'self' data:`.
+- **Screenshot form (package 14).** "Capture" offers presets that map to the REST fields
+  (`ui.forms.SCREENSHOT_PRESETS`; a field at its default is left out): `page` (default: the
+  whole page), `viewport` (1920×1080, first screen), `social` (1200×630, first screen, WebP,
+  quality 80), `thumb` (1280×800, first screen, WebP, `width` 400), `mobile` (390×844, whole
+  page) and `custom`, which reads the fieldset "Custom capture" (window width and height, image
+  format, quality, image width, whole page; `ui.js` enables it only with `custom`, and without
+  script every field stays usable). A 422 that names one of these fields is shown at its control.
+  The result shows a PNG, JPEG or WebP screenshot as a `data:` image.
 - **Jobs (P10-S18, P10-S19, P10-S20).** The progress view reads one or more jobs through
   `read_job` with one rate-limit hit per refresh, whatever the number of jobs, refreshes every 3 s
   while any is not `completed`, and stops then; "Cancel" calls D4's route. Batches come from a
@@ -2692,7 +2809,9 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   refused before anything is sent. The site tree groups a site job's pages, sitemap entries and
   "linked only" URLs by host and URL path segment (sections are directories, which editors know;
   the crawl's `parent` depends on discovery order and would move between runs), reads the job in
-  pages of 20 items and shows at most `UI_TREE_MAX_URLS` URLs.
+  pages of 20 items and shows at most `UI_TREE_MAX_URLS` URLs. Since package 14 each leaf has a
+  page type badge, "Types:" counts them, and "Select content pages" ticks the content pages (see
+  "Site structure", "Page types and link categories").
 
 **Languages of the UI (package 12, P12-S5 to P12-S7).** The UI speaks English and German; the
 API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) stay English.

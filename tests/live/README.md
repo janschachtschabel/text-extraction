@@ -49,14 +49,15 @@ after `BROWSER_QUEUE_WAIT_SECONDS`, and `browser` fails with `timeout`.
 | `--out` | `results/live_<UTC time>.jsonl` | One JSON line per URL. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
 | `--job-timeout` | 3600 | Seconds to wait for a job (a transcription answered 202) to complete; longer is `client_TimeoutError`. |
-| `--poll-seconds` | 5 | Seconds between two reads of a job. |
+| `--poll-seconds` | 3 | Seconds between two reads of a job (below the server's 5 s keep-alive). |
 | `--timeout` | 90 | Total client deadline per request in seconds (a slower answer is recorded as `client_TimeoutError`); keep it above the longest answer: `EXTRACT_TIMEOUT_SECONDS` + `BROWSER_QUEUE_WAIT_SECONDS` + `BROWSER_TIMEOUT_SECONDS` + 5 s for an escalating `auto` request (70 s by default; the live workflow sets the queue wait to 30 s and passes 120). |
 
 Every request is `POST /v1/extract` with the `--mode` (default `auto`), `format=text` and `cache=false`,
 plus `transcribe: true` where the row says so (unless `--no-transcribe`); an upload is
 `POST /v1/extract/file` with `format=text`. An answer that is a job (202 with a `status_url`: a
 transcription is always one) is read every `--poll-seconds` until its state is `completed`, and
-its item's result is recorded with `http_status` 200. Each domain
+its item's result is recorded with `http_status` 200. A read of a job that ends in a transport
+error (the server closed the idle connection) is sent once more. Each domain
 has its own queue and at most one request in flight (a job holds its domain's turn until it
 completes); the domains take turns under the global
 `--concurrency`. A domain with many URLs (GeoGebra is about a quarter of the corpus) therefore
@@ -130,7 +131,8 @@ uv run python -m tests.live.run_site --urls tests/live/urls/sites.csv --depth 1 
 
 Each site is one request (`depth`, `max_pages`, `compliance` as given, `cache: false`); all sites
 run at once (each is a host of its own, so the per-host limits keep them apart). The harness reads
-the job every `--poll-seconds` until it is `completed`, then all its items in pages of 500, and
+the job every `--poll-seconds` until it is `completed` (a read that ends in a transport error is
+sent once more), then all its items in pages of 500, and
 prints a Markdown summary: per site the job's state and duration (created to finished), its items,
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
 sitemap entries; a histogram of the pages' links by `region` and one by `crawl` decision; and the
@@ -148,7 +150,7 @@ so far. The exit code is always 0: the run is a report.
 | `--compliance` | `enforce` | The request's `compliance`. A crawler follows links, so it respects robots.txt and TDM opt-outs (CLAUDE.md rule 6, decision D4): what they exclude is not fetched and its link says `blocked`, counted in the crawl histogram. `report` fetches it anyway; use it only against a site you run. |
 | `--timeout` | 60 | Deadline of one HTTP request in seconds. |
 | `--job-timeout` | 1800 | Seconds to wait for a site's job to complete. |
-| `--poll-seconds` | 5 | Seconds between two reads of a job. |
+| `--poll-seconds` | 3 | Seconds between two reads of a job (below the server's 5 s keep-alive). |
 | `--out` | `results/site_<UTC time>.jsonl` | One JSON line per site, the numbers of the summary. |
 | `--summary-out` | none | Also write the Markdown summary to this file. |
 

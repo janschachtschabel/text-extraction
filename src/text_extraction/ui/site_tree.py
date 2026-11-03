@@ -14,17 +14,25 @@ Each source keeps at most ``max_urls`` URLs (``UI_TREE_MAX_URLS``), and the tree
 ``max_urls``: the pages first, then entries, then links. The rest is counted as ``hidden``. The
 items are taken one at a time (`TreeBuilder.add`), so a reader can feed them page by page.
 
+Each URL leaf has a page type (package 14): a crawled page its result's ``page_type`` (none
+when the page failed or its item was stored before page types, ruling P14-R7); a sitemap entry
+or a linked-only URL the type its URL says (``page_types.url_type``), ``type_guessed``, and none
+when the URL says nothing (ruling P14-R8: a link's ``category`` is not used; it defaults to
+``content``). ``SiteTree.type_counts`` counts the types of the URLs shown that have one.
+
 Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a directory
 (its label ends in ``/``) and has no URL of its own; every URL is a leaf: a directory's own
 page is the leaf ``/`` inside it, and a query string makes a leaf of its own. Children are in
 name order."""
 
+from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final, Literal
+from typing import Final, Literal, get_args
 
 from text_extraction.job_models import JobItem
+from text_extraction.page_types import PageType, url_type
 from text_extraction.site.types import SiteInfo
 from text_extraction.site.urls import seen_key
 from text_extraction.ui.i18n import Message
@@ -32,6 +40,7 @@ from text_extraction.ui.i18n import Message
 __all__ = [
     "FOUND_LABELS",
     "MAX_SECTION_DEPTH",
+    "NON_CONTENT_TYPES",
     "NodeKind",
     "SiteTree",
     "TreeBuilder",
@@ -57,6 +66,18 @@ MAX_SECTION_DEPTH: Final = 12
 HIDDEN_KEYS_MAX: Final = 250_000
 # Links not followed for these reasons are shown as linked only; a followed link has an item.
 LINKED_ONLY: Final = frozenset({"depth", "max_pages"})
+# The page types that "Select content pages" leaves unticked; a leaf of any other type, or
+# without one, is ticked.
+NON_CONTENT_TYPES: Final[tuple[PageType, ...]] = (
+    "imprint",
+    "privacy",
+    "legal",
+    "contact",
+    "auth",
+    "search",
+    "error",
+)
+_PAGE_TYPES: Final[tuple[PageType, ...]] = get_args(PageType)
 _PAGE, _ENTRY, _LINKED = 0, 1, 2
 _KINDS: Final[tuple[NodeKind, ...]] = ("page", "sitemap", "linked")
 
@@ -66,7 +87,7 @@ class TreeNode:
     """One node: a section (no URL) or a URL leaf of ``kind`` ``page`` (crawled), ``sitemap``
     (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
     ``error_code`` its error's code, ``depth`` its link distance from the start page,
-    ``lastmod`` a sitemap's."""
+    ``lastmod`` a sitemap's, ``page_type`` its type (``type_guessed`` when from its URL)."""
 
     label: str
     url: str | None
@@ -77,15 +98,20 @@ class TreeNode:
     lastmod: str | None = None
     children: list["TreeNode"] = field(default_factory=list)
     error_code: str | None = None
+    page_type: PageType | None = None
+    type_guessed: bool = False
 
 
 @dataclass(frozen=True)
 class SiteTree:
-    """The roots (one per host), the URLs shown and how many more were not shown."""
+    """The roots (one per host), the URLs shown and how many more were not shown;
+    ``type_counts`` the shown URLs of each page type, most first (then in the order of
+    ``PageType``), without the URLs that have no type."""
 
     roots: list[TreeNode]
     urls: int
     hidden: int
+    type_counts: Mapping[PageType, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -98,10 +124,15 @@ class _Found:
     depth: int | None = None
     lastmod: str | None = None
     error_code: str | None = None
+    page_type: PageType | None = None
+    type_guessed: bool = False
 
     def merge(self, other: "_Found") -> None:
         self.title = self.title or other.title
-        if self.status is None:
+        if self.status is None:  # not a crawled page (only a page has a status)
+            # A crawled page's own verdict, even none, wins over a type from a URL.
+            if other.status is not None or self.page_type is None:
+                self.page_type, self.type_guessed = other.page_type, other.type_guessed
             self.status, self.error_code = other.status, other.error_code
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
@@ -133,14 +164,17 @@ class TreeBuilder:
                 status=str(envelope.status),
                 depth=site.depth,
                 error_code=code,
+                page_type=data.page_type.type if data.page_type is not None else None,
             )
             self._add(_PAGE, found)
             for link in site.links or []:
                 if link.crawl in LINKED_ONLY:
-                    self._add(_LINKED, _Found(link.url))
+                    self._add(_LINKED, _guessed(link.url))
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
             for entry in site.sitemap.entries:
-                self._add(_ENTRY, _Found(entry.loc, lastmod=entry.lastmod))
+                found = _guessed(entry.loc)
+                found.lastmod = entry.lastmod
+                self._add(_ENTRY, found)
 
     def _add(self, rank: int, found: _Found) -> None:
         key = seen_key(found.url)
@@ -182,7 +216,18 @@ class TreeBuilder:
             found = list(source.values())
             shown.extend((_KINDS[rank], one) for one in found[:room])
             hidden += max(0, len(found) - room)
-        return SiteTree(roots=_assemble(shown), urls=len(shown), hidden=hidden)
+        counts = Counter(one.page_type for _, one in shown if one.page_type is not None)
+        ordered = sorted(counts.items(), key=lambda pair: (-pair[1], _PAGE_TYPES.index(pair[0])))
+        return SiteTree(
+            roots=_assemble(shown), urls=len(shown), hidden=hidden, type_counts=dict(ordered)
+        )
+
+
+def _guessed(url: str) -> _Found:
+    """A URL that was not crawled, with the type its URL says, as guessed (none if it says
+    nothing)."""
+    guess = url_type(url)
+    return _Found(url, page_type=guess, type_guessed=guess is not None)
 
 
 def build_tree(items: Iterable[JobItem], *, max_urls: int) -> SiteTree:
@@ -233,6 +278,8 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 error_code=found.error_code,
                 depth=found.depth,
                 lastmod=found.lastmod,
+                page_type=found.page_type,
+                type_guessed=found.type_guessed,
             )
         )
     ordered = sorted(roots.values(), key=_order)

@@ -121,9 +121,10 @@ job. Batches and crawls are jobs from the start. The full picture is in
   caller's keys `X-LLM-Api-Key` and `X-ASR-Api-Key` (secrets, never logged). Responses carry no
   custom headers besides `Retry-After` on 429 and `WWW-Authenticate` on 401:
   [configuration.md, Headers](configuration.md#headers).
-- Content types: JSON everywhere, plus `multipart/form-data` (uploads), `image/png` (screenshot
-  download), and for the playground `text/html`, `application/x-www-form-urlencoded`, CSS and
-  JavaScript. `/mcp` answers JSON only (no server-sent events):
+- Content types: JSON everywhere, plus `multipart/form-data` (uploads), `image/png`,
+  `image/jpeg` and `image/webp` (screenshot download), and for the playground `text/html`,
+  `application/x-www-form-urlencoded`, CSS and JavaScript. `/mcp` answers JSON only (no
+  server-sent events):
   [architecture.md, Public API](architecture.md#public-api-port-8080).
 - Response envelope: every extraction answer has `status` (`success`, `partial`, `failed`),
   `error.code`, `error.retryable`, `upstream_status`, `mode_used` and `timings`. A failed target
@@ -195,7 +196,8 @@ job. Batches and crawls are jobs from the start. The full picture is in
   `POST /v1/extract`, `/v1/extract/file`, `/v1/screenshot`, `/v1/structured` and `/v1/chunk`
   hand a slow extraction over to a job after `wait_seconds` (202). The job is read with
   `GET /v1/jobs/{id}` (status, progress, paged results), its screenshot with
-  `GET /v1/jobs/{id}/artifacts/screenshot.png`, and cancelled with `DELETE /v1/jobs/{id}`:
+  `GET /v1/jobs/{id}/artifacts/{name}` (`screenshot.png`, `screenshot.jpg` or
+  `screenshot.webp`), and cancelled with `DELETE /v1/jobs/{id}`:
   [architecture.md, Public API](architecture.md#public-api-port-8080) and
   [Jobs and the fair queue](architecture.md#jobs-and-the-fair-queue).
 

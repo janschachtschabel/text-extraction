@@ -180,7 +180,7 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         site = page.locator("#result section.job", has=page.locator("button.tree-button"))
         expect(site.locator(".state")).to_have_attribute("data-value", "completed")
         site.locator("button.tree-button").click()
-        expect(page.locator("#result .tree-view input[name=url]")).to_have_count(4)
+        expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
         found += _axe(page, "site tree")
 
     assert found == [], "\n".join(found)
@@ -341,6 +341,41 @@ def test_error_is_associated_with_its_field(ui: tuple[str, str]) -> None:
     assert console == []
 
 
+def test_screenshot_custom_fields_follow_the_preset(ui: tuple[str, str]) -> None:
+    """The custom fields are enabled only with the preset "custom"; a 422 of one of them is tied
+    to its control like any form error, and axe finds nothing in either state."""
+    url, origin = ui
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.click("#tab-screenshot")
+        quality = page.locator("#screenshot-quality")
+        expect(quality).to_be_disabled()
+        found = _axe(page, "screenshot, preset page")
+
+        page.select_option("#screenshot-preset", "social")
+        expect(quality).to_be_disabled()
+        page.select_option("#screenshot-preset", "custom")
+        expect(quality).to_be_enabled()
+        found += _axe(page, "screenshot, preset custom")
+
+        page.fill("#screenshot-url", f"{origin}/docs/a.html")
+        page.fill("#screenshot-quality", "50")
+        _submit(page, "screenshot")
+        error = page.locator("#result [data-error-for=screenshot-quality]")
+        expect(error).to_have_attribute("role", "alert")
+        expect(error).to_contain_text("quality needs format jpeg or webp")
+        expect(quality).to_have_attribute("aria-invalid", "true")
+        assert "screenshot-quality-error" in str(quality.get_attribute("aria-describedby"))
+        assert page.evaluate("document.activeElement.id") == "screenshot-quality"
+        found += _axe(page, "screenshot, error at the quality")
+
+        page.select_option("#screenshot-preset", "page")
+        expect(quality).to_be_disabled()
+    assert found == [], "\n".join(found)
+    assert console == []
+
+
 def test_an_error_that_replaces_its_target_is_not_announced_as_done(
     ui: tuple[str, str],
 ) -> None:
@@ -414,7 +449,7 @@ def _open_tree(page: Page, origin: str) -> str:
     site = page.locator("#result section.job", has=page.locator("button.tree-button"))
     expect(site.locator(".state")).to_have_attribute("data-value", "completed")
     site.locator("button.tree-button").click()
-    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(4)
+    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
     job_id: str = site.get_attribute("data-job") or ""
     return job_id
 

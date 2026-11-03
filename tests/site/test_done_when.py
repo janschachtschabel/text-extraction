@@ -9,10 +9,12 @@ sitemap's entries arrive in parts. The results are read the way a caller reads t
 ``GET /v1/jobs/{id}`` paged with ``limit=50``.
 
 Site A (``sites/a``): robots.txt with ``Disallow: /intern/`` and two ``Sitemap:`` lines, an
-index (a plain urlset and a gzipped one) and a text sitemap; 14 pages (the start page and three
+index (a plain urlset and a gzipped one) and a text sitemap; 17 pages (the start page and three
 levels below it) with the typed-links elements (header, breadcrumb, nav, main, footer, pagination,
 ``area``, head ``link``, ``iframe``), a 404 link, a redirect, a cycle, a ``nofollow`` link, a
-PDF link and an external link, crawled two clicks deep. Site B (``sites/b``): no robots.txt,
+PDF link, an external link and a footer with Mastodon and YouTube links, crawled two clicks deep.
+Its pages have each page type a site's own pages show (package 14): home, content, listing,
+imprint, privacy, contact and auth. Site B (``sites/b``): no robots.txt,
 ``/sitemap.xml`` found by the guess, 300 entries, crawled zero clicks deep.
 """
 
@@ -78,10 +80,31 @@ SITE_A_PAGE_PATHS = {
     "/seite-2.html",
     "/kontakt.html",
     "/impressum.html",
+    "/datenschutz/",
+    "/login.html",
+    "/kategorie/physik/",
     "/mathe/brueche.html",
     "/mathe/dezimalzahlen.html",
     "/physik/optik.html",
     "/physik/mechanik.html",
+}
+# The page type of every page item (package 14); the 404 has none.
+SITE_A_PAGE_TYPES = {
+    "/": "home",
+    "/mathe/": "content",
+    "/physik/": "content",
+    "/alt.html": "content",
+    "/fehlt.html": None,
+    "/seite-2.html": "content",
+    "/kontakt.html": "contact",
+    "/impressum.html": "imprint",
+    "/datenschutz/": "privacy",
+    "/login.html": "auth",
+    "/kategorie/physik/": "listing",
+    "/mathe/brueche.html": "content",
+    "/mathe/dezimalzahlen.html": "content",
+    "/physik/optik.html": "content",
+    "/physik/mechanik.html": "content",
 }
 REDIRECTS = {"/alt.html": "/neu.html"}
 SITE_B_ENTRIES = 300
@@ -403,8 +426,37 @@ def test_site_a_links_sitemaps_and_compliance(service: Service, httpserver: HTTP
     assert alt["result"]["data"]["final_url"] == f"{origin}/neu.html"
     assert back["/neu.html"]["target"] == alt["index"]
     assert "/neu.html" in requested_paths(httpserver)
-    # Structure only: no page keeps its text.
+    # Structure only: no page keeps its text, but each keeps its page type.
     assert all(i["result"]["data"]["content"] is None for i in items)
+    page_types = {
+        path_of(i["url"], origin): (i["result"]["data"]["page_type"] or {}).get("type")
+        for i in pages(items)
+    }
+    assert page_types == SITE_A_PAGE_TYPES
+    login = next(i for i in pages(items) if i["url"] == f"{origin}/login.html")
+    assert login["result"]["data"]["page_type"]["signals"] == ["url", "title", "h1"]
+
+    # Every link has a category; the footer's social links are ``social``.
+    assert all(found["category"] is not None for item in pages(items) for found in links(item))
+    for url in ("https://mastodon.social/@lernwerkstatt", "https://www.youtube.com/@lernwerkstatt"):
+        social = link(items, url)
+        assert (social["region"], social["category"], social["crawl"]) == (
+            "footer",
+            "social",
+            "out_of_scope",
+        )
+    categories = {
+        path: link(items, path)["category"]
+        for path in ("/impressum.html", "/datenschutz/", "/login.html", "/kategorie/physik/")
+    }
+    assert categories == {
+        "/impressum.html": "imprint",
+        "/datenschutz/": "privacy",
+        "/login.html": "auth",
+        "/kategorie/physik/": "listing",
+    }
+    assert link(items, "/", source="a")["category"] == "home"
+    assert link(items, "/material/arbeitsblatt.pdf")["category"] == "download"
 
     # robots.txt and the sitemaps: the two listed files, the index's two children.
     [robots] = by_role(items, "robots")

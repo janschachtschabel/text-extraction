@@ -74,6 +74,8 @@ Jede Antwort ist ein [Ergebnis-Envelope](usage.md#das-ergebnis-envelope): Lesen 
 | `content` | Der Text der Seite in `format`, ohne Navigation, Fußzeilen und andere wiederkehrende Seitenelemente. `title`, `language` und `word_count` beschreiben ihn. |
 | `metadata` | Titel, Beschreibung, Autoren, Datumsangaben, Name der Website, kanonische URL, Schlagwörter, Bilder, die Lizenz (`license`, der beste Kandidat, und `licenses`, alle gefundenen) und die LRMI-Felder (`lrmi`). Aus mit `metadata: false`. |
 | `quality` | Angaben zur Seite: `visible_chars`, `word_count`, `js_heavy`, `bot_challenge`, `soft_404`, `login_wall` und `browser_recommended`. Eine Seite mit `browser_recommended` sollte der Browser rendern. |
+| `page_type` | Was für eine Seite es ist, nach Regeln und ohne LLM: ihr `type` (etwa `content`, `listing`, `imprint` oder `contact`) und die `signals`, die dafür sprechen (etwa `url`, `title` oder `schema_org`). Nur für HTML-Seiten; null für Dokumente, Medien, reinen Text, Markdown, Uploads und eine Seite, die mit einem HTTP-Fehler (4xx oder 5xx) gescheitert ist. Siehe [Seitentypen und Linkkategorien](whole-site-and-metadata.md#seitentypen-und-linkkategorien). |
+| `links` | Mit `links: true`: die Links der Seite, jeder mit `url`, `text`, `kind` (`internal`, `external` oder `file`) und `category`, wohin er führt (etwa `imprint`, `social` oder `download`). |
 | `compliance` | Was die Website-Regeln ergeben haben: der `mode`, die `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` und die TDM-Angabe. Siehe [Website-Regeln](site-rules.md). |
 | `warnings` | Was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa `browser_unavailable` (der Browser hat die Seite nicht übernommen: das HTTP-Ergebnis). |
 

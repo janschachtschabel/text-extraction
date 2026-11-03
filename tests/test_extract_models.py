@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from tests.test_document_models import PACKAGE_4_RESULT
+from text_extraction.browser_options import ScreenshotOptions
 from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.extract_models import ChunkRequest, ExtractRequest, ExtractResult
 from text_extraction.file_models import FileForm, form_of, upload_options
@@ -334,3 +335,36 @@ def test_result_documents_the_site_warnings() -> None:
         "site_memory_guard",
     ):
         assert f"`{warning}`" in description
+
+
+def test_chunk_request_with_text_refuses_screenshot_options() -> None:
+    with pytest.raises(ValidationError, match="screenshot_options"):
+        ChunkRequest.model_validate(
+            {
+                "text": "Some text.",
+                "chunking": {"strategy": "sentence"},
+                "screenshot": True,
+                "screenshot_options": {"format": "jpeg"},
+            }
+        )
+
+
+def test_chunk_request_with_url_takes_screenshot_options_into_the_extract_request() -> None:
+    request = ChunkRequest.model_validate(
+        {
+            "url": URL,
+            "chunking": {"strategy": "sentence"},
+            "screenshot": True,
+            "screenshot_options": {"format": "jpeg"},
+        }
+    )
+
+    assert request.as_extract().screenshot_options == ScreenshotOptions(format="jpeg")
+
+
+def test_screenshot_options_travel_from_request_to_job_options() -> None:
+    options = ScreenshotOptions(format="webp", quality=70, width=600)
+    req = ExtractRequest(url=URL, mode="browser", screenshot=True, screenshot_options=options)
+
+    assert job_options(req, "enforce").screenshot_options == options
+    assert job_options(ExtractRequest(url=URL), "enforce").screenshot_options is None

@@ -17,6 +17,7 @@ from tests.test_extract_api import (
     browser_settings,
 )
 from text_extraction.browser_models import ScreenshotResult
+from text_extraction.jobs import JobStore
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x01" * 256
 BOB_KEY = "bob-key-0123456789-raw-secret"
@@ -91,6 +92,33 @@ def test_artifact_download_png() -> None:
         assert "application/json" not in route["responses"]["200"]["content"]
         assert {"404", "503"} <= set(route["responses"])
         assert "/v1/screenshot" in spec["paths"]
+
+
+@pytest.mark.parametrize(
+    ("name", "media_type"),
+    [
+        ("screenshot.png", "image/png"),
+        ("screenshot.jpg", "image/jpeg"),
+        ("screenshot.webp", "image/webp"),
+    ],
+)
+def test_artifact_download_in_each_format(name: str, media_type: str) -> None:
+    case = case_with_bob()
+    with TestClient(case.app) as client, case.worker(artifact=PNG):
+        job_id = take(client).json()["data"]["screenshot"]["url"].split("/")[3]
+        store = JobStore(FakeAsyncRedis(server=case.server), case.settings)
+        asyncio.run(store.put_artifact(job_id, name, PNG))
+
+        response = client.get(f"/v1/jobs/{job_id}/artifacts/{name}", headers=AUTH)
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == media_type
+        assert response.content == PNG
+        spec = client.get("/openapi.json").json()
+        route = spec["paths"]["/v1/jobs/{job_id}/artifacts/{name}"]["get"]
+        assert {"image/png", "image/jpeg", "image/webp"} <= set(
+            route["responses"]["200"]["content"]
+        )
 
 
 @pytest.mark.parametrize(
@@ -192,6 +220,25 @@ def test_screenshot_evaluate_by_user_is_403() -> None:
         response = take(client, actions=[{"type": "evaluate", "script": "1"}])
 
         assert response.status_code == 403
+        assert case.keys("job*") == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"format": "png", "quality": 50},
+        {"quality": 50},
+        {"width": 15},
+        {"viewport": {"width": 800, "height": 600}, "width": 801},
+        {"viewport": {"width": 319, "height": 600}},
+    ],
+)
+def test_screenshot_with_bad_options_is_422(body: dict[str, Any]) -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client:
+        response = take(client, **body)
+
+        assert response.status_code == 422
         assert case.keys("job*") == []
 
 

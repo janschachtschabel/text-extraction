@@ -17,6 +17,7 @@ from starlette.datastructures import State
 from text_extraction.api_examples import SCREENSHOT_EXAMPLES
 from text_extraction.auth import Principal, require_role
 from text_extraction.browser_models import ScreenshotRequest, ScreenshotResult, screenshot_view
+from text_extraction.browser_options import ScreenshotOptions
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
 from text_extraction.extract_api import respond
@@ -28,7 +29,7 @@ from text_extraction.ratelimit import rate_limited
 
 router = APIRouter()
 
-_MEDIA_TYPES = {".png": "image/png"}
+_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
 
 
 @router.post(
@@ -47,10 +48,14 @@ async def screenshot(
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
 ) -> Envelope[ScreenshotResult] | JSONResponse:
-    """Render a URL in the browser and capture it as a PNG, 1920 px wide.
+    """Render a URL in the browser and capture it as an image: a 1920x1080 PNG unless `viewport`,
+    `format`, `quality` and `width` say otherwise. A full-page capture holds at most 1920 x
+    `SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its height is
+    cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport width).
 
     `data.screenshot` references the file: download it from its `url`
-    (`GET /v1/jobs/{id}/artifacts/screenshot.png`) within `ARTIFACT_TTL_SECONDS`; the download
+    (`GET /v1/jobs/{id}/artifacts/screenshot.png`, `.jpg` or `.webp` by `format`) within
+    `ARTIFACT_TTL_SECONDS`; the download
     needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise 400). The page's
     `quality` is reported but does not fail a stored screenshot. Outcomes of the target answer
     200 with `status: failed`, as for `/v1/extract`; without a browser worker in time the
@@ -59,6 +64,11 @@ async def screenshot(
     `wait_seconds`: 202 with the job (kind `screenshot`), whose item holds the result.
     """
     return await run_screenshot(request.app.state, principal, body)
+
+
+def screenshot_options_of(body: ScreenshotRequest) -> ScreenshotOptions | None:
+    """The screenshot options of a request; None when it asks for none (a 1920x1080 PNG)."""
+    return body.screenshot_options()
 
 
 async def run_screenshot(
@@ -75,6 +85,7 @@ async def run_screenshot(
         metadata=False,
         screenshot=True,
         full_page=body.full_page,
+        screenshot_options=screenshot_options_of(body),
         actions=body.actions,
         cookies=body.cookies,
         headers=body.headers,
@@ -99,8 +110,12 @@ async def run_screenshot(
     response_class=Response,
     responses={
         200: {
-            "content": {"image/png": {"schema": {"type": "string", "format": "binary"}}},
-            "description": "The file (a screenshot is `screenshot.png`).",
+            "content": {
+                media_type: {"schema": {"type": "string", "format": "binary"}}
+                for media_type in _MEDIA_TYPES.values()
+            },
+            "description": "The file (a screenshot is `screenshot.png`, `screenshot.jpg` or "
+            "`screenshot.webp`, by `screenshot_options.format`).",
         },
         404: {
             "model": Envelope[None],

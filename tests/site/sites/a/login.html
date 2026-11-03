@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="utf-8"><title>Anmelden | Lernwerkstatt</title></head>
+<body>
+  <main>
+    <h1>Anmelden</h1>
+    <p>{{TEXT}}</p>
+    <p>Mit einem Konto speichern Lehrkräfte ihre Lieblingseinheiten, legen eigene Sammlungen
+       für ihre Klassen an und bekommen eine Nachricht, sobald zu einem Fach neues Material
+       erscheint. Das Konto ist kostenlos, und die Anmeldung dauert nur eine Minute. Wer sein
+       Passwort vergessen hat, bekommt über den Link unter dem Formular ein neues zugeschickt.</p>
+    <form method="post" action="/login.html">
+      <label>Benutzername <input type="text" name="user"></label>
+      <label>Passwort <input type="password" name="password"></label>
+      <button type="submit">Anmelden</button>
+    </form>
+    <p><a href="/">Zur Startseite</a></p>
+  </main>
+</body>
+</html>

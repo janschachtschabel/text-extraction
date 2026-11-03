@@ -35,6 +35,33 @@ ACCESS_RESPECT: Final = "respect"
 ACCESS_MAXIMUM: Final = "maximum"
 AccessChoice = Literal["hidden", "enabled", "disabled"]
 
+# The screenshot form's "Capture" choice: each preset is the REST fields it sets (a field it does
+# not name stays at its default); ``custom`` reads the form's own fields instead.
+_Preset = Mapping[str, Any]
+SCREENSHOT_PRESETS: Final[Mapping[str, _Preset]] = MappingProxyType(
+    {
+        "page": {"full_page": True},
+        "viewport": {"full_page": False, "viewport": {"width": 1920, "height": 1080}},
+        "social": {
+            "full_page": False,
+            "viewport": {"width": 1200, "height": 630},
+            "format": "webp",
+            "quality": 80,
+        },
+        "thumb": {
+            "full_page": False,
+            "viewport": {"width": 1280, "height": 800},
+            "format": "webp",
+            "width": 400,
+        },
+        "mobile": {"full_page": True, "viewport": {"width": 390, "height": 844}},
+    }
+)
+DEFAULT_PRESET: Final = "page"
+CUSTOM_PRESET: Final = "custom"
+DEFAULT_VIEWPORT: Final = (1920, 1080)
+DEFAULT_IMAGE_FORMAT: Final = "png"
+
 
 @dataclass(frozen=True)
 class Operation:
@@ -113,6 +140,42 @@ def error_control(form_id: str | None, field: str | None) -> str | None:
     if prefix not in FORM_PREFIXES:
         return None
     return f"{prefix}-{field.replace('_', '-')}"
+
+
+# The body fields of a form that a REST 422 can name, by operation: the answer's ``details`` then
+# tie to the control of the first of them (`rest_error_control`).
+_NAMED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {"screenshot": ("full_page", "format", "quality", "width", "viewport")}
+)
+_MODEL_ERROR_PREFIX: Final = "Value error, "
+
+
+def _detail_field(detail: Mapping[str, Any], names: tuple[str, ...]) -> str | None:
+    """The form field a 422 detail names: by its ``loc`` (``body``, the field, for a viewport
+    its side) or, for an error of the whole body, by the first word of its message."""
+    loc = [str(part) for part in detail.get("loc") or [] if part != "body"]
+    if loc and loc[0] in names:
+        if loc[0] != "viewport":
+            return loc[0]
+        side = loc[1] if len(loc) > 1 and loc[1] in ("width", "height") else "width"
+        return f"viewport_{side}"
+    words = str(detail.get("msg", "")).removeprefix(_MODEL_ERROR_PREFIX).split(maxsplit=1)
+    if not loc and words and words[0] in names:
+        return "viewport_width" if words[0] == "viewport" else words[0]
+    return None
+
+
+def rest_error_control(op: str, details: object) -> str | None:
+    """The id of the control of the first field of ``op``'s form that the ``details`` of a REST
+    422 name, or None (an operation whose fields are not named, or details that name none)."""
+    names = _NAMED_FIELDS.get(op)
+    if names is None or not isinstance(details, list):
+        return None
+    for detail in details:
+        field = _detail_field(detail, names) if isinstance(detail, Mapping) else None
+        if field is not None:
+            return error_control(f"{op}{FORM_ID_SUFFIX}", field)
+    return None
 
 
 @dataclass(frozen=True)
@@ -243,11 +306,48 @@ def _file_fields(form: Mapping[str, str]) -> Fields:
     return fields
 
 
+def _preset_fields(fields: Fields, preset: _Preset) -> None:
+    """The fields a preset sets; the REST fields it leaves out stay at their defaults."""
+    full_page = preset.get("full_page", True)
+    fields["full_page"] = _Field(full_page, set_by_user=full_page is not True)
+    for name in ("viewport", "format", "quality", "width"):
+        if name in preset:
+            fields[name] = _Field(preset[name], set_by_user=True)
+
+
+def _custom_fields(fields: Fields, form: Mapping[str, str]) -> None:
+    """The "Custom" capture: the fields as typed, each left out at its default. A viewport side
+    left empty takes the default of the viewport (1920x1080)."""
+    sides = (
+        _whole_number(form, "viewport_width", DEFAULT_VIEWPORT[0]),
+        _whole_number(form, "viewport_height", DEFAULT_VIEWPORT[1]),
+    )
+    if sides != DEFAULT_VIEWPORT:
+        viewport = {"width": sides[0], "height": sides[1]}
+        fields["viewport"] = _Field(viewport, set_by_user=True)
+    _box(fields, form, "full_page", default=True)
+    image_format = _text(form, "format") or DEFAULT_IMAGE_FORMAT
+    if image_format != DEFAULT_IMAGE_FORMAT:
+        fields["format"] = _Field(image_format, set_by_user=True)
+    for name in ("quality", "width"):
+        if _text(form, name):
+            fields[name] = _Field(_whole_number(form, name, 0), set_by_user=True)
+
+
 def _screenshot_fields(form: Mapping[str, str]) -> Fields:
+    """The "Capture" choice (`SCREENSHOT_PRESETS`) sets ``full_page``, ``viewport``, ``format``,
+    ``quality`` and ``width``; only ``custom`` reads the fields below it (a form without the
+    choice is the default preset)."""
     fields: Fields = {}
     _typed(fields, form, "url")
     _access(fields, form)
-    _box(fields, form, "full_page", default=True)
+    name = _text(form, "preset") or DEFAULT_PRESET
+    if name == CUSTOM_PRESET:
+        _custom_fields(fields, form)
+    elif name in SCREENSHOT_PRESETS:
+        _preset_fields(fields, SCREENSHOT_PRESETS[name])
+    else:
+        raise OptionsError(Message("options.unknown_preset", {"name": name}), "preset")
     _wait(fields, form)
     return fields
 

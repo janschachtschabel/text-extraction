@@ -10,7 +10,7 @@ use. They may carry secrets (a session cookie, a token header), so the models ke
 import ipaddress
 import re
 from datetime import datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Final, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -275,6 +275,64 @@ class BrowserSecrets(BaseModel, hide_input_in_errors=True):
 
     def empty(self) -> bool:
         return not (self.actions or self.cookies or self.headers)
+
+
+ScreenshotFormat = Literal["png", "jpeg", "webp"]
+DEFAULT_QUALITY = 80
+
+
+class Viewport(BaseModel, extra="forbid", strict=True):
+    """The size in CSS pixels of the browser window a page is rendered in."""
+
+    width: int = Field(ge=320, le=3840, description="Width in pixels, 320 to 3840.")
+    height: int = Field(ge=240, le=2160, description="Height in pixels, 240 to 2160.")
+
+
+DEFAULT_VIEWPORT: Final = Viewport(width=1920, height=1080)
+
+
+class ScreenshotOptions(BaseModel, extra="forbid", strict=True):
+    """How a screenshot is taken and stored: the browser window, the image format and size."""
+
+    viewport: Viewport = Field(
+        default=DEFAULT_VIEWPORT,
+        description="The browser window the page is rendered in; a narrow one gets the page's "
+        "mobile layout. Default 1920x1080. A full-page capture holds at most 1920 x "
+        "`SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its "
+        "height is cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport width).",
+    )
+    format: ScreenshotFormat = Field(
+        default="png",
+        description="Image format: `png` (default, lossless), `jpeg` or `webp`. A `webp` image "
+        "is at most 16,383 px high (the WebP limit): a taller one loses its bottom rows, with "
+        "the warning `screenshot_clipped`.",
+    )
+    quality: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="Quality of a `jpeg` or `webp` image, 1 to 100 (default 80). Not with `png`.",
+    )
+    width: int | None = Field(
+        default=None,
+        ge=16,
+        le=3840,
+        description="Scale the image down to this width in pixels (16 to 3840, at most the "
+        "viewport's width; it is never scaled up), keeping the aspect ratio. Default: the "
+        "viewport's width.",
+    )
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if self.quality is not None and self.format == "png":
+            raise ValueError("quality needs format jpeg or webp")
+        if self.width is not None and self.width > self.viewport.width:
+            raise ValueError("width cannot be larger than the viewport's width")
+        return self
+
+    def effective_quality(self) -> int:
+        """The quality to encode with: the given one, else ``DEFAULT_QUALITY``."""
+        return self.quality or DEFAULT_QUALITY
 
 
 class ArtifactRef(BaseModel):

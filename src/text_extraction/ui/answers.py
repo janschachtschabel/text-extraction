@@ -24,6 +24,8 @@ from text_extraction.vision.images import data_url, sniff_image
 
 # The key headers a curl line names (with a shell variable, never the value).
 KEY_HEADERS: Final = ("authorization", "x-llm-api-key", "x-asr-api-key")
+# The image types of a screenshot (``format``: png, jpeg or webp).
+SCREENSHOT_TYPES: Final = frozenset({"image/png", "image/jpeg", "image/webp"})
 # A body that is not JSON is shown up to this many characters.
 RAW_MAX_CHARS: Final = 10_000
 # An artifact name never starts with a dot (so never "." or "..").
@@ -119,10 +121,20 @@ def screenshot_failure(body: Mapping[str, Any] | None, status: int) -> tuple[Mes
     return Message("screenshot.http_error", {"status": status, "message": text}), detail
 
 
+def _image(content: bytes) -> Screenshot:
+    """``content`` as the ``data:`` URI of its image type (PNG, JPEG or WebP, by its bytes, never
+    by a declared type), or the note that it is no such image."""
+    media_type = sniff_image(content)
+    if media_type not in SCREENSHOT_TYPES:
+        return None, Message("screenshot.not_image"), None
+    return data_url(content, media_type), None, None
+
+
 async def read_screenshot(request: Request, job_id: str, name: str) -> Screenshot:
-    """The ``data:`` URI of the PNG artifact ``name`` of job ``job_id``, read from the artifact
-    route (a REST call with the browser's key), or the note why it could not be read (rendered
-    in the request's language) with the API's English message."""
+    """The ``data:`` URI of the screenshot artifact ``name`` (PNG, JPEG or WebP) of job
+    ``job_id``, read from the artifact route (a REST call with the browser's key), or the note
+    why it could not be read (rendered in the request's language) with the API's English
+    message."""
     path = OPERATIONS["artifact"].path.format(job_id=job_id, name=name)
     try:
         answer = await forward(request, "GET", path)
@@ -130,9 +142,7 @@ async def read_screenshot(request: Request, job_id: str, name: str) -> Screensho
         return None, Message("screenshot.not_artifact"), None
     if answer.status != 200:
         return None, *screenshot_failure(answer.body, answer.status)
-    if sniff_image(answer.content) != "image/png":
-        return None, Message("screenshot.not_png"), None
-    return data_url(answer.content, "image/png"), None, None
+    return _image(answer.content)
 
 
 async def screenshot_of(request: Request, envelope: Mapping[str, Any] | None) -> Screenshot:
@@ -151,9 +161,7 @@ async def screenshot_of(request: Request, envelope: Mapping[str, Any] | None) ->
     except ServiceError as error:
         body = {"error": {"code": error.code.value, "message": error.message}}
         return None, *screenshot_failure(body, error.http_status)
-    if sniff_image(content) != "image/png":
-        return None, Message("screenshot.not_png"), None
-    return data_url(content, "image/png"), None, None
+    return _image(content)
 
 
 def refusal(error: ServiceError, language: Language) -> Response:

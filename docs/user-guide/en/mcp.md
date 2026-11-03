@@ -71,13 +71,13 @@ A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and 
 | --- | --- | --- | --- |
 | `extract_url` | One page or document as Markdown or text, with metadata. | `POST /v1/extract` | `url`, `format` (`markdown`), `mode` (`auto`), `wait_seconds`, `content_offset`, `max_chars` |
 | `extract_file` | A file you have, such as a PDF, as text. | `POST /v1/extract/file` | `content_base64` (a `data:` URL prefix allowed), `file_name`, `content_type`, `format`, `wait_seconds`, `content_offset`, `max_chars` |
-| `screenshot_url` | A PNG of a page. | `POST /v1/screenshot` | `url`, `full_page` (true), `wait_seconds`; the PNG is attached up to `MCP_IMAGE_MAX_BYTES` |
+| `screenshot_url` | An image of a page (a PNG by default). | `POST /v1/screenshot` | `url`, `full_page` (true), `wait_seconds`; `viewport`, `format`, `quality` and `width` go into `options`; the image is attached up to `MCP_IMAGE_MAX_BYTES` |
 | `extract_structured` | The fields of a JSON schema from a page. | `POST /v1/structured` | `url`, `structured` (required), `format`, `wait_seconds`, `content_offset`, `max_chars` |
 | `chunk` | A page or a text split into chunks. | `POST /v1/chunk` | `url` or `text`, `chunking` (required), `text_type`, `wait_seconds`, `content_offset`, `max_chars` |
 | `batch_extract` | Many URLs as one job. | `POST /v1/batch` | `urls`, `format`, `mode`; answers a job |
 | `site_structure` | The map of a site, as a job. | `POST /v1/site-structure` | `url`, `depth` (2), `max_pages` (100), `scope` (`host`); answers a job |
 | `get_job` | A job's state and one page of its items. | `GET /v1/jobs/{id}` | `job_id`, `offset`, `limit` (5, 1-50), `wait_seconds` (0, up to `MCP_WAIT_SECONDS`), `content_offset`, `max_chars`; no `options` |
-| `get_job_screenshot` | The PNG of a screenshot job. | `GET /v1/jobs/{id}/artifacts/screenshot.png` | `job_id`; no `options` |
+| `get_job_screenshot` | The image of a screenshot job (PNG, JPEG or WebP). | `GET /v1/jobs/{id}/artifacts/{name}` | `job_id`; no `options` |
 | `cancel_job` | Cancel a job and delete it with its results. | `DELETE /v1/jobs/{id}` | `job_id`; no `options` |
 | `service_info` | The service's name and version, and the key's name and role. | `GET /v1/info` | none |
 

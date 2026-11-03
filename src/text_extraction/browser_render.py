@@ -27,7 +27,6 @@ import contextlib
 import contextvars
 import json
 import re
-import struct
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -77,6 +76,7 @@ from text_extraction.render import (
     RenderOptions,
     site,
 )
+from text_extraction.screenshot_image import SCREENSHOT_CLIPPED_WARNING, png_size
 from text_extraction.settings import Settings
 
 if TYPE_CHECKING:
@@ -262,12 +262,6 @@ def cookie_data(cookie: "Cookie") -> CookieData:
     )
 
 
-def png_size(png: bytes) -> tuple[int, int]:
-    """Width and height from a PNG's header."""
-    width, height = struct.unpack(">II", png[16:24])
-    return int(width), int(height)
-
-
 class _Render:
     """The state of one ``render_page`` call: its route handler and what the page did."""
 
@@ -430,6 +424,7 @@ class _Render:
         frame, so the page is read and the download dropped."""
         self.deadline = deadline
         reserve = _SCREENSHOT_RESERVE_SECONDS if self.options.screenshot else _READ_RESERVE_SECONDS
+        await self._set_viewport()
         if await self._goto(reserve):
             return self._ended_on_download()
         await self._idle(reserve)
@@ -466,6 +461,15 @@ class _Render:
         screenshot, size = await self._screenshot() if self.options.screenshot else (None, None)
         self.raise_kept()
         return self._rendered(html, screenshot, size, await self._cookies())
+
+    async def _set_viewport(self) -> None:
+        """Give the page the request's window before the first navigation, so the page lays
+        itself out for it (a media query, ``innerWidth``). The default is the window the
+        contexts open with; the unblock browser has no viewport of its own (``no_viewport``)
+        and takes this one the same way."""
+        width, height = self.options.viewport
+        if (width, height) != (VIEWPORT["width"], VIEWPORT["height"]):
+            await self.page.set_viewport_size({"width": width, "height": height})
 
     async def _idle(self, reserve: float) -> None:
         """Wait up to ``BROWSER_IDLE_WAIT_SECONDS`` for the network to go idle."""
@@ -609,21 +613,24 @@ class _Render:
         )
 
     async def _screenshot(self) -> tuple[bytes, tuple[int, int]]:
-        """PNG at 1920 wide: the full page up to ``SCREENSHOT_MAX_HEIGHT_PX`` (B7), or the
-        viewport."""
+        """PNG at the viewport's width: the full page up to ``SCREENSHOT_MAX_HEIGHT_PX`` rows
+        at 1920 wide (B7), or the viewport. A wider capture gets fewer rows, so that it holds
+        the pixels of a 1920 wide one at most (ruling P14-S1)."""
         timeout = max(self.left(), 0.1) * 1000
         if not self.options.full_page:
             png = await self.page.screenshot(type="png", timeout=timeout)
             return png, png_size(png)
+        width = self.options.viewport[0]
         limit = self.settings.screenshot_max_height_px
+        rows = min(limit, limit * VIEWPORT["width"] // width)
         height = int(await self.page.evaluate(PAGE_HEIGHT) or 0)
-        if height > limit:
-            self.warnings.append("screenshot_clipped")
-        # A clip on a full-page capture is trimmed to the document: 1920 wide, at most `limit`.
+        if height > rows:
+            self.warnings.append(SCREENSHOT_CLIPPED_WARNING)
+        # A clip on a full-page capture is trimmed to the document: viewport wide, `rows` high.
         png = await self.page.screenshot(
             type="png",
             full_page=True,
-            clip={"x": 0, "y": 0, "width": VIEWPORT["width"], "height": limit},
+            clip={"x": 0, "y": 0, "width": width, "height": rows},
             timeout=timeout,
         )
         return png, png_size(png)

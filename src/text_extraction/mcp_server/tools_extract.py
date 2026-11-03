@@ -45,10 +45,11 @@ from text_extraction.mcp_server.files import MAX_CONTENT_TYPE_CHARS, decode_file
 from text_extraction.mcp_server.results import (
     answer_payload,
     fit_answer,
+    image_content,
     image_over_limit_hint,
+    image_type,
     job_hint,
     payload_result,
-    png_content,
     slice_content,
 )
 from text_extraction.mcp_server.server import mcp_body_limit
@@ -157,7 +158,7 @@ class ExtractFileArguments(SlicedArguments):
 
 
 class ScreenshotUrlArguments(_Arguments):
-    url: str = Field(description="The http(s) URL to capture as a PNG.")
+    url: str = Field(description="The http(s) URL to capture as an image (PNG by default).")
     full_page: bool = Field(default=True, description="The whole page, not the first viewport.")
     options: Annotated[dict[str, Any] | None, options_argument("POST /v1/screenshot")] = None
 
@@ -388,7 +389,8 @@ class ScreenshotUrlTool(ExtractionTool):
     def __init__(self) -> None:
         super().__init__(
             "screenshot_url",
-            "Render a URL in the browser and capture it as a PNG, 1920 px wide "
+            "Render a URL in the browser and capture it as an image: a 1920x1080 PNG, or as "
+            "`options` say (viewport, format PNG, JPEG or WebP, quality, width, full_page) "
             "(POST /v1/screenshot); the image is attached when it is small enough.",
         )
 
@@ -420,11 +422,16 @@ class ScreenshotUrlTool(ExtractionTool):
             return
         try:
             check_jobs_enabled(state.settings)
-            png = await read_artifact(state, principal, location[1], location[2])
+            image = await read_artifact(state, principal, location[1], location[2])
         except ServiceError:
             hints.append(f"The screenshot could not be read now; download it from {url}.")
             return
-        content = png_content(png, limit=limit, url=url)
+        content = image_content(
+            image,
+            content_type=image_type(location[2], ref.get("content_type")),
+            limit=limit,
+            url=url,
+        )
         if isinstance(content, str):
             hints.append(content)
         else:

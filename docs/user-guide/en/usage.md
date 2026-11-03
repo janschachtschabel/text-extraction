@@ -138,7 +138,7 @@ it on), the browser worker renders them in Chromium. `mode` chooses the browser 
 
 | `mode` | In the playground | What happens |
 | --- | --- | --- |
-| `auto` | when the page needs it | HTTP first; the browser when the page needs it (a JavaScript shell, a challenge, a soft 404). The default. |
+| `auto` | when the page needs it | HTTP first; the browser when the page needs it (a JavaScript shell, a challenge, a soft 404, or a page with a script whose text is too short). The default. |
 | `fast` | never | HTTP only. |
 | `browser` | always | Always the browser. |
 
@@ -158,9 +158,10 @@ and `browser`, not with `fast` and not in batches; the OpenAPI spec at `/docs` l
 
 ### Screenshots
 
-A screenshot is a PNG, 1920 px wide, of the whole page (`full_page: false`: the first
-1920×1080). `POST /v1/screenshot` answers with the page's data and a reference to the file, which
-you download from the job that holds it:
+A screenshot is an image of the page as the browser shows it. By default it is a PNG of the whole
+page in a window of 1920×1080 (`full_page: false`: the first screen only). `POST /v1/screenshot`
+answers with the page's data and a reference to the file, which you download from the job that
+holds it:
 
 <!-- request: POST /v1/screenshot -->
 ```json
@@ -176,8 +177,34 @@ curl -H "Authorization: Bearer $KEY" -o page.png \
   http://localhost:8080/v1/jobs/<job id>/artifacts/screenshot.png
 ```
 
-`POST /v1/extract` takes `"screenshot": true` as well. The file is kept for `ARTIFACT_TTL_SECONDS`
-(one hour), and only its owner (or an admin) can fetch it.
+Four fields change the image. `viewport` is the browser window, `{"width": 320 to 3840,
+"height": 240 to 2160}`; a narrow window gets the page's mobile layout. `format` is `png`, `jpeg`
+or `webp`, and `quality` (1 to 100, default 80) is for `jpeg` and `webp` only. `width` scales the
+image down to that many pixels and keeps its aspect ratio; it is at most the window's width, and
+an image is never scaled up. A preview image for social media, 600 px wide:
+
+<!-- request: POST /v1/screenshot -->
+```json
+{"url": "https://example.org/", "full_page": false, "viewport": {"width": 1200, "height": 630}, "format": "webp", "width": 600}
+```
+
+`data.screenshot` names the file (`screenshot.png`, `screenshot.jpg` or `screenshot.webp`), its
+`content_type`, `width` and `height`. A whole page is cut at `SCREENSHOT_MAX_HEIGHT_PX` (16,384 px)
+with the warning `screenshot_clipped`. A window wider than 1920 px is cut sooner, so that an image
+never holds more pixels than a 1920 px wide one. WebP cannot hold more than 16,383 px a side, so a
+`webp` image taller than that (after `width` has scaled it) loses its bottom rows, with the same
+warning.
+
+`POST /v1/extract` takes `"screenshot": true` as well, and the same four fields in
+`screenshot_options`. The file is kept for `ARTIFACT_TTL_SECONDS` (one hour), and only its owner
+(or an admin) can fetch it.
+
+The **Screenshot** tab of the playground offers ready-made captures under "Capture": "The whole
+page, 1920 px wide (PNG)" (the default), "First screen, 1920 x 1080 (PNG)", "Social preview,
+1200 x 630 (WebP)", "Thumbnail, 400 px wide (WebP)" (a first screen of 1280×800, scaled down) and
+"Phone, 390 px wide, the whole page (PNG)". "Custom: set the fields below" reads the fields of
+"Custom capture": window width and height, image format, quality, image width and "The whole
+page".
 
 ### Maximum extraction
 

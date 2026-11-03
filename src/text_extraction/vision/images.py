@@ -3,7 +3,8 @@ URL, the cleaned description and its place in an image upload's content. No Open
 
 import base64
 import html
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Final
 
 from text_extraction.vision.types import (
     DESCRIPTION_MAX_CHARS,
@@ -19,13 +20,15 @@ __all__ = [
     "clean_description",
     "data_url",
     "describable_upload",
+    "is_svg",
     "sniff_image",
 ]
 
 
 def sniff_image(body: bytes) -> VisionMediaType | None:
     """The vision endpoint's media type of ``body`` from its magic bytes, never from a declared
-    type: PNG, JPEG, GIF and WebP; None for anything else (an SVG, HTML, a PDF, a TIFF, a BMP)."""
+    type: PNG, JPEG, GIF and WebP; None for anything else (HTML, a PDF, a TIFF, a BMP, an SVG: see
+    ``is_svg``)."""
     if body.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png"
     if body.startswith(b"\xff\xd8\xff"):
@@ -35,6 +38,38 @@ def sniff_image(body: bytes) -> VisionMediaType | None:
     if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
         return "image/webp"
     return None
+
+
+_SVG_SNIFF_BYTES: Final = 4096
+_XML_DECLARATION: Final = re.compile(r"<\?xml[\s?].*?\?>", re.DOTALL)
+_COMMENT: Final = re.compile(r"<!--.*?-->", re.DOTALL)
+_DOCTYPE_SVG: Final = re.compile(r"<!DOCTYPE\s+svg\b[^>\[]*(?:\[[^\]]*\])?\s*>", re.DOTALL)
+_SVG_ROOT: Final = re.compile(r"<(?:[A-Za-z_][\w.\-]*:)?svg(?=[\s/>])")
+
+
+def is_svg(body: bytes) -> bool:
+    """Whether ``body`` is an SVG document, from its start and never from a declared type: the
+    first 4,096 bytes as UTF-8 (a BOM allowed, errors ignored), after white space, one XML
+    declaration, comments and a ``<!DOCTYPE svg``, must begin with the root ``<svg`` (or
+    ``<prefix:svg``) followed by white space, ``>`` or ``/``. HTML with an inline ``<svg>``
+    is not one. The sniff stops there: it says nothing about what the markup does."""
+    text = body[:_SVG_SNIFF_BYTES].decode("utf-8", errors="ignore").removeprefix("\ufeff")
+    position = _skip_space(text, 0)
+    declaration = _XML_DECLARATION.match(text, position)
+    if declaration is not None:
+        position = _skip_space(text, declaration.end())
+    while True:
+        prolog = _COMMENT.match(text, position) or _DOCTYPE_SVG.match(text, position)
+        if prolog is None:
+            break
+        position = _skip_space(text, prolog.end())
+    return _SVG_ROOT.match(text, position) is not None
+
+
+def _skip_space(text: str, position: int) -> int:
+    while position < len(text) and text[position].isspace():
+        position += 1
+    return position
 
 
 def describable_upload(body: bytes, max_bytes: int) -> bool:

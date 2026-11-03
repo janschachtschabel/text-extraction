@@ -52,7 +52,7 @@ from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Code, Message
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
-from text_extraction.ui.site_tree import FOUND_LABELS, SiteTree, TreeBuilder
+from text_extraction.ui.site_tree import FOUND_LABELS, NON_CONTENT_TYPES, SiteTree, TreeBuilder
 from text_extraction.ui.templating import language_context, request_language, templates
 from text_extraction.ui.texts import error_text
 from text_extraction.ui.timeline import RequestedMode
@@ -700,6 +700,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "tree": tree,
         "snapshot": read.state != "completed",
         "found_labels": FOUND_LABELS,
+        "non_content_types": NON_CONTENT_TYPES,
         "access_choice": access_choice(principal.role, settings),
         "browser_enabled": settings.browser_enabled,
     }

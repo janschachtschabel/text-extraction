@@ -8,7 +8,7 @@ Chromium (or a full Chromium under ``/opt/pw-browsers``) they are skipped.
 import asyncio
 import os
 import signal
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,11 +126,13 @@ async def open_unblock_stack(
     *,
     checkbox_frame: Callable[[str], bool] | None = None,
     standard: bool = False,
+    ports: Iterable[int] = (),
 ) -> AsyncIterator[UnblockStack]:
+    """``ports``: other local servers of a test the proxy admits, besides the site's two."""
     registry = CollectorRegistry()
-    ports = {urlsplit(site.base).port or 0, urlsplit(site.third).port or 0}
+    admitted = {urlsplit(site.base).port or 0, urlsplit(site.third).port or 0, *ports}
     aliases = {name: "127.0.0.1" for name in ALIASED}
-    proxy = SiteProxy(settings, ports, registry, aliases=aliases)
+    proxy = SiteProxy(settings, admitted, registry, aliases=aliases)
     await proxy.start()
     slots = asyncio.Semaphore(settings.browser_concurrency)
     launcher = RecordingPatchright(settings, executable_path=executable, profile_root=profiles)

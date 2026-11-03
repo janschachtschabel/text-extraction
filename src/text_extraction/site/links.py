@@ -5,7 +5,8 @@
 ``convert.links.page_links``: http(s) only, the fragment dropped, an in-page ``#`` link skipped,
 the first occurrence per URL and element kind kept, ``kind`` by file extension and then host.
 Each link says where on the page it is (``region``, from the nearest ancestor that tells), its
-``rel`` tokens and ``hreflang``; the page says whether it asked robots not to follow its links.
+``rel`` tokens, ``hreflang`` and ``category`` (``page_types.link_category``); the page says
+whether it asked robots not to follow its links.
 Every link's ``crawl`` is ``listed`` and its ``target`` None: the crawl's follow rules set them.
 
 A page is untrusted input, so the answer is bounded: at most ``max_links`` links, a text of at
@@ -24,6 +25,7 @@ from bs4 import BeautifulSoup, Tag
 from text_extraction.compliance import robots_metas_say, x_robots_tag_says
 from text_extraction.convert.links import absolute_url, base_url_of, has_file_extension
 from text_extraction.convert.markup import attr, parse_html
+from text_extraction.page_types import link_category
 from text_extraction.site.types import (
     LINK_TEXT_MAX_CHARS,
     LinkKind,
@@ -89,16 +91,19 @@ def site_links(
             truncated = True
             break
         seen.add((url, source))
+        text = _text(tag, source)
+        kind = _kind(url, page_host)
         links.append(
             SiteLink(
                 url=url,
-                text=_text(tag, source),
-                kind=_kind(url, page_host),
+                text=text,
+                kind=kind,
                 source=source,
                 rel=rel,
                 hreflang=_hreflang(tag),
                 region=_link_region(tag, rel, contexts),
                 crawl="listed",
+                category=link_category(url, text, kind),
             )
         )
     return PageLinks(links=links, nofollow=_nofollow(soup, headers), truncated=truncated)

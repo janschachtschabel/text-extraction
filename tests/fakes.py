@@ -1,6 +1,7 @@
 """Fakes and pages shared by the pipeline and API tests."""
 
 import hashlib
+import struct
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -19,6 +20,7 @@ from text_extraction.render import (
     Rendered,
     RenderOptions,
 )
+from text_extraction.screenshot_image import EncodedScreenshot
 
 ORIGIN = "https://example.org"
 PAGE = f"{ORIGIN}/learn/photosynthesis.html?session=secret-token"
@@ -275,24 +277,35 @@ class FakeRenderer:
         return result
 
 
+def fake_png(width: int, height: int) -> bytes:
+    """Bytes with a PNG's signature and IHDR size fields (what ``png_size`` reads), not a
+    decodable image."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + b"\x00\x00\x00\rIHDR"
+        + struct.pack(">II", width, height)
+        + b"\x00" * 40
+    )
+
+
 class FakeArtifacts:
     """Keeps the screenshots it is given; ``refuse`` makes it raise ``ArtifactUnavailable``."""
 
     def __init__(self, *, refuse: bool = False) -> None:
         self.refuse = refuse
-        self.screenshots: list[tuple[bytes, int, int]] = []
+        self.screenshots: list[EncodedScreenshot] = []
 
-    async def put_screenshot(self, png: bytes, width: int, height: int) -> ArtifactRef:
+    async def put_screenshot(self, image: EncodedScreenshot) -> ArtifactRef:
         if self.refuse:
             raise ArtifactUnavailable("memory is high")
-        self.screenshots.append((png, width, height))
+        self.screenshots.append(image)
         return ArtifactRef(
-            name="screenshot.png",
-            url="/v1/jobs/job-1/artifacts/screenshot.png",
-            content_type="image/png",
-            bytes=len(png),
-            width=width,
-            height=height,
+            name=image.name,
+            url=f"/v1/jobs/job-1/artifacts/{image.name}",
+            content_type=image.content_type,
+            bytes=len(image.data),
+            width=image.width,
+            height=image.height,
             expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
 

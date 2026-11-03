@@ -217,6 +217,7 @@ def record(
     status: str | None = "success",
     error_code: str | None = None,
     warnings: tuple[str, ...] = (),
+    elapsed_ms: int = 1,
 ) -> Record:
     return Record(
         url=f"https://{domain}/",
@@ -229,7 +230,7 @@ def record(
         compliance_decision=decision,
         mode_used=mode_used,
         warnings=list(warnings),
-        elapsed_ms=1,
+        elapsed_ms=elapsed_ms,
     )
 
 
@@ -292,6 +293,25 @@ def test_summary_counts_browser_unavailable_and_error_codes() -> None:
     assert "| dns_error | 1 | c.example 1 |" in section
     assert section.index("| timeout |") < section.index("| content_too_short |")
     assert "client_ReadTimeout" not in section  # no answer, no envelope: counted as a bucket
+
+
+def test_summary_reports_the_time_per_url() -> None:
+    # P14 Task 9: the A/B rule compares the median time per URL of two runs.
+    records = [
+        record("a.example", "ok", elapsed_ms=1000),
+        record("a.example", "ok", elapsed_ms=2000),
+        record("b.example", "too_short", mode_used="browser", elapsed_ms=9000),
+        record("c.example", "ok", elapsed_ms=3000),
+        record("c.example", "ok", elapsed_ms=4000),
+    ]
+
+    text = summarize(records)
+
+    assert "Time per URL: median 3.0 s, p90 9.0 s, total 19.0 s" in text
+
+
+def test_summary_without_records_has_no_time_line() -> None:
+    assert "Time per URL" not in summarize([])
 
 
 def test_summary_without_error_codes_has_no_error_table() -> None:
@@ -649,3 +669,56 @@ def test_summary_has_a_media_table_by_platform_and_transcript_source() -> None:
 
 def test_summary_without_media_has_no_media_table() -> None:
     assert "### Media" not in summarize([record("a.example", "ok")])
+
+
+def flaky(transport: httpx.MockTransport, failures: int) -> httpx.MockTransport:
+    """``transport`` whose first ``failures`` GETs end in a ``ReadError``, as when the server
+    closes an idle keep-alive connection while the poll is sent."""
+    left = failures
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal left
+        if request.method == "GET" and left > 0:
+            left -= 1
+            raise httpx.ReadError("connection closed", request=request)
+        return transport.handle_request(request)
+
+    return httpx.MockTransport(handler)
+
+
+def test_a_job_poll_is_retried_once_on_a_transport_error() -> None:
+    transport, seen = job_service(TRANSCRIBED, polls_before_done=1)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    (only,), _ = run_rows(flaky(transport, 1), [row])
+
+    assert (only.bucket, only.http_status, only.error_code) == ("ok", 200, None)
+    assert [entry[:2] for entry in seen[1:]] == [("GET", "/v1/jobs/j1")] * 2
+
+
+def test_a_job_poll_fails_after_a_second_transport_error() -> None:
+    transport, _ = job_service(TRANSCRIBED, polls_before_done=1)
+    row = Row("https://cdn.example/talk.mp3", True, "file", "asr")
+
+    (only,), _ = run_rows(flaky(transport, 2), [row])
+
+    assert only.error_code == "client_ReadError"
+
+
+def test_get_job_retries_only_transport_errors() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503)
+
+    async def scenario() -> httpx.Response:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://service"
+        ) as client:
+            return await run_live.get_job(client, "/v1/jobs/j1", params={"limit": 1})
+
+    response = asyncio.run(scenario())
+
+    assert (response.status_code, calls) == (503, 1)  # an answer is not retried

@@ -15,7 +15,7 @@ The labels of the playground, as the English and the German playground show them
 | --- | --- | --- |
 | Extract | Extrahieren | The tab for one page by its URL. |
 | File | Datei | The tab for an upload. |
-| Screenshot | Screenshot | The tab for a PNG of a page. |
+| Screenshot | Screenshot | The tab for an image of a page. |
 | Structured | Strukturiert | The tab for structured data from a page. |
 | Chunk | Chunks | The tab that splits a page or a text into chunks. |
 | Batch | Batch | The tab for many URLs as one job. |
@@ -34,6 +34,9 @@ The labels of the playground, as the English and the German playground show them
 | Site tree | Website-Baum | The pages of a site structure, by host and path. |
 | crawled | gecrawlt | A page of the tree that the crawl fetched. |
 | linked only | nur verlinkt | A URL of the tree that a page links but the crawl did not fetch. |
+| guessed from the URL | aus der URL geschätzt | A page type of the tree read from a URL alone, for a URL the crawl did not fetch. |
+| Select content pages | Inhaltsseiten auswählen | Checks every URL of the tree but imprint, privacy, legal, contact, login, search and error pages and pages that failed. |
+| Capture | Aufnahme | The choice of size and image format on the Screenshot tab. |
 | Principal | Konto | The key's name and role in a result. |
 | What happened | Ablauf | The timeline of a result: claims, checks, fetch, render, conversion and outcome. |
 | Claim | Zuteilung | A worker taking a job item; a second claim is a retry. |
@@ -69,6 +72,8 @@ Terms of the API and of this guide.
 | maximum extraction | maximale Extraktion | `compliance: ignore` with unblock mode, for contract partners. |
 | unblock browser | Entsperr-Browser | The stealth Chrome of unblock mode. |
 | TDM opt-out | TDM-Nutzungsvorbehalt | A site's reservation against text and data mining. |
+| page type | Seitentyp | The kind of a page (`page_type`), such as content, listing or imprint; found by rules. |
+| link category | Linkkategorie | What a link leads to (`category`), such as an imprint, a social network or a download. |
 | entity | Treffer | A piece of personal data that `pii` found (not "Funde"). |
 | chunk | Chunk | One piece of split content. |
 | rate limit | Ratenlimit | The most requests per minute of one key. |

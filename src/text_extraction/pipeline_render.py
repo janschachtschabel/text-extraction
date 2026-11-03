@@ -8,6 +8,7 @@ conversion, cache); these are the pure parts of it. Nothing here imports a brows
 import hashlib
 from ipaddress import ip_address
 
+from text_extraction.browser_options import DEFAULT_VIEWPORT
 from text_extraction.envelope import ErrorCode
 from text_extraction.escalation import REFUSAL_STATUSES as CHALLENGE_STATUSES
 from text_extraction.extract_models import ExtractRequest
@@ -75,7 +76,9 @@ def render_options(
 ) -> RenderOptions:
     """How to render ``req``. The caller's headers go to the request URL's site only (B2 step
     5); an extraction render in standard mode leaves out the ``blocked`` resource types, a
-    screenshot or unblock render loads everything (B3). ``evaluate`` actions run for admins."""
+    screenshot or unblock render loads everything (B3). ``evaluate`` actions run for admins. The
+    window is the request's screenshot viewport, else the default."""
+    viewport = req.screenshot_options.viewport if req.screenshot_options else DEFAULT_VIEWPORT
     return RenderOptions(
         actions=tuple(req.actions),
         cookies=tuple(cookies),
@@ -86,6 +89,7 @@ def render_options(
         allow_evaluate=admin,
         unblock=unblock,
         blocked_resources=frozenset() if unblock or req.screenshot else blocked,
+        viewport=(viewport.width, viewport.height),
     )
 
 

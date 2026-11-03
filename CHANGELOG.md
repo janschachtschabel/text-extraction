@@ -9,6 +9,49 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+Package 14: screenshot formats, SVG previews and page types (plan
+[docs/superpowers/plans/2026-11-02-package-14-screenshots-svg-page-types.md](docs/superpowers/plans/2026-11-02-package-14-screenshots-svg-page-types.md)).
+
+### Added
+
+- Screenshots in other formats and sizes. `POST /v1/screenshot` takes `viewport` (the browser
+  window, 320 to 3840 by 240 to 2160 px, default 1920×1080; a narrow one gets the page's mobile
+  layout), `format` (`png`, `jpeg` or `webp`, default `png`), `quality` (1 to 100, default 80;
+  `jpeg` and `webp` only) and `width` (scales the image down to that width, keeping its aspect
+  ratio; never up), and `POST /v1/extract`, `/v1/structured` and `/v1/chunk` take them as
+  `screenshot_options`. The browser worker encodes and scales the capture with Pillow. The file
+  is `screenshot.png`, `screenshot.jpg` or `screenshot.webp`, and `data.screenshot` names it.
+- The playground's Screenshot tab has the choice "Capture": the whole page, the first screen, a
+  social preview (1200×630, WebP), a thumbnail (400 px wide, WebP), a phone (390 px wide, the
+  whole page) and custom values. `screenshot_url` takes the new fields in `options`, and both
+  MCP screenshot tools attach the image with its own type.
+- The playground's image preview shows SVG images, as a `data:` image inside `<img>`, where no
+  script in them runs. Image descriptions still skip SVG.
+- Page types: every HTML page that is fetched or rendered and converted has `page_type` (its
+  `type`, such as `content`, `listing`, `imprint` or `contact`, and the `signals` that say so),
+  found by rules without an LLM, in `/v1/extract`, batches and site structures. Every entry of
+  `links` and `site.links` has a `category` (the page types, plus `social`, `download` and
+  `nav`). Both are null in results stored before.
+- The site tree shows the page type of each URL (for a sitemap entry or a linked-only URL
+  guessed from the URL alone), counts the types, and has the button "Select content pages",
+  which leaves imprint, privacy, legal, contact, login, search and error pages unchecked.
+
+### Changed
+
+- `auto` mode also tries the browser on a 2xx HTML page that is too short or empty
+  (`content_too_short`, `empty_content`) when the page has a script. In A/B live runs on
+  `wlo_200` the usable share rose from 83.0 % to 83.5 % and 84.5 % with no higher median time per
+  URL; such pages take longer.
+- A full-page screenshot in a window wider than 1920 px is cut at `SCREENSHOT_MAX_HEIGHT_PX` ×
+  1920 / the window's width, so it never holds more pixels than a 1920 px wide one.
+  `SCREENSHOT_MAX_BYTES` applies to the encoded file. A `webp` image is at most 16,383 px high
+  (the WebP limit): a taller one loses its bottom rows, with the warning `screenshot_clipped`.
+- `GET /v1/jobs/{id}/artifacts/{name}` also serves `screenshot.jpg` (`image/jpeg`) and
+  `screenshot.webp` (`image/webp`); `get_job_screenshot` reads the file's name from the job's
+  result instead of assuming `screenshot.png`.
+- Pillow 13.0.0 is a direct runtime dependency (the browser worker imports it); before, it came in
+  only through other dependencies.
+
 ## [0.1.2] - 2026-11-01
 
 Dependency updates that v0.1.1 left out. Jan waived the 14-day rule for new dependency versions

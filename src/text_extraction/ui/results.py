@@ -20,6 +20,7 @@ from text_extraction.browser_models import ScreenshotResult
 from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
+from text_extraction.ui.forms import rest_error_control
 from text_extraction.ui.i18n import Language, Message
 from text_extraction.ui.markdown import is_http, render_markdown
 from text_extraction.ui.security import RUN_PREFIX
@@ -34,6 +35,7 @@ DOWNLOADS: Final = {
     "html": ("text/plain", ".html"),
 }
 DOWNLOAD_NAME: Final = "result"
+UNPROCESSABLE: Final = 422
 # Each copy of a large content in one fragment is bounded: the source shown, the raw JSON and the
 # chunks show at most SHOWN_MAX_CHARS (and only such a content is rendered as Markdown); the
 # download is the full copy, up to DOWNLOAD_MAX_CHARS.
@@ -296,7 +298,7 @@ def result_context(
     item: JobItem | None = None,
 ) -> dict[str, Any]:
     """The context of ``result.html`` for one REST answer: ``envelope`` is its JSON object (None
-    for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its PNG (or
+    for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its image (or
     ``screenshot_note`` why it could not be read, with the API's English
     ``screenshot_detail``), ``retry_after`` the seconds of a 429. An
     error is shown as the text of its code (``error_text``) with the API's English message and
@@ -315,6 +317,11 @@ def result_context(
             error_text(error.get("code"), http_status) if isinstance(error, Mapping) else None
         ),
         "details": _details(error) if isinstance(error, Mapping) else [],
+        "error_for": (
+            rest_error_control(op, error.get("details"))
+            if http_status == UNPROCESSABLE and isinstance(error, Mapping)
+            else None
+        ),
         "retry_after": retry_after,
         "raw_json": raw_json,
         "raw_note": raw_note,

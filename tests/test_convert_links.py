@@ -24,14 +24,14 @@ def test_page_links_kinds() -> None:
     links = page_links(PAGE, "https://www.example.org/de/start")
 
     assert links == [
-        Link("https://www.example.org/de/intro", "Intro", "internal"),
-        Link("https://example.org/about", "About (www-less host)", "internal"),
-        Link("https://other.example.net/x?q=1", "Elsewhere", "external"),
-        Link("https://www.example.org/files/Worksheet.PDF", "Worksheet", "file"),
-        Link("https://cdn.example.net/a.zip?dl=1", "", "file"),
-        Link("https://www.example.org/icon", "Settings", "internal"),
-        Link("https://www.example.org/titled", "Titled link", "internal"),
-        Link("https://www.example.org/spaced", "Spaced out", "internal"),
+        Link("https://www.example.org/de/intro", "Intro", "internal", "content"),
+        Link("https://example.org/about", "About (www-less host)", "internal", "about"),
+        Link("https://other.example.net/x?q=1", "Elsewhere", "external", "content"),
+        Link("https://www.example.org/files/Worksheet.PDF", "Worksheet", "file", "download"),
+        Link("https://cdn.example.net/a.zip?dl=1", "", "file", "download"),
+        Link("https://www.example.org/icon", "Settings", "internal", "content"),
+        Link("https://www.example.org/titled", "Titled link", "internal", "content"),
+        Link("https://www.example.org/spaced", "Spaced out", "internal", "content"),
     ]
 
 
@@ -43,7 +43,7 @@ def test_page_links_without_links_or_html() -> None:
 def test_page_links_resolve_against_the_page_without_a_base_tag() -> None:
     links = page_links('<a href="../up">Up</a>', "https://example.org/a/b/c")
 
-    assert links == [Link("https://example.org/a/up", "Up", "internal")]
+    assert links == [Link("https://example.org/a/up", "Up", "internal", "content")]
 
 
 def test_absolute_url_returns_none_for_unparseable_references() -> None:
@@ -55,5 +55,36 @@ def test_page_links_ignore_the_fragment_when_deduplicating() -> None:
     html = '<a href="/page#a">One</a><a href="/page">Two</a><a href="/page#b">Three</a>'
 
     assert page_links(html, "https://example.org/") == [
-        Link("https://example.org/page", "One", "internal")
+        Link("https://example.org/page", "One", "internal", "content")
     ]
+
+
+def test_page_links_have_a_category() -> None:
+    html = (
+        '<a href="/">Lernwerkstatt</a>'
+        '<a href="/impressum.html">Impressum</a>'
+        '<a href="/datenschutz/">Datenschutz</a>'
+        '<a href="/kategorie/physik/">Physik</a>'
+        '<a href="/unterricht/optik">Nach oben</a>'
+        '<a href="https://mastodon.social/@lernwerkstatt">Mastodon</a>'
+        '<a href="https://www.youtube.com/@lernwerkstatt">YouTube</a>'
+        '<a href="https://other.example.net/impressum">Their imprint</a>'
+    )
+
+    categories = {link.url: link.category for link in page_links(html, "https://example.org/a")}
+
+    assert categories == {
+        "https://example.org/": "home",
+        "https://example.org/impressum.html": "imprint",
+        "https://example.org/datenschutz/": "privacy",
+        "https://example.org/kategorie/physik/": "listing",
+        "https://example.org/unterricht/optik": "nav",
+        "https://mastodon.social/@lernwerkstatt": "social",
+        "https://www.youtube.com/@lernwerkstatt": "social",
+        "https://other.example.net/impressum": "content",
+    }
+
+
+def test_a_link_without_a_category_still_builds() -> None:
+    """Links of results cached before link categories have none."""
+    assert Link("https://example.org/", "Home", "internal").category is None

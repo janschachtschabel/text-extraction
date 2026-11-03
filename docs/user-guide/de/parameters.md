@@ -22,15 +22,16 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `mode` | `fast`, `auto` oder `browser` | `auto` | Der Browser-Fallback: `auto` nutzt den Browser, wenn die Seite ihn braucht, `fast` nie, `browser` immer. Siehe [Browser-Fallback](usage.md#browser-fallback). |
 | `format` | `markdown`, `text` oder `html` | `markdown` | Das Format von `content`. |
 | `metadata` | Boolean | `true` | Die Metadaten der Seite mitliefern (Titel, Autoren, Lizenz, Datumsangaben, Bilder, schema.org- und LRMI-Felder). |
-| `links` | Boolean | `false` | Die Links der Seite mitliefern. |
+| `links` | Boolean | `false` | Die Links der Seite mitliefern, jeden mit `kind` und `category` (wohin er führt, etwa `imprint` oder `social`). |
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Website-Regeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion zu einem Job (202); `0`: sofort ein Job. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. |
 | `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website. Nicht mit `mode: fast`. |
 | `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
-| `screenshot` | Boolean | `false` | Auch einen Screenshot als PNG aufnehmen. Nicht mit `mode: fast`. |
+| `screenshot` | Boolean | `false` | Auch einen Screenshot aufnehmen, ein PNG, wenn `screenshot_options` nichts anderes sagt. Nicht mit `mode: fast`. |
 | `full_page` | Boolean | `true` | Der Screenshot zeigt die ganze Seite; `false`: den ersten Viewport. `false` wird mit `mode: fast` abgelehnt. |
+| `screenshot_options` | Objekt | nicht gesetzt | Viewport-Größe, Bildformat und -größe des Screenshots: `viewport` (`{"width", "height"}`, Standard 1920×1080), `format` (`png`, `jpeg` oder `webp`), `quality` (1 bis 100, nur für `jpeg` und `webp`) und `width` (skaliert herunter, höchstens die Breite des Viewports). Braucht `screenshot`, wird also mit `mode: fast` abgelehnt. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | OCR für Dokumente: `auto` liest Scans und Bilder mit OCR, wo der Dienst sie hat. |
 | `transcribe` | Boolean | `false` | Audio und Video ohne Untertitel transkribieren (immer ein Job). |
 | `languages` | Liste von Sprachcodes | leer | Bevorzugte Sprachen für Untertitel und Transkription, höchstens 5, etwa `["de", "en"]`. |
@@ -64,6 +65,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |
 | `screenshot` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `full_page` | Boolean | `true` | Wie bei `POST /v1/extract`. |
+| `screenshot_options` | Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
 | `transcribe` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `languages` | Liste von Sprachcodes | leer | Wie bei `POST /v1/extract`. |
@@ -83,7 +85,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `url` | String | nicht gesetzt | Die Seite, die extrahiert und zerlegt wird, mit den Optionen von `POST /v1/extract`. |
-| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
+| `text` | String | nicht gesetzt | Ihr eigener Text, höchstens `DOCUMENT_MAX_BYTES`. Mit `text` ergeben die Felder einer Seite (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) 422. |
 | `text_type` | `markdown` oder `plain` | `markdown` | Was `text` ist; Markdown-Chunks tragen ihren Überschriftenpfad. |
 | `chunking` | Objekt | Pflicht | Wie zerlegt wird. Siehe [`chunking`](#chunking). |
 | `format` | `markdown` oder `text` | `markdown` | Das Format von `content` und der Chunks. |
@@ -98,6 +100,7 @@ Eine Seite über ihre URL oder Ihr eigener Text, in Chunks zerlegt. Genau eines 
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |
 | `screenshot` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `full_page` | Boolean | `true` | Wie bei `POST /v1/extract`. |
+| `screenshot_options` | Objekt | nicht gesetzt | Wie bei `POST /v1/extract`. |
 | `ocr` | `auto`, `never` oder `always` | `auto` | Wie bei `POST /v1/extract`. |
 | `transcribe` | Boolean | `false` | Wie bei `POST /v1/extract`. |
 | `languages` | Liste von Sprachcodes | leer | Wie bei `POST /v1/extract`. |
@@ -160,12 +163,17 @@ nur über HTTP gelesen, ohne ihren Text.
 
 ## `POST /v1/screenshot`
 
-Ein PNG einer Seite, im Browser gerendert.
+Ein Bild einer Seite, im Browser gerendert: ein PNG in einem Fenster von 1920×1080, wenn
+`viewport`, `format`, `quality` und `width` nichts anderes sagen.
 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `url` | String | Pflicht | Die Seite, die aufgenommen wird. |
-| `full_page` | Boolean | `true` | Die ganze Seite (bis `SCREENSHOT_MAX_HEIGHT_PX`); `false`: die ersten 1920×1080. |
+| `full_page` | Boolean | `true` | Die ganze Seite (bis `SCREENSHOT_MAX_HEIGHT_PX`); `false`: den ersten Viewport. |
+| `viewport` | Objekt | nicht gesetzt | Das Browserfenster, `{"width": 320 bis 3840, "height": 240 bis 2160}`; ein schmales zeigt das mobile Layout der Seite. Standard 1920×1080. Eine Ganzseiten-Aufnahme fasst höchstens 1920 × `SCREENSHOT_MAX_HEIGHT_PX` Pixel, ein breiterer Viewport ergibt also eine kürzere Aufnahme (die Höhe wird bei `SCREENSHOT_MAX_HEIGHT_PX` × 1920 / Viewport-Breite abgeschnitten). |
+| `format` | `png`, `jpeg` oder `webp` | `png` | Das Bildformat. Ein `webp`-Bild ist höchstens 16.383 px hoch (die Grenze von WebP): einem höheren fehlen die unteren Zeilen, mit der Warnung `screenshot_clipped`. |
+| `quality` | Ganzzahl, 1 bis 100 | `80` | Qualität eines `jpeg`- oder `webp`-Bilds. Nicht mit `png` (422). |
+| `width` | Ganzzahl, 16 bis 3840 | nicht gesetzt | Skaliert das Bild auf diese Breite herunter, das Seitenverhältnis bleibt; höchstens die Breite des Viewports (422), nie hochskaliert. |
 | `actions` | Liste von Objekten | leer | Seitenaktionen vor der Aufnahme, wie bei `POST /v1/extract`. |
 | `cookies` | Liste von Objekten | leer | Wie bei `POST /v1/extract`. |
 | `headers` | Objekt | leer | Wie bei `POST /v1/extract`. |

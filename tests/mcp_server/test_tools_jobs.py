@@ -28,6 +28,7 @@ from tests.mcp_server.test_tools_extract import (
     hints_of,
     refusal,
 )
+from tests.test_extract_api import BrowserCase
 from tests.test_jobs import success
 from text_extraction.app import create_public_app
 from text_extraction.jobs import JobStore
@@ -587,6 +588,33 @@ def test_get_job_screenshot(client: TestClient) -> None:
         "url": f"/v1/jobs/{job_id}/artifacts/screenshot.png",
         "bytes": len(PNG),
         "content_type": "image/png",
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "media_type"),
+    [
+        ("screenshot.webp", b"RIFF\x24\x00\x00\x00WEBP" + b"\x03" * 300, "image/webp"),
+        ("screenshot.jpg", b"\xff\xd8\xff\xe0" + b"\x02" * 300, "image/jpeg"),
+    ],
+)
+def test_get_job_screenshot_reads_the_name_from_the_result(
+    name: str, content: bytes, media_type: str
+) -> None:
+    case = BrowserCase(mcp_enabled=True)
+    with TestClient(case.app) as client, case.worker(artifact=content, artifact_name=name):
+        started = call_tool(client, "screenshot_url", {"url": PAGE}, headers=AUTH)
+        job_id = envelope_of(started)["data"]["screenshot"]["url"].split("/")[3]
+        result = call_tool(client, "get_job_screenshot", {"job_id": job_id}, headers=AUTH)
+
+    assert result["isError"] is False
+    images = [block for block in result["content"] if block["type"] == "image"]
+    assert [image["mimeType"] for image in images] == [media_type]
+    assert base64.b64decode(images[0]["data"]) == content
+    assert envelope_of(result)["data"] == {
+        "url": f"/v1/jobs/{job_id}/artifacts/{name}",
+        "bytes": len(content),
+        "content_type": media_type,
     }
 
 

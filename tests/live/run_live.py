@@ -14,7 +14,9 @@ import argparse
 import asyncio
 import csv
 import json
+import math
 import os
+import statistics
 import sys
 import time
 from collections import Counter, defaultdict, deque
@@ -44,7 +46,9 @@ DEFAULT_MODE = "auto"
 # A transcription is a job (202): the harness reads the job every few seconds until it is done,
 # for at most an hour (an hour of audio at the spike's real-time factor of 0.88, and a queue).
 DEFAULT_JOB_TIMEOUT_SECONDS = 3600.0
-DEFAULT_POLL_SECONDS = 5.0
+# Below uvicorn's keep-alive of 5 s: a poll every 5 s raced the server closing the idle
+# connection and ended a site run with `client ReadError` (live run 41549966609).
+DEFAULT_POLL_SECONDS = 3.0
 # The transcript sources of `data.media`, in the order of the media table.
 TRANSCRIPT_SOURCES = (
     "manual_subtitles",
@@ -250,10 +254,22 @@ def _status_url(http_status: int, payload: object) -> str | None:
     return status_url if http_status == 202 and isinstance(status_url, str) else None
 
 
+async def get_job(
+    client: httpx.AsyncClient, status_url: str, params: dict[str, int] | None = None
+) -> httpx.Response:
+    """``GET`` of a job's ``status_url``, sent once more after a transport error: a reused
+    keep-alive connection the server closed meanwhile fails the first try (a read of a job
+    changes nothing, so a second send is safe). Any answer, also an error status, is returned."""
+    try:
+        return await client.get(status_url, params=params)
+    except httpx.TransportError:
+        return await client.get(status_url, params=params)
+
+
 async def _job_result(client: httpx.AsyncClient, status_url: str, poll_seconds: float) -> object:
     """The first item's result envelope once the job is ``completed``."""
     while True:
-        response = await client.get(status_url)
+        response = await get_job(client, status_url)
         response.raise_for_status()
         data = response.json().get("data") or {}
         if data.get("state") == "completed":
@@ -346,6 +362,19 @@ def _percent(count: int, total: int) -> str:
     return f"{100 * count / total:.1f} %" if total else "0.0 %"
 
 
+def _timing(records: Sequence[Record]) -> list[str]:
+    """The time per URL as the client saw it: median, 90th percentile (nearest rank) and sum;
+    an A/B comparison of two runs reads the median."""
+    if not records:
+        return []
+    seconds = sorted(record.elapsed_ms / 1000 for record in records)
+    p90 = seconds[math.ceil(0.9 * len(seconds)) - 1]
+    return [
+        f"Time per URL: median {statistics.median(seconds):.1f} s, p90 {p90:.1f} s, "
+        f"total {sum(seconds):.1f} s"
+    ]
+
+
 def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> str:
     """The Markdown summary: buckets overall, ok rate, would-be blocks, answers whose browser
     worker did not answer in time, results per mode that produced them, buckets per domain, the
@@ -362,6 +391,7 @@ def summarize(records: Sequence[Record], *, top_domains: int = TOP_DOMAINS) -> s
         f"{sum(record.compliance_decision == 'reported' for record in records)}",
         f"Answers with the warning `{BROWSER_UNAVAILABLE}`: "
         f"{sum(BROWSER_UNAVAILABLE in record.warnings for record in records)}",
+        *_timing(records),
         "",
         "| Bucket | URLs | Share |",
         "| --- | ---: | ---: |",

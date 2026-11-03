@@ -72,6 +72,8 @@ Every answer is a [result envelope](usage.md#the-result-envelope): read `status`
 | `content` | The text of the page in `format`, without navigation, footers and other boilerplate. `title`, `language` and `word_count` describe it. |
 | `metadata` | Title, description, authors, dates, site name, canonical URL, keywords, images, the licence (`license`, the best candidate, and `licenses`, all that were found) and the LRMI fields (`lrmi`). Off with `metadata: false`. |
 | `quality` | Facts about the page: `visible_chars`, `word_count`, `js_heavy`, `bot_challenge`, `soft_404`, `login_wall` and `browser_recommended`. A page with `browser_recommended` is one the browser should render. |
+| `page_type` | What kind of page it is, by rules and without an LLM: its `type` (such as `content`, `listing`, `imprint` or `contact`) and the `signals` that say so (such as `url`, `title` or `schema_org`). HTML pages only; null for documents, media, plain text, Markdown, uploads and a page that failed with an HTTP error (4xx or 5xx). See [Page types and link categories](whole-site-and-metadata.md#page-types-and-link-categories). |
+| `links` | With `links: true`: the page's links, each with its `url`, `text`, `kind` (`internal`, `external` or `file`) and `category`, what it leads to (such as `imprint`, `social` or `download`). |
 | `compliance` | What the site rules found: the `mode`, the `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` and the TDM statement. See [Site rules](site-rules.md). |
 | `warnings` | What did not go as asked, although a result is returned, such as `browser_unavailable` (the browser did not take the page: the HTTP result). |
 

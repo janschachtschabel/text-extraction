@@ -443,6 +443,30 @@ def test_batches_site_tree_and_cancel(
     site_tree = get(ui, tree_url)
     checkable = set(site_tree.xpath("//ul[@class='tree']//input[@name='url']/@value"))
     assert {f"{origin}/", *urls} <= checkable
+    # Page types (package 14): a badge per typed page, none for the imprint (a 404: its page
+    # failed, ruling P14-R7), the counts over the tree and "Select content pages".
+    badges = {
+        leaf.xpath("./label/input/@value")[0]: texts(
+            leaf, "./label/span[contains(@class, 'page-type')]"
+        )
+        for leaf in site_tree.xpath("//ul[@class='tree']//li[./label/input[@name='url']]")
+    }
+    home, content = translate(lang, "page_type.home"), translate(lang, "page_type.content")
+    assert badges == {
+        f"{origin}/": [home],
+        **{url: [content] for url in urls},
+        f"{origin}/impressum.html": [],
+    }
+    # "Select content pages" leaves the failed imprint out (ruling P14-R9).
+    assert site_tree.xpath("//input[@name='url'][@data-failed]/@value") == [
+        f"{origin}/impressum.html"
+    ]
+    assert texts(site_tree, "//p[@class='tree-types']") == [
+        f"{translate(lang, 'tree.types')} {content} {len(urls)}, {home} 1"
+    ]
+    assert texts(site_tree, "//button[@data-action='tree-content']") == [
+        translate(lang, "tree.select_content")
+    ]
     assert translate(lang, "tree.snapshot") not in texts(site_tree, "//*[@class='hint']")
     selected = urls[:2]
     from_tree = post(ui, "batch-urls", url=selected, **batch_options())  # the checked boxes

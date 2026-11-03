@@ -37,7 +37,8 @@ Browser jobs (package 4) may have these as well:
                           deleted by the browser worker once the item has its outcome. The nlp
                           worker's items have one too: the unprocessed envelope, deleted once
                           the item has its outcome
-- ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``, B7), kept
+- ``job:{<id>}:artifact:<name>`` string: a file of the job (``screenshot.png``,
+                          ``screenshot.jpg`` or ``screenshot.webp``, B7), kept
                           ``ARTIFACT_TTL_SECONDS``
 
 Jobs that wait for a transcription (package 6, M11) may have:
@@ -132,7 +133,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from pydantic import BaseModel
 from redis.asyncio import Redis
@@ -191,7 +192,9 @@ _OWNER_ESCAPES = {"%": "%25", "{": "%7B", "}": "%7D"}
 
 # The files a job can have; ``delete`` removes them by name.
 SCREENSHOT_ARTIFACT = "screenshot.png"
-ARTIFACT_NAMES = (SCREENSHOT_ARTIFACT,)
+# A screenshot is stored in the format its request asked for (``screenshot_options.format``).
+SCREENSHOT_ARTIFACTS: Final = ("screenshot.png", "screenshot.jpg", "screenshot.webp")
+ARTIFACT_NAMES = SCREENSHOT_ARTIFACTS
 _ARTIFACT_NAME = re.compile(r"[a-z0-9_.-]{1,64}", re.ASCII)
 
 _NOT_FOUND = -1
@@ -495,9 +498,9 @@ def _artifact_key(job_id: str, name: str) -> str:
 def _options_json(options: JobOptions) -> str:
     """The stored form of a job's options. ``ocr`` (``auto``), ``transcribe`` (false),
     ``languages`` (none), ``pii`` (none), ``structured`` (none), ``chunking`` (none),
-    ``describe_images`` (none) and ``site`` (none) are left out while they are the default: pods
-    of a release before them parse the options strictly, and during a rolling upgrade they read
-    the jobs that new pods create."""
+    ``describe_images`` (none), ``site`` (none) and ``screenshot_options`` (none) are left out
+    while they are the default: pods of a release before them parse the options strictly, and
+    during a rolling upgrade they read the jobs that new pods create."""
     defaults = JobOptions.model_fields
     omit = {
         name
@@ -510,6 +513,7 @@ def _options_json(options: JobOptions) -> str:
             "chunking",
             "describe_images",
             "site",
+            "screenshot_options",
         )
         if getattr(options, name) == defaults[name].get_default(call_default_factory=True)
     }

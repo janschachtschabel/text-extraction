@@ -11,13 +11,22 @@ from fakeredis import FakeAsyncRedis
 from pydantic import BaseModel
 
 from text_extraction.auth import Principal
-from text_extraction.browser_options import BrowserCookie, BrowserSecrets, ClickAction
+from text_extraction.browser_options import (
+    BrowserCookie,
+    BrowserSecrets,
+    ClickAction,
+    ScreenshotOptions,
+    Viewport,
+)
 from text_extraction.chunking.types import Chunk
 from text_extraction.compliance import ComplianceReport
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.job_models import ItemRun, JobOptions, JobProgress
 from text_extraction.jobs import (
+    ARTIFACT_NAMES,
+    SCREENSHOT_ARTIFACT,
+    SCREENSHOT_ARTIFACTS,
     InputBudgetExceeded,
     JobLost,
     JobStore,
@@ -658,6 +667,29 @@ async def test_artifact_round_trip_and_ttl() -> None:
     assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:screenshot.png") <= 3600
     assert expires_at.timestamp() == START + 3600
     assert expires_at.utcoffset() is not None
+
+
+@scenario
+@pytest.mark.parametrize("name", SCREENSHOT_ARTIFACTS)
+async def test_every_screenshot_format_is_an_artifact(name: str) -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey, job_ttl_seconds=86400, artifact_ttl_seconds=3600)
+    job_id = await create_job(store, kind="screenshot")
+
+    await store.put_artifact(job_id, name, PNG)
+
+    assert await store.artifact(job_id, name) == PNG
+    assert 3595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:{name}") <= 3600
+    await store.shorten(job_id, 600)  # the expiry covers it
+    assert 595 <= await valkey.ttl(f"job:{{{job_id}}}:artifact:{name}") <= 600
+    await store.delete(job_id)  # and so does the deletion
+    assert [key async for key in valkey.scan_iter(match="job:*")] == []
+
+
+def test_screenshot_artifacts_are_the_three_formats() -> None:
+    assert SCREENSHOT_ARTIFACTS == ("screenshot.png", "screenshot.jpg", "screenshot.webp")
+    assert ARTIFACT_NAMES == SCREENSHOT_ARTIFACTS
+    assert SCREENSHOT_ARTIFACT == "screenshot.png"
 
 
 @scenario
@@ -1329,3 +1361,38 @@ async def test_items_show_run() -> None:
     assert third.run is None
     [only] = await store.items(job_id, 1, 1)
     assert only.run == second.run
+
+
+def test_job_options_dump_has_no_screenshot_options_when_unset() -> None:
+    options = JobOptions(compliance="enforce")
+
+    assert "screenshot_options" not in options.model_dump()
+    assert "screenshot_options" not in options.model_dump_json()
+
+
+@scenario
+async def test_job_options_round_trip_with_screenshot_options() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    shot = ScreenshotOptions(
+        viewport=Viewport(width=1200, height=630), format="webp", quality=70, width=600
+    )
+    options = JobOptions(
+        mode="browser", compliance="enforce", screenshot=True, screenshot_options=shot
+    )
+    job_id = await store.create("screenshot", OWNER, options, URLS[:1])
+
+    assert (await stored_options(valkey, job_id))["screenshot_options"]["format"] == "webp"
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options == options
+    assert record.options.screenshot_options == shot
+
+
+@scenario
+async def test_unset_screenshot_options_are_not_stored_so_older_pods_read_the_job() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    job_id = await store.create("batch", OWNER, JobOptions(compliance="enforce"), URLS[:1])
+
+    assert "screenshot_options" not in await stored_options(valkey, job_id)

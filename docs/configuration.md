@@ -81,9 +81,9 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `BROWSER_UNBLOCK_TIMEOUT_SECONDS` | `60` | Time budget of one page in unblock mode, in seconds. 10 to 180. |
 | `BROWSER_UNBLOCK_CHALLENGE_WAIT_SECONDS` | `20` | How long unblock mode waits for a challenge to clear, in seconds. 0 to 60. |
 | `BROWSER_UNBLOCK_COOKIE_TTL_SECONDS` | `1800` | How long the cookies of a cleared challenge are reused for the same host, in seconds. 0 means no reuse. Minimum 0. |
-| `SCREENSHOT_MAX_BYTES` | `10485760` | Largest screenshot file, in bytes (10 MiB). Minimum 1. |
-| `SCREENSHOT_MAX_HEIGHT_PX` | `16384` | Tallest screenshot, in pixels; a longer page is cut. 1080 to 32768. |
-| `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download (`GET /v1/jobs/{id}/artifacts/screenshot.png`), in seconds. The download is a job route: it needs `JOBS_ENABLED=true` (otherwise 400), so a deployment that takes screenshots keeps jobs on. Minimum 60. |
+| `SCREENSHOT_MAX_BYTES` | `10485760` | Largest screenshot file, in bytes (10 MiB), after it is encoded in its `format` and scaled to its `width`. Minimum 1. |
+| `SCREENSHOT_MAX_HEIGHT_PX` | `16384` | Tallest full-page screenshot, in pixels; a longer page is cut (warning `screenshot_clipped`). A `viewport` wider than 1920 px is cut sooner, at this value × 1920 / its width, so a capture never holds more pixels than 1920 × this value. 1080 to 32768. |
+| `ARTIFACT_TTL_SECONDS` | `3600` | How long a screenshot stays available for download (`GET /v1/jobs/{id}/artifacts/{name}`, `screenshot.png`, `screenshot.jpg` or `screenshot.webp`), in seconds. The download is a job route: it needs `JOBS_ENABLED=true` (otherwise 400), so a deployment that takes screenshots keeps jobs on. Minimum 60. |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, how long `/ready` answers 503 while both ports keep serving, so Kubernetes can take the pod out of the Service before connections are refused. The graceful shutdown starts afterwards (a second signal starts it at once). Drain plus graceful shutdown (35 s by default, 55 s with OCR only, 80 s with browser mode, 110 s with unblock mode) must stay below the API pods' `terminationGracePeriodSeconds` minus a 10 s margin; the Helm chart computes it from both unless you set it (45, 65, 90 or 120 s), see Response times. Minimum 0. |
 
 Result cache and fingerprint keys are `res:{<sha256>}` and `fp:{<sha256>}` in Valkey. The hash is
@@ -312,7 +312,7 @@ fragmentation, client buffers and the fork of an append-only-file rewrite. Raise
 Browser mode needs three things: `BROWSER_ENABLED=true` on the API pods, the extract workers and the
 browser workers (the Helm chart and docker compose set it everywhere together), at least one browser
 worker (`text-extraction-browser-worker`, image `text-extraction-browser`) and Valkey. Screenshots
-also need `JOBS_ENABLED=true`: the PNG is a job artifact. How it works is in
+also need `JOBS_ENABLED=true`: the image is a job artifact. How it works is in
 [architecture.md](architecture.md) ("Browser worker").
 
 The request fields it adds (all in the OpenAPI spec):
@@ -322,7 +322,7 @@ The request fields it adds (all in the OpenAPI spec):
 | `mode` | `POST /v1/extract`, `POST /v1/batch` | `fast`, `auto` (default) or `browser`. Batches take it too but no browser options. |
 | `actions` | `POST /v1/extract`, `POST /v1/screenshot` | Up to 20 page actions. `evaluate` is for admins. A click that starts a download discards the page. |
 | `cookies`, `headers` | same | Session cookies and extra headers for logged-in pages. Headers go only to the requested URL's host and port. What Chromium refuses to set answers 422, without the value: a control character (also NUL, tab, CR, LF) or DEL or a semicolon in a cookie's `name` or `value`, a space at either end of them, an `=` in the name, and a name and value of more than 4096 UTF-8 bytes together. Spaces inside, commas, backslashes, double quotes and non-ASCII text are set as given. Never logged or shown in a job. |
-| `screenshot`, `full_page` | `POST /v1/extract` | `data.screenshot` references the PNG for `GET /v1/jobs/{id}/artifacts/screenshot.png`, kept for `ARTIFACT_TTL_SECONDS`. |
+| `screenshot`, `full_page`, `screenshot_options` | `POST /v1/extract` | `data.screenshot` references the image (by default a PNG; `screenshot_options` sets the `viewport`, `format`, `quality` and `width`) for `GET /v1/jobs/{id}/artifacts/{name}`, kept for `ARTIFACT_TTL_SECONDS`. `POST /v1/screenshot` takes the same four fields at the top level. |
 | `compliance: ignore` | all | Admins only. Together with `BROWSER_UNBLOCK_ENABLED` it switches on unblock mode. |
 
 The Helm keys, with the variables they render (the full table is in the
@@ -1001,7 +1001,7 @@ touches this key together with a job key or a queue key.
 `DELETE /v1/jobs/{id}` (the owner or an admin; 404 for anyone else) cancels a job of any kind and
 state. It deletes every key of the job under `job:{<id>}:` that the job store knows by name:
 `meta`, `urls`, `results`, `done`, `runs`, the browser secrets, the drafts, the caller's ASR and
-LLM keys, the crawl keys of a site job (below), its files (`job:{<id>}:artifact:screenshot.png`)
+LLM keys, the crawl keys of a site job (below), its files (`job:{<id>}:artifact:screenshot.png`, `.jpg` or `.webp`)
 and the input of item 0 (an upload, whose bytes leave the input budget). Then it removes the id
 from the owner's `jobs:{owner:<name>}:open`, so an admin's delete frees the owner's slot. Items
 still in a queue stay there until a worker claims them; the worker drops them as items of an
@@ -1271,6 +1271,10 @@ model give their idle memory in brackets. Valkey keeps its sizes: one instance s
 of every pool (the load ran one pod per pool), its memory request equals its limit (Guaranteed QoS)
 and its limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at
 once, not for this load.
+
+Screenshot encoding was not part of the load: a browser worker encodes at most two screenshots at
+once (fixed in code), and one 1920 × 16,384 JPEG needs about 180 MB while it is encoded, so long
+full-page captures can add up to about 360 MB to the browser worker's peak above.
 
 **Selector processes (P11-S5, issue #19).** The selector scenario on fresh containers per value:
 

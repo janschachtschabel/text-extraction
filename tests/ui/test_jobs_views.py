@@ -609,8 +609,9 @@ def fake_reads(
     return reads
 
 
-def show_tree(client: TestClient, job_id: str = "a" * 32) -> str:
-    response = client.get("/ui/run/site-tree", params={"id": job_id}, headers=HEADERS)
+def show_tree(client: TestClient, job_id: str = "a" * 32, language: str = "en") -> str:
+    headers = {**HEADERS, LANGUAGE_HEADER: language}
+    response = client.get("/ui/run/site-tree", params={"id": job_id}, headers=headers)
     assert response.status_code == 200
     return response.text
 
@@ -652,7 +653,115 @@ def test_tree_checkboxes_named_only_for_urls(
     assert {button.get("data-action") for button in root.xpath("//button[@data-action]")} == {
         "tree-all",
         "tree-none",
+        "tree-content",
     }
+
+
+TYPED_SITE = [
+    page_item(
+        0,
+        f"{ORIGIN}/",
+        depth=0,
+        page_type="home",
+        links=(
+            (f"{ORIGIN}/agb", "depth", "legal"),
+            (f"{ORIGIN}/start", "depth", "nav"),
+            (f"{ORIGIN}/docs/c", "depth", "content"),  # the URL says nothing: no type
+        ),
+    ),
+    page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
+    page_item(2, f"{ORIGIN}/docs/b", page_type="content"),
+    page_item(3, f"{ORIGIN}/impressum", page_type="imprint"),
+    page_item(4, f"{ORIGIN}/kaputt", error=ErrorCode.TARGET_HTTP_ERROR),
+]
+TYPE_TEXTS = {
+    "en": {
+        "badges": {
+            "/": "Home",
+            "/docs/a": "Content",
+            "/docs/b": "Content",
+            "/impressum": "Imprint",
+            "/agb": "Legal (guessed from the URL)",
+        },
+        "types": "Types: Content 2, Home 1, Imprint 1, Legal 1",
+        "button": "Select content pages",
+    },
+    "de": {
+        "badges": {
+            "/": "Startseite",
+            "/docs/a": "Inhalt",
+            "/docs/b": "Inhalt",
+            "/impressum": "Impressum",
+            "/agb": "Rechtliches (aus der URL geschätzt)",
+        },
+        "types": "Typen: Inhalt 2, Startseite 1, Impressum 1, Rechtliches 1",
+        "button": "Inhaltsseiten auswählen",
+    },
+}
+
+
+@pytest.mark.parametrize("language", ["en", "de"])
+def test_tree_shows_page_types(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, language: str
+) -> None:
+    fake_reads(
+        monkeypatch, len(TYPED_SITE), lambda offset, limit: TYPED_SITE[offset : offset + limit]
+    )
+    expected = TYPE_TEXTS[language]
+
+    root = tree(show_tree(client, language=language))
+
+    badges = {
+        leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): " ".join(
+            leaf.xpath("./label/span[contains(@class, 'page-type')]")[0].text_content().split()
+        )
+        for leaf in root.xpath("//li[./label/input[@name='url']]")
+        if leaf.xpath("./label/span[contains(@class, 'page-type')]")
+    }
+    assert badges == expected["badges"]  # none for /kaputt (failed), /start and /docs/c
+    boxes = {
+        box.get("value").removeprefix(ORIGIN): box.get("data-page-type")
+        for box in root.xpath("//input[@name='url']")
+    }
+    assert boxes == {
+        "/": "home",
+        "/docs/a": "content",
+        "/docs/b": "content",
+        "/impressum": "imprint",
+        "/kaputt": None,
+        "/agb": "legal",
+        "/start": None,
+        "/docs/c": None,
+    }
+    # A failed page is left out by "Select content pages" (ruling P14-R9).
+    failed = root.xpath("//input[@name='url'][@data-failed]")
+    assert [box.get("value").removeprefix(ORIGIN) for box in failed] == ["/kaputt"]
+    # The badge is part of the checkbox's label, so a screen reader names it.
+    assert root.xpath("//li/span[contains(@class, 'page-type')]") == []
+    assert texts(root, "//p[@class='tree-types']") == [expected["types"]]
+    [button] = root.xpath("//button[@data-action='tree-content']")
+    assert " ".join(button.text_content().split()) == expected["button"]
+    assert set(button.get("data-exclude").split()) == {
+        "imprint",
+        "privacy",
+        "legal",
+        "contact",
+        "auth",
+        "search",
+        "error",
+    }
+
+
+def test_a_tree_without_types_has_no_types_line(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_reads(monkeypatch, 1, lambda offset, limit: [page_item(0, f"{ORIGIN}/")][offset:])
+
+    root = tree(show_tree(client))
+
+    assert root.xpath("//p[@class='tree-types']") == []
+    assert root.xpath("//span[contains(@class, 'page-type')]") == []
+    assert root.xpath("//button[@data-action='tree-content']")  # still offered: it ticks all
 
 
 def test_tree_counts_one_hit_per_500_items(

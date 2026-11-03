@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
+from text_extraction.browser_options import ScreenshotOptions
 from text_extraction.chunking.types import ChunkingOptions
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert import OutputFormat
@@ -107,6 +108,11 @@ class JobOptions(BaseModel, extra="forbid"):
     cache: bool = True
     screenshot: bool = False
     full_page: bool = True
+    # Left out of a dump while None, like ``site``: stored jobs and the workers'
+    # ``ExtractRequest(**options.model_dump())`` stay as they were when it is unset.
+    screenshot_options: ScreenshotOptions | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     ocr: OcrOption = "auto"
     transcribe: bool = False
     languages: list[LanguageCode] = Field(default=[], max_length=MAX_LANGUAGES)

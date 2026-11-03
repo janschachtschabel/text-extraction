@@ -20,15 +20,16 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `mode` | `fast`, `auto` or `browser` | `auto` | The browser fallback: `auto` uses the browser when the page needs it, `fast` never, `browser` always. See [Browser fallback](usage.md#browser-fallback). |
 | `format` | `markdown`, `text` or `html` | `markdown` | The format of `content`. |
 | `metadata` | boolean | `true` | Include the page's metadata (title, authors, licence, dates, images, schema.org and LRMI fields). |
-| `links` | boolean | `false` | Include the page's links. |
+| `links` | boolean | `false` | Include the page's links, each with its `kind` and its `category` (what it leads to, such as `imprint` or `social`). |
 | `compliance` | `enforce`, `report` or `ignore` | unset | The site rules: `enforce` refuses what robots.txt or a TDM opt-out forbids, `report` only reports it, `ignore` (admins only) skips the checks and allows maximum extraction. Unset: the operator's `COMPLIANCE_DEFAULT`. |
 | `cache` | boolean | `true` | Use the result cache; `false` neither reads nor stores. |
 | `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202); `0`: a job at once. Unset: the request waits for its answer, with three exceptions: with `transcribe: true` the default is 20, and a request that waits for the NLP or the LLM worker answers 202 after `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_SECONDS`. |
 | `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. |
 | `cookies` | list of objects | empty | Cookies for the requested site. Not with `mode: fast`. |
 | `headers` | object | empty | Request headers for the requested site. Not with `mode: fast`. |
-| `screenshot` | boolean | `false` | Also capture a PNG screenshot. Not with `mode: fast`. |
+| `screenshot` | boolean | `false` | Also capture a screenshot, a PNG unless `screenshot_options` says otherwise. Not with `mode: fast`. |
 | `full_page` | boolean | `true` | The screenshot shows the whole page; `false`: the first viewport. `false` is refused with `mode: fast`. |
+| `screenshot_options` | object | unset | Viewport size, image format and size of the screenshot: `viewport` (`{"width", "height"}`, default 1920×1080), `format` (`png`, `jpeg` or `webp`), `quality` (1 to 100, only for `jpeg` and `webp`) and `width` (scales down, at most the viewport's width). Needs `screenshot`, so it is refused with `mode: fast`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | OCR of documents: `auto` reads scans and images with OCR where the service has it. |
 | `transcribe` | boolean | `false` | Transcribe audio and video without subtitles (always a job). |
 | `languages` | list of language codes | empty | Preferred subtitle and transcription languages, at most 5, such as `["de", "en"]`. |
@@ -62,6 +63,7 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `headers` | object | empty | As for `POST /v1/extract`. |
 | `screenshot` | boolean | `false` | As for `POST /v1/extract`. |
 | `full_page` | boolean | `true` | As for `POST /v1/extract`. |
+| `screenshot_options` | object | unset | As for `POST /v1/extract`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | As for `POST /v1/extract`. |
 | `transcribe` | boolean | `false` | As for `POST /v1/extract`. |
 | `languages` | list of language codes | empty | As for `POST /v1/extract`. |
@@ -81,7 +83,7 @@ A page by its URL, or your own text, split into chunks. Exactly one of `url` and
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | string | unset | The page to extract and chunk, with the options of `POST /v1/extract`. |
-| `text` | string | unset | Your own text to chunk, at most `DOCUMENT_MAX_BYTES`. With `text` the fields of a page (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `ocr`, `transcribe`, `languages`, `describe_images`) answer 422. |
+| `text` | string | unset | Your own text to chunk, at most `DOCUMENT_MAX_BYTES`. With `text` the fields of a page (`mode`, `links`, `compliance`, `cache`, `actions`, `cookies`, `headers`, `screenshot`, `full_page`, `screenshot_options`, `ocr`, `transcribe`, `languages`, `describe_images`) answer 422. |
 | `text_type` | `markdown` or `plain` | `markdown` | What `text` is; Markdown chunks carry their heading path. |
 | `chunking` | object | required | How to split. See [`chunking`](#chunking). |
 | `format` | `markdown` or `text` | `markdown` | The format of `content` and of the chunks. |
@@ -96,6 +98,7 @@ A page by its URL, or your own text, split into chunks. Exactly one of `url` and
 | `headers` | object | empty | As for `POST /v1/extract`. |
 | `screenshot` | boolean | `false` | As for `POST /v1/extract`. |
 | `full_page` | boolean | `true` | As for `POST /v1/extract`. |
+| `screenshot_options` | object | unset | As for `POST /v1/extract`. |
 | `ocr` | `auto`, `never` or `always` | `auto` | As for `POST /v1/extract`. |
 | `transcribe` | boolean | `false` | As for `POST /v1/extract`. |
 | `languages` | list of language codes | empty | As for `POST /v1/extract`. |
@@ -158,12 +161,17 @@ over HTTP only, without their text.
 
 ## `POST /v1/screenshot`
 
-A PNG of a page, rendered in the browser.
+An image of a page, rendered in the browser: a PNG in a window of 1920×1080 unless `viewport`,
+`format`, `quality` and `width` say otherwise.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `url` | string | required | The page to capture. |
-| `full_page` | boolean | `true` | The whole page (up to `SCREENSHOT_MAX_HEIGHT_PX`); `false`: the first 1920×1080. |
+| `full_page` | boolean | `true` | The whole page (up to `SCREENSHOT_MAX_HEIGHT_PX`); `false`: the first viewport. |
+| `viewport` | object | unset | The browser window, `{"width": 320 to 3840, "height": 240 to 2160}`; a narrow one gets the page's mobile layout. Default 1920×1080. A full-page capture holds at most 1920 × `SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its height is cut at `SCREENSHOT_MAX_HEIGHT_PX` × 1920 / viewport width). |
+| `format` | `png`, `jpeg` or `webp` | `png` | The image format. A `webp` image is at most 16,383 px high (the WebP limit): a taller one loses its bottom rows, with the warning `screenshot_clipped`. |
+| `quality` | integer, 1 to 100 | `80` | Quality of a `jpeg` or `webp` image. Not with `png` (422). |
+| `width` | integer, 16 to 3840 | unset | Scale the image down to this width, keeping the aspect ratio; at most the viewport's width (422), never scaled up. |
 | `actions` | list of objects | empty | Page actions before the capture, as for `POST /v1/extract`. |
 | `cookies` | list of objects | empty | As for `POST /v1/extract`. |
 | `headers` | object | empty | As for `POST /v1/extract`. |

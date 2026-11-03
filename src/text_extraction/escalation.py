@@ -25,6 +25,11 @@ REFUSAL_STATUSES: Final[frozenset[int]] = frozenset({403, 429, 503})
 
 _HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
+# Error codes of a page too thin to use; with a script on it, the browser may see more (P14-T9).
+_THIN_PAGE_CODES: Final[frozenset[ErrorCode]] = frozenset(
+    {ErrorCode.CONTENT_TOO_SHORT, ErrorCode.EMPTY_CONTENT}
+)
+
 _STATUS_RANK: dict[Literal["success", "partial", "failed"], int] = {
     "failed": 0,
     "partial": 1,
@@ -47,13 +52,26 @@ def _is_refusal(envelope: Envelope[ExtractResult], result: ExtractResult) -> boo
     )
 
 
+def _is_thin_scripted_page(envelope: Envelope[ExtractResult], result: ExtractResult) -> bool:
+    """A 2xx HTML answer that is too short or empty although the page runs a script."""
+    return (
+        envelope.error is not None
+        and envelope.error.code in _THIN_PAGE_CODES
+        and result.quality is not None
+        and result.quality.script_count >= 1
+        and _is_ok_html(result)
+    )
+
+
 def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     """Whether a fast result should be tried again in the browser.
 
     Only a fast result of a page that was fetched and assessed (``quality`` is set) can escalate,
     never a document's, a platform video's or a media file's.
     It does when the quality gate recommends a browser and the answer is 2xx HTML (a browser
-    cannot do better on a text file or an error status). In unblock mode (maximum extraction,
+    cannot do better on a text file or an error status). It also does on a 2xx HTML answer that
+    is ``content_too_short`` or ``empty_content`` while the page has an executable script, even
+    when the gate did not recommend a browser (P14-T9). In unblock mode (maximum extraction,
     P12-S1) it also does on every answer refused with a 403, 429 or 503, whatever its body, on
     any 2xx HTML result that is not ``success``, and when the page was refused as bot
     protection. A refusal of a 429 or 503 leaves the host's pause in place: the render takes its
@@ -75,6 +93,8 @@ def needs_browser(envelope: Envelope[ExtractResult], *, unblock: bool) -> bool:
     if unblock and _is_refusal(envelope, result):
         return True  # judged before the recommendation, which a refusal's body seldom has
     if result.quality.browser_recommended and _is_ok_html(result):
+        return True
+    if _is_thin_scripted_page(envelope, result):
         return True
     if not unblock:
         return False

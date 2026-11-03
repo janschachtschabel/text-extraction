@@ -2,6 +2,7 @@
 the job's mode, the outbound gate's turns and the service's user agent."""
 
 import asyncio
+import inspect
 import time
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from contextlib import asynccontextmanager
@@ -107,11 +108,12 @@ def get(
     *,
     settings: Settings | None = None,
     timeout: float = TIMEOUT,
+    allow_svg: bool = False,
 ) -> ImageBytes | ImageSkipped:
     async def scenario() -> ImageBytes | ImageSkipped:
         images, _ = make_fetcher(settings)
         try:
-            return await images.get(url, mode, timeout=timeout)
+            return await images.get(url, mode, timeout=timeout, allow_svg=allow_svg)
         finally:
             await images.aclose()
 
@@ -197,6 +199,32 @@ def test_svg_skipped(httpserver: HTTPServer) -> None:
     )
 
     assert get(httpserver.url_for("/a.svg")) == ImageSkipped(reason="unsupported")
+
+
+def test_svg_is_returned_only_when_allowed(httpserver: HTTPServer) -> None:
+    no_robots(httpserver)
+    body = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    httpserver.expect_request("/a.svg").respond_with_data(body, content_type="text/plain")
+    url = httpserver.url_for("/a.svg")
+
+    assert get(url, allow_svg=True) == ImageBytes(data=body, media_type="image/svg+xml")
+    assert get(url, allow_svg=False) == ImageSkipped(reason="unsupported")
+    assert get(url) == ImageSkipped(reason="unsupported")
+
+
+def test_html_with_an_inline_svg_is_not_an_svg_image(httpserver: HTTPServer) -> None:
+    no_robots(httpserver)
+    httpserver.expect_request("/a.svg").respond_with_data(
+        "<html><body><svg></svg></body></html>", content_type="image/svg+xml"
+    )
+
+    assert get(httpserver.url_for("/a.svg"), allow_svg=True) == ImageSkipped(reason="unsupported")
+
+
+def test_allow_svg_is_keyword_only() -> None:
+    parameter = inspect.signature(ImageFetcher.get).parameters["allow_svg"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is False
 
 
 def test_body_over_cap_skipped(httpserver: HTTPServer) -> None:

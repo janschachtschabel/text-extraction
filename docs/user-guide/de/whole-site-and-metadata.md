@@ -35,9 +35,15 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 #   "title": "Start", "content": null, "site": {"role": "page", "depth": 0, "parent": null,
 #   "links": [
 #    {"url": "https://example.org/mathe/", "text": "Mathe", "kind": "internal", "source": "a",
-#     "rel": [], "hreflang": null, "region": "nav", "crawl": "queued", "target": 2},
+#     "rel": [], "hreflang": null, "region": "nav", "crawl": "queued", "target": 2,
+#     "category": "content"},
 #    {"url": "https://example.org/intern/", "text": "Intern", "kind": "internal", "source": "a",
-#     "rel": [], "hreflang": null, "region": "main", "crawl": "blocked", "target": null}, ...]}}}},
+#     "rel": [], "hreflang": null, "region": "main", "crawl": "blocked", "target": null,
+#     "category": "content"},
+#    {"url": "https://example.org/impressum", "text": "Impressum", "kind": "internal",
+#     "source": "a", "rel": [], "hreflang": null, "region": "footer", "crawl": "queued",
+#     "target": 4, "category": "imprint"}, ...]},
+#   "page_type": {"type": "home", "signals": ["root_path"]}}}},
 #  {"index": 1, "url": "https://example.org/robots.txt", "result": {"data": {"site": {
 #   "role": "robots", "depth": 0, "parent": 0,
 #   "sitemaps": ["https://example.org/sitemap.xml"]}, ...}, ...}},
@@ -63,7 +69,8 @@ Lesen Sie den Graphen aus den Einträgen: `data.site.role` jedes Eintrags ist `p
 `links` einer Seite sind ihre ausgehenden Links in Dokumentreihenfolge: `kind` (`internal`,
 `external`, `file`), `source` (`a`, `area`, ein `link` im Kopf wie `canonical` oder `alternate`,
 `iframe`), `rel`, `hreflang`, `region` (`nav`, `header`, `footer`, `aside`, `main`, `breadcrumb`,
-`pagination` oder null) und `crawl`, was der Crawl mit ihm gemacht hat.
+`pagination` oder null), `crawl`, was der Crawl mit ihm gemacht hat, und `category`, wohin er
+führt (siehe [Seitentypen und Linkkategorien](#seitentypen-und-linkkategorien)).
 
 - `queued` und `seen` führen zu einem Seiteneintrag, dessen Index `target` ist: eine Kante des
   Graphen (ein Link tiefer als `depth` auf eine Seite, die ohnehin ein Eintrag ist, hat ebenfalls
@@ -78,6 +85,44 @@ Die Einträge einer Sitemap stehen in `sitemap.entries`; eine große setzt sich 
 Sitemaps in `children`, jede mit dem Eintrag, der aus ihr wurde. Ein Eintrag, dessen `final_url`
 die URL eines anderen Eintrags ist, ist eine Weiterleitung auf diese Seite (seine Links
 wiederholen die der Seite): Entfernen Sie die Duplikate des Graphen anhand von `final_url`.
+
+### Seitentypen und Linkkategorien
+
+Jede HTML-Seite, die der Crawl liest, bekommt einen `page_type`, ebenso eine Seite aus
+`POST /v1/extract`: ihren `type` und die `signals`, die dafür sprechen. Es entscheiden Regeln,
+ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft, gewinnt:
+
+1. `error`: Die Seite hat mit 2xx geantwortet, ist aber eine Fehlerseite (eine weiche 404,
+   `quality.soft_404`). Eine Seite, die mit einem HTTP-Fehler (4xx oder 5xx) gescheitert ist,
+   wird nicht umgewandelt und hat keinen Typ (`page_type: null`); ihr Status sagt, was geschah.
+2. `home`: Der Pfad ist leer, `/`, `/index.html` oder nur ein Sprachkürzel wie `/de/` oder
+   `/en-gb/`. Es zählen nur Sprachen, die Websites üblicherweise nutzen, darum ist ein Bereich
+   wie `/ki/` oder `/ui/` keine Startseite.
+3. schema.org: Das JSON-LD oder die Microdata der Seite sagen `ContactPage` (`contact`),
+   `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`).
+4. Die URL: ein ganzes Pfadsegment wie `impressum` oder `imprint` (`imprint`), `datenschutz`
+   oder `privacy` (`privacy`), `agb`, `terms`, `cookies` oder `barrierefreiheit` (`legal`),
+   `login`, `registrieren` oder `konto` (`auth`), `suche` oder `search` oder eine Suchanfrage
+   wie `?q=...` (`search`), `kontakt` oder `contact` (`contact`), `ueber-uns`, `about` oder `team`
+   (`about`), `kategorie`, `tag`, `archiv` oder `page/2` (`listing`). `/impressum.html` ist ein
+   Impressum, `/impressum-archiv-2019` nicht.
+5. Der Titel oder die erste Überschrift beginnt oder endet mit dem Namen eines Typs, etwa
+   „Impressum“, „Kontakt“, „Login“ oder „Suchergebnisse“ (auch „Firma | Impressum“).
+6. `auth`: ein Passwortfeld auf einer Seite mit wenig Text.
+7. `listing`: ein Link auf die nächste oder vorige Seite (`rel="next"`) oder eine Seite, die
+   vor allem aus Links besteht (mindestens 20 Links, die 60 % ihres Textes ausmachen).
+8. `content`, wenn die Seite mindestens `QUALITY_MIN_WORDS` (50) Wörter hat, sonst `other`.
+
+`signals` nennt jede Regel, die zum Typ passt, in dieser Reihenfolge, auch die nach der
+entscheidenden: `/impressum` mit dem Titel „Impressum“ hat `["url", "title"]`.
+
+Jeder Link (hier `site.links`, bei `POST /v1/extract` `links`) hat eine `category`: `download`
+für eine Datei, `social` für ein soziales Netzwerk oder eine Videoplattform (etwa Mastodon,
+YouTube, Instagram oder LinkedIn) und für einen Link innerhalb der Website den Typ, den seine URL
+sagt (`home`, `listing`, `imprint`, `privacy`, `legal`, `contact`, `about`, `auth`, `search`).
+Sonst ist er `nav` für eine Navigationshilfe wie „Nach oben“ oder „Menü“ und `content` für alles
+andere, auch für jeden anderen Link auf eine fremde Website. Ergebnisse, die vor den Seitentypen
+gespeichert wurden, haben keines der beiden Felder (null).
 
 ## Jede Seite mit ihren Metadaten extrahieren
 
@@ -127,8 +172,11 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
 1. **Website-Struktur**: Geben Sie die Start-URL ein, setzen Sie „Linktiefe“ und „Maximale
    Seitenzahl“, lassen Sie „Bereich“ beim Host, und klicken Sie auf „Website-Struktur lesen“.
 2. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“ die Seiten nach Host und Pfad;
-   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. „Alle auswählen“ markiert
-   jede URL; oder markieren Sie die Abschnitte, die Sie möchten.
+   während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme. Jede URL zeigt ihren
+   Seitentyp, und „Typen:“ über dem Baum zählt sie. „Alle auswählen“ markiert jede URL und
+   „Inhaltsseiten auswählen“ jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
+   Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,
+   die Sie möchten.
 3. Lassen Sie „Metadaten“ an, und tragen Sie für die schema.org- und LRMI-Felder eine
    `structured`-Anfrage in „Optionen (JSON)“ ein, zum Beispiel
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.
