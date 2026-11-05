@@ -121,6 +121,21 @@ def _submit(page: Page, tab: str) -> None:
     page.locator(f"#panel-{tab} button[type=submit]").click()
 
 
+def _form_error(page: Page) -> list[str]:
+    """Send invalid options from the extract tab (its Advanced section opened here, whatever
+    came before) and check the form error; the field is emptied again."""
+    page.click("#tab-extract")
+    section = page.locator("#panel-extract details.advanced")
+    if section.get_attribute("open") is None:
+        section.locator("summary").click()
+    page.fill("#extract-options", "{")
+    _submit(page, "extract")
+    expect(page.locator("#result [data-error-for]")).to_be_visible()
+    found = _axe(page, "form error")
+    page.fill("#extract-options", "")
+    return found
+
+
 def test_axe_reports_a_violation() -> None:
     """The harness itself: the injected axe-core is 4.14.0 and reports a known violation."""
     with browsing("about:blank") as (page, console):
@@ -150,6 +165,8 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         for tab in TABS:
             page.click(f"#tab-{tab.name}")
             expect(page.locator(f"#panel-{tab.name}")).to_be_visible()
+            for summary in page.locator(f"#panel-{tab.name} details.advanced > summary").all():
+                summary.click()
             found += _axe(page, f"tab {tab.name}")
 
         page.click("#tab-extract")
@@ -157,12 +174,13 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         _submit(page, "extract")
         expect(page.locator("#result h3.title")).to_have_text("Docs A")
         found += _axe(page, "extract result")
+        page.evaluate(
+            "document.querySelectorAll('#result details').forEach(d => { d.open = true; })"
+        )
+        expect(page.locator("#result button[data-action=copy]")).to_be_visible()
+        found += _axe(page, "extract result, expanded")
 
-        page.fill("#extract-options", "{")
-        _submit(page, "extract")
-        expect(page.locator("#result [data-error-for]")).to_be_visible()
-        found += _axe(page, "form error")
-        page.fill("#extract-options", "")
+        found += _form_error(page)
 
         page.click("#tab-batch")
         page.fill("#batch-urls", f"{origin}{SLOW_PATH}")
@@ -173,6 +191,18 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         expect(job.locator(".state")).to_have_attribute("data-value", "completed")
         found += _axe(page, "completed progress")
 
+        page.click("#tab-batch-file")
+        page.locator("#panel-batch-file input[type=file]").set_input_files(
+            {
+                "name": "urls.csv",
+                "mimeType": "text/csv",
+                "buffer": f"url\n{origin}/docs/a.html\njavascript:alert(1)\n".encode(),
+            }
+        )
+        _submit(page, "batch-file")
+        expect(page.locator("#result section.batch-preview")).to_be_visible()
+        found += _axe(page, "batch preview")
+
         page.click("#tab-site-structure")
         page.fill("#site-url", f"{origin}/")
         page.fill("#site-depth", "1")
@@ -182,6 +212,73 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         site.locator("button.tree-button").click()
         expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
         found += _axe(page, "site tree")
+
+    assert found == [], "\n".join(found)
+    assert console == []
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_chunk_result_adds_no_tab_stops_per_chunk(ui: tuple[str, str], language: Language) -> None:
+    """A chunk result with many chunks: no chunk takes the focus (P15-R8), and axe is clean with
+    every section open."""
+    url, _origin = ui
+    text = "\n\n".join(
+        f"Paragraph {n} says something about chunking in the playground." for n in range(60)
+    )
+    with browsing(f"{url}?lang={language}") as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.click("#tab-chunk")
+        page.fill("#chunk-text", text)
+        page.fill("#chunk-chunking", '{"strategy": "recursive", "size": 200}')
+        _submit(page, "chunk")
+        expect(page.locator("#result ol.chunks")).to_be_visible()
+        assert page.locator("#result ol.chunks > li").count() > 10
+        assert page.locator("#result ol.chunks pre[tabindex]").count() == 0
+        page.evaluate(
+            "document.querySelectorAll('#result details').forEach(d => { d.open = true; })"
+        )
+        found = _axe(page, "chunk result, expanded")
+    assert found == [], "\n".join(found)
+    assert console == []
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Language) -> None:
+    """The login, every tab with its Advanced section open, an extract result with every
+    details element open and a form error, at 390 x 844."""
+    url, origin = ui
+    found: list[str] = []
+    with browsing(f"{url}?lang={language}") as (page, console):
+        page.set_viewport_size({"width": 390, "height": 844})
+        found += _axe(page, "phone login")
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        for tab in TABS:
+            page.click(f"#tab-{tab.name}")
+            expect(page.locator(f"#panel-{tab.name}")).to_be_visible()
+            for summary in page.locator(f"#panel-{tab.name} details.advanced > summary").all():
+                if summary.evaluate("s => !s.parentElement.open"):
+                    summary.click()
+            found += _axe(page, f"phone tab {tab.name}")
+
+        page.click("#tab-extract")
+        page.fill("#extract-url", f"{origin}/docs/a.html")
+        _submit(page, "extract")
+        expect(page.locator("#result h3.title")).to_have_text("Docs A")
+        page.evaluate(
+            "document.querySelectorAll('#result details').forEach(d => { d.open = true; })"
+        )
+        expect(page.locator("#result button[data-action=copy]")).to_be_visible()
+        found += _axe(page, "phone extract result, expanded")
+        found += _form_error(page)
+
+        page.click("#tab-batch")
+        page.fill("#batch-urls", f"{origin}/docs/a.html\n{origin}/docs/b.html")
+        _submit(page, "batch")
+        job = page.locator("#result section.job")
+        expect(job.locator(".state")).to_have_attribute("data-value", "completed")
+        found += _axe(page, "phone completed progress (scrolling items table)")
 
     assert found == [], "\n".join(found)
     assert console == []
@@ -325,6 +422,7 @@ def test_error_is_associated_with_its_field(ui: tuple[str, str]) -> None:
         options = page.locator("#extract-options")
         hint = options.get_attribute("aria-describedby")
         page.fill("#extract-url", f"{origin}/docs/a.html")
+        page.click("#panel-extract details.advanced > summary")
         page.fill("#extract-options", "{")
         _submit(page, "extract")
         error = page.locator("#result [data-error-for=extract-options]")
@@ -392,8 +490,9 @@ def test_an_error_that_replaces_its_target_is_not_announced_as_done(
             {"name": "urls.csv", "mimeType": "text/csv", "buffer": csv_file}
         )
         _submit(page, "batch-file")
-        page.wait_for_selector("#result .batch-preview #preview-options")
+        page.wait_for_selector("#result .batch-preview #preview-options", state="attached")
         page.evaluate(_RECORD_STATUS)
+        page.click("#result .batch-preview details.advanced > summary")
         page.fill("#preview-options", "{")
         page.locator("#preview-form button[type=submit]").click()
         expect(page.locator("#result > [role=alert]")).to_have_count(1)
@@ -404,6 +503,37 @@ def test_an_error_that_replaces_its_target_is_not_announced_as_done(
     assert translate("en", "status.sending") in texts
     assert translate("en", "status.done") not in texts
     assert status == ""
+    assert console == []
+
+
+def test_error_in_a_closed_section_opens_it(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.evaluate("document.getElementById('extract-options').value = '{'")
+        page.fill("#extract-url", f"{origin}/docs/a.html")
+        _submit(page, "extract")
+        expect(page.locator("#panel-extract details.advanced")).to_have_attribute("open", "")
+        assert page.evaluate("document.activeElement.id") == "extract-options"
+        field = page.locator("#extract-options")
+        expect(field).to_have_attribute("aria-invalid", "true")
+        error_id = page.locator("#result [data-error-for=extract-options]").get_attribute("id")
+        assert error_id == "extract-options-error"
+        assert error_id in (field.get_attribute("aria-describedby") or "").split()
+    assert console == []
+
+
+def test_invalid_value_in_a_closed_section_opens_it(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.fill("#extract-url", f"{origin}/docs/a.html")
+        page.evaluate("document.getElementById('extract-wait-seconds').value = '99'")
+        page.evaluate("document.querySelector('#panel-extract details.advanced').open = false")
+        _submit(page, "extract")
+        expect(page.locator("#panel-extract details.advanced")).to_have_attribute("open", "")
     assert console == []
 
 

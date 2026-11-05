@@ -1,0 +1,10 @@
+<details class="advanced"{% if chosen and chosen["options"] %} open{% endif %}>
+  <summary>{{ t("form.advanced") }}</summary>
+  <p class="hint">{{ t("hint.advanced" if with_wait else "hint.advanced_options") }}</p>
+  {% if with_wait %}
+  <label for="{{ prefix }}-wait-seconds">{{ t("form.wait") }}</label>
+  <input id="{{ prefix }}-wait-seconds" name="wait_seconds" type="number" min="0" max="60" step="any" value="25" aria-describedby="{{ prefix }}-wait-seconds-hint">
+  <p class="hint" id="{{ prefix }}-wait-seconds-hint">{{ t("hint.wait_seconds") }}</p>
+  {% endif %}
+  {% include "forms/options.html" %}
+</details>

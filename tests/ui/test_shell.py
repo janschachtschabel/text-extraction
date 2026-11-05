@@ -11,6 +11,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Any, Final, cast
 
+import lxml.html
 import pytest
 import structlog
 from fastapi import Depends, FastAPI, File, Form, UploadFile
@@ -23,6 +24,7 @@ from tests.ui.conftest import AUTH, HX, USER_KEY, running
 from text_extraction.auth import Principal, authenticate
 from text_extraction.settings import ConfigError, load_settings
 from text_extraction.ui.forward import checked_path, forward
+from text_extraction.ui.i18n import LANGUAGES, Language, translate
 from text_extraction.ui.security import ui_principal
 
 UI_PACKAGE = Path(__file__).parents[2] / "src" / "text_extraction" / "ui"
@@ -191,6 +193,26 @@ def test_auth_none_renders_app_with_banner() -> None:
     assert 'id="app-shell"' in page
     assert "anonymous" in page
     assert 'id="login-form"' not in page
+
+
+@pytest.mark.parametrize("auth_mode", ["api_key", "none"])
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_masthead_holds_the_logo_title_and_intro(auth_mode: str, language: Language) -> None:
+    with running(auth_mode=auth_mode) as client:
+        page = lxml.html.fromstring(client.get(f"/ui?lang={language}").text)
+
+    (masthead,) = page.xpath("//header[@class='masthead']")
+    (brand,) = masthead.xpath("./div[@class='bar-inner brand']")
+    (logo,) = brand.xpath("./*[local-name()='svg']")
+    assert logo.get("class") == "logo"
+    assert logo.get("aria-hidden") == "true"
+    assert logo.get("focusable") == "false"
+    assert page.xpath("//h1") == brand.xpath("./h1")
+    assert [h1.text_content() for h1 in brand.xpath("./h1")] == [translate(language, "page.title")]
+    (intro,) = brand.xpath("./p[@class='masthead-intro']")
+    assert intro.text_content() == translate(language, "page.intro", path="/v1")
+    assert not masthead.xpath("ancestor::main")
+    assert page.xpath("//main[@id='app']")
 
 
 def test_security_headers_on_every_ui_answer(client: TestClient) -> None:

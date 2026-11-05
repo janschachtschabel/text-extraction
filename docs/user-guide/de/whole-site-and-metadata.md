@@ -178,7 +178,7 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,
    die Sie möchten.
 3. Lassen Sie „Metadaten“ an, und tragen Sie für die schema.org- und LRMI-Felder eine
-   `structured`-Anfrage in „Optionen (JSON)“ ein, zum Beispiel
+   `structured`-Anfrage in „Optionen (JSON)“ (unter „Erweitert“) ein, zum Beispiel
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.
    Klicken Sie auf „Auswahl extrahieren“.
 4. Jeder Batch zeigt seinen Fortschritt und seine Einträge; „Vorherige“ und „Nächste“ blättern

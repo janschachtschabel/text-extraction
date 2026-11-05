@@ -1,7 +1,8 @@
 /*
- * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3, P12-S6, P12-S8 and P12-S9), the only
- * one besides htmx: the keys, the language, the tabs, the site tree's selection, the page's
- * status line and the status line of an answer htmx does not swap.
+ * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3, P12-S6, P12-S8, P12-S9 and P15-R1),
+ * the only one besides htmx: the keys, the language, the tabs, the site tree's selection, the
+ * result's "Copy" button, the page's status line and the status line of an answer htmx does not
+ * swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -15,6 +16,11 @@
  *
  * Screenshot form: its "custom capture" fields are enabled only with the preset "custom" (without
  * this script they stay usable and the service ignores them for any other preset).
+ *
+ * Copy (P15-R1, P15-S4): a result's "Copy" button (data-action=copy) is rendered hidden and
+ * shown only where the clipboard API exists (a secure context); without this script it stays
+ * hidden. It writes the text of the result's first pre.content (the source shown) to the
+ * clipboard and says in #ui-status whether the browser allowed it.
  *
  * Tabs: the WAI-ARIA tabs pattern, with a roving tabindex; the arrow keys, Home and End move the
  * focus and the selection.
@@ -242,8 +248,45 @@
       selectAll(button.closest("form"), action === "tree-all");
     } else if (action === "tree-content") {
       selectContent(button.closest("form"), button.getAttribute("data-exclude") || "");
+    } else if (action === "copy") {
+      copyResult(button);
     }
   });
+
+  // The result's "Copy" button: shown only where the clipboard API exists.
+  function canCopy() {
+    return Boolean(window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText);
+  }
+
+  function showCopy() {
+    if (!canCopy()) {
+      return;
+    }
+    document.querySelectorAll("button[data-action=copy][hidden]").forEach(function (button) {
+      button.hidden = false;
+    });
+  }
+
+  document.addEventListener("DOMContentLoaded", showCopy);
+  document.addEventListener("htmx:load", showCopy);
+
+  // Writes the text shown in the button's result (its first pre.content) to the clipboard.
+  function copyResult(button) {
+    var view = button.closest(".result-view");
+    var source = view ? view.querySelector("pre.content") : null;
+    if (!source || !canCopy()) {
+      announceAgain(text("copy-failed"));
+      return;
+    }
+    navigator.clipboard.writeText(source.textContent).then(
+      function () {
+        announceAgain(text("copied"));
+      },
+      function () {
+        announceAgain(text("copy-failed"));
+      }
+    );
+  }
 
   // The site tree (P10-S20): checking a node checks its subtree, a node shows indeterminate
   // while part of its subtree is checked, and the counter shows how many URLs are selected.
@@ -362,6 +405,19 @@
     }
   }
 
+  // Says "message" even when #ui-status already holds it (a second "Copy"): the status is
+  // cleared first and written again a moment later, so a screen reader reads it once more.
+  function announceAgain(message) {
+    var status = document.getElementById("ui-status");
+    if (!status) {
+      return;
+    }
+    status.textContent = "";
+    window.setTimeout(function () {
+      status.textContent = message;
+    }, 50);
+  }
+
   // Whether "element" is a view that refreshes itself: its requests are no requests of the user's.
   function isRefresh(element) {
     return element instanceof Element && element.hasAttribute("data-refresh");
@@ -391,6 +447,22 @@
     }
   }
 
+  // Open every closed <details> around a control, so a focus or a browser's validation bubble
+  // does not point at a field nobody can see.
+  function revealField(control) {
+    var section = control.closest("details");
+    while (section) {
+      section.open = true;
+      section = section.parentElement ? section.parentElement.closest("details") : null;
+    }
+  }
+
+  document.addEventListener("invalid", function (event) {
+    if (event.target instanceof Element) {
+      revealField(event.target);
+    }
+  }, true);
+
   function tieError(root) {
     var error = root.matches("[data-error-for]") ? root : root.querySelector("[data-error-for]");
     var field = error && error.id ? error.getAttribute("data-error-for") : "";
@@ -404,6 +476,7 @@
     setDescribedBy(control, ids.concat([error.id]));
     control.setAttribute("aria-invalid", "true");
     control.setAttribute("data-error-id", error.id);
+    revealField(control);
     control.focus();
   }
 

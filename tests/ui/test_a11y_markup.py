@@ -79,6 +79,38 @@ def _page(client: TestClient, language: Language) -> Any:
     return _document(response.text)
 
 
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_wait_and_options_are_in_a_closed_advanced_section(
+    admin: TestClient, language: Language
+) -> None:
+    page = _page(admin, language)
+    for field in page.xpath("//textarea[@name='options'] | //input[@name='wait_seconds']"):
+        (section,) = field.xpath("ancestor::details")
+        assert "advanced" in section.get("class")
+        assert section.get("open") is None
+        summary = section.xpath("./summary")[0].text_content().strip()
+        assert summary == translate(language, "form.advanced")
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_advanced_hint_names_only_the_fields_the_form_has(
+    admin: TestClient, language: Language
+) -> None:
+    """The hint under "Advanced" speaks of the wait only where the form has a wait field."""
+    page = _page(admin, language)
+    sections = page.xpath("//details[contains(@class, 'advanced')]")
+    with_wait = [s for s in sections if s.xpath(".//input[@name='wait_seconds']")]
+    without_wait = [s for s in sections if not s.xpath(".//input[@name='wait_seconds']")]
+    assert with_wait
+    assert without_wait  # batch, batch file and site structure
+    for section in with_wait:
+        hint = section.xpath("./p[@class='hint'][1]")[0].text_content().strip()
+        assert hint == translate(language, "hint.advanced")
+    for section in without_wait:
+        hint = section.xpath("./p[@class='hint'][1]")[0].text_content().strip()
+        assert hint == translate(language, "hint.advanced_options")
+
+
 def _batch(client: TestClient, count: int) -> str:
     """A batch of ``count`` URLs started over REST, with a result for its first item."""
     listed = [f"{ORIGIN}/page-{number}" for number in range(count)]
@@ -408,3 +440,14 @@ def test_vendored_axe_is_pinned() -> None:
     third_party = AXE_THIRD_PARTY.read_text(encoding="utf-8")
     assert "MIT License" in third_party
     assert "colorjs.io" in third_party
+
+
+def test_workspace_holds_the_panels_then_the_result(admin: TestClient) -> None:
+    page = _page(admin, "en")
+    (workspace,) = page.xpath("//div[contains(@class, 'workspace')]")
+    (settings,) = workspace.xpath("./div[@class='settings']")
+    assert [p.get("id") for p in settings.xpath("./section")] == [f"panel-{t.name}" for t in TABS]
+    assert workspace.xpath("./section[@id='result']")
+    (bar,) = page.xpath("//div[@class='app-bar']")
+    assert bar.xpath(".//div[@class='who']")
+    assert bar.xpath(".//*[@role='tablist']")

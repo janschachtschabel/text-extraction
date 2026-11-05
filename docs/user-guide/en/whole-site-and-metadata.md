@@ -170,7 +170,7 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
    privacy, legal, contact, login, search and error pages and pages that failed; or check the
    sections you want.
 3. Leave "Metadata" on, and for the schema.org and LRMI fields put a `structured` request into
-   "Options (JSON)", for example
+   "Options (JSON)" (under "Advanced"), for example
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.
    Press "Extract selected".
 4. Each batch shows its progress and its items; "Previous" and "Next" page through them, and

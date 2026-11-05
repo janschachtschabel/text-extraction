@@ -333,14 +333,14 @@ def test_result_shows_the_unblocked_badge() -> None:
     assert texts(german, "//*[contains(@class, 'badge-unblocked')]") == [
         translate("de", "access.unblocked")
     ]
-    terms = texts(root, "//dl[@class='facts']/dt")
-    values = texts(root, "//dl[@class='facts']/dd")
+    terms = texts(root, "//dl[@class='facts']//dt")
+    values = texts(root, "//dl[@class='facts']//dd")
     assert dict(zip(terms, values, strict=True))[en("access.compliance")] == "ignore"
     plain = result_data(PAGE)
     root = tree(render_result(op="extract", http_status=200, envelope={"data": plain}))
     assert root.xpath("//*[contains(@class, 'badge-unblocked')]") == []
-    terms = texts(root, "//dl[@class='facts']/dt")
-    values = texts(root, "//dl[@class='facts']/dd")
+    terms = texts(root, "//dl[@class='facts']//dt")
+    values = texts(root, "//dl[@class='facts']//dd")
     assert dict(zip(terms, values, strict=True))[en("access.compliance")] == "enforce"
 
 
@@ -355,6 +355,6 @@ def test_choice_and_result_follow_the_language(admin_client: TestClient) -> None
     answer = run(admin_client, "extract", url=PAGE, access="maximum", headers={**ADMIN, **german})
 
     result = tree(answer.text)
-    terms = texts(result, "//dl[@class='facts']/dt")
-    values = texts(result, "//dl[@class='facts']/dd")
+    terms = texts(result, "//dl[@class='facts']//dt")
+    values = texts(result, "//dl[@class='facts']//dd")
     assert dict(zip(terms, values, strict=True))[translate("de", "access.compliance")] == "ignore"

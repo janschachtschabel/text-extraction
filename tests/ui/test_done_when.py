@@ -518,8 +518,8 @@ def facts(fragment: Any) -> dict[str, str]:
     """The result view's facts (``dl.facts``): each term with its value."""
     return dict(
         zip(
-            texts(fragment, "//dl[@class='facts']/dt"),
-            texts(fragment, "//dl[@class='facts']/dd"),
+            texts(fragment, "//dl[@class='facts']//dt"),
+            texts(fragment, "//dl[@class='facts']//dd"),
             strict=True,
         )
     )

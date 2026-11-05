@@ -28,7 +28,7 @@ from text_extraction.ui.forms import (
     OptionsError,
     build_body,
 )
-from text_extraction.ui.i18n import text_of, translate
+from text_extraction.ui.i18n import Language, text_of, translate
 from text_extraction.ui.markdown import render_markdown
 from text_extraction.ui.results import render_result
 from text_extraction.ui.texts import warning_text
@@ -77,8 +77,8 @@ def texts(root: Any, xpath: str) -> list[str]:
 
 def pairs(root: Any, dl_class: str) -> dict[str, str]:
     """The terms and descriptions of the definition list of ``dl_class``."""
-    terms = texts(root, f"//dl[@class='{dl_class}']/dt")
-    return dict(zip(terms, texts(root, f"//dl[@class='{dl_class}']/dd"), strict=True))
+    terms = texts(root, f"//dl[@class='{dl_class}']//dt")
+    return dict(zip(terms, texts(root, f"//dl[@class='{dl_class}']//dd"), strict=True))
 
 
 def raw_json(html: str) -> dict[str, Any]:
@@ -156,7 +156,7 @@ def test_format_choice_text_and_markdown(client: TestClient, choice: str, suffix
 
     assert sent_body(html)["format"] == choice
     assert raw_json(html)["data"]["format"] == choice
-    links = tree(html).xpath("//a[@download]")
+    links = tree(html).xpath("//a[@class='download']")
     assert [link.get("download") for link in links] == [f"result{suffix}"]
     href = links[0].get("href")
     media = "text/plain" if choice == "text" else "text/markdown"
@@ -536,7 +536,9 @@ def test_links_only_http() -> None:
     ]
     assert len(root.xpath("//ul[@class='links']/li")) == 5
     assert all(
-        (a.get("href") or "").startswith(("http://", "https://", "data:text/"))
+        (a.get("href") or "").startswith(
+            ("http://", "https://", "data:text/", "data:application/json;")
+        )
         for a in root.xpath("//a")
     )
 
@@ -556,6 +558,94 @@ def test_job_answer_is_shown() -> None:
 
     assert texts(root, "//*[@class='http-status']") == ["HTTP 202"]
     assert texts(root, "//*[@class='job']") == ["Continues as job job1 (extract): /v1/jobs/job1"]
+
+
+def test_figures_have_page_type_and_time() -> None:
+    data = result_data(page_type={"type": "content", "signals": ["word_count"]})
+    data["timings"]["total_ms"] = 1530
+    root = tree(rendered(data))
+    figures = pairs(root, "facts")
+    assert (figures["Page type"], figures["Time"]) == ("Content", "1.53 s")
+    german = pairs(tree(rendered(data, language="de")), "facts")
+    assert (german["Seitentyp"], german["Zeit"]) == ("Inhalt", "1,53 s")
+
+
+def test_figures_without_page_type_or_timings() -> None:
+    data = result_data()
+    del data["timings"]
+    figures = pairs(tree(rendered(data)), "facts")
+    assert "Page type" not in figures
+    assert "Time" not in figures
+
+
+def test_markdown_in_the_reading_card_and_source_folded(client: TestClient) -> None:
+    root = tree(run(client, "extract", **fields()).text)
+    (card,) = root.xpath("//section[contains(@class, 'reading')]")
+    assert card.xpath("./div[@class='markdown']//h1")
+    (source,) = card.xpath("./details[@class='source']")
+    assert source.get("open") is None
+    assert source.xpath("./pre[@class='content']")
+
+
+def test_text_in_the_reading_card() -> None:
+    root = tree(rendered(result_data(format="text")))
+    (card,) = root.xpath("//section[contains(@class, 'reading')]")
+    assert card.xpath("./pre[@class='content']")
+    assert not card.xpath(".//details")
+
+
+def test_what_happened_is_open_only_with_warnings() -> None:
+    def opened(data: dict[str, Any]) -> list[bool]:
+        found = tree(rendered(data)).xpath("//details[contains(@class, 'timeline-view')]")
+        return [section.get("open") is not None for section in found]
+
+    assert opened(result_data()) == [False]
+    assert opened(result_data(warnings=["content_too_short"])) == [True]
+
+
+def test_error_without_data_keeps_the_status_line() -> None:
+    envelope = {"status": "failed", "error": {"code": "forbidden", "message": "No."}}
+    root = tree(render_result(op="extract", http_status=403, envelope=envelope))
+    assert texts(root, "//header[@class='answer']/span[@class='http-status']") == ["HTTP 403"]
+    assert root.xpath("//header[@class='answer']/span[@data-value='failed']")
+    assert root.xpath("//dl[@class='facts']") == []
+
+
+def test_job_answer_has_no_figures() -> None:
+    job = {"id": "j1", "kind": "extract", "status_url": "/v1/jobs/j1"}
+    root = tree(render_result(op="extract", http_status=202, envelope={"data": job}))
+    assert texts(root, "//header[@class='answer']/span[@class='http-status']") == ["HTTP 202"]
+    assert root.xpath("//button[contains(@class, 'progress-button')]")
+    assert root.xpath("//dl[@class='facts']") == []
+    assert root.xpath("//div[contains(@class, 'toolbar')]") == []
+    assert root.xpath("//a[contains(@class, 'download-response')]") == []
+
+
+@pytest.mark.parametrize(("language", "fmt"), [("en", "markdown"), ("de", "text")])
+def test_toolbar_has_copy_save_and_save_response(language: Language, fmt: str) -> None:
+    envelope = {"status": "success", "data": result_data(format=fmt), "trace_id": "t"}
+    root = tree(render_result(op="extract", http_status=200, envelope=envelope, language=language))
+    (toolbar,) = root.xpath("//div[@class='toolbar']")
+    (copy,) = toolbar.xpath("./button[@data-action='copy']")
+    assert copy.get("hidden") is not None
+    assert copy.get("type") == "button"
+    key = "result.copy_markdown" if fmt == "markdown" else "result.copy_text"
+    assert copy.text_content().strip() == translate(language, key)
+    assert toolbar.xpath("./a[@class='download']")
+    (saved,) = toolbar.xpath("./a[@class='download-response']")
+    assert saved.get("download") == "response.json"
+    head, encoded = saved.get("href").split(",", 1)
+    assert head == "data:application/json;charset=utf-8;base64"
+    assert json.loads(base64.b64decode(encoded)) == envelope
+
+
+def test_save_response_is_left_out_when_too_large(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(results, "DOWNLOAD_MAX_CHARS", 100)
+    root = tree(rendered(result_data(content="x" * 200)))
+    assert root.xpath("//a[@class='download-response']") == []
+    assert texts(root, "//div[@class='toolbar']/p[@class='hint']") == [
+        translate("en", "result.response_too_large")
+    ]
 
 
 # --- the timeline --------------------------------------------------------------------------------
@@ -643,7 +733,7 @@ def test_timeline_from_fields() -> None:
 def test_html_download_is_plain_text() -> None:
     root = tree(rendered(result_data(format="html", content=f"<p>{SCRIPT}</p>")))
 
-    links = root.xpath("//a[@download]")
+    links = root.xpath("//a[@class='download']")
     assert [link.get("download") for link in links] == ["result.html"]
     assert links[0].get("href").startswith("data:text/plain;charset=utf-8;base64,")
     assert "data:text/html" not in rendered(result_data(format="html", content="<p>x</p>"))

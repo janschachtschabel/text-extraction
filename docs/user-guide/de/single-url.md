@@ -17,11 +17,18 @@ Antwort, auf die es ankommt. Eigene Dateien, Audio und Video beschreibt
 - „Website-Regeln“ (nur Admins): siehe [Website-Regeln](site-rules.md).
 - „Metadaten“ (standardmäßig an), „Metadaten, strukturiert“ (die schema.org- und LRMI-Felder,
   nach Namen gelesen) und „Bilder beschreiben“.
-- „Optionen (JSON)“ nimmt jedes weitere Feld des REST-Bodys, etwa `{"links": true}`.
+- „Optionen (JSON)“ unter „Erweitert“ (ein zugeklappter Abschnitt, mit „Sekunden warten, bevor
+  daraus ein Job wird“) nimmt jedes weitere Feld des REST-Bodys, etwa `{"links": true}`.
 
-Das Ergebnis zeigt den Inhalt, die Metadaten, die Bilder, die Links, die Warnungen und „Ablauf“,
-eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung. „Rohes JSON“ ist die
-ganze Antwort und „Als curl“ dieselbe Anfrage für die Shell.
+Das Ergebnis beginnt mit einer Statuszeile (dem Status und dem HTTP-Status), einer Werkzeugleiste
+und einer Karte mit Kennzahlen: URL, Sprache, Wörter, verwendeter Modus, Seitentyp und Zeit. Die
+Werkzeugleiste hat „Markdown kopieren“ (oder „Text kopieren“; es erscheint nur, wo der Browser die
+Zwischenablage erlaubt), den Download des Inhalts und „Antwort speichern (JSON)“, die ganze Antwort
+als Datei. Darunter folgen zugeklappte Abschnitte für die Metadaten, die Links, die Bilder und
+„Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung (sie öffnet
+sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
+steht der Quelltext unter „Quelltext anzeigen“). Am Ende steht „Als curl“, dieselbe Anfrage für
+die Shell, und „Rohes JSON“, die ganze Antwort.
 
 ## Mit REST
 

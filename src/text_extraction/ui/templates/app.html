@@ -1,4 +1,5 @@
 <section id="app-shell" class="shell">
+  <div class="app-bar"><div class="bar-inner">
   {% if auth_none %}<p class="banner" role="note">{{ t(banner) }}</p>{% endif %}
   <div class="who">
     {% set signed_in_name %}<strong>{{ principal_name }}</strong>{% endset %}
@@ -27,6 +28,11 @@
     <button type="button" role="tab" id="tab-{{ tab.name }}" data-tab="{{ tab.name }}" aria-controls="panel-{{ tab.name }}" aria-selected="{{ 'true' if loop.first else 'false' }}" tabindex="{{ '0' if loop.first else '-1' }}">{{ t(tab.label_key) }}</button>
     {% endfor %}
   </div>
+  {% endif %}
+  </div></div>
+  <div class="workspace bar-inner">
+  <div class="settings">
+  {% if tabs %}
   {% for tab in tabs %}
   <section class="panel" id="panel-{{ tab.name }}" data-panel="{{ tab.name }}" role="tabpanel" aria-labelledby="tab-{{ tab.name }}" tabindex="0"{% if not loop.first %} hidden{% endif %}>
     <h2 class="visually-hidden">{{ t(tab.label_key) }}</h2>
@@ -35,6 +41,8 @@
   </section>
   {% endfor %}
   {% endif %}
+  </div>
   {#- No live region: #ui-status announces each answer once (ruling P12-S9). #}
   <section id="result" class="result"></section>
+  </div>
 </section>

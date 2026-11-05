@@ -22,6 +22,6 @@
   </fieldset>
   {% set access_variant = "site" %}
   {% include "forms/access.html" %}
-  {% include "forms/options.html" %}
+  {% with with_wait=false %}{% include "forms/advanced.html" %}{% endwith %}
   <button type="submit">{{ t("form.read_site") }}</button>
 </form>

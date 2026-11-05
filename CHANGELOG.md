@@ -9,6 +9,30 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+Package 15: the playground's new look (plan
+[docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md](docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md)).
+No API change.
+
+### Added
+
+- The result's toolbar in the playground has "Copy Markdown" (for text output "Copy text"), which
+  copies the shown text where the browser allows clipboard access, and "Save response (JSON)",
+  which saves the whole envelope as a file (above `DOWNLOAD_MAX_CHARS` characters the toolbar
+  points to the `curl` command instead).
+
+### Changed
+
+- The playground has a new look: a white header with the name, the language switch and the tabs;
+  the settings on the left and the result on the right (stacked on a phone); a status line, a
+  card of figures (with page type and time), closed cards for metadata, links, images and "What
+  happened", and the text in a white reading card in a serif font. Colours, radii and fonts are
+  tokens, and the form fields keep a 3:1 boundary. It works at phone width, with visible focus
+  rings and without animation for `prefers-reduced-motion`.
+- "Wait seconds" (where a form has it) and "Options (JSON)" are under a closed "Advanced"
+  section; a form error in them opens it.
+- A Markdown result shows the rendered text in the reading card; the Markdown source is under
+  "Show source" (before, the source was shown and the rendered text was under "Show rendered").
+
 Package 14: screenshot formats, SVG previews and page types (plan
 [docs/superpowers/plans/2026-11-02-package-14-screenshots-svg-page-types.md](docs/superpowers/plans/2026-11-02-package-14-screenshots-svg-page-types.md)).
 

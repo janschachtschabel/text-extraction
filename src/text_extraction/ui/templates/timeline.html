@@ -1,5 +1,5 @@
-<section class="timeline-view" aria-label="{{ t('result.what_happened') }}">
-  <h4>{{ t("result.what_happened") }}</h4>
+<details class="card fold timeline-view"{% if warnings %} open{% endif %}>
+  <summary>{{ t("result.what_happened") }}</summary>
   {% if steps %}
   <ol class="timeline">
     {% for step in steps %}
@@ -8,11 +8,11 @@
   </ol>
   {% endif %}
   {% if warnings %}
-  <h5>{{ t("result.warnings") }}</h5>
+  <h4>{{ t("result.warnings") }}</h4>
   <ul class="warnings">
     {% for name, text in warnings %}
     <li><code>{{ name }}</code>{% if text %}: {{ t(text) }}{% endif %}</li>
     {% endfor %}
   </ul>
   {% endif %}
-</section>
+</details>

@@ -1,18 +1,38 @@
-/* The UI's styles. No inline styles anywhere (CSP style-src 'self'). */
+/* The UI's styles. No inline styles anywhere (CSP style-src 'self').
+   Every colour, radius and font stack is a token on :root (package 15); tests/ui/test_palette.py
+   holds the colours to the approved mockup and to their contrast ratios. */
 :root {
-  --ink: #1d2433;
-  --muted: #5b6475;
-  --line: #d5dae3;
+  --page: #f3f4f6;
   --paper: #ffffff;
-  --wash: #f4f6f9;
-  --accent: #1f5fbf;
+  --line: #dde1e6; /* card borders: decorative, a card's text identifies it */
+  --field-line: #808993; /* field and outlined button borders: 3:1 on --page and --paper (P15-R3) */
+  --ink: #1f2328;
+  --muted: #59636e;
+  --accent: #1d6f6a;
+  --accent-strong: #155a56;
+  --accent-wash: #e6f2f0;
   --accent-ink: #ffffff;
-  --warn: #8a5a00;
-  --warn-wash: #fff4dc;
+  --neutral-wash: #eef0f3;
+  --warn: #7a4d00;
+  --warn-wash: #fdf3d7;
   --error: #a3222b;
   --error-wash: #fde8ea;
-  --focus: #1f5fbf; /* at least 3:1 against --paper and --wash */
+  --focus: #1d6f6a; /* at least 3:1 against --page and --paper */
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-read: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+  --font-code: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius-card: 12px;
+  --radius-field: 8px;
+  --control: 44px;
+  --gutter: 24px;
+  --content-max: 1440px;
   color-scheme: light;
+}
+
+@media (max-width: 599.98px) {
+  :root {
+    --gutter: 16px;
+  }
 }
 
 * {
@@ -21,9 +41,17 @@
 
 body {
   margin: 0;
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 16px/1.5 var(--font-ui);
   color: var(--ink);
-  background: var(--wash);
+  background: var(--page);
+}
+
+a {
+  color: var(--accent);
+}
+
+a:hover {
+  color: var(--accent-strong);
 }
 
 [hidden] {
@@ -57,13 +85,30 @@ body {
   z-index: 10;
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--paper);
   color: var(--accent);
 }
 
 .skip-link:focus {
   top: 0.5rem;
+}
+
+/* Transitions: colour only, 120 ms, and only when the user has not asked for less motion. */
+@media (prefers-reduced-motion: no-preference) {
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  label.inline {
+    transition:
+      color 120ms,
+      background-color 120ms,
+      border-color 120ms,
+      box-shadow 120ms;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -80,48 +125,135 @@ body {
 code,
 pre,
 textarea {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-size: 0.9em;
 }
 
+/* The building blocks: the centred bar, cards, pill badges and section labels. */
+.bar-inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+/* One pill box: the status pills and the job, item, page-type and skipped markers share it. */
+.pill,
+.state,
+table.items .badge,
+.page-type,
+.skipped,
+.found {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.pill-success {
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.pill-partial {
+  background: var(--warn-wash);
+  color: var(--warn);
+}
+
+.pill-failed {
+  background: var(--error-wash);
+  color: var(--error);
+}
+
+.pill-neutral {
+  background: var(--neutral-wash);
+  color: var(--ink);
+}
+
+.section-label,
+legend {
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The masthead: the logo, the name and the intro, on white. */
 .masthead {
-  padding: 1rem 1.5rem;
   background: var(--paper);
   border-bottom: 1px solid var(--line);
 }
 
-.masthead h1 {
-  margin: 0;
-  font-size: 1.4rem;
+.brand {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+  min-height: 60px;
+  padding-block: 10px;
 }
 
-.masthead p {
-  margin: 0.25rem 0 0;
+.logo {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.masthead-intro {
+  margin: 0;
+  font-size: 14px;
   color: var(--muted);
 }
 
 main {
-  max-width: 72rem;
-  margin: 1.5rem auto;
-  padding: 0 1rem;
+  padding: 0;
 }
 
-.login,
-.shell {
-  background: var(--paper);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 1.25rem 1.5rem;
-}
-
+/* The login is a centred card (class card); the app's shell is full bleed. */
 .login {
-  max-width: 30rem;
-  margin: 0 auto;
+  max-width: min(30rem, calc(100% - 2 * var(--gutter)));
+  margin: var(--gutter) auto;
+  padding: 32px;
 }
 
+.login h2 {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 1.25rem;
+}
+
+/* Fields: 44 px high, 8 px radius, a border of 3:1 (P15-R3). */
 label {
   display: block;
   margin: 0.75rem 0 0.25rem;
+  font-size: 15px;
   font-weight: 600;
 }
 
@@ -129,10 +261,26 @@ input,
 select,
 textarea {
   width: 100%;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius-field);
+  background: var(--paper);
+  color: var(--ink);
   font: inherit;
+  font-size: 15px;
+}
+
+input:not([type="checkbox"], [type="radio"]),
+select {
+  min-height: var(--control);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 details {
@@ -144,26 +292,63 @@ summary {
   color: var(--muted);
 }
 
+/* Buttons: the primary one petrol on white text, the secondary one outlined. */
 button {
+  min-height: var(--control);
   margin-top: 1rem;
-  padding: 0.5rem 1rem;
+  padding: 0 1rem;
   border: 1px solid var(--accent);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--accent);
   color: var(--accent-ink);
   font: inherit;
+  font-weight: 600;
   cursor: pointer;
 }
 
+/* :where() keeps the hover rule at its old specificity, so tabs and link buttons still override it. */
+button:hover:where(:not(:disabled)) {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+/* Disabled: flat grey, no hover, a not-allowed cursor; --muted on --neutral-wash stays above 4.5:1. */
+button:disabled,
+button.secondary:disabled {
+  border-color: var(--line);
+  background: var(--neutral-wash);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* The wide submit button of a settings column. */
+form.op > button[type="submit"],
+.tree-actions > button[type="submit"],
+#login-form button[type="submit"] {
+  width: 100%;
+  min-height: 48px;
+  font-weight: 700;
+}
+
 button.secondary {
+  min-height: 40px;
   margin-top: 0;
+  padding: 0 14px;
+  border-color: var(--field-line);
   background: var(--paper);
-  color: var(--accent);
+  color: var(--ink);
+  font-weight: 400;
+}
+
+button.secondary:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--neutral-wash);
 }
 
 .error {
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-left: 3px solid var(--error);
+  border-radius: var(--radius-field);
   background: var(--error-wash);
   color: var(--error);
 }
@@ -171,17 +356,39 @@ button.secondary {
 .banner {
   margin: 0 0 1rem;
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-radius: var(--radius-field);
   background: var(--warn-wash);
   color: var(--warn);
+}
+
+/* The header bar: white, full bleed, with the session line and the tabs. */
+.app-bar {
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-bar .banner {
+  margin: 12px 0 0;
 }
 
 .who {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0.25rem 0.75rem;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  padding-top: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.who button.secondary {
+  min-height: 36px;
+}
+
+.app-bar .keys {
+  padding-top: 8px;
+  font-size: 14px;
 }
 
 .keys button {
@@ -201,8 +408,11 @@ button.secondary {
   margin-bottom: 0.5rem;
 }
 
+/* A target of at least 24 px (WCAG 2.5.8), however the bar wraps on a phone. */
 .language-switch a {
-  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
 }
 
 .language-switch a[aria-current="true"] {
@@ -211,31 +421,67 @@ button.secondary {
   text-decoration: none;
 }
 
-.language-switch .hint {
-  flex-basis: 100%;
+.who .language-switch .hint {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
-  margin: 1.25rem 0 0;
-  border-bottom: 1px solid var(--line);
+  gap: 0 0.5rem;
+  margin: 0 0 -1px;
 }
 
-.tabs button {
+.tabs [role="tab"] {
+  min-height: 44px;
   margin: 0;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
+  padding: 0 0.75rem;
+  border: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
+  font-weight: 400;
 }
 
-.tabs button[aria-selected="true"] {
-  border-color: var(--line);
-  background: var(--paper);
+.tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--accent);
   color: var(--ink);
+  font-weight: 600;
+}
+
+/* The workspace: the settings on the left, the result on the right; stacked below 60rem. */
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+  padding-top: 24px;
+  padding-bottom: var(--gutter);
+}
+
+@media (max-width: 60rem) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .workspace .result {
+    padding-top: 1rem;
+    border-top: 1px solid var(--line);
+  }
+}
+
+.settings .intro {
+  font-size: 14px;
+  color: var(--muted);
 }
 
 .panel {
@@ -252,10 +498,52 @@ button.secondary {
 
 /* Forms of the operations. */
 fieldset.choice {
-  margin: 0.75rem 0 0;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  min-width: 0;
+  margin: 22px 0 0;
+  padding: 0;
+  border: none;
+}
+
+fieldset.choice > legend {
+  margin-bottom: 8px;
+}
+
+.segmented {
+  display: flex;
+  gap: 8px;
+}
+
+.segmented label.inline {
+  flex: 1;
+  justify-content: center;
+  min-height: var(--control);
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius-field);
+  background: var(--paper);
+  font-size: 15px;
+}
+
+/* The checked segment shows 2 px in the accent: the 1 px border plus a 1 px inset ring, so the
+   box and the content keep their place. */
+.segmented label.inline:has(input:checked) {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--accent-wash);
+  font-weight: 600;
+}
+
+/* The collapsed section for the wait time and the JSON options. */
+details.advanced {
+  margin: 22px 0 0;
+}
+
+details.advanced > summary {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
 }
 
 fieldset.custom-capture:disabled {
@@ -277,33 +565,261 @@ label.inline input {
 .hint {
   margin: 0.25rem 0 0;
   color: var(--muted);
-  font-size: 0.9em;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
-/* The result view. */
-.result {
-  margin-top: 1.25rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--line);
+/* A result: a column of blocks 16 px apart; the cards are white on the grey page. */
+.result-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 
+.result-view > * {
+  margin: 0;
+}
+
+.result-view > button {
+  align-self: flex-start;
+}
+
+/* The status line (P15-S3): the status pill, the unblocked pill, the HTTP status. */
 .answer {
   display: flex;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
 }
 
-.http-status,
-.badge {
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: var(--wash);
+.http-status {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* The toolbar (P15-R1, P15-S4): the title, then "Copy", "Save" and "Save response", outlined. */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.toolbar .title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.toolbar > button.secondary,
+.toolbar > a.download,
+.toolbar > a.download-response {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius-field);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 15px;
+  text-decoration: none;
+}
+
+.toolbar > a.download:hover,
+.toolbar > a.download-response:hover {
+  border-color: var(--ink);
+  background: var(--neutral-wash);
+  color: var(--ink);
+}
+
+.toolbar > .hint,
+.toolbar > .cut-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* The figures (P15-S9): one card, the pairs in a wrapping row 28 px apart, the URL on its own. */
+dl.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  padding: 14px 20px;
   border: 1px solid var(--line);
-  font-size: 0.85em;
+  border-radius: var(--radius-card);
+  background: var(--paper);
+  font-size: 15px;
+}
+
+dl.facts .fact {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+dl.facts .fact-url {
+  flex-basis: 100%;
+}
+
+dl.facts dt {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+dl.facts dd {
+  min-width: 0;
+  font-weight: 700;
+}
+
+/* The cards of a result: the service info, a screenshot, open sections and closed folds. */
+dl.info,
+.result-view > details.curl-box,
+.result-view > details.raw {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+
+dl.info,
+.result-view .fold,
+.result-view > details.curl-box,
+.result-view > details.raw {
+  padding: 14px 20px;
+}
+
+.result-view .card.block {
+  padding: 20px 24px;
+}
+
+.result-view .card.block > h4 {
+  margin: 0 0 12px;
+}
+
+.result-view .card.shot {
+  padding: 12px;
+}
+
+.result-view .card.shot img.screenshot {
+  display: block;
+  border: none;
+}
+
+.result-view .fold > summary,
+.result-view > details.curl-box > summary,
+.result-view > details.raw > summary {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.result-view .fold[open] > summary,
+.result-view > details.curl-box[open] > summary,
+.result-view > details.raw[open] > summary {
+  margin-bottom: 12px;
+}
+
+.timeline-view h4 {
+  margin: 12px 0 4px;
+  font-size: 15px;
+}
+
+/* The reading card (P15-S5): the text in the serif reading font, at most 70 characters wide,
+   with a petrol rule on its left; the source below it in the code font. */
+.reading {
+  padding: 40px 48px 48px;
+}
+
+.reading > h4 {
+  margin: 0 0 16px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.reading > .cut-note {
+  margin: 0 0 16px;
+}
+
+.reading .markdown,
+.reading > pre.content {
+  max-width: 70ch;
+  margin: 0;
+  padding: 0 0 0 20px;
+  border: none;
+  border-left: 3px solid var(--accent);
+  border-radius: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-read);
+  font-size: 19px;
+  line-height: 1.75;
+}
+
+.reading > pre.content {
+  max-height: none;
+  overflow: visible;
+  white-space: pre-wrap;
+}
+
+.reading .markdown > :first-child {
+  margin-top: 0;
+}
+
+.reading .markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.reading .markdown :is(h1, h2, h3, h4, h5, h6) {
+  font-family: var(--font-ui);
+  line-height: 1.3;
+}
+
+.reading .markdown h1 {
+  font-size: 1.5em;
+}
+
+.reading .markdown h2 {
+  font-size: 1.25em;
+}
+
+.reading .markdown h3 {
+  font-size: 1.1em;
+}
+
+.reading details.source {
+  margin: 24px 0 0;
+}
+
+.reading details.source pre.content {
+  margin: 8px 0 0;
+  background: var(--page);
+  font-family: var(--font-code);
+}
+
+@media (max-width: 599.98px) {
+  .reading {
+    padding: 20px 16px;
+  }
+
+  .reading .markdown,
+  .reading > pre.content {
+    font-size: 17px;
+  }
 }
 
 .badge-success {
-  color: #1d6b35;
+  color: var(--accent-strong);
 }
 
 .badge-partial {
@@ -314,21 +830,17 @@ label.inline input {
   color: var(--error);
 }
 
-.badge-unblocked {
-  color: var(--warn);
-  background: var(--warn-wash);
-}
-
 .request-status {
   margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
+  border-left: 3px solid var(--error);
+  border-radius: var(--radius-field);
   background: var(--error-wash);
   color: var(--error);
 }
 
 .error-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-code);
   font-weight: 600;
 }
 
@@ -337,13 +849,18 @@ pre {
   max-height: 32rem;
   padding: 0.75rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--wash);
+  border-radius: var(--radius-field);
+  background: var(--neutral-wash);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-dl.facts,
+/* A chunk never scrolls (it wraps), so it takes no tab stop (P15-R8). */
+ol.chunks pre {
+  max-height: none;
+  overflow: visible;
+}
+
 dl.meta,
 dl.info {
   display: grid;
@@ -374,16 +891,6 @@ td {
   overflow-wrap: anywhere;
 }
 
-.download {
-  display: inline-block;
-  margin-bottom: 0.5rem;
-}
-
-.markdown {
-  padding: 0 0.75rem;
-  border-left: 3px solid var(--line);
-}
-
 ol.timeline .step {
   font-weight: 600;
 }
@@ -403,6 +910,16 @@ ol.timeline .step {
 figure.preview {
   margin: 0;
   max-width: 14rem;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+
+figure.preview figcaption {
+  margin-top: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 figure.preview img,
@@ -412,24 +929,40 @@ img.screenshot {
   border: 1px solid var(--line);
 }
 
+figure.preview img {
+  border-radius: var(--radius-field);
+}
+
 .skipped {
-  display: inline-block;
-  padding: 0.25rem 0.5rem;
-  border-radius: 6px;
   background: var(--warn-wash);
   color: var(--warn);
 }
 
-/* Jobs: progress, previews of batch files, the site tree. */
-.jobs-view section.job {
+/* Jobs: progress, previews of batch files, the site tree. A job, a preview and a tree are cards
+   by CSS (P15-S11); their markup keeps its classes. */
+.jobs-view section.job,
+section.batch-preview,
+section.tree-view {
   margin: 0 0 1rem;
-  padding: 0.75rem 1rem;
+  padding: 16px 20px;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-card);
+  background: var(--paper);
 }
 
-.jobs-view h4 {
+.jobs-view h4,
+section.batch-preview h4,
+section.tree-view h4 {
   margin: 0 0 0.5rem;
+  font-size: 16px;
+}
+
+section.batch-preview h5 {
+  margin: 1rem 0 0.25rem;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .bar {
@@ -441,22 +974,34 @@ img.screenshot {
 }
 
 progress {
-  width: 16rem;
-  max-width: 100%;
+  width: 100%;
+  max-width: 24rem;
   height: 1rem;
+  accent-color: var(--accent);
 }
 
+/* The job's state is a pill: completed green, failed red, the others grey. */
 .state,
 .found {
-  padding: 0.05rem 0.4rem;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--wash);
-  font-size: 0.85em;
+  background: var(--neutral-wash);
+  color: var(--ink);
+}
+
+/* The tree's "found in" marker: the pill box, smaller and not bold. */
+.found {
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .state-completed {
-  color: #1d6b35;
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.state-failed {
+  background: var(--error-wash);
+  color: var(--error);
 }
 
 .elapsed,
@@ -468,17 +1013,75 @@ progress {
   font-size: 0.9em;
 }
 
+.counts .success {
+  color: var(--accent-strong);
+}
+
+.counts .partial {
+  color: var(--warn);
+}
+
+.counts .failed {
+  color: var(--error);
+}
+
+.counts span {
+  font-weight: 700;
+}
+
+table.items {
+  font-size: 14px;
+}
+
+table.items th {
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+table.items .badge {
+  border: 0;
+  background: var(--neutral-wash);
+}
+
+table.items th,
+table.items td.open,
+table.items td.index {
+  white-space: nowrap;
+}
+
 table.items td.url {
+  min-width: 0;
   max-width: 32rem;
+  overflow-wrap: anywhere;
+}
+
+table.items .badge-success {
+  background: var(--accent-wash);
+}
+
+table.items .badge-partial {
+  background: var(--warn-wash);
+}
+
+table.items .badge-failed {
+  background: var(--error-wash);
 }
 
 button.link {
+  min-height: 0;
   margin: 0;
   padding: 0;
   border: none;
   background: none;
   color: var(--accent);
+  font-weight: 400;
   text-decoration: underline;
+}
+
+button.link:hover {
+  color: var(--accent-strong);
 }
 
 .pager,
@@ -486,7 +1089,7 @@ button.link {
 .tree-tools {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 8px;
   align-items: center;
 }
 
@@ -496,8 +1099,8 @@ form.cancel button {
 
 .cancelled {
   padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  background: var(--wash);
+  border-radius: var(--radius-field);
+  background: var(--neutral-wash);
 }
 
 ul.tree,
@@ -512,11 +1115,29 @@ ul.tree {
   overflow: auto;
   padding: 0.5rem;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-field);
+  background: var(--page);
+}
+
+/* The options of "Extract selected" are as wide as the settings column's fields. */
+.tree-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.tree-actions > * {
+  max-width: 380px;
 }
 
 ul.tree li {
   margin: 0.15rem 0;
+}
+
+/* The label and the pills after it share one middle line. */
+ul.tree label.inline,
+ul.tree .found {
+  vertical-align: middle;
 }
 
 ul.tree .title {
@@ -533,16 +1154,13 @@ ul.tree .title {
 
 /* A leaf's page type; a type guessed from the URL has a dashed border and says so. */
 .page-type {
-  padding: 0.05rem 0.4rem;
-  border-radius: 999px;
-  border: 1px solid var(--accent);
-  background: var(--paper);
-  color: var(--accent);
-  font-size: 0.85em;
+  border: 1px solid transparent;
+  background: var(--neutral-wash);
+  color: var(--ink);
 }
 
 .page-type-guessed {
-  border-style: dashed;
+  border: 1px dashed var(--field-line);
 }
 
 .page-type .type-guessed,
@@ -550,6 +1168,39 @@ ul.tree .title {
   color: var(--muted);
 }
 
+/* The counts of a batch preview: a two-column grid instead of the figures' row. */
+dl.facts.counts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 20px;
+  margin: 0 0 0.5rem;
+  background: var(--page);
+}
+
 .batch-preview textarea[readonly] {
-  background: var(--wash);
+  background: var(--neutral-wash);
+}
+
+/* A phone: tables in the result cards scroll inside the card instead of widening the page. */
+@media (max-width: 599.98px) {
+  table.items,
+  table.images,
+  table.values {
+    display: block;
+    overflow-x: auto;
+  }
+
+  /* A URL keeps a readable line length, a header word stays whole: the table scrolls in its
+     card, the page does not. */
+  table.items td.url {
+    min-width: 12rem;
+  }
+
+  table.images th {
+    white-space: nowrap;
+  }
+
+  form.previews {
+    margin-top: 12px;
+  }
 }

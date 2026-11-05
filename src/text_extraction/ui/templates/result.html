@@ -6,10 +6,11 @@
 {%- elif status %}{% set summary = t("status.result", status=t(status_text(status)) if status_text(status) else status) %}
 {%- else %}{% set summary = t("result.http_answer", status=http_status) %}{% endif %}
 <article class="result-view" data-announce="{{ summary }}">
+  {#- The status line (P15-S3): the status, unblocked, the HTTP status; also without data. -#}
   <header class="answer">
+    {% if status %}<span class="badge badge-{{ status }} pill pill-{{ status }}" data-value="{{ status }}">{{ t(status_text(status)) if status_text(status) else code(status) }}</span>{% endif %}
+    {% if unblocked %}<span class="badge-unblocked pill pill-partial">{{ t("access.unblocked") }}</span>{% endif %}
     <span class="http-status">HTTP {{ http_status }}</span>
-    {% if status %}<span class="badge badge-{{ status }}" data-value="{{ status }}">{{ t(status_text(status)) if status_text(status) else code(status) }}</span>{% endif %}
-    {% if unblocked %}<span class="badge badge-unblocked">{{ t("access.unblocked") }}</span>{% endif %}
   </header>
   {% if error %}
   <div class="error" role="alert"{% if error_for %} id="{{ error_for }}-error" data-error-for="{{ error_for }}"{% endif %}>
@@ -31,49 +32,38 @@
   </dl>
   {% endif %}
   {% if screenshot %}
-  <img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}">
+  <div class="card shot"><img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}"></div>
   {% elif screenshot_note %}
   <p class="screenshot-note">{{ t(screenshot_note) }}</p>
   {% with detail=screenshot_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
   {% endif %}
   {% if data %}
-  {% if data["title"] %}<h3 class="title">{{ data["title"] }}</h3>{% endif %}
+  {#- The toolbar (P15-R1, P15-S4): "Copy" is revealed by ui.js when the clipboard API exists. -#}
+  <div class="toolbar">
+    {% if data["title"] %}<h3 class="title">{{ data["title"] }}</h3>{% endif %}
+    {% if data["content"] is string %}<button type="button" class="secondary copy" data-action="copy" hidden>{{ t("result.copy_markdown") if data["format"] == "markdown" else t("result.copy_text") }}</button>{% endif %}
+    {% if download %}<a class="download" href="{{ download.href }}" download="{{ download.name }}">{{ t("result.download", suffix=download.suffix) }}</a>{% endif %}
+    {% if response_download %}<a class="download-response" href="{{ response_download.href }}" download="{{ response_download.name }}">{{ t("result.save_response") }}</a>
+    {% elif response_too_large %}<p class="hint">{{ t("result.response_too_large") }}</p>{% endif %}
+    {% if download and download.note %}<p class="cut-note">{{ t(download.note) }}</p>{% endif %}
+  </div>
+  {#- The figures (P15-S9): each pair in a div.fact, only the values that exist. -#}
   <dl class="facts">
-    {% if data["url"] %}<dt>URL</dt><dd>{{ data["url"] }}</dd>{% endif %}
+    {% if data["url"] %}<div class="fact fact-url"><dt>URL</dt><dd>{{ data["url"] }}</dd></div>{% endif %}
     {% if data["word_count"] is defined %}
-    <dt>{{ t("result.language") }}</dt><dd>{{ data["language"] or t("result.unknown") }}</dd>
-    <dt>{{ t("result.words") }}</dt><dd>{{ data["word_count"] }}</dd>
+    <div class="fact"><dt>{{ t("result.language") }}</dt><dd>{{ data["language"] or t("result.unknown") }}</dd></div>
+    <div class="fact"><dt>{{ t("result.words") }}</dt><dd>{{ data["word_count"] }}</dd></div>
     {% endif %}
-    <dt>{{ t("result.mode_used") }}</dt><dd>{{ code(data["mode_used"]) }}</dd>
-    {% if compliance_mode %}<dt>{{ t("access.compliance") }}</dt><dd>{{ code(compliance_mode) }}</dd>{% endif %}
+    {% if data["mode_used"] %}<div class="fact"><dt>{{ t("result.mode_used") }}</dt><dd>{{ code(data["mode_used"]) }}</dd></div>{% endif %}
+    {% if page_type %}<div class="fact"><dt>{{ t("result.page_type") }}</dt><dd><span class="pill pill-neutral">{{ t("page_type." ~ page_type) }}</span></dd></div>{% endif %}
+    {% if data["timings"] is mapping and data["timings"]["total_ms"] is number %}
+    {%- set total = "%.2f"|format(data["timings"]["total_ms"] / 1000) %}
+    <div class="fact"><dt>{{ t("result.time") }}</dt><dd>{{ t("progress.seconds", seconds=total|replace(".", ",") if lang == "de" else total) }}</dd></div>
+    {% endif %}
+    {% if compliance_mode %}<div class="fact"><dt>{{ t("access.compliance") }}</dt><dd>{{ code(compliance_mode) }}</dd></div>{% endif %}
   </dl>
-  {% if data["content"] is string %}
-  <section class="content-view" aria-label="{{ t('result.content') }}">
-    <h4>{{ t("result.content") }}</h4>
-    {% if download %}<a class="download" href="{{ download.href }}" download="{{ download.name }}">{{ t("result.download", suffix=download.suffix) }}</a>
-    {% if download.note %}<p class="cut-note">{{ t(download.note) }}</p>{% endif %}{% endif %}
-    {% if markdown %}
-    <details class="rendered">
-      <summary>{{ t("result.show_rendered") }}</summary>
-      <div class="markdown">{{ markdown }}</div>
-    </details>
-    {% endif %}
-    {% if content_note %}<p class="cut-note">{{ t(content_note) }}</p>{% endif %}
-    <pre class="content">{{ shown_content }}</pre>
-  </section>
-  {% endif %}
-  {% if metadata %}
-  <section aria-label="{{ t('result.metadata') }}">
-    <h4>{{ t("result.metadata") }}</h4>
-    <dl class="meta">
-      {% for row in metadata %}
-      <dt>{{ t(row.label) }}</dt><dd>{% if row.licences %}{% for licence in row.licences %}{{ licence.text }}{% if licence.source %} {{ t("result.licence_source", source=licence.source) }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% elif row.link %}<a href="{{ row.text }}" rel="noopener noreferrer">{{ row.text }}</a>{% else %}{{ row.text }}{% endif %}</dd>
-      {% endfor %}
-    </dl>
-  </section>
-  {% endif %}
   {% if structured %}
-  <section aria-label="{{ t('result.structured_values') }}">
+  <section class="card block" aria-label="{{ t('result.structured_values') }}">
     <h4>{{ t("result.structured") }}</h4>
     {% if structured["values"] %}
     <table class="values">
@@ -94,20 +84,30 @@
     {% if structured["tables"] %}<p class="hint">{{ t("result.tables", count=structured["tables"]) }}</p>{% endif %}
   </section>
   {% endif %}
-  {% if chunks %}
-  <section aria-label="{{ t('result.chunks') }}">
-    <h4>{{ t("result.chunks_count", count=chunks|length) }}</h4>
-    <ol class="chunks">
-      {% for chunk in chunks %}
-      <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>
+  {#- Collapsible cards (P15-S7): closed; "What happened" is open when there are warnings. -#}
+  {% if metadata %}
+  <details class="card fold">
+    <summary>{{ t("result.metadata") }}</summary>
+    <dl class="meta">
+      {% for row in metadata %}
+      <dt>{{ t(row.label) }}</dt><dd>{% if row.licences %}{% for licence in row.licences %}{{ licence.text }}{% if licence.source %} {{ t("result.licence_source", source=licence.source) }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% elif row.link %}<a href="{{ row.text }}" rel="noopener noreferrer">{{ row.text }}</a>{% else %}{{ row.text }}{% endif %}</dd>
       {% endfor %}
-    </ol>
-    {% if chunks_note %}<p class="cut-note">{{ t(chunks_note) }}</p>{% endif %}
-  </section>
+    </dl>
+  </details>
+  {% endif %}
+  {% if links %}
+  <details class="card fold">
+    <summary>{{ t("result.links_count", count=links|length) }}</summary>
+    <ul class="links">
+      {% for link in links %}
+      <li>{% if link["http"] %}<a href="{{ link['url'] }}" rel="noopener noreferrer">{{ link["text"] or link["url"] }}</a>{% else %}<span class="url">{{ link["url"] }}</span> {{ link["text"] }}{% endif %} <span class="kind">{{ code(link["kind"]) if link["kind"] }}</span></li>
+      {% endfor %}
+    </ul>
+  </details>
   {% endif %}
   {% if images or image_report %}
-  <section aria-label="{{ t('result.images') }}">
-    <h4>{{ t("result.images") }}</h4>
+  <details class="card fold">
+    <summary>{{ t("result.images") }}</summary>
     {% if image_report %}
     <p class="image-report">{{ t("result.image_report", asked=image_report["asked"], described=image_report["described"], skipped=image_report["skipped"], failed=image_report["failed"]) }}</p>
     {% endif %}
@@ -138,31 +138,49 @@
     <div class="previews-out"></div>
     {% endif %}
     {% endif %}
+  </details>
+  {% endif %}
+  {% if steps or warnings %}{% include "timeline.html" %}{% endif %}
+  {#- The reading card (P15-S5): rendered Markdown with its source folded, or the text. -#}
+  {% if data["content"] is string %}
+  <section class="content-view card reading" aria-label="{{ t('result.content') }}">
+    <h4>{{ t("result.content") }}</h4>
+    {% if content_note %}<p class="cut-note">{{ t(content_note) }}</p>{% endif %}
+    {% if markdown %}
+    <div class="markdown">{{ markdown }}</div>
+    <details class="source">
+      <summary>{{ t("result.show_source") }}</summary>
+      <pre class="content" tabindex="0">{{ shown_content }}</pre>
+    </details>
+    {% else %}
+    <pre class="content">{{ shown_content }}</pre>
+    {% endif %}
   </section>
   {% endif %}
-  {% include "timeline.html" %}
-  {% if links %}
-  <section aria-label="{{ t('result.links') }}">
-    <h4>{{ t("result.links_count", count=links|length) }}</h4>
-    <ul class="links">
-      {% for link in links %}
-      <li>{% if link["http"] %}<a href="{{ link['url'] }}" rel="noopener noreferrer">{{ link["text"] or link["url"] }}</a>{% else %}<span class="url">{{ link["url"] }}</span> {{ link["text"] }}{% endif %} <span class="kind">{{ code(link["kind"]) if link["kind"] }}</span></li>
+  {% if chunks %}
+  <section class="card block" aria-label="{{ t('result.chunks') }}">
+    <h4>{{ t("result.chunks_count", count=chunks|length) }}</h4>
+    <ol class="chunks">
+      {% for chunk in chunks %}
+      <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>
       {% endfor %}
-    </ul>
+    </ol>
+    {% if chunks_note %}<p class="cut-note">{{ t(chunks_note) }}</p>{% endif %}
   </section>
   {% endif %}
   {% endif %}
+  {#- A block that may scroll (max-height) takes the focus, so a keyboard can scroll it. The chunks never scroll (no max-height), so they take no focus. -#}
   {% if curl %}
   <details class="curl-box">
     <summary>{{ t("result.as_curl") }}</summary>
-    <pre class="curl">{{ curl }}</pre>
+    <pre class="curl" tabindex="0">{{ curl }}</pre>
   </details>
   {% endif %}
   {% if raw_json %}
   <details class="raw">
     <summary>{{ t("result.raw_json") }}</summary>
     {% if raw_note %}<p class="cut-note">{{ t(raw_note) }}</p>{% endif %}
-    <pre>{{ raw_json }}</pre>
+    <pre tabindex="0">{{ raw_json }}</pre>
   </details>
   {% endif %}
 </article>

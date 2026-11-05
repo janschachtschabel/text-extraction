@@ -10,7 +10,7 @@
 <script src="/ui/static/htmx-2.0.11.min.js" defer></script>
 <script src="/ui/static/ui.js" defer></script>
 </head>
-<body data-text-request-failed="{{ t('status.request_failed') }}" data-text-network-error="{{ t('status.network_error') }}" data-text-selected="{{ t('status.selected') }}" data-text-sending="{{ t('status.sending') }}" data-text-done="{{ t('status.done') }}" data-text-api-details="{{ t('result.api_details') }}">
+<body data-text-request-failed="{{ t('status.request_failed') }}" data-text-network-error="{{ t('status.network_error') }}" data-text-selected="{{ t('status.selected') }}" data-text-sending="{{ t('status.sending') }}" data-text-done="{{ t('status.done') }}" data-text-api-details="{{ t('result.api_details') }}" data-text-copied="{{ t('status.copied') }}" data-text-copy-failed="{{ t('status.copy_failed') }}">
 <a class="skip-link" href="#app">{{ t("a11y.skip") }}</a>
 {% block body %}{% endblock %}
 {#- The status line of the page's requests (ruling P12-S9): ui.js writes into it. -#}

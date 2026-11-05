@@ -1,8 +1,9 @@
-"""The UI's result view (rulings P10-S14 to P10-S17): every forwarded answer becomes one
-fragment with the HTTP status, the envelope's status and error (with the 422 ``details``), the
-result's content (as source, rendered Markdown and a download), its title, language, word
-count, metadata, structured values, chunks, images, links and timeline, the raw JSON and the
-curl line of the request with ``$API_KEY`` in place of the key.
+"""The UI's result view (rulings P10-S14 to P10-S17, P15-R1, P15-S3 to P15-S9): every forwarded
+answer becomes one fragment with the HTTP status, the envelope's status and error (with the 422
+``details``), the result's content (as source, rendered Markdown and a download), the whole answer
+as a JSON download, its title, language, word count, page type, time, metadata, structured
+values, chunks, images, links and timeline, the raw JSON and the curl line of the request with
+``$API_KEY`` in place of the key.
 
 Everything is rendered by autoescaping templates: no field of a result reaches the page as HTML,
 except the Markdown rendering of `render_markdown`, which escapes it itself."""
@@ -200,6 +201,27 @@ def _download(data: Mapping[str, Any]) -> Download | None:
     return Download(href=href, name=f"{DOWNLOAD_NAME}{suffix}", suffix=suffix, note=note)
 
 
+RESPONSE_NAME: Final = "response.json"
+
+
+def _response_download(text: str) -> Download | None:
+    """The whole answer (its JSON ``text``) as a file to save (ruling P15-R1), or None when the
+    JSON is longer than ``DOWNLOAD_MAX_CHARS``: a cut JSON file would be no JSON."""
+    if len(text) > DOWNLOAD_MAX_CHARS:
+        return None
+    encoded = base64.b64encode(text.encode()).decode("ascii")
+    href = f"data:application/json;charset=utf-8;base64,{encoded}"
+    return Download(href=href, name=RESPONSE_NAME, suffix=".json")
+
+
+def _page_type(data: Mapping[str, Any]) -> str | None:
+    """The result's page type (package 14); None for a result without one, such as one cached
+    before package 14."""
+    page_type = data.get("page_type")
+    kind = page_type.get("type") if isinstance(page_type, Mapping) else None
+    return kind if isinstance(kind, str) else None
+
+
 def _content_note(content: str) -> Message | None:
     if len(content) <= SHOWN_MAX_CHARS:
         return None
@@ -223,8 +245,8 @@ def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], Message |
     return shown, (Message("result.chunks_more", {"count": rest}) if rest else None)
 
 
-def _raw_json(envelope: Mapping[str, Any]) -> tuple[str, Message | None]:
-    text = json.dumps(envelope, indent=2, ensure_ascii=False)
+def _raw_json(text: str) -> tuple[str, Message | None]:
+    """The answer's JSON ``text`` as far as it is shown, and a note when it is cut."""
     if len(text) <= SHOWN_MAX_CHARS:
         return text, None
     note = Message("result.raw_cut", {"max": SHOWN_MAX_CHARS, "total": len(text)})
@@ -307,7 +329,8 @@ def result_context(
     data = envelope.get("data")
     data = data if isinstance(data, Mapping) else None
     error = envelope.get("error")
-    raw_json, raw_note = _raw_json(envelope) if envelope else (raw, None)
+    envelope_json = json.dumps(envelope, indent=2, ensure_ascii=False)  # serialised once
+    raw_json, raw_note = _raw_json(envelope_json) if envelope else (raw, None)
     context: dict[str, Any] = {
         "op": op,
         "http_status": http_status,
@@ -347,6 +370,9 @@ def result_context(
         return context
     context["data"] = data
     context["download"] = _download(data)
+    context["response_download"] = _response_download(envelope_json)
+    context["response_too_large"] = context["response_download"] is None
+    context["page_type"] = _page_type(data)
     content = data.get("content")
     if isinstance(content, str):
         context["shown_content"] = content[:SHOWN_MAX_CHARS]

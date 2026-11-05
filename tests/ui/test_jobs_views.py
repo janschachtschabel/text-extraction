@@ -1068,3 +1068,10 @@ def test_badges_are_translated(client: TestClient, monkeypatch: pytest.MonkeyPat
     shown = tree(client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=german).text)
     assert texts(shown, "//span[@class='status']") == ["erfolgreich", "fehlgeschlagen"]
     assert texts(shown, "//span[@class='error-code']/code") == ["timeout"]
+
+
+def test_advanced_is_open_when_the_preview_keeps_options(client: TestClient) -> None:
+    html = run(client, "batch-urls", urls=f"{PAGE}\nnot a url", options='{"links": true}').text
+    (section,) = tree(html).xpath("//form[@id='preview-form']//details[@class='advanced']")
+    assert section.get("open") is not None
+    assert texts(section, ".//textarea[@name='options']") == ['{"links": true}']
