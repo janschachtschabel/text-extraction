@@ -75,6 +75,7 @@ Terms of the API and of this guide.
 | unblock browser | Entsperr-Browser | The stealth Chrome of unblock mode. |
 | TDM opt-out | TDM-Nutzungsvorbehalt | A site's reservation against text and data mining. |
 | page type | Seitentyp | The kind of a page (`page_type`), such as content, listing or imprint; found by rules. |
+| soft 404 | Soft-404 | A page that answers 2xx but is an error page (`quality.soft_404`). |
 | link category | Linkkategorie | What a link leads to (`category`), such as an imprint, a social network or a download. |
 | entity | Treffer | A piece of personal data that `pii` found (not "Funde"). |
 | chunk | Chunk | One piece of split content. |

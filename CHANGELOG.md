@@ -9,35 +9,21 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-05
+
 Package 15: the playground's new look (plan
 [docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md](docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md)).
 No API change.
-
-### Added
-
-- The result's toolbar in the playground has "Copy Markdown" (for text output "Copy text"), which
-  copies the shown text where the browser allows clipboard access, and "Save response (JSON)",
-  which saves the whole envelope as a file (above `DOWNLOAD_MAX_CHARS` characters the toolbar
-  points to the `curl` command instead).
-
-### Changed
-
-- The playground has a new look: a white header with the name, the language switch and the tabs;
-  the settings on the left and the result on the right (stacked on a phone); a status line, a
-  card of figures (with page type and time), closed cards for metadata, links, images and "What
-  happened", and the text in a white reading card in a serif font. Colours, radii and fonts are
-  tokens, and the form fields keep a 3:1 boundary. It works at phone width, with visible focus
-  rings and without animation for `prefers-reduced-motion`.
-- "Wait seconds" (where a form has it) and "Options (JSON)" are under a closed "Advanced"
-  section; a form error in them opens it.
-- A Markdown result shows the rendered text in the reading card; the Markdown source is under
-  "Show source" (before, the source was shown and the rendered text was under "Show rendered").
 
 Package 14: screenshot formats, SVG previews and page types (plan
 [docs/superpowers/plans/2026-11-02-package-14-screenshots-svg-page-types.md](docs/superpowers/plans/2026-11-02-package-14-screenshots-svg-page-types.md)).
 
 ### Added
 
+- The result's toolbar in the playground has "Copy Markdown" (for text output "Copy text"), which
+  copies the shown text where the browser allows clipboard access, and "Save response (JSON)",
+  which saves the whole envelope as a file (above 10 million characters (fixed in code) the toolbar
+  points to the `curl` command instead).
 - Screenshots in other formats and sizes. `POST /v1/screenshot` takes `viewport` (the browser
   window, 320 to 3840 by 240 to 2160 px, default 1920×1080; a narrow one gets the page's mobile
   layout), `format` (`png`, `jpeg` or `webp`, default `png`), `quality` (1 to 100, default 80;
@@ -62,6 +48,16 @@ Package 14: screenshot formats, SVG previews and page types (plan
 
 ### Changed
 
+- The playground has a new look: a white header with the name, the language switch and the tabs;
+  the settings on the left and the result on the right (stacked on a phone); a status line, a
+  card of figures (with page type and time), closed cards for metadata, links, images and "What
+  happened", and the text in a white reading card in a serif font. Colours, radii and fonts are
+  tokens, and the form fields keep a 3:1 boundary. It works at phone width, with visible focus
+  rings and without animation for `prefers-reduced-motion`.
+- "Wait seconds" (where a form has it) and "Options (JSON)" are under a closed "Advanced"
+  section; a form error in them opens it.
+- A Markdown result shows the rendered text in the reading card; the Markdown source is under
+  "Show source" (before, the source was shown and the rendered text was under "Show rendered").
 - `auto` mode also tries the browser on a 2xx HTML page that is too short or empty
   (`content_too_short`, `empty_content`) when the page has a script. In A/B live runs on
   `wlo_200` the usable share rose from 83.0 % to 83.5 % and 84.5 % with no higher median time per
@@ -70,20 +66,50 @@ Package 14: screenshot formats, SVG previews and page types (plan
   1920 / the window's width, so it never holds more pixels than a 1920 px wide one.
   `SCREENSHOT_MAX_BYTES` applies to the encoded file. A `webp` image is at most 16,383 px high
   (the WebP limit): a taller one loses its bottom rows, with the warning `screenshot_clipped`.
+- A render whose screenshot is encoded (`jpeg`, `webp` or a `width`) keeps 10 s of its time for
+  the encode, at most a third of the render time. Encoded screenshots need a
+  `BROWSER_TIMEOUT_SECONDS` of about 8 s or more (a plain PNG about 6 s).
 - `GET /v1/jobs/{id}/artifacts/{name}` also serves `screenshot.jpg` (`image/jpeg`) and
   `screenshot.webp` (`image/webp`); `get_job_screenshot` reads the file's name from the job's
   result instead of assuming `screenshot.png`.
 - Pillow 13.0.0 is a direct runtime dependency (the browser worker imports it); before, it came in
   only through other dependencies.
-
-Dependency rule:
-
-### Changed
-
 - The 14-day rule applies again to docling-core, docling-parse and docling-ibm-models: their
   `exclude-newer-package` entries are back to "14 days" instead of the fixed date
   2026-10-23 that v0.1.2 used. The locked releases (2.104.0, 7.23.0, 4.0.4) are now older than
   14 days, so no package changes.
+- Dependency updates: openai 3.29.0 → 3.35.1 → 3.36.0, patchright 1.63.0 → 1.64.1 and
+  ctranslate2 4.8.2 → 4.8.3 (PR #36); yt-dlp 2026.8.19 → 2026.10.21, markitdown 0.1.8 → 0.1.9
+  (with mammoth 1.11.0 → 1.13.0), av 19.0.1 → 19.0.2 and deno 2.9.7 → 2.9.8; joserfc 1.7.5 →
+  1.7.7 and setuptools 84.0.0 → 84.2.1 for the advisories CVE-2026-119284 and
+  GHSA-xmj3-9gf7-h52w, neither of which is reachable in the service.
+
+### Fixed
+
+- `POST /v1/extract` with an invalid URL answers `mode_used: null` in every mode (before, `fast`
+  in `auto` and `fast` mode, `null` in `browser` mode).
+- The default screenshot is described as the whole page as PNG, 1920 px wide (window
+  1920 x 1080), in the OpenAPI texts and the MCP tool `screenshot_url`, which now names `options`
+  and the tool's own `full_page` argument.
+- Screenshot encoding is bounded by pixels and keeps its slot until the encoding thread ends; the
+  memory figures in configuration.md and architecture.md follow.
+- Page types: stricter rules for queries, path positions, headings and articles (A26-R1 to
+  A26-R5), described in the user guides and architecture.md. A language parameter (`lang`, `hl`,
+  `locale`) keeps a start page home (`/?lang=en`).
+- Playground: the "Custom capture" box no longer has a heavy dashed frame, an error in "Options
+  (JSON)" is marked on that field, the page-type badge in the site tree has its space and stays
+  inside the tree, the result cards have real headings, invalid fields are marked visibly, the
+  reading card carries the content's language, and counts use plural forms.
+- Documentation: SVG previews, the package 15 playground view, the `connect-src 'self'` note,
+  the Patchright and CTranslate2 versions, the READMEs' package list, the parameter bounds in the
+  user guide and German wording and terms (Soft-404) match the code.
+
+### Upgrade
+
+- Update the browser workers (and the other workers) before the API pods. A job whose options
+  carry `screenshot_options` (package 14) is refused by 0.1.2 workers (`extra="forbid"`), and a
+  0.1.2 API pod cannot read such a job. Results with `page_type` and a link `category` are read
+  by old pods.
 
 ## [0.1.2] - 2026-11-01
 

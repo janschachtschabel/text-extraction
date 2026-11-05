@@ -129,7 +129,7 @@ textarea {
   font-size: 0.9em;
 }
 
-/* The building blocks: the centred bar, cards, pill badges and section labels. */
+/* The building blocks: the centred bar, cards, pill badges and legends. */
 .bar-inner {
   max-width: var(--content-max);
   margin: 0 auto;
@@ -180,7 +180,6 @@ table.items .badge,
   color: var(--ink);
 }
 
-.section-label,
 legend {
   max-width: 100%;
   margin: 0;
@@ -273,6 +272,13 @@ textarea {
 input:not([type="checkbox"], [type="radio"]),
 select {
   min-height: var(--control);
+}
+
+/* A field the last answer named (ui.js sets aria-invalid): a 2 px error border, the padding 1 px
+   less so the text stays in place (audit U6). */
+:is(input, select, textarea)[aria-invalid="true"] {
+  padding: calc(0.45rem - 1px) calc(0.75rem - 1px);
+  border: 2px solid var(--error);
 }
 
 input[type="checkbox"],
@@ -546,8 +552,26 @@ details.advanced > summary {
   text-transform: uppercase;
 }
 
-fieldset.custom-capture:disabled {
+/* The "Custom capture" box is framed in both states, so choosing "Custom" moves nothing: dashed,
+   with dimmed fields, while another preset leaves its fields unused (audit U1). */
+fieldset.choice.custom-capture {
+  padding: 4px 14px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+fieldset.choice.custom-capture > legend {
+  margin-bottom: 0;
+  padding: 0 4px;
+}
+
+fieldset.choice.custom-capture:disabled {
   border-style: dashed;
+  color: var(--muted);
+}
+
+fieldset.custom-capture:disabled :is(input, select) {
+  opacity: 0.6;
 }
 
 label.inline {
@@ -701,8 +725,10 @@ dl.info,
   padding: 20px 24px;
 }
 
-.result-view .card.block > h4 {
+/* An h3 without a title above it, else an h4 (result.html): one size either way. */
+.result-view .card.block > :is(h3, h4) {
   margin: 0 0 12px;
+  font-size: 1em;
 }
 
 .result-view .card.shot {
@@ -721,13 +747,21 @@ dl.info,
   color: var(--ink);
 }
 
+/* A folded card's heading sits in its summary and reads as the summary did (audit U4). */
+.fold-title {
+  display: inline;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+}
+
 .result-view .fold[open] > summary,
 .result-view > details.curl-box[open] > summary,
 .result-view > details.raw[open] > summary {
   margin-bottom: 12px;
 }
 
-.timeline-view h4 {
+.timeline-view .warnings-title {
   margin: 12px 0 4px;
   font-size: 15px;
 }
@@ -738,7 +772,7 @@ dl.info,
   padding: 40px 48px 48px;
 }
 
-.reading > h4 {
+.reading > :is(h3, h4) {
   margin: 0 0 16px;
   font-size: 12px;
   font-weight: 700;
@@ -950,14 +984,14 @@ section.tree-view {
   background: var(--paper);
 }
 
-.jobs-view h4,
-section.batch-preview h4,
-section.tree-view h4 {
+.jobs-view section.job > h3,
+section.batch-preview > h3,
+section.tree-view > h4 {
   margin: 0 0 0.5rem;
   font-size: 16px;
 }
 
-section.batch-preview h5 {
+section.batch-preview > h4 {
   margin: 1rem 0 0.25rem;
   font-size: 12px;
   letter-spacing: 0.09em;
@@ -1034,6 +1068,7 @@ table.items {
 }
 
 table.items th {
+  position: relative; /* holds a hidden header text inside the table, which may scroll */
   font-size: 12px;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -1140,6 +1175,12 @@ ul.tree .found {
   vertical-align: middle;
 }
 
+/* A label wraps its page-type badge below the name when the line is too narrow (audit U3);
+   a label without a badge keeps its long name beside its checkbox. */
+ul.tree label.inline:has(.page-type) {
+  flex-wrap: wrap;
+}
+
 ul.tree .title {
   font-style: italic;
 }
@@ -1152,8 +1193,11 @@ ul.tree .title {
   color: var(--muted);
 }
 
-/* A leaf's page type; a type guessed from the URL has a dashed border and says so. */
+/* A leaf's page type; a type guessed from the URL has a dashed border and says so. The gap is
+   the space between the type and its note, which the flex box drops (audit U3); a guessed
+   badge may wrap on a narrow screen. */
 .page-type {
+  gap: 0.3em;
   border: 1px solid transparent;
   background: var(--neutral-wash);
   color: var(--ink);
@@ -1161,6 +1205,7 @@ ul.tree .title {
 
 .page-type-guessed {
   border: 1px dashed var(--field-line);
+  white-space: normal;
 }
 
 .page-type .type-guessed,

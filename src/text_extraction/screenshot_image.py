@@ -7,9 +7,12 @@ image keeps at most ``WEBP_MAX_SIDE_PX`` rows (ruling P14-R10).
 """
 
 import asyncio
+import contextlib
 import io
 import struct
+from collections import deque
 from dataclasses import dataclass, field
+from typing import Final
 from weakref import WeakKeyDictionary
 
 from PIL import Image
@@ -29,12 +32,62 @@ WEBP_MAX_SIDE_PX = 16383
 # The warning of a capture cut short: at SCREENSHOT_MAX_HEIGHT_PX, or at the WebP limit.
 SCREENSHOT_CLIPPED_WARNING = "screenshot_clipped"
 
-# Encodes running at once in a process. One holds the decoded image and its copies in memory:
-# about 180 MB for a 1920 x 16,384 JPEG, so concurrent renders must not each start one.
-ENCODE_CONCURRENCY = 2
-# One set of slots per event loop (a semaphore belongs to the loop it waits on); a worker runs
-# one loop, so this is the process's limit.
-_ENCODE_SLOTS: WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = WeakKeyDictionary()
+# Pixels of all encodes running at once in a process. An encode holds the decoded image and its
+# copies in memory: for 1920 x 16,384 pixels about 330 MB as JPEG, about 470 MB as WebP and up to
+# about 900 MB as WebP of a noisy page. So at most one encode of that size runs at once, and an
+# encode weighs its pixels (a larger image weighs the whole budget, and runs alone).
+ENCODE_PIXEL_BUDGET: Final = 1920 * 16_384
+# Of a render's deadline: the time kept for encoding its screenshot (on top of the time the
+# browser needs to take it), when the screenshot is encoded at all.
+ENCODE_RESERVE_SECONDS: Final = 10.0
+
+
+class _PixelBudget:
+    """``ENCODE_PIXEL_BUDGET`` on one event loop, granted in the order it was asked for (a large
+    image is not passed over by a stream of small ones)."""
+
+    def __init__(self) -> None:
+        self._free = ENCODE_PIXEL_BUDGET
+        self._waiters: deque[tuple[int, asyncio.Future[None]]] = deque()
+
+    async def acquire(self, pixels: int) -> None:
+        if not self._waiters and pixels <= self._free:
+            self._free -= pixels
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        entry = (pixels, waiter)
+        self._waiters.append(entry)
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if waiter.done() and not waiter.cancelled():  # granted as the wait was cancelled
+                self.release(pixels)
+            else:
+                with contextlib.suppress(ValueError):  # unless ``_grant`` dropped it already
+                    self._waiters.remove(entry)
+                self._grant()  # the next in line may fit now
+            raise
+
+    def release(self, pixels: int) -> None:
+        self._free += pixels
+        self._grant()
+
+    def _grant(self) -> None:
+        while self._waiters:
+            pixels, waiter = self._waiters[0]
+            if waiter.done():  # its wait was cancelled
+                self._waiters.popleft()
+                continue
+            if pixels > self._free:
+                return
+            self._waiters.popleft()
+            self._free -= pixels
+            waiter.set_result(None)
+
+
+# One budget per event loop (its waits belong to the loop); a worker runs one loop, so this is
+# the process's budget.
+_BUDGETS: WeakKeyDictionary[asyncio.AbstractEventLoop, _PixelBudget] = WeakKeyDictionary()
 
 
 def png_size(png: bytes) -> tuple[int, int]:
@@ -68,14 +121,15 @@ def encode_screenshot(png: bytes, options: ScreenshotOptions | None) -> EncodedS
     options = options or ScreenshotOptions()
     fmt, target = options.format, options.width
     pillow_format, content_type, name = _FORMATS[fmt]
-    if fmt == "png" and target is None:
+    if _passes_through(options):
         try:
             width, height = png_size(png)
         except struct.error as error:
             raise ScreenshotEncodeError("The screenshot is not a PNG.") from error
         return EncodedScreenshot(png, width, height, content_type, name)
     try:
-        with Image.open(io.BytesIO(png)) as source:
+        # The browser captures a PNG: any other format is refused, not decoded (audit A9).
+        with Image.open(io.BytesIO(png), formats=("PNG",)) as source:
             image = _scaled(source, target)
             clipped = fmt == "webp" and image.height > WEBP_MAX_SIDE_PX
             if clipped:
@@ -112,13 +166,54 @@ def _scaled(image: Image.Image, width: int | None) -> Image.Image:
     return image.resize((width, height), Image.Resampling.LANCZOS)
 
 
+def encode_reserve_seconds(options: ScreenshotOptions | None) -> float:
+    """The time a render keeps for encoding its screenshot: none for a PNG passed through."""
+    if _passes_through(options):
+        return 0.0
+    return ENCODE_RESERVE_SECONDS
+
+
+def _passes_through(options: ScreenshotOptions | None) -> bool:
+    return options is None or (options.format == "png" and options.width is None)
+
+
+def _weight(png: bytes) -> int:
+    """The pixels an encode of ``png`` takes of the budget; a PNG without a readable header
+    takes all of it."""
+    try:
+        width, height = png_size(png)
+    except struct.error:
+        return ENCODE_PIXEL_BUDGET
+    return min(width * height, ENCODE_PIXEL_BUDGET)
+
+
 async def encode_screenshot_limited(
     png: bytes, options: ScreenshotOptions | None
 ) -> EncodedScreenshot:
-    """``encode_screenshot`` on a thread, at most ``ENCODE_CONCURRENCY`` at once."""
+    """``encode_screenshot`` on a thread, within ``ENCODE_PIXEL_BUDGET``; a PNG passed through
+    takes none of it. A cancel ends the wait, not the encode: its thread runs on with the image
+    in memory, so its pixels stay taken until the thread ends."""
+    if _passes_through(options):
+        return encode_screenshot(png, options)
     loop = asyncio.get_running_loop()
-    slots = _ENCODE_SLOTS.get(loop)
-    if slots is None:
-        slots = _ENCODE_SLOTS[loop] = asyncio.Semaphore(ENCODE_CONCURRENCY)
-    async with slots:
-        return await asyncio.to_thread(encode_screenshot, png, options)
+    budget = _BUDGETS.get(loop)
+    if budget is None:
+        budget = _BUDGETS[loop] = _PixelBudget()
+    pixels = _weight(png)
+    await budget.acquire(pixels)
+    try:
+        encoding = loop.run_in_executor(None, encode_screenshot, png, options)
+    except BaseException:
+        budget.release(pixels)
+        raise
+
+    def ended(done: asyncio.Future[EncodedScreenshot]) -> None:
+        budget.release(pixels)
+        # When the wait is cancelled first, shield drops its own callback on the encode, so
+        # nothing else reads its outcome: this marks the exception as read, and an encode
+        # nobody waits for any more logs no "Future exception was never retrieved".
+        if not done.cancelled():
+            done.exception()
+
+    encoding.add_done_callback(ended)
+    return await asyncio.shield(encoding)

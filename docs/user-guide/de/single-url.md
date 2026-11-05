@@ -27,7 +27,7 @@ Zwischenablage erlaubt), den Download des Inhalts und „Antwort speichern (JSON
 als Datei. Darunter folgen zugeklappte Abschnitte für die Metadaten, die Links, die Bilder und
 „Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung (sie öffnet
 sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
-steht der Quelltext unter „Quelltext anzeigen“). Am Ende steht „Als curl“, dieselbe Anfrage für
+steht der Quelltext unter „Quelltext anzeigen“). Am Ende stehen „Als curl“, dieselbe Anfrage für
 die Shell, und „Rohes JSON“, die ganze Antwort.
 
 ## Mit REST

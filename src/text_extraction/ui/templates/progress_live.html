@@ -16,7 +16,7 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
   {% for job in jobs %}
   <section class="job" data-job="{{ job.id }}">
     {% set job_id %}<code class="job-id">{{ job.id }}</code>{% endset %}
-    <h4>{{ t("progress.job", id=job_id) }}{% if job.kind %} <span class="kind">{{ code(job.kind) }}</span>{% endif %}{% if job.state %} <span class="state state-{{ job.state }}" data-value="{{ job.state }}">{{ t(state_text(job.state)) if state_text(job.state) else code(job.state) }}</span>{% endif %}</h4>
+    <h3>{{ t("progress.job", id=job_id) }}{% if job.kind %} <span class="kind">{{ code(job.kind) }}</span>{% endif %}{% if job.state %} <span class="state state-{{ job.state }}" data-value="{{ job.state }}">{{ t(state_text(job.state)) if state_text(job.state) else code(job.state) }}</span>{% endif %}</h3>
     {% if job.error %}
     <div class="error job-error">
       <p class="error-text">{{ t(job.error) }}</p>
@@ -33,7 +33,7 @@ buttons keep their ids across a refresh, so htmx keeps the focus on them (P12-S8
     <p class="elapsed">{{ t("progress.elapsed", elapsed=job.elapsed) }}</p>
     {% if job.items %}
     <table class="items">
-      <thead><tr><th scope="col">#</th><th scope="col">URL</th><th scope="col">{{ t("progress.state") }}</th><th scope="col">{{ t("progress.error") }}</th><th scope="col"></th></tr></thead>
+      <thead><tr><th scope="col">#</th><th scope="col">URL</th><th scope="col">{{ t("progress.state") }}</th><th scope="col">{{ t("progress.error") }}</th><th scope="col"><span class="visually-hidden">{{ t("progress.actions") }}</span></th></tr></thead>
       <tbody>
         {% for item in job.items %}
         <tr>

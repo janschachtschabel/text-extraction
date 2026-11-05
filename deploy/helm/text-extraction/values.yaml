@@ -263,8 +263,9 @@ workers:
         cpu: 2250m
         memory: 4608Mi
     # As the top-level documentParentReserveMiB, for these pods: the reserve covers Chromium with
-    # `concurrency` pages and the selector child (512) as well, so each document conversion child
-    # gets (4608 - 3072) / 2 = 768 MiB of address space (DOCUMENT_MEMORY_LIMIT_MB).
+    # `concurrency` pages, the selector child (512) and the screenshot encodes (up to about 900 MB
+    # at the default SCREENSHOT_MAX_HEIGHT_PX) as well, so each document conversion child gets
+    # (4608 - 3072) / 2 = 768 MiB of address space (DOCUMENT_MEMORY_LIMIT_MB).
     documentParentReserveMiB: 3072
     # Size limit of the emptyDir at /tmp: browser profiles, Chrome's caches and Xvfb's socket.
     # The browsers use it instead of /dev/shm (--disable-dev-shm-usage).

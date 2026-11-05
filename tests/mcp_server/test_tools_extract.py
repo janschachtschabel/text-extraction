@@ -711,8 +711,9 @@ def test_screenshot_image_has_the_media_type_of_its_format(
 def test_screenshot_tool_describes_the_formats() -> None:
     description = ScreenshotUrlTool().description or ""
 
-    assert "PNG, JPEG or WebP" in description
-    assert "1920 px wide" not in description
+    assert "`format` (png, jpeg, webp)" in description
+    assert "whole page as PNG, 1920 px wide (window 1920 x 1080)" in description
+    assert "`full_page: false` (the tool's own argument, not inside `options`)" in description
 
 
 def test_screenshot_hint_without_a_size() -> None:

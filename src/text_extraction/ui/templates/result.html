@@ -5,6 +5,11 @@
 {%- set summary = t("status.result_time", status=t(status_text(status)) if status_text(status) else status, seconds=seconds|replace(".", ",") if lang == "de" else seconds) %}
 {%- elif status %}{% set summary = t("status.result", status=t(status_text(status)) if status_text(status) else status) %}
 {%- else %}{% set summary = t("result.http_answer", status=http_status) %}{% endif %}
+{#- The headings follow the tab's h2 without a gap (audit U8): the title is an h3 and the cards'
+headings below it h4; without a title the cards' headings are h3. A card's sub-heading is one
+level lower. -#}
+{%- set card_heading = "h4" if data and data["title"] else "h3" %}
+{%- set sub_heading = "h5" if card_heading == "h4" else "h4" %}
 <article class="result-view" data-announce="{{ summary }}">
   {#- The status line (P15-S3): the status, unblocked, the HTTP status; also without data. -#}
   <header class="answer">
@@ -64,7 +69,7 @@
   </dl>
   {% if structured %}
   <section class="card block" aria-label="{{ t('result.structured_values') }}">
-    <h4>{{ t("result.structured") }}</h4>
+    <{{ card_heading }}>{{ t("result.structured") }}</{{ card_heading }}>
     {% if structured["values"] %}
     <table class="values">
       <thead><tr><th scope="col">{{ t("result.field") }}</th><th scope="col">{{ t("result.value") }}</th><th scope="col">{{ t("result.source") }}</th></tr></thead>
@@ -81,13 +86,13 @@
       {% for name in structured["missing"] %}<li>{{ name }}</li>{% endfor %}
     </ul>
     {% endif %}
-    {% if structured["tables"] %}<p class="hint">{{ t("result.tables", count=structured["tables"]) }}</p>{% endif %}
+    {% if structured["tables"] %}<p class="hint">{{ tn("result.tables", structured["tables"]) }}</p>{% endif %}
   </section>
   {% endif %}
   {#- Collapsible cards (P15-S7): closed; "What happened" is open when there are warnings. -#}
   {% if metadata %}
   <details class="card fold">
-    <summary>{{ t("result.metadata") }}</summary>
+    <summary><{{ card_heading }} class="fold-title">{{ t("result.metadata") }}</{{ card_heading }}></summary>
     <dl class="meta">
       {% for row in metadata %}
       <dt>{{ t(row.label) }}</dt><dd>{% if row.licences %}{% for licence in row.licences %}{{ licence.text }}{% if licence.source %} {{ t("result.licence_source", source=licence.source) }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}{% elif row.link %}<a href="{{ row.text }}" rel="noopener noreferrer">{{ row.text }}</a>{% else %}{{ row.text }}{% endif %}</dd>
@@ -97,7 +102,7 @@
   {% endif %}
   {% if links %}
   <details class="card fold">
-    <summary>{{ t("result.links_count", count=links|length) }}</summary>
+    <summary><{{ card_heading }} class="fold-title">{{ t("result.links_count", count=links|length) }}</{{ card_heading }}></summary>
     <ul class="links">
       {% for link in links %}
       <li>{% if link["http"] %}<a href="{{ link['url'] }}" rel="noopener noreferrer">{{ link["text"] or link["url"] }}</a>{% else %}<span class="url">{{ link["url"] }}</span> {{ link["text"] }}{% endif %} <span class="kind">{{ code(link["kind"]) if link["kind"] }}</span></li>
@@ -107,7 +112,7 @@
   {% endif %}
   {% if images or image_report %}
   <details class="card fold">
-    <summary>{{ t("result.images") }}</summary>
+    <summary><{{ card_heading }} class="fold-title">{{ t("result.images") }}</{{ card_heading }}></summary>
     {% if image_report %}
     <p class="image-report">{{ t("result.image_report", asked=image_report["asked"], described=image_report["described"], skipped=image_report["skipped"], failed=image_report["failed"]) }}</p>
     {% endif %}
@@ -141,25 +146,26 @@
   </details>
   {% endif %}
   {% if steps or warnings %}{% include "timeline.html" %}{% endif %}
-  {#- The reading card (P15-S5): rendered Markdown with its source folded, or the text. -#}
+  {#- The reading card (P15-S5): rendered Markdown with its source folded, or the text. The
+  content is in its own language (``content_lang``, WCAG 3.1.2), the card's texts in the page's. -#}
   {% if data["content"] is string %}
   <section class="content-view card reading" aria-label="{{ t('result.content') }}">
-    <h4>{{ t("result.content") }}</h4>
+    <{{ card_heading }}>{{ t("result.content") }}</{{ card_heading }}>
     {% if content_note %}<p class="cut-note">{{ t(content_note) }}</p>{% endif %}
     {% if markdown %}
-    <div class="markdown">{{ markdown }}</div>
+    <div class="markdown"{% if content_lang %} lang="{{ content_lang }}"{% endif %}>{{ markdown }}</div>
     <details class="source">
       <summary>{{ t("result.show_source") }}</summary>
-      <pre class="content" tabindex="0">{{ shown_content }}</pre>
+      <pre class="content" tabindex="0"{% if content_lang %} lang="{{ content_lang }}"{% endif %}>{{ shown_content }}</pre>
     </details>
     {% else %}
-    <pre class="content">{{ shown_content }}</pre>
+    <pre class="content"{% if content_lang %} lang="{{ content_lang }}"{% endif %}>{{ shown_content }}</pre>
     {% endif %}
   </section>
   {% endif %}
   {% if chunks %}
   <section class="card block" aria-label="{{ t('result.chunks') }}">
-    <h4>{{ t("result.chunks_count", count=chunks|length) }}</h4>
+    <{{ card_heading }}>{{ t("result.chunks_count", count=chunks|length) }}</{{ card_heading }}>
     <ol class="chunks">
       {% for chunk in chunks %}
       <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>

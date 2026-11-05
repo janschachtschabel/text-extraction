@@ -48,18 +48,18 @@ async def screenshot(
     request: Request,
     principal: Annotated[Principal, Depends(require_role("user"))],
 ) -> Envelope[ScreenshotResult] | JSONResponse:
-    """Render a URL in the browser and capture it as an image: a 1920x1080 PNG unless `viewport`,
-    `format`, `quality` and `width` say otherwise. A full-page capture holds at most 1920 x
-    `SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport gets a shorter capture (its height is
-    cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport width).
+    """Render a URL in the browser and capture it as an image: the whole page as PNG, 1920 px wide
+    (window 1920 x 1080), unless `viewport`, `format`, `quality` and `width` say otherwise. A
+    full-page capture holds at most 1920 x `SCREENSHOT_MAX_HEIGHT_PX` pixels, so a wider viewport
+    gets a shorter capture (its height is cut at `SCREENSHOT_MAX_HEIGHT_PX` x 1920 / viewport
+    width).
 
     `data.screenshot` references the file: download it from its `url`
     (`GET /v1/jobs/{id}/artifacts/screenshot.png`, `.jpg` or `.webp` by `format`) within
-    `ARTIFACT_TTL_SECONDS`; the download
-    needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise 400). The page's
-    `quality` is reported but does not fail a stored screenshot. Outcomes of the target answer
-    200 with `status: failed`, as for `/v1/extract`; without a browser worker in time the
-    answer is `failed`/`timeout`, retryable. 400 while browser mode is off, 403 for an
+    `ARTIFACT_TTL_SECONDS`; the download needs jobs to be enabled (`JOBS_ENABLED=true`, otherwise
+    400). The page's `quality` is reported but does not fail a stored screenshot. Outcomes of the
+    target answer 200 with `status: failed`, as for `/v1/extract`; without a browser worker in
+    time the answer is `failed`/`timeout`, retryable. 400 while browser mode is off, 403 for an
     `evaluate` action of a non-admin key or a compliance mode the key may not choose. With
     `wait_seconds`: 202 with the job (kind `screenshot`), whose item holds the result.
     """
@@ -67,7 +67,7 @@ async def screenshot(
 
 
 def screenshot_options_of(body: ScreenshotRequest) -> ScreenshotOptions | None:
-    """The screenshot options of a request; None when it asks for none (a 1920x1080 PNG)."""
+    """The screenshot options of a request; None when it asks for none (the default screenshot)."""
     return body.screenshot_options()
 
 

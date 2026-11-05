@@ -79,7 +79,7 @@ jobs:
       INTERNAL_URLS: >-
         http://127.0.0.1:9090,http://127.0.0.1:9091,http://127.0.0.1:9092,http://127.0.0.1:9093,http://127.0.0.1:9094,http://127.0.0.1:9095,http://127.0.0.1:9096
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -92,7 +92,7 @@ jobs:
 
       # uv reads .python-version (3.13) and provisions its own managed Python. The generator runs
       # on the runner; the dev group holds python-docx for the generated upload.
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -248,7 +248,7 @@ jobs:
       # Only what the generator wrote (summary.md, sizing.json, stats.jsonl, results.jsonl,
       # metrics/), the farm's records (farm/) and the service logs; never .env or any inspect
       # output.
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: load-results

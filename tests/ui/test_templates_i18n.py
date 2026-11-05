@@ -51,6 +51,9 @@ _WORD = re.compile(r"[^\W\d_]+")
 # A whole key, not a prefix joined with a value (``t("switch." ~ option)``).
 _T_CALL = re.compile(r"""\bt\(\s*(["'])([^"']+)\1\s*[,)]""")
 _MESSAGE_CALL = re.compile(r"""\bMessage\(\s*(["'])([^"']+)\1\s*[,)]""")
+# A count text: ``tn("tree.urls", count)`` in a template, ``count_message("…", count)`` in Python;
+# its key has a ``.one`` and a ``.other`` form.
+_COUNT_CALL = re.compile(r"""\b(?:tn|count_message)\(\s*(["'])([^"']+)\1\s*,""")
 _QUOTED = re.compile(r"""(["'])([a-z0-9_-]+(?:\.[a-z0-9_-]+)+)\1""")
 # A key prefix joined with a value in a template: ``t("switch." ~ option)``.
 _JOINED_PREFIX = re.compile(r"""(["'])([a-z0-9_.-]+\.)\1\s*~""")
@@ -99,15 +102,18 @@ def _keys_named(pattern: re.Pattern[str], paths: list[Path]) -> set[str]:
 
 
 def test_every_key_used_exists() -> None:
+    counted = _keys_named(_COUNT_CALL, TEMPLATES + PYTHON)
     named = (
         _keys_named(_T_CALL, TEMPLATES)
         | _keys_named(_MESSAGE_CALL, PYTHON)
         | {tab.label_key for tab in TABS}
+        | {f"{key}.{form}" for key in counted for form in ("one", "other")}
     )
 
     joined = _keys_named(_JOINED_PREFIX, TEMPLATES)
 
     assert named
+    assert counted
     assert joined
     for language in LANGUAGES:
         keys = set(CATALOGUES[language])
@@ -127,7 +133,14 @@ def test_no_unused_keys() -> None:
     }
     prefixes = DYNAMIC_PREFIXES + tuple(joined)
 
-    unused = [key for key in CATALOGUES["en"] if key not in quoted and not key.startswith(prefixes)]
+    # A count text's forms are used through its key (``tn("tree.urls", count)``).
+    unused = [
+        key
+        for key in CATALOGUES["en"]
+        if key not in quoted
+        and not (key.endswith((".one", ".other")) and key.rsplit(".", 1)[0] in quoted)
+        and not key.startswith(prefixes)
+    ]
 
     assert unused == []
 

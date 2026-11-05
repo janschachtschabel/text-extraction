@@ -29,7 +29,8 @@
  * (its target is aria-busy), then the answer's data-announce (a result's summary, the states of
  * a progress view's jobs). A progress view's own refresh (data-refresh) writes its states only
  * when they changed, so a refresh is never read out. A form error with data-error-for is tied to
- * its field (aria-invalid, aria-describedby) and the field gets the focus.
+ * its field (aria-invalid, aria-describedby), unless the field is disabled; the field is scrolled
+ * to the middle of the screen and gets the focus.
  */
 (function () {
   "use strict";
@@ -467,7 +468,9 @@
     var error = root.matches("[data-error-for]") ? root : root.querySelector("[data-error-for]");
     var field = error && error.id ? error.getAttribute("data-error-for") : "";
     var control = field ? document.getElementById(field) : null;
-    if (!control) {
+    // A disabled control (a custom-capture field under another preset) is not at fault: the
+    // status line shows the error (audit U2).
+    if (!control || control.matches(":disabled")) {
       return;
     }
     var ids = describedBy(control).filter(function (id) {
@@ -477,7 +480,10 @@
     control.setAttribute("aria-invalid", "true");
     control.setAttribute("data-error-id", error.id);
     revealField(control);
-    control.focus();
+    // On a phone the field can be far above the answer: bring it to the middle of the screen,
+    // then focus it there (audit U6).
+    control.scrollIntoView({block: "center"});
+    control.focus({preventScroll: true});
   }
 
   function untieErrors() {

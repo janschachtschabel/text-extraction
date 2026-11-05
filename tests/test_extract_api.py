@@ -2956,3 +2956,16 @@ def test_answer_without_describe_unchanged_but_new_nulls() -> None:
     plain = ExtractRequest(url=PAGE)
     describe = ExtractRequest.model_validate({"url": PAGE, "describe_images": DESCRIBE})
     assert _cache_options(describe, "enforce") == _cache_options(plain, "enforce")
+
+
+@pytest.mark.parametrize("mode", ["auto", "fast", "browser"])
+def test_invalid_url_has_no_mode_used_in_any_mode(mode: str) -> None:
+    case = BrowserCase()
+    with TestClient(case.app) as client:
+        response = client.post("/v1/extract", json={"url": "ftp://x/", "mode": mode}, headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["error"]["code"] == "invalid_url"
+    assert body["data"]["mode_used"] is None

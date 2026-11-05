@@ -49,7 +49,7 @@ from text_extraction.ui.answers import (
 )
 from text_extraction.ui.forms import OPERATIONS, OptionsError, access_choice, build_body
 from text_extraction.ui.forward import Forwarded, forward
-from text_extraction.ui.i18n import Code, Message
+from text_extraction.ui.i18n import Code, Message, count_message
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
 from text_extraction.ui.site_tree import FOUND_LABELS, NON_CONTENT_TYPES, SiteTree, TreeBuilder
@@ -538,7 +538,7 @@ def _preview(
         "first": listed.urls[:PREVIEW_URLS],
         "text": "\n".join(listed.urls),
         "too_many": (
-            Message("urls.select_at_most", {"max": most})
+            count_message("urls.select_at_most", most)
             if parts > settings.batch_max_open_per_client
             else None
         ),

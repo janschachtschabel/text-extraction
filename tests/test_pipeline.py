@@ -651,6 +651,7 @@ def test_invalid_url_is_a_failed_envelope() -> None:
     assert envelope.status == "failed"
     assert envelope.error is not None
     assert envelope.error.code == ErrorCode.INVALID_URL
+    assert data_of(envelope).mode_used is None
     assert data_of(envelope).attempts == 0
     assert harness.fetcher.calls == []
 

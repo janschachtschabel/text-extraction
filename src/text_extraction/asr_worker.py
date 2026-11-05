@@ -93,7 +93,7 @@ the external backend): a missing one ends the process with exit code 1 and a log
 ``ASR_MODELS_PATH``. The external backend without ``ASR_EXTERNAL_BASE_URL`` ends it with exit
 code 2 (``invalid_configuration``). Then
 it starts the proxy and the children, and each child runs the self-check: PyAV's FFmpeg must be
-an LGPL build (``ffmpeg_gpl_findings`` on ``av._core.library_meta``, PyAV 19.0.1's per-library
+an LGPL build (``ffmpeg_gpl_findings`` on ``av._core.library_meta``, PyAV 19.0.2's per-library
 ``configuration`` and ``license``; ``av.library_versions`` has the versions only), so neither
 ``--enable-gpl``, ``--enable-nonfree`` nor a GPL or non-free external library such as libx264
 (decision D5: the PyPI wheel of av bundles libx264 and libx265 and fails the check, by design;
@@ -129,7 +129,7 @@ scaling metric and keeps a long scale-down stabilisation window for that reason.
 The names used of the pinned libraries (``media/asr_child.py``): faster-whisper 1.2.1
 ``WhisperModel(path, device="cpu", compute_type=, cpu_threads=, local_files_only=True)`` and
 ``WhisperModel.transcribe(audio, language=, vad_filter=True, condition_on_previous_text=False)``
-(segments ``start``, ``end``, ``text``; info ``language``, ``duration``); PyAV 19.0.1 ``av.open``,
+(segments ``start``, ``end``, ``text``; info ``language``, ``duration``); PyAV 19.0.2 ``av.open``,
 ``av.AudioResampler(format="flt", layout="mono", rate=16000)``, ``av.error.InvalidDataError``;
 yt-dlp's ``YoutubeDL.extract_info``, ``process_ie_result`` and ``sanitize_info``.
 

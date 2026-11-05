@@ -1,7 +1,8 @@
 """The UI's languages (rulings P12-S5, P12-S6): the catalogues ``locales/en.json`` and
 ``de.json`` (flat dotted keys, plain-text values with ``{name}`` placeholders), the lookup, and
-how a request chooses its language. English is the source language and the fallback. The API's
-own texts never pass through here: they stay English."""
+how a request chooses its language. English is the source language and the fallback. A count
+text has two keys, ``<key>.one`` (for 1) and ``<key>.other`` (`translate_count`). The API's own
+texts never pass through here: they stay English."""
 
 import json
 import re
@@ -56,6 +57,18 @@ def translate(language: Language, key: str, /, **params: object) -> str:
     if text is None:
         text = CATALOGUES["en"].get(key, key)
     return fill(text, params) if params else text
+
+
+def count_key(key: str, count: int) -> str:
+    """The key of the form of the count text ``key`` for ``count``: ``<key>.one`` for 1,
+    ``<key>.other`` for any other number (English and German need no other forms)."""
+    return f"{key}.one" if count == 1 else f"{key}.other"
+
+
+def translate_count(language: Language, key: str, count: int, /, **params: object) -> str:
+    """The count text ``key`` for ``count`` in ``language`` (`count_key`), with ``{count}`` and
+    the other placeholders filled as `translate` fills them."""
+    return translate(language, count_key(key, count), count=count, **params)
 
 
 def fill(text: str, params: Mapping[str, object]) -> str:
@@ -139,6 +152,11 @@ class Message:
     def text(self, language: Language) -> str:
         values = {name: text_of(value, language) for name, value in self.params.items()}
         return translate(language, self.key, **values)
+
+
+def count_message(key: str, count: int, /, **params: object) -> Message:
+    """The count text ``key`` for ``count`` as a `Message` (`translate_count`)."""
+    return Message(count_key(key, count), {"count": count, **params})
 
 
 # The parts of a list or tuple, as `text_of` and the templates' ``t`` join them.

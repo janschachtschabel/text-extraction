@@ -24,7 +24,7 @@ One page or file by its URL. See [Usage](usage.md) for the answer.
 | `compliance` | `enforce`, `report` or `ignore` | unset | The site rules: `enforce` refuses what robots.txt or a TDM opt-out forbids, `report` only reports it, `ignore` (admins only) skips the checks and allows maximum extraction. Unset: the operator's `COMPLIANCE_DEFAULT`. |
 | `cache` | boolean | `true` | Use the result cache; `false` neither reads nor stores. |
 | `wait_seconds` | number, 0 to 60 | unset | After this many seconds a running extraction becomes a job (202); `0`: a job at once. Unset: the request waits for its answer, with three exceptions: with `transcribe: true` the default is 20, and a request that waits for the NLP or the LLM worker answers 202 after `PII_SYNC_WAIT_SECONDS` or `LLM_SYNC_WAIT_SECONDS`. |
-| `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. |
+| `actions` | list of objects | empty | Page actions in the browser, in order, at most 20 (such as `click`, `type`, `scroll`, `accept_cookies`). Not with `mode: fast`. The action `evaluate` (JavaScript) is for admin keys only; any other key gets 403. |
 | `cookies` | list of objects | empty | Cookies for the requested site. Not with `mode: fast`. |
 | `headers` | object | empty | Request headers for the requested site. Not with `mode: fast`. |
 | `screenshot` | boolean | `false` | Also capture a screenshot, a PNG unless `screenshot_options` says otherwise. Not with `mode: fast`. |
@@ -215,7 +215,7 @@ A bare string is the mode: `"pii": "mask"` is `"pii": {"mode": "mask"}`.
 | `mode` | `mask`, `redact`, `hash` or `annotate` | required | What happens to an entity. |
 | `entities` | list of entity types | unset | Which entities to find; unset: the operator's `PII_DEFAULT_ENTITIES`. |
 | `language` | `auto`, `de` or `en` | `auto` | The language of the text. |
-| `score_threshold` | number | unset | The least score of an entity; unset: `PII_SCORE_THRESHOLD`. |
+| `score_threshold` | number | unset | The least score of an entity, 0 to 1; unset: `PII_SCORE_THRESHOLD`. |
 
 ### `structured`
 
@@ -227,16 +227,16 @@ A bare string is the mode: `"pii": "mask"` is `"pii": {"mode": "mask"}`.
 | `patterns` | object | empty | Regular expressions per field, on the content. |
 | `tables` | boolean | `false` | Also return the page's tables. |
 | `learn_selectors` | boolean | `false` | Let the LLM propose selectors that the next pages of the site reuse. |
-| `instructions` | string | unset | Extra instructions for the LLM. |
+| `instructions` | string | unset | Extra instructions for the LLM, at most 2000 characters. |
 
 ### `chunking`
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `strategy` | `fixed`, `recursive`, `markdown`, `sentence` or `semantic` | `recursive` | Where to cut. |
-| `size` | integer | `1000` | Most characters per chunk. |
-| `overlap` | integer | `100` | Characters that two chunks share. |
-| `breakpoint_percentile` | integer | `90` | For `semantic`: how large a change of meaning cuts. |
+| `size` | integer | `1000` | Most characters per chunk, 200 to 20000. |
+| `overlap` | integer | `100` | Characters that two chunks share, at most half of `size`. |
+| `breakpoint_percentile` | integer | `90` | For `semantic`: how large a change of meaning cuts, 50 to 99. |
 
 ### `describe_images`
 

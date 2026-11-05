@@ -688,13 +688,27 @@ while `BROWSER_ENABLED` is false, are unchanged.
   encodes at most 16,383 px a side, one row less than the default full-page height: a WebP
   image taller than that after scaling keeps its top 16,383 rows and the result gets the warning
   `screenshot_clipped` (once, also when the capture was cut already; ruling P14-R10); PNG and
-  JPEG keep all rows. `quality` with `png` is 422. At most two images are encoded at once in a
-  process (`screenshot_image.ENCODE_CONCURRENCY`; one 1920 × 16,384 JPEG needs about 180 MB
-  while it is encoded). An image Pillow cannot decode or encode fails `internal_error`, not
-  retryable (the same bytes fail again), and logs `screenshot_encode_failed` with the error type,
-  the image size and the format (never the URL). The
-  encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores it
-  as `job:{<id>}:artifact:screenshot.png`, `screenshot.jpg` or `screenshot.webp` for
+  JPEG keep all rows. `quality` with `png` is 422. The encodes of a process share a budget of
+  1920 × 16,384 pixels (`screenshot_image.ENCODE_PIXEL_BUDGET`; an image weighs its pixels, a
+  larger one the whole budget): one 1920 × 16,384 encode needs about 330 MB as JPEG, about
+  470 MB as WebP and up to about 900 MB as WebP of a noisy page, and at the default
+  `SCREENSHOT_MAX_HEIGHT_PX` (16,384) this is also the most at once; a higher limit (up to
+  32,768) raises one encode's need in proportion, and an image over the budget runs alone.
+  **Ruling A26-R6 (FIFO grants):** encodes are granted in the order they asked
+  (`screenshot_image._PixelBudget`): a small image that would fit waits behind a larger one at
+  the head of the queue, so a large image is not starved by a stream of small ones; a wait that
+  is cancelled leaves the queue, and one granted as it was cancelled gives its pixels back. An
+  encode runs on a thread; when the extraction deadline cancels the wait, the thread runs on and
+  keeps its pixels until it ends. A render whose screenshot is encoded ends its page work 10 s
+  earlier (`ENCODE_RESERVE_SECONDS`, `RenderOptions.encode_reserve`), at most a third of the
+  render time (`browser_render.encode_reserve_within`), so the encode has that time before the
+  deadline. With the 3 s kept for taking the screenshot, encoded screenshots need a
+  `BROWSER_TIMEOUT_SECONDS` of about 8 s or more (a plain PNG about 6 s). The capture must be a PNG
+  (Pillow opens no other format). An image Pillow cannot decode or encode fails
+  `internal_error`, not retryable (the same bytes fail again), and logs
+  `screenshot_encode_failed` with the error type, the image size and the format (never the URL).
+  The encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores
+  it as `job:{<id>}:artifact:screenshot.png`, `screenshot.jpg` or `screenshot.webp` for
   `ARTIFACT_TTL_SECONDS` (expiry and deletion cover all three names); `data.screenshot` names it
   with its `content_type`, `width` and `height`, and the API serves it at
   `GET /v1/jobs/{id}/artifacts/{name}` as `image/png`, `image/jpeg` or `image/webp`. While
@@ -740,7 +754,7 @@ while `BROWSER_ENABLED` is false, are unchanged.
     sweep removes every released profile again for 30 s, the pause doubling from 1 s (warning
     `browser_profile_left` for one still there then); the worker's shutdown removes any left.
     Patchright is pinned to the newest release at least 14 days old
-    (1.63.0; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
+    (1.64.1; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
     the stable of that day.
   - What changes: robots and TDM are not checked (that is `ignore`); nothing is blocked; service
     workers and non-GET navigations are allowed. The proxy, the navigation checks, the byte cap
@@ -1514,7 +1528,7 @@ Prefer fixed replicas for steady load.
 no faster-whisper, CTranslate2, PyAV, Deno or models (image.yml checks it), and its parent
 processes never import yt-dlp or youtube-transcript-api. The ASR image (target `asr`, image
 `text-extraction-asr`, linux/amd64, about 1.4 GB uncompressed) holds the venv with the extra `asr`
-(faster-whisper 1.2.1, CTranslate2 4.8.2, PyAV 19.0.1 built against FFmpeg, `yt-dlp[deno]` with
+(faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.2 built against FFmpeg, `yt-dlp[deno]` with
 `yt-dlp-ejs` for YouTube's player challenges, the OpenAI SDK), the FFmpeg shared libraries and
 their licence (`/opt/ffmpeg`, registered with `ldconfig`), no `ffmpeg`, `ffprobe` or `rtmpdump`
 program and no models; non-root, tini. The LGPL build (D5) is enforced four times: the build
@@ -2569,10 +2583,26 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   1. `error`: `status` >= 400 or `quality.soft_404` (`status`, `soft_404`) (in practice only
      soft 404s: hard 4xx/5xx pages are not converted, P14-R7);
   2. `home`: the path is empty, `/`, `/index.(html|htm|php)` or only a language code (`/de`,
-     `/en/`, `/de-at/`; ruling P14-R5) (`root_path`). The language is one of a curated list
-     (`_SITE_LANGUAGES`: the 24 EU languages and about 25 more that sites use), not any ISO
-     639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/` and `/ui/` are no home;
-     the region after it is not checked;
+     `/en/`, `/de-at/`; ruling P14-R5), optionally with an index file (`root_path`). The language
+     is one of a curated list (`_SITE_LANGUAGES`: the 24 EU languages and about 25 more that
+     sites use), not any ISO 639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/`
+     and `/ui/` are no home; the region after it is not checked.
+     **Ruling A26-R1 (home needs an empty query):** every query parameter is a tracking
+     parameter, a language parameter or has an empty (blank) value; tracking parameters are
+     names starting `utm_` and `fbclid`, `gclid`, `dclid`, `gbraid`, `wbraid`, `msclkid`,
+     `yclid`, `igshid`, `mc_cid`, `mc_eid`, `_ga`, `_gl`, `ref`; language parameters are `lang`,
+     `hl` and `locale` (WPML's and Google-style language homes: `/?lang=en` is home). So
+     `/?p=12`, `/?page_id=42` and `/index.php?id=42` (a CMS that addresses its articles by query)
+     are no home, `/?utm_source=x&fbclid=y` and `/?lang=en` are. Search and
+     page parameters are read before home is checked, as before (`/?s=x` is a search).
+     **Ruling A26-R3 (language-only path):** `url_type` still answers `home` for `/de/` and
+     `/hr` (a link has no page to look at). `page_type` makes a path that is only a language code
+     (not the empty path, `/` or a bare index file) `home` only when the root element's `lang` is
+     missing or its primary subtag (before `-` or `_`) equals the path's language, case-folded
+     (`/it/` with `lang="it-IT"`, `/pt_BR/` with `lang="pt-BR"`); a `lang` that names no
+     language (`und`, `mul`, `zxx`, a private `x-...`) counts as missing; otherwise the URL gives no
+     vote and the other signals decide (`/it/` on a German site is an Italian section, not the
+     start page);
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
      `itemtype` is `ContactPage`, `AboutPage`, `SearchResultsPage` or `CollectionPage`
      (`schema_org`);
@@ -2580,10 +2610,30 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      case-folded, umlauts also as `ae`/`oe`/`ue` (German and English names per type, in the order
      `imprint`, `privacy`, `legal`, `auth`, `search`, `contact`, `about`, `listing`), a search
      query parameter with a value (`q`, `query`, `search`, `suche`, `s`, `keyword`), a page
-     number (`page/<n>`, `seite/<n>`, `?page=<n>`);
-  5. the `<title>` or the first `<h1>` starts with a type's name followed by nothing or a
-     separator, or ends with one after a separator ("Firma | Impressum"; ruling P14-R4)
-     (`title`, `h1`);
+     number (`page/<n>`, `seite/<n>`, `?page=<n>`).
+     **Ruling A26-R2 (segment position):** a trailing `index.(html|htm|php)` segment is dropped
+     before the segments are read, and a leading language code (a `_SITE_LANGUAGES` code with an
+     optional region) is skipped, so the segment after it is the first. A listing name
+     (`kategorie`, `category`, `categories`, `tag`, `tags`, `schlagwort`, `archiv`, `archive`)
+     counts only with at most one segment after it (`/kategorie/mathe` yes,
+     `/kategorie/mathe/bruchrechnung-einfach-erklaert` and `/archiv/2019/artikel-titel` no).
+     The ambiguous names `cookies`, `terms`, `legal`, `konto`, `account`, `profil`, `profile`,
+     `recherche`, `team`, `password`, `passwort`, `disclaimer` count only as the only segment
+     (`/cookies`, `/de/terms` yes; `/rezepte/cookies`, `/girokonto/konto`, `/profile/jan` no).
+     Every other name counts as the first or the last segment (`/service/impressum/index.html`
+     is an imprint, `/ueber-uns/kontakt` a contact page by the type order). The `page/<n>` rule
+     and the query rules are unchanged. Before, any segment counted, so a type name anywhere in
+     an article's path made it a non-content page and "Select content pages" unticked it;
+  5. the `<title>` starts with a type's name followed by nothing or a separator, or ends with
+     one after a separator ("Firma | Impressum"; ruling P14-R4) (`title`); the first `<h1>`
+     is a type's name (`h1`).
+     **Ruling A26-R4 (headings):** in the start form a colon is no separator: after a type word
+     it starts a subtitle ("Datenschutz: Was Schulen wissen müssen" is no privacy page); `|`, en
+     dash, em dash, middle dot and a spaced hyphen stay; a colon with nothing after it starts no
+     subtitle ("Impressum:" is an imprint, as the `<h1>` rule). The end form is unchanged
+     ("Firma GmbH: Datenschutzerklärung" is still privacy). An `<h1>` votes only when the whole
+     heading (folded, trimmed, one trailing `:` removed) is a type word: "Kontakt" yes,
+     "Kontakt zur Schule aufnehmen" and "Kontakt | Schule" no;
   6. `auth`: a password input and fewer than `THIN_PAGE_BELOW_WORDS` (100) words
      (`password_field`);
   7. `listing`: `rel="next|prev"` on a `<link>` or `<a>` (`pagination`), or at least
@@ -2592,8 +2642,15 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   8. `content` with at least `QUALITY_MIN_WORDS` words (`word_count`), else `other` (no signals).
 
   `og:type` `article` only ever agrees with `content` (`og_type`) and never decides (ruling
-  P14-R6). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML
-  or a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
+  P14-R6). **Ruling A26-R5 (article override):** when `og:type` is `article` and
+  `quality.word_count` is at least `min_words`, the votes `title`, `h1`, `pagination`,
+  `link_density` and a `url` vote for `listing` are dropped before the winner is chosen: an
+  article titled "Kontakt – So gelingt das Elterngespräch", one at `/blog/article?page=2`, or
+  one inside a menu of 60 links is `content`. A `url` vote for any other type and `schema_org`
+  stay, so a WordPress imprint at `/impressum/` (SEO plugins mark plain pages as articles too)
+  stays an imprint; `password_field` stays too (it needs fewer than `THIN_PAGE_BELOW_WORDS`
+  words). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML or
+  a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
   raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
   `page_type: null` instead of failing.
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
@@ -2624,7 +2681,7 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   contact form at `/service` without a schema type or a telling title is `content` or `other`.
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
-  home.
+  home unless the page's `lang` names another language (A26-R3).
 
 ## MCP and UI
 
@@ -2784,7 +2841,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   their alt text), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
   convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
-  catalogues). Previews follow
+  catalogues). The order and the look of this view (source first, then rendered) are superseded
+  by P15-S5 and the other P15 items below ("Look (package 15)"). Previews follow
   D7: at most 20 images, 4 at once, 10 s each and 25 s per view; a skipped one shows its reason.
   Since package 14 a preview may be an SVG (`vision.images.is_svg`: an XML document whose root
   is `<svg>`, also after an XML declaration, a BOM, comments, a doctype or with a namespace
@@ -2798,7 +2856,11 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   quality 80), `thumb` (1280×800, first screen, WebP, `width` 400), `mobile` (390×844, whole
   page) and `custom`, which reads the fieldset "Custom capture" (window width and height, image
   format, quality, image width, whole page; `ui.js` enables it only with `custom`, and without
-  script every field stays usable). A 422 that names one of these fields is shown at its control.
+  script every field stays usable). **Ruling A26-R7 (where a 422 is marked):** a 422 that names
+  one of these fields is shown at the "Options (JSON)" field when the key came from there (also
+  with `custom`: Options wins the tie), else at the field's control, but only with `custom`
+  (`forms.rest_error_control`; under another preset the fields are disabled and the error stays
+  untied, the status line still shows it).
   The result shows a PNG, JPEG or WebP screenshot as a `data:` image.
 - **Look (package 15).** A redesign of the templates and `ui.css` only; no new field, endpoint,
   setting or htmx behaviour besides the result toolbar. The page is a white header (three rows:
@@ -2835,16 +2897,17 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
     JSON links of 1, 3, 12 and 30 MB, so there is no 2 MB `data:` limit for downloads; the cost is
     page weight only.
   - **P15-R8, scrollable blocks and tables.** The result's scrollable `pre` blocks carry
-    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds at most three
-    tab stops per result (Markdown source, curl, raw JSON; all in sections that are closed by
-    default), even for a short block. Chunks wrap and never scroll, so they take no tab stop. Below 600 px tables scroll inside their card; the
-    items table's URL column keeps at least 12rem, so the "Show" column may need a sideways
-    scroll of the table.
+    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds at most three tab
+    stops per result (Markdown source, curl, raw JSON; all in sections that are closed by
+    default), even for a short block. Chunks wrap and never scroll, so they take no tab stop.
+    Below 600 px tables scroll inside their card; the items table's URL column keeps at least
+    12rem, so the "Show" column may need a sideways scroll of the table.
   - **P15-S3, status line.** `header.answer` holds the status pill, the unblocked pill and
     `HTTP <n>`; it stays there because an error without `data` has no card of figures.
   - **P15-S4, copy source.** "Copy" copies the text shown in `pre.content` (at most
-    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'none'` forbids reading the download's link back.
-    "Save response" is left out, with a hint, above `DOWNLOAD_MAX_CHARS` (a cut JSON is no JSON).
+    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'self'` does not allow fetching a `data:` URL, so
+    the download's link cannot be read back. "Save response" is left out, with a hint, above
+    `DOWNLOAD_MAX_CHARS` (a cut JSON is no JSON).
   - **P15-S5, reading card.** Rendered Markdown (or `pre.content` in the serif font for text, or
     for Markdown too long to render) stands in a white reading card; the Markdown source is in
     the closed section "Show source" (`details.source`).
@@ -2934,7 +2997,8 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   allowlist `FORM_PREFIXES`, to the control's id `<prefix>-<field>` (`_` as `-`), and
   `form_error.html` carries it as `data-error-for` with the id `<control>-error` (an unknown
   form id gives neither, so the header is never reflected). `ui.js` sets `aria-invalid="true"`
-  on the field, adds the error's id to its `aria-describedby` and moves focus there; the next
+  on the field (a red 2 px border), adds the error's id to its `aria-describedby`, scrolls it to
+  the middle of the screen and moves focus there (a disabled field is not tied); the next
   request of the user's unties it. A whole-form error is `role="alert"`.
 - **Status messages (P12-S9).** `base.html` holds `#ui-status` (`role="status"`,
   `aria-live="polite"`, visually hidden). While a request of the user's runs, it reads

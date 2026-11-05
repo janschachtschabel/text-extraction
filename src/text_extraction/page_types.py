@@ -7,16 +7,25 @@ a download, the link text for a navigation helper. ``page_type`` classifies a fe
 its signals, strongest first (ruling P14-S4):
 
 1. ``error``: the status is 400 or higher, or the quality gate saw a soft 404.
-2. ``home``: the path is empty, ``/`` or ``/index.html``.
+2. ``home``: the path is empty, ``/`` or an index file, without a query besides tracking and
+   language parameters (A26-R1). A path that is only a language code (``/it/``) is home only
+   when the page's ``<html lang>`` is missing or names that language; otherwise the URL gives no
+   vote (A26-R3).
 3. schema.org: the JSON-LD ``@type`` (top-level nodes and the ``@graph``) or the ``itemtype`` of
    the outermost microdata scope says ``ContactPage``, ``AboutPage``, ``SearchResultsPage`` or
    ``CollectionPage``.
 4. ``url_type`` (imprint, privacy, legal, auth, search, contact, about, listing).
-5. The ``<title>`` or the first ``<h1>`` starts with the name of a type (``Impressum``,
-   ``Kontakt``, ``Login`` ...), followed by nothing or a separator.
+5. The ``<title>`` starts with the name of a type (``Impressum``, ``Kontakt``, ``Login`` ...),
+   followed by nothing (a trailing colon aside) or a separator other than a colon, or ends with
+   one after a separator;
+   the first ``<h1>`` is the name of a type and nothing else (A26-R4).
 6. ``auth``: a password input on a thin page.
 7. ``listing``: ``rel="next|prev"``, or a page that is mostly links.
 8. ``content`` when the extracted content has enough words, else ``other``.
+
+An article (``og:type`` is ``article``) with enough words drops the votes of the title, the
+``<h1>``, the pagination, the link density and a ``url`` vote for ``listing`` before the winner
+is chosen (A26-R5); a ``url`` vote for another type and schema.org stay.
 
 ``PageTypeInfo.signals`` lists every signal that agrees with the winner, also those that rank
 lower, in the order of ``PageSignal``. ``og_type`` (``og:type`` is ``article``) only ever agrees
@@ -213,10 +222,33 @@ _SEGMENT_TYPE: Final[dict[str, PageType]] = {
     for page_type_name, names in _SEGMENT_NAMES.items()
     for name in names
 }
+_LISTING_NAMES: Final = frozenset(_fold(name) for name in _SEGMENT_NAMES["listing"])
+# Names that also name ordinary sections or articles (``/rezepte/cookies``, ``/glossary/terms``):
+# they count only as the whole path, after an optional language code (A26-R2).
+_AMBIGUOUS_NAMES: Final = frozenset(
+    {
+        *("cookies", "terms", "legal", "konto", "account", "profil", "profile", "recherche"),
+        *("team", "password", "passwort", "disclaimer"),
+    }
+)
+# Query parameters that say nothing about the page; home allows only these (A26-R1).
+_TRACKING_PARAMETERS: Final = frozenset(
+    {
+        *("fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid", "yclid", "igshid"),
+        *("mc_cid", "mc_eid", "_ga", "_gl", "ref"),
+    }
+)
+_TRACKING_PREFIX: Final = "utm_"
+# Query parameters that pick the language of a page; on a home path they keep it home (A26-R1):
+# ``/?lang=en`` (WPML), ``/?hl=de`` (Google-style), ``/?locale=de_DE``.
+_LANGUAGE_PARAMETERS: Final = frozenset({"lang", "hl", "locale"})
 _SEARCH_PARAMETERS: Final = frozenset({"q", "query", "search", "suche", "s", "keyword"})
 _PAGE_PARAMETERS: Final = frozenset({"page", "seite"})
 _PAGE_SEGMENTS: Final = frozenset({"page", "seite"})
 _FILE_EXTENSION = re.compile(r"\.(?:html?|php|aspx?)$")
+_INDEX_FILE = re.compile(r"^index\.(?:html?|php)$", re.IGNORECASE)
+# A language code as a path segment, with an optional region (``de``, ``de-at``, ``pt_BR``).
+_LANGUAGE_SEGMENT = re.compile(r"^(?P<language>[a-z]{2})(?:[-_][a-z]{2})?$", re.IGNORECASE)
 # Empty, ``/``, ``/index.html``, and a language code in front (``/de``, ``/en/``, ``/de-at/``).
 _HOME_PATH = re.compile(
     r"^/?(?:(?P<language>[a-z]{2})(?:[-_][a-z]{2})?(?:/|$))?(?:index\.(?:html?|php))?$",
@@ -245,12 +277,51 @@ def _segment_stem(segment: str) -> str:
     return _FILE_EXTENSION.sub("", _fold(segment)).replace("_", "-")
 
 
+def _site_language(segment: str) -> str | None:
+    """The language code (without its region) when ``segment`` is a site language, else None."""
+    match = _LANGUAGE_SEGMENT.match(segment)
+    if match is None or match["language"].lower() not in _SITE_LANGUAGES:
+        return None
+    return match["language"].lower()
+
+
+def _segment_types(stems: list[str]) -> set[PageType]:
+    """The types the path segments say by their position (A26-R2): a listing name with at most
+    one segment after it, an ambiguous name as the only segment, any other name as the first or
+    the last segment; a leading language code does not count as a segment."""
+    if stems and _site_language(stems[0]) is not None:
+        stems = stems[1:]
+    found: set[PageType] = set()
+    last = len(stems) - 1
+    for index, stem in enumerate(stems):
+        if stem not in _SEGMENT_TYPE:
+            continue
+        if stem in _LISTING_NAMES:
+            counts = last - index <= 1
+        elif stem in _AMBIGUOUS_NAMES:
+            counts = last == 0
+        else:
+            counts = index in (0, last)
+        if counts:
+            found.add(_SEGMENT_TYPE[stem])
+    return found
+
+
+def _is_tracking(name: str) -> bool:
+    return name.startswith(_TRACKING_PREFIX) or name in _TRACKING_PARAMETERS
+
+
 def url_type(url: str) -> PageType | None:
     """The type that the path and the query of ``url`` say, else None.
 
     A path segment (or its stem before ``.html``, ``.htm``, ``.php``) has to be a name in full:
-    ``/impressum.html`` is an imprint, ``/impressum-archiv-2019`` is not. Home is an empty path,
-    ``/`` or ``/index.html`` without a query that says something else.
+    ``/impressum.html`` is an imprint, ``/impressum-archiv-2019`` is not. A trailing index file
+    is dropped first. A listing name counts with at most one segment after it, a few ambiguous
+    names (``cookies``, ``terms``, ``team`` ...) only as the whole path, any other name as the
+    first or the last segment; a leading language code is skipped (A26-R2). Home is an empty
+    path, ``/``, an index file or only a language code (optionally with an index file), and
+    every query parameter is a tracking parameter, a language parameter (``lang``, ``hl``,
+    ``locale``) or empty (A26-R1).
     """
     try:
         parts = urlsplit(url)
@@ -259,9 +330,11 @@ def url_type(url: str) -> PageType | None:
         return None
     path = unicodedata.normalize("NFC", unquote(parts.path))
     segments = [segment for segment in path.split("/") if segment]
+    if segments and _INDEX_FILE.match(segments[-1]):
+        segments.pop()
     stems = [_segment_stem(segment) for segment in segments]
 
-    found: set[PageType] = {_SEGMENT_TYPE[stem] for stem in stems if stem in _SEGMENT_TYPE}
+    found = _segment_types(stems)
     for index, stem in enumerate(stems[:-1]):
         if stem in _PAGE_SEGMENTS and stems[index + 1].isdecimal():
             found.add("listing")
@@ -274,10 +347,26 @@ def url_type(url: str) -> PageType | None:
     for candidate in _URL_ORDER:
         if candidate in found:
             return candidate
+    if any(
+        value.strip() and not _is_tracking(name) and name not in _LANGUAGE_PARAMETERS
+        for name, value in ((key.lower(), value) for key, value in query)
+    ):
+        return None
     home = _HOME_PATH.match(path)
     if home is not None and (home["language"] or "en").lower() in _SITE_LANGUAGES:
         return "home"
     return None
+
+
+def _path_language(url: str) -> str | None:
+    """The language code (without its region) of a path that is only a language code, optionally
+    with an index file (``/it/``, ``/de-at/index.html``), else None."""
+    try:
+        path = unicodedata.normalize("NFC", unquote(urlsplit(url).path))
+    except ValueError:
+        return None
+    home = _HOME_PATH.match(path)
+    return home["language"].lower() if home is not None and home["language"] else None
 
 
 _SOCIAL_HOSTS: Final = (
@@ -391,8 +480,10 @@ _HEADING_WORDS_PATTERN = "|".join(
     re.escape(word) for word in sorted(_HEADING_TYPE, key=len, reverse=True)
 )
 # The name first, then nothing or a separator (a hyphen only with a space before or after it).
+# A colon is no separator here: after a type word it starts a subtitle ("Datenschutz: Was
+# Schulen wissen müssen"; A26-R4). A colon with nothing after it is no subtitle ("Impressum:").
 _HEADING_START = re.compile(
-    rf"^(?P<word>{_HEADING_WORDS_PATTERN})(?=\s*$|\s*[|\u2013\u2014:\u00b7]|\s+-|-\s)"
+    rf"^(?P<word>{_HEADING_WORDS_PATTERN})(?=\s*:?\s*$|\s*[|\u2013\u2014\u00b7]|\s+-|-\s)"
 )
 # Or the name last, after a separator (a hyphen only with a space before or after it).
 _HEADING_END = re.compile(
@@ -406,6 +497,9 @@ _SCHEMA_TYPES: Final[tuple[tuple[str, PageType], ...]] = (
     ("CollectionPage", "listing"),
 )
 _NON_VISIBLE: Final = ("script", "style", "noscript", "template")
+# Primary subtags of a ``lang`` that names no language: undetermined, multiple, no linguistic
+# content, and the private-use prefix (BCP 47).
+_NO_LANGUAGE_SUBTAGS: Final = frozenset({"und", "mul", "zxx", "x"})
 
 
 class PageTypeInfo(BaseModel):
@@ -498,10 +592,24 @@ def _schema_page_type(tree: HtmlElement) -> PageType | None:
     return None
 
 
-def _heading_type(text: str | None) -> PageType | None:
+def _title_type(text: str | None) -> PageType | None:
     folded = _fold((text or "")[:_MAX_HEADING_CHARS])
     match = _HEADING_START.match(folded) or _HEADING_END.search(folded)
     return _HEADING_TYPE[match.group("word")] if match else None
+
+
+def _h1_type(text: str | None) -> PageType | None:
+    """The type when the whole ``<h1>`` is a type word, a trailing colon aside (A26-R4)."""
+    folded = _fold((text or "")[:_MAX_HEADING_CHARS]).removesuffix(":").rstrip()
+    return _HEADING_TYPE.get(folded)
+
+
+def _html_language(tree: HtmlElement) -> str | None:
+    """The primary subtag of the root element's ``lang`` (``de`` of ``de-AT``), else None; a
+    ``lang`` that names no language (``und``, ``mul``, ``zxx``, a private ``x-...``) is None."""
+    lang = (tree.getroottree().getroot().get("lang") or "").strip()
+    primary = re.split(r"[-_]", lang, maxsplit=1)[0].lower()
+    return primary if primary and primary not in _NO_LANGUAGE_SUBTAGS else None
 
 
 def _has_og_article(tree: HtmlElement) -> bool:
@@ -551,6 +659,8 @@ _SIGNAL_ORDER: Final[tuple[PageSignal, ...]] = (
     "word_count",
 )
 _DECISIVE: Final[tuple[PageSignal, ...]] = tuple(s for s in _SIGNAL_ORDER if s != "og_type")
+# The votes an article with enough words drops (A26-R5); a ``url`` vote only for ``listing``.
+_ARTICLE_DROPS: Final[tuple[PageSignal, ...]] = ("title", "h1", "pagination", "link_density")
 
 
 def page_type(
@@ -570,28 +680,33 @@ def page_type(
         return PageTypeInfo(type="error", signals=error_signals)
 
     by_url = url_type(url)
-    if by_url == "home":
+    language = _path_language(url) if by_url == "home" else None
+    if by_url == "home" and language is None:
         return PageTypeInfo(type="home", signals=["root_path"])
 
     tree = parse_page(html)
+    if by_url == "home":
+        # A path that is only a language code (A26-R3): home unless the page says another one.
+        if _html_language(tree) in (None, language):
+            return PageTypeInfo(type="home", signals=["root_path"])
+        by_url = None
     votes: dict[PageSignal, PageType] = {}
     if (schema := _schema_page_type(tree)) is not None:
         votes["schema_org"] = schema
-    if _has_og_article(tree):
+    is_article = _has_og_article(tree)
+    if is_article:
         votes["og_type"] = "content"
     if by_url is not None:
         votes["url"] = by_url
 
     title = tree.find(".//title")
-    if (by_title := _heading_type(title.text_content() if title is not None else None)) is not None:
+    if (by_title := _title_type(title.text_content() if title is not None else None)) is not None:
         votes["title"] = by_title
 
     for element in list(tree.iter(*_NON_VISIBLE)):
         element.drop_tree()
     heading = tree.find(".//h1")
-    if (
-        by_h1 := _heading_type(heading.text_content() if heading is not None else None)
-    ) is not None:
+    if (by_h1 := _h1_type(heading.text_content() if heading is not None else None)) is not None:
         votes["h1"] = by_h1
 
     if quality.word_count < THIN_PAGE_BELOW_WORDS and _has_password_input(tree):
@@ -603,6 +718,11 @@ def page_type(
         votes["link_density"] = "listing"
     if quality.word_count >= min_words:
         votes["word_count"] = "content"
+        if is_article:
+            for signal in _ARTICLE_DROPS:
+                votes.pop(signal, None)
+            if votes.get("url") == "listing":
+                del votes["url"]
 
     winner: PageType = next((votes[s] for s in _DECISIVE if s in votes), "other")
     if winner == "other":

@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from tests.fakes import PAGE
 from tests.test_extract_api import BrowserCase
 from tests.ui.conftest import run, running
-from text_extraction.ui.forms import OptionsError, build_body
+from text_extraction.ui.forms import OptionsError, build_body, rest_error_control
 from text_extraction.ui.i18n import translate
 
 JPEG = b"\xff\xd8\xff\xe0" + b"\x02" * 120
@@ -176,6 +176,47 @@ def test_a_422_of_a_field_loc_is_shown_at_the_field(client: TestClient) -> None:
 
     [error] = tree(html).xpath("//div[@data-error-for]")
     assert error.get("data-error-for") == "screenshot-quality"
+
+
+def test_a_422_of_an_options_key_is_shown_at_the_options(client: TestClient) -> None:
+    """A preset leaves the custom fields disabled: a 422 of a key that came from "Options
+    (JSON)" is tied to the Options field, never to the disabled custom field (audit U2)."""
+    html = run(client, "screenshot", **form(preset="page", options='{"width": 3000}')).text
+
+    [error] = tree(html).xpath("//div[@data-error-for]")
+    assert error.get("data-error-for") == "screenshot-options"
+    assert error.get("id") == "screenshot-options-error"
+
+
+def test_a_422_of_a_custom_field_is_shown_at_the_field(client: TestClient) -> None:
+    html = run(client, "screenshot", **form(preset="custom", width="3000")).text
+
+    [error] = tree(html).xpath("//div[@data-error-for]")
+    assert error.get("data-error-for") == "screenshot-width"
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        ({"preset": "custom", "width": "3000"}, "screenshot-width"),
+        ({"preset": "custom", "options": '{"width": 3000}'}, "screenshot-options"),
+        ({"preset": "page", "options": '{"width": 3000}'}, "screenshot-options"),
+        ({"options": '{"viewport": {"width": 400, "height": 300}}'}, "screenshot-options"),
+        ({"preset": "thumb"}, None),
+        ({"preset": "page", "options": "{"}, None),
+    ],
+)
+def test_a_422_field_is_tied_by_where_it_came_from(
+    values: dict[str, str], expected: str | None
+) -> None:
+    """The control of a 422: an Options key at the Options field, a custom field only with the
+    preset "custom" (its fields are disabled otherwise), else none (the status line shows the
+    error)."""
+    details = [{"loc": ["body", "viewport", "width"], "msg": "too small"}]
+    if "viewport" not in values.get("options", ""):
+        details = [{"loc": ["body"], "msg": "Value error, width cannot be larger than ..."}]
+
+    assert rest_error_control("screenshot", details, values) == expected
 
 
 def test_a_422_of_another_form_is_not_tied(client: TestClient) -> None:

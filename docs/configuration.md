@@ -66,7 +66,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `JOBS_ENABLED` | `true` | `false` makes `POST /v1/batch`, `POST /v1/site-structure`, `GET /v1/jobs/{id}` and `DELETE /v1/jobs/{id}` answer 400 `invalid_request` ("Jobs are disabled on this deployment."; 503 `internal_error` until v0.1.0), for API pods without workers. `POST /v1/extract` then ignores `wait_seconds` and answers when the extraction ends. Screenshots are still taken, but their files cannot be downloaded (the artifact route is a job route), so keep jobs on with browser mode. Helm: `jobs.enabled`; unset, the chart renders `true` while `workers.extract.enabled` is true and `false` when the extract workers are off, so an install without workers does not accept jobs nobody works on. Set `jobs.enabled=true` to keep jobs on with workers that run elsewhere. KEDA and the queue alerts read the queue gauges, which only API pods with `JOBS_ENABLED=true` export. |
 | `EXTRACT_MAX_BACKGROUND` | `32` | Extractions one API pod holds for `POST /v1/extract` requests with `wait_seconds` (the ones that became a job and the ones still waiting), at most. Beyond it a request does not become a job: it keeps waiting for its result and answers 200 (or its error). Bounds the pod's memory and the tasks the shutdown waits for. Minimum 1. |
 | `BROWSER_ENABLED` | `false` | Switch browser mode on: pages are rendered by the browser workers (`text-extraction-browser-worker`, pool `browser`); the API pods queue them and wait. Off, `mode: browser`, `screenshot: true`, `actions`, `cookies`, `headers`, `POST /v1/screenshot` and a batch with `mode: browser` answer 400 `invalid_request` ("Browser mode is not enabled on this service."), and `mode: auto` never uses a browser (its answers are those of fast mode). The image of an API pod has no browser; the browser worker image has. On, the graceful shutdown of the API covers a sync request that waits for the browser: the fast phase of an escalating `auto` request (`EXTRACT_TIMEOUT_SECONDS`) + `BROWSER_QUEUE_WAIT_SECONDS` + the render deadline + 10 s, that is 75 s by default and 105 s with unblock mode. The Kubernetes `terminationGracePeriodSeconds` of the API pods must cover `SHUTDOWN_DRAIN_SECONDS` plus that plus a margin: the Helm chart sets it to 90 s (120 s with unblock mode) unless you set it, and docker compose stops the API with a 120 s grace period. Extract workers keep their own bound; browser workers have theirs (see Ports and probes). Helm: `workers.browser.enabled` (default true) deploys the browser workers and renders this variable into the API, extract worker and browser worker pods. docker compose always starts a browser worker and sets it to true for every service. |
-| `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. 5 to 120. |
+| `BROWSER_TIMEOUT_SECONDS` | `30` | Time budget of one page in the browser, from navigation to the finished text, in seconds. A render whose screenshot is encoded (`jpeg`, `webp`, or a `width`) keeps 10 s of it for the encode, at most a third of the render time. Encoded screenshots need a budget of about 8 s or more, a plain PNG screenshot about 6 s. 5 to 120. |
 | `BROWSER_QUEUE_WAIT_SECONDS` | `10` | How long a synchronous request (`POST /v1/extract`, `POST /v1/screenshot`) waits for a browser worker to take its page, in seconds; then it waits up to the render deadline (`BROWSER_TIMEOUT_SECONDS`, in unblock mode `BROWSER_UNBLOCK_TIMEOUT_SECONDS`) + 5 s for the result. If no worker takes it in time (none running, or all busy), `mode: auto` answers its fast result with the warning `browser_unavailable`, and `mode: browser` and screenshots answer `failed` with `timeout` (retryable). Batches are not bound by it. 0 to 60. |
 | `BROWSER_CONCURRENCY` | `4` | Pages one browser worker pod (`text-extraction-browser-worker`) renders at the same time, standard and unblock mode together; also its number of job slots (`WORKER_CONCURRENCY` does not apply there). Minimum 1. Helm: `workers.browser.concurrency`; the pod resources (`workers.browser.resources`) are sized for 4. |
 | `BROWSER_IDLE_WAIT_SECONDS` | `8` | Longest time a page is given to become quiet (no network traffic) after it has loaded, in seconds. 0 to 30. |
@@ -645,6 +645,13 @@ unknown fields), and that breaks them in two ways:
 Roll out the extract workers first and the API pods after them. `helm upgrade` rolls both
 Deployments at once, so send site jobs only once every pod runs the new release.
 
+**Upgrading to package 14: workers first, then API pods.** A job whose options carry
+`screenshot_options` (a screenshot with a viewport, format, quality or width) is refused by a
+0.1.2 worker (its job options forbid unknown fields), and a 0.1.2 API pod cannot read such a job.
+Update the browser workers (and the other workers) before the API pods, and send such requests
+only once every pod runs the new release. Results with `page_type` and a link `category` are read
+by old pods, so the new fields in results need no order.
+
 **Capacity of the extract workers.**
 
 - Each extract worker pod parses one sitemap at a time, on a thread of its own, so sitemaps never
@@ -779,13 +786,20 @@ REST answers apply, such as 400 without the LLM).
 
 Every answer is shown with its HTTP status, the envelope's status and error (with the `details`
 of a 422), the raw JSON and the request as a curl command, with `$API_KEY`, `$LLM_API_KEY` and
-`$ASR_API_KEY` in place of the keys. A result shows its content as source, Markdown also
-rendered (raw HTML shown as text, links only for http(s), images as their alt text), a download
-(`.md` or `.txt`; an `html` result saves as `.html` but is served as `text/plain`), its title, language and word count, its metadata, structured values (with
-their sources and the missing fields), chunks, images with their alt texts and descriptions, its
-links (clickable only for http(s)) and a timeline built from its fields: the job item's claim,
-compliance, fetch (attempts, upstream status, final URL, cache), render (with "escalated from
-fast" after `auto`), convert, PII, LLM and the outcome, with a one-line text for each warning. A
+`$ASR_API_KEY` in place of the keys. A result starts with a status line and a card of figures
+(page type, time, language and word count). A Markdown result is shown rendered in a reading
+card (raw HTML shown as text, links only for http(s), images as their alt text), with the
+Markdown source under the closed "Show source"; a text result shows the text itself. The toolbar
+has "Copy Markdown" (for text output "Copy text"), a download (`.md` or `.txt`; an `html` result
+saves as `.html` but is served as `text/plain`) and "Save response (JSON)". Metadata, links
+(clickable only for http(s)), images (with their alt texts and descriptions) and "What happened"
+are closed cards ("What happened" is open when there are warnings); structured values (with
+their sources and the missing fields) and chunks stay open. "What happened" is a timeline built
+from the result's fields: the job item's claim, compliance, fetch (attempts, upstream status,
+final URL, cache), render (with "escalated from fast" after `auto`), convert, PII, LLM and the
+outcome, with a one-line text for each warning. "Wait seconds" and "Options (JSON)" are under
+the closed "Advanced" section of each form that has them. The Screenshot tab's "Capture" offers
+presets (whole page, first screen, social preview, thumbnail, phone, custom). A
 screenshot is read from the artifact route (one more REST call) and shown inline, or a note says
 why it could not be read. A large content is bounded in the page: the source, the raw JSON and
 the chunks show at most 200,000 characters each (and only such a content is rendered as
@@ -794,8 +808,9 @@ Markdown), with a note when cut; the download is the full copy, up to 10,000,000
 "Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit per image, then the
 service fetches at most 20 of them (4 at once, 10 s each, 25 s for the whole view) itself, with the vision step's checks:
 the SSRF guard on the URL and every redirect, the caller's compliance mode, the host's outbound
-turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF or
-WebP by their bytes. A fetched image is inlined as a `data:` URI, so the image hosts never see
+turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF,
+WebP or SVG by their bytes (an SVG only as a `data:` image inside `<img>`, where no script in it
+runs; image descriptions skip SVG). A fetched image is inlined as a `data:` URI, so the image hosts never see
 the viewer and the CSP stays `img-src 'self' data:`; a skipped one shows why (`blocked`,
 `refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`, or `time` when the view's
 25 s ran out). An unexpected failure of one image skips that image as `error`; the others go on.
@@ -843,8 +858,11 @@ progress:
   hit, and refreshing stops
   once all are completed (after a 429 it tries again after `Retry-After`). A single operation
   that continues as a job (202) has a "Show progress" button for it.
-- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree
-  now" while it runs): the job is read in pages of 20 items, so at most 20 items are held at a
+- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree now"
+  while it runs): each URL has a badge with its page type (guessed from the URL for a sitemap
+  entry or a linked-only URL), "Types:" counts the shown URLs per type, and "Select content pages"
+  ticks the content pages and unticks imprint, privacy, legal, contact, login, search and error
+  pages and failed ones. The job is read in pages of 20 items, so at most 20 items are held at a
   time, and only the tree's fields are kept. The tree is built by URL path: a root per host (a
   leading `www.` dropped), a section per directory, and every URL a leaf (a directory's own page
   is the leaf `/`, a query string a leaf of its own), in name order. It merges the crawled pages
@@ -1272,9 +1290,14 @@ of every pool (the load ran one pod per pool), its memory request equals its lim
 and its limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at
 once, not for this load.
 
-Screenshot encoding was not part of the load: a browser worker encodes at most two screenshots at
-once (fixed in code), and one 1920 × 16,384 JPEG needs about 180 MB while it is encoded, so long
-full-page captures can add up to about 360 MB to the browser worker's peak above.
+Screenshot encoding was not part of the load. One 1920 × 16,384 encode needs about 330 MB as
+JPEG, about 470 MB as WebP and up to about 900 MB as WebP of a noisy page while it runs. The
+encodes of a browser worker share a budget of 1920 × 16,384 pixels (fixed in code), so at the
+default `SCREENSHOT_MAX_HEIGHT_PX` (16,384) this is also the most they need at once: long
+full-page captures can add up to about 900 MB to the browser worker's peak above. A higher limit
+(up to 32,768) raises one encode's need in proportion (up to about twice as much); an image over
+the budget runs alone. A render whose screenshot is encoded (`jpeg`, `webp`, or a `width`) keeps
+10 s of its time for the encode, at most a third of the render time.
 
 **Selector processes (P11-S5, issue #19).** The selector scenario on fresh containers per value:
 

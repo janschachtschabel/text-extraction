@@ -12,7 +12,7 @@ from text_extraction.browser_models import ScreenshotResult
 from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
-from text_extraction.ui.i18n import Code, Message
+from text_extraction.ui.i18n import Code, Message, count_message
 from text_extraction.ui.texts import status_text
 
 RequestedMode = Literal["fast", "auto", "browser"]
@@ -35,10 +35,6 @@ class TimelineStep:
 
 def _step(name: str, detail: Sequence[Part], ms: int | None) -> TimelineStep:
     return TimelineStep(Message(f"timeline.{name}"), tuple(detail), ms)
-
-
-def _count(count: int, one: str, many: str) -> Message:
-    return Message(one if count == 1 else many, {"count": count})
 
 
 def _claim(item: JobItem | None) -> list[TimelineStep]:
@@ -75,7 +71,7 @@ def _compliance(result: ExtractResult | ScreenshotResult) -> TimelineStep:
 def _fetch(result: ExtractResult | ScreenshotResult) -> TimelineStep:
     if result.mode_used == "upload":
         return _step("upload", [Message("timeline.no_fetch")], None)
-    parts: list[Part] = [_count(result.attempts, "timeline.attempt", "timeline.attempts")]
+    parts: list[Part] = [count_message("timeline.attempts", result.attempts)]
     if result.upstream_status is not None:
         parts.append(Message("timeline.http", {"status": result.upstream_status}))
     if result.final_url is not None and result.final_url != result.url:
@@ -104,7 +100,7 @@ def _convert(result: ExtractResult) -> TimelineStep:
     if document is not None:
         parts.append(document.converter)
         if document.pages is not None:
-            pages = _count(document.pages, "timeline.page", "timeline.pages")
+            pages = count_message("timeline.pages", document.pages)
             converted = document.pages_converted
             if converted is not None and converted != document.pages:
                 pages = Message("timeline.pages_of", {"converted": converted, "pages": pages})
@@ -118,7 +114,7 @@ def _pii(result: ExtractResult) -> list[TimelineStep]:
     if result.pii is None:
         return []
     count = sum(result.pii.entities.values())
-    entities = _count(count, "timeline.entity", "timeline.entities")
+    entities = count_message("timeline.entities", count)
     mode = Code(result.pii.mode)
     detail = Message("timeline.pii_detail", {"entities": entities, "mode": mode})
     return [_step("pii", [detail], result.timings.pii_ms)]

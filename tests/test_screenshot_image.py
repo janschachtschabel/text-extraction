@@ -1,16 +1,24 @@
 """``encode_screenshot`` (``screenshot_image.py``): the stored file in its format and width."""
 
 import asyncio
+import gc
 import io
+import struct
 import threading
 import time
+from collections.abc import Callable
 
 import pytest
 from PIL import Image
 
 from text_extraction import screenshot_image
 from text_extraction.browser_options import ScreenshotOptions, Viewport
-from text_extraction.screenshot_image import WEBP_MAX_SIDE_PX, EncodedScreenshot, encode_screenshot
+from text_extraction.screenshot_image import (
+    WEBP_MAX_SIDE_PX,
+    EncodedScreenshot,
+    ScreenshotEncodeError,
+    encode_screenshot,
+)
 
 
 def _png(width: int, height: int) -> bytes:
@@ -144,30 +152,267 @@ def test_other_formats_keep_all_rows(fmt: str) -> None:
     assert (tall.height, tall.clipped) == (16500, False)
 
 
-def test_encodes_run_at_most_encode_concurrency_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Each encode holds a full image in memory (~180 MB for a 1920x16384 JPEG): a process runs
-    # at most ENCODE_CONCURRENCY of them, however many renders finish together.
-    running = 0
-    peak = 0
-    lock = threading.Lock()
+_real_encode = encode_screenshot
+ENCODED = EncodedScreenshot(b"", 1, 1, "image/webp", "screenshot.webp")
 
-    def slow_encode(png: bytes, options: ScreenshotOptions | None) -> str:
-        nonlocal running, peak
-        with lock:
-            running += 1
-            peak = max(peak, running)
-        time.sleep(0.05)
-        with lock:
-            running -= 1
-        return "encoded"
 
-    monkeypatch.setattr(screenshot_image, "encode_screenshot", slow_encode)
+class _BlockingEncode:
+    """Stands in for ``encode_screenshot``: blocks until ``go`` is set, counts the encodes that
+    entered and how many ran at once. A PNG passed through goes to the real function."""
 
-    async def main() -> list[object]:
+    def __init__(self) -> None:
+        self.go = threading.Event()
+        self.entered = 0
+        self.running = 0
+        self.peak = 0
+        self.delay = 0.0  # seconds each encode takes once it may go on
+        self._lock = threading.Lock()
+
+    def __call__(self, png: bytes, options: ScreenshotOptions | None) -> EncodedScreenshot:
+        if options is None or (options.format == "png" and options.width is None):
+            return _real_encode(png, options)
+        with self._lock:
+            self.entered += 1
+            self.running += 1
+            self.peak = max(self.peak, self.running)
+        self.go.wait(timeout=10)
+        time.sleep(self.delay)
+        with self._lock:
+            self.running -= 1
+        return ENCODED
+
+
+def _png_header(width: int, height: int) -> bytes:
+    """The start of a PNG of ``width`` x ``height``: all the limiter reads (``png_size``)."""
+    return b"\x89PNG\r\n\x1a\n" + struct.pack(">I4sII", 13, b"IHDR", width, height) + bytes(5)
+
+
+WEBP = ScreenshotOptions(format="webp")
+MAX_SIZE = _png_header(1920, 16384)  # the largest full-page capture
+
+
+async def _until(condition: Callable[[], bool]) -> None:
+    async with asyncio.timeout(5):
+        while not condition():  # noqa: ASYNC110 - counted by the encode threads
+            await asyncio.sleep(0.01)
+
+
+def test_cancelled_encode_keeps_its_pixels_until_the_thread_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The extraction deadline cancels the awaiting coroutine; the thread runs on and still holds
+    # its image in memory, so its pixels stay taken until the thread ends (audit A1).
+    encode = _BlockingEncode()
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", encode)
+
+    async def main() -> None:
+        first = asyncio.create_task(screenshot_image.encode_screenshot_limited(MAX_SIZE, WEBP))
+        await _until(lambda: encode.entered == 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(screenshot_image.encode_screenshot_limited(MAX_SIZE, WEBP))
+        await asyncio.sleep(0.1)
+        assert encode.entered == 1  # the first thread still runs
+        encode.go.set()
+        assert await second == ENCODED
+
+    asyncio.run(main())
+    assert (encode.entered, encode.peak) == (2, 1)
+
+
+def test_small_encodes_share_the_pixel_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    encode = _BlockingEncode()
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", encode)
+    small = _png_header(1920, 5000)
+    assert 3 * 1920 * 5000 <= screenshot_image.ENCODE_PIXEL_BUDGET < 4 * 1920 * 5000
+
+    async def main() -> list[EncodedScreenshot]:
+        tasks = [
+            asyncio.create_task(screenshot_image.encode_screenshot_limited(small, WEBP))
+            for _ in range(4)
+        ]
+        await _until(lambda: encode.entered == 3)
+        await asyncio.sleep(0.1)
+        assert encode.entered == 3  # the fourth waits for pixels
+        encode.go.set()
+        return await asyncio.gather(*tasks)
+
+    assert asyncio.run(main()) == [ENCODED] * 4
+    assert encode.peak == 3
+
+
+def test_an_image_larger_than_the_budget_runs_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    encode = _BlockingEncode()
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", encode)
+    huge = _png_header(3840, 16384)  # twice the budget: weighed as the whole budget
+    assert screenshot_image.ENCODE_PIXEL_BUDGET < 3840 * 16384
+
+    async def main() -> list[EncodedScreenshot]:
+        first = asyncio.create_task(screenshot_image.encode_screenshot_limited(huge, WEBP))
+        await _until(lambda: encode.entered == 1)  # no deadlock: it gets the whole budget
+        small = asyncio.create_task(
+            screenshot_image.encode_screenshot_limited(_png_header(16, 16), WEBP)
+        )
+        await asyncio.sleep(0.1)
+        assert encode.entered == 1
+        encode.go.set()
+        return [await first, await small]
+
+    assert asyncio.run(main()) == [ENCODED] * 2
+    assert encode.peak == 1
+
+
+def test_unreadable_pngs_take_the_whole_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    encode = _BlockingEncode()
+    encode.go.set()
+    encode.delay = 0.05
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", encode)
+
+    async def main() -> list[EncodedScreenshot]:
         return await asyncio.gather(
-            *(screenshot_image.encode_screenshot_limited(b"", None) for _ in range(6))
+            *(screenshot_image.encode_screenshot_limited(b"", WEBP) for _ in range(6))
         )
 
-    assert asyncio.run(main()) == ["encoded"] * 6
-    assert peak == screenshot_image.ENCODE_CONCURRENCY == 2
-    assert asyncio.run(main()) == ["encoded"] * 6  # a new event loop gets its own slots
+    assert asyncio.run(main()) == [ENCODED] * 6
+    assert asyncio.run(main()) == [ENCODED] * 6  # a new event loop gets its own budget
+    assert encode.peak == 1
+
+
+def test_png_passthrough_takes_no_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
+    encode = _BlockingEncode()
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", encode)
+    png = _png(40, 30)
+
+    async def main() -> tuple[EncodedScreenshot, EncodedScreenshot]:
+        busy = [
+            asyncio.create_task(screenshot_image.encode_screenshot_limited(MAX_SIZE, WEBP))
+            for _ in range(2)
+        ]
+        await _until(lambda: encode.entered >= 1)
+        await asyncio.sleep(0.05)  # the whole budget is taken, and a second encode waits
+        try:
+            async with asyncio.timeout(1):
+                return (
+                    await screenshot_image.encode_screenshot_limited(png, None),
+                    await screenshot_image.encode_screenshot_limited(png, _options()),
+                )
+        finally:
+            encode.go.set()
+            await asyncio.gather(*busy)
+
+    plain, default = asyncio.run(main())
+    assert plain.data is png
+    assert default.data is png
+
+
+def test_a_failed_encode_nobody_waits_for_logs_no_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The deadline cancels the wait before the encode fails: shield drops its own callback on
+    # the encode then, so the limiter itself has to read the exception (audit A1).
+    def failing(png: bytes, options: ScreenshotOptions | None) -> EncodedScreenshot:
+        time.sleep(0.2)
+        raise ScreenshotEncodeError("boom")
+
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", failing)
+    reported: list[dict[str, object]] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: reported.append(context))
+        waiting = asyncio.create_task(screenshot_image.encode_screenshot_limited(b"x" * 100, WEBP))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await asyncio.sleep(0.4)  # the thread ends and its future gets the error
+        gc.collect()
+        await asyncio.sleep(0.05)
+
+    asyncio.run(main())
+    assert reported == []
+
+
+BUDGET = screenshot_image.ENCODE_PIXEL_BUDGET
+
+
+def _assert_idle(budget: screenshot_image._PixelBudget, free: int = BUDGET) -> None:
+    assert budget._free == free
+    assert not budget._waiters
+
+
+def test_a_cancelled_queued_wait_leaves_the_budget_as_it_was() -> None:
+    async def main() -> None:
+        budget = screenshot_image._PixelBudget()
+        await budget.acquire(BUDGET)
+        waiting = asyncio.create_task(budget.acquire(1))
+        await asyncio.sleep(0)
+        assert len(budget._waiters) == 1
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        _assert_idle(budget, free=0)
+        budget.release(BUDGET)
+        _assert_idle(budget)
+
+    asyncio.run(main())
+
+
+def test_a_wait_granted_and_cancelled_before_it_wakes_gives_its_pixels_back() -> None:
+    async def main() -> None:
+        budget = screenshot_image._PixelBudget()
+        await budget.acquire(BUDGET)
+        waiting = asyncio.create_task(budget.acquire(100))
+        await asyncio.sleep(0)
+        budget.release(BUDGET)  # grants the waiter its 100 pixels ...
+        assert budget._free == BUDGET - 100
+        waiting.cancel()  # ... and its task is cancelled before it runs again
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        _assert_idle(budget)
+
+    asyncio.run(main())
+
+
+def test_a_cancelled_large_head_wait_lets_the_smaller_one_behind_it_go() -> None:
+    async def main() -> None:
+        budget = screenshot_image._PixelBudget()
+        await budget.acquire(BUDGET - 10)
+        large = asyncio.create_task(budget.acquire(BUDGET))
+        await asyncio.sleep(0)
+        small = asyncio.create_task(budget.acquire(5))  # fits, but waits behind ``large``
+        await asyncio.sleep(0)
+        assert not small.done()
+        large.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await large
+        async with asyncio.timeout(1):
+            await small
+        _assert_idle(budget, free=5)
+        budget.release(5)
+        budget.release(BUDGET - 10)
+        _assert_idle(budget)
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize(
+    ("options", "seconds"),
+    [
+        (None, 0.0),
+        (ScreenshotOptions(), 0.0),
+        (ScreenshotOptions(width=800), 10.0),
+        (ScreenshotOptions(format="jpeg"), 10.0),
+        (ScreenshotOptions(format="webp"), 10.0),
+    ],
+)
+def test_encode_reserve_seconds(options: ScreenshotOptions | None, seconds: float) -> None:
+    assert screenshot_image.encode_reserve_seconds(options) == seconds
+    assert screenshot_image.ENCODE_RESERVE_SECONDS == 10.0
+
+
+def test_encode_refuses_a_non_png_capture() -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), (10, 20, 30)).save(buffer, format="JPEG")
+
+    with pytest.raises(ScreenshotEncodeError):
+        encode_screenshot(buffer.getvalue(), _options(format="webp"))
