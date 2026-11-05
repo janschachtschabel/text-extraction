@@ -89,6 +89,7 @@ CONSENT_SECONDS: Final = 3.0  # B11: best effort
 # The page's decoded response bytes may reach this many times its byte cap (audit B3).
 DECODED_BYTES_FACTOR: Final = 2
 # Of a render's deadline: what reading the DOM (and taking the screenshot) needs after the waits.
+# A screenshot that is encoded adds ``RenderOptions.encode_reserve``.
 _READ_RESERVE_SECONDS: Final = 1.0
 _SCREENSHOT_RESERVE_SECONDS: Final = 3.0
 _CONTENT_ATTEMPTS: Final = 3
@@ -423,7 +424,11 @@ class _Render:
         while the page went idle or its consent banner was handled leaves the page in the main
         frame, so the page is read and the download dropped."""
         self.deadline = deadline
-        reserve = _SCREENSHOT_RESERVE_SECONDS if self.options.screenshot else _READ_RESERVE_SECONDS
+        reserve = (
+            _SCREENSHOT_RESERVE_SECONDS + self.options.encode_reserve
+            if self.options.screenshot
+            else _READ_RESERVE_SECONDS
+        )
         await self._set_viewport()
         if await self._goto(reserve):
             return self._ended_on_download()

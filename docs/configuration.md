@@ -1272,9 +1272,12 @@ of every pool (the load ran one pod per pool), its memory request equals its lim
 and its limit is sized for `valkey.maxmemory` (60 %), that is for the results and documents held at
 once, not for this load.
 
-Screenshot encoding was not part of the load: a browser worker encodes at most two screenshots at
-once (fixed in code), and one 1920 × 16,384 JPEG needs about 180 MB while it is encoded, so long
-full-page captures can add up to about 360 MB to the browser worker's peak above.
+Screenshot encoding was not part of the load. One 1920 × 16,384 encode needs about 330 MB as
+JPEG, about 470 MB as WebP and up to about 900 MB as WebP of a noisy page while it runs. The
+encodes of a browser worker share a budget of 1920 × 16,384 pixels (fixed in code), so this is
+also the most they need at once: long full-page captures can add up to about 900 MB to the browser
+worker's peak above. A render whose screenshot is encoded (`jpeg`, `webp`, or a `width`) keeps
+10 s of its time for the encode.
 
 **Selector processes (P11-S5, issue #19).** The selector scenario on fresh containers per value:
 

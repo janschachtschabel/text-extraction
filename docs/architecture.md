@@ -688,9 +688,15 @@ while `BROWSER_ENABLED` is false, are unchanged.
   encodes at most 16,383 px a side, one row less than the default full-page height: a WebP
   image taller than that after scaling keeps its top 16,383 rows and the result gets the warning
   `screenshot_clipped` (once, also when the capture was cut already; ruling P14-R10); PNG and
-  JPEG keep all rows. `quality` with `png` is 422. At most two images are encoded at once in a
-  process (`screenshot_image.ENCODE_CONCURRENCY`; one 1920 × 16,384 JPEG needs about 180 MB
-  while it is encoded). An image Pillow cannot decode or encode fails `internal_error`, not
+  JPEG keep all rows. `quality` with `png` is 422. The encodes of a process share a budget of
+  1920 × 16,384 pixels (`screenshot_image.ENCODE_PIXEL_BUDGET`; an image weighs its pixels, a
+  larger one the whole budget): one 1920 × 16,384 encode needs about 330 MB as JPEG, about
+  470 MB as WebP and up to about 900 MB as WebP of a noisy page, and this is also the most at
+  once. An encode runs on a thread; when the extraction deadline cancels the wait, the thread
+  runs on and keeps its pixels until it ends. A render whose screenshot is encoded ends its page
+  work 10 s earlier (`ENCODE_RESERVE_SECONDS`, `RenderOptions.encode_reserve`), so the encode has
+  that time before the deadline. The capture must be a PNG (Pillow opens no other format). An
+  image Pillow cannot decode or encode fails `internal_error`, not
   retryable (the same bytes fail again), and logs `screenshot_encode_failed` with the error type,
   the image size and the format (never the URL). The
   encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores it

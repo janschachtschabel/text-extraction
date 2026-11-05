@@ -23,6 +23,7 @@ from text_extraction.render import (
     contacted_challenge_host,
     site,
 )
+from text_extraction.screenshot_image import encode_reserve_seconds
 from text_extraction.settings import Settings
 
 # ``CHALLENGE_STATUSES`` (``escalation.REFUSAL_STATUSES``): answers whose body may be a bot
@@ -77,7 +78,8 @@ def render_options(
     """How to render ``req``. The caller's headers go to the request URL's site only (B2 step
     5); an extraction render in standard mode leaves out the ``blocked`` resource types, a
     screenshot or unblock render loads everything (B3). ``evaluate`` actions run for admins. The
-    window is the request's screenshot viewport, else the default."""
+    window is the request's screenshot viewport, else the default. A screenshot that is encoded
+    gets its time kept from the render (audit A1)."""
     viewport = req.screenshot_options.viewport if req.screenshot_options else DEFAULT_VIEWPORT
     return RenderOptions(
         actions=tuple(req.actions),
@@ -90,6 +92,7 @@ def render_options(
         unblock=unblock,
         blocked_resources=frozenset() if unblock or req.screenshot else blocked,
         viewport=(viewport.width, viewport.height),
+        encode_reserve=encode_reserve_seconds(req.screenshot_options) if req.screenshot else 0.0,
     )
 
 

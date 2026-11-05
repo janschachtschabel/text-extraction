@@ -43,7 +43,7 @@ from text_extraction.outbound import CircuitOpen, DomainGate
 from text_extraction.pipeline import Pipeline
 from text_extraction.render import ArtifactSink, ClearanceStore, CookieData, Renderer
 from text_extraction.result_cache import ResultCache
-from text_extraction.screenshot_image import encode_screenshot
+from text_extraction.screenshot_image import ENCODE_RESERVE_SECONDS, encode_screenshot
 from text_extraction.settings import Settings
 
 USER = Principal(name="alice", role="user", rate_limit_per_minute=None)
@@ -661,6 +661,7 @@ def test_screenshot_is_stored_and_referenced() -> None:
     assert call.options.screenshot is True
     assert call.options.full_page is True
     assert call.options.blocked_resources == frozenset()  # a screenshot shows the images
+    assert call.options.encode_reserve == 0.0  # the PNG is passed through, not encoded
     assert data.cache == "bypass"  # the artifact belongs to this item only
     assert harness.keys("res:*") == []
 
@@ -701,9 +702,8 @@ def real_png(width: int, height: int) -> bytes:
 
 def test_screenshot_is_stored_in_the_requested_format_and_width() -> None:
     png = real_png(1200, 630)
-    harness = RenderHarness(
-        renderer=FakeRenderer(rendered(screenshot=png, screenshot_size=(1200, 630)))
-    )
+    renderer = FakeRenderer(rendered(screenshot=png, screenshot_size=(1200, 630)))
+    harness = RenderHarness(renderer=renderer)
     artifacts = FakeArtifacts()
     options = {"viewport": {"width": 1200, "height": 630}, "format": "jpeg", "width": 600}
 
@@ -719,6 +719,8 @@ def test_screenshot_is_stored_in_the_requested_format_and_width() -> None:
     [stored] = artifacts.screenshots
     assert stored.data.startswith(b"\xff\xd8\xff")
     assert ref.bytes == len(stored.data)
+    (call,) = renderer.calls
+    assert call.options.encode_reserve == ENCODE_RESERVE_SECONDS  # the render leaves time for it
 
 
 def test_the_renderer_gets_the_requests_viewport() -> None:
