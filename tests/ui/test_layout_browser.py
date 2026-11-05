@@ -1,5 +1,8 @@
 """The layout of the playground in a real Chromium (package 15, ``pytest -m browser``): two
-columns on a wide screen, one on a phone, and the petrol underline of the selected tab."""
+columns on a wide screen, one on a phone, the petrol underline of the selected tab, the main
+button and the reading card's serif text."""
+
+from typing import Final
 
 import pytest
 from playwright.sync_api import Page, expect
@@ -8,6 +11,13 @@ from tests.ui.test_playground_browser import browsing, log_in
 from tests.ui.test_playground_browser import ui as ui
 
 pytestmark = pytest.mark.browser
+# The width of a block and the width of a "0" in the block's font (what CSS calls 1ch).
+ZERO_WIDTH: Final = (
+    "() => { const block = document.querySelector('#result .reading .markdown');"
+    " const zero = document.createElement('span'); zero.textContent = '0';"
+    " block.appendChild(zero); const widths = [block.getBoundingClientRect().width,"
+    " zero.getBoundingClientRect().width]; zero.remove(); return widths; }"
+)
 
 
 def boxes(page: Page, *selectors: str) -> list[dict[str, float]]:
@@ -83,3 +93,23 @@ def test_main_button_is_wide_and_petrol(ui: tuple[str, str]) -> None:
         assert computed(page, "#extract-form > button[type=submit]", "backgroundColor") == [
             "rgb(29, 111, 106)"
         ]
+
+
+def test_reading_card_typography(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        _extract(page, origin)
+        family, size, rule, colour = computed(
+            page,
+            "#result .reading .markdown",
+            "fontFamily",
+            "fontSize",
+            "borderLeftWidth",
+            "borderLeftColor",
+        )
+        assert family.startswith("Charter")
+        assert (size, rule) == ("19px", "3px")
+        assert colour == "rgb(29, 111, 106)"
+        (width, zero) = page.evaluate(ZERO_WIDTH)
+        assert width <= 70 * zero + 1

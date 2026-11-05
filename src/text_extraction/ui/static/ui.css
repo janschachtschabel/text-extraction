@@ -547,19 +547,262 @@ label.inline input {
   border-top: 1px solid var(--line);
 }
 
+/* A result: a column of blocks 16 px apart; the cards are white on the grey page. */
+.result-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.result-view > * {
+  margin: 0;
+}
+
+.result-view > button {
+  align-self: flex-start;
+}
+
+/* The status line (P15-S3): the status pill, the unblocked pill, the HTTP status. */
 .answer {
   display: flex;
-  gap: 0.5rem;
+  flex-wrap: wrap;
+  gap: 8px;
   align-items: center;
 }
 
-.http-status,
-.badge {
+.http-status {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/* The status of a job's item (a pill in the result's status line). */
+.badge:not(.pill) {
   padding: 0.1rem 0.5rem;
   border-radius: 999px;
   background: var(--neutral-wash);
   border: 1px solid var(--line);
   font-size: 0.85em;
+}
+
+/* The toolbar (P15-R1, P15-S4): the title, then "Copy", "Save" and "Save response", outlined. */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.toolbar .title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.toolbar > button.secondary,
+.toolbar > a.download,
+.toolbar > a.download-response {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--field-line);
+  border-radius: var(--radius-field);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 15px;
+  text-decoration: none;
+}
+
+.toolbar > a.download:hover,
+.toolbar > a.download-response:hover {
+  border-color: var(--ink);
+  background: var(--neutral-wash);
+  color: var(--ink);
+}
+
+.toolbar > .hint,
+.toolbar > .cut-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* The figures (P15-S9): one card, the pairs in a wrapping row 28 px apart, the URL on its own. */
+dl.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+  padding: 14px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+  font-size: 15px;
+}
+
+dl.facts .fact {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+dl.facts .fact-url {
+  flex-basis: 100%;
+}
+
+dl.facts dt {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+dl.facts dd {
+  min-width: 0;
+  font-weight: 700;
+}
+
+/* The cards of a result: the service info, a screenshot, open sections and closed folds. */
+dl.info,
+.result-view > details.curl-box,
+.result-view > details.raw {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+
+dl.info,
+.result-view .fold,
+.result-view > details.curl-box,
+.result-view > details.raw {
+  padding: 14px 20px;
+}
+
+.result-view .card.block {
+  padding: 20px 24px;
+}
+
+.result-view .card.block > h4 {
+  margin: 0 0 12px;
+}
+
+.result-view .card.shot {
+  padding: 12px;
+}
+
+.result-view .card.shot img.screenshot {
+  display: block;
+  border: none;
+}
+
+.result-view .fold > summary,
+.result-view > details.curl-box > summary,
+.result-view > details.raw > summary {
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.result-view .fold[open] > summary,
+.result-view > details.curl-box[open] > summary,
+.result-view > details.raw[open] > summary {
+  margin-bottom: 12px;
+}
+
+.timeline-view h4 {
+  margin: 12px 0 4px;
+  font-size: 15px;
+}
+
+/* The reading card (P15-S5): the text in the serif reading font, at most 70 characters wide,
+   with a petrol rule on its left; the source below it in the code font. */
+.reading {
+  padding: 40px 48px 48px;
+}
+
+.reading > h4 {
+  margin: 0 0 16px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.reading > .cut-note {
+  margin: 0 0 16px;
+}
+
+.reading .markdown,
+.reading > pre.content {
+  max-width: 70ch;
+  margin: 0;
+  padding: 0 0 0 20px;
+  border: none;
+  border-left: 3px solid var(--accent);
+  border-radius: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--font-read);
+  font-size: 19px;
+  line-height: 1.75;
+}
+
+.reading > pre.content {
+  max-height: none;
+  overflow: visible;
+  white-space: pre-wrap;
+}
+
+.reading .markdown > :first-child {
+  margin-top: 0;
+}
+
+.reading .markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.reading .markdown :is(h1, h2, h3, h4, h5, h6) {
+  font-family: var(--font-ui);
+  line-height: 1.3;
+}
+
+.reading .markdown h1 {
+  font-size: 1.5em;
+}
+
+.reading .markdown h2 {
+  font-size: 1.25em;
+}
+
+.reading .markdown h3 {
+  font-size: 1.1em;
+}
+
+.reading details.source {
+  margin: 24px 0 0;
+}
+
+.reading details.source pre.content {
+  margin: 8px 0 0;
+  background: var(--page);
+  font-family: var(--font-code);
+}
+
+@media (max-width: 599.98px) {
+  .reading {
+    padding: 20px 16px;
+  }
+
+  .reading .markdown,
+  .reading > pre.content {
+    font-size: 17px;
+  }
 }
 
 .badge-success {
@@ -603,7 +846,6 @@ pre {
   overflow-wrap: anywhere;
 }
 
-dl.facts,
 dl.meta,
 dl.info {
   display: grid;
@@ -632,16 +874,6 @@ td {
   text-align: left;
   vertical-align: top;
   overflow-wrap: anywhere;
-}
-
-.download {
-  display: inline-block;
-  margin-bottom: 0.5rem;
-}
-
-.markdown {
-  padding: 0 0.75rem;
-  border-left: 3px solid var(--line);
 }
 
 ol.timeline .step {

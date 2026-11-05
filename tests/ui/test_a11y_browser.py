@@ -159,6 +159,11 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         _submit(page, "extract")
         expect(page.locator("#result h3.title")).to_have_text("Docs A")
         found += _axe(page, "extract result")
+        page.evaluate(
+            "document.querySelectorAll('#result details').forEach(d => { d.open = true; })"
+        )
+        expect(page.locator("#result button[data-action=copy]")).to_be_visible()
+        found += _axe(page, "extract result, expanded")
 
         page.fill("#extract-options", "{")  # the loop above left the section open
         _submit(page, "extract")
