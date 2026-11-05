@@ -1175,8 +1175,9 @@ ul.tree .found {
   vertical-align: middle;
 }
 
-/* A label wraps its page-type badge below the name when the line is too narrow (audit U3). */
-ul.tree label.inline {
+/* A label wraps its page-type badge below the name when the line is too narrow (audit U3);
+   a label without a badge keeps its long name beside its checkbox. */
+ul.tree label.inline:has(.page-type) {
   flex-wrap: wrap;
 }
 

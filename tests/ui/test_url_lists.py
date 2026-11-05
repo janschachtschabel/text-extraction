@@ -173,6 +173,11 @@ def test_url_list_problems_in_german() -> None:
         split_batches([A, B, C], per_batch=1, max_batches=2)
     assert caught.value.message.text("de") == "Wählen Sie höchstens 2 URLs auf einmal."
     assert str(caught.value) == "Select at most 2 URLs at once."  # English for logs and tests
+    # BATCH_MAX_URLS and BATCH_MAX_OPEN_PER_CLIENT may both be 1.
+    with pytest.raises(UrlListError) as caught:
+        split_batches([A, B], per_batch=1, max_batches=1)
+    assert caught.value.message.text("de") == "Wählen Sie höchstens 1 URL auf einmal."
+    assert str(caught.value) == "Select at most 1 URL at once."
 
 
 def test_every_url_problem_of_netguard_has_a_text() -> None:

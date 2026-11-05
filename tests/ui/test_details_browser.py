@@ -105,6 +105,15 @@ _BADGE: Final = (
 )
 
 
+# The computed flex-wrap of the tree's labels with a page-type badge and of those without.
+_LABEL_WRAPS: Final = (
+    "() => { const labels = [...document.querySelectorAll('#result ul.tree label.inline')];"
+    " const wrap = (label) => getComputedStyle(label).flexWrap;"
+    " return {badge: labels.filter((l) => l.querySelector('.page-type')).map(wrap),"
+    " plain: labels.filter((l) => !l.querySelector('.page-type')).map(wrap)}; }"
+)
+
+
 @pytest.fixture
 def guessed_ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
     origin = serve_site(httpserver, GUESSED_PAGES)
@@ -140,4 +149,10 @@ def test_guessed_page_type_keeps_its_space_and_fits_the_tree(
         assert measured["gap"] >= 0.25 * measured["size"]
         assert measured["right"] <= measured["inner"]
         assert measured["scrolls"] is False
+        # Only a label with a badge wraps; a long name without one stays beside its checkbox.
+        wraps = page.evaluate(_LABEL_WRAPS)
+        assert wraps["badge"]
+        assert set(wraps["badge"]) == {"wrap"}
+        assert wraps["plain"]
+        assert set(wraps["plain"]) == {"nowrap"}
     assert console == []

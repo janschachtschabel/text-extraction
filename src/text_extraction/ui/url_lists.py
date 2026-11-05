@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from text_extraction.netguard import MAX_URL_LENGTH, InvalidUrlError, validate_url
-from text_extraction.ui.i18n import Message, MessageError
+from text_extraction.ui.i18n import Message, MessageError, count_message
 
 __all__ = [
     "URL_PROBLEMS",
@@ -246,5 +246,5 @@ def split_batches(urls: Sequence[str], *, per_batch: int, max_batches: int) -> l
     batches than ``max_batches`` is refused (`UrlListError`), so nothing is sent."""
     count = math.ceil(len(urls) / per_batch)
     if count > max_batches:
-        raise UrlListError(Message("urls.select_at_most", {"max": max_batches * per_batch}))
+        raise UrlListError(count_message("urls.select_at_most", max_batches * per_batch))
     return [list(urls[start : start + per_batch]) for start in range(0, len(urls), per_batch)]
