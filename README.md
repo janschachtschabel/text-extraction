@@ -10,10 +10,10 @@ and a playground in English and German.
 
 ## Status
 
-Prototype `v0.1.2`: packages 0-13 are merged (foundation, service skeleton, fast extraction,
+Prototype `v0.1.2`: packages 0-15 are merged (foundation, service skeleton, fast extraction,
 jobs and batch, browser worker, documents and OCR, audio and video, PII, structured output and
 chunking, site structure, MCP and UI, hand-over, UI languages with the unblock option and
-bilingual docs, YouTube transcript panel). See
+bilingual docs, YouTube transcript panel, screenshot formats and page types, playground redesign). See
 [docs/packages.md](docs/packages.md#status) for the implementation packages and their status.
 
 ## Two ways to extract

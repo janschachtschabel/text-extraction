@@ -11,10 +11,10 @@ Englisch.
 
 ## Status
 
-Prototyp `v0.1.2`: Die Pakete 0 bis 13 sind gemergt (Grundlage, Dienstgerüst, schnelle
+Prototyp `v0.1.2`: Die Pakete 0 bis 15 sind gemergt (Grundlage, Dienstgerüst, schnelle
 Extraktion, Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte
 Ausgabe und Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
-Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht). Die Pakete und ihren
+Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und Seitentypen, neue Gestaltung des Playgrounds). Die Pakete und ihren
 Stand zeigt [docs/packages.md](docs/packages.md#status) (Englisch).
 
 ## Zwei Arten der Extraktion

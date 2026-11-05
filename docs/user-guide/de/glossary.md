@@ -75,6 +75,7 @@ Begriffe der API und dieser Anleitung.
 | unblock browser | Entsperr-Browser | Der getarnte Chrome des Entsperrmodus. |
 | TDM opt-out | TDM-Nutzungsvorbehalt | Der Vorbehalt einer Website gegen Text- und Data-Mining. |
 | page type | Seitentyp | Die Art einer Seite (`page_type`), etwa Inhalt, Übersicht oder Impressum; nach Regeln bestimmt. |
+| soft 404 | Soft-404 | Eine Seite, die mit 2xx antwortet, aber eine Fehlerseite ist (`quality.soft_404`). |
 | link category | Linkkategorie | Wohin ein Link führt (`category`), etwa zum Impressum, zu einem sozialen Netzwerk oder zu einem Download. |
 | entity | Treffer | Ein personenbezogenes Datum, das `pii` gefunden hat („Funde“ wird nicht verwendet). |
 | chunk | Chunk | Ein Stück zerlegten Inhalts. |

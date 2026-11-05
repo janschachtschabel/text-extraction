@@ -746,7 +746,7 @@ while `BROWSER_ENABLED` is false, are unchanged.
     sweep removes every released profile again for 30 s, the pause doubling from 1 s (warning
     `browser_profile_left` for one still there then); the worker's shutdown removes any left.
     Patchright is pinned to the newest release at least 14 days old
-    (1.63.0; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
+    (1.64.1; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
     the stable of that day.
   - What changes: robots and TDM are not checked (that is `ignore`); nothing is blocked; service
     workers and non-GET navigations are allowed. The proxy, the navigation checks, the byte cap
@@ -1520,7 +1520,7 @@ Prefer fixed replicas for steady load.
 no faster-whisper, CTranslate2, PyAV, Deno or models (image.yml checks it), and its parent
 processes never import yt-dlp or youtube-transcript-api. The ASR image (target `asr`, image
 `text-extraction-asr`, linux/amd64, about 1.4 GB uncompressed) holds the venv with the extra `asr`
-(faster-whisper 1.2.1, CTranslate2 4.8.2, PyAV 19.0.1 built against FFmpeg, `yt-dlp[deno]` with
+(faster-whisper 1.2.1, CTranslate2 4.8.3, PyAV 19.0.2 built against FFmpeg, `yt-dlp[deno]` with
 `yt-dlp-ejs` for YouTube's player challenges, the OpenAI SDK), the FFmpeg shared libraries and
 their licence (`/opt/ffmpeg`, registered with `ldconfig`), no `ffmpeg`, `ffprobe` or `rtmpdump`
 program and no models; non-root, tini. The LGPL build (D5) is enforced four times: the build
@@ -2829,7 +2829,8 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   their alt text), a download, its metadata, structured values, images with alt texts and
   descriptions, links and a timeline built from its fields only (claim, compliance, fetch, render,
   convert, PII, LLM, outcome) with a one-line text per warning (`warning.<name>` in the
-  catalogues). Previews follow
+  catalogues). The order and the look of this view (source first, then rendered) are superseded
+  by P15-S5 and the other P15 items below ("Look (package 15)"). Previews follow
   D7: at most 20 images, 4 at once, 10 s each and 25 s per view; a skipped one shows its reason.
   Since package 14 a preview may be an SVG (`vision.images.is_svg`: an XML document whose root
   is `<svg>`, also after an XML declaration, a BOM, comments, a doctype or with a namespace
@@ -2888,7 +2889,7 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   - **P15-S3, status line.** `header.answer` holds the status pill, the unblocked pill and
     `HTTP <n>`; it stays there because an error without `data` has no card of figures.
   - **P15-S4, copy source.** "Copy" copies the text shown in `pre.content` (at most
-    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'none'` forbids reading the download's link back.
+    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'self'` does not allow fetching a `data:` URL, so the download's link cannot be read back.
     "Save response" is left out, with a hint, above `DOWNLOAD_MAX_CHARS` (a cut JSON is no JSON).
   - **P15-S5, reading card.** Rendered Markdown (or `pre.content` in the serif font for text, or
     for Markdown too long to render) stands in a white reading card; the Markdown source is in

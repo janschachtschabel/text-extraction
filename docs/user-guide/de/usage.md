@@ -201,7 +201,7 @@ Medien, 600 px breit:
 ihren `content_type`, ihre `width` und ihre `height`. Eine ganze Seite wird bei
 `SCREENSHOT_MAX_HEIGHT_PX` (16.384 px) abgeschnitten, mit der Warnung `screenshot_clipped`. Ein
 Fenster, das breiter als 1920 px ist, wird früher abgeschnitten, damit ein Bild nie mehr Pixel hat
-als eines von 1920 px Breite. WebP fasst höchstens 16.383 px je Seite, darum verliert ein
+als eines von 1920 px Breite. WebP fasst höchstens 16.383 px je Kante, darum verliert ein
 `webp`-Bild, das (nach dem Verkleinern mit `width`) höher ist, seine unteren Zeilen, mit derselben
 Warnung.
 
@@ -373,8 +373,8 @@ ein zugeklappter Abschnitt; er enthält „Optionen (JSON)“ und, wo das Formul
 Formularfehler in einem Feld darin öffnet den Abschnitt und setzt den Cursor auf das Feld.
 
 Jedes Formular führt einen REST-Aufruf aus, mit denselben Prüfungen und demselben Ratenlimit wie
-jeder Client. Das Ergebnis beginnt mit einer Statuszeile (der Status, „maximale Extraktion (entsperrt)“ für eine
-Seite, die im Entsperrmodus geöffnet wurde, und der HTTP-Status), darunter folgen eine Werkzeugleiste, eine
+jeder Client. Das Ergebnis beginnt mit einer Statuszeile (dem Status, „maximale Extraktion (entsperrt)“ für eine
+Seite, die im Entsperrmodus geöffnet wurde, und dem HTTP-Status), darunter folgen eine Werkzeugleiste, eine
 Karte mit Kennzahlen (URL, Sprache, Wörter, verwendeter Modus, Seitentyp, Zeit) und der Inhalt in
 einer weißen Lesekarte. Metadaten, Links, Bilder und „Ablauf“ sind zugeklappte Abschnitte („Ablauf“
 öffnet sich von selbst, wenn es Warnungen gibt); bei Markdown steht der Quelltext unter „Quelltext

@@ -92,7 +92,7 @@ Jede HTML-Seite, die der Crawl liest, bekommt einen `page_type`, ebenso eine Sei
 `POST /v1/extract`: ihren `type` und die `signals`, die dafür sprechen. Es entscheiden Regeln,
 ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft, gewinnt:
 
-1. `error`: Die Seite hat mit 2xx geantwortet, ist aber eine Fehlerseite (eine weiche 404,
+1. `error`: Die Seite hat mit 2xx geantwortet, ist aber eine Fehlerseite (ein Soft-404,
    `quality.soft_404`). Eine Seite, die mit einem HTTP-Fehler (4xx oder 5xx) gescheitert ist,
    wird nicht umgewandelt und hat keinen Typ (`page_type: null`); ihr Status sagt, was geschah.
 2. `home`: Der Pfad ist leer, `/`, eine Indexdatei wie `/index.html` oder nur ein Sprachkürzel

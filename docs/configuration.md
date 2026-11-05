@@ -786,13 +786,20 @@ REST answers apply, such as 400 without the LLM).
 
 Every answer is shown with its HTTP status, the envelope's status and error (with the `details`
 of a 422), the raw JSON and the request as a curl command, with `$API_KEY`, `$LLM_API_KEY` and
-`$ASR_API_KEY` in place of the keys. A result shows its content as source, Markdown also
-rendered (raw HTML shown as text, links only for http(s), images as their alt text), a download
-(`.md` or `.txt`; an `html` result saves as `.html` but is served as `text/plain`), its title, language and word count, its metadata, structured values (with
-their sources and the missing fields), chunks, images with their alt texts and descriptions, its
-links (clickable only for http(s)) and a timeline built from its fields: the job item's claim,
-compliance, fetch (attempts, upstream status, final URL, cache), render (with "escalated from
-fast" after `auto`), convert, PII, LLM and the outcome, with a one-line text for each warning. A
+`$ASR_API_KEY` in place of the keys. A result starts with a status line and a card of figures
+(page type, time, language and word count). A Markdown result is shown rendered in a reading
+card (raw HTML shown as text, links only for http(s), images as their alt text), with the
+Markdown source under the closed "Show source"; a text result shows the text itself. The toolbar
+has "Copy Markdown" (for text output "Copy text"), a download (`.md` or `.txt`; an `html` result
+saves as `.html` but is served as `text/plain`) and "Save response (JSON)". Metadata, links
+(clickable only for http(s)), images (with their alt texts and descriptions) and "What happened"
+are closed cards ("What happened" is open when there are warnings); structured values (with
+their sources and the missing fields) and chunks stay open. "What happened" is a timeline built
+from the result's fields: the job item's claim, compliance, fetch (attempts, upstream status,
+final URL, cache), render (with "escalated from fast" after `auto`), convert, PII, LLM and the
+outcome, with a one-line text for each warning. "Wait seconds" and "Options (JSON)" are under
+the closed "Advanced" section of each form that has them. The Screenshot tab's "Capture" offers
+presets (whole page, first screen, social preview, thumbnail, phone, custom). A
 screenshot is read from the artifact route (one more REST call) and shown inline, or a note says
 why it could not be read. A large content is bounded in the page: the source, the raw JSON and
 the chunks show at most 200,000 characters each (and only such a content is rendered as
@@ -801,8 +808,9 @@ Markdown), with a note when cut; the download is the full copy, up to 10,000,000
 "Load previews" posts the result's image URLs to `/ui/run/images`: one rate-limit hit per image, then the
 service fetches at most 20 of them (4 at once, 10 s each, 25 s for the whole view) itself, with the vision step's checks:
 the SSRF guard on the URL and every redirect, the caller's compliance mode, the host's outbound
-turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF or
-WebP by their bytes. A fetched image is inlined as a `data:` URI, so the image hosts never see
+turn and the service's user agent, at most `UI_IMAGE_MAX_BYTES` each and only PNG, JPEG, GIF,
+WebP or SVG by their bytes (an SVG only as a `data:` image inside `<img>`, where no script in it
+runs; image descriptions skip SVG). A fetched image is inlined as a `data:` URI, so the image hosts never see
 the viewer and the CSP stays `img-src 'self' data:`; a skipped one shows why (`blocked`,
 `refused`, `too_large`, `unsupported`, `http_error`, `error`, `busy`, or `time` when the view's
 25 s ran out). An unexpected failure of one image skips that image as `error`; the others go on.
@@ -851,7 +859,10 @@ progress:
   once all are completed (after a 429 it tries again after `Retry-After`). A single operation
   that continues as a job (202) has a "Show progress" button for it.
 - **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree
-  now" while it runs): the job is read in pages of 20 items, so at most 20 items are held at a
+  now" while it runs): each URL has a badge with its page type (guessed from the URL for a
+  sitemap entry or a linked-only URL), "Types:" counts the shown URLs per type, and "Select
+  content pages" ticks the content pages and unticks imprint, privacy, legal, contact, login,
+  search and error pages and failed ones. The job is read in pages of 20 items, so at most 20 items are held at a
   time, and only the tree's fields are kept. The tree is built by URL path: a root per host (a
   leading `www.` dropped), a section per directory, and every URL a leaf (a directory's own page
   is the leaf `/`, a query string a leaf of its own), in name order. It merges the crawled pages

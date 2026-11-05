@@ -26,7 +26,7 @@ Eine Seite oder Datei über ihre URL. Die Antwort beschreibt [Nutzung](usage.md)
 | `compliance` | `enforce`, `report` oder `ignore` | nicht gesetzt | Die Website-Regeln: `enforce` lehnt ab, was robots.txt oder ein TDM-Nutzungsvorbehalt verbietet, `report` meldet es nur, `ignore` (nur Admins) lässt die Prüfungen aus und erlaubt die maximale Extraktion. Nicht gesetzt: `COMPLIANCE_DEFAULT` des Betreibers. |
 | `cache` | Boolean | `true` | Den Ergebnis-Cache nutzen; `false` liest und speichert nichts. |
 | `wait_seconds` | Zahl, 0 bis 60 | nicht gesetzt | Nach so vielen Sekunden wird eine laufende Extraktion zu einem Job (202); `0`: sofort ein Job. Nicht gesetzt: Die Anfrage wartet auf ihre Antwort, mit drei Ausnahmen: Mit `transcribe: true` ist der Standard 20, und eine Anfrage, die auf den NLP- oder den LLM-Worker wartet, antwortet nach `PII_SYNC_WAIT_SECONDS` oder `LLM_SYNC_WAIT_SECONDS` mit 202. |
-| `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. |
+| `actions` | Liste von Objekten | leer | Seitenaktionen im Browser, der Reihe nach, höchstens 20 (etwa `click`, `type`, `scroll`, `accept_cookies`). Nicht mit `mode: fast`. Die Aktion `evaluate` (JavaScript) ist nur für Admin-Schlüssel; andere Schlüssel erhalten 403. |
 | `cookies` | Liste von Objekten | leer | Cookies für die angefragte Website. Nicht mit `mode: fast`. |
 | `headers` | Objekt | leer | Header für die angefragte Website. Nicht mit `mode: fast`. |
 | `screenshot` | Boolean | `false` | Auch einen Screenshot aufnehmen, ein PNG, wenn `screenshot_options` nichts anderes sagt. Nicht mit `mode: fast`. |
@@ -217,7 +217,7 @@ Ein einfacher String ist der Modus: `"pii": "mask"` ist `"pii": {"mode": "mask"}
 | `mode` | `mask`, `redact`, `hash` oder `annotate` | Pflicht | Was mit einem Treffer geschieht. |
 | `entities` | Liste von Entitätstypen | nicht gesetzt | Welche Entitäten gesucht werden; nicht gesetzt: `PII_DEFAULT_ENTITIES` des Betreibers. |
 | `language` | `auto`, `de` oder `en` | `auto` | Die Sprache des Textes. |
-| `score_threshold` | Zahl | nicht gesetzt | Der kleinste Score eines Treffers; nicht gesetzt: `PII_SCORE_THRESHOLD`. |
+| `score_threshold` | Zahl | nicht gesetzt | Der kleinste Score eines Treffers, 0 bis 1; nicht gesetzt: `PII_SCORE_THRESHOLD`. |
 
 ### `structured`
 
@@ -229,16 +229,16 @@ Ein einfacher String ist der Modus: `"pii": "mask"` ist `"pii": {"mode": "mask"}
 | `patterns` | Objekt | leer | Reguläre Ausdrücke pro Feld, auf dem Inhalt. |
 | `tables` | Boolean | `false` | Auch die Tabellen der Seite liefern. |
 | `learn_selectors` | Boolean | `false` | Das LLM Selektoren vorschlagen lassen, die die nächsten Seiten der Website wiederverwenden. |
-| `instructions` | String | nicht gesetzt | Zusätzliche Anweisungen für das LLM. |
+| `instructions` | String | nicht gesetzt | Zusätzliche Anweisungen für das LLM, höchstens 2000 Zeichen. |
 
 ### `chunking`
 
 | Feld | Typ | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `strategy` | `fixed`, `recursive`, `markdown`, `sentence` oder `semantic` | `recursive` | Wo geschnitten wird. |
-| `size` | Ganzzahl | `1000` | Höchstens so viele Zeichen pro Chunk. |
-| `overlap` | Ganzzahl | `100` | Zeichen, die zwei Chunks teilen. |
-| `breakpoint_percentile` | Ganzzahl | `90` | Für `semantic`: wie groß ein Bedeutungswechsel sein muss, damit geschnitten wird. |
+| `size` | Ganzzahl | `1000` | Höchstens so viele Zeichen pro Chunk, 200 bis 20000. |
+| `overlap` | Ganzzahl | `100` | Zeichen, die zwei Chunks teilen, höchstens die Hälfte von `size`. |
+| `breakpoint_percentile` | Ganzzahl | `90` | Für `semantic`: wie groß ein Bedeutungswechsel sein muss, damit geschnitten wird, 50 bis 99. |
 
 ### `describe_images`
 
