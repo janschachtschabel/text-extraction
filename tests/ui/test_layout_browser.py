@@ -321,10 +321,41 @@ def test_tables_and_text_scroll_inside_their_card(ui: tuple[str, str]) -> None:
             long_word,
         )
         assert page.evaluate(OVERFLOW) <= PHONE["width"]
-        (display,) = computed(page, "#result table.values", "display")
-        assert display == "block"
-        (scroll,) = computed(page, "#result table.values", "overflowX")
-        assert scroll == "auto"
+        page.evaluate(
+            "document.querySelector('#result .card').insertAdjacentHTML('beforeend',"
+            ' \'<table class="items"><tr><td class="url">u</td></tr></table>'
+            '<table class="images"><tr><th>Description</th></tr></table>\')'
+        )
+        for table in ("values", "items", "images"):
+            assert computed(page, f"#result table.{table}", "display", "overflowX") == [
+                "block",
+                "auto",
+            ]
+
+
+def test_items_url_column_and_images_header_on_a_phone(ui: tuple[str, str]) -> None:
+    """The URL column keeps 12rem, so a URL does not break every few characters: the table
+    scrolls in its card, the page does not. A header word stays whole."""
+    url, origin = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size(PHONE)
+        _start_batch(page, origin)
+        cell = boxes(page, "#result table.items td.url")[0]
+        assert cell["width"] >= 12 * 16 - 1
+        assert page.evaluate(OVERFLOW) <= PHONE["width"]
+        scrolls = page.evaluate(
+            "() => { const t = document.querySelector('#result table.items');"
+            " return t.scrollWidth >= t.clientWidth; }"
+        )
+        assert scrolls
+        page.evaluate(
+            "document.querySelector('#result').insertAdjacentHTML('beforeend',"
+            ' \'<table class="images"><tr><th>Description</th></tr></table>'
+            '<form class="previews"><button class="secondary">x</button></form>\')'
+        )
+        assert computed(page, "#result table.images th", "whiteSpace") == ["nowrap"]
+        table, form = boxes(page, "#result table.images", "#result form.previews")
+        assert form["top"] - table["bottom"] >= 8
 
 
 def test_phone_gutter_is_16px(ui: tuple[str, str]) -> None:
@@ -362,7 +393,7 @@ def _focus_by_keyboard(page: Page, selector: str) -> None:
         "#extract-url",
     ],
 )
-def test_focus_ring_on_summary_and_segment(ui: tuple[str, str], selector: str) -> None:
+def test_focus_ring_on_summary_segment_tab_and_field(ui: tuple[str, str], selector: str) -> None:
     url, _ = ui
     with browsing(url) as (page, _):
         log_in(page)

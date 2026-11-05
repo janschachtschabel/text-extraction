@@ -1076,6 +1076,7 @@ table.items td.index {
 
 table.items td.url {
   min-width: 0;
+  max-width: 32rem;
   overflow-wrap: anywhere;
 }
 
@@ -1089,10 +1090,6 @@ table.items .badge-partial {
 
 table.items .badge-failed {
   background: var(--error-wash);
-}
-
-table.items td.url {
-  max-width: 32rem;
 }
 
 button.link {
@@ -1209,5 +1206,19 @@ dl.facts.counts {
   table.values {
     display: block;
     overflow-x: auto;
+  }
+
+  /* A URL keeps a readable line length, a header word stays whole: the table scrolls in its
+     card, the page does not. */
+  table.items td.url {
+    min-width: 12rem;
+  }
+
+  table.images th {
+    white-space: nowrap;
+  }
+
+  form.previews {
+    margin-top: 12px;
   }
 }

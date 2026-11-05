@@ -247,6 +247,13 @@ def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Langu
         found += _axe(page, "phone extract result, expanded")
         found += _form_error(page)
 
+        page.click("#tab-batch")
+        page.fill("#batch-urls", f"{origin}/docs/a.html\n{origin}/docs/b.html")
+        _submit(page, "batch")
+        job = page.locator("#result section.job")
+        expect(job.locator(".state")).to_have_attribute("data-value", "completed")
+        found += _axe(page, "phone completed progress (scrolling items table)")
+
     assert found == [], "\n".join(found)
     assert console == []
 
