@@ -121,6 +121,21 @@ def _submit(page: Page, tab: str) -> None:
     page.locator(f"#panel-{tab} button[type=submit]").click()
 
 
+def _form_error(page: Page) -> list[str]:
+    """Send invalid options from the extract tab (its Advanced section opened here, whatever
+    came before) and check the form error; the field is emptied again."""
+    page.click("#tab-extract")
+    section = page.locator("#panel-extract details.advanced")
+    if section.get_attribute("open") is None:
+        section.locator("summary").click()
+    page.fill("#extract-options", "{")
+    _submit(page, "extract")
+    expect(page.locator("#result [data-error-for]")).to_be_visible()
+    found = _axe(page, "form error")
+    page.fill("#extract-options", "")
+    return found
+
+
 def test_axe_reports_a_violation() -> None:
     """The harness itself: the injected axe-core is 4.14.0 and reports a known violation."""
     with browsing("about:blank") as (page, console):
@@ -165,11 +180,7 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         expect(page.locator("#result button[data-action=copy]")).to_be_visible()
         found += _axe(page, "extract result, expanded")
 
-        page.fill("#extract-options", "{")  # the loop above left the section open
-        _submit(page, "extract")
-        expect(page.locator("#result [data-error-for]")).to_be_visible()
-        found += _axe(page, "form error")
-        page.fill("#extract-options", "")
+        found += _form_error(page)
 
         page.click("#tab-batch")
         page.fill("#batch-urls", f"{origin}{SLOW_PATH}")
@@ -201,6 +212,40 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         site.locator("button.tree-button").click()
         expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
         found += _axe(page, "site tree")
+
+    assert found == [], "\n".join(found)
+    assert console == []
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Language) -> None:
+    """The login, every tab with its Advanced section open, an extract result with every
+    details element open and a form error, at 390 x 844."""
+    url, origin = ui
+    found: list[str] = []
+    with browsing(f"{url}?lang={language}") as (page, console):
+        page.set_viewport_size({"width": 390, "height": 844})
+        found += _axe(page, "phone login")
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        for tab in TABS:
+            page.click(f"#tab-{tab.name}")
+            expect(page.locator(f"#panel-{tab.name}")).to_be_visible()
+            for summary in page.locator(f"#panel-{tab.name} details.advanced > summary").all():
+                if summary.evaluate("s => !s.parentElement.open"):
+                    summary.click()
+            found += _axe(page, f"phone tab {tab.name}")
+
+        page.click("#tab-extract")
+        page.fill("#extract-url", f"{origin}/docs/a.html")
+        _submit(page, "extract")
+        expect(page.locator("#result h3.title")).to_have_text("Docs A")
+        page.evaluate(
+            "document.querySelectorAll('#result details').forEach(d => { d.open = true; })"
+        )
+        expect(page.locator("#result button[data-action=copy]")).to_be_visible()
+        found += _axe(page, "phone extract result, expanded")
+        found += _form_error(page)
 
     assert found == [], "\n".join(found)
     assert console == []

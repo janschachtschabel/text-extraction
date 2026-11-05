@@ -94,6 +94,23 @@ a:hover {
   top: 0.5rem;
 }
 
+/* Transitions: colour only, 120 ms, and only when the user has not asked for less motion. */
+@media (prefers-reduced-motion: no-preference) {
+  a,
+  button,
+  input,
+  select,
+  textarea,
+  summary,
+  label.inline {
+    transition:
+      color 120ms,
+      background-color 120ms,
+      border-color 120ms,
+      box-shadow 120ms;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -390,6 +407,13 @@ button.secondary:hover:not(:disabled) {
   margin-bottom: 0.5rem;
 }
 
+/* A target of at least 24 px (WCAG 2.5.8), however the bar wraps on a phone. */
+.language-switch a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+}
+
 .language-switch a[aria-current="true"] {
   color: var(--ink);
   font-weight: 600;
@@ -506,8 +530,11 @@ fieldset.choice > legend {
   font-size: 15px;
 }
 
+/* The checked segment shows 2 px in the accent: the 1 px border plus a 1 px inset ring, so the
+   box and the content keep their place. */
 .segmented label.inline:has(input:checked) {
-  border: 2px solid var(--accent);
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
   background: var(--accent-wash);
   font-weight: 600;
 }
@@ -1173,4 +1200,14 @@ dl.facts.counts {
 
 .batch-preview textarea[readonly] {
   background: var(--neutral-wash);
+}
+
+/* A phone: tables in the result cards scroll inside the card instead of widening the page. */
+@media (max-width: 599.98px) {
+  table.items,
+  table.images,
+  table.values {
+    display: block;
+    overflow-x: auto;
+  }
 }
