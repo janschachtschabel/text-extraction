@@ -145,3 +145,53 @@ def test_pills_use_the_status_colours(ui: tuple[str, str]) -> None:
         assert computed(page, "#result section.job .counts .failed", "color") == [
             "rgb(163, 34, 43)"
         ]
+
+
+def _start_batch(page: Page, origin: str) -> None:
+    log_in(page)
+    page.wait_for_selector("#app-shell")
+    open_tab(page, "batch")
+    page.fill("#batch-urls", f"{origin}/docs/a.html\n{origin}/docs/b.html")
+    page.click("#panel-batch button[type=submit]")
+    expect(page.locator("#result section.job .state")).to_have_text("completed")
+    expect(page.locator("#result section.job .done")).to_have_text("2/2")
+
+
+def test_items_table_keeps_its_words_whole_on_a_phone(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 390, "height": 844})
+        _start_batch(page, origin)
+        state = boxes(page, "#result section.job .state", "#result table.items .badge")
+        assert [round(box["height"]) for box in state] == [26, 26]
+        header = boxes(page, "#result table.items th:nth-child(4)")[0]
+        line = page.evaluate("getComputedStyle(document.querySelector('table.items th')).fontSize")
+        assert header["height"] < 2 * float(line[:-2]) + 16
+        show = boxes(page, "#result table.items td.open button")[0]
+        assert show["height"] < 30
+        assert page.evaluate("document.documentElement.scrollWidth") <= 390
+
+
+def test_tree_and_preview_pills_are_26px_and_aligned(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "site-structure")
+        page.fill("#site-url", f"{origin}/")
+        page.fill("#site-depth", "1")
+        page.click("#panel-site-structure button[type=submit]")
+        job = page.locator("#result section.job", has=page.locator("button.tree-button"))
+        expect(job.locator(".state")).to_have_text("completed")
+        job.locator("button.tree-button").click()
+        expect(page.locator("#result .tree-view .page-type").first).to_be_visible()
+        kind, found = boxes(page, "#result .tree-view .page-type", "#result .tree-view .found")
+        assert round(kind["height"]) == 26
+        assert abs((kind["top"] + kind["bottom"]) - (found["top"] + found["bottom"])) <= 2
+        page.evaluate(
+            "document.querySelector('#result').insertAdjacentHTML('beforeend',"
+            ' \'<div class="preview-grid"><figure class="preview"><p class="skipped-line">'
+            '<span class="skipped">too big</span></p></figure></div>\')'
+        )
+        assert round(boxes(page, "#result .skipped")[0]["height"]) == 26

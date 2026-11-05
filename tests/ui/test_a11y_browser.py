@@ -180,6 +180,18 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         expect(job.locator(".state")).to_have_attribute("data-value", "completed")
         found += _axe(page, "completed progress")
 
+        page.click("#tab-batch-file")
+        page.locator("#panel-batch-file input[type=file]").set_input_files(
+            {
+                "name": "urls.csv",
+                "mimeType": "text/csv",
+                "buffer": f"url\n{origin}/docs/a.html\njavascript:alert(1)\n".encode(),
+            }
+        )
+        _submit(page, "batch-file")
+        expect(page.locator("#result section.batch-preview")).to_be_visible()
+        found += _axe(page, "batch preview")
+
         page.click("#tab-site-structure")
         page.fill("#site-url", f"{origin}/")
         page.fill("#site-depth", "1")
