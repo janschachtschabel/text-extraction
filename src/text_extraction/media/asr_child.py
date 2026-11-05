@@ -42,7 +42,7 @@ the allowlist of what a parent may call by name:
   the external backend's self-check; the reply is the encoded size (``EncodeFailed`` without an
   Ogg Opus stream).
 - ``ffmpeg``: PyAV's FFmpeg libraries with their ``configuration`` and ``license``
-  (``av._core.library_meta`` of PyAV 19.0.1), the codecs PyAV offers (``av.codecs_available``),
+  (``av._core.library_meta`` of PyAV 19.0.2), the codecs PyAV offers (``av.codecs_available``),
   the outside programs yt-dlp could hand a download to that are on ``PATH`` (``ffmpeg``,
   ``rtmpdump``; the image ships neither) and PyAV's version, for the self-check
   (``asr_worker.ffmpeg_gpl_findings``).
