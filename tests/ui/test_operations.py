@@ -617,6 +617,8 @@ def test_job_answer_has_no_figures() -> None:
     assert texts(root, "//header[@class='answer']/span[@class='http-status']") == ["HTTP 202"]
     assert root.xpath("//button[contains(@class, 'progress-button')]")
     assert root.xpath("//dl[@class='facts']") == []
+    assert root.xpath("//div[contains(@class, 'toolbar')]") == []
+    assert root.xpath("//a[contains(@class, 'download-response')]") == []
 
 
 @pytest.mark.parametrize(("language", "fmt"), [("en", "markdown"), ("de", "text")])

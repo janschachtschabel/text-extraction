@@ -21,10 +21,11 @@ pytestmark = pytest.mark.browser
 
 @contextlib.contextmanager
 def opened(
-    url: str, *, clipboard: bool = True, javascript: bool = True
+    url: str, *, clipboard: bool = True, javascript: bool = True, init_script: str | None = None
 ) -> Iterator[tuple[Page, list[str]]]:
-    """A Chromium page at ``url`` (with the clipboard permissions when ``clipboard``) and the
-    console messages and page errors it collects."""
+    """A Chromium page at ``url`` (with the clipboard permissions when ``clipboard``;
+    ``init_script`` runs before the page's own scripts) and the console messages and page errors
+    it collects."""
     executable = _chromium()
     console: list[str] = []
     with sync_playwright() as driver:
@@ -33,6 +34,8 @@ def opened(
         if clipboard:
             context.grant_permissions(["clipboard-read", "clipboard-write"])
         page = context.new_page()
+        if init_script:
+            page.add_init_script(init_script)
         page.set_default_timeout(WAIT_MS)
         page.on("console", lambda message: console.append(f"{message.type}: {message.text}"))
         page.on("pageerror", lambda error: console.append(str(error)))
@@ -63,6 +66,43 @@ def test_copy_puts_the_text_on_the_clipboard(ui: tuple[str, str]) -> None:
         assert shown is not None
         assert "Docs A" in shown
         assert page.evaluate("navigator.clipboard.readText()") == shown
+    assert console == []
+
+
+def test_a_second_copy_announces_again(ui: tuple[str, str]) -> None:
+    """The status line already says "copied" after the first copy; the second one clears it and
+    writes it again, so a screen reader hears it a second time."""
+    url, origin = ui
+    with opened(url) as (page, console):
+        _extract(page, origin)
+        copy = page.locator("#result button[data-action=copy]")
+        copy.click()
+        expect(page.locator("#ui-status")).to_have_text(translate("en", "status.copied"))
+        page.evaluate(
+            "() => { window.statusTexts = []; const status = document.getElementById('ui-status');"
+            " new MutationObserver(() => window.statusTexts.push(status.textContent))"
+            ".observe(status, {childList: true, characterData: true, subtree: true}); }"
+        )
+        copy.click()
+        copied = translate("en", "status.copied")
+        page.wait_for_function("t => window.statusTexts.includes(t)", arg=copied)
+        texts = page.evaluate("window.statusTexts")
+        assert texts[0] == ""
+        assert texts[-1] == copied
+        expect(page.locator("#ui-status")).to_have_text(copied)
+    assert console == []
+
+
+def test_copy_stays_hidden_without_a_clipboard(ui: tuple[str, str]) -> None:
+    """Where the browser has no clipboard API (an insecure context), the stylesheet and script
+    of the real page keep "Copy" hidden."""
+    url, origin = ui
+    with opened(url, init_script="delete Navigator.prototype.clipboard;") as (page, console):
+        assert page.evaluate("navigator.clipboard === undefined")
+        _extract(page, origin)
+        expect(page.locator("#result button[data-action=copy]")).to_have_count(1)
+        expect(page.locator("#result button[data-action=copy]")).to_be_hidden()
+        expect(page.locator("#result a.download")).to_be_visible()
     assert console == []
 
 

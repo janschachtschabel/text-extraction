@@ -204,10 +204,9 @@ def _download(data: Mapping[str, Any]) -> Download | None:
 RESPONSE_NAME: Final = "response.json"
 
 
-def _response_download(envelope: Mapping[str, Any]) -> Download | None:
-    """The whole answer as a JSON file to save (ruling P15-R1), or None when its JSON is longer
-    than ``DOWNLOAD_MAX_CHARS``: a cut JSON file would be no JSON."""
-    text = json.dumps(envelope, indent=2, ensure_ascii=False)
+def _response_download(text: str) -> Download | None:
+    """The whole answer (its JSON ``text``) as a file to save (ruling P15-R1), or None when the
+    JSON is longer than ``DOWNLOAD_MAX_CHARS``: a cut JSON file would be no JSON."""
     if len(text) > DOWNLOAD_MAX_CHARS:
         return None
     encoded = base64.b64encode(text.encode()).decode("ascii")
@@ -246,8 +245,8 @@ def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], Message |
     return shown, (Message("result.chunks_more", {"count": rest}) if rest else None)
 
 
-def _raw_json(envelope: Mapping[str, Any]) -> tuple[str, Message | None]:
-    text = json.dumps(envelope, indent=2, ensure_ascii=False)
+def _raw_json(text: str) -> tuple[str, Message | None]:
+    """The answer's JSON ``text`` as far as it is shown, and a note when it is cut."""
     if len(text) <= SHOWN_MAX_CHARS:
         return text, None
     note = Message("result.raw_cut", {"max": SHOWN_MAX_CHARS, "total": len(text)})
@@ -330,7 +329,8 @@ def result_context(
     data = envelope.get("data")
     data = data if isinstance(data, Mapping) else None
     error = envelope.get("error")
-    raw_json, raw_note = _raw_json(envelope) if envelope else (raw, None)
+    envelope_json = json.dumps(envelope, indent=2, ensure_ascii=False)  # serialised once
+    raw_json, raw_note = _raw_json(envelope_json) if envelope else (raw, None)
     context: dict[str, Any] = {
         "op": op,
         "http_status": http_status,
@@ -370,7 +370,7 @@ def result_context(
         return context
     context["data"] = data
     context["download"] = _download(data)
-    context["response_download"] = _response_download(envelope)
+    context["response_download"] = _response_download(envelope_json)
     context["response_too_large"] = context["response_download"] is None
     context["page_type"] = _page_type(data)
     content = data.get("content")

@@ -28,8 +28,8 @@ No API change.
   happened", and the text in a white reading card in a serif font. Colours, radii and fonts are
   tokens, and the form fields keep a 3:1 boundary. It works at phone width, with visible focus
   rings and without animation for `prefers-reduced-motion`.
-- "Wait seconds" and "Options (JSON)" are under a closed "Advanced" section; a form error in
-  them opens it.
+- "Wait seconds" (where a form has it) and "Options (JSON)" are under a closed "Advanced"
+  section; a form error in them opens it.
 - A Markdown result shows the rendered text in the reading card; the Markdown source is under
   "Show source" (before, the source was shown and the rendered text was under "Show rendered").
 

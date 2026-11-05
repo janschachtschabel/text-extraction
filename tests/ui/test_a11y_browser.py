@@ -516,6 +516,11 @@ def test_error_in_a_closed_section_opens_it(ui: tuple[str, str]) -> None:
         _submit(page, "extract")
         expect(page.locator("#panel-extract details.advanced")).to_have_attribute("open", "")
         assert page.evaluate("document.activeElement.id") == "extract-options"
+        field = page.locator("#extract-options")
+        expect(field).to_have_attribute("aria-invalid", "true")
+        error_id = page.locator("#result [data-error-for=extract-options]").get_attribute("id")
+        assert error_id == "extract-options-error"
+        assert error_id in (field.get_attribute("aria-describedby") or "").split()
     assert console == []
 
 

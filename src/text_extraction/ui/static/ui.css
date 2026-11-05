@@ -147,7 +147,8 @@ textarea {
 .state,
 table.items .badge,
 .page-type,
-.skipped {
+.skipped,
+.found {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
@@ -238,7 +239,7 @@ main {
 
 /* The login is a centred card (class card); the app's shell is full bleed. */
 .login {
-  max-width: 30rem;
+  max-width: min(30rem, calc(100% - 2 * var(--gutter)));
   margin: var(--gutter) auto;
   padding: 32px;
 }
@@ -305,13 +306,13 @@ button {
   cursor: pointer;
 }
 
+/* :where() keeps the hover rule at its old specificity, so tabs and link buttons still override it. */
 button:hover:where(:not(:disabled)) {
   border-color: var(--accent-strong);
   background: var(--accent-strong);
 }
 
-/* Disabled: flat grey, no hover, a not-allowed cursor; --muted on --neutral-wash stays above 4.5:1.
-   :where() keeps the hover rule at its old specificity, so tabs and link buttons still override it. */
+/* Disabled: flat grey, no hover, a not-allowed cursor; --muted on --neutral-wash stays above 4.5:1. */
 button:disabled,
 button.secondary:disabled {
   border-color: var(--line);
@@ -466,12 +467,6 @@ button.secondary:hover:not(:disabled) {
   padding-bottom: var(--gutter);
 }
 
-.workspace .result {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: none;
-}
-
 @media (max-width: 60rem) {
   .workspace {
     grid-template-columns: minmax(0, 1fr);
@@ -574,13 +569,6 @@ label.inline input {
   line-height: 1.45;
 }
 
-/* The result view. */
-.result {
-  margin-top: 1.25rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--line);
-}
-
 /* A result: a column of blocks 16 px apart; the cards are white on the grey page. */
 .result-view {
   display: flex;
@@ -608,15 +596,6 @@ label.inline input {
 .http-status {
   font-size: 14px;
   color: var(--muted);
-}
-
-/* The status of a job's item (a pill in the result's status line). */
-.badge:not(.pill) {
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  background: var(--neutral-wash);
-  border: 1px solid var(--line);
-  font-size: 0.85em;
 }
 
 /* The toolbar (P15-R1, P15-S4): the title, then "Copy", "Save" and "Save response", outlined. */
@@ -851,11 +830,6 @@ dl.info,
   color: var(--error);
 }
 
-.badge-unblocked {
-  color: var(--warn);
-  background: var(--warn-wash);
-}
-
 .request-status {
   margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
@@ -1013,12 +987,9 @@ progress {
   color: var(--ink);
 }
 
+/* The tree's "found in" marker: the pill box, smaller and not bold. */
 .found {
-  display: inline-flex;
-  align-items: center;
-  min-height: 26px;
   padding: 0 8px;
-  border-radius: 999px;
   font-size: 12px;
   font-weight: 400;
 }
@@ -1148,10 +1119,15 @@ ul.tree {
   background: var(--page);
 }
 
+/* The options of "Extract selected" are as wide as the settings column's fields. */
 .tree-actions {
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid var(--line);
+}
+
+.tree-actions > * {
+  max-width: 380px;
 }
 
 ul.tree li {

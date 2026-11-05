@@ -9,7 +9,7 @@
   {#- The status line (P15-S3): the status, unblocked, the HTTP status; also without data. -#}
   <header class="answer">
     {% if status %}<span class="badge badge-{{ status }} pill pill-{{ status }}" data-value="{{ status }}">{{ t(status_text(status)) if status_text(status) else code(status) }}</span>{% endif %}
-    {% if unblocked %}<span class="badge badge-unblocked pill pill-partial">{{ t("access.unblocked") }}</span>{% endif %}
+    {% if unblocked %}<span class="badge-unblocked pill pill-partial">{{ t("access.unblocked") }}</span>{% endif %}
     <span class="http-status">HTTP {{ http_status }}</span>
   </header>
   {% if error %}

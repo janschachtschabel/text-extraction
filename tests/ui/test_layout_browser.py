@@ -213,6 +213,29 @@ def test_tree_and_preview_pills_are_26px_and_aligned(ui: tuple[str, str]) -> Non
         assert round(boxes(page, "#result .skipped")[0]["height"]) == 26
 
 
+def test_tree_actions_controls_stay_as_wide_as_the_settings_column(ui: tuple[str, str]) -> None:
+    """The "Extract selected" options are no wider than the settings column's fields (380 px),
+    not stretched over the 1440 px result column."""
+    url, origin = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "site-structure")
+        page.fill("#site-url", f"{origin}/")
+        page.fill("#site-depth", "1")
+        page.click("#panel-site-structure button[type=submit]")
+        job = page.locator("#result section.job", has=page.locator("button.tree-button"))
+        expect(job.locator(".state")).to_have_text("completed")
+        job.locator("button.tree-button").click()
+        expect(page.locator("#result .tree-actions")).to_be_visible()
+        controls = boxes(page, ".tree-actions .segmented", ".tree-actions select")
+        for box in controls:
+            assert 0 < box["width"] <= 380
+        (button,) = boxes(page, ".tree-actions > button[type=submit]")
+        assert button["width"] <= 380
+
+
 PHONE: Final = ViewportSize(width=390, height=844)
 OVERFLOW: Final = "document.documentElement.scrollWidth"
 
@@ -373,6 +396,20 @@ def test_phone_gutter_is_16px(ui: tuple[str, str]) -> None:
         )
 
 
+def test_login_card_keeps_the_gutter_on_a_phone(ui: tuple[str, str]) -> None:
+    """The login card is 30rem wide at most and never touches the screen edges."""
+    url, _ = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size(PHONE)
+        page.wait_for_selector(".login")
+        (card,) = boxes(page, ".login")
+        assert card["left"] >= 16
+        assert PHONE["width"] - card["right"] >= 16
+        page.set_viewport_size({"width": 1440, "height": 900})
+        (card,) = boxes(page, ".login")
+        assert card["width"] == 480
+
+
 FOCUS_RING: Final = ["solid", "3px", "rgb(29, 111, 106)", "2px"]
 RING = ("outlineStyle", "outlineWidth", "outlineColor", "outlineOffset")
 
@@ -421,7 +458,25 @@ def test_focus_ring_on_download_and_tree_checkbox(ui: tuple[str, str]) -> None:
         assert computed(page, ":focus", *RING) == FOCUS_RING
 
 
+# The rules of ui.css that set a transition, by where they sit: outside any @media, or inside
+# a media rule (its condition).
+_TRANSITION_RULES: Final = """() => {
+  const found = {outside: 0, media: []};
+  const sheet = [...document.styleSheets].find(s => s.href && s.href.endsWith('ui.css'));
+  const sets = rule => rule.style && rule.style.getPropertyValue('transition-property') !== '';
+  for (const rule of sheet.cssRules) {
+    if (rule.type === CSSRule.MEDIA_RULE) {
+      if ([...rule.cssRules].some(sets)) found.media.push(rule.conditionText);
+    } else if (sets(rule)) found.outside += 1;
+  }
+  return found;
+}"""
+
+
 def test_reduced_motion_turns_transitions_off(ui: tuple[str, str]) -> None:
+    """Transitions exist only without a reduced-motion request: the colour transition is 0.12 s
+    then and (near) zero with "reduce", and ui.css declares it only inside the no-preference
+    block (so the later !important reset is not what hides it)."""
     url, _ = ui
     with browsing(url) as (page, _):
         log_in(page)
@@ -434,6 +489,9 @@ def test_reduced_motion_turns_transitions_off(ui: tuple[str, str]) -> None:
         page.emulate_media(reduced_motion="reduce")
         (duration,) = computed(page, "#tab-file", "transitionDuration")
         assert float(duration.split(", ")[0].rstrip("s")) <= 0.001
+        rules = page.evaluate(_TRANSITION_RULES)
+        assert rules["outside"] == 0
+        assert any("no-preference" in condition for condition in rules["media"])
 
 
 def test_disabled_button_does_not_change_on_hover(ui: tuple[str, str]) -> None:
@@ -485,7 +543,12 @@ def test_checked_segment_keeps_its_border_width_and_shows_2px_in_accent(
         unchecked = computed(page, f"{labels}:nth-child(2)", *names)
         page.locator(f"{labels}:nth-child(2) input").check()
         checked = f"{labels}:has(input:checked)"
-        page.wait_for_timeout(300)  # the 120 ms colour transitions end
+        page.emulate_media(reduced_motion="reduce")  # the colours reach their end values at once
+        page.wait_for_function(
+            "s => getComputedStyle(document.querySelector(s)).boxShadow"
+            ".startsWith('rgb(29, 111, 106) 0px 0px 0px 1px inset')",
+            arg=checked,
+        )
         assert computed(page, checked, *names) == unchecked
         border, shadow = computed(page, checked, "borderTopColor", "boxShadow")
         assert border == "rgb(29, 111, 106)"

@@ -275,15 +275,15 @@
     var view = button.closest(".result-view");
     var source = view ? view.querySelector("pre.content") : null;
     if (!source || !canCopy()) {
-      announce(text("copy-failed"));
+      announceAgain(text("copy-failed"));
       return;
     }
     navigator.clipboard.writeText(source.textContent).then(
       function () {
-        announce(text("copied"));
+        announceAgain(text("copied"));
       },
       function () {
-        announce(text("copy-failed"));
+        announceAgain(text("copy-failed"));
       }
     );
   }
@@ -403,6 +403,19 @@
     if (status && status.textContent !== message) {
       status.textContent = message;
     }
+  }
+
+  // Says "message" even when #ui-status already holds it (a second "Copy"): the status is
+  // cleared first and written again a moment later, so a screen reader reads it once more.
+  function announceAgain(message) {
+    var status = document.getElementById("ui-status");
+    if (!status) {
+      return;
+    }
+    status.textContent = "";
+    window.setTimeout(function () {
+      status.textContent = message;
+    }, 50);
   }
 
   // Whether "element" is a view that refreshes itself: its requests are no requests of the user's.
