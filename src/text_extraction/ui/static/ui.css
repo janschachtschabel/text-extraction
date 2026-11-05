@@ -208,27 +208,14 @@ legend {
 }
 
 main {
-  max-width: var(--content-max);
-  margin: 0 auto;
-  padding: var(--gutter);
+  padding: 0;
 }
 
-/* The login is a centred card (class card); the app's shell is a card until the header bar
-   and the two columns come. */
-.shell {
-  background: var(--paper);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-}
-
-.login,
-.shell {
-  padding: 1.25rem 1.5rem;
-}
-
+/* The login is a centred card (class card); the app's shell is full bleed. */
 .login {
   max-width: 30rem;
-  margin: 0 auto;
+  margin: var(--gutter) auto;
+  padding: 1.25rem 1.5rem;
 }
 
 .login h2 {
@@ -326,12 +313,34 @@ button.secondary:hover {
   color: var(--warn);
 }
 
+/* The header bar: white, full bleed, with the session line and the tabs. */
+.app-bar {
+  background: var(--paper);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-bar .banner {
+  margin: 12px 0 0;
+}
+
 .who {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0.25rem 0.75rem;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  padding-top: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.who button.secondary {
+  min-height: 36px;
+}
+
+.app-bar .keys {
+  padding-top: 8px;
+  font-size: 14px;
 }
 
 .keys button {
@@ -357,33 +366,73 @@ button.secondary:hover {
   text-decoration: none;
 }
 
-.language-switch .hint {
-  flex-basis: 100%;
+.who .language-switch .hint {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
-  margin: 1.25rem 0 0;
-  border-bottom: 1px solid var(--line);
+  gap: 0 0.5rem;
+  margin: 0 0 -1px;
 }
 
-.tabs button {
+.tabs [role="tab"] {
+  min-height: 44px;
   margin: 0;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--radius-field) var(--radius-field) 0 0;
+  padding: 0 0.75rem;
+  border: none;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   font-weight: 400;
 }
 
-.tabs button[aria-selected="true"] {
-  border-color: var(--line);
-  background: var(--paper);
+.tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--accent);
   color: var(--ink);
   font-weight: 600;
+}
+
+/* The workspace: the settings on the left, the result on the right; stacked below 60rem. */
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+  padding-top: 24px;
+  padding-bottom: var(--gutter);
+}
+
+@media (max-width: 60rem) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .workspace .result {
+    padding-top: 1rem;
+    border-top: 1px solid var(--line);
+  }
+}
+
+.workspace .result {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.settings .intro {
+  font-size: 14px;
+  color: var(--muted);
 }
 
 .panel {

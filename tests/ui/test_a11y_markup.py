@@ -408,3 +408,14 @@ def test_vendored_axe_is_pinned() -> None:
     third_party = AXE_THIRD_PARTY.read_text(encoding="utf-8")
     assert "MIT License" in third_party
     assert "colorjs.io" in third_party
+
+
+def test_workspace_holds_the_panels_then_the_result(admin: TestClient) -> None:
+    page = _page(admin, "en")
+    (workspace,) = page.xpath("//div[contains(@class, 'workspace')]")
+    (settings,) = workspace.xpath("./div[@class='settings']")
+    assert [p.get("id") for p in settings.xpath("./section")] == [f"panel-{t.name}" for t in TABS]
+    assert workspace.xpath("./section[@id='result']")
+    (bar,) = page.xpath("//div[@class='app-bar']")
+    assert bar.xpath(".//div[@class='who']")
+    assert bar.xpath(".//*[@role='tablist']")
