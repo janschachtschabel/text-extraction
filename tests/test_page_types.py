@@ -75,6 +75,14 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/?page_id=42", None),
     ("https://example.org/index.php?id=42", None),
     ("https://example.org/index.html#top", "home"),
+    # a language parameter on a home path is a language home (WPML, Google-style)
+    ("https://example.org/?lang=en", "home"),
+    ("https://example.org/?hl=de&utm_source=x", "home"),
+    ("https://example.org/index.php?locale=de_DE", "home"),
+    ("https://example.org/de/?lang=de", "home"),
+    ("https://example.org/?lang=en&p=12", None),
+    ("https://example.org/blog?lang=en", None),
+    ("https://example.org/impressum?lang=en", "imprint"),
     ("https://example.org/de", "home"),
     ("https://example.org/en/", "home"),
     ("https://example.org/de-at/", "home"),
@@ -195,6 +203,8 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/de/terms", "legal"),
     ("https://example.org/service/impressum/index.html", "imprint"),
     ("https://example.org/ueber-uns/kontakt", "contact"),
+    ("https://example.org/en/imprint/archive-2019", "imprint"),
+    ("https://example.org/de/kategorie/mathe/x", None),
     # no type
     ("https://example.org/blog/mein-artikel", None),
     ("https://example.org/impressum-archiv-2019", None),
@@ -352,6 +362,14 @@ def test_language_path_with_its_own_html_lang_is_home() -> None:
 def test_language_path_without_html_lang_is_home() -> None:
     assert classify(html_lang(None), "https://example.org/it/", words=900)[0] == "home"
     assert classify(html_lang(""), "https://example.org/it/", words=900)[0] == "home"
+
+
+@pytest.mark.parametrize("lang", ["und", "mul", "zxx", "x-klingon", "X-Private", "UND"])
+def test_a_lang_that_names_no_language_counts_as_missing(lang: str) -> None:
+    assert classify(html_lang(lang), "https://example.org/it/", words=900) == (
+        "home",
+        ["root_path"],
+    )
 
 
 def test_root_path_is_home_whatever_the_html_lang() -> None:
@@ -551,6 +569,16 @@ def test_title_with_a_colon_subtitle_is_no_type(heading: str) -> None:
     assert classify(doc(title=heading))[0] == "other"
     html = doc(title=heading, body=f"<h1>{heading}</h1>")
     assert classify(html, "https://example.org/blog/x", words=900) == ("content", ["word_count"])
+
+
+@pytest.mark.parametrize(
+    ("heading", "expected"), [("Impressum:", "imprint"), ("Kontakt :  ", "contact")]
+)
+def test_title_of_a_type_word_and_a_trailing_colon_names_the_type(
+    heading: str, expected: str
+) -> None:
+    # As the h1 rule: a colon with nothing after it starts no subtitle (A26-R4).
+    assert classify(doc(title=heading)) == (expected, ["title"])
 
 
 def test_h1_votes_only_as_the_whole_type_word() -> None:

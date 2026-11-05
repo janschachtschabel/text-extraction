@@ -7,16 +7,17 @@ a download, the link text for a navigation helper. ``page_type`` classifies a fe
 its signals, strongest first (ruling P14-S4):
 
 1. ``error``: the status is 400 or higher, or the quality gate saw a soft 404.
-2. ``home``: the path is empty, ``/`` or an index file, without a query besides tracking
-   parameters (A26-R1). A path that is only a language code (``/it/``) is home only when the
-   page's ``<html lang>`` is missing or names that language; otherwise the URL gives no vote
-   (A26-R3).
+2. ``home``: the path is empty, ``/`` or an index file, without a query besides tracking and
+   language parameters (A26-R1). A path that is only a language code (``/it/``) is home only
+   when the page's ``<html lang>`` is missing or names that language; otherwise the URL gives no
+   vote (A26-R3).
 3. schema.org: the JSON-LD ``@type`` (top-level nodes and the ``@graph``) or the ``itemtype`` of
    the outermost microdata scope says ``ContactPage``, ``AboutPage``, ``SearchResultsPage`` or
    ``CollectionPage``.
 4. ``url_type`` (imprint, privacy, legal, auth, search, contact, about, listing).
 5. The ``<title>`` starts with the name of a type (``Impressum``, ``Kontakt``, ``Login`` ...),
-   followed by nothing or a separator other than a colon, or ends with one after a separator;
+   followed by nothing (a trailing colon aside) or a separator other than a colon, or ends with
+   one after a separator;
    the first ``<h1>`` is the name of a type and nothing else (A26-R4).
 6. ``auth``: a password input on a thin page.
 7. ``listing``: ``rel="next|prev"``, or a page that is mostly links.
@@ -238,6 +239,9 @@ _TRACKING_PARAMETERS: Final = frozenset(
     }
 )
 _TRACKING_PREFIX: Final = "utm_"
+# Query parameters that pick the language of a page; on a home path they keep it home (A26-R1):
+# ``/?lang=en`` (WPML), ``/?hl=de`` (Google-style), ``/?locale=de_DE``.
+_LANGUAGE_PARAMETERS: Final = frozenset({"lang", "hl", "locale"})
 _SEARCH_PARAMETERS: Final = frozenset({"q", "query", "search", "suche", "s", "keyword"})
 _PAGE_PARAMETERS: Final = frozenset({"page", "seite"})
 _PAGE_SEGMENTS: Final = frozenset({"page", "seite"})
@@ -316,7 +320,8 @@ def url_type(url: str) -> PageType | None:
     names (``cookies``, ``terms``, ``team`` ...) only as the whole path, any other name as the
     first or the last segment; a leading language code is skipped (A26-R2). Home is an empty
     path, ``/``, an index file or only a language code (optionally with an index file), and
-    every query parameter is a tracking parameter or empty (A26-R1).
+    every query parameter is a tracking parameter, a language parameter (``lang``, ``hl``,
+    ``locale``) or empty (A26-R1).
     """
     try:
         parts = urlsplit(url)
@@ -342,7 +347,10 @@ def url_type(url: str) -> PageType | None:
     for candidate in _URL_ORDER:
         if candidate in found:
             return candidate
-    if any(value.strip() and not _is_tracking(key.lower()) for key, value in query):
+    if any(
+        value.strip() and not _is_tracking(name) and name not in _LANGUAGE_PARAMETERS
+        for name, value in ((key.lower(), value) for key, value in query)
+    ):
         return None
     home = _HOME_PATH.match(path)
     if home is not None and (home["language"] or "en").lower() in _SITE_LANGUAGES:
@@ -473,9 +481,9 @@ _HEADING_WORDS_PATTERN = "|".join(
 )
 # The name first, then nothing or a separator (a hyphen only with a space before or after it).
 # A colon is no separator here: after a type word it starts a subtitle ("Datenschutz: Was
-# Schulen wissen müssen"; A26-R4).
+# Schulen wissen müssen"; A26-R4). A colon with nothing after it is no subtitle ("Impressum:").
 _HEADING_START = re.compile(
-    rf"^(?P<word>{_HEADING_WORDS_PATTERN})(?=\s*$|\s*[|\u2013\u2014\u00b7]|\s+-|-\s)"
+    rf"^(?P<word>{_HEADING_WORDS_PATTERN})(?=\s*:?\s*$|\s*[|\u2013\u2014\u00b7]|\s+-|-\s)"
 )
 # Or the name last, after a separator (a hyphen only with a space before or after it).
 _HEADING_END = re.compile(
@@ -489,6 +497,9 @@ _SCHEMA_TYPES: Final[tuple[tuple[str, PageType], ...]] = (
     ("CollectionPage", "listing"),
 )
 _NON_VISIBLE: Final = ("script", "style", "noscript", "template")
+# Primary subtags of a ``lang`` that names no language: undetermined, multiple, no linguistic
+# content, and the private-use prefix (BCP 47).
+_NO_LANGUAGE_SUBTAGS: Final = frozenset({"und", "mul", "zxx", "x"})
 
 
 class PageTypeInfo(BaseModel):
@@ -594,10 +605,11 @@ def _h1_type(text: str | None) -> PageType | None:
 
 
 def _html_language(tree: HtmlElement) -> str | None:
-    """The primary subtag of the root element's ``lang`` (``de`` of ``de-AT``), else None."""
+    """The primary subtag of the root element's ``lang`` (``de`` of ``de-AT``), else None; a
+    ``lang`` that names no language (``und``, ``mul``, ``zxx``, a private ``x-...``) is None."""
     lang = (tree.getroottree().getroot().get("lang") or "").strip()
     primary = re.split(r"[-_]", lang, maxsplit=1)[0].lower()
-    return primary or None
+    return primary if primary and primary not in _NO_LANGUAGE_SUBTAGS else None
 
 
 def _has_og_article(tree: HtmlElement) -> bool:

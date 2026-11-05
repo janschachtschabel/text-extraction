@@ -94,10 +94,11 @@ are checked in this order, and the first that applies wins:
    (`page_type: null`); its status says what happened.
 2. `home`: the path is empty, `/`, an index file such as `/index.html`, or only a language code
    such as `/de/` or `/en-gb/` (with or without an index file), and the address has no query
-   besides tracking parameters such as `utm_source` or `fbclid`: `/?p=12` is no start page. Only
-   languages that sites commonly use count, so a section such as `/ki/` or `/ui/` is no start
-   page. A path that is only a language code is the start page unless the page declares another
-   language (`<html lang>`): `/it/` on a German page is left to the other rules.
+   besides tracking parameters such as `utm_source` or `fbclid` and language parameters (`lang`,
+   `hl`, `locale`): `/?lang=en` is the start page, `/?p=12` is not. Only languages that sites
+   commonly use count, so a section such as `/ki/` or `/ui/` is no start page. A path that is only
+   a language code is the start page unless the page declares another language (`<html lang>`):
+   `/it/` on a German page is left to the other rules.
 3. schema.org: the page's JSON-LD or microdata says `ContactPage` (`contact`), `AboutPage`
    (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`).
 4. The URL: a whole path segment such as `impressum` or `imprint` (`imprint`), `datenschutz` or
@@ -113,9 +114,10 @@ are checked in this order, and the first that applies wins:
    `recherche`, `team`, `password`, `passwort` and `disclaimer`. So `/cookies` is `legal`, but
    `/rezepte/cookies` is not.
 5. The title begins or ends with a type's name, such as "Impressum", "Kontakt", "Login" or
-   "Suchergebnisse" ("Impressum | Firma" and "Firma | Impressum"). A colon after the name starts
-   a subtitle: "Datenschutz: Was Schulen wissen müssen" is no privacy page. The first heading
-   counts only when it is the name alone: "Kontakt", not "Kontakt zur Schule aufnehmen".
+   "Suchergebnisse" ("Impressum | Firma" and "Firma | Impressum"). A colon after the name starts a
+   subtitle: "Datenschutz: Was Schulen wissen müssen" is no privacy page ("Impressum:" with
+   nothing after it is an imprint). The first heading counts only when it is the name alone:
+   "Kontakt", not "Kontakt zur Schule aufnehmen".
 6. `auth`: a password field on a page with little text.
 7. `listing`: a link to the next or previous page (`rel="next"`), or a page that is mostly links
    (at least 20 links that hold 60 % of its text).
@@ -123,8 +125,8 @@ are checked in this order, and the first that applies wins:
 
 An article (`og:type` is `article`) with at least `QUALITY_MIN_WORDS` words stays `content`
 whatever its title, its first heading, its links or a listing address (such as `/blog/page/2`
-or `/tag/python`) say. Only another address (such as `/impressum/`) or schema.org can make it
-another type.
+or `/tag/python`) say. Only another address (such as `/impressum/`), schema.org or a password
+field on a short page (`auth`) can make it another type.
 
 `signals` lists every rule that agrees with the type, in this order, also those after the one
 that decided: `/impressum` titled "Impressum" has `["url", "title"]`.
