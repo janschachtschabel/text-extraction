@@ -89,7 +89,8 @@ CONSENT_SECONDS: Final = 3.0  # B11: best effort
 # The page's decoded response bytes may reach this many times its byte cap (audit B3).
 DECODED_BYTES_FACTOR: Final = 2
 # Of a render's deadline: what reading the DOM (and taking the screenshot) needs after the waits.
-# A screenshot that is encoded adds ``RenderOptions.encode_reserve``.
+# A screenshot that is encoded adds ``RenderOptions.encode_reserve``, at most a third of the
+# render time (``encode_reserve_within``).
 _READ_RESERVE_SECONDS: Final = 1.0
 _SCREENSHOT_RESERVE_SECONDS: Final = 3.0
 _CONTENT_ATTEMPTS: Final = 3
@@ -135,6 +136,12 @@ class Loaded:
     # Raises what went wrong in the page meanwhile: a navigation the check refused, a fault of
     # the route handler, a document that did not load.
     raise_kept: Callable[[], None]
+
+
+def encode_reserve_within(wanted: float, render_seconds: float) -> float:
+    """The time a render of ``render_seconds`` keeps for encoding its screenshot: ``wanted``, at
+    most a third of the render time, so a short ``BROWSER_TIMEOUT_SECONDS`` still navigates."""
+    return max(0.0, min(wanted, render_seconds / 3))
 
 
 # Runs after the load and the network-idle wait, before the consent step and the actions, and
@@ -425,7 +432,8 @@ class _Render:
         frame, so the page is read and the download dropped."""
         self.deadline = deadline
         reserve = (
-            _SCREENSHOT_RESERVE_SECONDS + self.options.encode_reserve
+            _SCREENSHOT_RESERVE_SECONDS
+            + encode_reserve_within(self.options.encode_reserve, self.left())
             if self.options.screenshot
             else _READ_RESERVE_SECONDS
         )

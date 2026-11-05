@@ -305,6 +305,69 @@ def test_png_passthrough_takes_no_pixels(monkeypatch: pytest.MonkeyPatch) -> Non
     assert default.data is png
 
 
+BUDGET = screenshot_image.ENCODE_PIXEL_BUDGET
+
+
+def _assert_idle(budget: screenshot_image._PixelBudget, free: int = BUDGET) -> None:
+    assert budget._free == free
+    assert not budget._waiters
+
+
+def test_a_cancelled_queued_wait_leaves_the_budget_as_it_was() -> None:
+    async def main() -> None:
+        budget = screenshot_image._PixelBudget()
+        await budget.acquire(BUDGET)
+        waiting = asyncio.create_task(budget.acquire(1))
+        await asyncio.sleep(0)
+        assert len(budget._waiters) == 1
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        _assert_idle(budget, free=0)
+        budget.release(BUDGET)
+        _assert_idle(budget)
+
+    asyncio.run(main())
+
+
+def test_a_wait_granted_and_cancelled_before_it_wakes_gives_its_pixels_back() -> None:
+    async def main() -> None:
+        budget = screenshot_image._PixelBudget()
+        await budget.acquire(BUDGET)
+        waiting = asyncio.create_task(budget.acquire(100))
+        await asyncio.sleep(0)
+        budget.release(BUDGET)  # grants the waiter its 100 pixels ...
+        assert budget._free == BUDGET - 100
+        waiting.cancel()  # ... and its task is cancelled before it runs again
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        _assert_idle(budget)
+
+    asyncio.run(main())
+
+
+def test_a_cancelled_large_head_wait_lets_the_smaller_one_behind_it_go() -> None:
+    async def main() -> None:
+        budget = screenshot_image._PixelBudget()
+        await budget.acquire(BUDGET - 10)
+        large = asyncio.create_task(budget.acquire(BUDGET))
+        await asyncio.sleep(0)
+        small = asyncio.create_task(budget.acquire(5))  # fits, but waits behind ``large``
+        await asyncio.sleep(0)
+        assert not small.done()
+        large.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await large
+        async with asyncio.timeout(1):
+            await small
+        _assert_idle(budget, free=5)
+        budget.release(5)
+        budget.release(BUDGET - 10)
+        _assert_idle(budget)
+
+    asyncio.run(main())
+
+
 @pytest.mark.parametrize(
     ("options", "seconds"),
     [

@@ -121,7 +121,7 @@ def encode_screenshot(png: bytes, options: ScreenshotOptions | None) -> EncodedS
     options = options or ScreenshotOptions()
     fmt, target = options.format, options.width
     pillow_format, content_type, name = _FORMATS[fmt]
-    if fmt == "png" and target is None:
+    if _passes_through(options):
         try:
             width, height = png_size(png)
         except struct.error as error:
@@ -207,10 +207,10 @@ async def encode_screenshot_limited(
         budget.release(pixels)
         raise
 
-    def ended(done: asyncio.Future[EncodedScreenshot]) -> None:
+    # The shield reads the encode's outcome, also when its wait was cancelled: an encode nobody
+    # waits for any more logs no error.
+    def ended(_done: asyncio.Future[EncodedScreenshot]) -> None:
         budget.release(pixels)
-        if not done.cancelled():
-            done.exception()  # read, so an encode nobody waits for any more logs no error
 
     encoding.add_done_callback(ended)
     return await asyncio.shield(encoding)
