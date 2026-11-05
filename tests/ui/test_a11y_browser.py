@@ -150,6 +150,8 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         for tab in TABS:
             page.click(f"#tab-{tab.name}")
             expect(page.locator(f"#panel-{tab.name}")).to_be_visible()
+            for summary in page.locator(f"#panel-{tab.name} details.advanced > summary").all():
+                summary.click()
             found += _axe(page, f"tab {tab.name}")
 
         page.click("#tab-extract")
@@ -158,7 +160,7 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         expect(page.locator("#result h3.title")).to_have_text("Docs A")
         found += _axe(page, "extract result")
 
-        page.fill("#extract-options", "{")
+        page.fill("#extract-options", "{")  # the loop above left the section open
         _submit(page, "extract")
         expect(page.locator("#result [data-error-for]")).to_be_visible()
         found += _axe(page, "form error")
@@ -325,6 +327,7 @@ def test_error_is_associated_with_its_field(ui: tuple[str, str]) -> None:
         options = page.locator("#extract-options")
         hint = options.get_attribute("aria-describedby")
         page.fill("#extract-url", f"{origin}/docs/a.html")
+        page.click("#panel-extract details.advanced > summary")
         page.fill("#extract-options", "{")
         _submit(page, "extract")
         error = page.locator("#result [data-error-for=extract-options]")
@@ -392,8 +395,9 @@ def test_an_error_that_replaces_its_target_is_not_announced_as_done(
             {"name": "urls.csv", "mimeType": "text/csv", "buffer": csv_file}
         )
         _submit(page, "batch-file")
-        page.wait_for_selector("#result .batch-preview #preview-options")
+        page.wait_for_selector("#result .batch-preview #preview-options", state="attached")
         page.evaluate(_RECORD_STATUS)
+        page.click("#result .batch-preview details.advanced > summary")
         page.fill("#preview-options", "{")
         page.locator("#preview-form button[type=submit]").click()
         expect(page.locator("#result > [role=alert]")).to_have_count(1)
@@ -404,6 +408,32 @@ def test_an_error_that_replaces_its_target_is_not_announced_as_done(
     assert translate("en", "status.sending") in texts
     assert translate("en", "status.done") not in texts
     assert status == ""
+    assert console == []
+
+
+def test_error_in_a_closed_section_opens_it(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.evaluate("document.getElementById('extract-options').value = '{'")
+        page.fill("#extract-url", f"{origin}/docs/a.html")
+        _submit(page, "extract")
+        expect(page.locator("#panel-extract details.advanced")).to_have_attribute("open", "")
+        assert page.evaluate("document.activeElement.id") == "extract-options"
+    assert console == []
+
+
+def test_invalid_value_in_a_closed_section_opens_it(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.fill("#extract-url", f"{origin}/docs/a.html")
+        page.evaluate("document.getElementById('extract-wait-seconds').value = '99'")
+        page.evaluate("document.querySelector('#panel-extract details.advanced').open = false")
+        _submit(page, "extract")
+        expect(page.locator("#panel-extract details.advanced")).to_have_attribute("open", "")
     assert console == []
 
 

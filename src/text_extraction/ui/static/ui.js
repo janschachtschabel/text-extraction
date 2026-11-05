@@ -391,6 +391,22 @@
     }
   }
 
+  // Open every closed <details> around a control, so a focus or a browser's validation bubble
+  // does not point at a field nobody can see.
+  function revealField(control) {
+    var section = control.closest("details");
+    while (section) {
+      section.open = true;
+      section = section.parentElement ? section.parentElement.closest("details") : null;
+    }
+  }
+
+  document.addEventListener("invalid", function (event) {
+    if (event.target instanceof Element) {
+      revealField(event.target);
+    }
+  }, true);
+
   function tieError(root) {
     var error = root.matches("[data-error-for]") ? root : root.querySelector("[data-error-for]");
     var field = error && error.id ? error.getAttribute("data-error-for") : "";
@@ -404,6 +420,7 @@
     setDescribedBy(control, ids.concat([error.id]));
     control.setAttribute("aria-invalid", "true");
     control.setAttribute("data-error-id", error.id);
+    revealField(control);
     control.focus();
   }
 

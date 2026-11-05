@@ -79,6 +79,19 @@ def _page(client: TestClient, language: Language) -> Any:
     return _document(response.text)
 
 
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_wait_and_options_are_in_a_closed_advanced_section(
+    admin: TestClient, language: Language
+) -> None:
+    page = _page(admin, language)
+    for field in page.xpath("//textarea[@name='options'] | //input[@name='wait_seconds']"):
+        (section,) = field.xpath("ancestor::details")
+        assert "advanced" in section.get("class")
+        assert section.get("open") is None
+        summary = section.xpath("./summary")[0].text_content().strip()
+        assert summary == translate(language, "form.advanced")
+
+
 def _batch(client: TestClient, count: int) -> str:
     """A batch of ``count`` URLs started over REST, with a result for its first item."""
     listed = [f"{ORIGIN}/page-{number}" for number in range(count)]

@@ -158,8 +158,10 @@ textarea {
 
 .section-label,
 legend {
+  max-width: 100%;
   margin: 0;
   padding: 0;
+  overflow-wrap: anywhere;
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.09em;
@@ -227,6 +229,7 @@ main {
 label {
   display: block;
   margin: 0.75rem 0 0.25rem;
+  font-size: 15px;
   font-weight: 600;
 }
 
@@ -240,6 +243,7 @@ textarea {
   background: var(--paper);
   color: var(--ink);
   font: inherit;
+  font-size: 15px;
 }
 
 input:not([type="checkbox"], [type="radio"]),
@@ -278,9 +282,28 @@ button {
   cursor: pointer;
 }
 
-button:hover {
+button:hover:where(:not(:disabled)) {
   border-color: var(--accent-strong);
   background: var(--accent-strong);
+}
+
+/* Disabled: flat grey, no hover, a not-allowed cursor; --muted on --neutral-wash stays above 4.5:1.
+   :where() keeps the hover rule at its old specificity, so tabs and link buttons still override it. */
+button:disabled,
+button.secondary:disabled {
+  border-color: var(--line);
+  background: var(--neutral-wash);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* The wide submit button of a settings column. */
+form.op > button[type="submit"],
+.tree-actions > button[type="submit"],
+#login-form button[type="submit"] {
+  width: 100%;
+  min-height: 48px;
+  font-weight: 700;
 }
 
 button.secondary {
@@ -293,7 +316,7 @@ button.secondary {
   font-weight: 400;
 }
 
-button.secondary:hover {
+button.secondary:hover:not(:disabled) {
   border-color: var(--ink);
   background: var(--neutral-wash);
 }
@@ -449,10 +472,49 @@ button.secondary:hover {
 
 /* Forms of the operations. */
 fieldset.choice {
-  margin: 0.75rem 0 0;
-  padding: 0.5rem 0.75rem;
-  border: 1px solid var(--line);
+  min-width: 0;
+  margin: 22px 0 0;
+  padding: 0;
+  border: none;
+}
+
+fieldset.choice > legend {
+  margin-bottom: 8px;
+}
+
+.segmented {
+  display: flex;
+  gap: 8px;
+}
+
+.segmented label.inline {
+  flex: 1;
+  justify-content: center;
+  min-height: var(--control);
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--field-line);
   border-radius: var(--radius-field);
+  background: var(--paper);
+  font-size: 15px;
+}
+
+.segmented label.inline:has(input:checked) {
+  border: 2px solid var(--accent);
+  background: var(--accent-wash);
+  font-weight: 600;
+}
+
+/* The collapsed section for the wait time and the JSON options. */
+details.advanced {
+  margin: 22px 0 0;
+}
+
+details.advanced > summary {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
 }
 
 fieldset.custom-capture:disabled {
@@ -474,7 +536,8 @@ label.inline input {
 .hint {
   margin: 0.25rem 0 0;
   color: var(--muted);
-  font-size: 0.9em;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 /* The result view. */

@@ -15,7 +15,7 @@ def boxes(page: Page, *selectors: str) -> list[dict[str, float]]:
         page.evaluate(
             "s => { const r = document.querySelector(s).getBoundingClientRect();"
             " return {left: r.left, right: r.right, top: r.top,"
-            " bottom: r.bottom, width: r.width}; }",
+            " bottom: r.bottom, width: r.width, height: r.height}; }",
             selector,
         )
         for selector in selectors
@@ -69,3 +69,17 @@ def test_selected_tab_has_the_petrol_underline(ui: tuple[str, str]) -> None:
         page.wait_for_selector("#app-shell")
         style = computed(page, "#tab-extract", "borderBottomColor", "borderBottomWidth")
         assert style == ["rgb(29, 111, 106)", "3px"]
+
+
+def test_main_button_is_wide_and_petrol(ui: tuple[str, str]) -> None:
+    url, _ = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        button, form = boxes(page, "#extract-form > button[type=submit]", "#extract-form")
+        assert button["width"] == form["width"]
+        assert button["height"] >= 48
+        assert computed(page, "#extract-form > button[type=submit]", "backgroundColor") == [
+            "rgb(29, 111, 106)"
+        ]
