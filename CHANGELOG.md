@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-05
+
 Package 15: the playground's new look (plan
 [docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md](docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md)).
 No API change.
