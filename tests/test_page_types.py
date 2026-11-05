@@ -738,7 +738,9 @@ def test_article_overrides_title_listing_and_link_density() -> None:
         ["og_type", "word_count"],
     )
     menu = "".join(f'<li><a href="/m/{i}">Men\u00fcpunkt Nummer {i}</a></li>' for i in range(60))
-    dense = doc(head=OG_ARTICLE, body=f"<ul>{menu}</ul><p>{' '.join(['Wort'] * 220)}</p>")
+    body = f"<ul>{menu}</ul><p>{' '.join(['Wort'] * 30)}</p>"
+    assert classify(doc(body=body), words=220, min_words=50) == ("listing", ["link_density"])
+    dense = doc(head=OG_ARTICLE, body=body)
     assert classify(dense, words=220, min_words=50) == ("content", ["og_type", "word_count"])
 
 
