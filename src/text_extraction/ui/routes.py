@@ -183,8 +183,9 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
         form = await read_form(request, max_part_size=part_limit, max_files=max_files)
         if isinstance(form, Message):
             return templates.TemplateResponse(request, "form_error.html", {"message": form})
+        fields = text_fields(form)
         try:
-            body = build_body(op, text_fields(form))
+            body = build_body(op, fields)
         except OptionsError as error:
             await form.close()
             context = options_error(error, request)
@@ -210,6 +211,7 @@ def _single_view(op: str, settings: Settings) -> Callable[[Request], Awaitable[R
             screenshot=screenshot,
             screenshot_note=screenshot_note,
             screenshot_detail=screenshot_detail,
+            form=fields,
             language=request_language(request),
         )
         return HTMLResponse(html)

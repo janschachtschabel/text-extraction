@@ -1,5 +1,5 @@
 <details class="card fold timeline-view"{% if warnings %} open{% endif %}>
-  <summary>{{ t("result.what_happened") }}</summary>
+  <summary><{{ card_heading }} class="fold-title">{{ t("result.what_happened") }}</{{ card_heading }}></summary>
   {% if steps %}
   <ol class="timeline">
     {% for step in steps %}
@@ -8,7 +8,7 @@
   </ol>
   {% endif %}
   {% if warnings %}
-  <h4>{{ t("result.warnings") }}</h4>
+  <{{ sub_heading }} class="warnings-title">{{ t("result.warnings") }}</{{ sub_heading }}>
   <ul class="warnings">
     {% for name, text in warnings %}
     <li><code>{{ name }}</code>{% if text %}: {{ t(text) }}{% endif %}</li>

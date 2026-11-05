@@ -10,6 +10,7 @@ except the Markdown rendering of `render_markdown`, which escapes it itself."""
 
 import base64
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
@@ -22,7 +23,7 @@ from text_extraction.envelope import ErrorInfo
 from text_extraction.extract_models import ExtractResult
 from text_extraction.job_models import JobItem
 from text_extraction.ui.forms import rest_error_control
-from text_extraction.ui.i18n import Language, Message
+from text_extraction.ui.i18n import Language, Message, count_message
 from text_extraction.ui.markdown import is_http, render_markdown
 from text_extraction.ui.security import RUN_PREFIX
 from text_extraction.ui.templating import language_context, templates
@@ -214,6 +215,18 @@ def _response_download(text: str) -> Download | None:
     return Download(href=href, name=RESPONSE_NAME, suffix=".json")
 
 
+# A BCP 47 language tag: a primary subtag of two or three letters, then subtags of one to eight
+# letters or digits.
+_LANGUAGE_TAG: Final = re.compile(r"([A-Za-z]{2,3})(?:-[A-Za-z0-9]{1,8})*")
+
+
+def _content_language(value: object) -> str | None:
+    """The ``lang`` of the extracted content: the primary subtag (lower case) of the result's
+    ``language``; None without one, or for a value that is no BCP 47 tag."""
+    match = _LANGUAGE_TAG.fullmatch(value) if isinstance(value, str) else None
+    return match.group(1).lower() if match else None
+
+
 def _page_type(data: Mapping[str, Any]) -> str | None:
     """The result's page type (package 14); None for a result without one, such as one cached
     before package 14."""
@@ -242,7 +255,7 @@ def _chunks(data: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], Message |
             break
         shown.append(chunk)
     rest = len(chunks) - len(shown)
-    return shown, (Message("result.chunks_more", {"count": rest}) if rest else None)
+    return shown, (count_message("result.chunks_more", rest) if rest else None)
 
 
 def _raw_json(text: str) -> tuple[str, Message | None]:
@@ -318,11 +331,13 @@ def result_context(
     screenshot_detail: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
+    form: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """The context of ``result.html`` for one REST answer: ``envelope`` is its JSON object (None
     for another body, then ``raw`` is shown), ``screenshot`` the ``data:`` URI of its image (or
     ``screenshot_note`` why it could not be read, with the API's English
-    ``screenshot_detail``), ``retry_after`` the seconds of a 429. An
+    ``screenshot_detail``), ``retry_after`` the seconds of a 429, ``form`` the text fields of the
+    form that was sent (a 422 is tied to its control by them, `rest_error_control`). An
     error is shown as the text of its code (``error_text``) with the API's English message and
     ``details`` below it."""
     envelope = envelope or {}
@@ -341,7 +356,7 @@ def result_context(
         ),
         "details": _details(error) if isinstance(error, Mapping) else [],
         "error_for": (
-            rest_error_control(op, error.get("details"))
+            rest_error_control(op, error.get("details"), form or {})
             if http_status == UNPROCESSABLE and isinstance(error, Mapping)
             else None
         ),
@@ -374,6 +389,7 @@ def result_context(
     context["response_too_large"] = context["response_download"] is None
     context["page_type"] = _page_type(data)
     content = data.get("content")
+    context["content_lang"] = _content_language(data.get("language"))
     if isinstance(content, str):
         context["shown_content"] = content[:SHOWN_MAX_CHARS]
         context["content_note"] = _content_note(content)
@@ -421,6 +437,7 @@ def render_result(
     screenshot_detail: str | None = None,
     retry_after: str | None = None,
     item: JobItem | None = None,
+    form: Mapping[str, str] | None = None,
     language: Language = "en",
 ) -> str:
     """``result.html`` rendered in ``language`` with `result_context` of the other
@@ -437,5 +454,6 @@ def render_result(
         screenshot_detail=screenshot_detail,
         retry_after=retry_after,
         item=item,
+        form=form,
     )
     return templates.get_template("result.html").render({**language_context(language), **context})

@@ -143,7 +143,8 @@ def error_control(form_id: str | None, field: str | None) -> str | None:
 
 
 # The body fields of a form that a REST 422 can name, by operation: the answer's ``details`` then
-# tie to the control of the first of them (`rest_error_control`).
+# tie to the control of the first of them (`rest_error_control`). The screenshot form's are its
+# "Custom capture" fields.
 _NAMED_FIELDS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
     {"screenshot": ("full_page", "format", "quality", "width", "viewport")}
 )
@@ -165,16 +166,37 @@ def _detail_field(detail: Mapping[str, Any], names: tuple[str, ...]) -> str | No
     return None
 
 
-def rest_error_control(op: str, details: object) -> str | None:
-    """The id of the control of the first field of ``op``'s form that the ``details`` of a REST
-    422 name, or None (an operation whose fields are not named, or details that name none)."""
+def _options_keys(form: Mapping[str, str]) -> frozenset[str]:
+    """The keys of the form's "Options (JSON)" object; none when it is empty or no object."""
+    try:
+        options = _json_object(form, "options", Message("options.label.options"))
+    except OptionsError:
+        return frozenset()
+    return frozenset(options or ())
+
+
+def rest_error_control(op: str, details: object, form: Mapping[str, str]) -> str | None:
+    """The id of the control at fault in a REST 422 to ``op``'s form, posted as ``form``, for
+    the first of its fields the ``details`` name that can be tied: the "Options (JSON)" field
+    when the field's key came from there, else the field's own control, but only with the
+    preset ``custom`` (ui.js disables the custom fields for any other). None for an operation
+    whose fields are not named, or details that tie to no control (the status line still shows
+    the error)."""
     names = _NAMED_FIELDS.get(op)
     if names is None or not isinstance(details, list):
         return None
+    form_id = f"{op}{FORM_ID_SUFFIX}"
+    from_options = _options_keys(form)
+    custom = _text(form, "preset") == CUSTOM_PRESET
     for detail in details:
         field = _detail_field(detail, names) if isinstance(detail, Mapping) else None
-        if field is not None:
-            return error_control(f"{op}{FORM_ID_SUFFIX}", field)
+        if field is None:
+            continue
+        key = "viewport" if field.startswith("viewport_") else field
+        if key in from_options:
+            return error_control(form_id, "options")
+        if custom:
+            return error_control(form_id, field)
     return None
 
 

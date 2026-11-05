@@ -2844,7 +2844,10 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   quality 80), `thumb` (1280×800, first screen, WebP, `width` 400), `mobile` (390×844, whole
   page) and `custom`, which reads the fieldset "Custom capture" (window width and height, image
   format, quality, image width, whole page; `ui.js` enables it only with `custom`, and without
-  script every field stays usable). A 422 that names one of these fields is shown at its control.
+  script every field stays usable). A 422 that names one of these fields is shown at the
+  "Options (JSON)" field when the key came from there, else at the field's control, but only
+  with `custom` (`forms.rest_error_control`; under another preset the fields are disabled and
+  the error stays untied).
   The result shows a PNG, JPEG or WebP screenshot as a `data:` image.
 - **Look (package 15).** A redesign of the templates and `ui.css` only; no new field, endpoint,
   setting or htmx behaviour besides the result toolbar. The page is a white header (three rows:
@@ -2980,7 +2983,8 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   allowlist `FORM_PREFIXES`, to the control's id `<prefix>-<field>` (`_` as `-`), and
   `form_error.html` carries it as `data-error-for` with the id `<control>-error` (an unknown
   form id gives neither, so the header is never reflected). `ui.js` sets `aria-invalid="true"`
-  on the field, adds the error's id to its `aria-describedby` and moves focus there; the next
+  on the field (a red 2 px border), adds the error's id to its `aria-describedby`, scrolls it to
+  the middle of the screen and moves focus there (a disabled field is not tied); the next
   request of the user's unties it. A whole-form error is `role="alert"`.
 - **Status messages (P12-S9).** `base.html` holds `#ui-status` (`role="status"`,
   `aria-live="polite"`, visually hidden). While a request of the user's runs, it reads

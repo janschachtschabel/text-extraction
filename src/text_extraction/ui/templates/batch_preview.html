@@ -1,5 +1,5 @@
 <section class="batch-preview" aria-label="{{ t('batch.preview') }}">
-  <h4>{{ t("batch.holds." ~ source, count=urls) }}</h4>
+  <h3>{{ tn("batch.holds." ~ source, urls) }}</h3>
   <dl class="facts counts">
     <dt>{{ t("batch.rows") }}</dt><dd class="rows">{{ rows }}</dd>
     <dt>URLs</dt><dd class="urls">{{ urls }}</dd>
@@ -8,14 +8,14 @@
     <dt>{{ t("batch.parts") }}</dt><dd class="parts">{{ parts }}</dd>
   </dl>
   {% if problems %}
-  <h5>{{ t("batch.unused_rows") }}</h5>
+  <h4>{{ t("batch.unused_rows") }}</h4>
   <ul class="problems">
     {% for row, reason in problems %}<li>{{ t("batch.row_problem", row=row, reason=reason) }}</li>{% endfor %}
   </ul>
-  {% if more_problems %}<p class="hint">{{ t("batch.more_unused", count=more_problems) }}</p>{% endif %}
+  {% if more_problems %}<p class="hint">{{ tn("batch.more_unused", more_problems) }}</p>{% endif %}
   {% endif %}
   {% if first %}
-  <h5>{{ t("batch.first_urls") }}</h5>
+  <h4>{{ t("batch.first_urls") }}</h4>
   <ol class="first-urls">
     {% for url in first %}<li>{{ url }}</li>{% endfor %}
   </ol>

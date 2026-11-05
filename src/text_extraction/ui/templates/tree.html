@@ -1,7 +1,7 @@
 <section class="tree-view" aria-label="{{ t('tree.label') }}">
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
   {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
-  <p class="tree-counts">{{ t("tree.urls", count=tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ t("tree.hidden", count=tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
+  <p class="tree-counts">{{ tn("tree.urls", tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {%- if tree.type_counts %}
   <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
   {%- endif %}

@@ -1,7 +1,7 @@
 """The UI's Jinja2 templates, with autoescape on for every template whatever its name
-(ruling P10-S12), and the language context of every template (ruling P12-S5): ``t``, ``show``,
-``lang`` and ``languages``. ``status_text`` and ``state_text`` name the texts of a result's
-status and a job's state."""
+(ruling P10-S12), and the language context of every template (ruling P12-S5): ``t``, ``tn``,
+``show``, ``lang`` and ``languages``. ``status_text`` and ``state_text`` name the texts of a
+result's status and a job's state."""
 
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +20,7 @@ from text_extraction.ui.i18n import (
     Code,
     Language,
     Message,
+    count_key,
     fill,
     translate,
 )
@@ -65,15 +66,19 @@ def text_function(language: Language) -> Callable[..., Markup]:
 
 
 def language_context(language: Language) -> dict[str, Any]:
-    """What every template gets for ``language``: ``t``, ``show`` (a value as ``t`` renders a
-    placeholder's value: a `Message`, a `Code`, a list of them or a plain value), ``lang`` and
-    ``languages``."""
+    """What every template gets for ``language``: ``t``, ``tn(key, count, **params)`` (the
+    count text ``key`` for ``count``, rendered as ``t`` renders it; `count_key`), ``show`` (a
+    value as ``t`` renders a placeholder's value: a `Message`, a `Code`, a list of them or a
+    plain value), ``lang`` and ``languages``."""
     t = text_function(language)
+
+    def tn(key: str, count: int, /, **params: object) -> Markup:
+        return t(count_key(key, count), count=count, **params)
 
     def show(value: object) -> Markup:
         return _markup(value, t)
 
-    return {"t": t, "show": show, "lang": language, "languages": LANGUAGES}
+    return {"t": t, "tn": tn, "show": show, "lang": language, "languages": LANGUAGES}
 
 
 def request_language(request: Request) -> Language:

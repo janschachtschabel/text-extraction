@@ -3,6 +3,8 @@ in both languages: every control has a label and every field a hint tied to it, 
 every ARIA reference has its target, the tabs use a roving tabindex, a progress bar has a name
 and the buttons of the refreshing progress view keep their ids, a form error names its field,
 and each tab starts with an intro and a help link into the user guide of the page's language.
+Headings do not skip a level, every table header has a name, every result card has a heading
+and the extracted content carries its own language.
 The axe-core of the browser tests is vendored unmodified and pinned."""
 
 import hashlib
@@ -27,6 +29,7 @@ from text_extraction.ui.i18n import (
     help_url,
     translate,
 )
+from text_extraction.ui.results import render_result
 from text_extraction.ui.routes import TABS
 
 VENDOR = Path(__file__).parent / "vendor"
@@ -451,3 +454,101 @@ def test_workspace_holds_the_panels_then_the_result(admin: TestClient) -> None:
     (bar,) = page.xpath("//div[@class='app-bar']")
     assert bar.xpath(".//div[@class='who']")
     assert bar.xpath(".//*[@role='tablist']")
+
+
+def _levels(root: Any) -> list[int]:
+    return [int(heading.tag[1]) for heading in root.xpath("//h1|//h2|//h3|//h4|//h5|//h6")]
+
+
+def _skips(levels: list[int], under: int) -> list[tuple[int, int]]:
+    """The steps of ``levels`` that go down more than one level, for a fragment shown under a
+    heading of level ``under``."""
+    steps = zip([under, *levels], levels, strict=False)
+    return [(before, after) for before, after in steps if after > before + 1]
+
+
+def _untitled_result(language: Language) -> Any:
+    """A result without a title (no h3), with metadata, links, warnings and Markdown."""
+    data = result_data(
+        f"{ORIGIN}/a",
+        format="markdown",
+        content="# Heading\n\nSome text.",
+        metadata={"description": "A page."},
+        links=[{"url": f"{ORIGIN}/b", "text": "B", "kind": "internal"}],
+        warnings=["thin_content"],
+    )
+    envelope = {"status": "partial", "data": data}
+    html = render_result(op="extract", http_status=200, envelope=envelope, language=language)
+    return _fragment(html)
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_headings_do_not_skip_a_level(
+    admin: TestClient, language: Language, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit U8 (axe heading-order): a fragment shown under a tab's h2 starts at h3 at most, and
+    the tree, shown under its job's h3, at h4."""
+    fragments = _fragments(admin, language, monkeypatch)
+    shown = {name: (fragments[name], 2) for name in ("result", "preview", "progress")}
+    shown["tree"] = (fragments["tree"], 3)
+    shown["untitled result"] = (_untitled_result(language), 2)
+
+    for name, (root, under) in shown.items():
+        assert _levels(root), name
+        assert _skips(_levels(root), under) == [], name
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_result_cards_have_headings(language: Language) -> None:
+    """Audit U4: each folded card names itself with a heading in its summary."""
+    root = _untitled_result(language)
+
+    titles = [
+        " ".join(summary.text_content().split())
+        for summary in root.xpath("//details[contains(@class, 'fold')]/summary")
+    ]
+    headings = root.xpath("//details[contains(@class, 'fold')]/summary/*[@class='fold-title']")
+    assert len(titles) == 3  # metadata, links, what happened
+    assert [" ".join(h.text_content().split()) for h in headings] == titles
+    assert {heading.tag for heading in headings} == {"h3"}  # no title: under the tab's h2
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_every_table_header_has_a_name(admin: TestClient, language: Language) -> None:
+    """Audit U8: the items table's last column (its "Show" buttons) has a hidden header."""
+    root = _fragment(_progress(admin, language, _batch(admin, 3)))
+
+    headers = root.xpath("//table[contains(@class, 'items')]//th")
+    assert headers
+    assert [h for h in headers if not h.text_content().strip()] == []
+    (hidden,) = headers[-1].xpath("./*[@class='visually-hidden']")
+    assert hidden.text_content() == translate(language, "progress.actions")
+
+
+def _content_languages(given: str | None, content_format: str) -> tuple[list[Any], Any]:
+    data = result_data(
+        f"{ORIGIN}/a", format=content_format, content="# Titel\n\nEin Text.", language=given
+    )
+    root = _fragment(render_result(op="extract", http_status=200, envelope={"data": data}))
+    (card,) = root.xpath("//section[contains(@class, 'reading')]")
+    shown = card.xpath(".//div[@class='markdown'] | .//pre[contains(@class, 'content')]")
+    return shown, card
+
+
+@pytest.mark.parametrize("content_format", ["markdown", "text"])
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [("de", "de"), ("de-AT", "de"), ("EN", "en"), (None, None), ("", None), ("x1 y", None)],
+)
+def test_the_content_carries_its_language(
+    given: str | None, expected: str | None, content_format: str
+) -> None:
+    """Audit U7 (WCAG 3.1.2): the reading card's content (the rendered Markdown and its source,
+    or the text) has ``lang`` from ``data.language``; the card's own texts stay in the page's
+    language."""
+    shown, card = _content_languages(given, content_format)
+
+    assert len(shown) == (2 if content_format == "markdown" else 1)
+    assert [element.get("lang") for element in shown] == [expected] * len(shown)
+    assert card.get("lang") is None
+    assert card.xpath(".//h3/@lang | .//h4/@lang") == []

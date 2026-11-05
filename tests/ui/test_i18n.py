@@ -1,6 +1,7 @@
 """The UI's catalogues and lookups (rulings P12-S5, P12-S6): ``locales/en.json`` and
 ``de.json`` hold the same keys and placeholders and plain text only; ``translate`` falls back to
-English, then to the key; ``negotiate`` reads ``Accept-Language``."""
+English, then to the key; ``translate_count`` picks a text's ``one`` or ``other`` form by a count;
+``negotiate`` reads ``Accept-Language``."""
 
 import json
 import re
@@ -13,8 +14,10 @@ from text_extraction.ui.i18n import (
     LANGUAGES,
     Language,
     Message,
+    count_message,
     negotiate,
     translate,
+    translate_count,
 )
 
 LOCALES = Path(__file__).parents[2] / "src" / "text_extraction" / "ui" / "locales"
@@ -85,6 +88,36 @@ def test_message_renders_in_each_language() -> None:
     assert message.text("de") == "2 ausgewählt"
     assert Message("login.title").params == {}
     assert Message("login.title").text("de") == "Anmelden"
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
+@pytest.mark.parametrize(("count", "form"), [(1, "one"), (0, "other"), (2, "other")])
+def test_translate_count_picks_one_or_other(language: Language, count: int, form: str) -> None:
+    expected = translate(language, f"tree.urls.{form}", count=count)
+
+    assert translate_count(language, "tree.urls", count) == expected
+    assert count_message("tree.urls", count).text(language) == expected
+
+
+def test_translate_count_fills_the_count_and_the_params() -> None:
+    assert translate_count("en", "tree.urls", 1) == "1 URL"
+    assert translate_count("en", "tree.urls", 2) == "2 URLs"
+    assert translate_count("de", "tree.urls", 1) == "1 URL"
+    assert translate_count("de", "tree.urls", 0) == "0 URLs"
+    assert translate_count("en", "tree.hidden", 1, setting="X") == "1 more URL not shown (X)"
+    assert translate_count("de", "result.tables", 1) == "1 Tabelle: siehe das rohe JSON."
+
+
+def test_every_count_text_has_both_forms() -> None:
+    """A key ending in ``.one`` has its ``.other`` partner, and both forms show the count (a
+    ``.other`` alone is no count text: ``page_type.other`` is a page type)."""
+    for language in LANGUAGES:
+        catalogue = CATALOGUES[language]
+        counted = {key.removesuffix(".one") for key in catalogue if key.endswith(".one")}
+        assert counted, language
+        for key in counted:
+            for form in ("one", "other"):
+                assert "count" in _placeholders(catalogue[f"{key}.{form}"]), (language, key)
 
 
 @pytest.mark.parametrize(

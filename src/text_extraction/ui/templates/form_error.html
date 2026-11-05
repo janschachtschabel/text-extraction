@@ -6,6 +6,6 @@ ui.js ties the message to the field and moves focus there. -#}
   <ul class="problems">
     {% for row, reason in problems %}<li>{{ t("batch.row_problem", row=row, reason=reason) }}</li>{% endfor %}
   </ul>
-  {% if more_problems %}<p class="hint">{{ t("batch.more_problems", count=more_problems) }}</p>{% endif %}
+  {% if more_problems %}<p class="hint">{{ tn("batch.more_problems", more_problems) }}</p>{% endif %}
   {% endif %}
 </div>
