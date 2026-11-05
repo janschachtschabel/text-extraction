@@ -18,9 +18,9 @@ cyclopts = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 cymem = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 dnspython = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 doclang = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
-docling-core = "2026-10-23T00:00:00Z"
-docling-ibm-models = "2026-10-23T00:00:00Z"
-docling-parse = "2026-10-23T00:00:00Z"
+docling-core = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+docling-ibm-models = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
+docling-parse = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 griffelib = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 jiter = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
 joserfc = { timestamp = "0001-01-01T00:00:00Z", span = "P14D" }
