@@ -2800,6 +2800,63 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   format, quality, image width, whole page; `ui.js` enables it only with `custom`, and without
   script every field stays usable). A 422 that names one of these fields is shown at its control.
   The result shows a PNG, JPEG or WebP screenshot as a `data:` image.
+- **Look (package 15).** A redesign of the templates and `ui.css` only; no new field, endpoint,
+  setting or htmx behaviour besides the result toolbar. The page is a white header (three rows:
+  the masthead with the logo, `h1` and intro, outside the `#app` that the login replaces; the
+  session line; the tabs), then two columns, the settings on the left and the result on the
+  right, stacked below 60rem (settings first). Every colour, radius, font stack and size is a
+  token on `:root` (`--page`, `--paper`, `--ink`, `--muted`, `--line`, `--field-line`,
+  `--accent`, `--accent-strong`, `--focus`, `--radius-card`, `--radius-field`, `--control`,
+  `--gutter`, `--font-ui`, `--font-read`, `--font-code`); no colour stands outside `:root`, and
+  `tests/ui/test_palette.py` holds every text pair at 4.5:1 or more and field boundaries and
+  focus at 3:1 or more. Where a test pins an exact class (`dl.facts`, `dl.info`, `details.raw`,
+  `section.job`, `form.tree-form`, `div.markdown`), the card look comes from CSS on that
+  selector (P15-S11). Rulings (plan
+  `docs/superpowers/plans/2026-11-03-package-15-playground-redesign.md`):
+  - **P15-R1, toolbar.** The result toolbar holds "Copy Markdown" (or "Copy text"), the content
+    download and "Save response (JSON)". "Copy" is rendered `hidden` and revealed by `ui.js` only
+    when `window.isSecureContext` and `navigator.clipboard` exist; a refused write says so in
+    `#ui-status`. Both downloads are server-built `data:` links, so they work without script and
+    need no CSP change.
+  - **P15-R2, screenshots.** The before and after screenshots (11 states, en and de, 1440 px and
+    390 px; `python -m tests.ui.screenshots --out <dir>`) are written outside the repository, to
+    `/mnt/project-files/package-15/screenshots/before/` and `.../after/`.
+  - **P15-R3, field borders.** Inputs, selects, textareas, unchecked segment options and outlined
+    buttons use `--field-line: #8a939d` (3.12:1 on white, WCAG 1.4.11), not the mockup's
+    `#c9cfd6` (1.57:1); card borders stay `#dde1e6` (decorative).
+  - **P15-R4, three header rows.** The `h1` stays outside `#app`, so the login swap, the skip
+    link's target and the focus rules of package 12 are unchanged.
+  - **P15-R5, no "Verbatim from the page" pill.** It would not be true of OCR, transcripts,
+    chunks or LLM output.
+  - **P15-R6, existing section titles.** The small capital labels are the existing legends
+    ("Format", "Also", "Site rules", "Custom capture").
+  - **P15-R7, "Save response (JSON)" size.** It uses the same `DOWNLOAD_MAX_CHARS` cap as the
+    content download; above it the hint shows and points to curl. Chromium downloads `data:`
+    JSON links of 1, 3, 12 and 30 MB, so there is no 2 MB `data:` limit for downloads; the cost is
+    page weight only.
+  - **P15-R8, scrollable blocks and tables.** The result's scrollable `pre` blocks carry
+    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds up to four tab
+    stops per result, even for a short block. Below 600 px tables scroll inside their card; the
+    items table's URL column keeps at least 12rem, so the "Show" column may need a sideways
+    scroll of the table.
+  - **P15-S3, status line.** `header.answer` holds the status pill, the unblocked pill and
+    `HTTP <n>`; it stays there because an error without `data` has no card of figures.
+  - **P15-S4, copy source.** "Copy" copies the text shown in `pre.content` (at most
+    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'none'` forbids reading the download's link back.
+    "Save response" is left out, with a hint, above `DOWNLOAD_MAX_CHARS` (a cut JSON is no JSON).
+  - **P15-S5, reading card.** Rendered Markdown (or `pre.content` in the serif font for text, or
+    for Markdown too long to render) stands in a white reading card; the Markdown source is in
+    the closed section "Show source" (`details.source`).
+  - **P15-S7, cards.** Metadata, Links, Images and "What happened" are closed `details` cards
+    ("What happened" is open when there are warnings); Structured values and Chunks stay open;
+    "As curl" and "Raw JSON" stay closed.
+  - **P15-S8, Advanced.** `details.advanced` (closed) holds "Wait seconds" and "Options (JSON)"
+    in every form that has them; it is open when the form is re-rendered with options.
+  - **P15-S9, figures.** `dl.facts` is the card of figures, each pair in a `div.fact`; it shows
+    only what exists, and adds "Page type" (a pill) and "Time" (seconds, two decimals, decimal
+    comma in German).
+  - **P15-S10, language switch.** Two links; in the header its hint is visually hidden and still
+    read through `aria-describedby`.
 - **Jobs (P10-S18, P10-S19, P10-S20).** The progress view reads one or more jobs through
   `read_job` with one rate-limit hit per refresh, whatever the number of jobs, refreshes every 3 s
   while any is not `completed`, and stops then; "Cancel" calls D4's route. Batches come from a
@@ -2904,6 +2961,12 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
 - **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
   `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
   "Extract selected", so a keyboard user does not tab through every checkbox.
+- **Closed sections (package 15).** `ui.js` `revealField` opens every closed `details` ancestor
+  of a control before it takes focus: for a form error (`tieError`) and for the browser's own
+  `invalid` event (a capture listener on the document), so a value refused inside "Advanced" is
+  never hidden. The scrollable `pre` blocks of a result have `tabindex="0"` (P15-R8).
+- **Contrast of fields (package 15).** The boundary of an input, select, textarea, unchecked
+  segment option and outlined button is `--field-line` at 3.12:1 on white (WCAG 1.4.11, P15-R3).
 - **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
   progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
   `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its
@@ -2912,8 +2975,10 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   `wcag2aa`, `wcag21a`, `wcag21aa` and `wcag22aa` over the login (also with an error), every tab,
   an extract result, a form error, a running and a completed progress view, the site tree and
   the Extract tab with "Site rules" enabled (browser and unblock mode on), in both languages; the
-  gate is zero violations, with no rule or element excluded. Keyboard, focus, status and error
-  tests run beside it.
+  gate is zero violations, with no rule or element excluded. Since package 15 the run also covers
+  the states with every `details` of the forms and the result open, and the phone width (390 px)
+  in both languages; the tests also hold that no page scrolls sideways at that width. Keyboard,
+  focus, status and error tests run beside it.
 
 **Metrics and logs (P10-S22).** `text_extraction_mcp_tool_calls_total{tool, outcome}` (`success`,
 `partial`, `failed`, `job` or a refusal's error code; every tool exported at 0),

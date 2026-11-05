@@ -366,16 +366,31 @@ jeder Seite; die Wahl bleibt im Browser gespeichert. Jeder Tab beginnt mit einer
 und einem Link „Hilfe (Anleitung)“ zu dieser Anleitung, der sich in einem neuen Tab öffnet, und
 jedes Feld hat einen Hinweis.
 
+Die Seite hat oben eine weiße Kopfzeile mit dem Namen, dem Sprachwechsel und den Tabs. Darunter
+stehen links die Einstellungen und rechts das Ergebnis; auf einem schmalen Bildschirm (einem
+Smartphone) stehen sie untereinander, die Einstellungen zuerst. In den Einstellungen ist „Erweitert“
+ein zugeklappter Abschnitt; er enthält „Sekunden warten, bevor daraus ein Job wird“ und „Optionen (JSON)“. Ein
+Formularfehler in einem Feld darin öffnet den Abschnitt und setzt den Cursor auf das Feld.
+
 Jedes Formular führt einen REST-Aufruf aus, mit denselben Prüfungen und demselben Ratenlimit wie
-jeder Client, und zeigt den HTTP-Status, das Envelope, das rohe JSON und die Anfrage als
-`curl`-Befehl (mit `$API_KEY` anstelle Ihres Schlüssels). Die Tabs:
+jeder Client. Das Ergebnis beginnt mit einer Statuszeile (der Status, „maximale Extraktion (entsperrt)“ für eine
+Seite, die im Entsperrmodus geöffnet wurde, und der HTTP-Status), darunter folgen eine Werkzeugleiste, eine
+Karte mit Kennzahlen (URL, Sprache, Wörter, verwendeter Modus, Seitentyp, Zeit) und der Inhalt in
+einer weißen Lesekarte. Metadaten, Links, Bilder und „Ablauf“ sind zugeklappte Abschnitte („Ablauf“
+öffnet sich von selbst, wenn es Warnungen gibt); bei Markdown steht der Quelltext unter „Quelltext
+anzeigen“. „Rohes JSON“ ist das ganze Envelope und „Als curl“ die Anfrage als `curl`-Befehl (mit
+`$API_KEY` anstelle Ihres Schlüssels). Die Werkzeugleiste bietet „Markdown kopieren“ (bei Text als
+Ausgabe „Text kopieren“), das den gezeigten Text kopiert und nur erscheint, wo der Browser den Zugriff
+auf die Zwischenablage erlaubt (HTTPS oder localhost), einen Download des Inhalts und „Antwort
+speichern (JSON)“, das das ganze Envelope speichert. Ist eine Antwort für den Download zu groß,
+sagt die Seite das und verweist auf den `curl`-Befehl. Die Tabs:
 
 - **Extrahieren**: eine URL als Markdown oder Text, mit Metadaten, strukturierten Metadaten
   (schema.org- und LRMI-Felder wie Lizenz, Autor und Bildungsstufe) und Bildbeschreibungen. Das
   Ergebnis zeigt den Inhalt, die Metadaten, die Bilder, die Links und eine Zeitleiste des Ablaufs.
 - **Datei**, **Screenshot**, **Strukturiert**, **Chunks** und **Info**: die anderen einzelnen
-  Aufrufe, mit derselben Ergebnisansicht; das Feld „Optionen (JSON)“ nimmt jedes weitere Feld des
-  REST-Bodys.
+  Aufrufe, mit derselben Ergebnisansicht; das Feld „Optionen (JSON)“ unter „Erweitert“ nimmt jedes
+  weitere Feld des REST-Bodys.
 - **Batch**: URLs, eine pro Zeile. **Batch-Datei**: eine CSV- oder JSON-Datei mit URLs, zuerst auf
   dem Server geprüft, mit einer Vorschau vor „Batch starten“.
 - **Website-Struktur**: startet einen Crawl; wenn er abgeschlossen ist, listet „Als Baum

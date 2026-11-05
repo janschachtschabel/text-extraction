@@ -126,7 +126,7 @@ nicht.
 
 - „Regeln der Website beachten (Standard)“ sendet kein `compliance`.
 - „Maximale Extraktion (Vertragspartner)“ sendet `compliance: ignore`. Setzen Sie `compliance`
-  zusätzlich in „Optionen (JSON)“, lehnt das Formular es ab: `compliance` ist dann doppelt
+  zusätzlich in „Optionen (JSON)“ (unter „Erweitert“), lehnt das Formular es ab: `compliance` ist dann doppelt
   angegeben.
 
 Solange `BROWSER_ENABLED` oder `BROWSER_UNBLOCK_ENABLED` aus ist, ist die Auswahl gesperrt, und ihr

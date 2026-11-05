@@ -347,15 +347,30 @@ The playground speaks English and German. The language switch ("Deutsch", "Engli
 top of every page; the choice stays in the browser. Each tab starts with a short intro and a
 "Help (user guide)" link to this guide, which opens in a new tab, and each field has a hint.
 
-Every form runs one REST call, with the same checks and rate limit as any client, and shows the
-HTTP status, the envelope, the raw JSON and the request as a `curl` command (with `$API_KEY` in
-place of your key). The tabs:
+The page has a white header with the name, the language switch and the tabs. Below it the
+settings are on the left and the result on the right; on a narrow screen (a phone) they stack,
+settings first. In the settings, "Advanced" is a closed section; it holds "Wait seconds before it
+becomes a job" and "Options (JSON)". A form error in a field inside it opens the section and puts the cursor on the
+field.
+
+Every form runs one REST call, with the same checks and rate limit as any client. The result
+starts with a status line (the status, "maximum extraction (unblocked)" for a page opened in unblock mode, and the HTTP
+status), then a toolbar, a card of figures (URL, language, words, mode used, page type, time) and
+the content in a white reading card. Metadata, links, images and "What happened" are closed
+sections ("What happened" opens by itself when there are warnings); for Markdown the source is
+under "Show source". "Raw JSON" is the whole envelope and "As curl" the request as a `curl`
+command (with `$API_KEY` in place of your key). The toolbar offers "Copy Markdown" (for text
+output "Copy text"), which copies the shown text and appears only where the browser allows
+clipboard access (HTTPS or localhost), a download of the content, and "Save response (JSON)",
+which saves the whole envelope. An answer too large for the download says so and points to the
+`curl` command. The tabs:
 
 - **Extract**: a URL as Markdown or text, with metadata, structured metadata (schema.org and
   LRMI fields such as licence, author and educational level) and image descriptions. The result
   shows the content, the metadata, the images, the links and a timeline of what happened.
 - **File**, **Screenshot**, **Structured**, **Chunk** and **Info**: the other single calls, with
-  the same result view; the "Options (JSON)" box takes any further field of the REST body.
+  the same result view; the "Options (JSON)" box under "Advanced" takes any further field of the
+  REST body.
 - **Batch**: URLs, one per line. **Batch file**: a CSV or JSON file of URLs, checked on the
   server first, with a preview before "Start batch".
 - **Site structure**: starts a crawl; once it is completed, "Show as tree" lists its pages by

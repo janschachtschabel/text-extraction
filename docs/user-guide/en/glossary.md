@@ -23,6 +23,8 @@ The labels of the playground, as the English and the German playground show them
 | Site structure | Website-Struktur | The tab that crawls a site; also the job and its result. |
 | Info | Info | The tab with the service's name and version and the key's role. |
 | Operations | Funktionen | The list of tabs. |
+| Advanced | Erweitert | The closed section of a form that holds "Wait seconds before it becomes a job" and "Options (JSON)". |
+| Show source | Quelltext anzeigen | The closed section of a Markdown result that shows the Markdown text. |
 | Site rules | Website-Regeln | The choice between respecting a site's rules and maximum extraction. |
 | Respect the site's rules (default) | Regeln der Website beachten (Standard) | The default: robots.txt and the TDM opt-out are checked. |
 | Maximum extraction (contract partners) | Maximale Extraktion (Vertragspartner) | For sites that allowed extraction by contract: `compliance: ignore`, with unblock mode. |

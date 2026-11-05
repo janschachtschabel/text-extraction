@@ -59,6 +59,15 @@ differs. Task 8 records them in `docs/architecture.md`.
   ("Format", "Also", "Site rules", "Custom capture"). Reason: "Source", "Output" and "Options"
   would be new texts, and "Options" would clash with "Options (JSON)" and the user guide's
   names.
+- **P15-R7, "Save response (JSON)" size.** It uses the same `DOWNLOAD_MAX_CHARS` cap as the
+  content download; above it the toolbar shows a hint that points to curl. Checked: Chromium
+  downloads `data:` JSON links of 1, 3, 12 and 30 MB, so there is no 2 MB `data:` URL limit for
+  downloads; the cost is page weight only.
+- **P15-R8, scrollable blocks and tables.** The result's scrollable `pre` blocks carry
+  `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1); this adds up to four tab stops
+  per result, even when a block is short. Below 600 px tables scroll inside their card; the items
+  table's URL column keeps at least 12rem, so the "Show" column may need a sideways scroll of the
+  table.
 
 ## Global Constraints
 

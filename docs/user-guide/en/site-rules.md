@@ -119,7 +119,7 @@ with "Extract selected" in the site tree. The **File** tab has none.
 
 - "Respect the site's rules (default)" sends no `compliance`.
 - "Maximum extraction (contract partners)" sends `compliance: ignore`. If you also set
-  `compliance` in "Options (JSON)", the form refuses it: compliance is given twice.
+  `compliance` in "Options (JSON)" (under "Advanced"), the form refuses it: compliance is given twice.
 
 While `BROWSER_ENABLED` or `BROWSER_UNBLOCK_ENABLED` is off, the choice is disabled and its hint
 says why. With "Browser fallback" set to "never", maximum extraction stays with HTTP. The result
