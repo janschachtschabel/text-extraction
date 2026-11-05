@@ -349,8 +349,8 @@ top of every page; the choice stays in the browser. Each tab starts with a short
 
 The page has a white header with the name, the language switch and the tabs. Below it the
 settings are on the left and the result on the right; on a narrow screen (a phone) they stack,
-settings first. In the settings, "Advanced" is a closed section; it holds "Wait seconds before it
-becomes a job" and "Options (JSON)". A form error in a field inside it opens the section and puts the cursor on the
+settings first. In the settings, "Advanced" is a closed section; it holds "Options (JSON)" and, where
+the form has it, "Wait seconds before it becomes a job". A form error in a field inside it opens the section and puts the cursor on the
 field.
 
 Every form runs one REST call, with the same checks and rate limit as any client. The result

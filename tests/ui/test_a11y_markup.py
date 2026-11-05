@@ -92,6 +92,25 @@ def test_wait_and_options_are_in_a_closed_advanced_section(
         assert summary == translate(language, "form.advanced")
 
 
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_advanced_hint_names_only_the_fields_the_form_has(
+    admin: TestClient, language: Language
+) -> None:
+    """The hint under "Advanced" speaks of the wait only where the form has a wait field."""
+    page = _page(admin, language)
+    sections = page.xpath("//details[contains(@class, 'advanced')]")
+    with_wait = [s for s in sections if s.xpath(".//input[@name='wait_seconds']")]
+    without_wait = [s for s in sections if not s.xpath(".//input[@name='wait_seconds']")]
+    assert with_wait
+    assert without_wait  # batch, batch file and site structure
+    for section in with_wait:
+        hint = section.xpath("./p[@class='hint'][1]")[0].text_content().strip()
+        assert hint == translate(language, "hint.advanced")
+    for section in without_wait:
+        hint = section.xpath("./p[@class='hint'][1]")[0].text_content().strip()
+        assert hint == translate(language, "hint.advanced_options")
+
+
 def _batch(client: TestClient, count: int) -> str:
     """A batch of ``count`` URLs started over REST, with a result for its first item."""
     listed = [f"{ORIGIN}/page-{number}" for number in range(count)]

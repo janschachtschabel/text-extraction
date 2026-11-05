@@ -5,7 +5,7 @@
   --page: #f3f4f6;
   --paper: #ffffff;
   --line: #dde1e6; /* card borders: decorative, a card's text identifies it */
-  --field-line: #8a939d; /* field and outlined button borders: 3:1 on --paper (P15-R3) */
+  --field-line: #808993; /* field and outlined button borders: 3:1 on --page and --paper (P15-R3) */
   --ink: #1f2328;
   --muted: #59636e;
   --accent: #1d6f6a;
@@ -879,6 +879,12 @@ pre {
   background: var(--neutral-wash);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* A chunk never scrolls (it wraps), so it takes no tab stop (P15-R8). */
+ol.chunks pre {
+  max-height: none;
+  overflow: visible;
 }
 
 dl.meta,

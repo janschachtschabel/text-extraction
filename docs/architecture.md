@@ -2822,7 +2822,7 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
     390 px; `python -m tests.ui.screenshots --out <dir>`) are written outside the repository, to
     `/mnt/project-files/package-15/screenshots/before/` and `.../after/`.
   - **P15-R3, field borders.** Inputs, selects, textareas, unchecked segment options and outlined
-    buttons use `--field-line: #8a939d` (3.12:1 on white, WCAG 1.4.11), not the mockup's
+    buttons use `--field-line: #808993` (3.22:1 on the page grey, 3.55:1 on white, WCAG 1.4.11), not the mockup's
     `#c9cfd6` (1.57:1); card borders stay `#dde1e6` (decorative).
   - **P15-R4, three header rows.** The `h1` stays outside `#app`, so the login swap, the skip
     link's target and the focus rules of package 12 are unchanged.
@@ -2835,8 +2835,9 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
     JSON links of 1, 3, 12 and 30 MB, so there is no 2 MB `data:` limit for downloads; the cost is
     page weight only.
   - **P15-R8, scrollable blocks and tables.** The result's scrollable `pre` blocks carry
-    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds up to four tab
-    stops per result, even for a short block. Below 600 px tables scroll inside their card; the
+    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds at most three
+    tab stops per result (Markdown source, curl, raw JSON; all in sections that are closed by
+    default), even for a short block. Chunks wrap and never scroll, so they take no tab stop. Below 600 px tables scroll inside their card; the
     items table's URL column keeps at least 12rem, so the "Show" column may need a sideways
     scroll of the table.
   - **P15-S3, status line.** `header.answer` holds the status pill, the unblocked pill and
@@ -2966,7 +2967,7 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   `invalid` event (a capture listener on the document), so a value refused inside "Advanced" is
   never hidden. The scrollable `pre` blocks of a result have `tabindex="0"` (P15-R8).
 - **Contrast of fields (package 15).** The boundary of an input, select, textarea, unchecked
-  segment option and outlined button is `--field-line` at 3.12:1 on white (WCAG 1.4.11, P15-R3).
+  segment option and outlined button is `--field-line` at 3.22:1 on the page grey and 3.55:1 on white (WCAG 1.4.11, P15-R3).
 - **Checks.** `tests/ui/test_a11y_markup.py` (labels, hints, unique ids, ARIA references, tabs,
   progress, help links, the error's field) and `tests/ui/test_a11y_browser.py` (marker
   `browser`): axe-core 4.14.0 (MPL-2.0, vendored unmodified in `tests/ui/vendor/` with its

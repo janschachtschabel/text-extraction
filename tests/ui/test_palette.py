@@ -17,15 +17,22 @@ TEXT_PAIRS = [
     ("muted", "page"),
     ("muted", "paper"),
     ("muted", "neutral-wash"),
+    ("muted", "accent-wash"),
     ("accent", "page"),
     ("accent", "paper"),
+    ("accent", "accent-wash"),
     ("accent-ink", "accent"),
     ("accent-ink", "accent-strong"),
     ("accent-strong", "accent-wash"),
     ("warn", "warn-wash"),
     ("error", "error-wash"),
 ]
-NON_TEXT_PAIRS = [("field-line", "paper"), ("focus", "page"), ("focus", "paper")]
+NON_TEXT_PAIRS = [
+    ("field-line", "paper"),
+    ("field-line", "page"),
+    ("focus", "page"),
+    ("focus", "paper"),
+]
 
 _ROOT = re.compile(r"^:root\s*\{(?P<body>[^}]*)\}", re.MULTILINE)
 _COLOUR = re.compile(r"--(?P<name>[a-z][a-z-]*)\s*:\s*(?P<value>#[0-9a-fA-F]{6})\s*;")
@@ -69,7 +76,7 @@ def test_tokens_are_the_mockups_values() -> None:
 
 
 def test_field_borders_are_darker_than_the_mockup() -> None:
-    assert tokens()["field-line"] == "#8a939d"  # ruling P15-R3
+    assert tokens()["field-line"] == "#808993"  # ruling P15-R3
 
 
 @pytest.mark.parametrize(("fore", "back"), TEXT_PAIRS)

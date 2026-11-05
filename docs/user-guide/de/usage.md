@@ -369,7 +369,7 @@ jedes Feld hat einen Hinweis.
 Die Seite hat oben eine weiße Kopfzeile mit dem Namen, dem Sprachwechsel und den Tabs. Darunter
 stehen links die Einstellungen und rechts das Ergebnis; auf einem schmalen Bildschirm (einem
 Smartphone) stehen sie untereinander, die Einstellungen zuerst. In den Einstellungen ist „Erweitert“
-ein zugeklappter Abschnitt; er enthält „Sekunden warten, bevor daraus ein Job wird“ und „Optionen (JSON)“. Ein
+ein zugeklappter Abschnitt; er enthält „Optionen (JSON)“ und, wo das Formular es hat, „Sekunden warten, bevor daraus ein Job wird“. Ein
 Formularfehler in einem Feld darin öffnet den Abschnitt und setzt den Cursor auf das Feld.
 
 Jedes Formular führt einen REST-Aufruf aus, mit denselben Prüfungen und demselben Ratenlimit wie

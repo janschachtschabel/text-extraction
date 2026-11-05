@@ -22,11 +22,11 @@ Open the **Extract** tab, enter the URL and press "Extract".
 The result starts with a status line (the status and the HTTP status), a toolbar and a card of
 figures: URL, language, words, mode used, page type and time. The toolbar has "Copy Markdown"
 (or "Copy text"; it appears only where the browser allows the clipboard), the download of the
-content and "Save response (JSON)", the whole answer as a file. Below come the content in a
-reading card (for Markdown, its source is under "Show source"), then closed sections for the
-metadata, the images, the links and "What happened", a timeline of the checks, the fetch, the
-render and the conversion; it opens by itself when there are warnings. "Raw JSON" is the whole
-answer, and "As curl" the same request for the shell.
+content and "Save response (JSON)", the whole answer as a file. Below come closed sections for the
+metadata, the links, the images and "What happened", a timeline of the checks, the fetch, the
+render and the conversion (it opens by itself when there are warnings), and after them the
+content in a reading card (for Markdown, its source is under "Show source"). At the end, "As curl"
+is the same request for the shell and "Raw JSON" the whole answer.
 
 ## With REST
 

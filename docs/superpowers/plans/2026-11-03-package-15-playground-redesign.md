@@ -45,8 +45,8 @@ differs. Task 8 records them in `docs/architecture.md`.
   and shown to Jan there; the PR body says where they are. The helper takes the output
   directory as an argument (Tasks 1 and 8).
 - **P15-R3, field borders.** Inputs, selects, textareas, unchecked segment options and outlined
-  buttons get `--field-line: #8a939d` (3.12:1 on white), not the mockup's `#c9cfd6` (1.57:1).
-  Reason: field boundaries must meet WCAG 1.4.11 (3:1). Card borders stay `#dde1e6`
+  buttons get `--field-line: #808993` (3.22:1 on the page grey `#f3f4f6`, 3.55:1 on white), not the mockup's `#c9cfd6` (1.57:1).
+  Reason: field boundaries must meet WCAG 1.4.11 (3:1), also on the grey page (the settings column and the result toolbar sit on `--page`, not on a card). Card borders stay `#dde1e6`
   (decorative: a card's text identifies it).
 - **P15-R4, three header rows.** The masthead (`h1`, intro) is outside the `#app` that the
   login replaces (R-P12-9), the session line inside it, so the white header has three rows: the
@@ -64,8 +64,10 @@ differs. Task 8 records them in `docs/architecture.md`.
   downloads `data:` JSON links of 1, 3, 12 and 30 MB, so there is no 2 MB `data:` URL limit for
   downloads; the cost is page weight only.
 - **P15-R8, scrollable blocks and tables.** The result's scrollable `pre` blocks carry
-  `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1); this adds up to four tab stops
-  per result, even when a block is short. Below 600 px tables scroll inside their card; the items
+  `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1); this adds at most three tab stops
+  per result (the Markdown source, the curl command and the raw JSON, all in sections that are closed
+  by default), even when a block is short. The chunks (`ol.chunks pre`) never scroll (no `max-height`,
+  the text wraps), so they take no tab stop. Below 600 px tables scroll inside their card; the items
   table's URL column keeps at least 12rem, so the "Show" column may need a sideways scroll of the
   table.
 
@@ -256,7 +258,7 @@ Expected: 44 PNGs (11 states x 2 languages x 2 widths) in
 **Interfaces:**
 - Produces (later tasks use these names only):
   - Tokens on `:root`: `--page: #f3f4f6`, `--paper: #ffffff`, `--line: #dde1e6`,
-    `--field-line: #8a939d`, `--ink: #1f2328`, `--muted: #59636e`, `--accent: #1d6f6a`,
+    `--field-line: #808993`, `--ink: #1f2328`, `--muted: #59636e`, `--accent: #1d6f6a`,
     `--accent-strong: #155a56`, `--accent-wash: #e6f2f0`, `--accent-ink: #ffffff`,
     `--neutral-wash: #eef0f3`, `--warn: #7a4d00`, `--warn-wash: #fdf3d7`, `--error: #a3222b`,
     `--error-wash: #fde8ea`, `--focus: #1d6f6a`, `--font-ui`, `--font-read`, `--font-code`
@@ -276,11 +278,11 @@ Expected: 44 PNGs (11 states x 2 languages x 2 widths) in
 - Contrast pairs the test holds (ratio, WCAG 2.x relative luminance):
   text 4.5:1 for `ink`, `muted`, `accent`, `accent-strong`, `warn`, `error` on their
   backgrounds (`page`, `paper`, `accent-wash`, `neutral-wash`, `warn-wash`, `error-wash` as used)
-  and `accent-ink` on `accent` and `accent-strong`; non-text 3:1 for `field-line` on `paper`,
+  and `accent-ink` on `accent` and `accent-strong`; non-text 3:1 for `field-line` on `paper` and `page`,
   `focus` on `page` and `paper`. The ratios of these values: ink/page 14.35, ink/paper 15.80, muted/page
   5.56, muted/paper 6.11, muted/neutral-wash 5.36, accent/paper 5.94, accent/page 5.40,
   accent-ink/accent 5.94, accent-ink/accent-strong 7.99, accent-strong/accent-wash 6.97,
-  warn/warn-wash 6.57, error/error-wash 6.35, field-line/paper 3.12, focus/page 5.40.
+  warn/warn-wash 6.57, error/error-wash 6.35, field-line/paper 3.55, field-line/page 3.22, focus/page 5.40, accent/accent-wash 5.18, muted/accent-wash 5.33.
 
 - [ ] **Step 1: Write the failing tests**
 

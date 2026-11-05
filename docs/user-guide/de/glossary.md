@@ -23,7 +23,7 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | Site structure | Website-Struktur | Der Tab, der eine Website crawlt; auch der Job und sein Ergebnis. |
 | Info | Info | Der Tab mit Name und Version des Dienstes und der Rolle des Schlüssels. |
 | Operations | Funktionen | Die Liste der Tabs. |
-| Advanced | Erweitert | Der zugeklappte Abschnitt eines Formulars mit „Sekunden warten, bevor daraus ein Job wird“ und „Optionen (JSON)“. |
+| Advanced | Erweitert | Der zugeklappte Abschnitt eines Formulars mit „Optionen (JSON)“ und, wo das Formular es hat, „Sekunden warten, bevor daraus ein Job wird“. |
 | Show source | Quelltext anzeigen | Der zugeklappte Abschnitt eines Markdown-Ergebnisses, der den Markdown-Text zeigt. |
 | Site rules | Website-Regeln | Die Wahl zwischen dem Beachten der Regeln einer Website und der maximalen Extraktion. |
 | Respect the site's rules (default) | Regeln der Website beachten (Standard) | Der Standard: robots.txt und der TDM-Nutzungsvorbehalt werden geprüft. |

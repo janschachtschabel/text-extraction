@@ -218,6 +218,32 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
+def test_chunk_result_adds_no_tab_stops_per_chunk(ui: tuple[str, str], language: Language) -> None:
+    """A chunk result with many chunks: no chunk takes the focus (P15-R8), and axe is clean with
+    every section open."""
+    url, _origin = ui
+    text = "\n\n".join(
+        f"Paragraph {n} says something about chunking in the playground." for n in range(60)
+    )
+    with browsing(f"{url}?lang={language}") as (page, console):
+        _log_in(page)
+        page.wait_for_selector("#app-shell")
+        page.click("#tab-chunk")
+        page.fill("#chunk-text", text)
+        page.fill("#chunk-chunking", '{"strategy": "recursive", "size": 200}')
+        _submit(page, "chunk")
+        expect(page.locator("#result ol.chunks")).to_be_visible()
+        assert page.locator("#result ol.chunks > li").count() > 10
+        assert page.locator("#result ol.chunks pre[tabindex]").count() == 0
+        page.evaluate(
+            "document.querySelectorAll('#result details').forEach(d => { d.open = true; })"
+        )
+        found = _axe(page, "chunk result, expanded")
+    assert found == [], "\n".join(found)
+    assert console == []
+
+
+@pytest.mark.parametrize("language", LANGUAGES)
 def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Language) -> None:
     """The login, every tab with its Advanced section open, an extract result with every
     details element open and a form error, at 390 x 844."""

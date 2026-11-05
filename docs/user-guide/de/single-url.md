@@ -24,11 +24,11 @@ Das Ergebnis beginnt mit einer Statuszeile (dem Status und dem HTTP-Status), ein
 und einer Karte mit Kennzahlen: URL, Sprache, Wörter, verwendeter Modus, Seitentyp und Zeit. Die
 Werkzeugleiste hat „Markdown kopieren“ (oder „Text kopieren“; es erscheint nur, wo der Browser die
 Zwischenablage erlaubt), den Download des Inhalts und „Antwort speichern (JSON)“, die ganze Antwort
-als Datei. Darunter folgen der Inhalt in einer Lesekarte (bei Markdown steht der Quelltext unter
-„Quelltext anzeigen“) und zugeklappte Abschnitte für die Metadaten, die Bilder, die Links und
-„Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung; sie öffnet
-sich von selbst, wenn es Warnungen gibt. „Rohes JSON“ ist die ganze Antwort und „Als curl“
-dieselbe Anfrage für die Shell.
+als Datei. Darunter folgen zugeklappte Abschnitte für die Metadaten, die Links, die Bilder und
+„Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung (sie öffnet
+sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
+steht der Quelltext unter „Quelltext anzeigen“). Am Ende steht „Als curl“, dieselbe Anfrage für
+die Shell, und „Rohes JSON“, die ganze Antwort.
 
 ## Mit REST
 

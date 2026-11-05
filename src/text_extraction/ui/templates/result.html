@@ -162,14 +162,14 @@
     <h4>{{ t("result.chunks_count", count=chunks|length) }}</h4>
     <ol class="chunks">
       {% for chunk in chunks %}
-      <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre tabindex="0">{{ chunk["text"] }}</pre></li>
+      <li>{% if chunk["headings"] %}<span class="headings">{{ chunk["headings"]|join(" > ") }}</span>{% endif %}<pre>{{ chunk["text"] }}</pre></li>
       {% endfor %}
     </ol>
     {% if chunks_note %}<p class="cut-note">{{ t(chunks_note) }}</p>{% endif %}
   </section>
   {% endif %}
   {% endif %}
-  {#- A block that may scroll (max-height) takes the focus, so a keyboard can scroll it. -#}
+  {#- A block that may scroll (max-height) takes the focus, so a keyboard can scroll it. The chunks never scroll (no max-height), so they take no focus. -#}
   {% if curl %}
   <details class="curl-box">
     <summary>{{ t("result.as_curl") }}</summary>

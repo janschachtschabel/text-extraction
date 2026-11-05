@@ -417,6 +417,7 @@
   "hint.max_images": "Mit „Bilder beschreiben“: wie viele Bilder eine Beschreibung bekommen.",
   "hint.wait_seconds": "So lange wartet diese Seite auf die Antwort; was länger dauert, läuft als Job weiter.",
   "hint.advanced": "Wie lange gewartet wird, bevor die Anfrage als Job weiterläuft, und jedes weitere Feld des REST-Bodys als JSON (etwa Aktionen, Cookies, Header oder Cache).",
+  "hint.advanced_options": "Jedes weitere Feld des REST-Bodys als JSON (etwa Aktionen, Cookies, Header oder Cache).",
   "hint.file": "Ein Dokument (etwa PDF, Word oder HTML), eine Audio- oder eine Videodatei.",
   "hint.full_page": "Die ganze Höhe der Seite, bis zur Grenze des Dienstes; sonst nur der erste Bildschirm.",
   "hint.structured": "Was gelesen wird: eine Strategie, ein JSON-Schema der Felder und bei Bedarf Selektor- oder Musterregeln.",
