@@ -412,6 +412,12 @@ button.secondary:hover {
   padding-bottom: var(--gutter);
 }
 
+.workspace .result {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
 @media (max-width: 60rem) {
   .workspace {
     grid-template-columns: minmax(0, 1fr);
@@ -422,12 +428,6 @@ button.secondary:hover {
     padding-top: 1rem;
     border-top: 1px solid var(--line);
   }
-}
-
-.workspace .result {
-  margin-top: 0;
-  padding-top: 0;
-  border-top: none;
 }
 
 .settings .intro {

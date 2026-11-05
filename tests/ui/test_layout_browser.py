@@ -48,6 +48,7 @@ def test_two_columns_on_a_wide_screen(ui: tuple[str, str]) -> None:
         assert settings["right"] <= result["left"]
         assert abs(settings["top"] - result["top"]) <= 1
         assert 300 <= settings["width"] <= 380
+        assert computed(page, "#result", "borderTopWidth") == ["0px"]
 
 
 def test_one_column_on_a_phone(ui: tuple[str, str]) -> None:
@@ -58,6 +59,7 @@ def test_one_column_on_a_phone(ui: tuple[str, str]) -> None:
         settings, result = boxes(page, ".settings", "#result")
         assert result["top"] >= settings["bottom"]
         assert page.evaluate("document.documentElement.scrollWidth") <= 390
+        assert computed(page, "#result", "borderTopWidth") == ["1px"]
 
 
 def test_selected_tab_has_the_petrol_underline(ui: tuple[str, str]) -> None:
