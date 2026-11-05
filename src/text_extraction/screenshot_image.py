@@ -207,10 +207,13 @@ async def encode_screenshot_limited(
         budget.release(pixels)
         raise
 
-    # The shield reads the encode's outcome, also when its wait was cancelled: an encode nobody
-    # waits for any more logs no error.
-    def ended(_done: asyncio.Future[EncodedScreenshot]) -> None:
+    def ended(done: asyncio.Future[EncodedScreenshot]) -> None:
         budget.release(pixels)
+        # When the wait is cancelled first, shield drops its own callback on the encode, so
+        # nothing else reads its outcome: this marks the exception as read, and an encode
+        # nobody waits for any more logs no "Future exception was never retrieved".
+        if not done.cancelled():
+            done.exception()
 
     encoding.add_done_callback(ended)
     return await asyncio.shield(encoding)

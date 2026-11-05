@@ -701,8 +701,9 @@ while `BROWSER_ENABLED` is false, are unchanged.
   encode runs on a thread; when the extraction deadline cancels the wait, the thread runs on and
   keeps its pixels until it ends. A render whose screenshot is encoded ends its page work 10 s
   earlier (`ENCODE_RESERVE_SECONDS`, `RenderOptions.encode_reserve`), at most a third of the
-  render time (`browser_render.encode_reserve_within`, so a short `BROWSER_TIMEOUT_SECONDS` still
-  navigates), so the encode has that time before the deadline. The capture must be a PNG
+  render time (`browser_render.encode_reserve_within`), so the encode has that time before the
+  deadline. With the 3 s kept for taking the screenshot, encoded screenshots need a
+  `BROWSER_TIMEOUT_SECONDS` of about 8 s or more (a plain PNG about 6 s). The capture must be a PNG
   (Pillow opens no other format). An image Pillow cannot decode or encode fails
   `internal_error`, not retryable (the same bytes fail again), and logs
   `screenshot_encode_failed` with the error type, the image size and the format (never the URL).

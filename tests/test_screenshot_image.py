@@ -1,6 +1,7 @@
 """``encode_screenshot`` (``screenshot_image.py``): the stored file in its format and width."""
 
 import asyncio
+import gc
 import io
 import struct
 import threading
@@ -303,6 +304,32 @@ def test_png_passthrough_takes_no_pixels(monkeypatch: pytest.MonkeyPatch) -> Non
     plain, default = asyncio.run(main())
     assert plain.data is png
     assert default.data is png
+
+
+def test_a_failed_encode_nobody_waits_for_logs_no_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The deadline cancels the wait before the encode fails: shield drops its own callback on
+    # the encode then, so the limiter itself has to read the exception (audit A1).
+    def failing(png: bytes, options: ScreenshotOptions | None) -> EncodedScreenshot:
+        time.sleep(0.2)
+        raise ScreenshotEncodeError("boom")
+
+    monkeypatch.setattr(screenshot_image, "encode_screenshot", failing)
+    reported: list[dict[str, object]] = []
+
+    async def main() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: reported.append(context))
+        waiting = asyncio.create_task(screenshot_image.encode_screenshot_limited(b"x" * 100, WEBP))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await asyncio.sleep(0.4)  # the thread ends and its future gets the error
+        gc.collect()
+        await asyncio.sleep(0.05)
+
+    asyncio.run(main())
+    assert reported == []
 
 
 BUDGET = screenshot_image.ENCODE_PIXEL_BUDGET

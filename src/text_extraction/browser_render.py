@@ -140,7 +140,8 @@ class Loaded:
 
 def encode_reserve_within(wanted: float, render_seconds: float) -> float:
     """The time a render of ``render_seconds`` keeps for encoding its screenshot: ``wanted``, at
-    most a third of the render time, so a short ``BROWSER_TIMEOUT_SECONDS`` still navigates."""
+    most a third of the render time, so a short ``BROWSER_TIMEOUT_SECONDS`` (about 8 s) still
+    leaves time to navigate."""
     return max(0.0, min(wanted, render_seconds / 3))
 
 

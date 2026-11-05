@@ -67,8 +67,8 @@ Package 14: screenshot formats, SVG previews and page types (plan
   `SCREENSHOT_MAX_BYTES` applies to the encoded file. A `webp` image is at most 16,383 px high
   (the WebP limit): a taller one loses its bottom rows, with the warning `screenshot_clipped`.
 - A render whose screenshot is encoded (`jpeg`, `webp` or a `width`) keeps 10 s of its time for
-  the encode, at most a third of the render time, so a short `BROWSER_TIMEOUT_SECONDS` still
-  renders.
+  the encode, at most a third of the render time. Encoded screenshots need a
+  `BROWSER_TIMEOUT_SECONDS` of about 8 s or more (a plain PNG about 6 s).
 - `GET /v1/jobs/{id}/artifacts/{name}` also serves `screenshot.jpg` (`image/jpeg`) and
   `screenshot.webp` (`image/webp`); `get_job_screenshot` reads the file's name from the job's
   result instead of assuming `screenshot.png`.
