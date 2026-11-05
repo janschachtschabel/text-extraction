@@ -100,8 +100,8 @@ class ExtractRequest(BaseModel, extra="forbid", hide_input_in_errors=True, stric
     screenshot_options: ScreenshotOptions | None = Field(
         default=None,
         description="Viewport size, image `format` (`png`, `jpeg`, `webp`), `quality` and "
-        "`width` of the screenshot; default: a 1920x1080 PNG. Needs `screenshot`, so not with "
-        "`mode: fast`.",
+        "`width` of the screenshot; default: the whole page as PNG, 1920 px wide (window "
+        "1920 x 1080). Needs `screenshot`, so not with `mode: fast`.",
     )
     ocr: OcrOption = Field(
         default="auto",

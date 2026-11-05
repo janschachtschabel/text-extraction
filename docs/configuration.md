@@ -645,6 +645,13 @@ unknown fields), and that breaks them in two ways:
 Roll out the extract workers first and the API pods after them. `helm upgrade` rolls both
 Deployments at once, so send site jobs only once every pod runs the new release.
 
+**Upgrading to package 14: workers first, then API pods.** A job whose options carry
+`screenshot_options` (a screenshot with a viewport, format, quality or width) is refused by a
+0.1.2 worker (its job options forbid unknown fields), and a 0.1.2 API pod cannot read such a job.
+Update the browser workers (and the other workers) before the API pods, and send such requests
+only once every pod runs the new release. Results with `page_type` and a link `category` are read
+by old pods, so the new fields in results need no order.
+
 **Capacity of the extract workers.**
 
 - Each extract worker pod parses one sitemap at a time, on a thread of its own, so sitemaps never

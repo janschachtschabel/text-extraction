@@ -410,15 +410,9 @@ async def respond(
     check_describe_request(body.describe_images, body.pii, body.metadata, settings, llm_key=llm_key)
     if renders_first(body) and not _plain_url(body.url):
         # An invalid URL fails at once with `invalid_url`, as in fast mode: no job, no wait for
-        # a browser worker (the fast pipeline refuses it before any fetch). No mode ran, so
-        # `mode_used` is null (as for C14's own faults), not the fast pipeline's "fast".
+        # a browser worker. No mode ran, so the pipeline answers `mode_used` null.
         pipeline: Pipeline = state.pipeline
-        refused = await pipeline.run(body, principal)
-        if refused.data is None:  # pragma: no cover - the pipeline's failures carry data
-            return refused
-        return refused.model_copy(
-            update={"data": refused.data.model_copy(update={"mode_used": None})}
-        )
+        return await pipeline.run(body, principal)
     wait_seconds = request_wait_seconds(body, settings)
     handover = Handover()
     wait_until = handover_time(wait_seconds, settings)

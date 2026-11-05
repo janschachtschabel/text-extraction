@@ -1336,7 +1336,10 @@ class Pipeline:
         try:
             validate_url(req.url)
         except InvalidUrlError as error:
-            return run.failed(ErrorCode.INVALID_URL, str(error))
+            # No mode ran, so `mode_used` is null in every mode (not the fast default).
+            return _failed(
+                run.result(mode_used=None), ErrorCode.INVALID_URL, str(error), retryable=False
+            )
         run.host = urlsplit(req.url).hostname
         target = self._platform_target(run)
         if target is not None and target.video_id is None:

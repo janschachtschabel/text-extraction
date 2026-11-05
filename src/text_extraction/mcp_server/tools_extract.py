@@ -389,9 +389,11 @@ class ScreenshotUrlTool(ExtractionTool):
     def __init__(self) -> None:
         super().__init__(
             "screenshot_url",
-            "Render a URL in the browser and capture it as an image: a 1920x1080 PNG, or as "
-            "`options` say (viewport, format PNG, JPEG or WebP, quality, width, full_page) "
-            "(POST /v1/screenshot); the image is attached when it is small enough.",
+            "Render a URL in the browser and capture it as an image: by default the whole page "
+            "as PNG, 1920 px wide (window 1920 x 1080) (POST /v1/screenshot). `options` can set "
+            "`viewport`, `format` (png, jpeg, webp), `quality` and `width`; `full_page: false` "
+            "(the tool's own argument, not inside `options`) takes only the first screen. The "
+            "image is attached when it is small enough.",
         )
 
     async def answer(

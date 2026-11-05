@@ -85,6 +85,21 @@ Dependency rule:
   2026-10-23 that v0.1.2 used. The locked releases (2.104.0, 7.23.0, 4.0.4) are now older than
   14 days, so no package changes.
 
+### Upgrade
+
+- Update the browser workers (and the other workers) before the API pods. A job whose options
+  carry `screenshot_options` (package 14) is refused by 0.1.2 workers (`extra="forbid"`), and a
+  0.1.2 API pod cannot read such a job. Results with `page_type` and a link `category` are read
+  by old pods.
+
+### Fixed
+
+- `POST /v1/extract` with an invalid URL answers `mode_used: null` in every mode (before, `fast`
+  in `auto` and `fast` mode, `null` in `browser` mode).
+- The default screenshot is described as the whole page as PNG, 1920 px wide (window
+  1920 x 1080), in the OpenAPI texts and the MCP tool `screenshot_url`, which now names `options`
+  and the tool's own `full_page` argument.
+
 ## [0.1.2] - 2026-11-01
 
 Dependency updates that v0.1.1 left out. Jan waived the 14-day rule for new dependency versions
