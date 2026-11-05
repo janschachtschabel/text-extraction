@@ -217,7 +217,7 @@ main {
 .login {
   max-width: 30rem;
   margin: var(--gutter) auto;
-  padding: 1.25rem 1.5rem;
+  padding: 32px;
 }
 
 .login h2 {
@@ -323,6 +323,7 @@ button.secondary:hover:not(:disabled) {
 
 .error {
   padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--error);
   border-radius: var(--radius-field);
   background: var(--error-wash);
   color: var(--error);
@@ -825,6 +826,7 @@ dl.info,
 .request-status {
   margin: 0 0 0.5rem;
   padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--error);
   border-radius: var(--radius-field);
   background: var(--error-wash);
   color: var(--error);
@@ -895,6 +897,16 @@ ol.timeline .step {
 figure.preview {
   margin: 0;
   max-width: 14rem;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+
+figure.preview figcaption {
+  margin-top: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 figure.preview img,
@@ -904,24 +916,45 @@ img.screenshot {
   border: 1px solid var(--line);
 }
 
+figure.preview img {
+  border-radius: var(--radius-field);
+}
+
 .skipped {
   display: inline-block;
-  padding: 0.25rem 0.5rem;
-  border-radius: var(--radius-field);
+  padding: 0 10px;
+  border-radius: 999px;
   background: var(--warn-wash);
   color: var(--warn);
+  font-size: 13px;
+  font-weight: 700;
 }
 
-/* Jobs: progress, previews of batch files, the site tree. */
-.jobs-view section.job {
+/* Jobs: progress, previews of batch files, the site tree. A job, a preview and a tree are cards
+   by CSS (P15-S11); their markup keeps its classes. */
+.jobs-view section.job,
+section.batch-preview,
+section.tree-view {
   margin: 0 0 1rem;
-  padding: 0.75rem 1rem;
+  padding: 16px 20px;
   border: 1px solid var(--line);
-  border-radius: var(--radius-field);
+  border-radius: var(--radius-card);
+  background: var(--paper);
 }
 
-.jobs-view h4 {
+.jobs-view h4,
+section.batch-preview h4,
+section.tree-view h4 {
   margin: 0 0 0.5rem;
+  font-size: 16px;
+}
+
+section.batch-preview h5 {
+  margin: 1rem 0 0.25rem;
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .bar {
@@ -933,22 +966,39 @@ img.screenshot {
 }
 
 progress {
-  width: 16rem;
-  max-width: 100%;
+  width: 100%;
+  max-width: 24rem;
   height: 1rem;
+  accent-color: var(--accent);
 }
 
+/* The job's state is a pill: completed green, failed red, the others grey. */
 .state,
 .found {
-  padding: 0.05rem 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
   border-radius: 999px;
-  border: 1px solid var(--line);
   background: var(--neutral-wash);
-  font-size: 0.85em;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.found {
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .state-completed {
+  background: var(--accent-wash);
   color: var(--accent-strong);
+}
+
+.state-failed {
+  background: var(--error-wash);
+  color: var(--error);
 }
 
 .elapsed,
@@ -958,6 +1008,55 @@ progress {
 .lastmod {
   color: var(--muted);
   font-size: 0.9em;
+}
+
+.counts .success {
+  color: var(--accent-strong);
+}
+
+.counts .partial {
+  color: var(--warn);
+}
+
+.counts .failed {
+  color: var(--error);
+}
+
+.counts span {
+  font-weight: 700;
+}
+
+table.items {
+  font-size: 14px;
+}
+
+table.items th {
+  font-size: 12px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+table.items .badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  background: var(--neutral-wash);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+table.items .badge-success {
+  background: var(--accent-wash);
+}
+
+table.items .badge-partial {
+  background: var(--warn-wash);
+}
+
+table.items .badge-failed {
+  background: var(--error-wash);
 }
 
 table.items td.url {
@@ -984,7 +1083,7 @@ button.link:hover {
 .tree-tools {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 8px;
   align-items: center;
 }
 
@@ -1011,6 +1110,13 @@ ul.tree {
   padding: 0.5rem;
   border: 1px solid var(--line);
   border-radius: var(--radius-field);
+  background: var(--page);
+}
+
+.tree-actions {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
 }
 
 ul.tree li {
@@ -1031,21 +1137,33 @@ ul.tree .title {
 
 /* A leaf's page type; a type guessed from the URL has a dashed border and says so. */
 .page-type {
-  padding: 0.05rem 0.4rem;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid transparent;
   border-radius: 999px;
-  border: 1px solid var(--accent);
-  background: var(--paper);
-  color: var(--accent);
-  font-size: 0.85em;
+  background: var(--neutral-wash);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .page-type-guessed {
-  border-style: dashed;
+  border: 1px dashed var(--field-line);
 }
 
 .page-type .type-guessed,
 .tree-types {
   color: var(--muted);
+}
+
+/* The counts of a batch preview: a two-column grid instead of the figures' row. */
+dl.facts.counts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 20px;
+  margin: 0 0 0.5rem;
+  background: var(--page);
 }
 
 .batch-preview textarea[readonly] {

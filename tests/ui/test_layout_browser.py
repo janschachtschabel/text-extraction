@@ -7,7 +7,7 @@ from typing import Final
 import pytest
 from playwright.sync_api import Page, expect
 
-from tests.ui.test_playground_browser import browsing, log_in
+from tests.ui.test_playground_browser import browsing, log_in, open_tab
 from tests.ui.test_playground_browser import ui as ui
 
 pytestmark = pytest.mark.browser
@@ -113,3 +113,35 @@ def test_reading_card_typography(ui: tuple[str, str]) -> None:
         assert colour == "rgb(29, 111, 106)"
         (width, zero) = page.evaluate(ZERO_WIDTH)
         assert width <= 70 * zero + 1
+
+
+def test_pills_use_the_status_colours(ui: tuple[str, str]) -> None:
+    url, origin = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "batch-file")
+        panel = page.locator("#panel-batch-file")
+        csv_file = f"url\n{origin}/docs/a.html\n".encode()
+        panel.locator("input[type=file]").set_input_files(
+            {"name": "urls.csv", "mimeType": "text/csv", "buffer": csv_file}
+        )
+        panel.locator("button[type=submit]").click()
+        expect(page.locator("#result section.batch-preview")).to_be_visible()
+        card = computed(page, "#result section.batch-preview", "backgroundColor", "borderRadius")
+        assert card == ["rgb(255, 255, 255)", "12px"]
+        page.locator("#result .batch-preview button[type=submit]", has_text="Start batch").click()
+        expect(page.locator("#result section.job .state")).to_have_text("completed")
+        expect(page.locator("#result section.job .counts .failed")).to_be_visible()
+        assert computed(page, "#result section.job .state", "backgroundColor", "color") == [
+            "rgb(230, 242, 240)",
+            "rgb(21, 90, 86)",
+        ]
+        assert computed(page, "#result section.job progress", "accentColor") == [
+            "rgb(29, 111, 106)"
+        ]
+        assert computed(page, "#result section.job", "borderRadius") == ["12px"]
+        assert computed(page, "#result section.job .counts .failed", "color") == [
+            "rgb(163, 34, 43)"
+        ]
