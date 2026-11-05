@@ -26,7 +26,7 @@ jobs:
     timeout-minutes: 5
     steps:
       # The notes come from the changelog on main, so a fix to a section reaches its page.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           persist-credentials: false

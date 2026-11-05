@@ -22,14 +22,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           # A pull request needs the history back to its base for the translation pair check.
           fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       # uv reads .python-version (3.13) and provisions its own managed Python.
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -52,11 +52,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -75,11 +75,11 @@ jobs:
       AUTH_MODE: none
       DOCLING_MODELS_PATH: ${{ github.workspace }}/.docling-models
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -90,7 +90,7 @@ jobs:
       - name: licence gate (docling)
         run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser --extra docling
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.DOCLING_MODELS_PATH }}
           key: docling-models-${{ hashFiles('src/text_extraction/documents/models.toml') }}
@@ -111,11 +111,11 @@ jobs:
     env:
       AUTH_MODE: none
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -125,7 +125,7 @@ jobs:
       - name: licence gate (asr)
         run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser --extra asr
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/asr-models-small
           key: asr-models-small-${{ hashFiles('src/text_extraction/media/models.toml') }}
@@ -144,7 +144,7 @@ jobs:
           ASR_MODELS_PATH: ${{ runner.temp }}/asr-models-small
 
       - if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/asr-models-large-v3-turbo
           key: asr-models-large-v3-turbo-${{ hashFiles('src/text_extraction/media/models.toml') }}
@@ -172,11 +172,11 @@ jobs:
     env:
       AUTH_MODE: none
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           enable-cache: true
 
@@ -187,7 +187,7 @@ jobs:
       - name: licence gate (nlp)
         run: uv run python scripts/check_licenses.py --lock uv.lock --extra browser --extra nlp
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/nlp-models-md
           key: nlp-models-md-${{ hashFiles('src/text_extraction/pii/models.toml') }}
@@ -209,7 +209,7 @@ jobs:
           PII_TEST_MODELS_PATH: ${{ runner.temp }}/nlp-models-md
 
       - if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/nlp-models-lg
           key: nlp-models-lg-${{ hashFiles('src/text_extraction/pii/models.toml') }}
@@ -236,11 +236,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: azure/setup-helm@v5
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.19.0
 
@@ -312,7 +312,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

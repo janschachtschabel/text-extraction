@@ -8,7 +8,8 @@ name: image
 #   asr      ghcr.io/<repo>-asr      target `asr`: the ASR worker (PyAV on an LGPL FFmpeg, no models,
 #                                    no ffmpeg program);
 #   nlp      ghcr.io/<repo>-nlp      target `nlp`: the NLP worker (Presidio and spaCy, no models).
-# Each image is built and checked first; pull requests stop there and push nothing.
+# Each image is built and checked first (job `image`, `packages: read`); pull requests stop there
+# and push nothing. Only the job `push` (never for a pull request) holds `packages: write`.
 # Pushes to main publish `latest` (staging) and `sha-<short>`.
 # Tags vX.Y.Z publish `X.Y.Z` and `X.Y` (production uses SemVer tags only).
 on:
@@ -32,7 +33,7 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      packages: write
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -56,12 +57,12 @@ jobs:
       IMAGE: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
       CHECK_TAG: text-extraction-${{ matrix.variant }}:check
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
           # `latest` only comes from main; SemVer tags never move it.
@@ -73,10 +74,10 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=ref,event=pr
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Build into the local Docker daemon for the checks below.
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: ${{ matrix.target }}
@@ -186,7 +187,7 @@ jobs:
       # the image itself downloads them, as the Helm init container does (writable mount).
       - name: Docling models cache
         if: matrix.variant == 'docling'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/docling-models
           key: docling-models-${{ hashFiles('src/text_extraction/documents/models.toml') }}
@@ -246,7 +247,7 @@ jobs:
       # downloads it, as the Helm init container does (writable mount).
       - name: ASR model cache
         if: matrix.variant == 'asr'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/asr-models
           key: asr-models-small-image-${{ hashFiles('src/text_extraction/media/models.toml') }}
@@ -283,7 +284,7 @@ jobs:
       # (writable mount).
       - name: NLP models cache
         if: matrix.variant == 'nlp'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/nlp-models
           key: nlp-models-md-image-${{ hashFiles('src/text_extraction/pii/models.toml') }}
@@ -314,16 +315,66 @@ jobs:
           echo "${{ matrix.variant }} image: $((size / 1000000)) MB"
           echo "${{ matrix.variant }} image: $((size / 1000000)) MB" >> "$GITHUB_STEP_SUMMARY"
 
-      - if: github.event_name != 'pull_request'
-        uses: docker/login-action@v4
+  # Login and push live in their own job: it never runs for a pull request and alone holds
+  # `packages: write`, so a pull request's token cannot write to the registry. It runs after the
+  # checks of the same variant and builds again from the cache.
+  push:
+    name: push (${{ matrix.variant }})
+    needs: image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: api
+            target: runtime
+            suffix: ""
+          - variant: browser
+            target: browser
+            suffix: "-browser"
+          - variant: docling
+            target: docling
+            suffix: "-docling"
+          - variant: asr
+            target: asr
+            suffix: "-asr"
+          - variant: nlp
+            target: nlp
+            suffix: "-nlp"
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}${{ matrix.suffix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # `latest` only comes from main; SemVer tags never move it.
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.ref == 'refs/heads/main' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Same build from the cache, now with the release tags and pushed.
-      - if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: ${{ matrix.target }}
