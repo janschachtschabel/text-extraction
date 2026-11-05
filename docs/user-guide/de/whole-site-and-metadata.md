@@ -95,9 +95,13 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
 1. `error`: Die Seite hat mit 2xx geantwortet, ist aber eine Fehlerseite (eine weiche 404,
    `quality.soft_404`). Eine Seite, die mit einem HTTP-Fehler (4xx oder 5xx) gescheitert ist,
    wird nicht umgewandelt und hat keinen Typ (`page_type: null`); ihr Status sagt, was geschah.
-2. `home`: Der Pfad ist leer, `/`, `/index.html` oder nur ein Sprachkürzel wie `/de/` oder
-   `/en-gb/`. Es zählen nur Sprachen, die Websites üblicherweise nutzen, darum ist ein Bereich
-   wie `/ki/` oder `/ui/` keine Startseite.
+2. `home`: Der Pfad ist leer, `/`, eine Indexdatei wie `/index.html` oder nur ein Sprachkürzel
+   wie `/de/` oder `/en-gb/` (mit oder ohne Indexdatei), und die Adresse hat keine Abfrage außer
+   Tracking-Parametern wie `utm_source` oder `fbclid`: `/?p=12` ist keine Startseite. Es zählen
+   nur Sprachen, die Websites üblicherweise nutzen, darum ist ein Bereich wie `/ki/` oder `/ui/`
+   keine Startseite. Ein Pfad, der nur ein Sprachkürzel ist, ist die Startseite, außer die Seite
+   gibt eine andere Sprache an (`<html lang>`): Über `/it/` auf einer deutschen Seite
+   entscheiden die übrigen Regeln.
 3. schema.org: Das JSON-LD oder die Microdata der Seite sagen `ContactPage` (`contact`),
    `AboutPage` (`about`), `SearchResultsPage` (`search`) oder `CollectionPage` (`listing`).
 4. Die URL: ein ganzes Pfadsegment wie `impressum` oder `imprint` (`imprint`), `datenschutz`
@@ -105,13 +109,27 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
    `login`, `registrieren` oder `konto` (`auth`), `suche` oder `search` oder eine Suchanfrage
    wie `?q=...` (`search`), `kontakt` oder `contact` (`contact`), `ueber-uns`, `about` oder `team`
    (`about`), `kategorie`, `tag`, `archiv` oder `page/2` (`listing`). `/impressum.html` ist ein
-   Impressum, `/impressum-archiv-2019` nicht.
-5. Der Titel oder die erste Überschrift beginnt oder endet mit dem Namen eines Typs, etwa
-   „Impressum“, „Kontakt“, „Login“ oder „Suchergebnisse“ (auch „Firma | Impressum“).
+   Impressum, `/impressum-archiv-2019` nicht. Ein Name zählt als erster oder letzter Teil des
+   Pfads (ein Sprachkürzel davor zählt nicht mit): `/de/impressum` und `/service/impressum` sind
+   Impressen. Ein Listenname zählt mit höchstens einem Teil danach: `/kategorie/mathe` ist eine
+   Liste, `/kategorie/mathe/bruchrechnung` nicht. Einige Wörter, die auch gewöhnliche Seiten
+   benennen, zählen nur allein: `cookies`, `terms`, `legal`, `konto`, `account`, `profil`,
+   `profile`, `recherche`, `team`, `password`, `passwort` und `disclaimer`. So ist `/cookies`
+   `legal`, `/rezepte/cookies` aber nicht.
+5. Der Titel beginnt oder endet mit dem Namen eines Typs, etwa „Impressum“, „Kontakt“, „Login“
+   oder „Suchergebnisse“ („Impressum | Firma“ und „Firma | Impressum“). Ein Doppelpunkt nach dem
+   Namen leitet einen Untertitel ein: „Datenschutz: Was Schulen wissen müssen“ ist keine
+   Datenschutzseite. Die erste Überschrift zählt nur, wenn sie allein aus dem Namen besteht:
+   „Kontakt“, nicht „Kontakt zur Schule aufnehmen“.
 6. `auth`: ein Passwortfeld auf einer Seite mit wenig Text.
 7. `listing`: ein Link auf die nächste oder vorige Seite (`rel="next"`) oder eine Seite, die
    vor allem aus Links besteht (mindestens 20 Links, die 60 % ihres Textes ausmachen).
 8. `content`, wenn die Seite mindestens `QUALITY_MIN_WORDS` (50) Wörter hat, sonst `other`.
+
+Ein Artikel (`og:type` ist `article`) mit mindestens `QUALITY_MIN_WORDS` Wörtern bleibt
+`content`, gleich was sein Titel, seine erste Überschrift, seine Links oder eine Listenadresse
+(etwa `/blog/page/2` oder `/tag/python`) sagen. Nur eine andere Adresse (etwa `/impressum/`) oder
+schema.org können ihn zu einem anderen Typ machen.
 
 `signals` nennt jede Regel, die zum Typ passt, in dieser Reihenfolge, auch die nach der
 entscheidenden: `/impressum` mit dem Titel „Impressum“ hat `["url", "title"]`.

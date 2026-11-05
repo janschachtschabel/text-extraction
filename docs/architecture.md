@@ -2575,10 +2575,23 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   1. `error`: `status` >= 400 or `quality.soft_404` (`status`, `soft_404`) (in practice only
      soft 404s: hard 4xx/5xx pages are not converted, P14-R7);
   2. `home`: the path is empty, `/`, `/index.(html|htm|php)` or only a language code (`/de`,
-     `/en/`, `/de-at/`; ruling P14-R5) (`root_path`). The language is one of a curated list
-     (`_SITE_LANGUAGES`: the 24 EU languages and about 25 more that sites use), not any ISO
-     639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/` and `/ui/` are no home;
-     the region after it is not checked;
+     `/en/`, `/de-at/`; ruling P14-R5), optionally with an index file (`root_path`). The language
+     is one of a curated list (`_SITE_LANGUAGES`: the 24 EU languages and about 25 more that
+     sites use), not any ISO 639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/`
+     and `/ui/` are no home; the region after it is not checked.
+     **Ruling A26-R1 (home needs an empty query):** every query parameter is a tracking
+     parameter or has an empty (blank) value; tracking parameters are names starting `utm_` and
+     `fbclid`, `gclid`, `dclid`, `gbraid`, `wbraid`, `msclkid`, `yclid`, `igshid`, `mc_cid`,
+     `mc_eid`, `_ga`, `_gl`, `ref`. So `/?p=12`, `/?page_id=42` and `/index.php?id=42` (a CMS
+     that addresses its articles by query) are no home, `/?utm_source=x&fbclid=y` is. Search and
+     page parameters are read before home is checked, as before (`/?s=x` is a search).
+     **Ruling A26-R3 (language-only path):** `url_type` still answers `home` for `/de/` and
+     `/hr` (a link has no page to look at). `page_type` makes a path that is only a language code
+     (not the empty path, `/` or a bare index file) `home` only when the root element's `lang` is
+     missing or its primary subtag (before `-` or `_`) equals the path's language, case-folded
+     (`/it/` with `lang="it-IT"`, `/pt_BR/` with `lang="pt-BR"`); otherwise the URL gives no
+     vote and the other signals decide (`/it/` on a German site is an Italian section, not the
+     start page);
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
      `itemtype` is `ContactPage`, `AboutPage`, `SearchResultsPage` or `CollectionPage`
      (`schema_org`);
@@ -2586,10 +2599,29 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      case-folded, umlauts also as `ae`/`oe`/`ue` (German and English names per type, in the order
      `imprint`, `privacy`, `legal`, `auth`, `search`, `contact`, `about`, `listing`), a search
      query parameter with a value (`q`, `query`, `search`, `suche`, `s`, `keyword`), a page
-     number (`page/<n>`, `seite/<n>`, `?page=<n>`);
-  5. the `<title>` or the first `<h1>` starts with a type's name followed by nothing or a
-     separator, or ends with one after a separator ("Firma | Impressum"; ruling P14-R4)
-     (`title`, `h1`);
+     number (`page/<n>`, `seite/<n>`, `?page=<n>`).
+     **Ruling A26-R2 (segment position):** a trailing `index.(html|htm|php)` segment is dropped
+     before the segments are read, and a leading language code (a `_SITE_LANGUAGES` code with an
+     optional region) is skipped, so the segment after it is the first. A listing name
+     (`kategorie`, `category`, `categories`, `tag`, `tags`, `schlagwort`, `archiv`, `archive`)
+     counts only with at most one segment after it (`/kategorie/mathe` yes,
+     `/kategorie/mathe/bruchrechnung-einfach-erklaert` and `/archiv/2019/artikel-titel` no).
+     The ambiguous names `cookies`, `terms`, `legal`, `konto`, `account`, `profil`, `profile`,
+     `recherche`, `team`, `password`, `passwort`, `disclaimer` count only as the only segment
+     (`/cookies`, `/de/terms` yes; `/rezepte/cookies`, `/girokonto/konto`, `/profile/jan` no).
+     Every other name counts as the first or the last segment (`/service/impressum/index.html`
+     is an imprint, `/ueber-uns/kontakt` a contact page by the type order). The `page/<n>` rule
+     and the query rules are unchanged. Before, any segment counted, so a type name anywhere in
+     an article's path made it a non-content page and "Select content pages" unticked it;
+  5. the `<title>` starts with a type's name followed by nothing or a separator, or ends with
+     one after a separator ("Firma | Impressum"; ruling P14-R4) (`title`); the first `<h1>`
+     is a type's name (`h1`).
+     **Ruling A26-R4 (headings):** in the start form a colon is no separator: after a type word
+     it starts a subtitle ("Datenschutz: Was Schulen wissen müssen" is no privacy page); `|`, en
+     dash, em dash, middle dot and a spaced hyphen stay. The end form is unchanged ("Firma GmbH:
+     Datenschutzerklärung" is still privacy). An `<h1>` votes only when the whole heading
+     (folded, trimmed, one trailing `:` removed) is a type word: "Kontakt" yes, "Kontakt zur
+     Schule aufnehmen" and "Kontakt | Schule" no;
   6. `auth`: a password input and fewer than `THIN_PAGE_BELOW_WORDS` (100) words
      (`password_field`);
   7. `listing`: `rel="next|prev"` on a `<link>` or `<a>` (`pagination`), or at least
@@ -2598,8 +2630,15 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   8. `content` with at least `QUALITY_MIN_WORDS` words (`word_count`), else `other` (no signals).
 
   `og:type` `article` only ever agrees with `content` (`og_type`) and never decides (ruling
-  P14-R6). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML
-  or a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
+  P14-R6). **Ruling A26-R5 (article override):** when `og:type` is `article` and
+  `quality.word_count` is at least `min_words`, the votes `title`, `h1`, `pagination`,
+  `link_density` and a `url` vote for `listing` are dropped before the winner is chosen: an
+  article titled "Kontakt – So gelingt das Elterngespräch", one at `/blog/article?page=2`, or
+  one inside a menu of 60 links is `content`. A `url` vote for any other type and `schema_org`
+  stay, so a WordPress imprint at `/impressum/` (SEO plugins mark plain pages as articles too)
+  stays an imprint; `password_field` stays too (it needs fewer than `THIN_PAGE_BELOW_WORDS`
+  words). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML or
+  a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
   raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
   `page_type: null` instead of failing.
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
@@ -2630,7 +2669,7 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   contact form at `/service` without a schema type or a telling title is `content` or `other`.
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
-  home.
+  home unless the page's `lang` names another language (A26-R3).
 
 ## MCP and UI
 

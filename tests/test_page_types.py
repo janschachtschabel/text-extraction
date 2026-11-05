@@ -68,6 +68,12 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/index.htm", "home"),
     ("https://example.org/INDEX.PHP", "home"),
     ("https://example.org/?utm_source=x", "home"),
+    # home needs an empty query besides tracking parameters (A26-R1)
+    ("https://example.org/?utm_source=x&fbclid=y", "home"),
+    ("https://example.org/?ref=nav", "home"),
+    ("https://example.org/?p=12", None),
+    ("https://example.org/?page_id=42", None),
+    ("https://example.org/index.php?id=42", None),
     ("https://example.org/index.html#top", "home"),
     ("https://example.org/de", "home"),
     ("https://example.org/en/", "home"),
@@ -171,6 +177,24 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/blog/seite/3/", "listing"),
     ("https://example.org/blog?page=2", "listing"),
     ("https://example.org/blog?seite=4", "listing"),
+    ("https://example.org/blog/category/news/page/2", "listing"),
+    # a listing name counts with at most one segment after it (A26-R2)
+    ("https://example.org/kategorie/mathe/bruchrechnung-einfach-erklaert", None),
+    ("https://example.org/archiv/2019/artikel-titel", None),
+    ("https://example.org/category/news/2024/05/headline", None),
+    ("https://example.org/magazine/archive/2019/05/slug/588011/", None),
+    # other names count in the first or the last segment, ambiguous ones only alone (A26-R2)
+    ("https://example.org/rezepte/cookies", None),
+    ("https://example.org/recipes/cookies", None),
+    ("https://example.org/glossary/terms", None),
+    ("https://example.org/services/legal", None),
+    ("https://example.org/girokonto/konto", None),
+    ("https://example.org/profile/jan", None),
+    ("https://example.org/themen/recherche", None),
+    ("https://example.org/cookies", "legal"),
+    ("https://example.org/de/terms", "legal"),
+    ("https://example.org/service/impressum/index.html", "imprint"),
+    ("https://example.org/ueber-uns/kontakt", "contact"),
     # no type
     ("https://example.org/blog/mein-artikel", None),
     ("https://example.org/impressum-archiv-2019", None),
@@ -178,6 +202,8 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     ("https://example.org/blog?s=", None),
     ("https://example.org/blog?s=&q=%20", None),
     ("https://example.org/?s=", "home"),
+    ("https://example.org/?s=%20&p=", "home"),
+    ("https://example.org/?UTM_Medium=mail&_ga=1.2", "home"),
     ("https://example.org/blog?page=abc", None),
     ("https://example.org/blog/page", None),
     ("https://example.org/pages/2", None),
@@ -187,11 +213,11 @@ URL_TYPES: list[tuple[str, PageType | None]] = [
     # precedence when several match
     ("https://example.org/impressum/privacy", "imprint"),
     ("https://example.org/privacy/terms", "privacy"),
-    ("https://example.org/terms/login", "legal"),
+    ("https://example.org/terms/login", "auth"),
     ("https://example.org/login/search", "auth"),
     ("https://example.org/search/kontakt", "search"),
     ("https://example.org/kontakt/team", "contact"),
-    ("https://example.org/team/archiv", "about"),
+    ("https://example.org/team/archiv", "listing"),
     ("https://example.org/kontakt?s=x", "search"),
     ("https://example.org/impressum?page=2", "imprint"),
     # not a URL at all
@@ -298,6 +324,39 @@ def test_status_below_400_and_unknown_status_are_no_error() -> None:
 def test_language_root_is_home() -> None:
     assert classify(doc(title="Kontakt"), "https://example.org/en/") == ("home", ["root_path"])
     assert classify(doc(), "https://example.org/de-AT", words=900)[0] == "home"
+
+
+def html_lang(lang: str | None, *, title: str = "") -> str:
+    attribute = f' lang="{lang}"' if lang is not None else ""
+    return doc(title=title).replace("<html>", f"<html{attribute}>", 1)
+
+
+def test_language_path_with_another_html_lang_is_no_home() -> None:
+    article = html_lang("de", title="Ein Artikel")
+    assert classify(article, "https://example.org/it/", words=900) == ("content", ["word_count"])
+    assert classify(html_lang("de-DE"), "https://example.org/it/index.html", words=900)[0] == (
+        "content"
+    )
+
+
+def test_language_path_with_its_own_html_lang_is_home() -> None:
+    assert classify(html_lang("it-IT"), "https://example.org/it/", words=900) == (
+        "home",
+        ["root_path"],
+    )
+    assert classify(html_lang("IT"), "https://example.org/it")[0] == "home"
+    assert classify(html_lang("pt-BR"), "https://example.org/pt_BR/")[0] == "home"
+    assert classify(html_lang("de_AT"), "https://example.org/de-at/")[0] == "home"
+
+
+def test_language_path_without_html_lang_is_home() -> None:
+    assert classify(html_lang(None), "https://example.org/it/", words=900)[0] == "home"
+    assert classify(html_lang(""), "https://example.org/it/", words=900)[0] == "home"
+
+
+def test_root_path_is_home_whatever_the_html_lang() -> None:
+    assert classify(html_lang("de"), "https://example.org/")[0] == "home"
+    assert classify(html_lang("de"), "https://example.org/index.html")[0] == "home"
 
 
 def test_root_path_is_home_even_with_a_contact_page_title() -> None:
@@ -462,17 +521,43 @@ def test_signals_that_disagree_are_left_out() -> None:
         ("Search results", "search"),
         ("Suchergebnisse", "search"),
         ("  impressum  ", "imprint"),
-        ("Impressum | Firma GmbH", "imprint"),
-        ("Impressum - Firma GmbH", "imprint"),
-        ("Kontakt \u2013 Firma", "contact"),
-        ("Suche: Tomaten", "search"),
-        ("Privacy Policy · Firma", "privacy"),
-        ("Search results | Shop", "search"),
     ],
 )
 def test_title_and_first_h1_name_the_type(heading: str, expected: str) -> None:
     assert classify(doc(title=heading)) == (expected, ["title"])
     assert classify(doc(body=f"<h1>{heading}</h1>")) == (expected, ["h1"])
+
+
+@pytest.mark.parametrize(
+    ("heading", "expected"),
+    [
+        ("Impressum | Firma GmbH", "imprint"),
+        ("Impressum - Firma GmbH", "imprint"),
+        ("Kontakt \u2013 Firma", "contact"),
+        ("Kontakt \u2014 Firma", "contact"),
+        ("Privacy Policy · Firma", "privacy"),
+        ("Search results | Shop", "search"),
+    ],
+)
+def test_title_may_start_with_the_type_word_and_a_separator(heading: str, expected: str) -> None:
+    assert classify(doc(title=heading)) == (expected, ["title"])
+    assert classify(doc(body=f"<h1>{heading}</h1>"))[0] == "other"
+
+
+@pytest.mark.parametrize(
+    "heading", ["Datenschutz: Was Schulen wissen müssen", "Suche: Tomaten", "Kontakt : Formular"]
+)
+def test_title_with_a_colon_subtitle_is_no_type(heading: str) -> None:
+    assert classify(doc(title=heading))[0] == "other"
+    html = doc(title=heading, body=f"<h1>{heading}</h1>")
+    assert classify(html, "https://example.org/blog/x", words=900) == ("content", ["word_count"])
+
+
+def test_h1_votes_only_as_the_whole_type_word() -> None:
+    assert classify(doc(body="<h1>Kontakt</h1>")) == ("contact", ["h1"])
+    assert classify(doc(body="<h1> Kontakt : </h1>")) == ("contact", ["h1"])
+    assert classify(doc(body="<h1>Kontakt zur Schule aufnehmen</h1>"))[0] == "other"
+    assert classify(doc(body="<h1>Kontakt | Schule</h1>"))[0] == "other"
 
 
 @pytest.mark.parametrize(
@@ -493,9 +578,9 @@ def test_title_and_first_h1_name_the_type(heading: str, expected: str) -> None:
         ("Impressum | Kontakt", "imprint"),
     ],
 )
-def test_title_and_h1_may_end_with_the_type_word(heading: str, expected: str) -> None:
+def test_title_may_end_with_the_type_word(heading: str, expected: str) -> None:
     assert classify(doc(title=heading)) == (expected, ["title"])
-    assert classify(doc(body=f"<h1>{heading}</h1>")) == (expected, ["h1"])
+    assert classify(doc(body=f"<h1>{heading}</h1>"))[0] == "other"
 
 
 @pytest.mark.parametrize(
@@ -634,6 +719,45 @@ def test_og_type_article_is_a_signal_for_content() -> None:
 def test_og_type_alone_does_not_make_content() -> None:
     html = doc(head='<meta property="og:type" content="article">')
     assert classify(html, words=1) == ("other", [])
+
+
+OG_ARTICLE = '<meta property="og:type" content="article">'
+
+
+def test_article_overrides_title_listing_and_link_density() -> None:
+    titled = doc(head=OG_ARTICLE, title="Kontakt \u2013 So gelingt das Elterngespr\u00e4ch")
+    assert classify(titled, "https://example.org/blog/x", words=900) == (
+        "content",
+        ["og_type", "word_count"],
+    )
+    headed = doc(head=OG_ARTICLE, body="<h1>Kontakt</h1>")
+    assert classify(headed, words=900)[0] == "content"
+    paged = doc(head=OG_ARTICLE + '<link rel="next" href="/2">')
+    assert classify(paged, "https://example.org/blog/article?page=2", words=900) == (
+        "content",
+        ["og_type", "word_count"],
+    )
+    menu = "".join(f'<li><a href="/m/{i}">Men\u00fcpunkt Nummer {i}</a></li>' for i in range(60))
+    dense = doc(head=OG_ARTICLE, body=f"<ul>{menu}</ul><p>{' '.join(['Wort'] * 220)}</p>")
+    assert classify(dense, words=220, min_words=50) == ("content", ["og_type", "word_count"])
+
+
+def test_article_override_keeps_a_url_type() -> None:
+    html = doc(head=OG_ARTICLE, title="Impressum")
+    assert classify(html, "https://example.org/impressum/", words=900) == (
+        "imprint",
+        ["url"],
+    )
+
+
+def test_article_override_keeps_schema_org() -> None:
+    schema = '<script type="application/ld+json">{"@type": "ContactPage"}</script>'
+    assert classify(doc(head=OG_ARTICLE + schema), words=900)[0] == "contact"
+
+
+def test_article_override_needs_enough_words() -> None:
+    html = doc(head=OG_ARTICLE, title="Kontakt")
+    assert classify(html, words=10) == ("contact", ["title"])
 
 
 def test_url_and_schema_org_and_title_all_agree() -> None:
