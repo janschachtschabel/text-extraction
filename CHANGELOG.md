@@ -66,6 +66,9 @@ Package 14: screenshot formats, SVG previews and page types (plan
   1920 / the window's width, so it never holds more pixels than a 1920 px wide one.
   `SCREENSHOT_MAX_BYTES` applies to the encoded file. A `webp` image is at most 16,383 px high
   (the WebP limit): a taller one loses its bottom rows, with the warning `screenshot_clipped`.
+- A render whose screenshot is encoded (`jpeg`, `webp` or a `width`) keeps 10 s of its time for
+  the encode, at most a third of the render time, so a short `BROWSER_TIMEOUT_SECONDS` still
+  renders.
 - `GET /v1/jobs/{id}/artifacts/{name}` also serves `screenshot.jpg` (`image/jpeg`) and
   `screenshot.webp` (`image/webp`); `get_job_screenshot` reads the file's name from the job's
   result instead of assuming `screenshot.png`.
@@ -91,9 +94,12 @@ Package 14: screenshot formats, SVG previews and page types (plan
 - Screenshot encoding is bounded by pixels and keeps its slot until the encoding thread ends; the
   memory figures in configuration.md and architecture.md follow.
 - Page types: stricter rules for queries, path positions, headings and articles (A26-R1 to
-  A26-R5), described in the user guides and architecture.md.
-- Playground details: further fixes to the result view, the image previews and the site tree
-  of the new look.
+  A26-R5), described in the user guides and architecture.md. A language parameter (`lang`, `hl`,
+  `locale`) keeps a start page home (`/?lang=en`).
+- Playground: the "Custom capture" box no longer has a heavy dashed frame, an error in "Options
+  (JSON)" is marked on that field, the page-type badge in the site tree has its space and stays
+  inside the tree, the result cards have real headings, invalid fields are marked visibly, the
+  reading card carries the content's language, and counts use plural forms.
 - Documentation: SVG previews, the package 15 playground view, the `connect-src 'self'` note,
   the Patchright and CTranslate2 versions, the READMEs' package list, the parameter bounds in the
   user guide and German wording and terms (Soft-404) match the code.

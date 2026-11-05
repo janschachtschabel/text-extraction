@@ -316,8 +316,11 @@ jobs:
           echo "${{ matrix.variant }} image: $((size / 1000000)) MB" >> "$GITHUB_STEP_SUMMARY"
 
   # Login and push live in their own job: it never runs for a pull request and alone holds
-  # `packages: write`, so a pull request's token cannot write to the registry. It runs after the
-  # checks of the same variant and builds again from the cache.
+  # `packages: write`, so a pull request's token cannot write to the registry. `needs: image`
+  # waits for the whole image matrix: every variant must pass its checks before any is pushed
+  # (all or nothing, so a release never publishes a partial set of images). Its matrix equals
+  # the image matrix (tests/test_workflow_pins.py). It runs on another runner and builds again
+  # from the gha cache of its variant; on a cache miss that is a full rebuild.
   push:
     name: push (${{ matrix.variant }})
     needs: image

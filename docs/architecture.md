@@ -691,16 +691,23 @@ while `BROWSER_ENABLED` is false, are unchanged.
   JPEG keep all rows. `quality` with `png` is 422. The encodes of a process share a budget of
   1920 × 16,384 pixels (`screenshot_image.ENCODE_PIXEL_BUDGET`; an image weighs its pixels, a
   larger one the whole budget): one 1920 × 16,384 encode needs about 330 MB as JPEG, about
-  470 MB as WebP and up to about 900 MB as WebP of a noisy page, and this is also the most at
-  once. An encode runs on a thread; when the extraction deadline cancels the wait, the thread
-  runs on and keeps its pixels until it ends. A render whose screenshot is encoded ends its page
-  work 10 s earlier (`ENCODE_RESERVE_SECONDS`, `RenderOptions.encode_reserve`), so the encode has
-  that time before the deadline. The capture must be a PNG (Pillow opens no other format). An
-  image Pillow cannot decode or encode fails `internal_error`, not
-  retryable (the same bytes fail again), and logs `screenshot_encode_failed` with the error type,
-  the image size and the format (never the URL). The
-  encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores it
-  as `job:{<id>}:artifact:screenshot.png`, `screenshot.jpg` or `screenshot.webp` for
+  470 MB as WebP and up to about 900 MB as WebP of a noisy page, and at the default
+  `SCREENSHOT_MAX_HEIGHT_PX` (16,384) this is also the most at once; a higher limit (up to
+  32,768) raises one encode's need in proportion, and an image over the budget runs alone.
+  **Ruling A26-R6 (FIFO grants):** encodes are granted in the order they asked
+  (`screenshot_image._PixelBudget`): a small image that would fit waits behind a larger one at
+  the head of the queue, so a large image is not starved by a stream of small ones; a wait that
+  is cancelled leaves the queue, and one granted as it was cancelled gives its pixels back. An
+  encode runs on a thread; when the extraction deadline cancels the wait, the thread runs on and
+  keeps its pixels until it ends. A render whose screenshot is encoded ends its page work 10 s
+  earlier (`ENCODE_RESERVE_SECONDS`, `RenderOptions.encode_reserve`), at most a third of the
+  render time (`browser_render.encode_reserve_within`, so a short `BROWSER_TIMEOUT_SECONDS` still
+  navigates), so the encode has that time before the deadline. The capture must be a PNG
+  (Pillow opens no other format). An image Pillow cannot decode or encode fails
+  `internal_error`, not retryable (the same bytes fail again), and logs
+  `screenshot_encode_failed` with the error type, the image size and the format (never the URL).
+  The encoded file over `SCREENSHOT_MAX_BYTES` fails with `too_large`. The browser worker stores
+  it as `job:{<id>}:artifact:screenshot.png`, `screenshot.jpg` or `screenshot.webp` for
   `ARTIFACT_TTL_SECONDS` (expiry and deletion cover all three names); `data.screenshot` names it
   with its `content_type`, `width` and `height`, and the API serves it at
   `GET /v1/jobs/{id}/artifacts/{name}` as `image/png`, `image/jpeg` or `image/webp`. While
@@ -2580,16 +2587,19 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      sites use), not any ISO 639-1 code, so `/ki/` (an AI section, though Kikuyu's code), `/ai/`
      and `/ui/` are no home; the region after it is not checked.
      **Ruling A26-R1 (home needs an empty query):** every query parameter is a tracking
-     parameter or has an empty (blank) value; tracking parameters are names starting `utm_` and
-     `fbclid`, `gclid`, `dclid`, `gbraid`, `wbraid`, `msclkid`, `yclid`, `igshid`, `mc_cid`,
-     `mc_eid`, `_ga`, `_gl`, `ref`. So `/?p=12`, `/?page_id=42` and `/index.php?id=42` (a CMS
-     that addresses its articles by query) are no home, `/?utm_source=x&fbclid=y` is. Search and
+     parameter, a language parameter or has an empty (blank) value; tracking parameters are
+     names starting `utm_` and `fbclid`, `gclid`, `dclid`, `gbraid`, `wbraid`, `msclkid`,
+     `yclid`, `igshid`, `mc_cid`, `mc_eid`, `_ga`, `_gl`, `ref`; language parameters are `lang`,
+     `hl` and `locale` (WPML's and Google-style language homes: `/?lang=en` is home). So
+     `/?p=12`, `/?page_id=42` and `/index.php?id=42` (a CMS that addresses its articles by query)
+     are no home, `/?utm_source=x&fbclid=y` and `/?lang=en` are. Search and
      page parameters are read before home is checked, as before (`/?s=x` is a search).
      **Ruling A26-R3 (language-only path):** `url_type` still answers `home` for `/de/` and
      `/hr` (a link has no page to look at). `page_type` makes a path that is only a language code
      (not the empty path, `/` or a bare index file) `home` only when the root element's `lang` is
      missing or its primary subtag (before `-` or `_`) equals the path's language, case-folded
-     (`/it/` with `lang="it-IT"`, `/pt_BR/` with `lang="pt-BR"`); otherwise the URL gives no
+     (`/it/` with `lang="it-IT"`, `/pt_BR/` with `lang="pt-BR"`); a `lang` that names no
+     language (`und`, `mul`, `zxx`, a private `x-...`) counts as missing; otherwise the URL gives no
      vote and the other signals decide (`/it/` on a German site is an Italian section, not the
      start page);
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
@@ -2618,10 +2628,11 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      is a type's name (`h1`).
      **Ruling A26-R4 (headings):** in the start form a colon is no separator: after a type word
      it starts a subtitle ("Datenschutz: Was Schulen wissen müssen" is no privacy page); `|`, en
-     dash, em dash, middle dot and a spaced hyphen stay. The end form is unchanged ("Firma GmbH:
-     Datenschutzerklärung" is still privacy). An `<h1>` votes only when the whole heading
-     (folded, trimmed, one trailing `:` removed) is a type word: "Kontakt" yes, "Kontakt zur
-     Schule aufnehmen" and "Kontakt | Schule" no;
+     dash, em dash, middle dot and a spaced hyphen stay; a colon with nothing after it starts no
+     subtitle ("Impressum:" is an imprint, as the `<h1>` rule). The end form is unchanged
+     ("Firma GmbH: Datenschutzerklärung" is still privacy). An `<h1>` votes only when the whole
+     heading (folded, trimmed, one trailing `:` removed) is a type word: "Kontakt" yes,
+     "Kontakt zur Schule aufnehmen" and "Kontakt | Schule" no;
   6. `auth`: a password input and fewer than `THIN_PAGE_BELOW_WORDS` (100) words
      (`password_field`);
   7. `listing`: `rel="next|prev"` on a `<link>` or `<a>` (`pagination`), or at least
@@ -2844,10 +2855,11 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
   quality 80), `thumb` (1280×800, first screen, WebP, `width` 400), `mobile` (390×844, whole
   page) and `custom`, which reads the fieldset "Custom capture" (window width and height, image
   format, quality, image width, whole page; `ui.js` enables it only with `custom`, and without
-  script every field stays usable). A 422 that names one of these fields is shown at the
-  "Options (JSON)" field when the key came from there, else at the field's control, but only
-  with `custom` (`forms.rest_error_control`; under another preset the fields are disabled and
-  the error stays untied).
+  script every field stays usable). **Ruling A26-R7 (where a 422 is marked):** a 422 that names
+  one of these fields is shown at the "Options (JSON)" field when the key came from there (also
+  with `custom`: Options wins the tie), else at the field's control, but only with `custom`
+  (`forms.rest_error_control`; under another preset the fields are disabled and the error stays
+  untied, the status line still shows it).
   The result shows a PNG, JPEG or WebP screenshot as a `data:` image.
 - **Look (package 15).** A redesign of the templates and `ui.css` only; no new field, endpoint,
   setting or htmx behaviour besides the result toolbar. The page is a white header (three rows:
@@ -2884,16 +2896,17 @@ so the caller's LLM key wins over `LLM_API_KEY` (rule 3) on every door.
     JSON links of 1, 3, 12 and 30 MB, so there is no 2 MB `data:` limit for downloads; the cost is
     page weight only.
   - **P15-R8, scrollable blocks and tables.** The result's scrollable `pre` blocks carry
-    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds at most three
-    tab stops per result (Markdown source, curl, raw JSON; all in sections that are closed by
-    default), even for a short block. Chunks wrap and never scroll, so they take no tab stop. Below 600 px tables scroll inside their card; the
-    items table's URL column keeps at least 12rem, so the "Show" column may need a sideways
-    scroll of the table.
+    `tabindex="0"` (axe `scrollable-region-focusable`, WCAG 2.1.1), which adds at most three tab
+    stops per result (Markdown source, curl, raw JSON; all in sections that are closed by
+    default), even for a short block. Chunks wrap and never scroll, so they take no tab stop.
+    Below 600 px tables scroll inside their card; the items table's URL column keeps at least
+    12rem, so the "Show" column may need a sideways scroll of the table.
   - **P15-S3, status line.** `header.answer` holds the status pill, the unblocked pill and
     `HTTP <n>`; it stays there because an error without `data` has no card of figures.
   - **P15-S4, copy source.** "Copy" copies the text shown in `pre.content` (at most
-    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'self'` does not allow fetching a `data:` URL, so the download's link cannot be read back.
-    "Save response" is left out, with a hint, above `DOWNLOAD_MAX_CHARS` (a cut JSON is no JSON).
+    `SHOWN_MAX_CHARS`); the CSP's `connect-src 'self'` does not allow fetching a `data:` URL, so
+    the download's link cannot be read back. "Save response" is left out, with a hint, above
+    `DOWNLOAD_MAX_CHARS` (a cut JSON is no JSON).
   - **P15-S5, reading card.** Rendered Markdown (or `pre.content` in the serif font for text, or
     for Markdown too long to render) stands in a white reading card; the Markdown source is in
     the closed section "Show source" (`details.source`).

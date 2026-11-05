@@ -858,11 +858,11 @@ progress:
   hit, and refreshing stops
   once all are completed (after a 429 it tries again after `Retry-After`). A single operation
   that continues as a job (202) has a "Show progress" button for it.
-- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree
-  now" while it runs): each URL has a badge with its page type (guessed from the URL for a
-  sitemap entry or a linked-only URL), "Types:" counts the shown URLs per type, and "Select
-  content pages" ticks the content pages and unticks imprint, privacy, legal, contact, login,
-  search and error pages and failed ones. The job is read in pages of 20 items, so at most 20 items are held at a
+- **Site tree** (`/ui/run/site-tree`, "Show as tree" once a site job is completed, "Show tree now"
+  while it runs): each URL has a badge with its page type (guessed from the URL for a sitemap
+  entry or a linked-only URL), "Types:" counts the shown URLs per type, and "Select content pages"
+  ticks the content pages and unticks imprint, privacy, legal, contact, login, search and error
+  pages and failed ones. The job is read in pages of 20 items, so at most 20 items are held at a
   time, and only the tree's fields are kept. The tree is built by URL path: a root per host (a
   leading `www.` dropped), a section per directory, and every URL a leaf (a directory's own page
   is the leaf `/`, a query string a leaf of its own), in name order. It merges the crawled pages

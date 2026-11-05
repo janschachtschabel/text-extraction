@@ -41,3 +41,14 @@ def test_only_the_push_job_holds_packages_write() -> None:
     assert "image" in push["needs"]
     assert workflow["jobs"]["image"]["permissions"]["packages"] == "read"
     assert "docker/login-action" not in str(workflow["jobs"]["image"])
+
+
+def test_the_push_matrix_equals_the_image_matrix() -> None:
+    # The push job waits for the whole image matrix and pushes the same variants (all or none).
+    workflow = yaml.safe_load(Path(WORKFLOWS[0].parent / "image.yml").read_text())
+    jobs = workflow["jobs"]
+    image = jobs["image"]["strategy"]["matrix"]
+    push = jobs["push"]["strategy"]["matrix"]
+    assert image["include"]
+    assert push == image
+    assert jobs["push"]["needs"] == "image"
