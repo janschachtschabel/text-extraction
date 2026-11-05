@@ -76,6 +76,15 @@ Package 14: screenshot formats, SVG previews and page types (plan
 - Pillow 13.0.0 is a direct runtime dependency (the browser worker imports it); before, it came in
   only through other dependencies.
 
+Dependency rule:
+
+### Changed
+
+- The 14-day rule applies again to docling-core, docling-parse and docling-ibm-models: their
+  `exclude-newer-package` entries are back to "14 days" instead of the fixed date
+  2026-10-23 that v0.1.2 used. The locked releases (2.104.0, 7.23.0, 4.0.4) are now older than
+  14 days, so no package changes.
+
 ## [0.1.2] - 2026-11-01
 
 Dependency updates that v0.1.1 left out. Jan waived the 14-day rule for new dependency versions
