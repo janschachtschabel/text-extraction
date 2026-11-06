@@ -47,7 +47,7 @@ from text_extraction.ui.answers import (
     sent_keys,
     text_fields,
 )
-from text_extraction.ui.forms import OPERATIONS, OptionsError, access_choice, build_body
+from text_extraction.ui.forms import OPERATIONS, OptionsError, access_offer, build_body
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Code, Message, count_message
 from text_extraction.ui.results import curl_line, render_result
@@ -524,7 +524,7 @@ def _preview(
 ) -> Response:
     """The batch preview of a parsed list (P10-S19): the counts, the first URLs and problems,
     and the valid URLs in a read-only box with the batch options (``chosen``: the fields the
-    user had set; "Site rules" as `access_choice` offers it to ``role``) and "Start batch",
+    user had set; "Site rules" as `access_offer` offers it to ``role``) and "Start batch",
     unless there are none or too many."""
     parts = math.ceil(len(listed.urls) / settings.batch_max_urls)
     most = settings.batch_max_open_per_client * settings.batch_max_urls
@@ -543,7 +543,7 @@ def _preview(
             else None
         ),
         "chosen": chosen,
-        "access_choice": access_choice(role, settings),
+        "access": access_offer(role, settings),
         "browser_enabled": settings.browser_enabled,
         **_problems(listed.invalid),
     }
@@ -701,7 +701,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "snapshot": read.state != "completed",
         "found_labels": FOUND_LABELS,
         "non_content_types": NON_CONTENT_TYPES,
-        "access_choice": access_choice(principal.role, settings),
+        "access": access_offer(principal.role, settings),
         "browser_enabled": settings.browser_enabled,
     }
     html = await asyncio.to_thread(templates.get_template("tree.html").render, context)

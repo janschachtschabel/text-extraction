@@ -292,7 +292,7 @@ def test_axe_finds_no_violations_with_maximum_extraction_on(
         _log_in(page)
         page.wait_for_selector("#app-shell")
         expect(page.locator("#panel-extract")).to_be_visible()
-        expect(page.locator("#extract-access-maximum")).to_be_enabled()
+        expect(page.locator("#extract-access-ignore")).to_be_enabled()
         expect(page.locator("#extract-mode-fast-hint")).to_be_visible()
         found = _axe(page, "extract tab, maximum extraction on")
 

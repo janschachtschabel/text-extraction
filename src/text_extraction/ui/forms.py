@@ -7,9 +7,10 @@ the form sets (a typed value, a box or choice changed from its default) and Opti
 refused with "<key> is given twice.". Nothing is forwarded for a refused form. The REST route
 validates the merged body as for any client.
 
-"Site rules" (``access``, ruling P12-S3) is a form field that is no body field: ``respect`` (the
-default) sends no ``compliance``, ``maximum`` sends ``compliance: "ignore"`` as set by the user.
-Only admins see the choice (`access_choice`); REST refuses ``ignore`` from anyone else."""
+"Site rules" (``access``, rulings P12-S3, package 16) is a form field that is no body field: the
+radio of a step (``enforce``, ``report`` or ``ignore``) sends that ``compliance`` as set by the
+user; the deployment's default step (radio value ``default``) sends nothing. The steps a caller
+sees come from `access_offer`; REST refuses what a key may not choose (``ignore`` for a user)."""
 
 import json
 import math
@@ -18,6 +19,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final, Literal
 
+from text_extraction.compliance import ComplianceMode
 from text_extraction.file_api import PATH as FILE_PATH
 from text_extraction.settings import Settings
 from text_extraction.site_api import PATH as SITE_PATH
@@ -29,11 +31,10 @@ DEFAULT_MAX_IMAGES: Final = 5
 DEFAULT_SITE_DEPTH: Final = 2
 DEFAULT_SITE_PAGES: Final = 100
 CHECKED: Final = "on"
-# The "Site rules" choice: its form field and its two values.
+# The "Site rules" choice: its form field and the radio value of the deployment's default step.
 ACCESS_FIELD: Final = "access"
-ACCESS_RESPECT: Final = "respect"
-ACCESS_MAXIMUM: Final = "maximum"
-AccessChoice = Literal["hidden", "enabled", "disabled"]
+ACCESS_DEFAULT: Final = "default"
+_ACCESS_ORDER: Final[tuple[ComplianceMode, ...]] = ("enforce", "report", "ignore")
 
 # The screenshot form's "Capture" choice: each preset is the REST fields it sets (a field it does
 # not name stays at its default); ``custom`` reads the form's own fields instead.
@@ -260,21 +261,51 @@ def _wait(fields: Fields, form: Mapping[str, str]) -> None:
 
 
 def _access(fields: Fields, form: Mapping[str, str]) -> None:
-    """The "Site rules" choice: ``maximum`` sends ``compliance: "ignore"`` as set by the user
-    (so Options cannot give ``compliance`` too); ``respect`` or any other value sends nothing."""
-    if _text(form, ACCESS_FIELD) == ACCESS_MAXIMUM:
-        fields["compliance"] = _Field("ignore", set_by_user=True)
+    """The "Site rules" choice: ``enforce``, ``report`` or ``ignore`` sends that ``compliance``
+    as set by the user (so Options cannot give ``compliance`` too); ``default``, empty or any
+    other value sends nothing."""
+    value = _text(form, ACCESS_FIELD)
+    if value in _ACCESS_ORDER:
+        fields["compliance"] = _Field(value, set_by_user=True)
 
 
-def access_choice(role: str, settings: Settings) -> AccessChoice:
-    """How the forms offer "Site rules" to a caller of ``role``: ``hidden`` for anyone but an
-    admin; for an admin ``enabled`` while browser mode and unblock mode are both on
-    (``BROWSER_ENABLED``, ``BROWSER_UNBLOCK_ENABLED``), else ``disabled``."""
-    if role != "admin":
-        return "hidden"
-    if settings.browser_enabled and settings.browser_unblock_enabled:
-        return "enabled"
-    return "disabled"
+@dataclass(frozen=True)
+class AccessOffer:
+    """The "Site rules" steps a caller is offered: ``modes`` in the order enforce, report,
+    ignore; ``default`` is the deployment's default step; ``unblock`` tells that ``ignore`` also
+    unlocks the unblock browser for this caller."""
+
+    modes: tuple[ComplianceMode, ...]
+    default: ComplianceMode
+    unblock: bool
+
+    @property
+    def shown(self) -> bool:
+        """Whether there is a choice to show."""
+        return len(self.modes) > 1
+
+
+def access_offer(role: str, settings: Settings) -> AccessOffer:
+    """The steps the forms offer to a caller of ``role``: an admin all three; anyone else
+    ``enforce`` and ``report`` while ``compliance_allow_override`` is on, plus ``ignore`` only
+    when it is the default; without override only the default (as REST's ``resolve_mode``)."""
+    default = settings.compliance_default
+    if role == "admin":
+        allowed = set(_ACCESS_ORDER)
+    elif settings.compliance_allow_override:
+        allowed = {"enforce", "report", default}
+    else:
+        allowed = {default}
+    unblock = role == "admin" and settings.browser_enabled and settings.browser_unblock_enabled
+    return AccessOffer(tuple(m for m in _ACCESS_ORDER if m in allowed), default, unblock)
+
+
+def access_value(offer: AccessOffer, mode: ComplianceMode | None) -> str:
+    """The radio value that presets ``mode``: ``default`` for None, the default step or a mode
+    the caller is not offered, else the mode's name."""
+    if mode is None or mode == offer.default or mode not in offer.modes:
+        return ACCESS_DEFAULT
+    return mode
 
 
 def _no_constant(name: str) -> Any:

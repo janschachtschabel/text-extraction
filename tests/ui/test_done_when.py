@@ -531,7 +531,7 @@ def test_access_choice_as_an_admin(unblock_live: Live, lang: Language) -> None:
         client_of(unblock_live, lang, ADMIN_HEADERS) as admin,
         client_of(unblock_live, lang, HEADERS) as user,
     ):
-        # The admin sees the choice, enabled, respect first; a user does not see it.
+        # The admin sees three steps, the default first; a user sees two.
         shell = post(admin, "login")
         [group] = shell.xpath(
             "//section[@data-panel='extract']//fieldset[contains(@class, 'access')]"
@@ -539,14 +539,17 @@ def test_access_choice_as_an_admin(unblock_live: Live, lang: Language) -> None:
         assert group.get("disabled") is None
         assert texts(group, "./legend") == [translate(lang, "access.legend")]
         radios = group.xpath(f".//input[@name='{ACCESS_FIELD}']")
-        assert [radio.get("value") for radio in radios] == ["respect", "maximum"]
-        assert [radio.get("disabled") for radio in radios] == [None, None]
+        assert [radio.get("value") for radio in radios] == ["default", "report", "ignore"]
+        assert [radio.get("disabled") for radio in radios] == [None] * 3
         assert radios[0].get("checked") is not None
-        assert not post(user, "login").xpath(f"//input[@name='{ACCESS_FIELD}']")
+        user_radios = post(user, "login").xpath(
+            f"//section[@data-panel='extract']//input[@name='{ACCESS_FIELD}']"
+        )
+        assert [radio.get("value") for radio in user_radios] == ["default", "report"]
 
-        # respect sends no compliance (the default applies), maximum sends "ignore"; the result
+        # the default sends no compliance (it applies), ignore sends "ignore"; the result
         # view shows the mode. The pages need no browser, so nothing is unblocked.
-        for access, mode in (("respect", "enforce"), ("maximum", "ignore")):
+        for access, mode in (("default", "enforce"), ("ignore", "ignore")):
             shown = post(admin, "extract", **extract_fields(f"{origin}/", access=access))
             status, envelope = shown_answer(shown)
             assert (status, envelope["status"]) == ("HTTP 200", "success"), access
@@ -555,7 +558,7 @@ def test_access_choice_as_an_admin(unblock_live: Live, lang: Language) -> None:
             assert envelope["data"]["unblocked"] is False
             assert not shown.xpath("//*[contains(@class, 'badge-unblocked')]")
 
-        # A user who forges maximum gets REST's 403.
-        forged = post(user, "extract", **extract_fields(f"{origin}/", access="maximum"))
+        # A user who forges ignore gets REST's 403.
+        forged = post(user, "extract", **extract_fields(f"{origin}/", access="ignore"))
         assert texts(forged, "//*[@class='http-status']") == ["HTTP 403"]
         assert texts(forged, "//*[@class='error-code']") == ["forbidden"]
