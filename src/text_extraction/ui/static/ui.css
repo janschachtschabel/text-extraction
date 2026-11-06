@@ -506,6 +506,12 @@ button.secondary:hover:not(:disabled) {
   margin: 0;
 }
 
+/* A status line of an answer htmx did not swap stands alone: no "The result appears here"
+   below it. */
+.request-status ~ .result-empty {
+  display: none;
+}
+
 .settings .intro {
   font-size: 14px;
   color: var(--muted);

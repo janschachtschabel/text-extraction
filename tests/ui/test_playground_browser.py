@@ -338,6 +338,9 @@ def test_an_answer_htmx_does_not_swap_shows_a_status_line(ui_small: str) -> None
         )
         expect(status.locator(".api-detail-label")).to_have_text("Details from the API (English)")
         assert detail.evaluate("line => line.children.length") == 0
+        # The empty state the answer did not replace does not sit below the status line.
+        expect(page.locator("#result > .result-empty")).to_have_count(1)
+        expect(page.locator("#result > .result-empty")).to_be_hidden()
 
         page.route("**/ui/run/extract", lambda route: route.abort())
         open_tab(page, "extract")
