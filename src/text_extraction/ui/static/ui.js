@@ -526,6 +526,11 @@
       box.checked = false;
     }
     hint.hidden = !fast;
+    // A hidden hint is not read out with the box.
+    var ids = describedBy(box).filter(function (id) {
+      return id !== hint.id;
+    });
+    setDescribedBy(box, fast ? ids.concat(hint.id) : ids);
   }
 
   document.addEventListener("change", function (event) {

@@ -377,16 +377,21 @@ def test_screenshot_box_follows_mode() -> None:
         panel = page.locator("#panel-extract")
         box = panel.locator("input[name=screenshot]")
         hint = panel.locator("#extract-screenshot-fast-hint")
+        alone = "extract-screenshot-hint"
+        both = "extract-screenshot-hint extract-screenshot-fast-hint"
         expect(box).to_be_enabled()
         expect(hint).to_be_hidden()
+        expect(box).to_have_attribute("aria-describedby", alone)
         box.check()
 
         panel.locator("select[name=mode]").select_option("fast")
         expect(box).to_be_disabled()
         expect(box).not_to_be_checked()
         expect(hint).to_be_visible()
+        expect(box).to_have_attribute("aria-describedby", both)
 
         panel.locator("select[name=mode]").select_option("auto")
         expect(box).to_be_enabled()
         expect(hint).to_be_hidden()
+        expect(box).to_have_attribute("aria-describedby", alone)
     assert console == []

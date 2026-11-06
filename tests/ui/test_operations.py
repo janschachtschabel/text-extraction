@@ -223,10 +223,16 @@ def test_extract_screenshot_box_disabled_without_browser() -> None:
     (hint,) = root.xpath("//*[@id='extract-screenshot-fast-hint']")
     assert hint.get("hidden") is None
     assert texts(hint, ".") == [translate("en", "hint.screenshot_needs_browser")]
+    assert found.get("aria-describedby").split() == [
+        "extract-screenshot-hint",
+        "extract-screenshot-fast-hint",
+    ]
 
     found, root = box(browser_enabled=True)
     assert found.get("disabled") is None
     assert root.xpath("//*[@id='extract-screenshot-fast-hint']")[0].get("hidden") is not None
+    # A hidden hint is not read out: ui.js names it while the mode is "fast".
+    assert found.get("aria-describedby").split() == ["extract-screenshot-hint"]
 
 
 def test_metadata_structured_checkbox() -> None:
