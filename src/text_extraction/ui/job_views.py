@@ -743,8 +743,9 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     rule files (robots.txt, TDMRep, ai.txt) of their origins, which are loaded once per origin
     (`_tree_rules`: the ``TREE_RULES_MAX_ORIGINS`` origins with most leaves, loaded within
     ``TREE_RULES_SECONDS`` in all and judged within ``TREE_JUDGE_SECONDS``; origins that fail or
-    run out of time are ``unchecked``, those past the cap are counted in ``unchecked_more``); a leaf that ``enforce`` would block is marked and, while the form's
-    "Site rules" is ``enforce``, cannot be selected."""
+    run out of time are ``unchecked``, those past the cap are counted in ``unchecked_more``); a
+    leaf that ``enforce`` would block is marked and, while the form's "Site rules" is
+    ``enforce``, cannot be selected."""
     job_id = request.query_params.get("id") or ""
     if not job_id:
         return _form_error(request, NO_JOB)
