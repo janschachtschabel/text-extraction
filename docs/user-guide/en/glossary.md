@@ -25,9 +25,9 @@ The labels of the playground, as the English and the German playground show them
 | Operations | Funktionen | The list of tabs. |
 | Advanced | Erweitert | The closed section of a form that holds "Options (JSON)" and, where the form has it, "Wait seconds before it becomes a job". |
 | Show source | Quelltext anzeigen | The closed section of a Markdown result that shows the Markdown text. |
-| Site rules | Website-Regeln | The choice between respecting a site's rules and maximum extraction. |
+| Site rules | Website-Regeln | The three-step choice in the playground: respect the rules, check and report only, or checks off. |
 | Respect the site's rules (default) | Regeln der Website beachten (Standard) | The default: robots.txt and the TDM opt-out are checked. |
-| Maximum extraction (contract partners) | Maximale Extraktion (Vertragspartner) | For sites that allowed extraction by contract: `compliance: ignore`, with unblock mode. |
+| Checks off (contract partners) | Prüfung aus (Vertragspartner) | The playground step for sites that allowed extraction by contract: `compliance: ignore`; with unblock mode it is maximum extraction. |
 | Browser fallback | Browser-Fallback | The `mode` field: whether the browser renders a page. |
 | when the page needs it | wenn die Seite ihn braucht | `mode: auto`. |
 | never | nie | `mode: fast`. |

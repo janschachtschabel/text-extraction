@@ -9,6 +9,31 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+Package 16: robots marks in the site tree and the site rules switch (plan
+[docs/superpowers/plans/2026-11-06-package-16-robots-tree-compliance-switch.md](docs/superpowers/plans/2026-11-06-package-16-robots-tree-compliance-switch.md)).
+No API change.
+
+### Added
+
+- The playground's site tree marks URLs that the site's rules block: the badge "robots.txt"
+  (robots.txt disallows, or could not be retrieved) or "TDM" (tdmrep.json, ai.txt or noai), with
+  the reason as tooltip and for screen readers. Every shown URL is judged when the tree is shown,
+  against the site's current rules (from the cache, or loaded once per site within the per-host
+  limits; at most 20 sites, 12 s). Links the crawl did not follow because the rules blocked them
+  appear as "linked only" leaves. A line above the tree counts the blocked URLs, and another names
+  sites whose rules could not be read. Under "Respect the site's rules" blocked URLs cannot be
+  ticked and the selection buttons skip them. Closes #26.
+
+### Changed
+
+- The playground's "Site rules" choice has three steps in every form with a URL and under the
+  site tree: "Respect the site's rules" (`enforce`), "Check and report only" (`report`) and
+  "Checks off (contract partners)" (`ignore`). The deployment default is preselected and sends
+  nothing. Not only admins see it: other keys see `enforce` and `report` while
+  `COMPLIANCE_ALLOW_OVERRIDE` is on. "Checks off" works without unblock mode; with unblock mode
+  on it is maximum extraction as before. The batch below the site tree starts with the step the
+  crawl ran with.
+
 ## [0.1.3] - 2026-11-05
 
 Package 15: the playground's new look (plan

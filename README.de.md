@@ -23,7 +23,10 @@ Seitentypen, neue Gestaltung des Playgrounds). Die Pakete und ihren Stand zeigt
 - **Regeln der Website beachten** (der Standard): robots.txt und der TDM-Nutzungsvorbehalt der EU
   werden geprüft, jeder Host bekommt nur wenige Anfragen gleichzeitig, und der Dienst sendet
   seinen eigenen, ehrlichen User-Agent.
-- **Maximale Extraktion** für Websites, die die Extraktion vertraglich erlaubt haben: Ein Admin
+- **Prüfung pro Lauf an- und abschalten** (`compliance`: `enforce`, `report` oder `ignore`; die
+  Spielwiese bietet je nach Rolle „Regeln der Website beachten“, „Nur prüfen und melden“ und
+  „Prüfung aus (Vertragspartner)“). **Maximale Extraktion** für Websites, die die Extraktion
+  vertraglich erlaubt haben: Ein Admin
   sendet `"compliance": "ignore"`, und wo der Betreiber `BROWSER_UNBLOCK_ENABLED` eingeschaltet
   hat, kommt ein getarnter Browser am Bot-Schutz vorbei, auch nach einem einfachen 403, 429 oder
   503. Er löst keine Bild-Captchas, nutzt keinen bezahlten Dienst und wechselt keine IP-Adressen;

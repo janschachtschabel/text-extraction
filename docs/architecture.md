@@ -3023,6 +3023,14 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   masthead's `h1` is outside the swapped `#app` and not focusable), after a refused key to the
   key field, and after a swap that removed the focused element of a progress view to the view
   itself (`section.jobs-view`, `tabindex="-1"`), never to a tab.
+- **Site rules in the site tree (package 16).** The tree judges every shown URL when it is shown,
+  not when the crawl ran, against the site's current robots.txt, tdmrep.json and ai.txt (from the
+  cache, or loaded once per site within the per-host limits; at most 20 sites, 12 s). A blocked
+  URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable) or "TDM", with the
+  reason as tooltip; the links the crawl skipped because of the rules are "linked only" leaves.
+  Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons skip it;
+  under `report` and `ignore` it can be ticked. The batch below the tree starts with the step the
+  crawl ran with.
 - **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
   `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
   "Extract selected", so a keyboard user does not tab through every checkbox.

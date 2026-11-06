@@ -186,7 +186,10 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
    "Show tree now" shows a snapshot. Each URL shows its page type, and "Types:" above the tree
    counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
    privacy, legal, contact, login, search and error pages and pages that failed; or check the
-   sections you want.
+   sections you want. URLs that the site's rules block are marked "robots.txt" or "TDM" and
+   are skipped by the buttons while "Site rules" is "Respect the site's rules"; the batch below
+   the tree starts with the step the crawl ran with, and the marks show the rules at the time the
+   tree is shown (see [Part of a site](part-of-a-site.md#in-the-playground)).
 3. Leave "Metadata" on, and for the schema.org and LRMI fields put a `structured` request into
    "Options (JSON)" (under "Advanced"), for example
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.
