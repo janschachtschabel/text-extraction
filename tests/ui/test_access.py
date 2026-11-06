@@ -409,3 +409,41 @@ def test_choice_and_result_follow_the_language(admin_client: TestClient) -> None
     terms = texts(result, "//dl[@class='facts']//dt")
     values = texts(result, "//dl[@class='facts']//dd")
     assert dict(zip(terms, values, strict=True))[translate("de", "access.compliance")] == "ignore"
+
+
+def test_extract_result_lists_server_errors() -> None:
+    errors = [
+        {
+            "level": "Warning",
+            "message": "Undefined variable $x",
+            "file": "/var/www/a.php",
+            "line": 128,
+            "count": 2,
+        },
+        {
+            "level": "Notice",
+            "message": "Trying to read",
+            "file": "/var/www/b.php",
+            "line": 7,
+            "count": 1,
+        },
+    ]
+    envelope = {"data": result_data(PAGE, server_errors=errors)}
+
+    root = tree(render_result(op="extract", http_status=200, envelope=envelope))
+    german = tree(render_result(op="extract", http_status=200, envelope=envelope, language="de"))
+
+    fold = "//details[contains(@class, 'fold')][.//*[@class='server-errors']]"
+    assert texts(root, f"{fold}/summary") == ["Server error messages removed from the text (3)"]
+    assert texts(root, f"{fold}//li/code") == ["Warning", "Notice"]
+    items = texts(root, f"{fold}//li")
+    assert "in /var/www/a.php, line 128" in items[0]
+    assert "\u00d72" in items[0]
+    assert "\u00d7" not in items[1]
+    assert texts(german, f"{fold}/summary") == [
+        "Fehlermeldungen des Servers aus dem Text entfernt (3)"
+    ]
+    assert "in /var/www/a.php, Zeile 128" in texts(german, f"{fold}//li")[0]
+    assert root.xpath(fold)[0].get("open") is None
+    plain = tree(render_result(op="extract", http_status=200, envelope={"data": result_data(PAGE)}))
+    assert plain.xpath("//*[@class='server-errors']") == []

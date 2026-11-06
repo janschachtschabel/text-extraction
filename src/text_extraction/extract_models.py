@@ -303,6 +303,17 @@ class Timings(BaseModel):
     llm_ms: int = 0
 
 
+class ServerErrorInfo(BaseModel):
+    """An error message of the site's server (PHP) that was removed from the text; identical
+    messages are counted once."""
+
+    level: str
+    message: str
+    file: str
+    line: int
+    count: int
+
+
 class ExtractResult(BaseModel):
     """What one extraction produced; on failure as much of it as was known."""
 
@@ -380,6 +391,12 @@ class ExtractResult(BaseModel):
         "the page were not followed: the crawl has `max_pages` pages), `site_memory_guard` "
         "(Valkey was nearly full: no link of the page was followed) (site structure). Converter "
         "notes may follow."
+    )
+    server_errors: list[ServerErrorInfo] | None = Field(
+        default=None,
+        description="The site's server error messages (PHP warnings, notices, errors) removed "
+        "from `content`, at most 50, identical ones merged with `count`; null when there were "
+        "none. Comes with the warning `server_errors_removed`.",
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None

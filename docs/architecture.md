@@ -164,7 +164,9 @@ add a note of its own):
   reads an undeclared page, windows-1252 or the legacy encoding its bytes fit; audit B2),
   `server_errors_removed` (PHP error messages that the site printed into its own HTML, such as
   `Warning: ... in /path/file.php on line 128`, were removed before extraction; text inside
-  `pre`, `code`, `textarea` and `script` is kept; package 17).
+  `pre`, `code`, `textarea` and `script` is kept; package 17). The removed messages are listed
+  in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
+  null when there were none), and the playground shows them in a fold.
 - Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
   `action_<index>_failed`, `navigation_refused_non_get`, `consent_overlay_removed`,
   `screenshot_clipped`, `browser_bytes_capped`, `challenge_checkbox_clicked`,

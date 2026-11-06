@@ -248,6 +248,7 @@ def test_success_envelope_shape(client: TestClient) -> None:
         "image_descriptions",
         "site",
         "page_type",
+        "server_errors",  # package 17: null unless the page printed PHP errors
     }
     assert data["structured"] is None
     assert data["chunks"] is None

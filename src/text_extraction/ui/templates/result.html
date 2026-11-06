@@ -159,6 +159,16 @@ level lower. -#}
     {% endif %}
   </details>
   {% endif %}
+  {% if data and data["server_errors"] %}
+  <details class="card fold">
+    <summary><{{ card_heading }} class="fold-title">{{ tn("result.server_errors", data["server_errors"]|sum(attribute="count")) }}</{{ card_heading }}></summary>
+    <ul class="server-errors">
+      {% for entry in data["server_errors"] %}
+      <li><code>{{ entry["level"] }}</code> {{ entry["message"] }} <span class="where">{{ t("result.server_error_where", file=entry["file"], line=entry["line"]) }}</span>{% if entry["count"] > 1 %} <span class="count">×{{ entry["count"] }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
   {% if steps or warnings %}{% include "timeline.html" %}{% endif %}
   {#- The reading card (P15-S5): rendered Markdown with its source folded, or the text. The
   content is in its own language (``content_lang``, WCAG 3.1.2), the card's texts in the page's. -#}
