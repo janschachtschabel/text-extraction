@@ -24,7 +24,7 @@ from tests.fakes import (
     fetched,
 )
 from text_extraction.auth import Principal
-from text_extraction.compliance import ComplianceChecker, RobotsSitemaps
+from text_extraction.compliance import ComplianceChecker, OriginRules, RobotsSitemaps
 from text_extraction.documents.pool import DocumentPool
 from text_extraction.envelope import Envelope, ErrorCode
 from text_extraction.errors import ServiceError
@@ -113,6 +113,9 @@ class Hooks:
 
     def robots_sitemaps(self, url: str = PAGE, **options: Any) -> RobotsSitemaps:
         return self.go(self.pipeline.robots_sitemaps(url, **options))
+
+    def origin_rules(self, url: str = PAGE) -> OriginRules | None:
+        return self.go(self.pipeline.origin_rules(url))
 
     def urls(self) -> list[str]:
         return [url for url, _ in self.fetcher.calls]
@@ -503,6 +506,38 @@ def test_robots_sitemaps_gate_refusal() -> None:
         hooks.robots_sitemaps(gate_refusals="raise")
 
     assert answered == RobotsSitemaps(state="unavailable", urls=[])
+    assert hooks.urls() == []
+
+
+def test_pipeline_origin_rules_loads_in_a_turn_then_from_cache() -> None:
+    hooks = Hooks(robots(DISALLOW_PRIVATE))
+
+    first = hooks.origin_rules()
+    hooks.fetcher.calls.clear()
+    hooks.events().clear()
+    second = hooks.origin_rules(f"{ORIGIN}/private/x")
+
+    assert first is not None
+    assert second is not None
+    assert second.judge(f"{ORIGIN}/private/x", "enforce").robots == "disallowed"
+    assert hooks.urls() == []
+    assert hooks.events() == []
+
+
+def test_pipeline_origin_rules_fetches_the_three_files_once() -> None:
+    hooks = Hooks(robots(DISALLOW_PRIVATE))
+
+    hooks.origin_rules()
+    hooks.origin_rules()
+
+    assert hooks.urls() == [ROBOTS, f"{ORIGIN}/.well-known/tdmrep.json", f"{ORIGIN}/ai.txt"]
+    assert hooks.events() == [("take", "example.org"), ("give back", "example.org")]
+
+
+def test_pipeline_origin_rules_answers_none_when_the_gate_refuses() -> None:
+    hooks = Hooks(robots(), gate=RefusingGate(OutboundBusy(30)))
+
+    assert hooks.origin_rules() is None
     assert hooks.urls() == []
 
 

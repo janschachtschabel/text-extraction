@@ -157,6 +157,7 @@ from text_extraction.compliance import (
     ComplianceChecker,
     ComplianceMode,
     ComplianceReport,
+    OriginRules,
     RobotsSitemaps,
     blocking_code,
     compliance_block,
@@ -1303,6 +1304,26 @@ class Pipeline:
         if loaded is None:  # pragma: no cover - only `cached_only` answers None
             raise RuntimeError("robots.txt was not loaded")
         return loaded
+
+    async def origin_rules(self, url: str) -> OriginRules | None:
+        """The rule files of ``url``'s origin, to judge many of its URLs: from the compliance
+        cache without a request, else loaded in the host's turn (within the 10 s budget of an
+        origin's files). None when the gate refuses the turn or its backend fails; it never
+        raises. It reads in every compliance mode."""
+        cached = await self._checker.origin_rules(url, cached_only=True)
+        if cached is not None:
+            return cached
+        turn = HostTurn(self._gate)
+        try:
+            await turn.take(urlsplit(url).hostname or "", None)
+            return await self._checker.origin_rules(url, cached_only=False)
+        except (OutboundBusy, CircuitOpen) as error:
+            _log.warning("origin_rules_refused", error_type=type(error).__name__)
+        except RedisError as error:
+            _log.warning("outbound_gate_unavailable", error_type=type(error).__name__)
+        finally:
+            await turn.give_back()
+        return None
 
     async def blocked_from_cache(self, url: str, mode: ComplianceMode) -> bool | None:
         """Whether step 4 would block ``url`` under ``mode``, judged from the cached origin

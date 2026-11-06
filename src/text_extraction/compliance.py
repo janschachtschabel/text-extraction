@@ -49,6 +49,11 @@ Parsing a rules file runs in a worker thread, off the event loop.
 for the site crawl (package 9), from the same cache entry: with ``cached_only`` it answers None
 while the file is not cached; otherwise it loads robots.txt alone, in the caller's turn. It
 checks nothing, so it reads the file in every mode.
+
+``ComplianceChecker.origin_rules`` loads (or, with ``cached_only``, reads from the cache) all
+three files of an origin once as ``OriginRules``; its ``judge`` then decides for any number of
+the origin's URLs without I/O, with the result ``before_fetch`` would give. ``block_reason`` names
+why a report would block, and ``origin_of`` gives a URL's origin.
 """
 
 import asyncio
@@ -202,6 +207,29 @@ def _violation(report: ComplianceReport) -> ErrorCode | None:
     return None
 
 
+BlockReason = Literal["robots", "robots_unavailable", "tdm"]
+
+
+def block_reason(report: ComplianceReport) -> BlockReason | None:
+    """Why this report would block, whatever the mode (the order of ``_violation``)."""
+    if report.robots == "disallowed":
+        return "robots"
+    if report.robots == "unavailable":
+        return "robots_unavailable"
+    if report.tdm_reserved is True or report.noai or report.ai_txt == "disallowed":
+        return "tdm"
+    return None
+
+
+def origin_of(url: str) -> str | None:
+    """The origin of an http(s) URL as ``scheme://host[:port]`` (default port left out); None
+    for any other URL."""
+    try:
+        return _origin(url).base
+    except ValueError:
+        return None
+
+
 def blocking_code(report: ComplianceReport) -> ErrorCode | None:
     """The error code to fail with, or ``None``. Only ``enforce`` blocks."""
     return _violation(report) if report.mode == "enforce" else None
@@ -312,6 +340,28 @@ class _Entry:
     error: ErrorCode | None = None  # unavailable: the fetch error, one of _HOST_ERRORS
 
 
+@dataclass(frozen=True)
+class OriginRules:
+    """The three rule files of one origin as loaded, with robots.txt and ai.txt parsed: judges
+    any number of its URLs without further I/O."""
+
+    robots: _Entry
+    tdmrep: _Entry
+    ai: _Entry
+    robots_rules: Protego | None
+    ai_rules: Protego | None
+
+    def judge(self, url: str, mode: ComplianceMode) -> ComplianceReport:
+        """What ``ComplianceChecker.before_fetch`` reports for ``url`` from these files."""
+        if mode == "ignore":
+            return ComplianceReport(mode=mode, decision="skipped")
+        report = ComplianceReport(mode=mode)
+        report = _apply_robots(report, self.robots, self.robots_rules, url)
+        report = _apply_tdmrep(report, self.tdmrep, url)
+        report = _apply_ai_txt(report, self.ai, self.ai_rules, url)
+        return _decided(report)
+
+
 class ComplianceChecker:
     """Reads and caches the compliance files of an origin and judges URLs against them."""
 
@@ -382,11 +432,34 @@ class ComplianceChecker:
     async def _judge(
         self, mode: ComplianceMode, url: str, robots: _Entry, tdmrep: _Entry, ai: _Entry
     ) -> ComplianceReport:
-        report = ComplianceReport(mode=mode)
-        report = self._apply_robots(report, robots, await self._rules(robots), url)
-        report = self._apply_tdmrep(report, tdmrep, url)
-        report = self._apply_ai_txt(report, ai, await self._rules(ai), url)
-        return _decided(report)
+        return (await self._origin_rules(robots, tdmrep, ai)).judge(url, mode)
+
+    async def _origin_rules(self, robots: _Entry, tdmrep: _Entry, ai: _Entry) -> OriginRules:
+        return OriginRules(robots, tdmrep, ai, await self._rules(robots), await self._rules(ai))
+
+    async def origin_rules(self, url: str, *, cached_only: bool) -> OriginRules | None:
+        """The three rule files of ``url``'s origin, to judge many URLs of it without further
+        I/O (``OriginRules.judge``). With ``cached_only`` from the cache alone (one read; None
+        while any file is not cached, or the cache cannot be read); otherwise the missing files
+        are loaded one after another within one 10 s budget, as ``before_fetch`` does, so call
+        it in the host's turn. It reads in every compliance mode."""
+        origin = _origin(url)
+        if cached_only:
+            keys = [_cache_key(kind, origin) for kind in ("robots", "tdmrep", "ai")]
+            try:
+                raws = await self._valkey.mget(keys)
+            except (RedisError, OSError) as error:
+                _log.warning("compliance_cache_read_failed", error=type(error).__name__)
+                return None
+            robots, tdmrep, ai = (_parse_entry(raw) for raw in raws)
+            if robots is None or tdmrep is None or ai is None:
+                return None
+        else:
+            deadline = time.monotonic() + _FILE_TIMEOUT_SECONDS
+            robots = await self._load("robots", origin, _ROBOTS_PATH, deadline)
+            tdmrep = await self._load("tdmrep", origin, _TDMREP_PATH, deadline)
+            ai = await self._load("ai", origin, _AI_TXT_PATH, deadline)
+        return await self._origin_rules(robots, tdmrep, ai)
 
     def after_fetch(
         self, report: ComplianceReport, fetched: FetchResult, html: str | None
@@ -427,63 +500,6 @@ class ComplianceChecker:
 
         update["reasons"] = reasons
         return _decided(report.model_copy(update=update))
-
-    # --- applying one file to the report -------------------------------------------------------
-
-    def _apply_robots(
-        self, report: ComplianceReport, entry: _Entry, rules: Protego | None, url: str
-    ) -> ComplianceReport:
-        if entry.state == "absent":
-            return report.model_copy(update={"robots": "allowed"})
-        reasons = list(report.reasons)
-        if rules is None:
-            reasons.append("robots.txt could not be retrieved, so access cannot be confirmed.")
-            return report.model_copy(
-                update={"robots": "unavailable", "reasons": reasons, "robots_error": entry.error}
-            )
-        allowed = rules.can_fetch(url, PRODUCT_TOKEN)
-        if not allowed:
-            reasons.append(f"robots.txt disallows this URL for {PRODUCT_TOKEN}.")
-        return report.model_copy(
-            update={
-                "robots": "allowed" if allowed else "disallowed",
-                "crawl_delay": _crawl_delay(rules),
-                "reasons": reasons,
-            }
-        )
-
-    def _apply_tdmrep(self, report: ComplianceReport, entry: _Entry, url: str) -> ComplianceReport:
-        if entry.state == "absent":
-            return report
-        reasons = list(report.reasons)
-        matched = _match_tdmrep(entry.body, url) if entry.state == "found" else None
-        if matched is None:
-            if entry.state == "unavailable":
-                reasons.append("tdmrep.json could not be retrieved.")
-            return report.model_copy(update={"reasons": reasons})
-        if matched.reserved:
-            reasons.append("tdmrep.json reserves text and data mining rights for this URL.")
-        return report.model_copy(
-            update={
-                "tdm_reserved": matched.reserved,
-                "tdm_policy": matched.policy,
-                "tdm_source": "tdmrep.json",
-                "reasons": reasons,
-            }
-        )
-
-    def _apply_ai_txt(
-        self, report: ComplianceReport, entry: _Entry, rules: Protego | None, url: str
-    ) -> ComplianceReport:
-        reasons = list(report.reasons)
-        if rules is None:
-            if entry.state == "unavailable":
-                reasons.append("ai.txt could not be retrieved.")
-            return report.model_copy(update={"ai_txt": "absent", "reasons": reasons})
-        if rules.can_fetch(url, PRODUCT_TOKEN):
-            return report.model_copy(update={"ai_txt": "allowed"})
-        reasons.append(f"ai.txt disallows this URL for {PRODUCT_TOKEN}.")
-        return report.model_copy(update={"ai_txt": "disallowed", "reasons": reasons})
 
     async def _rules(self, entry: _Entry) -> Protego | None:
         """The parsed rules of a found robots.txt or ai.txt; None for any other entry."""
@@ -600,6 +616,67 @@ class ComplianceChecker:
             await self._valkey.set(key, payload, ex=ttl)
         except (RedisError, OSError) as error:
             _log.warning("compliance_cache_write_failed", error=type(error).__name__)
+
+
+# --- applying one file to the report -------------------------------------------------------------
+
+
+def _apply_robots(
+    report: ComplianceReport, entry: _Entry, rules: Protego | None, url: str
+) -> ComplianceReport:
+    if entry.state == "absent":
+        return report.model_copy(update={"robots": "allowed"})
+    reasons = list(report.reasons)
+    if rules is None:
+        reasons.append("robots.txt could not be retrieved, so access cannot be confirmed.")
+        return report.model_copy(
+            update={"robots": "unavailable", "reasons": reasons, "robots_error": entry.error}
+        )
+    allowed = rules.can_fetch(url, PRODUCT_TOKEN)
+    if not allowed:
+        reasons.append(f"robots.txt disallows this URL for {PRODUCT_TOKEN}.")
+    return report.model_copy(
+        update={
+            "robots": "allowed" if allowed else "disallowed",
+            "crawl_delay": _crawl_delay(rules),
+            "reasons": reasons,
+        }
+    )
+
+
+def _apply_tdmrep(report: ComplianceReport, entry: _Entry, url: str) -> ComplianceReport:
+    if entry.state == "absent":
+        return report
+    reasons = list(report.reasons)
+    matched = _match_tdmrep(entry.body, url) if entry.state == "found" else None
+    if matched is None:
+        if entry.state == "unavailable":
+            reasons.append("tdmrep.json could not be retrieved.")
+        return report.model_copy(update={"reasons": reasons})
+    if matched.reserved:
+        reasons.append("tdmrep.json reserves text and data mining rights for this URL.")
+    return report.model_copy(
+        update={
+            "tdm_reserved": matched.reserved,
+            "tdm_policy": matched.policy,
+            "tdm_source": "tdmrep.json",
+            "reasons": reasons,
+        }
+    )
+
+
+def _apply_ai_txt(
+    report: ComplianceReport, entry: _Entry, rules: Protego | None, url: str
+) -> ComplianceReport:
+    reasons = list(report.reasons)
+    if rules is None:
+        if entry.state == "unavailable":
+            reasons.append("ai.txt could not be retrieved.")
+        return report.model_copy(update={"ai_txt": "absent", "reasons": reasons})
+    if rules.can_fetch(url, PRODUCT_TOKEN):
+        return report.model_copy(update={"ai_txt": "allowed"})
+    reasons.append(f"ai.txt disallows this URL for {PRODUCT_TOKEN}.")
+    return report.model_copy(update={"ai_txt": "disallowed", "reasons": reasons})
 
 
 # --- helpers -------------------------------------------------------------------------------------

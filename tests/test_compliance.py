@@ -1498,3 +1498,61 @@ def test_robots_sitemaps_cached_only() -> None:
         "https://example.org/relative.xml",
     ]
     assert fetcher.calls == []
+
+
+# --- the rules of an origin, judged for many URLs ----------------------------------------------
+
+
+def origin_files() -> dict[str, FetchResult | FetchError]:
+    return {
+        ROBOTS: result(ROBOTS, "User-agent: *\nDisallow: /private\n"),
+        TDMREP: result(TDMREP, json.dumps([{"location": "/tdm/*", "tdm-reservation": 1}])),
+        AI_TXT: result(AI_TXT, "User-agent: *\nDisallow: /ai\n"),
+    }
+
+
+@pytest.mark.parametrize("mode", ["enforce", "report"])
+def test_origin_rules_judge_equals_before_fetch(mode: ComplianceMode) -> None:
+    checker, _, _ = make_checker(origin_files())
+
+    async def run() -> None:
+        for path in ("/", "/private/x", "/tdm/a", "/ai/b"):
+            url = f"{ORIGIN}{path}"
+            rules = await checker.origin_rules(url, cached_only=False)
+            assert rules is not None
+            assert rules.judge(url, mode) == await checker.before_fetch(url, mode)
+
+    asyncio.run(run())
+
+
+def test_origin_rules_cached_only_needs_all_three_files() -> None:
+    checker, fetcher, _ = make_checker(origin_files())
+
+    assert asyncio.run(checker.origin_rules(PAGE, cached_only=True)) is None
+    assert fetcher.calls == []
+
+    asyncio.run(checker.before_fetch(PAGE, "enforce"))
+    fetcher.calls.clear()
+    rules = asyncio.run(checker.origin_rules(PAGE, cached_only=True))
+
+    assert rules is not None
+    assert fetcher.calls == []
+
+
+def test_block_reason_maps_each_violation() -> None:
+    def report(**fields: Any) -> ComplianceReport:
+        return ComplianceReport(mode="enforce", **fields)
+
+    assert compliance.block_reason(report(robots="disallowed")) == "robots"
+    assert compliance.block_reason(report(robots="unavailable")) == "robots_unavailable"
+    assert compliance.block_reason(report(tdm_reserved=True)) == "tdm"
+    assert compliance.block_reason(report(noai=True)) == "tdm"
+    assert compliance.block_reason(report(ai_txt="disallowed")) == "tdm"
+    assert compliance.block_reason(report(robots="allowed", tdm_reserved=False)) is None
+    assert compliance.block_reason(ComplianceReport(mode="ignore", decision="skipped")) is None
+
+
+def test_origin_of() -> None:
+    assert compliance.origin_of("https://Example.org:443/a?b") == "https://example.org"
+    assert compliance.origin_of("http://example.org:8080/") == "http://example.org:8080"
+    assert compliance.origin_of("ftp://x/") is None
