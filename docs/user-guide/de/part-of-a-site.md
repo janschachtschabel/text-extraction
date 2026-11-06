@@ -84,8 +84,13 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   und „Typen:“ über dem Baum zählt sie. Eine gecrawlte Seite zeigt den Typ ihres Ergebnisses;
   eine Seite, die mit einem HTTP-Fehler gescheitert ist, hat keinen. Ein Sitemap-Eintrag oder
   eine nur verlinkte URL wurde nicht gelesen; deshalb wird ihr Typ allein aus ihrer URL geschätzt
-  und als „aus der URL geschätzt“ markiert. Eine URL, die nichts sagt, zeigt keinen Typ.
-  „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
+  und als „aus der URL geschätzt“ markiert. Die URL-Regeln kennen unter anderem Autorenseiten
+  (`author`, `autor`: „Übersicht“), weitere Namen für Kontaktseiten sowie datierte Pfade wie
+  `/2021/05/oer-camp/` oder WordPress-Adressen wie `?p=12` und `?page_id=12` („Inhalt“). Eine
+  URL, die keine Regel kennt, zeigt das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen;
+  der Typ zeigt sich beim Extrahieren“ (als Tooltip und für Screenreader), und die Zeile „Typen:“
+  zählt „Typ offen“ mit.
+    „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
   Anmeldung, Suche und Fehlerseiten und entfernt bei diesen und bei jeder gescheiterten Seite
   das Häkchen; eine URL ohne Typ wird markiert, außer ihre Seite ist gescheitert.
 
@@ -103,6 +108,18 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   eines Abschnitts überspringen sie; unter „Nur prüfen und melden“ oder „Prüfung aus“ lassen sie
   sich markieren, und die Schaltflächen schließen sie ein. Der Batch unter dem Baum beginnt mit der
   Stufe von „Website-Regeln“, mit der der Crawl lief.
+
+  Ein Abschnitt, der nur seine eigene Seite enthält, ist eine Zeile und kein Abschnitt mit einem
+  einzelnen Blatt. Jeden Abschnitt können Sie mit der Schaltfläche vor seinem Namen auf- und
+  zuklappen: Die oberste Ebene beginnt aufgeklappt, die Ebenen darunter beginnen zugeklappt.
+  „Alle aufklappen“ und „Alle zuklappen“ über dem Baum erledigen das für jeden Abschnitt. Ohne
+  JavaScript zeigt der Baum jeden Knoten aufgeklappt. Das Markieren eines Abschnitts markiert auch
+  jede wählbare URL darunter, zugeklappt oder nicht, und der Zähler zählt sie; „Alle auswählen“
+  tut dasselbe. Eine gesperrte URL in einem zugeklappten Abschnitt bleibt unter „Regeln der
+  Website einhalten“ unmarkiert.
+
+  Unter dem Baum zeigt die Liste „Soziale Medien“ die Profil-Links der Website (ihre Links zu
+  sozialen Netzwerken). Sie liegen außerhalb der Website und lassen sich nicht auswählen.
 - **Batch**: Fügen Sie die URLs ein, eine pro Zeile, und klicken Sie auf „Batch starten“. Mehr
   URLs, als ein Batch fasst, werden als mehrere Batches gesendet.
 - **Batch-Datei**: Wählen Sie eine CSV- oder JSON-Datei und klicken Sie auf „Datei prüfen“. Eine

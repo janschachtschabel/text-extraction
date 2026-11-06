@@ -16,6 +16,9 @@ Open the **Extract** tab, enter the URL and press "Extract".
 - "Site rules" (admins only): see [Site rules](site-rules.md).
 - "Metadata" (on by default), "Metadata, structured" (the schema.org and LRMI fields, read by
   name) and "Describe images".
+- "Also take a screenshot": the whole page as a PNG, taken in the browser, so the request takes
+  longer. The box is disabled with "Browser fallback: never" and while the browser is off; its
+  hint says why. Format and size are on the Screenshot tab.
 - "Options (JSON)", under "Advanced" (a closed section, with "Wait seconds before it becomes a
   job"), takes any further field of the REST body, such as `{"links": true}`.
 
@@ -23,7 +26,8 @@ The result starts with a status line (the status and the HTTP status), a toolbar
 figures: URL, language, words, mode used, page type and time. The toolbar has "Copy Markdown"
 (or "Copy text"; it appears only where the browser allows the clipboard), the download of the
 content and "Save response (JSON)", the whole answer as a file. Below come closed sections for the
-metadata, the links, the images and "What happened", a timeline of the checks, the fetch, the
+metadata, the links, the images, the removed server error messages (only when there are some),
+the screenshot (only when you asked for one) and "What happened", a timeline of the checks, the fetch, the
 render and the conversion (it opens by itself when there are warnings), and after them the
 content in a reading card (for Markdown, its source is under "Show source"). At the end, "As curl"
 is the same request for the shell and "Raw JSON" the whole answer.
@@ -81,7 +85,14 @@ Every answer is a [result envelope](usage.md#the-result-envelope): read `status`
 | `page_type` | What kind of page it is, by rules and without an LLM: its `type` (such as `content`, `listing`, `imprint` or `contact`) and the `signals` that say so (such as `url`, `title` or `schema_org`). HTML pages only; null for documents, media, plain text, Markdown, uploads and a page that failed with an HTTP error (4xx or 5xx). See [Page types and link categories](whole-site-and-metadata.md#page-types-and-link-categories). |
 | `links` | With `links: true`: the page's links, each with its `url`, `text`, `kind` (`internal`, `external` or `file`) and `category`, what it leads to (such as `imprint`, `social` or `download`). |
 | `compliance` | What the site rules found: the `mode`, the `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` and the TDM statement. See [Site rules](site-rules.md). |
-| `warnings` | What did not go as asked, although a result is returned, such as `browser_unavailable` (the browser did not take the page: the HTTP result). |
+| `warnings` | What did not go as asked, although a result is returned, such as `browser_unavailable` (the browser did not take the page: the HTTP result) or `server_errors_removed` (see below). |
+| `server_errors` | Error output of the site's server that was removed from the text, or null when there was none: a list of `level` (such as `Warning`, `Notice` or `Fatal error`), `message`, `file`, `line` and `count` (identical messages are merged), at most 50. |
+
+Some sites print PHP error output into their pages, such as `Warning: Undefined variable $x in
+/var/www/page.php on line 12`. The conversion removes it from the text (not inside `pre`, `code`,
+`textarea` and `script`, where such a line is part of the content), adds the warning
+`server_errors_removed` and lists the messages in `data.server_errors`. The playground shows
+them in a closed section after "Images".
 
 A licence has an `id` (such as `CC-BY-SA-4.0`), a `url`, a `label`, its `source` (a `rel-license`
 link, JSON-LD, microdata, RDFa, a meta tag or the page text) and a `confidence`. `mode_used`

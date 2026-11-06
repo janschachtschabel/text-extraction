@@ -9,6 +9,43 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+Package 17: the playground after the v0.1.4 test (plan
+[docs/superpowers/plans/2026-11-06-package-17-playground-after-v014-test.md](docs/superpowers/plans/2026-11-06-package-17-playground-after-v014-test.md)).
+The only API change is the new warning code `server_errors_removed` and the optional result field
+`data.server_errors`.
+
+### Added
+
+- PHP error output that a site prints into its pages (`Warning`, `Notice`, `Deprecated`,
+  `Fatal error` and the like, "in /path.php on line N") is removed from the text, except inside
+  `pre`, `code`, `textarea` and `script`. The result carries the warning `server_errors_removed`
+  and the new optional field `data.server_errors` (level, message, file, line, count; at most 50,
+  identical messages merged; null when there are none). The playground lists them in a closed
+  section after "Images".
+- The site tree guesses the type of URLs that were not fetched from more rules: author pages
+  (`author`, `autor`) are listings, more contact names are contact pages, and dated paths
+  (`/YYYY/MM/slug`) and WordPress `?p=` and `?page_id=` addresses are content, marked as guessed.
+  A URL that no rule knows shows the badge "Type open" with its reason, and the types line counts
+  it.
+- The site tree lists the site's social media profile links in a "Social media" list below the
+  tree. They cannot be selected.
+- Every section of the site tree can be folded and unfolded (the top level starts open, the levels
+  below folded), with "Unfold all" and "Fold all". Without JavaScript the tree stays unfolded.
+- The extract form has the box "Also take a screenshot": a whole-page PNG taken in the browser,
+  shown in a closed "Screenshot" section of the result. The box is disabled with "Browser
+  fallback: never" and while the browser is off.
+
+### Changed
+
+- In the site tree a section that holds only its own page is one row.
+- The playground's settings are a card, and the result area shows an empty card until a result
+  arrives.
+
+### Fixed
+
+- Inline content in a block whose first child is an inline element or a `<br>` stays one
+  paragraph, with its spaces, instead of falling apart into pieces.
+
 ## [0.1.4] - 2026-11-06
 
 Package 16: robots marks in the site tree and the site rules switch (plan

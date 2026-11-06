@@ -376,7 +376,9 @@ Jedes Formular führt einen REST-Aufruf aus, mit denselben Prüfungen und demsel
 jeder Client. Das Ergebnis beginnt mit einer Statuszeile (dem Status, „maximale Extraktion (entsperrt)“ für eine
 Seite, die im Entsperrmodus geöffnet wurde, und dem HTTP-Status), darunter folgen eine Werkzeugleiste, eine
 Karte mit Kennzahlen (URL, Sprache, Wörter, verwendeter Modus, Seitentyp, Zeit) und der Inhalt in
-einer weißen Lesekarte. Metadaten, Links, Bilder und „Ablauf“ sind zugeklappte Abschnitte („Ablauf“
+einer weißen Lesekarte. Bis ein Ergebnis eintrifft, zeigt der Ergebnisbereich eine leere Karte.
+Die Einstellungen sind eine eigene Karte. Metadaten, Links, Bilder, entfernte Fehlermeldungen des
+Servers, der Screenshot (wenn einer aufgenommen wurde) und „Ablauf“ sind zugeklappte Abschnitte („Ablauf“
 öffnet sich von selbst, wenn es Warnungen gibt); bei Markdown steht der Quelltext unter „Quelltext
 anzeigen“. „Rohes JSON“ ist das ganze Envelope und „Als curl“ die Anfrage als `curl`-Befehl (mit
 `$API_KEY` anstelle Ihres Schlüssels). Die Werkzeugleiste bietet „Markdown kopieren“ (bei Text als
