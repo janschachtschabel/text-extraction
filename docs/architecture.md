@@ -161,7 +161,10 @@ add a note of its own):
 
 - Pages: `charset_mismatch` (the page or upload was declared UTF-8, by its header or a meta tag,
   but has fewer valid non-ASCII characters than invalid sequences: it is read as the guess
-  reads an undeclared page, windows-1252 or the legacy encoding its bytes fit; audit B2).
+  reads an undeclared page, windows-1252 or the legacy encoding its bytes fit; audit B2),
+  `server_errors_removed` (PHP error messages that the site printed into its own HTML, such as
+  `Warning: ... in /path/file.php on line 128`, were removed before extraction; text inside
+  `pre`, `code`, `textarea` and `script` is kept; package 17).
 - Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
   `action_<index>_failed`, `navigation_refused_non_get`, `consent_overlay_removed`,
   `screenshot_clipped`, `browser_bytes_capped`, `challenge_checkbox_clicked`,

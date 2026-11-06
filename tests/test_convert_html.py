@@ -395,3 +395,155 @@ def test_only_tables_nested_deeper_than_the_cap_lose_their_table_tag() -> None:
     shallow = BeautifulSoup(_nested_tables(cap), "html.parser")
     html_module.flatten_deep_tables(shallow)
     assert len(shallow.find_all("table")) == cap
+
+
+def _page(content: str) -> str:
+    return f"<html><body><main><h1>Inline runs</h1>{content}<p>{LONG}</p></main></body></html>"
+
+
+def test_inline_runs_after_br_stay_one_paragraph() -> None:
+    result = convert_html(_page("<div><br/>Start <b>b</b> danach</div>"), URL, "markdown")
+
+    assert "Start **b** danach" in result.content
+
+
+def test_leading_inline_element_keeps_spaces() -> None:
+    page = _page('<div><a href="https://e.org/z">W</a> danach text <b>x</b> mehr</div>')
+
+    result = convert_html(page, URL, "markdown")
+
+    assert "[W](https://e.org/z) danach text **x** mehr" in result.content
+
+
+def test_mixed_block_and_inline_children() -> None:
+    page = _page("<div><b>W</b>: msg<div>Inner <b>z</b> end</div>tail <i>t</i> after</div>")
+
+    content = convert_html(page, URL, "markdown").content
+
+    paragraphs = content.split("\n\n")
+    assert "**W**: msg" in paragraphs
+    assert "Inner **z** end" in paragraphs
+    assert "tail *t* after" in paragraphs
+    first = paragraphs.index("**W**: msg")
+    assert paragraphs.index("Inner **z** end") == first + 1
+    assert paragraphs.index("tail *t* after") == first + 2
+
+
+def _without_wrapping(page: str, fmt: OutputFormat, monkeypatch: pytest.MonkeyPatch) -> str:
+    with monkeypatch.context() as patched:
+        patched.setattr(html_module, "wrap_inline_runs", lambda soup: None)
+        return convert_html(page, URL, fmt).content
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "text", "html"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        # Ordinary prose in a <div>: no leading inline element, so nothing moves.
+        '<div>Text with a <a href="/l">link</a> and <b>bold</b> words.<br/>Second '
+        "<i>line</i> here.</div><div>Another <strong>block</strong> of text.</div>",
+        # Table cells keep their structure, even when a cell starts with an inline element.
+        "<table><tr><th><b>Name</b> of it</th><th>Value</th></tr>"
+        "<tr><td><a href='/x'>x</a> one</td><td><br/>two <b>2</b></td></tr></table>",
+        # Nothing inside <pre> moves.
+        "<pre><b>W</b>: code <i>x</i>\n<div><b>y</b> z</div></pre>",
+        # A <p> keeps its own structure.
+        "<p><b>W</b>: already <i>a</i> paragraph</p>",
+    ],
+    ids=["div-prose", "table-cells", "pre", "paragraph"],
+)
+def test_content_without_a_leading_inline_run_is_unchanged(
+    content: str, fmt: OutputFormat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = _page(content)
+
+    assert convert_html(page, URL, fmt).content == _without_wrapping(page, fmt, monkeypatch)
+
+
+def test_wrap_inline_runs_leaves_cells_pre_and_paragraphs_alone() -> None:
+    markup = (
+        "<table><tr><td><b>a</b> b</td><th><br/>c</th></tr></table>"
+        "<pre><b>d</b> e<div><b>f</b> g</div></pre><p><b>h</b> i</p>"
+    )
+    soup = BeautifulSoup(f"<html><body>{markup}</body></html>", "lxml")
+    before = str(soup)
+
+    html_module.wrap_inline_runs(soup)
+
+    assert str(soup) == before
+
+
+def test_wrap_inline_runs_wraps_each_run_and_drops_br_only_runs() -> None:
+    soup = BeautifulSoup(
+        "<html><body><section><br/> <b>a</b> b<br/>c<div>d</div> <br/> <div>e</div>"
+        "<i>f</i></section></body></html>",
+        "lxml",
+    )
+
+    html_module.wrap_inline_runs(soup)
+
+    section = soup.find("section")
+    assert section is not None
+    children = [child.name for child in section.find_all(recursive=False)]
+    assert children == ["p", "div", "div", "p"]
+    first = section.find("p")
+    assert first is not None
+    assert str(first) == "<p><b>a</b> b<br/>c</p>"  # the leading <br> and space are gone
+
+
+def test_wrap_inline_runs_handles_deep_nesting() -> None:
+    depth = 3000
+    soup = BeautifulSoup(
+        "<html><body>" + "<div><b>x</b> y" * depth + "</div>" * depth + "</body></html>",
+        "lxml",
+    )
+
+    started = time.perf_counter()
+    html_module.wrap_inline_runs(soup)
+
+    assert time.perf_counter() - started < 10
+    assert len(soup.find_all("p")) == depth
+
+
+PHP_PAGE = _page(
+    "<div class='x'>"
+    + "".join(
+        "<br />\n<b>Warning</b>:  Undefined array key "
+        f'"http://w3id.org/openeduhub/vocabs/discipline/{subject}" in '
+        "<b>/var/www/prod.210317/wp-content/themes/wir-lernen-online/front-page.php</b> on line "
+        "<b>128</b><br />\n"
+        for subject in ("Sport", "Kunst")
+    )
+    + "Mechatronik Germanistik</div>"
+)
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "text", "html"])
+def test_php_warnings_removed_and_reported(fmt: OutputFormat) -> None:
+    result = convert_html(PHP_PAGE, URL, fmt)
+
+    assert "Warning" not in result.content
+    assert "front-page.php" not in result.content
+    assert "Mechatronik Germanistik" in result.content
+    assert result.warnings.count("server_errors_removed") == 1
+    assert len(result.server_errors) == 2
+    assert all(error.level == "Warning" for error in result.server_errors)
+    assert result.server_errors[0].message.startswith("Undefined array key ")
+
+
+def test_php_warnings_removed_in_the_page_text_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(html_module, "extract", lambda *args, **kwargs: None)
+
+    result = convert_html(PHP_PAGE, URL, "markdown")
+
+    assert result.converter == "bs4"
+    assert "Warning" not in result.content
+    assert "Mechatronik Germanistik" in result.content
+    assert "server_errors_removed" in result.warnings
+
+
+def test_page_without_server_errors_has_no_warning() -> None:
+    result = convert_html(ARTICLE, URL, "markdown")
+
+    assert "server_errors_removed" not in result.warnings
+    assert result.server_errors == []
