@@ -192,6 +192,7 @@
   "tree.blocked.one": "{count} URL durch die Regeln der Website gesperrt: auswählbar nur mit „Nur prüfen und melden“ oder „Prüfung aus“.",
   "tree.blocked.other": "{count} URLs durch die Regeln der Website gesperrt: auswählbar nur mit „Nur prüfen und melden“ oder „Prüfung aus“.",
   "tree.unchecked": "Die Regeln von {origins} konnten nicht gelesen werden; ihre URLs sind nicht markiert.",
+  "tree.unchecked_more": "{count} weitere Websites wurden nicht geprüft.",
   "tree.select_all": "Alle auswählen",
   "tree.select_none": "Keine auswählen",
   "tree.skip_to_actions": "Zu den Aktionen nach dem Baum springen",

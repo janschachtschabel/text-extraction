@@ -1215,3 +1215,94 @@ def test_tree_tdm_reservation_is_marked(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert box_of(root, f"{ORIGIN}/tdm/a").get("data-blocked") == "tdm"
     assert box_of(root, f"{ORIGIN}/").get("data-blocked") is None
+
+
+OTHER_ORIGIN = "https://other.example"
+
+
+def two_origin_site() -> list[JobItem]:
+    return [
+        *rules_site(),
+        sitemap_item(2, f"{OTHER_ORIGIN}/sitemap.xml", [{"loc": f"{OTHER_ORIGIN}/p"}]),
+    ]
+
+
+def test_tree_rules_timeout_names_the_origin_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from text_extraction.ui import job_views
+
+    monkeypatch.setattr(job_views, "TREE_RULES_SECONDS", 0.05)
+    cancelled: list[str] = []
+    with running(rules_fetcher()) as client, capture_logs() as logs:
+
+        async def never(url: str) -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(url)
+                raise
+
+        monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", never)
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read; their URLs carry no mark."
+    ]
+    assert len(cancelled) == 1  # the pending load was cancelled
+    assert [log for log in logs if log["event"] == "tree_rules_timeout"][0]["origins"] == 1
+
+
+def test_tree_rules_exception_leaves_the_origin_unchecked_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with running(rules_fetcher()) as client, capture_logs() as logs:
+
+        async def broken(url: str) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", broken)
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read; their URLs carry no mark."
+    ]
+    failed = [log for log in logs if log["event"] == "tree_rules_failed"]
+    assert [(log["origin"], log["error_type"]) for log in failed] == [(ORIGIN, "RuntimeError")]
+
+
+def test_tree_rules_cap_loads_only_the_first_origins(monkeypatch: pytest.MonkeyPatch) -> None:
+    from text_extraction.ui import job_views
+
+    monkeypatch.setattr(job_views, "TREE_RULES_MAX_ORIGINS", 1)
+    loaded: list[str] = []
+    with running(rules_fetcher()) as client:
+        pipeline = cast(FastAPI, client.app).state.pipeline
+        real = pipeline.origin_rules
+
+        async def recording(url: str) -> Any:
+            loaded.append(url)
+            return await real(url)
+
+        monkeypatch.setattr(pipeline, "origin_rules", recording)
+        root = rules_tree(monkeypatch, client, two_origin_site())
+
+    assert len(loaded) == 1 and loaded[0].startswith(ORIGIN)  # most leaves first
+    assert root.xpath("//p[@class='tree-unchecked']") == []  # not tried is not "could not be read"
+    assert texts(root, "//p[@class='tree-unchecked-more']") == ["1 more sites were not checked."]
+    assert box_of(root, BLOCKED_ONE).get("data-blocked") == "robots"
+
+
+def test_tree_failed_page_that_is_blocked_for_another_reason_stays_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items = [
+        page_item(0, f"{ORIGIN}/sammlung/", depth=0),
+        page_item(1, BLOCKED_ONE, error=ErrorCode.NOT_FOUND),
+    ]
+    with running(rules_fetcher()) as client:
+        root = rules_tree(monkeypatch, client, items)
+
+    box = box_of(root, BLOCKED_ONE)
+    assert box.get("data-blocked") == "robots"
+    assert box.get("data-failed") is not None

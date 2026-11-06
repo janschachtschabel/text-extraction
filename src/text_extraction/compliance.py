@@ -65,7 +65,7 @@ import re
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Literal
 from urllib.parse import urljoin, urlsplit
@@ -350,6 +350,12 @@ class OriginRules:
     ai: _Entry
     robots_rules: Protego | None
     ai_rules: Protego | None
+    # tdmrep.json parsed once (here, not per judged URL); None when absent or unreadable.
+    tdm_entries: "tuple[_TdmEntry, ...] | None" = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        entries = _parse_tdmrep(self.tdmrep.body) if self.tdmrep.state == "found" else None
+        object.__setattr__(self, "tdm_entries", entries)
 
     def judge(self, url: str, mode: ComplianceMode) -> ComplianceReport:
         """What ``ComplianceChecker.before_fetch`` reports for ``url`` from these files."""
@@ -357,7 +363,7 @@ class OriginRules:
             return ComplianceReport(mode=mode, decision="skipped")
         report = ComplianceReport(mode=mode)
         report = _apply_robots(report, self.robots, self.robots_rules, url)
-        report = _apply_tdmrep(report, self.tdmrep, url)
+        report = _apply_tdmrep(report, self.tdmrep, self.tdm_entries, url)
         report = _apply_ai_txt(report, self.ai, self.ai_rules, url)
         return _decided(report)
 
@@ -644,11 +650,16 @@ def _apply_robots(
     )
 
 
-def _apply_tdmrep(report: ComplianceReport, entry: _Entry, url: str) -> ComplianceReport:
+def _apply_tdmrep(
+    report: ComplianceReport,
+    entry: _Entry,
+    entries: "tuple[_TdmEntry, ...] | None",
+    url: str,
+) -> ComplianceReport:
     if entry.state == "absent":
         return report
     reasons = list(report.reasons)
-    matched = _match_tdmrep(entry.body, url) if entry.state == "found" else None
+    matched = _match_tdmrep(entries, url) if entries is not None else None
     if matched is None:
         if entry.state == "unavailable":
             reasons.append("tdmrep.json could not be retrieved.")
@@ -765,6 +776,13 @@ def _crawl_delay(rules: Protego) -> float | None:
 
 
 @dataclass(frozen=True)
+class _TdmEntry:
+    location: str
+    reserved: bool
+    policy: str | None
+
+
+@dataclass(frozen=True)
 class _TdmMatch:
     reserved: bool
     policy: str | None
@@ -808,16 +826,16 @@ def _location_matches(pattern: str, target: str) -> bool:
     return target.find(last, position) >= 0
 
 
-def _match_tdmrep(body: str, url: str) -> _TdmMatch | None:
-    """The first tdmrep.json entry that covers ``url`` and states a reservation."""
+def _parse_tdmrep(body: str) -> "tuple[_TdmEntry, ...] | None":
+    """The entries of a tdmrep.json body that state a reservation, in file order; None when the
+    body is not a JSON list."""
     try:
         entries = json.loads(body)
     except (ValueError, RecursionError):
         return None
     if not isinstance(entries, list):
         return None
-    parts = urlsplit(url)
-    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    parsed: list[_TdmEntry] = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
@@ -825,8 +843,17 @@ def _match_tdmrep(body: str, url: str) -> _TdmMatch | None:
         reserved = _parse_reservation(entry.get("tdm-reservation"))
         if not isinstance(location, str) or reserved is None:
             continue
-        if _location_matches(location, target):
-            return _TdmMatch(reserved, _policy(entry.get("tdm-policy")))
+        parsed.append(_TdmEntry(location, reserved, _policy(entry.get("tdm-policy"))))
+    return tuple(parsed)
+
+
+def _match_tdmrep(entries: "tuple[_TdmEntry, ...]", url: str) -> _TdmMatch | None:
+    """The first parsed entry that covers ``url``."""
+    parts = urlsplit(url)
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    for entry in entries:
+        if _location_matches(entry.location, target):
+            return _TdmMatch(entry.reserved, entry.policy)
     return None
 
 

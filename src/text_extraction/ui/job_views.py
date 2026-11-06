@@ -17,6 +17,7 @@ Every outcome is answered with HTTP 200 and a fragment, so htmx swaps it."""
 import asyncio
 import math
 import re
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -685,36 +686,53 @@ def _add_all(builder: TreeBuilder, items: Iterable[JobItem]) -> None:
 
 
 # The site tree judges the leaves of at most this many origins (most leaves first) against their
-# rule files, all loads together within this many seconds.
+# rule files, all loads together within this many seconds; judging the leaves then takes at most
+# TREE_JUDGE_SECONDS (the origins not judged in time are unchecked).
 TREE_RULES_MAX_ORIGINS: Final = 20
 TREE_RULES_SECONDS: Final = 12
+TREE_JUDGE_SECONDS: Final = 5
 
 
-async def _origin_rules(pipeline: Pipeline, url: str) -> OriginRules | None:
+async def _origin_rules(pipeline: Pipeline, origin: str, url: str) -> OriginRules | None:
     """The rules of ``url``'s origin; None when they cannot be loaded."""
     try:
         return await pipeline.origin_rules(url)
-    except Exception:  # a rule file that cannot be read marks nothing
+    except Exception as error:  # a rule file that cannot be read marks nothing
+        _log.warning("tree_rules_failed", origin=origin, error_type=type(error).__name__)
         return None
 
 
 async def _tree_rules(pipeline: Pipeline, tree: SiteTree) -> SiteTree:
     """``tree`` with its leaves marked that the rules of their origin block under ``enforce``:
     the rules of the first ``TREE_RULES_MAX_ORIGINS`` origins are loaded concurrently within
-    ``TREE_RULES_SECONDS`` (loads still pending then are cancelled); an origin whose load fails
-    or times out counts as not read (``SiteTree.unchecked``)."""
+    ``TREE_RULES_SECONDS`` (loads still pending then are cancelled, also when the request itself
+    is cancelled); an origin whose load fails or times out counts as not read
+    (``SiteTree.unchecked``), one past the cap as not tried (``SiteTree.unchecked_more``)."""
     origins = list(leaf_origins(tree).items())[:TREE_RULES_MAX_ORIGINS]
-    loads = {origin: asyncio.ensure_future(_origin_rules(pipeline, url)) for origin, url in origins}
-    if loads:
-        await asyncio.wait(loads.values(), timeout=TREE_RULES_SECONDS)
+    loads = {
+        origin: asyncio.ensure_future(_origin_rules(pipeline, origin, url))
+        for origin, url in origins
+    }
     rules: dict[str, OriginRules | None] = {}
-    for origin, load in loads.items():
-        if load.done() and not load.cancelled():
-            rules[origin] = load.result()
-        else:
+    try:
+        if loads:
+            await asyncio.wait(loads.values(), timeout=TREE_RULES_SECONDS)
+        timed_out = 0
+        for origin, load in loads.items():
+            if load.done() and not load.cancelled():
+                rules[origin] = load.result()
+            else:
+                timed_out += 1
+                rules[origin] = None
+        if timed_out:
+            _log.warning("tree_rules_timeout", origins=timed_out)
+    finally:
+        pending = [load for load in loads.values() if not load.done()]
+        for load in pending:
             load.cancel()
-            rules[origin] = None
-    return await asyncio.to_thread(mark_blocked, tree, rules)
+        await asyncio.gather(*pending, return_exceptions=True)
+    deadline = time.monotonic() + TREE_JUDGE_SECONDS
+    return await asyncio.to_thread(mark_blocked, tree, rules, deadline)
 
 
 async def site_tree_view(request: Request, settings: Settings) -> Response:
@@ -760,6 +778,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "access_preset": preset,
         "tree_mode": tree.crawl_mode if tree.crawl_mode in access.modes else access.default,
         "unchecked_origins": [Code(origin) for origin in tree.unchecked],
+        "unchecked_more": tree.unchecked_more,
         "browser_enabled": settings.browser_enabled,
     }
     html = await asyncio.to_thread(templates.get_template("tree.html").render, context)

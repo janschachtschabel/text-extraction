@@ -31,6 +31,7 @@ Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a
 page is the leaf ``/`` inside it, and a query string makes a leaf of its own. Children are in
 name order."""
 
+import time
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -126,7 +127,8 @@ class SiteTree:
     ``type_counts`` the shown URLs of each page type, most first (then in the order of
     ``PageType``), without the URLs that have no type. ``crawl_mode`` is the compliance mode
     of the crawl (none when no item says), ``blocked`` the leaves with a block reason and
-    ``unchecked`` the origins whose leaves could not be judged (`mark_blocked`)."""
+    ``unchecked`` the origins tried whose leaves could not be judged and ``unchecked_more`` the
+    number of origins not tried (`mark_blocked`)."""
 
     roots: list[TreeNode]
     urls: int
@@ -135,6 +137,7 @@ class SiteTree:
     crawl_mode: ComplianceMode | None = None
     blocked: int = 0
     unchecked: tuple[str, ...] = ()
+    unchecked_more: int = 0
 
 
 @dataclass
@@ -356,18 +359,34 @@ def leaf_origins(tree: SiteTree) -> dict[str, str]:
     return {origin: first[origin] for origin in sorted(first, key=lambda o: (-counts[o], o))}
 
 
-def mark_blocked(tree: SiteTree, rules: Mapping[str, OriginRules | None]) -> SiteTree:
-    """``tree`` with every leaf marked that its origin's rules block under ``enforce`` (a
-    leaf the crawl marked keeps its reason). ``rules`` maps an origin (as `leaf_origins` gives
-    it) to its rules; the origins without rules, or with none, are ``unchecked``. Pure: the
-    nodes are updated in place."""
+def mark_blocked(
+    tree: SiteTree, rules: Mapping[str, OriginRules | None], deadline: float | None = None
+) -> SiteTree:
+    """``tree`` with every leaf marked that its origin's rules block under ``enforce``. ``rules``
+    maps an origin (as `leaf_origins` gives it) to its rules, ``None`` for an origin that was
+    tried and could not be read (``SiteTree.unchecked``); an origin absent from it was not tried
+    (``SiteTree.unchecked_more`` counts them). Where the origin's rules are known, the current
+    judgement decides; the crawl's own reason stays only for ``tdm`` (a page's ``noai`` is known
+    only after its fetch) and for unchecked origins. ``deadline`` (a ``time.monotonic`` value)
+    bounds the work: origins with a leaf not judged by then are ``unchecked``. Pure: the nodes
+    are updated in place."""
     blocked = 0
+    cut: set[str] = set()
     for node in _leaves(tree):
-        if node.blocked is None and node.url is not None:
-            origin = origin_of(node.url)
-            known = rules.get(origin) if origin is not None else None
-            if known is not None:
-                node.blocked = block_reason(known.judge(node.url, "enforce"))
+        origin = origin_of(node.url) if node.url is not None else None
+        known = rules.get(origin) if origin is not None else None
+        if known is not None and node.url is not None and origin is not None:
+            if deadline is not None and time.monotonic() >= deadline:
+                cut.add(origin)
+            else:
+                judged = block_reason(known.judge(node.url, "enforce"))
+                node.blocked = node.blocked if judged is None and node.blocked == "tdm" else judged
         blocked += node.blocked is not None
-    unchecked = tuple(origin for origin in leaf_origins(tree) if rules.get(origin) is None)
-    return replace(tree, blocked=blocked, unchecked=unchecked)
+    origins = leaf_origins(tree)
+    unchecked = tuple(o for o in origins if o in rules and (rules[o] is None or o in cut))
+    return replace(
+        tree,
+        blocked=blocked,
+        unchecked=unchecked,
+        unchecked_more=sum(1 for o in origins if o not in rules),
+    )

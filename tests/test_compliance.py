@@ -1556,3 +1556,27 @@ def test_origin_of() -> None:
     assert compliance.origin_of("https://Example.org:443/a?b") == "https://example.org"
     assert compliance.origin_of("http://example.org:8080/") == "http://example.org:8080"
     assert compliance.origin_of("ftp://x/") is None
+
+
+def test_origin_rules_parse_tdmrep_json_once_for_many_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    entries = [{"location": f"/p{i}/*", "tdm-reservation": 0} for i in range(2000)]
+    entries.append({"location": "/tdm/*", "tdm-reservation": 1})
+    files = origin_files()
+    files[TDMREP] = result(TDMREP, json.dumps(entries))
+    checker, _, _ = make_checker(files)
+    rules = asyncio.run(checker.origin_rules(PAGE, cached_only=False))
+    assert rules is not None
+
+    loads = 0
+    real_loads = json.loads
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        nonlocal loads
+        loads += 1
+        return real_loads(*args, **kwargs)
+
+    monkeypatch.setattr(compliance.json, "loads", counting)
+    reports = [rules.judge(f"{ORIGIN}/tdm/{i}", "enforce") for i in range(300)]
+
+    assert loads == 0  # parsed when the rules were built, not per judged URL
+    assert all(report.tdm_reserved is True for report in reports)

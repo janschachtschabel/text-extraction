@@ -560,3 +560,10 @@ def test_blocked_from_cache() -> None:
     assert reported is False
     assert allowed is False
     assert hooks.urls() == []  # the cache alone
+
+
+def test_pipeline_origin_rules_answers_none_for_a_url_without_an_http_origin() -> None:
+    hooks = Hooks(robots())
+
+    assert hooks.origin_rules("ftp://example.org/file") is None
+    assert hooks.urls() == []

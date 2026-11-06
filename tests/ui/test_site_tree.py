@@ -2,6 +2,7 @@
 merged by seen key, pages first, capped at ``UI_TREE_MAX_URLS``."""
 
 import asyncio
+import time
 from typing import Any, cast
 
 from fakeredis import FakeAsyncRedis
@@ -357,7 +358,9 @@ def test_mark_blocked_names_origins_without_rules() -> None:
     marks = {node.url: node.blocked for node in _leaves(marked)}
     assert marks == {f"{ORIGIN}/a": "robots", f"{other}/p": None}
     assert (marked.blocked, marked.unchecked) == (1, (other,))
-    assert mark_blocked(tree, {ORIGIN: rules}).unchecked == (other,)
+    # An origin that was not tried is counted, not named.
+    not_tried = mark_blocked(tree, {ORIGIN: rules})
+    assert (not_tried.unchecked, not_tried.unchecked_more) == ((), 1)
 
 
 def test_leaf_origins_orders_by_leaf_count() -> None:
@@ -374,3 +377,47 @@ def test_leaf_origins_orders_by_leaf_count() -> None:
         "https://b.example": "https://b.example/1",
         "https://a.example": "https://a.example/1",
     }
+
+
+def test_mark_blocked_current_judgement_replaces_a_stale_crawl_reason() -> None:
+    stale = _with_compliance(
+        page_item(0, f"{ORIGIN}/a", error=ErrorCode.BLOCKED_BY_ROBOTS),
+        mode="enforce",
+        decision="blocked",
+        robots="unavailable",
+    )
+    tree = build_tree([stale], max_urls=10)
+    allowing = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /other\n")
+
+    marked = mark_blocked(tree, {ORIGIN: allowing})
+
+    assert [node.blocked for node in _leaves(marked)] == [None]
+    assert marked.blocked == 0
+
+
+def test_mark_blocked_keeps_a_crawl_tdm_reason_and_a_reason_of_an_unchecked_origin() -> None:
+    noai = _with_compliance(
+        page_item(0, f"{ORIGIN}/a"), mode="enforce", decision="blocked", noai=True
+    )
+    other = "https://other.example"
+    robots = _with_compliance(
+        page_item(1, f"{other}/b"), mode="enforce", decision="blocked", robots="disallowed"
+    )
+    tree = build_tree([noai, robots], max_urls=10)
+    allowing = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /other\n")
+
+    marked = mark_blocked(tree, {ORIGIN: allowing, other: None})
+
+    marks = {node.url: node.blocked for node in _leaves(marked)}
+    assert marks == {f"{ORIGIN}/a": "tdm", f"{other}/b": "robots"}
+
+
+def test_mark_blocked_deadline_leaves_the_rest_unchecked() -> None:
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+
+    marked = mark_blocked(tree, {ORIGIN: rules}, deadline=time.monotonic() - 1)
+
+    assert marked.unchecked == (ORIGIN,)
+    assert marked.blocked == 0
+    assert all(node.blocked is None for node in _leaves(marked))

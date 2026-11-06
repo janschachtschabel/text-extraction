@@ -8,6 +8,9 @@
   {%- if tree.unchecked %}
   <p class="tree-unchecked">{{ t("tree.unchecked", origins=unchecked_origins) }}</p>
   {%- endif %}
+  {%- if tree.unchecked_more %}
+  <p class="tree-unchecked-more">{{ t("tree.unchecked_more", count=tree.unchecked_more) }}</p>
+  {%- endif %}
   {%- if tree.type_counts %}
   <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
   {%- endif %}
@@ -29,7 +32,7 @@
         {#- The type badge sits in the label, so a screen reader names it with the checkbox. A
         failed page is marked, so "Select content pages" leaves it out (ruling P14-R9); a URL the site's rules block is not a failed page, so "Select content pages" takes
         it with the mode that allows it (package 16). #}
-        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and not node.blocked %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
+        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and node.error_code not in ("blocked_by_robots", "tdm_reserved") %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
         {%- if node.url and node.page_type %} <span class="page-type{% if node.type_guessed %} page-type-guessed{% endif %}">{{ t("page_type." ~ node.page_type) }}{% if node.type_guessed %} <span class="type-guessed">({{ t("tree.type_guessed") }})</span>{% endif %}</span>{% endif %}
         {%- if node.url and node.blocked %} <span class="blocked-badge" data-blocked="{{ node.blocked }}" title="{{ t('tree.blocked_reason.' ~ node.blocked) }}">{{ t("tree.blocked_badge." ~ node.blocked) }}<span class="visually-hidden">: {{ t("tree.blocked_reason." ~ node.blocked) }}</span></span>{% endif %}</label>
         {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
