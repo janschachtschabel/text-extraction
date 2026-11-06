@@ -305,7 +305,10 @@ def wrap_inline_runs(soup: BeautifulSoup) -> None:
     container starts with an inline element or a ``<br>`` (see ``_RUN_CONTAINERS``).
 
     A run is a maximal sequence of text, inline elements and ``<br>``; whitespace and ``<br>``
-    at its edges, and a run of nothing else, are dropped. An element that holds a block
+    at its edges are dropped. Only a run with text of the container's own is wrapped
+    (``<b>Fach:</b> Mathematik``): adjacent inline elements alone (``<a>…</a><span>…</span>``
+    in a teaser, date and subject spans on a card) stay as they are, as Trafilatura reads them
+    apart or drops them. An element that holds a block
     (``<a><div>``) is no inline element here. A container that starts with text is left alone,
     so ordinary prose keeps its paragraphs. One pass over the tree, without recursion."""
     pending: list[Tag] = [soup]
@@ -358,6 +361,8 @@ def _wrap_runs(soup: BeautifulSoup, container: Tag) -> None:
 def _wrap(
     soup: BeautifulSoup, container: Tag, children: list[PageElement], begin: int, stop: int
 ) -> None:
+    if not any(_is_text(children[index]) for index in range(begin, stop)):
+        return  # no text of the container's own: teaser links, card meta, key-value spans
     content = [index for index in range(begin, stop) if _has_content(children[index])]
     # Whitespace and <br> before the first and after the last content go: a paragraph's edges
     # need no line break, and a run of nothing else between blocks is dropped.
@@ -377,6 +382,10 @@ def _wrap(
 def _has_content(node: PageElement) -> bool:
     if isinstance(node, Tag):
         return node.name != "br"
+    return _is_text(node)
+
+
+def _is_text(node: PageElement) -> bool:
     return type(node) is NavigableString and bool(node.strip())
 
 

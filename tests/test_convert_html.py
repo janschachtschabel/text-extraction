@@ -417,6 +417,25 @@ def test_leading_inline_element_keeps_spaces() -> None:
     assert "[W](https://e.org/z) danach text **x** mehr" in result.content
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("<div><b>Fach:</b> Mathematik</div>", "**Fach:** Mathematik"),
+        (
+            "<div><i>Hinweis:</i> Das Material ist frei.</div>",
+            "*Hinweis:* Das Material ist frei.",
+        ),
+    ],
+)
+def test_a_leading_label_stays_on_the_line_of_its_text(
+    content: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = _page(content)
+
+    assert expected in convert_html(page, URL, "markdown").content
+    assert expected not in _without_wrapping(page, "markdown", monkeypatch)
+
+
 def test_mixed_block_and_inline_children() -> None:
     page = _page("<div><b>W</b>: msg<div>Inner <b>z</b> end</div>tail <i>t</i> after</div>")
 
@@ -465,6 +484,50 @@ def test_content_without_a_leading_inline_run_is_unchanged(
     assert convert_html(page, URL, fmt).content == _without_wrapping(page, fmt, monkeypatch)
 
 
+TEASERS = (
+    "<html><body>"
+    + "".join(
+        f'<div><a href="/m{index}">Material {index} zur Bruchrechnung</a>'
+        "<span>Ein kurzer Text über Brüche.</span></div>"
+        for index in range(5)
+    )
+    + "</body></html>"
+)
+CARDS = _page(
+    "".join(
+        f"<div class=card><span>12.05.2024</span><span>Mathematik</span><h3>Karte {index}</h3>"
+        f"<p>{LONG}</p></div>"
+        for index in range(4)
+    )
+)
+KEY_VALUES = (
+    "<html><body><h1>Daten</h1>"
+    + "".join(
+        f"<div><span>Feld {index}</span><span>Wert {index}</span></div>" for index in range(5)
+    )
+    + f"<p>{LONG}</p></body></html>"
+)
+SENTENCES = (
+    "<html><body><div><span>Ein erster Satz, der hier steht und gelesen wird.</span>"
+    "<span>Ein zweiter Satz, der danach kommt.</span></div>"
+    "<p>Noch ein Absatz mit etwas Text.</p></body></html>"
+)
+
+
+@pytest.mark.parametrize("fmt", ["markdown", "text", "html"])
+@pytest.mark.parametrize(
+    "page",
+    [TEASERS, CARDS, KEY_VALUES, SENTENCES],
+    ids=["teasers", "card-meta", "key-values", "sentences-in-spans"],
+)
+def test_a_run_of_inline_elements_without_own_text_is_not_wrapped(
+    page: str, fmt: OutputFormat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Adjacent inline elements with no text of the container between them (teaser links,
+    # card meta, key-value rows) are no prose run: wrapping them glued them together.
+    assert convert_html(page, URL, fmt).content == _without_wrapping(page, fmt, monkeypatch)
+
+
 def test_wrap_inline_runs_leaves_cells_pre_paragraphs_lists_and_quotes_alone() -> None:
     markup = (
         "<table><tr><td><b>a</b> b</td><th><br/>c</th></tr></table>"
@@ -479,10 +542,10 @@ def test_wrap_inline_runs_leaves_cells_pre_paragraphs_lists_and_quotes_alone() -
     assert str(soup) == before
 
 
-def test_wrap_inline_runs_wraps_each_run_and_drops_br_only_runs() -> None:
+def test_wrap_inline_runs_wraps_only_runs_with_own_text() -> None:
     soup = BeautifulSoup(
         "<html><body><section><br/> <b>a</b> b<br/>c<div>d</div> <br/> <div>e</div>"
-        "<i>f</i></section></body></html>",
+        "<i>f</i><span>g</span></section></body></html>",
         "lxml",
     )
 
@@ -491,7 +554,8 @@ def test_wrap_inline_runs_wraps_each_run_and_drops_br_only_runs() -> None:
     section = soup.find("section")
     assert section is not None
     children = [child.name for child in section.find_all(recursive=False)]
-    assert children == ["p", "div", "div", "p"]
+    # The <br>-only run and the run of elements without text of the section stay as they are.
+    assert children == ["p", "div", "br", "div", "i", "span"]
     first = section.find("p")
     assert first is not None
     assert str(first) == "<p><b>a</b> b<br/>c</p>"  # the leading <br> and space are gone
