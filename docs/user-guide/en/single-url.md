@@ -89,10 +89,11 @@ Every answer is a [result envelope](usage.md#the-result-envelope): read `status`
 | `server_errors` | Error output of the site's server that was removed from the text, or null when there was none: a list of `level` (such as `Warning`, `Notice` or `Fatal error`), `message`, `file`, `line` and `count` (identical messages are merged), at most 50. |
 
 Some sites print PHP error output into their pages, such as `Warning: Undefined variable $x in
-/var/www/page.php on line 12`. The conversion removes it from the text (not inside `pre`, `code`,
-`textarea` and `script`, where such a line is part of the content), adds the warning
-`server_errors_removed` and lists the messages in `data.server_errors`. The playground shows
-them in a closed section after "Images".
+/var/www/page.php on line 12`. The conversion removes such a message from the text when it starts a
+line, as PHP writes it. A message quoted inside a sentence stays, and so does one inside `pre`,
+`code`, `kbd`, `samp`, `var`, `tt`, `textarea` and `script`, where it is part of the content. For a
+removed message the conversion adds the warning `server_errors_removed` and lists the messages in
+`data.server_errors`. The playground shows them in a closed section after "Images".
 
 A licence has an `id` (such as `CC-BY-SA-4.0`), a `url`, a `label`, its `source` (a `rel-license`
 link, JSON-LD, microdata, RDFa, a meta tag or the page text) and a `confidence`. `mode_used`

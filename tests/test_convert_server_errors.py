@@ -89,13 +89,35 @@ def test_strips_plain_text_php_errors() -> None:
     assert "After the errors." in text
 
 
-def test_strips_a_message_inside_a_line_of_text_and_keeps_the_rest() -> None:
-    soup = _soup("<p>Start Deprecated: Function x() is deprecated in /a/b.inc on line 12 end</p>")
+def test_keeps_a_message_inside_a_line_of_text() -> None:
+    # PHP starts every message on a line of its own; one in the middle of a line is quoted.
+    text = "Start Deprecated: Function x() is deprecated in /a/b.inc on line 12 end"
+    soup = _soup(f"<p>{text}</p>")
+
+    assert strip_server_errors(soup) == []
+    assert soup.get_text() == text
+
+
+def test_keeps_a_message_quoted_in_prose() -> None:
+    text = (
+        "Ich bekomme Warning: Undefined variable $x in /var/www/html/index.php on line 5 "
+        "beim Aufruf."
+    )
+    soup = _soup(f"<p>{text}</p>")
+
+    assert strip_server_errors(soup) == []
+    assert soup.get_text() == text
+
+
+def test_strips_a_message_on_a_line_of_its_own_after_text() -> None:
+    soup = _soup(
+        "<div>Start<br/>  Deprecated: Function x() is deprecated in /a/b.inc on line 12</div>"
+    )
 
     assert strip_server_errors(soup) == [
         ServerError("Deprecated", "Function x() is deprecated", "/a/b.inc", 12)
     ]
-    assert " ".join(soup.get_text().split()) == "Start end"
+    assert soup.get_text().strip() == "Start"
 
 
 def test_every_label_is_recognised() -> None:
@@ -124,11 +146,13 @@ def test_keeps_php_error_text_in_code_and_pre() -> None:
         f"<pre>{message}</pre>"
         f"<pre><b>Warning</b>:  foo in <b>/var/www/x.php</b> on line <b>3</b></pre>"
         f"<textarea>{message}</textarea>"
+        f"<div><samp>{message}</samp></div><div><kbd>{message}</kbd></div>"
+        f"<div><var>{message}</var></div><div><tt>{message}</tt></div>"
     )
 
     assert strip_server_errors(soup) == []
 
-    assert soup.get_text().count("/var/www/x.php") == 4
+    assert soup.get_text().count("/var/www/x.php") == 8
 
 
 def test_keeps_prose_that_mentions_warnings() -> None:
@@ -154,7 +178,7 @@ def test_linear_on_hostile_input() -> None:
 
 
 def test_linear_on_many_labels_close_to_a_line_number() -> None:
-    chunk = "Warning: " * 100 + " in /" * 100 + "x on line 1 "
+    chunk = "\nWarning: " * 100 + " in /" * 100 + "x on line 1 "
 
     def page(size: int) -> str:
         return "<div>" + chunk * size + "</div>"
@@ -204,7 +228,7 @@ def test_a_long_message_is_cut_and_its_whitespace_collapsed() -> None:
 
 def test_many_messages_in_one_text_node_take_linear_time() -> None:
     def page(size: int) -> str:
-        return "<div>" + "Notice: a in /a.php on line 1 " * size + "</div>"
+        return "<div>" + "Notice: a in /a.php on line 1\n" * size + "</div>"
 
     soup = _soup(page(5_000))
     assert strip_server_errors(soup) == [ServerError("Notice", "a", "/a.php", 1, count=5_000)]

@@ -7,9 +7,9 @@ line 128``). Such a message is the server's, not the page's content.
 
 The scan reads the text of each block, its inline children included (a message in the
 ``html_errors`` form spans ``<b>`` elements and the text between them), and anchors on the
-label: every candidate costs a few binary searches, so the work stays linear in the page.
-Text inside ``pre``, ``code``, ``textarea`` and ``script`` is never touched; an article that
-quotes a PHP warning keeps it.
+label at the start of a line: every candidate costs a few binary searches, so the work stays
+linear in the page. A message inside a line of prose is a quotation and stays, and so does text
+inside ``pre``, ``code``, ``kbd``, ``samp``, ``var``, ``tt``, ``textarea`` and ``script``.
 """
 
 import re
@@ -27,9 +27,12 @@ SERVER_ERRORS_REMOVED_WARNING: Final = "server_errors_removed"
 MAX_LISTED_ERRORS: Final = 50  # distinct messages returned; removal itself has no cap
 MAX_MESSAGE_CHARS: Final = 300  # of a returned message
 
+# PHP writes "\n" (or "<br />\n") before every label, so a label counts only at the start of a
+# line of the block's text (a <br> and a block boundary read as "\n"); one inside a sentence
+# is quoted. "^" holds only after a "\n", so each line's leading blanks are read once.
 _LABEL = re.compile(
-    r"(?<!\w)(?:PHP )?(?P<level>Warning|Notice|Deprecated|Fatal error|Parse error"
-    r"|Strict Standards|Recoverable fatal error|Catchable fatal error):[^\S\n]+"
+    r"(?m:^)[^\S\n]*(?P<label>(?:PHP )?(?P<level>Warning|Notice|Deprecated|Fatal error"
+    r"|Parse error|Strict Standards|Recoverable fatal error|Catchable fatal error)):[^\S\n]+"
 )
 _ON_LINE = re.compile(r" on line (\d+)")
 _IN_PATH = re.compile(r" in (?:/|[A-Za-z]:\\)")  # a path starts with "/" or a drive letter
@@ -39,7 +42,7 @@ _NON_SPACE = re.compile(r"\S")
 _EXTENSIONS = (".php", ".inc", ".phtml")
 _MAX_MESSAGE = 1000
 _MAX_PATH = 500
-_SKIPPED = frozenset({"pre", "code", "textarea", "script"})
+_SKIPPED = frozenset({"pre", "code", "kbd", "samp", "script", "textarea", "tt", "var"})
 
 # A block's text, piece by piece: a text node, a <br> or a boundary (a nested block or a
 # skipped element), which reads as a line break.
@@ -139,7 +142,7 @@ def _messages(text: str) -> list[_Found]:
     paths = [match.start() for match in _IN_PATH.finditer(text)]
     found: list[_Found] = []
     for label in _LABEL.finditer(text):
-        start, message = label.start(), label.end()
+        start, message = label.start("label"), label.end()
         if found and start < found[-1].end:
             continue
         index = bisect_left(line_starts, message)

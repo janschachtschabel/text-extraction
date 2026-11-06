@@ -91,11 +91,13 @@ Jede Antwort ist ein [Ergebnis-Envelope](usage.md#das-ergebnis-envelope): Lesen 
 | `warnings` | Was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa `browser_unavailable` (der Browser hat die Seite nicht übernommen: das HTTP-Ergebnis) oder `server_errors_removed` (siehe unten). |
 | `server_errors` | Fehlerausgabe des Servers der Website, die aus dem Text entfernt wurde, oder null, wenn es keine gab: eine Liste mit `level` (etwa `Warning`, `Notice` oder `Fatal error`), `message`, `file`, `line` und `count` (gleiche Meldungen werden zusammengefasst), höchstens 50. |
 
-Manche Websites geben PHP-Fehlerausgaben in ihre Seiten aus, etwa `Warning: Undefined variable $x
-in /var/www/page.php on line 12`. Die Umwandlung entfernt sie aus dem Text (nicht innerhalb von
-`pre`, `code`, `textarea` und `script`, wo eine solche Zeile zum Inhalt gehört), fügt die Warnung
-`server_errors_removed` hinzu und listet die Meldungen in `data.server_errors`. Die Spielwiese
-zeigt sie in einem zugeklappten Abschnitt nach „Bilder“.
+Manche Websites geben PHP-Fehlerausgaben in ihre Seiten aus, etwa `Warning: Undefined variable $x in
+/var/www/page.php on line 12`. Die Umwandlung entfernt eine solche Meldung aus dem Text, wenn sie
+eine Zeile beginnt, wie PHP sie schreibt. Eine Meldung, die mitten in einem Satz zitiert wird,
+bleibt stehen, ebenso eine innerhalb von `pre`, `code`, `kbd`, `samp`, `var`, `tt`, `textarea` und
+`script`, wo sie zum Inhalt gehört. Für eine entfernte Meldung fügt die Umwandlung die Warnung
+`server_errors_removed` hinzu und listet die Meldungen in `data.server_errors`. Die Spielwiese zeigt
+sie in einem zugeklappten Abschnitt nach „Bilder“.
 
 Eine Lizenz hat eine `id` (etwa `CC-BY-SA-4.0`), eine `url`, ein `label`, ihre `source` (ein Link
 `rel-license`, JSON-LD, Microdata, RDFa, ein Meta-Tag oder der Text der Seite) und eine

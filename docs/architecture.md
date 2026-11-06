@@ -163,8 +163,10 @@ add a note of its own):
   but has fewer valid non-ASCII characters than invalid sequences: it is read as the guess
   reads an undeclared page, windows-1252 or the legacy encoding its bytes fit; audit B2),
   `server_errors_removed` (PHP error messages that the site printed into its own HTML, such as
-  `Warning: ... in /path/file.php on line 128`, were removed before extraction; text inside
-  `pre`, `code`, `textarea` and `script` is kept; package 17). The removed messages are listed
+  `Warning: ... in /path/file.php on line 128`, were removed before extraction; only a message
+  that starts a line of its block counts, as PHP writes one, so a message quoted inside a
+  sentence stays, and so does text inside `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
+  `textarea` and `script`; package 17). The removed messages are listed
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
   null when there were none), and the playground shows them in a fold.
 - Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
