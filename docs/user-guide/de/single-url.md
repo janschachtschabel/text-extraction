@@ -89,7 +89,7 @@ Jede Antwort ist ein [Ergebnis-Envelope](usage.md#das-ergebnis-envelope): Lesen 
 | `links` | Mit `links: true`: die Links der Seite, jeder mit `url`, `text`, `kind` (`internal`, `external` oder `file`) und `category`, wohin er führt (etwa `imprint`, `social` oder `download`). |
 | `compliance` | Was die Website-Regeln ergeben haben: der `mode`, die `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` und die TDM-Angabe. Siehe [Website-Regeln](site-rules.md). |
 | `warnings` | Was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa `browser_unavailable` (der Browser hat die Seite nicht übernommen: das HTTP-Ergebnis) oder `server_errors_removed` (siehe unten). |
-| `server_errors` | Fehlerausgabe des Servers der Website, die aus dem Text entfernt wurde, oder null, wenn es keine gab: eine Liste mit `level` (etwa `Warning`, `Notice` oder `Fatal error`), `message`, `file`, `line` und `count` (gleiche Meldungen werden zusammengefasst), höchstens 50. |
+| `server_errors` | Fehlerausgabe des Servers der Website, die aus dem Text entfernt wurde, oder null, wenn es keine gab oder eine Behandlung personenbezogener Daten angefordert wurde (die Meldungen sind Text der Seite): eine Liste mit `level` (etwa `Warning`, `Notice` oder `Fatal error`), `message`, `file`, `line` und `count` (gleiche Meldungen werden zusammengefasst), höchstens 50. |
 
 Manche Websites geben PHP-Fehlerausgaben in ihre Seiten aus, etwa `Warning: Undefined variable $x in
 /var/www/page.php on line 12`. Die Umwandlung entfernt eine solche Meldung aus dem Text, wenn sie

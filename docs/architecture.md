@@ -168,7 +168,9 @@ add a note of its own):
   sentence stays, and so does text inside `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
   `textarea` and `script`; package 17). The removed messages are listed
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
-  null when there were none), and the playground shows them in a fold.
+  null when there were none, and null when PII handling was requested: the messages are page
+  text that can name a person, and the PII step does not read them), and the playground shows
+  them in a fold.
 - Browser mode: `browser_unavailable` (no browser worker took the page; the fast result),
   `action_<index>_failed`, `navigation_refused_non_get`, `consent_overlay_removed`,
   `screenshot_clipped`, `browser_bytes_capped`, `challenge_checkbox_clicked`,

@@ -396,7 +396,8 @@ class ExtractResult(BaseModel):
         default=None,
         description="The site's server error messages (PHP warnings, notices, errors) removed "
         "from `content`, at most 50, identical ones merged with `count`; null when there were "
-        "none. Comes with the warning `server_errors_removed`.",
+        "none, and null when PII handling was requested (the messages are page text). Comes "
+        "with the warning `server_errors_removed`.",
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None

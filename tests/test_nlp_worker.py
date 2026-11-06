@@ -22,7 +22,7 @@ from structlog.testing import capture_logs
 
 from tests.pii.conftest import NlpModels, nlp_models  # noqa: F401 - the fixture of the nlp tests
 from tests.pii.test_child import HAS_NLP, nlp_test
-from tests.pii.test_fields import make_result
+from tests.pii.test_fields import SERVER_ERRORS, make_result
 from tests.test_worker import OWNER, free_port, scenario, status_of
 from text_extraction import model_store, nlp_worker
 from text_extraction.documents.pool import (
@@ -252,6 +252,23 @@ async def test_runner_masks_draft_and_reports() -> None:
     assert data.word_count == 20  # the extraction's, as it was
     assert draft.data is not None
     assert data.fingerprint == draft.data.fingerprint
+
+
+@scenario
+async def test_runner_redact_drops_the_server_errors_and_keeps_the_warning() -> None:
+    # A PHP message is page text: it can name a person (a variable, a home directory).
+    nlp = Nlp()
+    draft = draft_of(server_errors=SERVER_ERRORS, warnings=["server_errors_removed"])
+    job_id = await nlp.submit(draft, "redact")
+
+    await nlp.process_next()
+
+    result = await nlp.result(job_id)
+    data = data_of(result)
+    assert result.status == "success"
+    assert data.pii is not None
+    assert data.server_errors is None
+    assert data.warnings == ["server_errors_removed"]
 
 
 @scenario

@@ -86,7 +86,7 @@ Every answer is a [result envelope](usage.md#the-result-envelope): read `status`
 | `links` | With `links: true`: the page's links, each with its `url`, `text`, `kind` (`internal`, `external` or `file`) and `category`, what it leads to (such as `imprint`, `social` or `download`). |
 | `compliance` | What the site rules found: the `mode`, the `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` and the TDM statement. See [Site rules](site-rules.md). |
 | `warnings` | What did not go as asked, although a result is returned, such as `browser_unavailable` (the browser did not take the page: the HTTP result) or `server_errors_removed` (see below). |
-| `server_errors` | Error output of the site's server that was removed from the text, or null when there was none: a list of `level` (such as `Warning`, `Notice` or `Fatal error`), `message`, `file`, `line` and `count` (identical messages are merged), at most 50. |
+| `server_errors` | Error output of the site's server that was removed from the text, or null when there was none or when PII handling was requested (the messages are page text): a list of `level` (such as `Warning`, `Notice` or `Fatal error`), `message`, `file`, `line` and `count` (identical messages are merged), at most 50. |
 
 Some sites print PHP error output into their pages, such as `Warning: Undefined variable $x in
 /var/www/page.php on line 12`. The conversion removes such a message from the text when it starts a
