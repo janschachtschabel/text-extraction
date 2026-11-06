@@ -2,12 +2,18 @@
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
   {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
   <p class="tree-counts">{{ tn("tree.urls", tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
+  {%- if tree.blocked %}
+  <p class="tree-blocked">{{ tn("tree.blocked", tree.blocked) }}</p>
+  {%- endif %}
+  {%- if tree.unchecked %}
+  <p class="tree-unchecked">{{ t("tree.unchecked", origins=unchecked_origins) }}</p>
+  {%- endif %}
   {%- if tree.type_counts %}
   <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
   {%- endif %}
   {% if tree.roots %}
   {% set prefix = "tree" %}
-  <form id="tree-form" class="tree-form" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
+  <form id="tree-form" class="tree-form" data-access-mode="{{ tree_mode }}" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
     <p class="tree-tools">
       <button type="button" class="secondary" data-action="tree-all">{{ t("tree.select_all") }}</button>
       <button type="button" class="secondary" data-action="tree-none">{{ t("tree.select_none") }}</button>
@@ -21,9 +27,11 @@
       {%- for node in tree.roots recursive %}
       <li class="node node-{{ node.kind }}">
         {#- The type badge sits in the label, so a screen reader names it with the checkbox. A
-        failed page is marked, so "Select content pages" leaves it out (ruling P14-R9). #}
-        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.status == "failed" %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
-        {%- if node.url and node.page_type %} <span class="page-type{% if node.type_guessed %} page-type-guessed{% endif %}">{{ t("page_type." ~ node.page_type) }}{% if node.type_guessed %} <span class="type-guessed">({{ t("tree.type_guessed") }})</span>{% endif %}</span>{% endif %}</label>
+        failed page is marked, so "Select content pages" leaves it out (ruling P14-R9); a URL the site's rules block is not a failed page, so "Select content pages" takes
+        it with the mode that allows it (package 16). #}
+        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and not node.blocked %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
+        {%- if node.url and node.page_type %} <span class="page-type{% if node.type_guessed %} page-type-guessed{% endif %}">{{ t("page_type." ~ node.page_type) }}{% if node.type_guessed %} <span class="type-guessed">({{ t("tree.type_guessed") }})</span>{% endif %}</span>{% endif %}
+        {%- if node.url and node.blocked %} <span class="blocked-badge" data-blocked="{{ node.blocked }}" title="{{ t('tree.blocked_reason.' ~ node.blocked) }}">{{ t("tree.blocked_badge." ~ node.blocked) }}<span class="visually-hidden">: {{ t("tree.blocked_reason." ~ node.blocked) }}</span></span>{% endif %}</label>
         {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
         {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
         {%- if node.depth is not none %} <span class="depth">{{ t("tree.depth", depth=node.depth) }}</span>{% endif %}

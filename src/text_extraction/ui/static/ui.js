@@ -305,14 +305,24 @@
     }
   }
 
-  // A section's box from its children's: checked when all are, indeterminate when some are.
+  // A section's box from its children's: checked when all enabled ones are, indeterminate when
+  // some are; a section with no enabled box below it is unchecked (package 16: a URL the site's
+  // rules block is disabled under "Respect the site's rules").
   function settle(item) {
     var boxes = Array.prototype.map.call(
       item.querySelectorAll(":scope > ul > li"),
       nodeBox
-    ).filter(Boolean);
+    ).filter(function (box) { return box && !box.disabled; });
     var own = nodeBox(item);
-    if (!own || boxes.length === 0) {
+    if (!own || own.disabled || item.querySelector(":scope > ul") === null) {
+      return;
+    }
+    if (boxes.length === 0) {
+      if (own.name === "url") {
+        return;  // a page with children keeps its own box
+      }
+      own.checked = false;
+      own.indeterminate = false;
       return;
     }
     var checked = boxes.filter(function (box) { return box.checked; }).length;
@@ -335,26 +345,74 @@
   function selectContent(form, excluded) {
     var skip = excluded.split(/\s+/).filter(Boolean);
     form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
+      if (box.disabled) {
+        return;
+      }
       box.checked =
         !box.hasAttribute("data-failed") &&
         skip.indexOf(box.getAttribute("data-page-type") || "") < 0;
       box.indeterminate = false;
     });
-    // Children before their parents: the reverse of document order.
-    var items = form.querySelectorAll(".tree li");
-    for (var index = items.length - 1; index >= 0; index -= 1) {
-      settle(items[index]);
-    }
+    settleAll(form);
     countSelected(form);
   }
 
   function selectAll(form, value) {
     form.querySelectorAll(".tree input[type=checkbox]").forEach(function (box) {
+      if (box.disabled) {
+        return;
+      }
       box.checked = value;
       box.indeterminate = false;
     });
+    settleAll(form);
     countSelected(form);
   }
+
+  // Every section from its children, children before their parents.
+  function settleAll(form) {
+    var items = form.querySelectorAll(".tree li");
+    for (var index = items.length - 1; index >= 0; index -= 1) {
+      settle(items[index]);
+    }
+  }
+
+  // The mode the tree is judged under: the checked "Site rules" step, else the crawl's.
+  function treeMode(form) {
+    var radio = form.querySelector("input[name=access]:checked");
+    return radio ? radio.getAttribute("data-mode") : form.getAttribute("data-access-mode");
+  }
+
+  // Under "enforce" a URL the site's rules block cannot be selected; under any other mode it can.
+  function applyTreeMode(form) {
+    var enforce = treeMode(form) === "enforce";
+    form.querySelectorAll(".tree input[data-blocked]").forEach(function (box) {
+      box.disabled = enforce;
+      if (enforce) {
+        box.checked = false;
+      }
+    });
+    settleAll(form);
+    countSelected(form);
+  }
+
+  document.addEventListener("htmx:load", function (event) {
+    var root = event.target;
+    if (!(root instanceof Element)) {
+      return;
+    }
+    var forms = root.matches("form.tree-form") ? [root] : root.querySelectorAll("form.tree-form");
+    Array.prototype.forEach.call(forms, applyTreeMode);
+  });
+
+  document.addEventListener("change", function (event) {
+    var radio = event.target;
+    if (radio instanceof HTMLInputElement && radio.name === "access" && radio.form) {
+      if (radio.form.classList.contains("tree-form")) {
+        applyTreeMode(radio.form);
+      }
+    }
+  });
 
   document.addEventListener("change", function (event) {
     var box = event.target;
@@ -363,6 +421,9 @@
     }
     var item = box.closest("li");
     item.querySelectorAll("ul input[type=checkbox]").forEach(function (inner) {
+      if (inner.disabled) {
+        return;
+      }
       inner.checked = box.checked;
       inner.indeterminate = false;
     });

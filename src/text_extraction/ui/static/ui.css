@@ -147,6 +147,7 @@ textarea {
 .state,
 table.items .badge,
 .page-type,
+.blocked-badge,
 .skipped,
 .found {
   display: inline-flex;
@@ -1177,7 +1178,7 @@ ul.tree .found {
 
 /* A label wraps its page-type badge below the name when the line is too narrow (audit U3);
    a label without a badge keeps its long name beside its checkbox. */
-ul.tree label.inline:has(.page-type) {
+ul.tree label.inline:has(.page-type, .blocked-badge) {
   flex-wrap: wrap;
 }
 
@@ -1201,6 +1202,18 @@ ul.tree .title {
   border: 1px solid transparent;
   background: var(--neutral-wash);
   color: var(--ink);
+}
+
+/* A leaf the site's rules block (package 16): the palette's warning pair; its label is dimmed
+   while the box is disabled. The reason is in the label's text for a screen reader. */
+.blocked-badge {
+  border: 1px solid transparent;
+  background: var(--warn-wash);
+  color: var(--warn);
+}
+
+ul.tree label.inline:has(input:disabled) .label {
+  color: var(--muted);
 }
 
 .page-type-guessed {

@@ -31,8 +31,10 @@ from starlette.responses import HTMLResponse, Response
 
 from text_extraction import jobs_api
 from text_extraction.auth import Principal, authenticate
+from text_extraction.compliance import OriginRules
 from text_extraction.errors import ServiceError
 from text_extraction.job_models import JobAccepted, JobItem, JobView
+from text_extraction.pipeline import Pipeline
 from text_extraction.ratelimit import count_used
 from text_extraction.settings import Settings
 from text_extraction.ui.answers import (
@@ -47,12 +49,25 @@ from text_extraction.ui.answers import (
     sent_keys,
     text_fields,
 )
-from text_extraction.ui.forms import OPERATIONS, OptionsError, access_offer, build_body
+from text_extraction.ui.forms import (
+    OPERATIONS,
+    OptionsError,
+    access_offer,
+    access_value,
+    build_body,
+)
 from text_extraction.ui.forward import Forwarded, forward
 from text_extraction.ui.i18n import Code, Message, count_message
 from text_extraction.ui.results import curl_line, render_result
 from text_extraction.ui.security import RUN_PREFIX, form_part_limit, ui_principal
-from text_extraction.ui.site_tree import FOUND_LABELS, NON_CONTENT_TYPES, SiteTree, TreeBuilder
+from text_extraction.ui.site_tree import (
+    FOUND_LABELS,
+    NON_CONTENT_TYPES,
+    SiteTree,
+    TreeBuilder,
+    leaf_origins,
+    mark_blocked,
+)
 from text_extraction.ui.templating import language_context, request_language, templates
 from text_extraction.ui.texts import error_text
 from text_extraction.ui.timeline import RequestedMode
@@ -669,11 +684,48 @@ def _add_all(builder: TreeBuilder, items: Iterable[JobItem]) -> None:
         builder.add(item)
 
 
+# The site tree judges the leaves of at most this many origins (most leaves first) against their
+# rule files, all loads together within this many seconds.
+TREE_RULES_MAX_ORIGINS: Final = 20
+TREE_RULES_SECONDS: Final = 12
+
+
+async def _origin_rules(pipeline: Pipeline, url: str) -> OriginRules | None:
+    """The rules of ``url``'s origin; None when they cannot be loaded."""
+    try:
+        return await pipeline.origin_rules(url)
+    except Exception:  # a rule file that cannot be read marks nothing
+        return None
+
+
+async def _tree_rules(pipeline: Pipeline, tree: SiteTree) -> SiteTree:
+    """``tree`` with its leaves marked that the rules of their origin block under ``enforce``:
+    the rules of the first ``TREE_RULES_MAX_ORIGINS`` origins are loaded concurrently within
+    ``TREE_RULES_SECONDS`` (loads still pending then are cancelled); an origin whose load fails
+    or times out counts as not read (``SiteTree.unchecked``)."""
+    origins = list(leaf_origins(tree).items())[:TREE_RULES_MAX_ORIGINS]
+    loads = {origin: asyncio.ensure_future(_origin_rules(pipeline, url)) for origin, url in origins}
+    if loads:
+        await asyncio.wait(loads.values(), timeout=TREE_RULES_SECONDS)
+    rules: dict[str, OriginRules | None] = {}
+    for origin, load in loads.items():
+        if load.done() and not load.cancelled():
+            rules[origin] = load.result()
+        else:
+            load.cancel()
+            rules[origin] = None
+    return await asyncio.to_thread(mark_blocked, tree, rules)
+
+
 async def site_tree_view(request: Request, settings: Settings) -> Response:
     """``GET /ui/run/site-tree?id=`` (P10-S20): the site job read through ``read_job`` in
     pages of 20 items until ``next_offset`` is null, kept as the tree's fields only, and shown
     as a tree of checkboxes; while the job runs, as a snapshot. One rate-limit hit per 500
-    items read (``TREE_ITEMS_PER_HIT``, a REST page, M4)."""
+    items read (``TREE_ITEMS_PER_HIT``, a REST page, M4). The leaves are then judged against the
+    rule files (robots.txt, TDMRep, ai.txt) of their origins, which are loaded once per origin
+    (`_tree_rules`: the 20 origins with most leaves, within 12 s in all; the others are
+    ``unchecked``); a leaf that ``enforce`` would block is marked and, while the form's "Site
+    rules" is ``enforce``, cannot be selected."""
     job_id = request.query_params.get("id") or ""
     if not job_id:
         return _form_error(request, NO_JOB)
@@ -694,6 +746,9 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     if read.kind != "site":
         return _form_error(request, NOT_A_SITE)
     tree: SiteTree = await asyncio.to_thread(builder.tree)
+    tree = await _tree_rules(request.app.state.pipeline, tree)
+    access = access_offer(principal.role, settings)
+    preset = access_value(access, tree.crawl_mode)
     context = {
         **language_context(request_language(request)),
         "job_id": job_id,
@@ -701,7 +756,10 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "snapshot": read.state != "completed",
         "found_labels": FOUND_LABELS,
         "non_content_types": NON_CONTENT_TYPES,
-        "access": access_offer(principal.role, settings),
+        "access": access,
+        "access_preset": preset,
+        "tree_mode": tree.crawl_mode if tree.crawl_mode in access.modes else access.default,
+        "unchecked_origins": [Code(origin) for origin in tree.unchecked],
         "browser_enabled": settings.browser_enabled,
     }
     html = await asyncio.to_thread(templates.get_template("tree.html").render, context)
