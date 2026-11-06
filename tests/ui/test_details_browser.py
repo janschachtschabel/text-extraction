@@ -108,7 +108,8 @@ _BADGE: Final = (
 # A wider face than the sandbox's: the runner's DejaVu Sans, which made the German tree scroll on
 # GitHub (package 17), spaced a tenth wider still to leave a margin for other fonts.
 _WIDER: Final = (
-    "() => { document.documentElement.style.setProperty('--font-ui', '\"DejaVu Sans\", sans-serif');"
+    "() => { document.documentElement.style"
+    ".setProperty('--font-ui', '\"DejaVu Sans\", sans-serif');"
     " document.querySelector('#result ul.tree').style.letterSpacing = '0.1em'; }"
 )
 
