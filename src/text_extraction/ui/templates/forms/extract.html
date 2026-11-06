@@ -12,6 +12,9 @@
     <p class="hint" id="extract-metadata-hint">{{ t("hint.metadata") }}</p>
     <label class="inline"><input type="checkbox" name="metadata_structured" value="on" aria-describedby="extract-metadata-structured-hint"> {{ t("form.metadata_structured") }}</label>
     <p class="hint" id="extract-metadata-structured-hint">{{ t("hint.metadata_structured") }}</p>
+    <label class="inline"><input type="checkbox" name="screenshot" value="on"{% if not browser_enabled %} disabled data-no-browser{% endif %} aria-describedby="extract-screenshot-hint extract-screenshot-fast-hint"> {{ t("form.screenshot") }}</label>
+    <p class="hint" id="extract-screenshot-hint">{{ t("hint.screenshot_also") }}</p>
+    <p class="hint" id="extract-screenshot-fast-hint"{% if browser_enabled %} hidden{% endif %}>{{ t("hint.screenshot_needs_browser") }}</p>
     <label class="inline"><input type="checkbox" name="describe_images" value="on" aria-describedby="extract-describe-images-hint"> {{ t("form.describe_images") }}</label>
     <p class="hint" id="extract-describe-images-hint">{{ t("hint.describe_images") }}</p>
   </fieldset>

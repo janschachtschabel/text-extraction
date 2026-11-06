@@ -111,8 +111,9 @@ def failing_ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
         yield url, origin
 
 
-def _settings() -> Settings:
+def _settings(**overrides: object) -> Settings:
     return Settings(
+        **overrides,  # type: ignore[arg-type]
         auth_mode="api_key",
         ui_enabled=True,
         rate_limit_per_minute=10_000,
@@ -365,3 +366,27 @@ def ui_small() -> Iterator[str]:
     )
     with serving(settings) as url:
         yield url
+
+
+def test_screenshot_box_follows_mode() -> None:
+    """The screenshot box needs the browser: with the mode "never" (fast) it is disabled and
+    unticked and its hint shows; with another mode it is usable again."""
+    with serving(_settings(browser_enabled=True)) as url, browsing(url) as (page, console):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        panel = page.locator("#panel-extract")
+        box = panel.locator("input[name=screenshot]")
+        hint = panel.locator("#extract-screenshot-fast-hint")
+        expect(box).to_be_enabled()
+        expect(hint).to_be_hidden()
+        box.check()
+
+        panel.locator("select[name=mode]").select_option("fast")
+        expect(box).to_be_disabled()
+        expect(box).not_to_be_checked()
+        expect(hint).to_be_visible()
+
+        panel.locator("select[name=mode]").select_option("auto")
+        expect(box).to_be_enabled()
+        expect(hint).to_be_hidden()
+    assert console == []

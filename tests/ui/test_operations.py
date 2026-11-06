@@ -178,6 +178,57 @@ def test_extract_body_from_the_form_fields() -> None:
     assert build_body("extract", {"url": PAGE})["metadata"] is False  # an unchecked box
 
 
+def test_extract_screenshot_box_sends_screenshot() -> None:
+    body = build_body("extract", fields(mode="auto", screenshot="on"))
+
+    assert body["screenshot"] is True
+    assert "screenshot_options" not in body
+
+
+def test_extract_screenshot_ignored_in_fast_mode() -> None:
+    # The API answers 422 for screenshot with mode fast, so the form sends nothing.
+    assert "screenshot" not in build_body("extract", fields(mode="fast", screenshot="on"))
+
+
+def test_extract_without_box_sends_no_screenshot() -> None:
+    assert "screenshot" not in build_body("extract", fields())
+
+
+def test_extract_result_shows_screenshot_in_a_fold() -> None:
+    uri = "data:image/png;base64," + base64.b64encode(PNG).decode()
+    root = tree(rendered(result_data(), screenshot=uri))
+
+    assert root.xpath("//div[@class='card shot']") == []
+    (fold,) = root.xpath("//details[contains(@class, 'fold')][.//img[@class='screenshot']]")
+    assert fold.get("open") is None
+    assert texts(fold, ".//summary") == [translate("en", "result.screenshot_title")]
+    assert fold.xpath(".//img[@class='screenshot']")[0].get("src") == uri
+    assert fold.xpath("preceding::dl[@class='facts']")
+
+    envelope = {"status": "success", "data": result_data(), "trace_id": "t"}
+    top = render_result(op="screenshot", http_status=200, envelope=envelope, screenshot=uri)
+    assert len(tree(top).xpath("//div[@class='card shot']/img[@class='screenshot']")) == 1
+    assert tree(top).xpath("//details[.//img[@class='screenshot']]") == []
+
+
+def test_extract_screenshot_box_disabled_without_browser() -> None:
+    def box(**settings: Any) -> Any:
+        with running(auth_mode="none", **settings) as client:
+            html = client.get("/ui?lang=en").text
+        (found,) = tree(html).xpath("//form[@id='extract-form']//input[@name='screenshot']")
+        return found, tree(html)
+
+    found, root = box(browser_enabled=False)
+    assert found.get("disabled") is not None
+    (hint,) = root.xpath("//*[@id='extract-screenshot-fast-hint']")
+    assert hint.get("hidden") is None
+    assert texts(hint, ".") == [translate("en", "hint.screenshot_needs_browser")]
+
+    found, root = box(browser_enabled=True)
+    assert found.get("disabled") is None
+    assert root.xpath("//*[@id='extract-screenshot-fast-hint']")[0].get("hidden") is not None
+
+
 def test_metadata_structured_checkbox() -> None:
     body = build_body("extract", fields(metadata_structured="on"))
 

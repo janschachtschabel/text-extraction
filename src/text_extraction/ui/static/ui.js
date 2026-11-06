@@ -17,6 +17,9 @@
  * Screenshot form: its "custom capture" fields are enabled only with the preset "custom" (without
  * this script they stay usable and the service ignores them for any other preset).
  *
+ * Extract form: the "Also take a screenshot" box needs the browser, so it is disabled and
+ * unticked while the mode is "fast" (the "never" choice), and the hint that says why is shown.
+ *
  * Copy (P15-R1, P15-S4): a result's "Copy" button (data-action=copy) is rendered hidden and
  * shown only where the clipboard API exists (a secure context); without this script it stays
  * hidden. It writes the text of the result's first pre.content (the source shown) to the
@@ -505,6 +508,42 @@
 
   document.addEventListener("DOMContentLoaded", initCapture);
   document.addEventListener("htmx:load", initCapture);
+
+  // The extract form's screenshot box is off while the mode is "fast" (the API refuses the pair).
+  function syncScreenshotBox(form) {
+    var mode = form.querySelector("#extract-mode");
+    var box = form.querySelector("input[name=screenshot]");
+    var hint = form.querySelector("#extract-screenshot-fast-hint");
+    if (!(mode && box && hint)) {
+      return;
+    }
+    if (box.hasAttribute("data-no-browser")) {
+      return;
+    }
+    var fast = mode.value === "fast";
+    box.disabled = fast;
+    if (fast) {
+      box.checked = false;
+    }
+    hint.hidden = !fast;
+  }
+
+  document.addEventListener("change", function (event) {
+    var select = event.target;
+    if (select instanceof HTMLSelectElement && select.id === "extract-mode") {
+      syncScreenshotBox(select.form);
+    }
+  });
+
+  function initScreenshotBox() {
+    var form = document.getElementById("extract-form");
+    if (form) {
+      syncScreenshotBox(form);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", initScreenshotBox);
+  document.addEventListener("htmx:load", initScreenshotBox);
 
   // The page's status line (ruling P12-S9).
   function announce(message) {
