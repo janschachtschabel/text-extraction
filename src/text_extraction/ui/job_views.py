@@ -741,9 +741,10 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
     as a tree of checkboxes; while the job runs, as a snapshot. One rate-limit hit per 500
     items read (``TREE_ITEMS_PER_HIT``, a REST page, M4). The leaves are then judged against the
     rule files (robots.txt, TDMRep, ai.txt) of their origins, which are loaded once per origin
-    (`_tree_rules`: the 20 origins with most leaves, within 12 s in all; the others are
-    ``unchecked``); a leaf that ``enforce`` would block is marked and, while the form's "Site
-    rules" is ``enforce``, cannot be selected."""
+    (`_tree_rules`: the ``TREE_RULES_MAX_ORIGINS`` origins with most leaves, loaded within
+    ``TREE_RULES_SECONDS`` in all and judged within ``TREE_JUDGE_SECONDS``; origins that fail or
+    run out of time are ``unchecked``, those past the cap are counted in ``unchecked_more``); a leaf that ``enforce`` would block is marked and, while the form's
+    "Site rules" is ``enforce``, cannot be selected."""
     job_id = request.query_params.get("id") or ""
     if not job_id:
         return _form_error(request, NO_JOB)

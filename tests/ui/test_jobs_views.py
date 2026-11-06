@@ -1200,7 +1200,8 @@ def test_tree_rules_not_read_are_named(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert root.xpath("//input[@data-blocked]") == []
     assert texts(root, "//p[@class='tree-unchecked']") == [
-        "The rules of https://example.org could not be read; their URLs carry no mark."
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
     ]
 
 
@@ -1246,7 +1247,8 @@ def test_tree_rules_timeout_names_the_origin_and_logs(monkeypatch: pytest.Monkey
 
     assert root.xpath("//input[@data-blocked]") == []
     assert texts(root, "//p[@class='tree-unchecked']") == [
-        "The rules of https://example.org could not be read; their URLs carry no mark."
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
     ]
     assert len(cancelled) == 1  # the pending load was cancelled
     assert next(log for log in logs if log["event"] == "tree_rules_timeout")["origins"] == 1
@@ -1265,7 +1267,8 @@ def test_tree_rules_exception_leaves_the_origin_unchecked_and_logs(
 
     assert root.xpath("//input[@data-blocked]") == []
     assert texts(root, "//p[@class='tree-unchecked']") == [
-        "The rules of https://example.org could not be read; their URLs carry no mark."
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
     ]
     failed = [log for log in logs if log["event"] == "tree_rules_failed"]
     assert [(log["origin"], log["error_type"]) for log in failed] == [(ORIGIN, "RuntimeError")]
@@ -1290,7 +1293,7 @@ def test_tree_rules_cap_loads_only_the_first_origins(monkeypatch: pytest.MonkeyP
     assert len(loaded) == 1
     assert loaded[0].startswith(ORIGIN)  # most leaves first
     assert root.xpath("//p[@class='tree-unchecked']") == []  # not tried is not "could not be read"
-    assert texts(root, "//p[@class='tree-unchecked-more']") == ["1 more sites were not checked."]
+    assert texts(root, "//p[@class='tree-unchecked-more']") == ["1 more site was not checked."]
     assert box_of(root, BLOCKED_ONE).get("data-blocked") == "robots"
 
 

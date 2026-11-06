@@ -3,10 +3,10 @@
 Deutsch: [Website-Regeln](../de/site-rules.md)
 
 By default the service respects a site's rules. Maximum extraction is for sites that allowed
-extraction by contract; it needs a key that may choose `compliance: ignore` (an admin, or any key
-where that is the operator's default) and the operator's switch. The checks can also be set for
-each run. This page explains the default, maximum extraction, the pause a host may ask for, and
-how to choose in the API, the MCP server and the playground.
+extraction by contract; only an admin may use it, and only where the operator switched it on. The
+checks can also be set for each run: a key that is allowed to choose it can switch them off with
+`compliance: ignore`. This page explains the default, maximum extraction, the pause a host may ask
+for, and how to choose in the API, the MCP server and the playground.
 
 ## Respect the site's rules
 
@@ -102,8 +102,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 ## With MCP
 
-The MCP client's key must be allowed to choose the value (see [Switch the checks per run](#switch-the-checks-per-run)). `compliance` goes into `options`, for example with
-`extract_url`:
+The MCP client's key must be allowed to choose the value (see
+[Switch the checks per run](#switch-the-checks-per-run)). `compliance` goes into `options`, for
+example with `extract_url`:
 
 ```json
 {"url": "https://example.org/partner-page", "options": {"compliance": "ignore"}}

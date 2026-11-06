@@ -3,11 +3,11 @@
 English: [Site rules](../en/site-rules.md)
 
 Standardmäßig beachtet der Dienst die Regeln einer Website. Die maximale Extraktion ist für
-Websites, die die Extraktion vertraglich erlaubt haben; sie braucht einen Schlüssel, der
-`compliance: ignore` wählen darf (ein Admin, oder jeder Schlüssel, wo das der Standard des
-Betreibers ist), und den Schalter des Betreibers. Die Prüfungen lassen sich auch pro Lauf
-einstellen. Diese Seite erklärt den Standard, die maximale Extraktion, die Pause, um die ein
-Host bitten kann, und wie Sie in der API, im MCP-Server und in der Spielwiese wählen.
+Websites, die die Extraktion vertraglich erlaubt haben; nur ein Admin darf sie nutzen, und nur dort,
+wo der Betreiber sie eingeschaltet hat. Die Prüfungen lassen sich auch pro Lauf einstellen: Ein
+Schlüssel, der es wählen darf, kann sie mit `compliance: ignore` abschalten. Diese Seite erklärt den
+Standard, die maximale Extraktion, die Pause, um die ein Host bitten kann, und wie Sie in der API,
+im MCP-Server und in der Spielwiese wählen.
 
 ## Die Regeln der Website beachten
 
@@ -108,8 +108,9 @@ nehmen `compliance` genauso. Eine Website-Struktur liest ihre Seiten nur über H
 
 ## Mit MCP
 
-Der Schlüssel des MCP-Clients muss den Wert wählen dürfen (siehe [Prüfung pro Lauf an- und abschalten](#prüfung-pro-lauf-an--und-abschalten)). `compliance` gehört in `options`,
-zum Beispiel bei `extract_url`:
+Der Schlüssel des MCP-Clients muss den Wert wählen dürfen (siehe
+[Prüfung pro Lauf an- und abschalten](#prüfung-pro-lauf-an--und-abschalten)). `compliance` gehört
+in `options`, zum Beispiel bei `extract_url`:
 
 ```json
 {"url": "https://example.org/partner-page", "options": {"compliance": "ignore"}}

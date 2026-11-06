@@ -23,8 +23,10 @@ when the URL says nothing (ruling P14-R8: a link's ``category`` is not used; it 
 A leaf can be marked as blocked (``TreeNode.blocked``, a ``BlockReason``): a crawled page by
 its own compliance report (`TreeBuilder.add`), then every other leaf by the view's judgement of
 its URL against its origin's rules under ``enforce`` (`mark_blocked`, which does no I/O: the
-caller loads the rules per origin, `leaf_origins`). Origins without rules are named
-(``SiteTree.unchecked``), and their leaves stay unmarked.
+caller loads the rules per origin, `leaf_origins`). Origins tried whose rules could not be
+read or judged in time (the caller's budgets, `mark_blocked`'s deadline) are named
+(``SiteTree.unchecked``); origins not tried (past the caller's cap) are counted
+(``SiteTree.unchecked_more``). Their leaves stay unmarked.
 
 Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a directory
 (its label ends in ``/``) and has no URL of its own; every URL is a leaf: a directory's own

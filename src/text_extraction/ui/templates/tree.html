@@ -9,7 +9,7 @@
   <p class="tree-unchecked">{{ t("tree.unchecked", origins=unchecked_origins) }}</p>
   {%- endif %}
   {%- if tree.unchecked_more %}
-  <p class="tree-unchecked-more">{{ t("tree.unchecked_more", count=tree.unchecked_more) }}</p>
+  <p class="tree-unchecked-more">{{ tn("tree.unchecked_more", tree.unchecked_more) }}</p>
   {%- endif %}
   {%- if tree.type_counts %}
   <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
