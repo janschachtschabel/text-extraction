@@ -18,7 +18,7 @@
 - The tree view gets fold buttons (progressive enhancement in `ui.js`), a "type open" badge and a social media list.
 - The workspace frames the settings as a card and shows an empty result card.
 - The extract form gets a "Also take a screenshot" box that sends the existing `screenshot: true`.
-- No REST, OpenAPI or MCP change besides the new warning code.
+- No REST, OpenAPI or MCP change besides the new warning code and the optional result field `server_errors` (Task 6).
 
 **Tech Stack:** Python 3.13, BeautifulSoup/lxml, Trafilatura 2.3, FastAPI, Jinja2, htmx, plain JS (`ui.js`), pytest, Playwright (Chromium) for `-m browser`, axe-core.
 
@@ -36,7 +36,7 @@
   - Every changed user doc in `docs/user-guide/en/` changes its partner in `docs/user-guide/de/` in the same task.
   - These pairs are checked by `tests/test_docs_i18n.py`, `tests/ui/test_i18n.py` and `scripts/check_translation_pairs.py`.
   - The German playground texts address the reader with „Sie“ or impersonal forms, as the existing `de.json` does; never „du“.
-- **API:** no REST, OpenAPI or MCP change except the new warning code `server_errors_removed`. It is documented where the other warning codes are listed: `extract_models.py` (the `warnings` description), `docs/architecture.md`, and the UI text `warning.server_errors_removed`.
+- **API:** no REST, OpenAPI or MCP change except the new warning code `server_errors_removed` and the optional result field `server_errors` (Task 6, Jan 2026-11-06 11:57). It is documented where the other warning codes are listed: `extract_models.py` (the `warnings` description), `docs/architecture.md`, and the UI text `warning.server_errors_removed`.
 - **Accessibility:**
   - Every new control has an accessible name.
   - The fold buttons carry `aria-expanded` and `aria-controls`.
@@ -67,9 +67,11 @@
 **Interfaces:**
 - Produces:
   - `SERVER_ERRORS_REMOVED_WARNING: Final = "server_errors_removed"` in `convert/server_errors.py`.
-  - `def strip_server_errors(soup: BeautifulSoup) -> int` in `convert/server_errors.py`: removes PHP error output in place and returns how many messages it removed.
+  - `@dataclass(frozen=True) class ServerError: level: str; message: str; file: str; line: int; count: int = 1` in `convert/server_errors.py` (amended 2026-11-06 for Task 6): `level` as written without a leading `PHP `, `message` whitespace-collapsed and cut to 300 characters.
+  - `def strip_server_errors(soup: BeautifulSoup) -> list[ServerError]` in `convert/server_errors.py`: removes PHP error output in place and returns the removed messages, identical ones merged with `count`, in first-seen order, at most 50 entries (the removal itself is not capped).
+  - `Conversion.server_errors: list[ServerError]` (default empty).
   - `def wrap_inline_runs(soup: BeautifulSoup) -> None` in `convert/html.py`: in place.
-  - `convert_html` adds `SERVER_ERRORS_REMOVED_WARNING` to `Conversion.warnings` once when `strip_server_errors` removed one or more messages.
+  - `convert_html` fills `Conversion.server_errors` and adds `SERVER_ERRORS_REMOVED_WARNING` to `Conversion.warnings` once when the list is not empty.
 
 **Root cause (reproduced on 2026-11-06 with Trafilatura 2.3.1):**
 - A block container (`div`, `section`, `article`, `main`, `aside`, `header`, `footer`, `li`, `blockquote`, `figure`, `figcaption`, `form`) whose first meaningful child is an inline element or a `<br>`, with no text before it, is split by Trafilatura. Every inline element becomes its own paragraph, and the space after it is lost:
@@ -286,12 +288,45 @@
 - [ ] **Step 4: Run** `uv run pytest tests/ui -q` and `uv run pytest -m browser tests/ui -q`. Everything PASSES, and axe is clean.
 - [ ] **Step 5: Commit** `feat(ui): take a screenshot along with an extraction`.
 
-### Task 6: Docs, changelog, package row
+### Task 6: The removed server errors in the result (API field and UI section)
+
+Jan, 2026-11-06 11:57: "die gefilterten php fehler können eventuell getrennt ausgewiesen werden". The removed messages are listed separately, not only counted. This adds one optional field to the API result; nothing else in the API changes.
+
+**Files:**
+- Modify: `src/text_extraction/extract_models.py` (new `ServerErrorInfo` model, `ExtractResult.server_errors`), `src/text_extraction/pipeline.py` (`_Processed.server_errors`, filled from `conversion.server_errors` in the HTML branch near line 2742, and passed on wherever an `ExtractResult` is built from a `_Processed`: near lines 1945, 2257 and 2603)
+- Modify: `src/text_extraction/ui/templates/result.html`, `src/text_extraction/ui/locales/en.json`, `de.json`
+- Modify: `docs/architecture.md` (one sentence beside the warning), the OpenAPI snapshot if the repo keeps one (`grep -rln "openapi" tests | head`)
+- Test: `tests/test_extract_models.py`, `tests/test_pipeline.py` (or the module that tests `_process` on HTML), `tests/ui/test_jobs_views.py` or the module that renders extract results
+
+**Interfaces:**
+- Consumes (Task 1): `ServerError(level: str, message: str, file: str, line: int, count: int)` and `Conversion.server_errors: list[ServerError]`.
+- Produces:
+  - `class ServerErrorInfo(BaseModel)` with the fields `level: str`, `message: str`, `file: str`, `line: int` and `count: int`. Its description: "An error message of the site's server (PHP) that was removed from the text; identical messages are counted once."
+  - `ExtractResult.server_errors: list[ServerErrorInfo] | None = None`. Its description: "The site's server error messages (PHP warnings, notices, errors) removed from `content`, at most 50, identical ones merged with `count`; null when there were none. Comes with the warning `server_errors_removed`." It is null, not an empty list, when nothing was removed, so existing results and cached entries stay the same.
+- **UI:**
+  - When `data["server_errors"]`, the result shows a closed `<details class="fold">` after "Images" and before "Timeline". Its summary is `tn("result.server_errors", total)`, where `total` is the sum of the counts.
+  - Inside it, a `<ul>` with one `<li>` per entry: `<code>{{ level }}</code> {{ message }}`, then `<span class="where">{{ t("result.server_error_where", file=file, line=line) }}</span>` and `×{{ count }}` when the count is above 1.
+- **Texts (en / de):**
+  - `result.server_errors.one`: "Server error message removed from the text ({count})" / „Fehlermeldung des Servers aus dem Text entfernt ({count})“.
+  - `result.server_errors.other`: "Server error messages removed from the text ({count})" / „Fehlermeldungen des Servers aus dem Text entfernt ({count})“.
+  - `result.server_error_where`: "in {file}, line {line}" / „in {file}, Zeile {line}“.
+
+- [ ] **Step 1: Write the failing tests**
+  - `test_extract_result_server_errors_default_none` (model).
+  - A pipeline test: an HTML page with two identical PHP warnings and one different warning gives an envelope whose `data.server_errors` has 2 entries. The first has `count == 2`. `warnings` contains `server_errors_removed`, and `content` contains no `Warning`.
+  - A page without server errors gives `data.server_errors is None`.
+  - UI: `test_extract_result_lists_server_errors`. An envelope with two entries renders the fold with the summary count 3 (2+1), both levels in `<code>`, and "line 128" / „Zeile 128“. Without the field there is no fold.
+- [ ] **Step 2: Run** them. They FAIL.
+- [ ] **Step 3: Implement.** Map `ServerError` to `ServerErrorInfo` in the pipeline (`None` when the list is empty).
+- [ ] **Step 4: Run** `uv run pytest tests/test_extract_models.py tests/test_pipeline.py tests/ui -q`, then `uv run pytest -q -x` and the OpenAPI tests. Everything PASSES. An OpenAPI snapshot is updated deliberately; say so in the report.
+- [ ] **Step 5: Commit** `feat: list the removed server error messages in the result`.
+
+### Task 7: Docs, changelog, package row
 
 **Files:**
 - Modify:
   - `docs/user-guide/en/part-of-a-site.md` and `de/` (folding, one-row sections, "type open", the guessed types, the social media list);
-  - `docs/user-guide/en/single-url.md` and `de/` (the screenshot box, and that PHP error output is removed, with the warning);
+  - `docs/user-guide/en/single-url.md` and `de/` (the screenshot box, and that PHP error output is removed, with the warning and the new section listing it);
   - `docs/user-guide/en/usage.md` and `de/` (the empty result card, if the page describes the layout);
   - `CHANGELOG.md` (`[Unreleased]`: Added, Changed, Fixed);
   - `docs/packages.md` (the contents row and the Status row 17, as for 16).
