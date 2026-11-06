@@ -1,10 +1,12 @@
 import time
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from bs4 import BeautifulSoup
 
+from tests.scaling import GROWTH_LIMIT, growth
 from text_extraction.convert import OutputFormat, convert_html, convert_plain, page_links
 from text_extraction.convert import html as html_module
 
@@ -495,18 +497,27 @@ def test_wrap_inline_runs_wraps_each_run_and_drops_br_only_runs() -> None:
     assert str(first) == "<p><b>a</b> b<br/>c</p>"  # the leading <br> and space are gone
 
 
+def _wrapping(body: Callable[[int], str]) -> Callable[[int], Callable[[], object]]:
+    """For ``growth``: a fresh page of the given size, and the wrapping to time on it."""
+
+    def prepare(size: int) -> Callable[[], object]:
+        soup = BeautifulSoup(f"<html><body>{body(size)}</body></html>", "lxml")
+        return lambda: html_module.wrap_inline_runs(soup)
+
+    return prepare
+
+
+def _nested(depth: int) -> str:
+    return "<div><b>x</b> y" * depth + "</div>" * depth
+
+
 def test_wrap_inline_runs_handles_deep_nesting() -> None:
-    depth = 3000
-    soup = BeautifulSoup(
-        "<html><body>" + "<div><b>x</b> y" * depth + "</div>" * depth + "</body></html>",
-        "lxml",
-    )
+    soup = BeautifulSoup(f"<html><body>{_nested(3000)}</body></html>", "lxml")
 
-    started = time.perf_counter()
-    html_module.wrap_inline_runs(soup)
+    html_module.wrap_inline_runs(soup)  # no recursion: no RecursionError
 
-    assert time.perf_counter() - started < 10
-    assert len(soup.find_all("p")) == depth
+    assert len(soup.find_all("p")) == 3000
+    assert growth(_wrapping(_nested), 500) < GROWTH_LIMIT
 
 
 PHP_PAGE = _page(
@@ -553,16 +564,17 @@ def test_page_without_server_errors_has_no_warning() -> None:
     assert result.server_errors == []
 
 
-def test_wrap_inline_runs_takes_linear_time_in_a_wide_container() -> None:
-    soup = BeautifulSoup(
-        "<html><body><div>" + "<b>x</b> y " * 100_000 + "</div></body></html>", "lxml"
-    )
+def _runs(size: int) -> str:
+    return "<div>" + "<b>x</b> y<hr/>" * size + "</div>"
 
-    started = time.perf_counter()
+
+def test_wrap_inline_runs_takes_linear_time_in_a_wide_container() -> None:
+    soup = BeautifulSoup(f"<html><body>{_runs(1_000)}</body></html>", "lxml")
+
     html_module.wrap_inline_runs(soup)
 
-    assert time.perf_counter() - started < 2
     div = soup.find("div")
     assert div is not None
-    assert [child.name for child in div.find_all(recursive=False)] == ["p"]
-    assert len(div.contents) == 1
+    assert [child.name for child in div.find_all(recursive=False)] == ["p", "hr"] * 1_000
+    # The quadratic version (bs4 finding each moved node's position) grew about 15-fold.
+    assert growth(_wrapping(_runs), 1_000) < GROWTH_LIMIT

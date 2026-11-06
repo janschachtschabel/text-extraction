@@ -1,7 +1,8 @@
-import time
+from collections.abc import Callable
 
 from bs4 import BeautifulSoup
 
+from tests.scaling import GROWTH_LIMIT, growth
 from text_extraction.convert.server_errors import (
     MAX_LISTED_ERRORS,
     MAX_MESSAGE_CHARS,
@@ -24,6 +25,16 @@ def php_warning(subject: str, line: int = 128) -> str:
 
 def _soup(body: str) -> BeautifulSoup:
     return BeautifulSoup(f"<html><body>{body}</body></html>", "lxml")
+
+
+def _stripping(body: Callable[[int], str]) -> Callable[[int], Callable[[], object]]:
+    """For ``growth``: a fresh page of the given size, and the strip to time on it."""
+
+    def prepare(size: int) -> Callable[[], object]:
+        soup = _soup(body(size))
+        return lambda: strip_server_errors(soup)
+
+    return prepare
 
 
 def test_the_warning_code() -> None:
@@ -135,23 +146,20 @@ def test_keeps_a_message_without_a_php_path() -> None:
 
 
 def test_linear_on_hostile_input() -> None:
-    soup = _soup("<div><b>Warning</b>: " + "a " * 200_000 + "</div>")
+    def page(size: int) -> str:
+        return "<div><b>Warning</b>: " + "a " * size + "</div>"
 
-    started = time.perf_counter()
-    removed = strip_server_errors(soup)
-
-    assert time.perf_counter() - started < 1
-    assert removed == []
+    assert strip_server_errors(_soup(page(200_000))) == []
+    assert growth(_stripping(page), 50_000) < GROWTH_LIMIT
 
 
 def test_linear_on_many_labels_close_to_a_line_number() -> None:
     chunk = "Warning: " * 100 + " in /" * 100 + "x on line 1 "
-    soup = _soup("<div>" + chunk * 200 + "</div>")
 
-    started = time.perf_counter()
-    strip_server_errors(soup)
+    def page(size: int) -> str:
+        return "<div>" + chunk * size + "</div>"
 
-    assert time.perf_counter() - started < 1
+    assert growth(_stripping(page), 20) < GROWTH_LIMIT
 
 
 def test_identical_messages_are_merged() -> None:
@@ -195,14 +203,14 @@ def test_a_long_message_is_cut_and_its_whitespace_collapsed() -> None:
 
 
 def test_many_messages_in_one_text_node_take_linear_time() -> None:
-    soup = _soup("<div>" + "Notice: a in /a.php on line 1 " * 40_000 + "</div>")
+    def page(size: int) -> str:
+        return "<div>" + "Notice: a in /a.php on line 1 " * size + "</div>"
 
-    started = time.perf_counter()
-    errors = strip_server_errors(soup)
-
-    assert time.perf_counter() - started < 1
-    assert errors == [ServerError("Notice", "a", "/a.php", 1, count=40_000)]
+    soup = _soup(page(5_000))
+    assert strip_server_errors(soup) == [ServerError("Notice", "a", "/a.php", 1, count=5_000)]
     assert soup.get_text().strip() == ""
+    # The quadratic version (a copy of the text node per message) grew about 11-fold.
+    assert growth(_stripping(page), 5_000) < GROWTH_LIMIT
 
 
 def test_a_message_between_two_lines_keeps_them_apart() -> None:
@@ -233,12 +241,12 @@ def test_a_message_before_text_on_its_line_keeps_the_line_break() -> None:
 
 
 def test_many_html_messages_in_one_block_take_linear_time() -> None:
-    soup = _soup("<div>start" + php_warning("Sport") * 20_000 + "end</div>")
+    def page(size: int) -> str:
+        return "<div>start" + php_warning("Sport") * size + "end</div>"
 
-    started = time.perf_counter()
-    errors = strip_server_errors(soup)
-
-    assert time.perf_counter() - started < 2
-    assert [error.count for error in errors] == [20_000]
+    soup = _soup(page(1_000))
+    assert [error.count for error in strip_server_errors(soup)] == [1_000]
     assert soup.find("b") is None
     assert " ".join(soup.get_text().split()) == "start end"
+    # The quadratic version (bs4 removing one node at a time) grew about 16-fold.
+    assert growth(_stripping(page), 1_000) < GROWTH_LIMIT
