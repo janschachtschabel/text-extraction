@@ -26,10 +26,10 @@ The result starts with a status line (the status and the HTTP status), a toolbar
 figures: URL, language, words, mode used, page type and time. The toolbar has "Copy Markdown"
 (or "Copy text"; it appears only where the browser allows the clipboard), the download of the
 content and "Save response (JSON)", the whole answer as a file. Below come closed sections for the
-metadata, the links, the images, the removed server error messages (only when there are some),
-the screenshot (only when you asked for one) and "What happened", a timeline of the checks, the fetch, the
-render and the conversion (it opens by itself when there are warnings), and after them the
-content in a reading card (for Markdown, its source is under "Show source"). At the end, "As curl"
+screenshot (only when you asked for one), the metadata, the links, the images, the removed server
+error messages (only when there are some) and "What happened", a timeline of the checks, the
+fetch, the render and the conversion (it opens by itself when there are warnings), and after them
+the content in a reading card (for Markdown, its source is under "Show source"). At the end, "As curl"
 is the same request for the shell and "Raw JSON" the whole answer.
 
 ## With REST

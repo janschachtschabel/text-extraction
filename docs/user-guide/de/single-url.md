@@ -27,10 +27,10 @@ Das Ergebnis beginnt mit einer Statuszeile (dem Status und dem HTTP-Status), ein
 und einer Karte mit Kennzahlen: URL, Sprache, Wörter, verwendeter Modus, Seitentyp und Zeit. Die
 Werkzeugleiste hat „Markdown kopieren“ (oder „Text kopieren“; es erscheint nur, wo der Browser die
 Zwischenablage erlaubt), den Download des Inhalts und „Antwort speichern (JSON)“, die ganze Antwort
-als Datei. Darunter folgen zugeklappte Abschnitte für die Metadaten, die Links, die Bilder, die
-entfernten Fehlermeldungen des Servers (nur wenn es welche gibt), den Screenshot (nur wenn Sie
-einen verlangt haben) und „Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung (sie öffnet
-sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
+als Datei. Darunter folgen zugeklappte Abschnitte für den Screenshot (nur wenn Sie einen verlangt haben),
+die Metadaten, die Links, die Bilder, die entfernten Fehlermeldungen des Servers (nur wenn es
+welche gibt) und „Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der
+Umwandlung (sie öffnet sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
 steht der Quelltext unter „Quelltext anzeigen“). Am Ende stehen „Als curl“, dieselbe Anfrage für
 die Shell, und „Rohes JSON“, die ganze Antwort.
 

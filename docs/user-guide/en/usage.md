@@ -357,8 +357,9 @@ Every form runs one REST call, with the same checks and rate limit as any client
 starts with a status line (the status, "maximum extraction (unblocked)" for a page opened in unblock mode, and the HTTP
 status), then a toolbar, a card of figures (URL, language, words, mode used, page type, time) and
 the content in a white reading card. Until a result arrives, the result area shows an empty
-card. The settings are a card of their own. Metadata, links, images, removed server error
-messages, the screenshot (when one was taken) and "What happened" are closed sections ("What happened" opens by itself when there are warnings); for Markdown the source is
+card. The settings are a card of their own. The screenshot (when
+one was taken), metadata, links, images, removed server error messages and "What happened" are
+closed sections ("What happened" opens by itself when there are warnings); for Markdown the source is
 under "Show source". "Raw JSON" is the whole envelope and "As curl" the request as a `curl`
 command (with `$API_KEY` in place of your key). The toolbar offers "Copy Markdown" (for text
 output "Copy text"), which copies the shown text and appears only where the browser allows
