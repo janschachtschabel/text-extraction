@@ -2,11 +2,12 @@
 
 English: [Site rules](../en/site-rules.md)
 
-Jede Anfrage extrahiert auf eine von zwei Arten. Standardmäßig beachtet der Dienst die Regeln
-einer Website. Die maximale Extraktion ist für Websites, die die Extraktion vertraglich erlaubt
-haben; nur ein Admin darf sie nutzen, und nur dort, wo der Betreiber sie eingeschaltet hat. Diese
-Seite erklärt beide Arten, die Pause, um die ein Host bitten kann, und wie Sie die Art in der
-API, im MCP-Server und in der Spielwiese wählen.
+Standardmäßig beachtet der Dienst die Regeln einer Website. Die maximale Extraktion ist für
+Websites, die die Extraktion vertraglich erlaubt haben; nur ein Admin darf sie nutzen, und nur dort,
+wo der Betreiber sie eingeschaltet hat. Die Prüfungen lassen sich auch pro Lauf einstellen: Ein
+Schlüssel, der es wählen darf, kann sie mit `compliance: ignore` abschalten. Diese Seite erklärt den
+Standard, die maximale Extraktion, die Pause, um die ein Host bitten kann, und wie Sie in der API,
+im MCP-Server und in der Spielwiese wählen.
 
 ## Die Regeln der Website beachten
 
@@ -26,7 +27,7 @@ Das ist der Standard. Der Dienst:
 | --- | --- |
 | `enforce` | Eine Seite, die robots.txt verbietet, schlägt mit `blocked_by_robots` fehl, eine Seite mit TDM-Nutzungsvorbehalt mit `tdm_reserved`. |
 | `report` | Die Seite wird extrahiert; `data.compliance` meldet, was die Prüfungen gefunden haben. |
-| `ignore` | Nur für Admins: Die Prüfungen entfallen. Mit dem Entsperrmodus ist das die maximale Extraktion. |
+| `ignore` | Nur für Admins (oder wo es der Standard ist): Die Prüfungen entfallen. Mit dem Entsperrmodus ist das die maximale Extraktion. |
 
 Eine Anfrage ohne `compliance` bekommt `COMPLIANCE_DEFAULT` des Betreibers (`enforce`). Jedes
 Ergebnis enthält den Bericht in `data.compliance`: den `mode`, der galt, die `decision`
@@ -107,8 +108,9 @@ nehmen `compliance` genauso. Eine Website-Struktur liest ihre Seiten nur über H
 
 ## Mit MCP
 
-Der Schlüssel des MCP-Clients muss ein Admin-Schlüssel sein. `compliance` gehört in `options`,
-zum Beispiel bei `extract_url`:
+Der Schlüssel des MCP-Clients muss den Wert wählen dürfen (siehe
+[Prüfung pro Lauf an- und abschalten](#prüfung-pro-lauf-an--und-abschalten)). `compliance` gehört
+in `options`, zum Beispiel bei `extract_url`:
 
 ```json
 {"url": "https://example.org/partner-page", "options": {"compliance": "ignore"}}
@@ -117,19 +119,53 @@ zum Beispiel bei `extract_url`:
 `batch_extract`, `extract_structured`, `chunk`, `screenshot_url` und `site_structure` nehmen es
 genauso. Siehe [MCP](mcp.md).
 
+## Prüfung pro Lauf an- und abschalten
+
+`compliance` (`enforce`, `report` oder `ignore`) ist ein Feld der Anfrage; Sie wählen die
+Prüfungen also für jeden Lauf und nicht nur für die ganze Installation:
+
+- Eine Anfrage: `compliance` im Body von `POST /v1/extract`, `/v1/structured`, `/v1/chunk`
+  und `/v1/screenshot`.
+- Ein Batch: `compliance` im Body von `POST /v1/batch`. Der eine Wert gilt für alle seine
+  URLs.
+- Ein Website-Lauf: `compliance` im Body von `POST /v1/site-structure`. Es gilt für den ganzen Lauf.
+- MCP: `compliance` gehört in `options` des Werkzeugs.
+
+Ein Schlüssel darf nur wählen, was ihm erlaubt ist: Ein Admin wählt alle drei Werte; ein anderer
+Schlüssel wählt `enforce` oder `report`, solange der Betreiber Überschreibungen erlaubt
+(`COMPLIANCE_ALLOW_OVERRIDE`), und `ignore` nur, wo es der Standard des Betreibers ist. REST lehnt
+jeden anderen Wert mit 403 `forbidden` ab.
+
 ## In der Spielwiese
 
-Admins sehen die Auswahl „Website-Regeln“ in den Tabs **Extrahieren**, **Strukturiert**,
-**Screenshot**, **Chunks** (für eine URL), **Batch**, **Batch-Datei** (in der Vorschau) und
-**Website-Struktur** sowie bei „Auswahl extrahieren“ im Website-Baum. Der Tab **Datei** hat sie
-nicht.
+Die Auswahl „Website-Regeln“ hat drei Stufen. Sie steht in jedem Formular mit einer URL
+(**Extrahieren**, **Strukturiert**, **Screenshot**, **Chunks** für eine URL, **Batch**,
+**Batch-Datei**, **Website-Struktur**) und unter dem Website-Baum bei „Auswahl extrahieren“. Der
+Tab **Datei** hat sie nicht.
 
-- „Regeln der Website beachten (Standard)“ sendet kein `compliance`.
-- „Maximale Extraktion (Vertragspartner)“ sendet `compliance: ignore`. Setzen Sie `compliance`
-  zusätzlich in „Optionen (JSON)“ (unter „Erweitert“), lehnt das Formular es ab: `compliance` ist dann doppelt
-  angegeben.
+| Stufe | Sendet | Bedeutung |
+| --- | --- | --- |
+| „Regeln der Website einhalten“ | `compliance: enforce` | robots.txt und TDM-Vorbehalte lehnen eine Seite ab. |
+| „Nur prüfen und melden“ | `compliance: report` | Die Prüfungen laufen und werden gemeldet; nichts wird abgelehnt. |
+| „Prüfung aus (Vertragspartner)“ | `compliance: ignore` | Die Prüfungen entfallen. Für Websites, die die Extraktion vertraglich erlaubt haben. |
 
-Solange `BROWSER_ENABLED` oder `BROWSER_UNBLOCK_ENABLED` aus ist, ist die Auswahl gesperrt, und ihr
-Hinweis nennt den Grund. Steht „Browser-Fallback“ auf „nie“, bleibt die maximale Extraktion bei
-HTTP. Das Ergebnis zeigt den Wert der Website-Regeln (`compliance`) und, wenn `data.unblocked` true
-ist, das Kennzeichen „maximale Extraktion (entsperrt)“.
+Der Standard des Betreibers (`COMPLIANCE_DEFAULT`) ist vorausgewählt und mit „(Standard)“
+gekennzeichnet; er sendet nichts, daher gilt der Wert des Betreibers. Eine andere Stufe sendet
+`compliance`. Wer welche Stufe sieht:
+
+| Wer | Stufen |
+| --- | --- |
+| Admins (und jeder Besucher unter `AUTH_MODE=none`) | alle drei |
+| Andere Schlüssel, `COMPLIANCE_ALLOW_OVERRIDE` an | „Regeln der Website einhalten“ und „Nur prüfen und melden“; „Prüfung aus“ nur, wenn es der Standard ist |
+| Andere Schlüssel, `COMPLIANCE_ALLOW_OVERRIDE` aus | keine Auswahl |
+
+„Prüfung aus“ funktioniert ohne Entsperrmodus: Die Prüfungen entfallen, und der normale Browser
+wird genutzt. Hat der Betreiber zusätzlich den Entsperrmodus eingeschaltet (`BROWSER_ENABLED` und
+`BROWSER_UNBLOCK_ENABLED`), ist es die maximale Extraktion, wie oben beschrieben. Setzen Sie
+`compliance` zusätzlich in „Optionen (JSON)“ (unter „Erweitert“), lehnt das Formular es ab:
+`compliance` ist dann doppelt angegeben. Steht „Browser-Fallback“ auf „nie“, bleibt die maximale
+Extraktion bei HTTP. Das Ergebnis zeigt den Wert der Website-Regeln (`compliance`) und, wenn
+`data.unblocked` true ist, das Kennzeichen „maximale Extraktion (entsperrt)“.
+
+Im Website-Baum sind URLs markiert, die die Regeln der Website sperren; siehe
+[Teil einer Website](part-of-a-site.md#in-der-spielwiese).

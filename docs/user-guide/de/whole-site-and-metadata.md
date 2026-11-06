@@ -197,7 +197,11 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
    Seitentyp, und „Typen:“ über dem Baum zählt sie. „Alle auswählen“ markiert jede URL und
    „Inhaltsseiten auswählen“ jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
    Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,
-   die Sie möchten.
+   die Sie möchten. URLs, die die Regeln der Website sperren, sind mit „robots.txt“ oder „TDM“
+   markiert und werden von den Schaltflächen übersprungen, solange „Website-Regeln“ auf „Regeln der
+   Website einhalten“ steht; der Batch unter dem Baum beginnt mit der Stufe, mit der der Crawl lief,
+   und die Markierungen zeigen die Regeln zum Zeitpunkt der Anzeige des Baums (siehe
+   [Teil einer Website](part-of-a-site.md#in-der-spielwiese)).
 3. Lassen Sie „Metadaten“ an, und tragen Sie für die schema.org- und LRMI-Felder eine
    `structured`-Anfrage in „Optionen (JSON)“ (unter „Erweitert“) ein, zum Beispiel
    `{"structured": {"strategy": "metadata", "schema": {"type": "object", "properties": {"license": {"type": "string"}}}}}`.

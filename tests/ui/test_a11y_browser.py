@@ -48,11 +48,16 @@ _RECORD_STATUS: Final = (
 )
 
 
+ROBOTS: Final = "User-agent: *\nDisallow: /impressum.html\n"
+
+
 def _serve(httpserver: HTTPServer) -> str:
     def handle(request: Request) -> Response:
         if request.path == SLOW_PATH:
             time.sleep(SLOW_SECONDS)
             return Response(_page("Slow page", []), content_type="text/html; charset=utf-8")
+        if request.path == "/robots.txt":  # one crawled-page link is blocked (package 16)
+            return Response(ROBOTS, content_type="text/plain")
         found = PAGES.get(request.path)
         if found is None:
             return Response("Not found", status=404, content_type="text/plain")
@@ -211,6 +216,9 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         expect(site.locator(".state")).to_have_attribute("data-value", "completed")
         site.locator("button.tree-button").click()
         expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
+        blocked = page.locator("#result .tree-view input[data-blocked=robots]")
+        expect(blocked).to_have_count(1)  # the imprint, disabled, with its badge in the label
+        expect(blocked).to_be_disabled()
         found += _axe(page, "site tree")
 
     assert found == [], "\n".join(found)
@@ -292,7 +300,7 @@ def test_axe_finds_no_violations_with_maximum_extraction_on(
         _log_in(page)
         page.wait_for_selector("#app-shell")
         expect(page.locator("#panel-extract")).to_be_visible()
-        expect(page.locator("#extract-access-maximum")).to_be_enabled()
+        expect(page.locator("#extract-access-ignore")).to_be_enabled()
         expect(page.locator("#extract-mode-fast-hint")).to_be_visible()
         found = _axe(page, "extract tab, maximum extraction on")
 

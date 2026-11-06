@@ -2,10 +2,11 @@
 
 Deutsch: [Website-Regeln](../de/site-rules.md)
 
-Every request extracts in one of two ways. By default the service respects a site's rules.
-Maximum extraction is for sites that allowed extraction by contract; only an admin may use it,
-and only where the operator switched it on. This page explains both, the pause a host may ask
-for, and how to choose the way in the API, the MCP server and the playground.
+By default the service respects a site's rules. Maximum extraction is for sites that allowed
+extraction by contract; only an admin may use it, and only where the operator switched it on. The
+checks can also be set for each run: a key that is allowed to choose it can switch them off with
+`compliance: ignore`. This page explains the default, maximum extraction, the pause a host may ask
+for, and how to choose in the API, the MCP server and the playground.
 
 ## Respect the site's rules
 
@@ -25,7 +26,7 @@ This is the default. The service:
 | --- | --- |
 | `enforce` | A page that robots.txt forbids fails with `blocked_by_robots`, a page whose TDM rights are reserved with `tdm_reserved`. |
 | `report` | The page is extracted; `data.compliance` reports what the checks found. |
-| `ignore` | Admins only: the checks are skipped. With unblock mode this is maximum extraction. |
+| `ignore` | Admins only (or where it is the default): the checks are skipped. With unblock mode this is maximum extraction. |
 
 A request without `compliance` gets the operator's `COMPLIANCE_DEFAULT` (`enforce`). Every result
 carries the report in `data.compliance`: the `mode` that applied, the `decision` (`allowed`,
@@ -101,8 +102,9 @@ curl -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
 
 ## With MCP
 
-The MCP client's key must be an admin key. `compliance` goes into `options`, for example with
-`extract_url`:
+The MCP client's key must be allowed to choose the value (see
+[Switch the checks per run](#switch-the-checks-per-run)). `compliance` goes into `options`, for
+example with `extract_url`:
 
 ```json
 {"url": "https://example.org/partner-page", "options": {"compliance": "ignore"}}
@@ -111,17 +113,52 @@ The MCP client's key must be an admin key. `compliance` goes into `options`, for
 `batch_extract`, `extract_structured`, `chunk`, `screenshot_url` and `site_structure` take it the
 same way. See [MCP](mcp.md).
 
+## Switch the checks per run
+
+`compliance` (`enforce`, `report` or `ignore`) is a field of the request, so you choose the
+checks for each run and not only for the whole deployment:
+
+- One request: `compliance` in the body of `POST /v1/extract`, `/v1/structured`, `/v1/chunk`
+  and `/v1/screenshot`.
+- One batch: `compliance` in the body of `POST /v1/batch`. The one value applies to all of its
+  URLs.
+- One site run: `compliance` in the body of `POST /v1/site-structure`. It applies to the whole run.
+- MCP: `compliance` goes into `options` of the tool.
+
+A key may only choose what it is allowed to: an admin chooses all three values; another key
+chooses `enforce` or `report` while the operator allows overrides (`COMPLIANCE_ALLOW_OVERRIDE`),
+and `ignore` only where it is the operator's default. REST refuses any other value with 403
+`forbidden`.
+
 ## In the playground
 
-Admins see the choice "Site rules" on the tabs **Extract**, **Structured**, **Screenshot**,
-**Chunk** (for a URL), **Batch**, **Batch file** (in the preview) and **Site structure**, and
-with "Extract selected" in the site tree. The **File** tab has none.
+The choice "Site rules" has three steps. It is in every form with a URL (**Extract**,
+**Structured**, **Screenshot**, **Chunk** for a URL, **Batch**, **Batch file**,
+**Site structure**) and under the site tree, for "Extract selected". The **File** tab has none.
 
-- "Respect the site's rules (default)" sends no `compliance`.
-- "Maximum extraction (contract partners)" sends `compliance: ignore`. If you also set
-  `compliance` in "Options (JSON)" (under "Advanced"), the form refuses it: compliance is given twice.
+| Step | Sends | Meaning |
+| --- | --- | --- |
+| "Respect the site's rules" | `compliance: enforce` | robots.txt and TDM reservations refuse a page. |
+| "Check and report only" | `compliance: report` | The checks run and are reported; nothing is refused. |
+| "Checks off (contract partners)" | `compliance: ignore` | The checks are skipped. For sites that allowed extraction by contract. |
 
-While `BROWSER_ENABLED` or `BROWSER_UNBLOCK_ENABLED` is off, the choice is disabled and its hint
-says why. With "Browser fallback" set to "never", maximum extraction stays with HTTP. The result
+The operator's default (`COMPLIANCE_DEFAULT`) is preselected and marked "(default)"; it sends
+nothing, so the operator's value applies. Choosing another step sends `compliance`. Who sees which
+step:
+
+| Who | Steps |
+| --- | --- |
+| Admins (and every visitor under `AUTH_MODE=none`) | all three |
+| Other keys, `COMPLIANCE_ALLOW_OVERRIDE` on | "Respect the site's rules" and "Check and report only"; "Checks off" only when it is the default |
+| Other keys, `COMPLIANCE_ALLOW_OVERRIDE` off | no choice |
+
+"Checks off" works without unblock mode: the checks are skipped and the normal browser is used.
+Where the operator also switched on unblock mode (`BROWSER_ENABLED` and
+`BROWSER_UNBLOCK_ENABLED`), it is maximum extraction as described above. If you also set
+`compliance` in "Options (JSON)" (under "Advanced"), the form refuses it: compliance is given
+twice. With "Browser fallback" set to "never", maximum extraction stays with HTTP. The result
 shows the compliance mode, and the badge "maximum extraction (unblocked)" when `data.unblocked` is
 true.
+
+In the site tree, URLs that the site's rules block are marked; see
+[Part of a site](part-of-a-site.md#in-the-playground).

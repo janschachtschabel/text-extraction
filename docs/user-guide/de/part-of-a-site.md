@@ -88,6 +88,21 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
   Anmeldung, Suche und Fehlerseiten und entfernt bei diesen und bei jeder gescheiterten Seite
   das Häkchen; eine URL ohne Typ wird markiert, außer ihre Seite ist gescheitert.
+
+  Der Baum markiert URLs, die die Regeln der Website sperren: das Kennzeichen „robots.txt“
+  (robots.txt verbietet die URL, oder robots.txt konnte nicht abgerufen werden) oder „TDM“ (ein
+  Vorbehalt in tdmrep.json, ein Verbot in ai.txt oder eine noai-Angabe). Der Grund steht als
+  Tooltip am Kennzeichen und wird von Screenreadern vorgelesen. Jede angezeigte URL wird beim
+  Anzeigen des Baums gegen die aktuellen Dateien robots.txt, tdmrep.json und ai.txt der Website
+  beurteilt (aus dem Cache oder einmal pro Website geladen, innerhalb der Grenzen pro Host;
+  höchstens 20 Websites und 12 s); die Markierungen zeigen also die Regeln zu diesem Zeitpunkt.
+  Links, die der Crawl wegen der Regeln nicht verfolgt hat, erscheinen als Blätter „nur
+  verlinkt“. Eine Zeile über dem Baum zählt die gesperrten URLs, eine weitere nennt Websites,
+  deren Regeln nicht gelesen werden konnten. Unter „Regeln der Website einhalten“ lassen sich
+  gesperrte URLs nicht markieren, und „Alle auswählen“, „Inhaltsseiten auswählen“ und das Markieren
+  eines Abschnitts überspringen sie; unter „Nur prüfen und melden“ oder „Prüfung aus“ lassen sie
+  sich markieren, und die Schaltflächen schließen sie ein. Der Batch unter dem Baum beginnt mit der
+  Stufe von „Website-Regeln“, mit der der Crawl lief.
 - **Batch**: Fügen Sie die URLs ein, eine pro Zeile, und klicken Sie auf „Batch starten“. Mehr
   URLs, als ein Batch fasst, werden als mehrere Batches gesendet.
 - **Batch-Datei**: Wählen Sie eine CSV- oder JSON-Datei und klicken Sie auf „Datei prüfen“. Eine

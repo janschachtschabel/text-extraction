@@ -382,14 +382,18 @@ every 3 s until it is completed, and has a "Cancel" button.
 
 ### Site rules in the playground
 
-The forms of a URL have the choice "Site rules":
+The forms of a URL have the choice "Site rules" with three steps:
 
-- "Respect the site's rules (default)" sends no `compliance`: the operator's checks apply.
-- "Maximum extraction (contract partners)" sends `compliance: ignore`. It is for sites that
-  allowed extraction by contract (see [Site rules](site-rules.md)).
+- "Respect the site's rules" sends `compliance: enforce`.
+- "Check and report only" sends `compliance: report`: the checks run and are reported.
+- "Checks off (contract partners)" sends `compliance: ignore`. It is for sites that allowed
+  extraction by contract (see [Site rules](site-rules.md)).
 
-Only admins see the choice, and it is disabled with a hint while `BROWSER_ENABLED` or
-`BROWSER_UNBLOCK_ENABLED` is off. With `AUTH_MODE=none` every visitor counts as an admin, so
-every visitor sees the choice. The "Browser fallback" field sets `mode`: "when the page needs it"
-(`auto`), "never" (`fast`) or "always" (`browser`). With maximum extraction, "never" stays with
-HTTP: the page never reaches the browser.
+The operator's default (`COMPLIANCE_DEFAULT`) is preselected, marked "(default)" and sends nothing.
+Admins see all three steps; other keys see "Respect the site's rules" and "Check and report only"
+while `COMPLIANCE_ALLOW_OVERRIDE` is on (and "Checks off" only when it is the default), and
+without override there is no choice. With `AUTH_MODE=none` every visitor counts as an admin.
+"Checks off" works without unblock mode; with unblock mode on (`BROWSER_ENABLED` and
+`BROWSER_UNBLOCK_ENABLED`) it is maximum extraction. The "Browser fallback" field sets `mode`:
+"when the page needs it" (`auto`), "never" (`fast`) or "always" (`browser`). With maximum
+extraction, "never" stays with HTTP: the page never reaches the browser.

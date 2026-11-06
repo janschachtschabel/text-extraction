@@ -36,7 +36,7 @@ from text_extraction.ui.forms import (
     OPERATIONS,
     SINGLE_OPERATIONS,
     OptionsError,
-    access_choice,
+    access_offer,
     build_body,
     multipart_fields,
 )
@@ -132,7 +132,7 @@ def _app_context(settings: Settings, name: str, role: str) -> dict[str, Any]:
         "banner": BANNER,
         "tabs": TABS,
         "help_url": partial(help_url, settings),
-        "access_choice": access_choice(role, settings),
+        "access": access_offer(role, settings),
         "browser_enabled": settings.browser_enabled,
     }
 

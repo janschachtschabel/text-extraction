@@ -3,7 +3,8 @@
 {%- set mode_id = prefix ~ "-mode-hint" %}
 {%- set no_browser_id = prefix ~ "-mode-no-browser-hint" %}
 {%- set fast_id = prefix ~ "-mode-fast-hint" %}
-{%- set mode_hints = [mode_id] + ([no_browser_id] if not browser_enabled else []) + ([fast_id] if access_choice == "enabled" else []) %}
+{%- set fast_note = access is defined and access.unblock and "ignore" in access.modes %}
+{%- set mode_hints = [mode_id] + ([no_browser_id] if not browser_enabled else []) + ([fast_id] if fast_note else []) %}
 <label for="{{ prefix }}-mode">{{ t("mode.label") }}</label>
 <select id="{{ prefix }}-mode" name="mode" aria-describedby="{{ mode_hints|join(' ') }}">
   <option value="auto"{% if chosen_mode == "auto" %} selected{% endif %}>{{ t("mode.auto") }}</option>
@@ -12,4 +13,4 @@
 </select>
 <p class="hint" id="{{ mode_id }}">{{ t("hint.mode") }}</p>
 {% if not browser_enabled %}<p class="hint" id="{{ no_browser_id }}">{{ t("mode.no_browser", setting=code("BROWSER_ENABLED")) }}</p>{% endif %}
-{% if access_choice == "enabled" %}<p class="hint" id="{{ fast_id }}">{{ t("mode.fast_with_maximum") }}</p>{% endif %}
+{% if fast_note %}<p class="hint" id="{{ fast_id }}">{{ t("mode.fast_with_maximum") }}</p>{% endif %}

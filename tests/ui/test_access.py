@@ -1,7 +1,7 @@
 """The "Site rules" choice and the "Browser fallback" select of the UI's forms (rulings P12-S3,
-P12-S4): ``respect`` sends no ``compliance``, ``maximum`` sends ``compliance: "ignore"``; only
-admins see the choice, enabled only while browser mode and unblock mode are on; the result view
-shows the compliance mode and the unblocked badge."""
+P12-S4, package 16): three steps (``enforce``, ``report``, ``ignore``) offered by role through
+`access_offer`; the default step sends nothing; the result view shows the compliance mode and the
+unblocked badge."""
 
 import hashlib
 from collections.abc import Iterator
@@ -15,7 +15,13 @@ from tests.fakes import ARTICLE, PAGE, FakeFetcher, fetched
 from tests.ui.conftest import AUTH, HX, USER_KEY, make_settings, run, running
 from tests.ui.site_items import result_data
 from tests.ui.test_jobs_views import SMALL_SITE, fake_reads
-from text_extraction.ui.forms import ACCESS_FIELD, OptionsError, access_choice, build_body
+from text_extraction.ui.forms import (
+    ACCESS_FIELD,
+    OptionsError,
+    access_offer,
+    access_value,
+    build_body,
+)
 from text_extraction.ui.forward import forward
 from text_extraction.ui.i18n import translate
 from text_extraction.ui.results import render_result
@@ -88,74 +94,115 @@ def panel(root: Any, name: str) -> Any:
 # --- the bodies ----------------------------------------------------------------------------------
 
 
-def test_maximum_adds_compliance_ignore() -> None:
+def test_each_step_sends_its_compliance() -> None:
     assert ACCESS_FIELD == "access"
     for op in ("extract", "structured", "screenshot", "chunk", "site-structure"):
-        body = build_body(op, {"url": PAGE, "access": "maximum"})
-        assert body["compliance"] == "ignore", op
-    assert build_body("batch", {"access": "maximum"})["compliance"] == "ignore"
-
-
-def test_respect_sends_no_compliance() -> None:
+        for mode in ("enforce", "report", "ignore"):
+            body = build_body(op, {"url": PAGE, "access": mode})
+            assert body["compliance"] == mode, (op, mode)
+    assert build_body("batch", {"access": "report"})["compliance"] == "report"
     for op in ("extract", "structured", "screenshot", "chunk", "site-structure", "batch"):
-        assert "compliance" not in build_body(op, {"url": PAGE, "access": "respect"}), op
+        for value in ("default", "maximum", "respect", ""):
+            assert "compliance" not in build_body(op, {"url": PAGE, "access": value}), (op, value)
         assert "compliance" not in build_body(op, {"url": PAGE}), op
-    # Options may still choose a mode under respect.
+    # Options may still choose a mode under the default step.
     body = build_body("extract", {"url": PAGE, "options": '{"compliance": "report"}'})
     assert body["compliance"] == "report"
     # A text has no page: chunking a text sends no compliance.
-    assert "compliance" not in build_body("chunk", {"text": "Some text.", "access": "maximum"})
+    assert "compliance" not in build_body("chunk", {"text": "Some text.", "access": "ignore"})
 
 
-def test_maximum_and_options_compliance_is_given_twice() -> None:
-    form = {"url": PAGE, "access": "maximum", "options": '{"compliance": "report"}'}
+def test_switch_and_options_compliance() -> None:
+    form = {"url": PAGE, "access": "report", "options": '{"compliance": "enforce"}'}
     with pytest.raises(OptionsError, match=r"^compliance is given twice\.$"):
         build_body("extract", form)
+    sent = build_body("extract", {**form, "access": "default"})
+    assert sent["compliance"] == "enforce"
 
 
 # --- who sees the choice -------------------------------------------------------------------------
 
 
-def test_access_choice_by_role_and_switches() -> None:
+def test_access_offer_by_role_and_settings() -> None:
     on = make_settings(**BOTH_ON)
-    assert access_choice("user", on) == "hidden"
-    assert access_choice("admin", on) == "enabled"
-    assert access_choice("admin", make_settings(browser_enabled=True)) == "disabled"
-    assert access_choice("admin", make_settings(browser_unblock_enabled=True)) == "disabled"
-    assert access_choice("admin", make_settings()) == "disabled"
+    assert access_offer("admin", on).modes == ("enforce", "report", "ignore")
+    assert access_offer("user", on).modes == ("enforce", "report")
+    assert access_offer("user", on).shown
+    fixed = access_offer("user", make_settings(compliance_allow_override=False))
+    assert fixed.modes == ("enforce",)
+    assert not fixed.shown
+    lax = access_offer("user", make_settings(compliance_default="ignore"))
+    assert lax.default == "ignore"
+    assert "ignore" in lax.modes
+    assert access_offer("user", make_settings(compliance_default="report")).modes == (
+        "enforce",
+        "report",
+    )
+    assert access_offer("admin", on).unblock
+    assert not access_offer("user", on).unblock
+    assert not access_offer("admin", make_settings(browser_enabled=True)).unblock
+    assert not access_offer("admin", make_settings(browser_unblock_enabled=True)).unblock
 
 
-def test_choice_shown_only_to_admins() -> None:
+def test_access_value_presets_a_mode() -> None:
+    offer = access_offer("user", make_settings())
+    assert access_value(offer, None) == "default"
+    assert access_value(offer, "enforce") == "default"
+    assert access_value(offer, "report") == "report"
+    assert access_value(offer, "ignore") == "default"  # not offered
+
+
+def radios_of(root: Any, name: str) -> list[Any]:
+    (group,) = panel(root, name).xpath(".//fieldset[contains(@class, 'access')]")
+    assert group.get("disabled") is None, name
+    assert texts(group, "./legend") == [en("access.legend")]
+    return list(group.xpath(f".//input[@type='radio'][@name='{ACCESS_FIELD}']"))
+
+
+def test_choice_offered_by_role() -> None:
     with running(api_keys=KEYS, **BOTH_ON) as client:
         user = app_root(client, AUTH)
-        assert user.xpath(f"//input[@name='{ACCESS_FIELD}']") == []
         admin = app_root(client, ADMIN)
         for name, prefix in WITH_CHOICE.items():
-            (group,) = panel(admin, name).xpath(".//fieldset[contains(@class, 'access')]")
-            assert texts(group, "./legend") == [en("access.legend")]
-            assert group.get("disabled") is None, name
-            radios = group.xpath(f".//input[@type='radio'][@name='{ACCESS_FIELD}']")
-            assert [radio.get("value") for radio in radios] == ["respect", "maximum"]
-            assert [radio.get("checked") is not None for radio in radios] == [True, False]
-            assert [radio.get("disabled") for radio in radios] == [None, None]
-            respect, maximum = radios
-            assert respect.get("id") == f"{prefix}-access-respect"
-            assert texts(group, f".//label[@for='{prefix}-access-maximum']") == [
-                en("access.maximum")
+            radios = radios_of(user, name)
+            assert [r.get("value") for r in radios] == ["default", "report"], name
+            assert [r.get("data-mode") for r in radios] == ["enforce", "report"]
+            assert [r.get("checked") is not None for r in radios] == [True, False]
+            assert radios[0].get("id") == f"{prefix}-access-default"
+            assert texts(user, f"//label[@for='{prefix}-access-default']") == [
+                en("access.enforce") + en("access.default")
             ]
-            assert described(admin, respect) == [en("hint.access.respect")]
-            maximum_hint = MAXIMUM_HINTS.get(name, "hint.access.maximum")
-            assert described(admin, maximum) == [en(maximum_hint, value="compliance: ignore")]
+            assert texts(user, f"//label[@for='{prefix}-access-report']") == [en("access.report")]
+            assert described(user, radios[0]) == [en("hint.access.enforce")]
+            assert described(user, radios[1]) == [en("hint.access.report")]
+            radios = radios_of(admin, name)
+            assert [r.get("value") for r in radios] == ["default", "report", "ignore"]
+            assert [r.get("data-mode") for r in radios] == ["enforce", "report", "ignore"]
+            assert [r.get("checked") is not None for r in radios] == [True, False, False]
+            assert [r.get("disabled") for r in radios] == [None] * 3
     with running(api_keys=KEYS, browser_enabled=True) as client:
-        admin = app_root(client, ADMIN)
-        off = en("hint.access.off", browser="BROWSER_ENABLED", unblock="BROWSER_UNBLOCK_ENABLED")
+        admin = app_root(client, ADMIN)  # no unblock mode: still three steps, none disabled
         for name in WITH_CHOICE:
-            (group,) = panel(admin, name).xpath(".//fieldset[contains(@class, 'access')]")
-            assert group.get("disabled") is not None, name
-            assert off in texts(group, ".//*[contains(@class, 'hint')]")
-            for radio in group.xpath(f".//input[@name='{ACCESS_FIELD}']"):
-                assert radio.get("disabled") is not None
-                assert off in described(admin, radio)
+            assert len(radios_of(admin, name)) == 3
+    with running(api_keys=KEYS, compliance_allow_override=False) as client:
+        user = app_root(client, AUTH)
+        assert user.xpath(f"//input[@name='{ACCESS_FIELD}']") == []
+
+
+def test_ignore_hint_depends_on_unblock() -> None:
+    with running(api_keys=KEYS, **BOTH_ON) as client:
+        admin = app_root(client, ADMIN)
+        for name in WITH_CHOICE:
+            ignore = radios_of(admin, name)[2]
+            hint = MAXIMUM_HINTS.get(name, "hint.access.maximum")
+            assert described(admin, ignore) == [en(hint, value="compliance: ignore")], name
+    with running(api_keys=KEYS) as client:
+        admin = app_root(client, ADMIN)
+        for name in WITH_CHOICE:
+            ignore = radios_of(admin, name)[2]
+            assert described(admin, ignore) == [
+                en("hint.access.ignore", value="compliance: ignore")
+            ]
 
 
 def test_file_form_has_no_access_choice(admin_client: TestClient) -> None:
@@ -164,10 +211,10 @@ def test_file_form_has_no_access_choice(admin_client: TestClient) -> None:
         assert panel(admin, name).xpath(f".//input[@name='{ACCESS_FIELD}']") == [], name
 
 
-def test_forged_maximum_from_a_user_is_refused_by_rest() -> None:
+def test_forged_ignore_from_a_user_is_refused_by_rest() -> None:
     fetcher = FakeFetcher({PAGE: fetched(body=ARTICLE)})
     with running(fetcher, api_keys=KEYS, **BOTH_ON) as client:
-        answer = run(client, "extract", url=PAGE, access="maximum")
+        answer = run(client, "extract", url=PAGE, access="ignore")
 
     root = tree(answer.text)
     assert texts(root, "//*[@class='http-status']") == ["HTTP 403"]
@@ -184,13 +231,13 @@ def test_forged_maximum_from_a_user_is_refused_by_rest() -> None:
     ],
     ids=["batch", "tree-batch", "site-structure"],
 )
-def test_forged_maximum_from_a_user_starts_no_job(view: str, fields: dict[str, Any]) -> None:
-    """The job routes refuse a user's forged ``access=maximum`` too (REST's ``resolve_mode``):
+def test_forged_ignore_from_a_user_starts_no_job(view: str, fields: dict[str, Any]) -> None:
+    """The job routes refuse a user's forged ``access=ignore`` too (REST's ``resolve_mode``):
     403 ``forbidden``, and no job, so no page is fetched."""
     fetcher = FakeFetcher({PAGE: fetched(body=ARTICLE)})
     with running(fetcher, api_keys=KEYS, **BOTH_ON) as client:
         answer = client.post(
-            f"/ui/run/{view}", data={**fields, "access": "maximum"}, headers={**HX, **AUTH}
+            f"/ui/run/{view}", data={**fields, "access": "ignore"}, headers={**HX, **AUTH}
         )
 
     assert answer.status_code == 200  # a fragment htmx swaps
@@ -266,13 +313,13 @@ def test_batch_tree_and_site_carry_the_access_choice(
 ) -> None:
     sent = {**HX, **ADMIN}
     batch = admin_client.post(
-        "/ui/run/batch-urls", data={"urls": PAGE, "access": "maximum"}, headers=sent
+        "/ui/run/batch-urls", data={"urls": PAGE, "access": "ignore"}, headers=sent
     )
     site = admin_client.post(
-        "/ui/run/site-structure", data={"url": PAGE, "access": "maximum"}, headers=sent
+        "/ui/run/site-structure", data={"url": PAGE, "access": "ignore"}, headers=sent
     )
     tree_batch = admin_client.post(
-        "/ui/run/batch-urls", data={"url": [PAGE], "access": "maximum"}, headers=sent
+        "/ui/run/batch-urls", data={"url": [PAGE], "access": "ignore"}, headers=sent
     )
     respected = admin_client.post("/ui/run/batch-urls", data={"urls": PAGE}, headers=sent)
 
@@ -288,31 +335,35 @@ def test_batch_tree_and_site_carry_the_access_choice(
     preview = tree(
         admin_client.post(
             "/ui/run/batch-urls",
-            data={"urls": f"{PAGE}\nnot a url", "access": "maximum"},
+            data={"urls": f"{PAGE}\nnot a url", "access": "ignore"},
             headers=sent,
         ).text
     )
     radios = preview.xpath(f"//form//input[@name='{ACCESS_FIELD}']")
     assert [(r.get("value"), r.get("checked") is not None) for r in radios] == [
-        ("respect", False),
-        ("maximum", True),
+        ("default", False),
+        ("report", False),
+        ("ignore", True),
     ]
-    assert radios[0].get("id") == "preview-access-respect"
+    assert radios[0].get("id") == "preview-access-default"
     fake_reads(
         monkeypatch, len(SMALL_SITE), lambda offset, limit: SMALL_SITE[offset : offset + limit]
     )
     shown = admin_client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=sent)
     (form,) = tree(shown.text).xpath("//form[@class='tree-form']")
     radios = form.xpath(f".//input[@name='{ACCESS_FIELD}']")
-    assert [radio.get("value") for radio in radios] == ["respect", "maximum"]
-    assert radios[0].get("id") == "tree-access-respect"
+    assert [radio.get("value") for radio in radios] == ["default", "report", "ignore"]
+    assert radios[0].get("id") == "tree-access-default"
     assert [o.get("disabled") for o in form.xpath(".//select[@name='mode']/option")] == [None] * 3
 
 
 def test_batch_file_preview_offers_the_choice_to_admins_only() -> None:
     upload = {"file": ("urls.txt", f"{PAGE}\n".encode(), "text/plain")}
     with running(api_keys=KEYS, **BOTH_ON) as client:
-        for auth, expected in ((ADMIN, ["respect", "maximum"]), (AUTH, [])):
+        for auth, expected in (
+            (ADMIN, ["default", "report", "ignore"]),
+            (AUTH, ["default", "report"]),
+        ):
             answer = client.post("/ui/run/batch-file", files=upload, headers={**HX, **auth})
             radios = tree(answer.text).xpath(f"//input[@name='{ACCESS_FIELD}']")
             assert [radio.get("value") for radio in radios] == expected
@@ -352,7 +403,7 @@ def test_choice_and_result_follow_the_language(admin_client: TestClient) -> None
     (label,) = root.xpath("//label[@for='extract-mode']")
     assert label.text_content() == translate("de", "mode.label")
 
-    answer = run(admin_client, "extract", url=PAGE, access="maximum", headers={**ADMIN, **german})
+    answer = run(admin_client, "extract", url=PAGE, access="ignore", headers={**ADMIN, **german})
 
     result = tree(answer.text)
     terms = texts(result, "//dl[@class='facts']//dt")

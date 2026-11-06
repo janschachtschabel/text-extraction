@@ -81,6 +81,19 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   nothing shows no type. "Select content pages" checks every URL but the imprint, privacy,
   legal, contact, login, search and error pages, and unchecks those and every page that failed;
   a URL without a type is checked unless its page failed.
+
+  The tree marks URLs that the site's rules block: the badge "robots.txt" (robots.txt disallows
+  the URL, or robots.txt could not be retrieved) or "TDM" (a tdmrep.json reservation, an ai.txt
+  disallow or a noai statement). The reason is the badge's tooltip and is read out by screen
+  readers. Every shown URL is judged when the tree is shown, against the site's current
+  robots.txt, tdmrep.json and ai.txt (from the cache, or loaded once per site within the per-host
+  limits; at most 20 sites and 12 s), so the marks show the rules at that time. Links that the
+  crawl did not follow because the rules blocked them appear as "linked only" leaves. A line above
+  the tree counts the blocked URLs, and another names sites whose rules could not be read. Under
+  "Respect the site's rules", blocked URLs cannot be checked, and "Select all", "Select content
+  pages" and checking a section skip them; under "Check and report only" or "Checks off" they can
+  be checked and the buttons include them. The batch below the tree starts with the "Site rules"
+  step that the crawl ran with.
 - **Batch**: paste the URLs, one per line, and press "Start batch". More URLs than one batch
   takes are sent as several batches.
 - **Batch file**: choose a CSV or JSON file and press "Check the file". A CSV has a `url` column

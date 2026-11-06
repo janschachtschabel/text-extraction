@@ -58,9 +58,9 @@ must be listed in `MCP_ALLOWED_ORIGINS`; a request with any other `Origin` is re
 An MCP client authenticates with an API key of the service, exactly as a REST client does (see
 [API keys](usage.md#api-keys)). Every tool call runs the REST route's checks, with the key's role,
 and is counted against the key's rate limit, as are `initialize` and `tools/list`; a `get_job`
-that waits counts one more call for each further 10 s. An admin key may also use `compliance: ignore`
-(see [Site rules](site-rules.md)) and XPath selectors. Under `AUTH_MODE=none` leave the header
-out.
+that waits counts one more call for each further 10 s. A key that may choose it can also use
+`compliance: ignore` (see [Site rules](site-rules.md)); an admin key may also use XPath selectors.
+Under `AUTH_MODE=none` leave the header out.
 
 A caller's LLM or ASR key goes the same way, as the headers `X-LLM-Api-Key` and `X-ASR-Api-Key`
 (another `--header` each); it is never a tool argument.

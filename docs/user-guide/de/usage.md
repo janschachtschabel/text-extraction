@@ -404,15 +404,19 @@ seine Einträge, aktualisiert sich alle 3 s, bis er abgeschlossen ist, und hat e
 
 ### Website-Regeln in der Spielwiese
 
-Die Formulare für eine URL haben die Auswahl „Website-Regeln“:
+Die Formulare für eine URL haben die Auswahl „Website-Regeln“ mit drei Stufen:
 
-- „Regeln der Website beachten (Standard)“ sendet kein `compliance`: Es gelten die Prüfungen des
-  Betreibers.
-- „Maximale Extraktion (Vertragspartner)“ sendet `compliance: ignore`. Diese Wahl ist für Websites,
-  die die Extraktion vertraglich erlaubt haben (siehe [Website-Regeln](site-rules.md)).
+- „Regeln der Website einhalten“ sendet `compliance: enforce`.
+- „Nur prüfen und melden“ sendet `compliance: report`: Die Prüfungen laufen und werden gemeldet.
+- „Prüfung aus (Vertragspartner)“ sendet `compliance: ignore`. Das ist für Websites, die die
+  Extraktion vertraglich erlaubt haben (siehe [Website-Regeln](site-rules.md)).
 
-Nur Admins sehen die Auswahl, und sie ist mit einem Hinweis gesperrt, solange `BROWSER_ENABLED` oder
-`BROWSER_UNBLOCK_ENABLED` aus ist. Mit `AUTH_MODE=none` zählt jeder Besucher als Admin, daher sieht
-jeder Besucher die Auswahl. Das Feld „Browser-Fallback“ setzt `mode`: „wenn die Seite ihn braucht“
+Der Standard des Betreibers (`COMPLIANCE_DEFAULT`) ist vorausgewählt, mit „(Standard)“
+gekennzeichnet und sendet nichts. Admins sehen alle drei Stufen; andere Schlüssel sehen „Regeln
+der Website einhalten“ und „Nur prüfen und melden“, solange `COMPLIANCE_ALLOW_OVERRIDE` an ist (und
+„Prüfung aus“ nur, wenn es der Standard ist); ohne Überschreibung gibt es keine Auswahl. Mit
+`AUTH_MODE=none` zählt jeder Besucher als Admin. „Prüfung aus“ funktioniert ohne Entsperrmodus;
+mit eingeschaltetem Entsperrmodus (`BROWSER_ENABLED` und `BROWSER_UNBLOCK_ENABLED`) ist es die
+maximale Extraktion. Das Feld „Browser-Fallback“ setzt `mode`: „wenn die Seite ihn braucht“
 (`auto`), „nie“ (`fast`) oder „immer“ (`browser`). Bei maximaler Extraktion bleibt „nie“ bei HTTP:
 Die Seite erreicht den Browser nie.

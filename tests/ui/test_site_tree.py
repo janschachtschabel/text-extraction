@@ -1,11 +1,27 @@
 """The site tree of a ``site`` job (ruling P10-S20): built from its items by URL path segments,
 merged by seen key, pages first, capped at ``UI_TREE_MAX_URLS``."""
 
-from typing import Any
+import asyncio
+import time
+from typing import Any, cast
 
+from fakeredis import FakeAsyncRedis
+
+from tests.test_compliance import FakeFetcher, result
 from tests.ui.site_items import page_item, pending_item, robots_item, sitemap_item
+from text_extraction.compliance import ComplianceChecker, ComplianceReport, OriginRules
 from text_extraction.envelope import ErrorCode
-from text_extraction.ui.site_tree import MAX_SECTION_DEPTH, SiteTree, TreeNode, build_tree
+from text_extraction.fetch import Fetcher
+from text_extraction.job_models import JobItem
+from text_extraction.settings import Settings
+from text_extraction.ui.site_tree import (
+    MAX_SECTION_DEPTH,
+    SiteTree,
+    TreeNode,
+    build_tree,
+    leaf_origins,
+    mark_blocked,
+)
 
 ORIGIN = "https://example.org"
 
@@ -250,3 +266,158 @@ def test_an_old_jobs_items_have_no_page_type() -> None:
     [node] = _leaves(tree)
     assert (node.page_type, node.type_guessed) == (None, False)
     assert dict(tree.type_counts) == {}
+
+
+# --- blocked leaves (package 16) ---------------------------------------------------------------
+
+
+def _with_compliance(item: JobItem, **report: Any) -> JobItem:
+    assert item.result is not None
+    assert item.result.data is not None
+    item.result.data.compliance = ComplianceReport.model_validate(report)
+    return item
+
+
+def _rules(url: str, robots: str, *, origin: str = ORIGIN) -> OriginRules:
+    fetcher = FakeFetcher({f"{origin}/robots.txt": result(f"{origin}/robots.txt", robots)})
+    checker = ComplianceChecker(
+        cast(Fetcher, fetcher), FakeAsyncRedis(), Settings(auth_mode="none")
+    )
+    rules = asyncio.run(checker.origin_rules(url, cached_only=False))
+    assert rules is not None
+    return rules
+
+
+def test_crawled_page_blocked_by_robots_is_marked() -> None:
+    blocked = _with_compliance(
+        page_item(0, f"{ORIGIN}/a", error=ErrorCode.BLOCKED_BY_ROBOTS),
+        mode="enforce",
+        decision="blocked",
+        robots="disallowed",
+    )
+    allowed = page_item(1, f"{ORIGIN}/b")
+
+    tree = build_tree([blocked, allowed], max_urls=10)
+
+    marks = {node.url: node.blocked for node in _leaves(tree)}
+    assert marks == {f"{ORIGIN}/a": "robots", f"{ORIGIN}/b": None}
+
+
+def test_tree_records_the_crawl_mode() -> None:
+    item = _with_compliance(page_item(0, f"{ORIGIN}/a"), mode="ignore", decision="skipped")
+
+    assert build_tree([item], max_urls=10).crawl_mode == "ignore"
+    assert build_tree([], max_urls=10).crawl_mode is None
+
+
+def test_blocked_links_are_linked_only_leaves() -> None:
+    items = [page_item(0, f"{ORIGIN}/", depth=0, links=((f"{ORIGIN}/x", "blocked"),))]
+
+    tree = build_tree(items, max_urls=10)
+
+    [node] = [one for one in _leaves(tree) if one.kind == "linked"]
+    assert (node.url, node.blocked) == (f"{ORIGIN}/x", None)
+
+
+def _blocked_fixture() -> SiteTree:
+    items = [
+        page_item(
+            0, f"{ORIGIN}/sammlung/", depth=0, links=((f"{ORIGIN}/sammlung/_page3", "depth"),)
+        ),
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/sammlung/_page2"}]),
+    ]
+    return build_tree(items, max_urls=10)
+
+
+def test_mark_blocked_judges_sitemap_and_linked_leaves() -> None:
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+
+    marked = mark_blocked(tree, {ORIGIN: rules})
+
+    marks = {node.url: node.blocked for node in _leaves(marked)}
+    assert marks == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": "robots",
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }
+    assert (marked.blocked, marked.unchecked) == (2, ())
+
+
+def test_mark_blocked_names_origins_without_rules() -> None:
+    other = "https://other.example"
+    items = [
+        page_item(0, f"{ORIGIN}/a", depth=0),
+        sitemap_item(1, f"{other}/sitemap.xml", [{"loc": f"{other}/p"}]),
+    ]
+    tree = build_tree(items, max_urls=10)
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /\n")
+
+    marked = mark_blocked(tree, {ORIGIN: rules, other: None})
+
+    marks = {node.url: node.blocked for node in _leaves(marked)}
+    assert marks == {f"{ORIGIN}/a": "robots", f"{other}/p": None}
+    assert (marked.blocked, marked.unchecked) == (1, (other,))
+    # An origin that was not tried is counted, not named.
+    not_tried = mark_blocked(tree, {ORIGIN: rules})
+    assert (not_tried.unchecked, not_tried.unchecked_more) == ((), 1)
+
+
+def test_leaf_origins_orders_by_leaf_count() -> None:
+    items = [
+        page_item(0, "https://b.example/1", depth=0),
+        page_item(1, "https://a.example/1"),
+        page_item(2, "https://b.example/2"),
+        sitemap_item(3, "https://c.example/s.xml", [{"loc": "ftp://c.example/x"}]),
+    ]
+
+    tree = build_tree(items, max_urls=10)
+
+    assert leaf_origins(tree) == {
+        "https://b.example": "https://b.example/1",
+        "https://a.example": "https://a.example/1",
+    }
+
+
+def test_mark_blocked_current_judgement_replaces_a_stale_crawl_reason() -> None:
+    stale = _with_compliance(
+        page_item(0, f"{ORIGIN}/a", error=ErrorCode.BLOCKED_BY_ROBOTS),
+        mode="enforce",
+        decision="blocked",
+        robots="unavailable",
+    )
+    tree = build_tree([stale], max_urls=10)
+    allowing = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /other\n")
+
+    marked = mark_blocked(tree, {ORIGIN: allowing})
+
+    assert [node.blocked for node in _leaves(marked)] == [None]
+    assert marked.blocked == 0
+
+
+def test_mark_blocked_keeps_a_crawl_tdm_reason_and_a_reason_of_an_unchecked_origin() -> None:
+    noai = _with_compliance(
+        page_item(0, f"{ORIGIN}/a"), mode="enforce", decision="blocked", noai=True
+    )
+    other = "https://other.example"
+    robots = _with_compliance(
+        page_item(1, f"{other}/b"), mode="enforce", decision="blocked", robots="disallowed"
+    )
+    tree = build_tree([noai, robots], max_urls=10)
+    allowing = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /other\n")
+
+    marked = mark_blocked(tree, {ORIGIN: allowing, other: None})
+
+    marks = {node.url: node.blocked for node in _leaves(marked)}
+    assert marks == {f"{ORIGIN}/a": "tdm", f"{other}/b": "robots"}
+
+
+def test_mark_blocked_deadline_leaves_the_rest_unchecked() -> None:
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+
+    marked = mark_blocked(tree, {ORIGIN: rules}, deadline=time.monotonic() - 1)
+
+    assert marked.unchecked == (ORIGIN,)
+    assert marked.blocked == 0
+    assert all(node.blocked is None for node in _leaves(marked))

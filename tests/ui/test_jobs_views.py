@@ -4,6 +4,8 @@ public route."""
 
 import asyncio
 import gc
+import hashlib
+import json
 import weakref
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -17,8 +19,8 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 from structlog.testing import capture_logs
 
-from tests.fakes import PAGE
-from tests.ui.conftest import AUTH, HX, run, running
+from tests.fakes import PAGE, FakeFetcher, fetched
+from tests.ui.conftest import AUTH, HX, USER_KEY, run, running
 from tests.ui.site_items import page_item, result_data, sitemap_item
 from text_extraction import jobs_api, ratelimit
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
@@ -1075,3 +1077,236 @@ def test_advanced_is_open_when_the_preview_keeps_options(client: TestClient) -> 
     (section,) = tree(html).xpath("//form[@id='preview-form']//details[@class='advanced']")
     assert section.get("open") is not None
     assert texts(section, ".//textarea[@name='options']") == ['{"links": true}']
+
+
+# --- the tree marks the URLs the site's rules block ---------------------------------------------
+
+RULES_ROBOTS = f"{ORIGIN}/robots.txt"
+RULES_TDM = f"{ORIGIN}/.well-known/tdmrep.json"
+ADMIN_KEY = "admin-key-0123456789-raw-secret"
+ADMIN_HEADERS = {**HX, "Authorization": f"Bearer {ADMIN_KEY}"}
+BLOCKED_ONE = f"{ORIGIN}/sammlung/_page2"
+BLOCKED_TWO = f"{ORIGIN}/sammlung/_page3"
+ACCESS_KEYS = [
+    {"name": "alice", "role": "user", "sha256": hashlib.sha256(USER_KEY.encode()).hexdigest()},
+    {"name": "root", "role": "admin", "sha256": hashlib.sha256(ADMIN_KEY.encode()).hexdigest()},
+]
+
+
+def rules_site(*, mode: str = "enforce") -> list[JobItem]:
+    """A crawled page, a linked-only URL and a sitemap entry; the last two sit under the path
+    that ``rules_fetcher``'s robots.txt disallows."""
+    page = page_item(
+        0, f"{ORIGIN}/sammlung/", title="Home", depth=0, links=((BLOCKED_ONE, "blocked"),)
+    )
+    assert page.result is not None
+    assert page.result.data is not None
+    assert page.result.data.compliance is not None
+    page.result.data.compliance.mode = mode  # type: ignore[assignment]
+    return [page, sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": BLOCKED_TWO}])]
+
+
+def rules_fetcher(**answers: Any) -> FakeFetcher:
+    robots = answers.pop(
+        "robots", fetched(RULES_ROBOTS, "User-agent: *\nDisallow: /sammlung/_page")
+    )
+    return FakeFetcher({RULES_ROBOTS: robots, **answers})
+
+
+def rules_tree(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient, items: list[JobItem], **kwargs: Any
+) -> Any:
+    fake_reads(monkeypatch, len(items), lambda offset, limit: items[offset : offset + limit])
+    headers = {**kwargs.pop("headers", HEADERS)}
+    response = client.get("/ui/run/site-tree", params={"id": "a" * 32}, headers=headers)
+    assert response.status_code == 200
+    return tree(response.text)
+
+
+def box_of(root: Any, url: str) -> Any:
+    (box,) = root.xpath(f"//input[@name='url'][@value='{url}']")
+    return box
+
+
+def test_tree_marks_robots_disallowed_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    with running(rules_fetcher()) as client:
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    for url in (BLOCKED_ONE, BLOCKED_TWO):
+        box = box_of(root, url)
+        assert box.get("data-blocked") == "robots"
+        assert box.get("disabled") is not None
+        label = box.getparent()
+        assert texts(label, ".//span[@class='blocked-badge']")[0].startswith("robots.txt")
+        assert "robots.txt disallows this URL" in label.text_content()
+    allowed = box_of(root, f"{ORIGIN}/sammlung/")
+    assert allowed.get("data-blocked") is None
+    assert allowed.get("disabled") is None
+    assert texts(root, "//p[@class='tree-blocked']") == [
+        "2 URLs blocked by the site's rules: they can be selected only with "
+        "“Check and report only” or “Checks off”."
+    ]
+    assert root.xpath("//p[@class='tree-unchecked']") == []
+
+
+def test_tree_batch_is_preset_with_the_crawl_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    with running(rules_fetcher(), api_keys=ACCESS_KEYS) as client:
+        root = rules_tree(monkeypatch, client, rules_site(mode="ignore"), headers=ADMIN_HEADERS)
+
+    assert root.xpath("//form[@id='tree-form']/@data-access-mode") == ["ignore"]
+    assert root.xpath("//input[@name='access'][@checked]/@value") == ["ignore"]
+    box = box_of(root, BLOCKED_ONE)
+    assert box.get("data-blocked") == "robots"
+    assert box.get("disabled") is None
+
+
+def test_tree_report_default_presets_enforce_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
+    with running(rules_fetcher(), compliance_default="report") as client:
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//form[@id='tree-form']/@data-access-mode") == ["enforce"]
+    assert root.xpath("//input[@name='access'][@checked]/@value") == ["enforce"]
+    assert box_of(root, BLOCKED_ONE).get("disabled") is not None
+
+
+def test_tree_without_choice_keeps_blocked_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    with running(rules_fetcher(), compliance_allow_override=False) as client:
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//input[@name='access']") == []
+    assert root.xpath("//form[@id='tree-form']/@data-access-mode") == ["enforce"]
+    assert box_of(root, BLOCKED_ONE).get("disabled") is not None
+
+
+def test_tree_robots_unavailable_marks_every_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    unavailable = rules_fetcher(robots=fetched(RULES_ROBOTS, "down", status=503))
+    with running(unavailable) as client:
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    boxes = root.xpath("//input[@name='url']")
+    assert len(boxes) == 3
+    assert {box.get("data-blocked") for box in boxes} == {"robots_unavailable"}
+    assert "could not be retrieved" in boxes[0].getparent().text_content()
+
+
+def test_tree_rules_not_read_are_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    with running(rules_fetcher()) as client:
+
+        async def none(url: str) -> None:
+            return None
+
+        monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", none)
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
+    ]
+
+
+def test_tree_tdm_reservation_is_marked(monkeypatch: pytest.MonkeyPatch) -> None:
+    reserved = json.dumps([{"location": "/tdm/*", "tdm-reservation": 1}])
+    items = [
+        page_item(0, f"{ORIGIN}/", title="Home", depth=0),
+        sitemap_item(1, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/tdm/a"}]),
+    ]
+    with running(rules_fetcher(**{RULES_TDM: fetched(RULES_TDM, reserved)})) as client:
+        root = rules_tree(monkeypatch, client, items)
+
+    assert box_of(root, f"{ORIGIN}/tdm/a").get("data-blocked") == "tdm"
+    assert box_of(root, f"{ORIGIN}/").get("data-blocked") is None
+
+
+OTHER_ORIGIN = "https://other.example"
+
+
+def two_origin_site() -> list[JobItem]:
+    return [
+        *rules_site(),
+        sitemap_item(2, f"{OTHER_ORIGIN}/sitemap.xml", [{"loc": f"{OTHER_ORIGIN}/p"}]),
+    ]
+
+
+def test_tree_rules_timeout_names_the_origin_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from text_extraction.ui import job_views
+
+    monkeypatch.setattr(job_views, "TREE_RULES_SECONDS", 0.05)
+    cancelled: list[str] = []
+    with running(rules_fetcher()) as client, capture_logs() as logs:
+
+        async def never(url: str) -> None:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                cancelled.append(url)
+                raise
+
+        monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", never)
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
+    ]
+    assert len(cancelled) == 1  # the pending load was cancelled
+    assert next(log for log in logs if log["event"] == "tree_rules_timeout")["origins"] == 1
+
+
+def test_tree_rules_exception_leaves_the_origin_unchecked_and_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with running(rules_fetcher()) as client, capture_logs() as logs:
+
+        async def broken(url: str) -> None:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(cast(FastAPI, client.app).state.pipeline, "origin_rules", broken)
+        root = rules_tree(monkeypatch, client, rules_site())
+
+    assert root.xpath("//input[@data-blocked]") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
+    ]
+    failed = [log for log in logs if log["event"] == "tree_rules_failed"]
+    assert [(log["origin"], log["error_type"]) for log in failed] == [(ORIGIN, "RuntimeError")]
+
+
+def test_tree_rules_cap_loads_only_the_first_origins(monkeypatch: pytest.MonkeyPatch) -> None:
+    from text_extraction.ui import job_views
+
+    monkeypatch.setattr(job_views, "TREE_RULES_MAX_ORIGINS", 1)
+    loaded: list[str] = []
+    with running(rules_fetcher()) as client:
+        pipeline = cast(FastAPI, client.app).state.pipeline
+        real = pipeline.origin_rules
+
+        async def recording(url: str) -> Any:
+            loaded.append(url)
+            return await real(url)
+
+        monkeypatch.setattr(pipeline, "origin_rules", recording)
+        root = rules_tree(monkeypatch, client, two_origin_site())
+
+    assert len(loaded) == 1
+    assert loaded[0].startswith(ORIGIN)  # most leaves first
+    assert root.xpath("//p[@class='tree-unchecked']") == []  # not tried is not "could not be read"
+    assert texts(root, "//p[@class='tree-unchecked-more']") == ["1 more site was not checked."]
+    assert box_of(root, BLOCKED_ONE).get("data-blocked") == "robots"
+
+
+def test_tree_failed_page_that_is_blocked_for_another_reason_stays_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items = [
+        page_item(0, f"{ORIGIN}/sammlung/", depth=0),
+        page_item(1, BLOCKED_ONE, error=ErrorCode.NOT_FOUND),
+    ]
+    with running(rules_fetcher()) as client:
+        root = rules_tree(monkeypatch, client, items)
+
+    box = box_of(root, BLOCKED_ONE)
+    assert box.get("data-blocked") == "robots"
+    assert box.get("data-failed") is not None
