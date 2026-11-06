@@ -72,7 +72,7 @@
   - `convert_html` adds `SERVER_ERRORS_REMOVED_WARNING` to `Conversion.warnings` once when `strip_server_errors` removed one or more messages.
 
 **Root cause (reproduced on 2026-11-06 with Trafilatura 2.3.1):**
-- A block container (`div`, `section`, `article`, `main`, `aside`, `header`, `footer`, `li`, `td`, `th`, `blockquote`, `figure`, `figcaption`, `form`) whose first meaningful child is an inline element or a `<br>`, with no text before it, is split by Trafilatura. Every inline element becomes its own paragraph, and the space after it is lost:
+- A block container (`div`, `section`, `article`, `main`, `aside`, `header`, `footer`, `li`, `blockquote`, `figure`, `figcaption`, `form`) whose first meaningful child is an inline element or a `<br>`, with no text before it, is split by Trafilatura. Every inline element becomes its own paragraph, and the space after it is lost:
   - `<div><b>W</b>: msg in <b>/x.php</b> on line <b>1</b></div>` gives `**W**: msg in\n\n**/x.php**on line\n\n**1**`.
   - `<div><br/>Start <b>b</b> danach</div>` gives `Start\n\n**b**danach`.
 - The same content wrapped in a `<p>` comes out right: `**W**: msg in **/x.php** on line **1**`.
@@ -107,7 +107,7 @@
   - **`wrap_inline_runs`**
     - For every block container listed above whose own leading text is empty or whitespace and whose first non-whitespace child is an inline element or a `<br>`, wrap each maximal run of inline children (text, inline elements and `<br>`) in a new `<p>`.
     - A run that is only whitespace and `<br>` is dropped.
-    - Containers that are `p`, or that are inside `pre` or `table` cell content with block children, keep their structure.
+    - `p`, table cells (`td`, `th`) and anything inside `pre` keep their structure; Markdown tables must not change.
   - **`convert_html`**
     - Call `strip_server_errors` right after `strip_non_content`, and `wrap_inline_runs` right after `flatten_deep_tables`.
     - The `bs4` fallback uses the same soup, so it profits from both.
