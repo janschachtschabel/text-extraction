@@ -479,11 +479,31 @@ button.secondary:hover:not(:disabled) {
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
   }
+}
 
-  .workspace .result {
-    padding-top: 1rem;
-    border-top: 1px solid var(--line);
-  }
+/* The settings are a card; the result area starts as a dashed empty card that the first
+   result replaces (the swap into #result is innerHTML). */
+.settings {
+  padding: 14px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+
+.result-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 12rem;
+  padding: 14px 20px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-card);
+  color: var(--muted);
+  text-align: center;
+}
+
+.result-empty > p {
+  margin: 0;
 }
 
 .settings .intro {
@@ -497,10 +517,6 @@ button.secondary:hover:not(:disabled) {
 
 .panel .intro {
   margin: 0 0 0.5rem;
-}
-
-.result:empty {
-  display: none;
 }
 
 /* Forms of the operations. */

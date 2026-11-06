@@ -128,6 +128,7 @@
   "progress.cancel": "Cancel",
   "progress.cancelled": "Job {id} ({kind}) was cancelled and deleted with its results.",
   "progress.item_state": "Item {index}: {state}.",
+  "result.empty": "The result appears here. Fill in the form on the left and start.",
   "result.retryable": "(retryable)",
   "result.retry_after": "Retry after {seconds} s.",
   "result.continues_as_job": "Continues as job {id} ({kind}): {url}",

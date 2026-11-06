@@ -200,6 +200,8 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
 
         _log_in(page)
         page.wait_for_selector("#app-shell")
+        expect(page.locator("#result .result-empty")).to_be_visible()
+        found += _axe(page, "empty result card")
         for tab in TABS:
             page.click(f"#tab-{tab.name}")
             expect(page.locator(f"#panel-{tab.name}")).to_be_visible()
@@ -284,6 +286,8 @@ def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Langu
         found += _axe(page, "phone login")
         _log_in(page)
         page.wait_for_selector("#app-shell")
+        expect(page.locator("#result .result-empty")).to_be_visible()
+        found += _axe(page, "phone empty result card")
         for tab in TABS:
             page.click(f"#tab-{tab.name}")
             expect(page.locator(f"#panel-{tab.name}")).to_be_visible()
