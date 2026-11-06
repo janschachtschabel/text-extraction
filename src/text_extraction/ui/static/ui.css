@@ -1242,6 +1242,12 @@ ul.tree label.inline:has(input:disabled) .label {
   color: var(--muted);
 }
 
+/* The last resort on a narrow line: the note breaks inside a word instead of making the tree
+   scroll sideways; it stays beside the type. */
+.page-type .type-guessed {
+  overflow-wrap: anywhere;
+}
+
 /* A URL not fetched whose URL says nothing has an open type (package 17): the muted pill. */
 .page-type-open {
   color: var(--muted);
@@ -1351,5 +1357,11 @@ dl.facts.counts {
 
   form.previews {
     margin-top: 12px;
+  }
+
+  /* A level of the tree is indented less, so a leaf five levels deep, with the fold buttons'
+     indent, still has room for its page type beside a long German note (package 17). */
+  ul.tree ul {
+    padding-left: 0.75rem;
   }
 }
