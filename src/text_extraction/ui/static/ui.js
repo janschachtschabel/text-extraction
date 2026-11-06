@@ -314,16 +314,21 @@
       nodeBox
     ).filter(function (box) { return box && !box.disabled; });
     var own = nodeBox(item);
-    if (!own || own.disabled || item.querySelector(":scope > ul") === null) {
+    if (!own || item.querySelector(":scope > ul") === null) {
       return;
     }
-    if (boxes.length === 0) {
-      if (own.name === "url") {
+    if (own.name === "url") {
+      if (boxes.length === 0) {
         return;  // a page with children keeps its own box
       }
-      own.checked = false;
-      own.indeterminate = false;
-      return;
+    } else {
+      // A section with no enabled box below it cannot be ticked.
+      own.disabled = boxes.length === 0;
+      if (boxes.length === 0) {
+        own.checked = false;
+        own.indeterminate = false;
+        return;
+      }
     }
     var checked = boxes.filter(function (box) { return box.checked; }).length;
     var partly = boxes.some(function (box) { return box.indeterminate; });
@@ -428,6 +433,7 @@
       inner.indeterminate = false;
     });
     box.indeterminate = false;
+    settle(item);
     settleParents(item);
     countSelected(box.closest("form"));
   });
