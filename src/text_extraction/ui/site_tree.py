@@ -20,6 +20,12 @@ or a linked-only URL the type its URL says (``page_types.url_type``), ``type_gue
 when the URL says nothing (ruling P14-R8: a link's ``category`` is not used; it defaults to
 ``content``). ``SiteTree.type_counts`` counts the types of the URLs shown that have one.
 
+A leaf can be marked as blocked (``TreeNode.blocked``, a ``BlockReason``): a crawled page by
+its own compliance report (`TreeBuilder.add`), then every other leaf by the view's judgement of
+its URL against its origin's rules under ``enforce`` (`mark_blocked`, which does no I/O: the
+caller loads the rules per origin, `leaf_origins`). Origins without rules are named
+(``SiteTree.unchecked``), and their leaves stay unmarked.
+
 Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a directory
 (its label ends in ``/``) and has no URL of its own; every URL is a leaf: a directory's own
 page is the leaf ``/`` inside it, and a query string makes a leaf of its own. Children are in
@@ -27,10 +33,17 @@ name order."""
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Final, Literal, get_args
 
+from text_extraction.compliance import (
+    BlockReason,
+    ComplianceMode,
+    OriginRules,
+    block_reason,
+    origin_of,
+)
 from text_extraction.job_models import JobItem
 from text_extraction.page_types import PageType, url_type
 from text_extraction.site.types import SiteInfo
@@ -46,6 +59,8 @@ __all__ = [
     "TreeBuilder",
     "TreeNode",
     "build_tree",
+    "leaf_origins",
+    "mark_blocked",
 ]
 
 NodeKind = Literal["section", "page", "sitemap", "linked"]
@@ -65,7 +80,8 @@ MAX_SECTION_DEPTH: Final = 12
 # further mention counts, so the count never needs more memory than this.
 HIDDEN_KEYS_MAX: Final = 250_000
 # Links not followed for these reasons are shown as linked only; a followed link has an item.
-LINKED_ONLY: Final = frozenset({"depth", "max_pages"})
+# A "blocked" link carries no reason of its own: `mark_blocked` judges it.
+LINKED_ONLY: Final = frozenset({"depth", "max_pages", "blocked"})
 # The page types that "Select content pages" leaves unticked; a leaf of any other type, or
 # without one, is ticked.
 NON_CONTENT_TYPES: Final[tuple[PageType, ...]] = (
@@ -87,7 +103,8 @@ class TreeNode:
     """One node: a section (no URL) or a URL leaf of ``kind`` ``page`` (crawled), ``sitemap``
     (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
     ``error_code`` its error's code, ``depth`` its link distance from the start page,
-    ``lastmod`` a sitemap's, ``page_type`` its type (``type_guessed`` when from its URL)."""
+    ``lastmod`` a sitemap's, ``page_type`` its type (``type_guessed`` when from its URL),
+    ``blocked`` why the site's rules block it (none: no rule does, or it is not known)."""
 
     label: str
     url: str | None
@@ -100,18 +117,24 @@ class TreeNode:
     error_code: str | None = None
     page_type: PageType | None = None
     type_guessed: bool = False
+    blocked: BlockReason | None = None
 
 
 @dataclass(frozen=True)
 class SiteTree:
     """The roots (one per host), the URLs shown and how many more were not shown;
     ``type_counts`` the shown URLs of each page type, most first (then in the order of
-    ``PageType``), without the URLs that have no type."""
+    ``PageType``), without the URLs that have no type. ``crawl_mode`` is the compliance mode
+    of the crawl (none when no item says), ``blocked`` the leaves with a block reason and
+    ``unchecked`` the origins whose leaves could not be judged (`mark_blocked`)."""
 
     roots: list[TreeNode]
     urls: int
     hidden: int
     type_counts: Mapping[PageType, int] = field(default_factory=dict)
+    crawl_mode: ComplianceMode | None = None
+    blocked: int = 0
+    unchecked: tuple[str, ...] = ()
 
 
 @dataclass
@@ -126,6 +149,7 @@ class _Found:
     error_code: str | None = None
     page_type: PageType | None = None
     type_guessed: bool = False
+    blocked: BlockReason | None = None
 
     def merge(self, other: "_Found") -> None:
         self.title = self.title or other.title
@@ -136,6 +160,7 @@ class _Found:
             self.status, self.error_code = other.status, other.error_code
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
+        self.blocked = self.blocked or other.blocked
 
 
 class TreeBuilder:
@@ -147,6 +172,7 @@ class TreeBuilder:
         self._sources: tuple[dict[str, _Found], ...] = ({}, {}, {})
         self._hidden: set[int] = set()
         self._hidden_more = 0
+        self._mode: ComplianceMode | None = None
 
     def add(self, item: JobItem) -> None:
         """Take what ``item`` says: a page, a sitemap's entries or a page's linked-only URLs.
@@ -154,7 +180,11 @@ class TreeBuilder:
         envelope = item.result
         data = envelope.data if envelope is not None else None
         site: SiteInfo | None = data.site if data is not None else None
-        if envelope is None or data is None or site is None:
+        if envelope is None or data is None:
+            return
+        if self._mode is None and data.compliance is not None:
+            self._mode = data.compliance.mode
+        if site is None:
             return
         if site.role == "page" and item.url:
             code = str(envelope.error.code) if envelope.error is not None else None
@@ -165,6 +195,7 @@ class TreeBuilder:
                 depth=site.depth,
                 error_code=code,
                 page_type=data.page_type.type if data.page_type is not None else None,
+                blocked=block_reason(data.compliance) if data.compliance is not None else None,
             )
             self._add(_PAGE, found)
             for link in site.links or []:
@@ -219,7 +250,12 @@ class TreeBuilder:
         counts = Counter(one.page_type for _, one in shown if one.page_type is not None)
         ordered = sorted(counts.items(), key=lambda pair: (-pair[1], _PAGE_TYPES.index(pair[0])))
         return SiteTree(
-            roots=_assemble(shown), urls=len(shown), hidden=hidden, type_counts=dict(ordered)
+            roots=_assemble(shown),
+            urls=len(shown),
+            hidden=hidden,
+            type_counts=dict(ordered),
+            crawl_mode=self._mode,
+            blocked=sum(1 for _, one in shown if one.blocked is not None),
         )
 
 
@@ -280,6 +316,7 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 lastmod=found.lastmod,
                 page_type=found.page_type,
                 type_guessed=found.type_guessed,
+                blocked=found.blocked,
             )
         )
     ordered = sorted(roots.values(), key=_order)
@@ -293,3 +330,44 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
 
 def _order(node: TreeNode) -> tuple[str, str]:
     return node.label.casefold(), node.label
+
+
+def _leaves(tree: SiteTree) -> Iterable[TreeNode]:
+    """The URL leaves in the order the tree shows them."""
+    stack = list(reversed(tree.roots))
+    while stack:
+        node = stack.pop()
+        if node.url is not None:
+            yield node
+        stack.extend(reversed(node.children))
+
+
+def leaf_origins(tree: SiteTree) -> dict[str, str]:
+    """The origins of the tree's leaves, each with the first leaf URL of it, the origin with
+    most leaves first (then by the origin's text). Leaves of no http(s) origin are left out."""
+    first: dict[str, str] = {}
+    counts: Counter[str] = Counter()
+    for node in _leaves(tree):
+        origin = origin_of(node.url) if node.url is not None else None
+        if origin is None or node.url is None:
+            continue
+        first.setdefault(origin, node.url)
+        counts[origin] += 1
+    return {origin: first[origin] for origin in sorted(first, key=lambda o: (-counts[o], o))}
+
+
+def mark_blocked(tree: SiteTree, rules: Mapping[str, OriginRules | None]) -> SiteTree:
+    """``tree`` with every leaf marked that its origin's rules block under ``enforce`` (a
+    leaf the crawl marked keeps its reason). ``rules`` maps an origin (as `leaf_origins` gives
+    it) to its rules; the origins without rules, or with none, are ``unchecked``. Pure: the
+    nodes are updated in place."""
+    blocked = 0
+    for node in _leaves(tree):
+        if node.blocked is None and node.url is not None:
+            origin = origin_of(node.url)
+            known = rules.get(origin) if origin is not None else None
+            if known is not None:
+                node.blocked = block_reason(known.judge(node.url, "enforce"))
+        blocked += node.blocked is not None
+    unchecked = tuple(origin for origin in leaf_origins(tree) if rules.get(origin) is None)
+    return replace(tree, blocked=blocked, unchecked=unchecked)
