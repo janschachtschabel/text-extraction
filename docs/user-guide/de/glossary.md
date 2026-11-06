@@ -26,7 +26,8 @@ Die Beschriftungen der Spielwiese, wie die englische und die deutsche Spielwiese
 | Advanced | Erweitert | Der zugeklappte Abschnitt eines Formulars mit „Optionen (JSON)“ und, wo das Formular es hat, „Sekunden warten, bevor daraus ein Job wird“. |
 | Show source | Quelltext anzeigen | Der zugeklappte Abschnitt eines Markdown-Ergebnisses, der den Markdown-Text zeigt. |
 | Site rules | Website-Regeln | Die Wahl in drei Stufen in der Spielwiese: Regeln beachten, nur prüfen und melden oder Prüfung aus. |
-| Respect the site's rules (default) | Regeln der Website beachten (Standard) | Der Standard: robots.txt und der TDM-Nutzungsvorbehalt werden geprüft. |
+| Respect the site's rules | Regeln der Website einhalten | `compliance: enforce`: robots.txt und der TDM-Nutzungsvorbehalt werden geprüft, und eine Seite, die sie sperren, wird nicht extrahiert. Die Standardstufe des Betreibers trägt in der Spielwiese den Zusatz „(Standard)“. |
+| Check and report only | Nur prüfen und melden | `compliance: report`: Die Prüfungen laufen und werden gemeldet, aber nichts wird gesperrt. |
 | Checks off (contract partners) | Prüfung aus (Vertragspartner) | Die Stufe der Spielwiese für Websites, die die Extraktion vertraglich erlaubt haben: `compliance: ignore`; mit Entsperrmodus ist es die maximale Extraktion. |
 | Browser fallback | Browser-Fallback | Das Feld `mode`: ob der Browser eine Seite rendert. |
 | when the page needs it | wenn die Seite ihn braucht | `mode: auto`. |

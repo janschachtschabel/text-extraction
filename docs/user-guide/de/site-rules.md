@@ -2,12 +2,12 @@
 
 English: [Site rules](../en/site-rules.md)
 
-Jede Anfrage extrahiert auf eine von zwei Arten. Standardmäßig beachtet der Dienst die Regeln
-einer Website. Die maximale Extraktion ist für Websites, die die Extraktion vertraglich erlaubt
-haben; nur ein Admin darf sie nutzen, und nur dort, wo der Betreiber sie eingeschaltet hat. Die Prüfungen lassen sich pro Lauf
-schalten. Diese
-Seite erklärt beide Arten, die Pause, um die ein Host bitten kann, und wie Sie die Art in der
-API, im MCP-Server und in der Spielwiese wählen.
+Standardmäßig beachtet der Dienst die Regeln einer Website. Die maximale Extraktion ist für
+Websites, die die Extraktion vertraglich erlaubt haben; sie braucht einen Schlüssel, der
+`compliance: ignore` wählen darf (ein Admin, oder jeder Schlüssel, wo das der Standard des
+Betreibers ist), und den Schalter des Betreibers. Die Prüfungen lassen sich auch pro Lauf
+einstellen. Diese Seite erklärt den Standard, die maximale Extraktion, die Pause, um die ein
+Host bitten kann, und wie Sie in der API, im MCP-Server und in der Spielwiese wählen.
 
 ## Die Regeln der Website beachten
 
@@ -108,7 +108,7 @@ nehmen `compliance` genauso. Eine Website-Struktur liest ihre Seiten nur über H
 
 ## Mit MCP
 
-Der Schlüssel des MCP-Clients muss den Wert wählen dürfen (siehe oben). `compliance` gehört in `options`,
+Der Schlüssel des MCP-Clients muss den Wert wählen dürfen (siehe [Prüfung pro Lauf an- und abschalten](#prüfung-pro-lauf-an--und-abschalten)). `compliance` gehört in `options`,
 zum Beispiel bei `extract_url`:
 
 ```json
@@ -144,7 +144,7 @@ Tab **Datei** hat sie nicht.
 
 | Stufe | Sendet | Bedeutung |
 | --- | --- | --- |
-| „Regeln der Website beachten“ | `compliance: enforce` | robots.txt und TDM-Vorbehalte lehnen eine Seite ab. |
+| „Regeln der Website einhalten“ | `compliance: enforce` | robots.txt und TDM-Vorbehalte lehnen eine Seite ab. |
 | „Nur prüfen und melden“ | `compliance: report` | Die Prüfungen laufen und werden gemeldet; nichts wird abgelehnt. |
 | „Prüfung aus (Vertragspartner)“ | `compliance: ignore` | Die Prüfungen entfallen. Für Websites, die die Extraktion vertraglich erlaubt haben. |
 
@@ -155,7 +155,7 @@ gekennzeichnet; er sendet nichts, daher gilt der Wert des Betreibers. Eine ander
 | Wer | Stufen |
 | --- | --- |
 | Admins (und jeder Besucher unter `AUTH_MODE=none`) | alle drei |
-| Andere Schlüssel, `COMPLIANCE_ALLOW_OVERRIDE` an | „Regeln der Website beachten“ und „Nur prüfen und melden“; „Prüfung aus“ nur, wenn es der Standard ist |
+| Andere Schlüssel, `COMPLIANCE_ALLOW_OVERRIDE` an | „Regeln der Website einhalten“ und „Nur prüfen und melden“; „Prüfung aus“ nur, wenn es der Standard ist |
 | Andere Schlüssel, `COMPLIANCE_ALLOW_OVERRIDE` aus | keine Auswahl |
 
 „Prüfung aus“ funktioniert ohne Entsperrmodus: Die Prüfungen entfallen, und der normale Browser

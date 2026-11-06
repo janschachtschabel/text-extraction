@@ -98,7 +98,7 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   höchstens 20 Websites und 12 s); die Markierungen zeigen also die Regeln zu diesem Zeitpunkt.
   Links, die der Crawl wegen der Regeln nicht verfolgt hat, erscheinen als Blätter „nur
   verlinkt“. Eine Zeile über dem Baum zählt die gesperrten URLs, eine weitere nennt Websites,
-  deren Regeln nicht gelesen werden konnten. Unter „Regeln der Website beachten“ lassen sich
+  deren Regeln nicht gelesen werden konnten. Unter „Regeln der Website einhalten“ lassen sich
   gesperrte URLs nicht markieren, und „Alle auswählen“, „Inhaltsseiten auswählen“ und das Markieren
   eines Abschnitts überspringen sie; unter „Nur prüfen und melden“ oder „Prüfung aus“ lassen sie
   sich markieren, und die Schaltflächen schließen sie ein. Der Batch unter dem Baum beginnt mit der

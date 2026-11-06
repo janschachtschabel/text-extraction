@@ -406,14 +406,14 @@ seine Einträge, aktualisiert sich alle 3 s, bis er abgeschlossen ist, und hat e
 
 Die Formulare für eine URL haben die Auswahl „Website-Regeln“ mit drei Stufen:
 
-- „Regeln der Website beachten“ sendet `compliance: enforce`.
+- „Regeln der Website einhalten“ sendet `compliance: enforce`.
 - „Nur prüfen und melden“ sendet `compliance: report`: Die Prüfungen laufen und werden gemeldet.
 - „Prüfung aus (Vertragspartner)“ sendet `compliance: ignore`. Das ist für Websites, die die
   Extraktion vertraglich erlaubt haben (siehe [Website-Regeln](site-rules.md)).
 
 Der Standard des Betreibers (`COMPLIANCE_DEFAULT`) ist vorausgewählt, mit „(Standard)“
 gekennzeichnet und sendet nichts. Admins sehen alle drei Stufen; andere Schlüssel sehen „Regeln
-der Website beachten“ und „Nur prüfen und melden“, solange `COMPLIANCE_ALLOW_OVERRIDE` an ist (und
+der Website einhalten“ und „Nur prüfen und melden“, solange `COMPLIANCE_ALLOW_OVERRIDE` an ist (und
 „Prüfung aus“ nur, wenn es der Standard ist); ohne Überschreibung gibt es keine Auswahl. Mit
 `AUTH_MODE=none` zählt jeder Besucher als Admin. „Prüfung aus“ funktioniert ohne Entsperrmodus;
 mit eingeschaltetem Entsperrmodus (`BROWSER_ENABLED` und `BROWSER_UNBLOCK_ENABLED`) ist es die

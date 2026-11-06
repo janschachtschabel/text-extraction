@@ -20,13 +20,13 @@ See [docs/packages.md](docs/packages.md#status) for the implementation packages 
 
 - **Respect the site's rules** (the default): robots.txt and the EU TDM opt-out are checked, every
   host gets only a few requests at a time, and the service sends its own honest user agent.
-- **Switch the checks per run** (`compliance`: `enforce`, `report` or `ignore`; the playground
-  offers "Respect the site's rules", "Check and report only" and "Checks off (contract
-  partners)" by role). **Maximum extraction**, for sites that allowed extraction by contract: an
-  admin sends `"compliance": "ignore"`, and where the operator switched on `BROWSER_UNBLOCK_ENABLED`, a
+- **Maximum extraction**, for sites that allowed extraction by contract: an admin sends
+  `"compliance": "ignore"`, and where the operator switched on `BROWSER_UNBLOCK_ENABLED`, a
   stealth browser gets past bot protection, also after a plain 403, 429 or 503. It solves no
   image captchas, uses no paid service and rotates no IP address; the per-host limits still
-  apply.
+  apply. The checks can be switched per run (`compliance`: `enforce`, `report` or `ignore`); the
+  playground offers "Respect the site's rules", "Check and report only" and "Checks off
+  (contract partners)" by role.
 
 In both, the browser fallback (`mode`) decides whether a page is rendered in the browser: when
 the page needs it (`auto`, the default), never (`fast`) or always (`browser`). See

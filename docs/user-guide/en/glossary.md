@@ -26,7 +26,8 @@ The labels of the playground, as the English and the German playground show them
 | Advanced | Erweitert | The closed section of a form that holds "Options (JSON)" and, where the form has it, "Wait seconds before it becomes a job". |
 | Show source | Quelltext anzeigen | The closed section of a Markdown result that shows the Markdown text. |
 | Site rules | Website-Regeln | The three-step choice in the playground: respect the rules, check and report only, or checks off. |
-| Respect the site's rules (default) | Regeln der Website beachten (Standard) | The default: robots.txt and the TDM opt-out are checked. |
+| Respect the site's rules | Regeln der Website einhalten | `compliance: enforce`: robots.txt and the TDM opt-out are checked and a page they forbid is not extracted. The operator's default step carries "(default)" in the playground. |
+| Check and report only | Nur prüfen und melden | `compliance: report`: the checks run and are reported, but nothing is blocked. |
 | Checks off (contract partners) | Prüfung aus (Vertragspartner) | The playground step for sites that allowed extraction by contract: `compliance: ignore`; with unblock mode it is maximum extraction. |
 | Browser fallback | Browser-Fallback | The `mode` field: whether the browser renders a page. |
 | when the page needs it | wenn die Seite ihn braucht | `mode: auto`. |
