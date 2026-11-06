@@ -138,6 +138,8 @@ def test_guessed_page_type_keeps_its_space_and_fits_the_tree(
         job = page.locator("#result section.job")
         expect(job.locator(".state")).to_have_attribute("data-value", "completed")
         job.locator("button.tree-button").click()
+        # The badge's leaf is in a section, folded at first (package 17).
+        page.locator("#result [data-action=tree-unfold-all]").click()
 
         badge = page.locator("#result .page-type-guessed")
         expect(badge).to_have_count(1)

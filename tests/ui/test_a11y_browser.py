@@ -49,6 +49,15 @@ _RECORD_STATUS: Final = (
 
 
 ROBOTS: Final = "User-agent: *\nDisallow: /impressum.html\n"
+# The site of ``PAGES`` with a social network link on the start page and a link one level too
+# deep from /docs/a.html: its tree has a folded section, a "type open" leaf and a social link.
+SOCIAL: Final = "https://www.youtube.com/@example"
+SITE: Final = {
+    **PAGES,
+    "/": (PAGES["/"][0], [*PAGES["/"][1], SOCIAL]),
+    "/docs/a.html": (PAGES["/docs/a.html"][0], ["/docs/deeper.html"]),
+}
+TREE_URLS: Final = 6  # the five pages and /docs/deeper.html, linked only
 
 
 def _serve(httpserver: HTTPServer) -> str:
@@ -58,13 +67,37 @@ def _serve(httpserver: HTTPServer) -> str:
             return Response(_page("Slow page", []), content_type="text/html; charset=utf-8")
         if request.path == "/robots.txt":  # one crawled-page link is blocked (package 16)
             return Response(ROBOTS, content_type="text/plain")
-        found = PAGES.get(request.path)
+        found = SITE.get(request.path)
         if found is None:
             return Response("Not found", status=404, content_type="text/plain")
         return Response(_page(*found), content_type="text/html; charset=utf-8")
 
     httpserver.expect_request(re.compile(".*")).respond_with_handler(handle)
     return httpserver.url_for("/").rstrip("/")
+
+
+def _tree(page: Page, origin: str, state: str) -> list[str]:
+    """Read the local site's structure from its tab and show its tree; the axe violations of the
+    tree as it opens (its sections folded) and with every node unfolded."""
+    page.click("#tab-site-structure")
+    page.fill("#site-url", f"{origin}/")
+    page.fill("#site-depth", "1")
+    _submit(page, "site-structure")
+    site = page.locator("#result section.job", has=page.locator("button.tree-button"))
+    expect(site.locator(".state")).to_have_attribute("data-value", "completed")
+    site.locator("button.tree-button").click()
+    view = page.locator("#result .tree-view")
+    expect(view.locator("input[name=url]")).to_have_count(TREE_URLS)
+    blocked = view.locator("input[data-blocked=robots]")
+    expect(blocked).to_have_count(1)  # the imprint, disabled, with its badge in the label
+    expect(blocked).to_be_disabled()
+    expect(view.locator("button.fold[aria-expanded=false]")).to_have_count(1)  # docs/
+    expect(view.locator(".tree-social a")).to_have_attribute("href", SOCIAL)
+    found = _axe(page, f"{state}, folded")
+    view.locator("[data-action=tree-unfold-all]").click()
+    expect(view.locator(".page-type-open")).to_be_visible()  # /docs/deeper.html
+    found += _axe(page, f"{state}, unfolded")
+    return found
 
 
 @pytest.fixture
@@ -208,18 +241,7 @@ def test_axe_finds_no_violations(ui: tuple[str, str], language: Language) -> Non
         expect(page.locator("#result section.batch-preview")).to_be_visible()
         found += _axe(page, "batch preview")
 
-        page.click("#tab-site-structure")
-        page.fill("#site-url", f"{origin}/")
-        page.fill("#site-depth", "1")
-        _submit(page, "site-structure")
-        site = page.locator("#result section.job", has=page.locator("button.tree-button"))
-        expect(site.locator(".state")).to_have_attribute("data-value", "completed")
-        site.locator("button.tree-button").click()
-        expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
-        blocked = page.locator("#result .tree-view input[data-blocked=robots]")
-        expect(blocked).to_have_count(1)  # the imprint, disabled, with its badge in the label
-        expect(blocked).to_be_disabled()
-        found += _axe(page, "site tree")
+        found += _tree(page, origin, "site tree")
 
     assert found == [], "\n".join(found)
     assert console == []
@@ -254,7 +276,7 @@ def test_chunk_result_adds_no_tab_stops_per_chunk(ui: tuple[str, str], language:
 @pytest.mark.parametrize("language", LANGUAGES)
 def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Language) -> None:
     """The login, every tab with its Advanced section open, an extract result with every
-    details element open and a form error, at 390 x 844."""
+    details element open, a form error and the site tree (folded and unfolded), at 390 x 844."""
     url, origin = ui
     found: list[str] = []
     with browsing(f"{url}?lang={language}") as (page, console):
@@ -287,6 +309,8 @@ def test_axe_finds_no_violations_on_a_phone(ui: tuple[str, str], language: Langu
         job = page.locator("#result section.job")
         expect(job.locator(".state")).to_have_attribute("data-value", "completed")
         found += _axe(page, "phone completed progress (scrolling items table)")
+
+        found += _tree(page, origin, "phone site tree")
 
     assert found == [], "\n".join(found)
     assert console == []
@@ -587,19 +611,19 @@ def _open_tree(page: Page, origin: str) -> str:
     site = page.locator("#result section.job", has=page.locator("button.tree-button"))
     expect(site.locator(".state")).to_have_attribute("data-value", "completed")
     site.locator("button.tree-button").click()
-    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(5)
+    expect(page.locator("#result .tree-view input[name=url]")).to_have_count(TREE_URLS)
     job_id: str = site.get_attribute("data-job") or ""
     return job_id
 
 
 def test_tree_actions_are_reachable_from_the_start_of_the_tree(ui: tuple[str, str]) -> None:
-    """From the tree's first checkbox, "Extract selected" is a few key presses away, however
-    many URLs the tree lists: Shift+Tab reaches the link before the tree, which leads to the
-    actions after it (ruling R-P12-9 b)."""
+    """From the tree's first control (its host's fold button), "Extract selected" is a few key
+    presses away, however many URLs the tree lists: Shift+Tab reaches the link before the tree,
+    which leads to the actions after it (ruling R-P12-9 b)."""
     url, origin = ui
     with browsing(url) as (page, console):
         job_id = _open_tree(page, origin)
-        page.locator("#result ul.tree input[type=checkbox]").first.focus()
+        page.locator("#result ul.tree button.fold").first.focus()
         page.keyboard.press("Shift+Tab")
         expect(page.locator("#result .tree-view a.skip-to-actions")).to_be_focused()
         page.keyboard.press("Enter")

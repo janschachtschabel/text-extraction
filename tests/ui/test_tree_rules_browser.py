@@ -89,6 +89,7 @@ def test_blocked_url_follows_the_site_rules_switch(ui: tuple[str, str]) -> None:
         # "Check and report only": the box can be ticked by hand, and "Select all" takes it.
         view.get_by_label("Check and report only").check()
         expect(blocked).to_be_enabled()
+        docs.locator(":scope > button.fold").click()  # folded at first (package 17)
         blocked.check()
         expect(view.locator(".tree-counter")).to_have_text("2 selected")
         view.locator("[data-action=tree-none]").click()

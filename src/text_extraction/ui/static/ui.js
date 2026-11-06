@@ -1,8 +1,8 @@
 /*
  * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3, P12-S6, P12-S8, P12-S9 and P15-R1),
- * the only one besides htmx: the keys, the language, the tabs, the site tree's selection, the
- * result's "Copy" button, the page's status line and the status line of an answer htmx does not
- * swap.
+ * the only one besides htmx: the keys, the language, the tabs, the site tree's selection and
+ * folding, the result's "Copy" button, the page's status line and the status line of an answer
+ * htmx does not swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -230,6 +230,11 @@
       writeLanguage(choice.getAttribute("hreflang"));
       return;
     }
+    var fold = target ? target.closest(".tree button.fold") : null;
+    if (fold) {
+      setFold(fold, fold.getAttribute("aria-expanded") !== "true");
+      return;
+    }
     var button = target ? target.closest("[data-action], [data-tab]") : null;
     if (!button) {
       return;
@@ -249,6 +254,10 @@
       selectAll(button.closest("form"), action === "tree-all");
     } else if (action === "tree-content") {
       selectContent(button.closest("form"), button.getAttribute("data-exclude") || "");
+    } else if (action === "tree-unfold-all" || action === "tree-fold-all") {
+      button.closest("form").querySelectorAll(".tree button.fold").forEach(function (each) {
+        setFold(each, action === "tree-unfold-all");
+      });
     } else if (action === "copy") {
       copyResult(button);
     }
@@ -401,13 +410,45 @@
     countSelected(form);
   }
 
+  // Folding (package 17): a node with children has a fold button before its label, rendered
+  // hidden, so without this script every node stays unfolded. A folded node's list (the
+  // button's aria-controls, its sibling) is hidden; its boxes still take part in the selection.
+  function setFold(button, open) {
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    var list = button.parentElement.querySelector(":scope > ul");
+    if (list) {
+      list.hidden = !open;
+    }
+  }
+
+  // Shows a new tree's fold buttons and folds every node below the hosts. A button already
+  // shown belongs to a tree set up before, whose folds the user may have changed.
+  function initFolding(form) {
+    var fresh = form.querySelectorAll(".tree button.fold[hidden]");
+    if (fresh.length === 0) {
+      return;
+    }
+    fresh.forEach(function (button) {
+      button.hidden = false;
+      setFold(button, button.parentElement.parentElement.classList.contains("tree"));
+    });
+    form.querySelectorAll("[data-action=tree-unfold-all], [data-action=tree-fold-all]").forEach(
+      function (button) {
+        button.hidden = false;
+      }
+    );
+  }
+
   document.addEventListener("htmx:load", function (event) {
     var root = event.target;
     if (!(root instanceof Element)) {
       return;
     }
     var forms = root.matches("form.tree-form") ? [root] : root.querySelectorAll("form.tree-form");
-    Array.prototype.forEach.call(forms, applyTreeMode);
+    Array.prototype.forEach.call(forms, function (form) {
+      initFolding(form);
+      applyTreeMode(form);
+    });
   });
 
   document.addEventListener("change", function (event) {

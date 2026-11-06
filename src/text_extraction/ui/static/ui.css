@@ -1226,6 +1226,81 @@ ul.tree label.inline:has(input:disabled) .label {
   color: var(--muted);
 }
 
+/* A URL not fetched whose URL says nothing has an open type (package 17): the muted pill. */
+.page-type-open {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* A node's fold button (package 17): a 24 x 24 px target before its label. Its mark changes
+   with aria-expanded inside the fixed box, so the row does not move. While the buttons show,
+   a row without one is indented by the button's width, so the boxes of one level line up. */
+ul.tree button.fold {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  margin: 0 0.25rem 0 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+ul.tree button.fold:hover:not(:disabled) {
+  border-color: var(--field-line);
+  background: var(--neutral-wash);
+}
+
+ul.tree button.fold .fold-mark::before {
+  content: "▾";
+}
+
+ul.tree button.fold[aria-expanded="false"] .fold-mark::before {
+  content: "▸";
+}
+
+ul.tree:has(button.fold:not([hidden])) li:not(:has(> button.fold)) > label.inline {
+  margin-left: calc(24px + 0.25rem);
+}
+
+/* The social media links after the tree (package 17): a long URL breaks, so the list wraps on
+   a phone instead of widening the page. */
+.tree-social {
+  margin-top: 1rem;
+}
+
+.tree-social > h5 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.tree-social ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tree-social li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tree-social a {
+  display: inline-block;
+  min-height: 24px;
+  overflow-wrap: anywhere;
+}
+
 /* The counts of a batch preview: a two-column grid instead of the figures' row. */
 dl.facts.counts {
   display: grid;

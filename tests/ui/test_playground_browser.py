@@ -228,6 +228,7 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         view.locator("[data-action=tree-none]").click()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
         docs.locator(":scope > label > input").check()
+        docs.locator(":scope > button.fold").click()  # folded at first (package 17)
         docs_pages.first.uncheck()
         expect(view.locator(".tree-counter")).to_have_text("1 selected")
         assert docs.locator(":scope > label > input").evaluate("box => box.indeterminate")

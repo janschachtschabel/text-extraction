@@ -656,6 +656,8 @@ def test_tree_checkboxes_named_only_for_urls(
         "tree-all",
         "tree-none",
         "tree-content",
+        "tree-unfold-all",
+        "tree-fold-all",
     }
 
 
@@ -685,7 +687,7 @@ TYPE_TEXTS = {
             "/impressum": "Imprint",
             "/agb": "Legal (guessed from the URL)",
         },
-        "types": "Types: Content 2, Home 1, Imprint 1, Legal 1",
+        "types": "Types: Content 2, Home 1, Imprint 1, Legal 1, Type open 2",
         "button": "Select content pages",
     },
     "de": {
@@ -696,7 +698,7 @@ TYPE_TEXTS = {
             "/impressum": "Impressum",
             "/agb": "Rechtliches (aus der URL geschätzt)",
         },
-        "types": "Typen: Inhalt 2, Startseite 1, Impressum 1, Rechtliches 1",
+        "types": "Typen: Inhalt 2, Startseite 1, Impressum 1, Rechtliches 1, Typ offen 2",
         "button": "Inhaltsseiten auswählen",
     },
 }
@@ -713,14 +715,18 @@ def test_tree_shows_page_types(
 
     root = tree(show_tree(client, language=language))
 
+    typed = "./label/span[contains(@class, 'page-type') and not(contains(@class, 'type-open'))]"
     badges = {
         leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): " ".join(
-            leaf.xpath("./label/span[contains(@class, 'page-type')]")[0].text_content().split()
+            leaf.xpath(typed)[0].text_content().split()
         )
         for leaf in root.xpath("//li[./label/input[@name='url']]")
-        if leaf.xpath("./label/span[contains(@class, 'page-type')]")
+        if leaf.xpath(typed)
     }
     assert badges == expected["badges"]  # none for /kaputt (failed), /start and /docs/c
+    # The linked-only URLs whose URL says nothing are marked "type open" (package 17).
+    untyped = root.xpath("//li[./label/span[contains(@class, 'page-type-open')]]/label/input")
+    assert {box.get("value").removeprefix(ORIGIN) for box in untyped} == {"/start", "/docs/c"}
     boxes = {
         box.get("value").removeprefix(ORIGIN): box.get("data-page-type")
         for box in root.xpath("//input[@name='url']")
@@ -764,6 +770,141 @@ def test_a_tree_without_types_has_no_types_line(
     assert root.xpath("//p[@class='tree-types']") == []
     assert root.xpath("//span[contains(@class, 'page-type')]") == []
     assert root.xpath("//button[@data-action='tree-content']")  # still offered: it ticks all
+
+
+SOCIAL_URL = "https://www.youtube.com/@example"
+FOLD_SITE = [
+    page_item(
+        0,
+        f"{ORIGIN}/",
+        depth=0,
+        page_type="home",
+        links=((f"{ORIGIN}/docs/deep/linked", "depth"),),
+        external=((SOCIAL_URL, "social"), ("https://example.com/elsewhere", "content")),
+    ),
+    page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
+    sitemap_item(2, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/docs/deep/listed"}]),
+]
+
+
+def _fold_site(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_reads(
+        monkeypatch, len(FOLD_SITE), lambda offset, limit: FOLD_SITE[offset : offset + limit]
+    )
+
+
+@pytest.mark.parametrize(
+    ("language", "name"), [("en", "Pages under docs/"), ("de", "Seiten unter docs/")]
+)
+def test_tree_has_fold_buttons_for_sections(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, language: str, name: str
+) -> None:
+    _fold_site(monkeypatch)
+
+    root = tree(show_tree(client, language=language))
+
+    parents = root.xpath("//ul[@class='tree']//li[./ul]")
+    assert len(parents) == 3  # example.org, docs/ and deep/
+    ids = [item.xpath("./ul")[0].get("id") for item in parents]
+    assert all(ids)
+    every_id = [str(value) for value in root.xpath("//@id")]
+    assert len(set(every_id)) == len(every_id)  # unique in the whole view
+    for item, list_id in zip(parents, ids, strict=True):
+        [button] = item.xpath("./button[contains(@class, 'fold')]")
+        assert button.get("type") == "button"
+        assert button.get("hidden") is not None  # shown by ui.js only
+        assert button.get("aria-expanded") == "true"
+        assert button.get("aria-controls") == list_id
+        # Before the label, not inside it: the checkbox keeps its name.
+        assert button.getnext().tag == "label"
+        assert button.xpath(".//*[@aria-hidden='true']")  # the indicator is not read
+    # A leaf has no fold button.
+    assert root.xpath("//li[not(./ul)]/button") == []
+    [docs] = [item for item in parents if texts(item, "./label/span[@class='label']") == ["docs/"]]
+    assert texts(docs, "./button") == [name]
+    assert texts(docs, "./label") == ["docs/"]
+    tools = {
+        button.get("data-action"): button
+        for button in root.xpath("//p[@class='tree-tools']/button")
+    }
+    assert {"tree-unfold-all", "tree-fold-all"} <= set(tools)
+    assert tools["tree-unfold-all"].get("hidden") is not None
+    assert tools["tree-fold-all"].get("hidden") is not None
+    assert tools["tree-unfold-all"].get("type") == "button"
+
+
+@pytest.mark.parametrize(
+    ("language", "pill", "types"),
+    [
+        (
+            "en",
+            "Type open: Not fetched; its type shows when it is extracted",
+            "Types: Home 1, Content 1, Type open 2",
+        ),
+        (
+            "de",
+            "Typ offen: Nicht abgerufen; der Typ zeigt sich beim Extrahieren",
+            "Typen: Startseite 1, Inhalt 1, Typ offen 2",
+        ),
+    ],
+)
+def test_tree_marks_type_open(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, language: str, pill: str, types: str
+) -> None:
+    _fold_site(monkeypatch)
+
+    root = tree(show_tree(client, language=language))
+
+    open_ = {
+        leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): leaf
+        for leaf in root.xpath("//li[./label/span[contains(@class, 'page-type-open')]]")
+    }
+    assert set(open_) == {"/docs/deep/linked", "/docs/deep/listed"}  # crawled pages are typed
+    for leaf in open_.values():
+        [badge] = leaf.xpath("./label/span[contains(@class, 'page-type-open')]")
+        assert "page-type" in badge.get("class").split()
+        assert " ".join(badge.text_content().split()) == pill
+        assert badge.xpath("./span[@class='visually-hidden']")
+        assert badge.get("title") == pill.split(": ", 1)[1]
+        assert leaf.xpath("./label/input")[0].get("data-page-type") is None
+    assert texts(root, "//p[@class='tree-types']") == [types]
+
+
+def test_tree_lists_social_links(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _fold_site(monkeypatch)
+
+    root = tree(show_tree(client))
+
+    [social] = root.xpath("//section[@class='tree-social']")
+    # After the tree, before the actions: it is no part of the selection.
+    assert social.getprevious().get("class") == "tree"
+    assert social.getnext().get("class") == "tree-actions"
+    [title] = social.xpath("./h5")
+    assert title.get("id")
+    assert social.get("aria-labelledby") == title.get("id")
+    assert texts(social, "./h5") == ["Social media"]
+    assert texts(social, ".//p[@class='hint']") == [
+        "Profiles the site links to. They are outside the site, so they cannot be selected."
+    ]
+    [link] = social.xpath(".//ul/li/a")
+    assert link.get("href") == SOCIAL_URL
+    assert {"noopener", "noreferrer", "nofollow"} <= set(link.get("rel").split())
+    assert link.get("target") == "_blank"
+    assert texts(social, ".//a") == [f"{SOCIAL_URL} (opens in a new tab)"]
+    assert texts(social, ".//a/span[@class='visually-hidden']") == ["(opens in a new tab)"]
+    assert social.xpath(".//input") == []
+
+
+def test_tree_without_social_has_no_section(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_reads(
+        monkeypatch, len(SMALL_SITE), lambda offset, limit: SMALL_SITE[offset : offset + limit]
+    )
+
+    root = tree(show_tree(client))
+
+    assert root.xpath("//*[contains(@class, 'tree-social')]") == []
 
 
 def test_tree_counts_one_hit_per_500_items(
