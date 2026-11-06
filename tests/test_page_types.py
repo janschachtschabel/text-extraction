@@ -9,6 +9,7 @@ from text_extraction.page_types import (
     LISTING_MIN_LINKS,
     PageSignal,
     PageType,
+    guess_url_type,
     link_category,
     page_type,
     url_type,
@@ -826,3 +827,27 @@ def test_microdata_scan_stops_after_the_scope_limit() -> None:
     scopes = '<div itemscope itemtype="https://schema.org/WebPage"></div>' * 60
     late = '<div itemscope itemtype="https://schema.org/ContactPage"></div>'
     assert classify(doc(body=scopes + late))[0] == "other"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://x.org/2021/05/oer-camp/", "content"),
+        ("https://x.org/2021/05/17/oer-camp/", "content"),
+        ("https://x.org/2021/13/a/", None),
+        ("https://x.org/?page_id=45952", "content"),
+        ("https://x.org/?p=12", "content"),
+        ("https://x.org/?p=12&cat=3", None),
+        ("https://x.org/impressum/", "imprint"),
+        ("https://x.org/author/jan/", "listing"),
+        ("https://x.org/ansprechpartner/", "contact"),
+        ("https://x.org/2-dezember/", None),
+    ],
+)
+def test_guess_url_type(url: str, expected: PageType | None) -> None:
+    assert guess_url_type(url) == expected
+
+
+def test_url_type_itself_never_says_content() -> None:
+    assert url_type("https://x.org/2021/05/oer-camp/") is None
+    assert url_type("https://x.org/?p=12") is None

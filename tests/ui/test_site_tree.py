@@ -16,6 +16,7 @@ from text_extraction.job_models import JobItem
 from text_extraction.settings import Settings
 from text_extraction.ui.site_tree import (
     MAX_SECTION_DEPTH,
+    TREE_MAX_SOCIAL,
     SiteTree,
     TreeNode,
     build_tree,
@@ -421,3 +422,104 @@ def test_mark_blocked_deadline_leaves_the_rest_unchecked() -> None:
     assert marked.unchecked == (ORIGIN,)
     assert marked.blocked == 0
     assert all(node.blocked is None for node in _leaves(marked))
+
+
+# --- one row per lone page, untyped count, social links (package 17) ----------------------------
+
+
+def test_section_with_only_its_page_is_one_row() -> None:
+    sitemap = sitemap_item(
+        0,
+        "https://x.org/sitemap.xml",
+        [{"loc": "https://x.org/a/"}, {"loc": "https://x.org/b/"}, {"loc": "https://x.org/b/c"}],
+    )
+
+    tree = build_tree([sitemap], max_urls=10)
+
+    assert [shape(root) for root in tree.roots] == [
+        section(
+            "x.org",
+            leaf("a/", "sitemap", "https://x.org/a/"),
+            section(
+                "b/",
+                leaf("/", "sitemap", "https://x.org/b/"),
+                leaf("c", "sitemap", "https://x.org/b/c"),
+            ),
+        )
+    ]
+
+
+def test_folded_row_keeps_blocked_and_type() -> None:
+    page = page_item(0, "https://x.org/impressum/", page_type="imprint")
+    tree = build_tree([page], max_urls=10)
+    rules = _rules(
+        "https://x.org/", "User-agent: *\nDisallow: /impressum/\n", origin="https://x.org"
+    )
+
+    marked = mark_blocked(tree, {"https://x.org": rules})
+
+    [root] = marked.roots
+    [node] = root.children
+    assert (node.label, node.url, node.children) == ("impressum/", "https://x.org/impressum/", [])
+    assert (node.kind, node.page_type, node.blocked) == ("page", "imprint", "robots")
+
+
+def test_untyped_counts_unfetched_leaves_without_type() -> None:
+    sitemap = sitemap_item(
+        0,
+        "https://x.org/sitemap.xml",
+        [{"loc": "https://x.org/2-dezember/"}, {"loc": "https://x.org/impressum/"}],
+    )
+    failed = page_item(1, "https://x.org/broken", error=ErrorCode.TARGET_HTTP_ERROR)
+
+    tree = build_tree([sitemap, failed], max_urls=10)
+
+    assert tree.untyped == 1
+
+
+def test_social_links_collected_once() -> None:
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=(
+            ("https://www.facebook.com/wlo", "social"),
+            ("https://facebook.com/wlo", "social"),
+            ("https://mastodon.social/@wlo", "social"),
+            ("https://example.com/x", "content"),
+        ),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert [(link.url, link.host) for link in tree.social] == [
+        ("https://www.facebook.com/wlo", "facebook.com"),
+        ("https://mastodon.social/@wlo", "mastodon.social"),
+    ]
+
+
+def test_social_links_capped() -> None:
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=tuple((f"https://facebook.com/page{n}", "social") for n in range(60)),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert len(tree.social) == TREE_MAX_SOCIAL == 50
+
+
+def test_social_links_use_category_or_host() -> None:
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=(
+            ("https://unknown-network.example/me", "social"),
+            ("https://www.instagram.com/wlo", None),  # stored before categories: judged by host
+            ("https://example.com/x", None),
+        ),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert [link.host for link in tree.social] == ["unknown-network.example", "instagram.com"]

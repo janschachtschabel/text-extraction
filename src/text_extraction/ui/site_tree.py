@@ -16,9 +16,13 @@ items are taken one at a time (`TreeBuilder.add`), so a reader can feed them pag
 
 Each URL leaf has a page type (package 14): a crawled page its result's ``page_type`` (none
 when the page failed or its item was stored before page types, ruling P14-R7); a sitemap entry
-or a linked-only URL the type its URL says (``page_types.url_type``), ``type_guessed``, and none
-when the URL says nothing (ruling P14-R8: a link's ``category`` is not used; it defaults to
-``content``). ``SiteTree.type_counts`` counts the types of the URLs shown that have one.
+or a linked-only URL the type its URL says (``page_types.guess_url_type``: also ``content`` for a
+dated path or a WordPress ``?p=`` query), ``type_guessed``, and none when the URL says nothing
+(ruling P14-R8: a link's ``category`` is not used; the type stays open). ``SiteTree.type_counts``
+counts the types of the URLs shown that have one, ``SiteTree.untyped`` the shown URLs that were
+not fetched and have none. ``SiteTree.social`` lists the external social links of the crawled
+pages (``category`` ``social``, or for an item stored without categories the host), each once by
+host and path, at most ``TREE_MAX_SOCIAL``.
 
 A leaf can be marked as blocked (``TreeNode.blocked``, a ``BlockReason``): a crawled page by
 its own compliance report (`TreeBuilder.add`), then every other leaf by the view's judgement of
@@ -30,8 +34,9 @@ read or judged in time (the caller's budgets, `mark_blocked`'s deadline) are nam
 
 Roots are hosts (a leading ``www.`` dropped, as in ``seen_key``); a section is a directory
 (its label ends in ``/``) and has no URL of its own; every URL is a leaf: a directory's own
-page is the leaf ``/`` inside it, and a query string makes a leaf of its own. Children are in
-name order."""
+page is the leaf ``/`` inside it, and a query string makes a leaf of its own. A section whose
+only child is that leaf is one row: the leaf, with the section's label. Children are in name
+order."""
 
 import time
 from collections import Counter
@@ -39,6 +44,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Final, Literal, get_args
+from urllib.parse import urlsplit
 
 from text_extraction.compliance import (
     BlockReason,
@@ -48,7 +54,7 @@ from text_extraction.compliance import (
     origin_of,
 )
 from text_extraction.job_models import JobItem
-from text_extraction.page_types import PageType, url_type
+from text_extraction.page_types import PageType, guess_url_type, is_social_url
 from text_extraction.site.types import SiteInfo
 from text_extraction.site.urls import seen_key
 from text_extraction.ui.i18n import Message
@@ -57,8 +63,10 @@ __all__ = [
     "FOUND_LABELS",
     "MAX_SECTION_DEPTH",
     "NON_CONTENT_TYPES",
+    "TREE_MAX_SOCIAL",
     "NodeKind",
     "SiteTree",
+    "SocialLink",
     "TreeBuilder",
     "TreeNode",
     "build_tree",
@@ -79,6 +87,8 @@ FOUND_LABELS: Final[Mapping[NodeKind, Message]] = MappingProxyType(
 # Sections below a host; the segments of a deeper path stay together in its leaf's label, so
 # neither the tree nor its rendering nests without bound.
 MAX_SECTION_DEPTH: Final = 12
+# The social links listed for the site, at most.
+TREE_MAX_SOCIAL: Final = 50
 # Hidden URLs are counted once each up to this many (by their key's hash); beyond it, each
 # further mention counts, so the count never needs more memory than this.
 HIDDEN_KEYS_MAX: Final = 250_000
@@ -124,13 +134,22 @@ class TreeNode:
 
 
 @dataclass(frozen=True)
+class SocialLink:
+    """An external link to a social network: its URL and its host (without ``www.``)."""
+
+    url: str
+    host: str
+
+
+@dataclass(frozen=True)
 class SiteTree:
     """The roots (one per host), the URLs shown and how many more were not shown;
     ``type_counts`` the shown URLs of each page type, most first (then in the order of
     ``PageType``), without the URLs that have no type. ``crawl_mode`` is the compliance mode
     of the crawl (none when no item says), ``blocked`` the leaves with a block reason and
     ``unchecked`` the origins tried whose leaves could not be judged and ``unchecked_more`` the
-    number of origins not tried (`mark_blocked`)."""
+    number of origins not tried (`mark_blocked`). ``untyped`` counts the shown URLs that were
+    not fetched (sitemap or linked) and have no page type; ``social`` the social links."""
 
     roots: list[TreeNode]
     urls: int
@@ -140,6 +159,8 @@ class SiteTree:
     blocked: int = 0
     unchecked: tuple[str, ...] = ()
     unchecked_more: int = 0
+    untyped: int = 0
+    social: tuple[SocialLink, ...] = ()
 
 
 @dataclass
@@ -178,6 +199,7 @@ class TreeBuilder:
         self._hidden: set[int] = set()
         self._hidden_more = 0
         self._mode: ComplianceMode | None = None
+        self._social: dict[str, SocialLink] = {}
 
     def add(self, item: JobItem) -> None:
         """Take what ``item`` says: a page, a sitemap's entries or a page's linked-only URLs.
@@ -206,11 +228,26 @@ class TreeBuilder:
             for link in site.links or []:
                 if link.crawl in LINKED_ONLY:
                     self._add(_LINKED, _guessed(link.url))
+                if link.kind == "external":
+                    self._add_social(link.url, link.category)
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
             for entry in site.sitemap.entries:
                 found = _guessed(entry.loc)
                 found.lastmod = entry.lastmod
                 self._add(_ENTRY, found)
+
+    def _add_social(self, url: str, category: str | None) -> None:
+        if len(self._social) >= TREE_MAX_SOCIAL:
+            return
+        if category != "social" and not (category is None and is_social_url(url)):
+            return
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            return
+        host = (parts.hostname or "").lower().removeprefix("www.")
+        if host:
+            self._social.setdefault(f"{host}{parts.path}", SocialLink(url, host))
 
     def _add(self, rank: int, found: _Found) -> None:
         key = seen_key(found.url)
@@ -261,13 +298,15 @@ class TreeBuilder:
             type_counts=dict(ordered),
             crawl_mode=self._mode,
             blocked=sum(1 for _, one in shown if one.blocked is not None),
+            untyped=sum(1 for kind, one in shown if kind != "page" and one.page_type is None),
+            social=tuple(self._social.values()),
         )
 
 
 def _guessed(url: str) -> _Found:
     """A URL that was not crawled, with the type its URL says, as guessed (none if it says
     nothing)."""
-    guess = url_type(url)
+    guess = guess_url_type(url)
     return _Found(url, page_type=guess, type_guessed=guess is not None)
 
 
@@ -329,8 +368,19 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
     while stack:
         node = stack.pop()
         node.children.sort(key=_order)
+        node.children = [_folded(child) for child in node.children]
         stack.extend(child for child in node.children if child.children)
     return ordered
+
+
+def _folded(node: TreeNode) -> TreeNode:
+    """``node``, or when it is a section whose only child is its own page (the leaf ``/``, with
+    no children), that leaf with the section's label: one row for a lone page."""
+    if node.url is None and len(node.children) == 1:
+        [only] = node.children
+        if only.label == "/" and not only.children:
+            return replace(only, label=node.label)
+    return node
 
 
 def _order(node: TreeNode) -> tuple[str, str]:

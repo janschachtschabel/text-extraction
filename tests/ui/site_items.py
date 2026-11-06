@@ -53,10 +53,13 @@ def page_item(
     links: tuple[tuple[str, str] | tuple[str, str, str | None], ...] = (),
     error: ErrorCode | None = None,
     page_type: str | None = None,
+    external: tuple[tuple[str, str | None], ...] = (),
 ) -> JobItem:
     """A crawled page; ``links`` are (url, crawl) pairs or (url, crawl, category) triples (a
     pair, like an item stored before link categories, has no category); ``page_type`` is the
-    page's type (None: like a failed page or an item stored before page types)."""
+    page's type (None: like a failed page or an item stored before page types); ``external`` are
+    (url, category) pairs of external links (a None category: like an item stored before link
+    categories)."""
     site = {
         "role": "page",
         "depth": depth,
@@ -72,6 +75,18 @@ def page_item(
                 "category": link[2] if len(link) == 3 else None,
             }
             for link in links
+        ]
+        + [
+            {
+                "url": url_,
+                "text": "",
+                "kind": "external",
+                "source": "a",
+                "rel": [],
+                "crawl": "out_of_scope",
+                "category": category,
+            }
+            for url_, category in external
         ],
     }
     typed = {"type": page_type, "signals": []} if page_type is not None else None

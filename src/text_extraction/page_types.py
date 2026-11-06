@@ -168,7 +168,16 @@ _SEGMENT_NAMES: Final[dict[PageType, tuple[str, ...]]] = {
         "accessibility",
         "accessibility-statement",
     ),
-    "contact": ("kontakt", "contact", "contact-us", "kontaktformular"),
+    "contact": (
+        "kontakt",
+        "contact",
+        "contact-us",
+        "kontaktformular",
+        "ansprechpartner",
+        "ansprechpersonen",
+        "kontakt-aufnehmen",
+        "get-in-touch",
+    ),
     "about": (
         "ueber-uns",
         "uber-uns",
@@ -215,6 +224,10 @@ _SEGMENT_NAMES: Final[dict[PageType, tuple[str, ...]]] = {
         "schlagwort",
         "archiv",
         "archive",
+        "author",
+        "authors",
+        "autor",
+        "autoren",
     ),
 }
 _SEGMENT_TYPE: Final[dict[str, PageType]] = {
@@ -358,6 +371,31 @@ def url_type(url: str) -> PageType | None:
     return None
 
 
+_DATED_PATH: Final = re.compile(
+    r"/(?:19|20)\d\d/(?:0[1-9]|1[0-2])/(?:(?:0[1-9]|[12]\d|3[01])/)?(?!\d+/?$)[^/]+"
+)
+_WORDPRESS_QUERIES: Final = frozenset({"p", "page_id"})
+
+
+def guess_url_type(url: str) -> PageType | None:
+    """The type of a URL that was not fetched: ``url_type``, else ``content`` for a dated path
+    (``/2021/05/oer-camp/``) or a WordPress ``?p=12`` / ``?page_id=12`` query, else None.
+    ``url_type`` itself never says ``content``, because ``page_type`` uses it as a signal."""
+    known = url_type(url)
+    if known is not None:
+        return known
+    try:
+        parts = urlsplit(url)
+        query = [(k.lower(), v) for k, v in parse_qsl(parts.query) if not _is_tracking(k.lower())]
+    except ValueError:
+        return None
+    if len(query) == 1 and query[0][0] in _WORDPRESS_QUERIES and query[0][1].isdecimal():
+        return "content"
+    if not query and _DATED_PATH.search(unicodedata.normalize("NFC", unquote(parts.path))):
+        return "content"
+    return None
+
+
 def _path_language(url: str) -> str | None:
     """The language code (without its region) of a path that is only a language code, optionally
     with an index file (``/it/``, ``/de-at/index.html``), else None."""
@@ -436,7 +474,7 @@ _URL_LINK_CATEGORY: Final[dict[PageType, LinkCategory]] = {
 }
 
 
-def _is_social(url: str) -> bool:
+def is_social_url(url: str) -> bool:
     try:
         host = (urlsplit(url).hostname or "").lower().rstrip(".")
     except ValueError:
@@ -451,7 +489,7 @@ def link_category(url: str, text: str, kind: LinkKind) -> LinkCategory:
     if kind == "file":
         return "download"
     if kind == "external":
-        return "social" if _is_social(url) else "content"
+        return "social" if is_social_url(url) else "content"
     by_url = url_type(url)
     if by_url is not None and by_url in _URL_LINK_CATEGORY:
         return _URL_LINK_CATEGORY[by_url]
