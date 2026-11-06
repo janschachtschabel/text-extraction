@@ -22,7 +22,8 @@ dated path or a WordPress ``?p=`` query), ``type_guessed``, and none when the UR
 counts the types of the URLs shown that have one, ``SiteTree.untyped`` the shown URLs that were
 not fetched and have none. ``SiteTree.social`` lists the external social links of the crawled
 pages (``category`` ``social``, or for an item stored without categories the host), each once by
-host and path, at most ``TREE_MAX_SOCIAL``.
+host and path, at most ``TREE_MAX_SOCIAL``; share and intent endpoints (``facebook.com/sharer.php``,
+``x.com/intent/post``) name no profile and are left out.
 
 A leaf can be marked as blocked (``TreeNode.blocked``, a ``BlockReason``): a crawled page by
 its own compliance report (`TreeBuilder.add`), then every other leaf by the view's judgement of
@@ -89,6 +90,12 @@ FOUND_LABELS: Final[Mapping[NodeKind, Message]] = MappingProxyType(
 MAX_SECTION_DEPTH: Final = 12
 # The social links listed for the site, at most.
 TREE_MAX_SOCIAL: Final = 50
+# A network's share and intent endpoints (a "share this page" button), which name no profile:
+# the first path segment, or a path and what follows it, lower-cased.
+_SHARE_SEGMENTS: Final = frozenset(
+    {"intent", "share", "share.php", "sharearticle", "sharer", "sharer.php", "sharing", "submit"}
+)
+_SHARE_PATHS: Final = ("/dialog/feed", "/dialog/share", "/pin/create", "/send", "/spi/shares")
 # Hidden URLs are counted once each up to this many (by their key's hash); beyond it, each
 # further mention counts, so the count never needs more memory than this.
 HIDDEN_KEYS_MAX: Final = 250_000
@@ -246,7 +253,7 @@ class TreeBuilder:
         except ValueError:
             return
         host = (parts.hostname or "").lower().removeprefix("www.")
-        if host:
+        if host and not _is_share_url(host, parts.path, parts.query):
             self._social.setdefault(f"{host}{parts.path}", SocialLink(url, host))
 
     def _add(self, rank: int, found: _Found) -> None:
@@ -301,6 +308,17 @@ class TreeBuilder:
             untyped=sum(1 for kind, one in shown if kind != "page" and one.page_type is None),
             social=tuple(self._social.values()),
         )
+
+
+def _is_share_url(host: str, path: str, query: str) -> bool:
+    """Whether a social link is a share or intent endpoint (``facebook.com/sharer.php``,
+    ``x.com/intent/post``, ``wa.me/?text=``), not a profile of the site."""
+    path = path.lower()
+    if path.strip("/").split("/", 1)[0] in _SHARE_SEGMENTS:
+        return True
+    if any(path == prefix or path.startswith(f"{prefix}/") for prefix in _SHARE_PATHS):
+        return True
+    return host == "wa.me" and path in ("", "/") and "text=" in query
 
 
 def _guessed(url: str) -> _Found:

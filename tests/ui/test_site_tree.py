@@ -523,3 +523,46 @@ def test_social_links_use_category_or_host() -> None:
     tree = build_tree([page], max_urls=10)
 
     assert [link.host for link in tree.social] == ["unknown-network.example", "instagram.com"]
+
+
+def test_share_endpoints_are_no_social_profiles() -> None:
+    shares = (
+        "https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fx.org%2F",
+        "https://facebook.com/sharer.php?u=x",
+        "https://www.facebook.com/share.php?u=x",
+        "https://www.facebook.com/dialog/share?href=x",
+        "https://twitter.com/intent/tweet?url=x",
+        "https://twitter.com/share?url=x",
+        "https://x.com/intent/post?url=x",
+        "https://www.linkedin.com/shareArticle?mini=true&url=x",
+        "https://www.linkedin.com/sharing/share-offsite/?url=x",
+        "https://wa.me/?text=x",
+        "https://api.whatsapp.com/send?text=x",
+        "https://pinterest.com/pin/create/button/?url=x",
+        "https://de.pinterest.com/pin/create/link/?url=x",
+        "https://t.me/share/url?url=x",
+        "https://telegram.me/share?url=x",
+        "https://www.reddit.com/submit?url=x",
+        "https://mastodon.social/share?text=x",
+        "https://bsky.app/intent/compose?text=x",
+        "https://www.xing.com/spi/shares/new?url=x",
+    )
+    profiles = (
+        "https://www.facebook.com/wlo",
+        "https://x.com/wlo",
+        "https://www.linkedin.com/company/wlo",
+        "https://wa.me/4930123456",
+        "https://www.pinterest.com/wlo/",
+        "https://t.me/wlo",
+        "https://www.reddit.com/r/wlo",
+        "https://mastodon.social/@wlo",
+    )
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=tuple((url, "social") for url in (*shares, *profiles)),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert [link.url for link in tree.social] == list(profiles)
