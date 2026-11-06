@@ -1952,3 +1952,35 @@ def test_a_pii_request_runs_no_dom_stage_and_keeps_the_plain_key() -> None:
         )
     )
     assert uploaded.structured is None
+
+
+PHP_PAGE = """<!doctype html><html lang="en"><head><title>PHP</title></head><body><article>
+<br />
+<b>Warning</b>:  Undefined variable $x in <b>/var/www/a.php</b> on line <b>128</b><br />
+<br />
+<b>Warning</b>:  Undefined variable $x in <b>/var/www/a.php</b> on line <b>128</b><br />
+<p>Hello. Real text.</p>
+<br />
+<b>Notice</b>:  Trying to read in <b>/var/www/b.php</b> on line <b>7</b><br />
+</article></body></html>"""
+
+
+def test_server_errors_are_listed_separately() -> None:
+    harness = Harness({PAGE: fetched(body=PHP_PAGE)})
+
+    envelope = harness.run_once()
+
+    data = data_of(envelope)
+    assert data.server_errors is not None
+    assert len(data.server_errors) == 2
+    assert data.server_errors[0].count == 2
+    assert data.server_errors[0].level == "Warning"
+    assert "server_errors_removed" in data.warnings
+    assert data.content is not None
+    assert "Warning" not in data.content
+
+
+def test_a_page_without_server_errors_has_none() -> None:
+    envelope = Harness({PAGE: fetched()}).run_once()
+
+    assert data_of(envelope).server_errors is None

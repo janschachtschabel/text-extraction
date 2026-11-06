@@ -163,12 +163,17 @@ def fail_closed(
 ) -> Envelope[ExtractResult]:
     """N12: an envelope that owes the PII step is answered as ``failed``/``pii_failed``
     (retryable), with the content, title, metadata, links, media uploader and file name
-    withheld, and ``structured`` and ``chunks`` (derived from the page; R13) dropped, and the
-    rest kept (what the target answered, compliance, timings). Any other envelope is returned
-    as it is."""
+    withheld, and ``structured``, ``chunks`` (derived from the page; R13) and ``server_errors``
+    dropped, and the rest kept (what the target answered, compliance, timings). Any other
+    envelope is returned as it is, but for its ``server_errors`` under a PII request: they are
+    page text the step does not read (package 17)."""
     data = envelope.data
-    if data is None or not needs_pii(envelope, options):
+    if data is None or options is None:
         return envelope
+    if not needs_pii(envelope, options):
+        if data.server_errors is None:
+            return envelope
+        return envelope.model_copy(update={"data": data.model_copy(update={"server_errors": None})})
     withheld = data.model_copy(
         update={
             "content": None,
@@ -181,6 +186,7 @@ def fail_closed(
             else None,
             "structured": None,
             "chunks": None,
+            "server_errors": None,
         }
     )
     return Envelope[ExtractResult](
@@ -202,13 +208,18 @@ def withheld(
     """``envelope`` withheld by the PII step: ``fail_closed`` (its text, metadata, links,
     uploader and file name removed, the facts of the target kept), then ``failed`` with
     ``code``, ``message`` and ``retryable``. For an envelope that owes the step; one that does
-    not keeps its data and fails all the same, but for ``structured`` and ``chunks``, which a
-    withheld answer never carries (R13)."""
+    not keeps its data and fails all the same, but for ``structured``, ``chunks`` and
+    ``server_errors``, which a withheld answer never carries (R13, package 17)."""
     held = fail_closed(envelope, options)
     error = ErrorInfo(code=code, message=message, retryable=retryable)
     update: dict[str, Any] = {"status": "failed", "error": error}
-    if held.data is not None and (held.data.structured is not None or held.data.chunks is not None):
-        update["data"] = held.data.model_copy(update={"structured": None, "chunks": None})
+    data = held.data
+    if data is not None and (
+        data.structured is not None or data.chunks is not None or data.server_errors is not None
+    ):
+        update["data"] = data.model_copy(
+            update={"structured": None, "chunks": None, "server_errors": None}
+        )
     return held.model_copy(update=update)
 
 
@@ -280,7 +291,9 @@ class _Walk:
         return parsed.render(replacements, drop_unread=True)
 
     def result(self, result: ExtractResult) -> ExtractResult:
-        update: dict[str, Any] = {}
+        # The server's error messages are page text the analyser is not given: they go
+        # (package 17; the warning ``server_errors_removed`` stays).
+        update: dict[str, Any] = {"server_errors": None}
         if result.content is not None:
             update["content"] = (
                 self.html("content", result.content)

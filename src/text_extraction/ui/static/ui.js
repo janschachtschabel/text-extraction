@@ -1,8 +1,8 @@
 /*
  * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3, P12-S6, P12-S8, P12-S9 and P15-R1),
- * the only one besides htmx: the keys, the language, the tabs, the site tree's selection, the
- * result's "Copy" button, the page's status line and the status line of an answer htmx does not
- * swap.
+ * the only one besides htmx: the keys, the language, the tabs, the site tree's selection and
+ * folding, the result's "Copy" button, the page's status line and the status line of an answer
+ * htmx does not swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -16,6 +16,9 @@
  *
  * Screenshot form: its "custom capture" fields are enabled only with the preset "custom" (without
  * this script they stay usable and the service ignores them for any other preset).
+ *
+ * Extract form: the "Also take a screenshot" box needs the browser, so it is disabled and
+ * unticked while the mode is "fast" (the "never" choice), and the hint that says why is shown.
  *
  * Copy (P15-R1, P15-S4): a result's "Copy" button (data-action=copy) is rendered hidden and
  * shown only where the clipboard API exists (a secure context); without this script it stays
@@ -230,6 +233,11 @@
       writeLanguage(choice.getAttribute("hreflang"));
       return;
     }
+    var fold = target ? target.closest(".tree button.fold") : null;
+    if (fold) {
+      setFold(fold, fold.getAttribute("aria-expanded") !== "true");
+      return;
+    }
     var button = target ? target.closest("[data-action], [data-tab]") : null;
     if (!button) {
       return;
@@ -249,6 +257,10 @@
       selectAll(button.closest("form"), action === "tree-all");
     } else if (action === "tree-content") {
       selectContent(button.closest("form"), button.getAttribute("data-exclude") || "");
+    } else if (action === "tree-unfold-all" || action === "tree-fold-all") {
+      button.closest("form").querySelectorAll(".tree button.fold").forEach(function (each) {
+        setFold(each, action === "tree-unfold-all");
+      });
     } else if (action === "copy") {
       copyResult(button);
     }
@@ -401,13 +413,45 @@
     countSelected(form);
   }
 
+  // Folding (package 17): a node with children has a fold button before its label, rendered
+  // hidden, so without this script every node stays unfolded. A folded node's list (the
+  // button's aria-controls, its sibling) is hidden; its boxes still take part in the selection.
+  function setFold(button, open) {
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    var list = button.parentElement.querySelector(":scope > ul");
+    if (list) {
+      list.hidden = !open;
+    }
+  }
+
+  // Shows a new tree's fold buttons and folds every node below the hosts. A button already
+  // shown belongs to a tree set up before, whose folds the user may have changed.
+  function initFolding(form) {
+    var fresh = form.querySelectorAll(".tree button.fold[hidden]");
+    if (fresh.length === 0) {
+      return;
+    }
+    fresh.forEach(function (button) {
+      button.hidden = false;
+      setFold(button, button.parentElement.parentElement.classList.contains("tree"));
+    });
+    form.querySelectorAll("[data-action=tree-unfold-all], [data-action=tree-fold-all]").forEach(
+      function (button) {
+        button.hidden = false;
+      }
+    );
+  }
+
   document.addEventListener("htmx:load", function (event) {
     var root = event.target;
     if (!(root instanceof Element)) {
       return;
     }
     var forms = root.matches("form.tree-form") ? [root] : root.querySelectorAll("form.tree-form");
-    Array.prototype.forEach.call(forms, applyTreeMode);
+    Array.prototype.forEach.call(forms, function (form) {
+      initFolding(form);
+      applyTreeMode(form);
+    });
   });
 
   document.addEventListener("change", function (event) {
@@ -464,6 +508,47 @@
 
   document.addEventListener("DOMContentLoaded", initCapture);
   document.addEventListener("htmx:load", initCapture);
+
+  // The extract form's screenshot box is off while the mode is "fast" (the API refuses the pair).
+  function syncScreenshotBox(form) {
+    var mode = form.querySelector("#extract-mode");
+    var box = form.querySelector("input[name=screenshot]");
+    var hint = form.querySelector("#extract-screenshot-fast-hint");
+    if (!(mode && box && hint)) {
+      return;
+    }
+    if (box.hasAttribute("data-no-browser")) {
+      return;
+    }
+    var fast = mode.value === "fast";
+    box.disabled = fast;
+    if (fast) {
+      box.checked = false;
+    }
+    hint.hidden = !fast;
+    // A hidden hint is not read out with the box.
+    var ids = describedBy(box).filter(function (id) {
+      return id !== hint.id;
+    });
+    setDescribedBy(box, fast ? ids.concat(hint.id) : ids);
+  }
+
+  document.addEventListener("change", function (event) {
+    var select = event.target;
+    if (select instanceof HTMLSelectElement && select.id === "extract-mode") {
+      syncScreenshotBox(select.form);
+    }
+  });
+
+  function initScreenshotBox() {
+    var form = document.getElementById("extract-form");
+    if (form) {
+      syncScreenshotBox(form);
+    }
+  }
+
+  document.addEventListener("DOMContentLoaded", initScreenshotBox);
+  document.addEventListener("htmx:load", initScreenshotBox);
 
   // The page's status line (ruling P12-S9).
   function announce(message) {

@@ -105,6 +105,15 @@ _BADGE: Final = (
 )
 
 
+# A wider face than the sandbox's: the runner's DejaVu Sans, which made the German tree scroll on
+# GitHub (package 17), spaced a tenth wider still to leave a margin for other fonts.
+_WIDER: Final = (
+    "() => { document.documentElement.style"
+    ".setProperty('--font-ui', '\"DejaVu Sans\", sans-serif');"
+    " document.querySelector('#result ul.tree').style.letterSpacing = '0.1em'; }"
+)
+
+
 # The computed flex-wrap of the tree's labels with a page-type badge and of those without.
 _LABEL_WRAPS: Final = (
     "() => { const labels = [...document.querySelectorAll('#result ul.tree label.inline')];"
@@ -138,6 +147,8 @@ def test_guessed_page_type_keeps_its_space_and_fits_the_tree(
         job = page.locator("#result section.job")
         expect(job.locator(".state")).to_have_attribute("data-value", "completed")
         job.locator("button.tree-button").click()
+        # The badge's leaf is in a section, folded at first (package 17).
+        page.locator("#result [data-action=tree-unfold-all]").click()
 
         badge = page.locator("#result .page-type-guessed")
         expect(badge).to_have_count(1)
@@ -149,6 +160,10 @@ def test_guessed_page_type_keeps_its_space_and_fits_the_tree(
         assert measured["gap"] >= 0.25 * measured["size"]
         assert measured["right"] <= measured["inner"]
         assert measured["scrolls"] is False
+        page.evaluate(_WIDER)
+        wider = page.evaluate(_BADGE)
+        assert wider["right"] <= wider["inner"]
+        assert wider["scrolls"] is False
         # Only a label with a badge wraps; a long name without one stays beside its checkbox.
         wraps = page.evaluate(_LABEL_WRAPS)
         assert wraps["badge"]

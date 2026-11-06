@@ -16,6 +16,7 @@ from text_extraction.job_models import JobItem
 from text_extraction.settings import Settings
 from text_extraction.ui.site_tree import (
     MAX_SECTION_DEPTH,
+    TREE_MAX_SOCIAL,
     SiteTree,
     TreeNode,
     build_tree,
@@ -421,3 +422,147 @@ def test_mark_blocked_deadline_leaves_the_rest_unchecked() -> None:
     assert marked.unchecked == (ORIGIN,)
     assert marked.blocked == 0
     assert all(node.blocked is None for node in _leaves(marked))
+
+
+# --- one row per lone page, untyped count, social links (package 17) ----------------------------
+
+
+def test_section_with_only_its_page_is_one_row() -> None:
+    sitemap = sitemap_item(
+        0,
+        "https://x.org/sitemap.xml",
+        [{"loc": "https://x.org/a/"}, {"loc": "https://x.org/b/"}, {"loc": "https://x.org/b/c"}],
+    )
+
+    tree = build_tree([sitemap], max_urls=10)
+
+    assert [shape(root) for root in tree.roots] == [
+        section(
+            "x.org",
+            leaf("a/", "sitemap", "https://x.org/a/"),
+            section(
+                "b/",
+                leaf("/", "sitemap", "https://x.org/b/"),
+                leaf("c", "sitemap", "https://x.org/b/c"),
+            ),
+        )
+    ]
+
+
+def test_folded_row_keeps_blocked_and_type() -> None:
+    page = page_item(0, "https://x.org/impressum/", page_type="imprint")
+    tree = build_tree([page], max_urls=10)
+    rules = _rules(
+        "https://x.org/", "User-agent: *\nDisallow: /impressum/\n", origin="https://x.org"
+    )
+
+    marked = mark_blocked(tree, {"https://x.org": rules})
+
+    [root] = marked.roots
+    [node] = root.children
+    assert (node.label, node.url, node.children) == ("impressum/", "https://x.org/impressum/", [])
+    assert (node.kind, node.page_type, node.blocked) == ("page", "imprint", "robots")
+
+
+def test_untyped_counts_unfetched_leaves_without_type() -> None:
+    sitemap = sitemap_item(
+        0,
+        "https://x.org/sitemap.xml",
+        [{"loc": "https://x.org/2-dezember/"}, {"loc": "https://x.org/impressum/"}],
+    )
+    failed = page_item(1, "https://x.org/broken", error=ErrorCode.TARGET_HTTP_ERROR)
+
+    tree = build_tree([sitemap, failed], max_urls=10)
+
+    assert tree.untyped == 1
+
+
+def test_social_links_collected_once() -> None:
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=(
+            ("https://www.facebook.com/wlo", "social"),
+            ("https://facebook.com/wlo", "social"),
+            ("https://mastodon.social/@wlo", "social"),
+            ("https://example.com/x", "content"),
+        ),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert [(link.url, link.host) for link in tree.social] == [
+        ("https://www.facebook.com/wlo", "facebook.com"),
+        ("https://mastodon.social/@wlo", "mastodon.social"),
+    ]
+
+
+def test_social_links_capped() -> None:
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=tuple((f"https://facebook.com/page{n}", "social") for n in range(60)),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert len(tree.social) == TREE_MAX_SOCIAL == 50
+
+
+def test_social_links_use_category_or_host() -> None:
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=(
+            ("https://unknown-network.example/me", "social"),
+            ("https://www.instagram.com/wlo", None),  # stored before categories: judged by host
+            ("https://example.com/x", None),
+        ),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert [link.host for link in tree.social] == ["unknown-network.example", "instagram.com"]
+
+
+def test_share_endpoints_are_no_social_profiles() -> None:
+    shares = (
+        "https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fx.org%2F",
+        "https://facebook.com/sharer.php?u=x",
+        "https://www.facebook.com/share.php?u=x",
+        "https://www.facebook.com/dialog/share?href=x",
+        "https://twitter.com/intent/tweet?url=x",
+        "https://twitter.com/share?url=x",
+        "https://x.com/intent/post?url=x",
+        "https://www.linkedin.com/shareArticle?mini=true&url=x",
+        "https://www.linkedin.com/sharing/share-offsite/?url=x",
+        "https://wa.me/?text=x",
+        "https://api.whatsapp.com/send?text=x",
+        "https://pinterest.com/pin/create/button/?url=x",
+        "https://de.pinterest.com/pin/create/link/?url=x",
+        "https://t.me/share/url?url=x",
+        "https://telegram.me/share?url=x",
+        "https://www.reddit.com/submit?url=x",
+        "https://mastodon.social/share?text=x",
+        "https://bsky.app/intent/compose?text=x",
+        "https://www.xing.com/spi/shares/new?url=x",
+    )
+    profiles = (
+        "https://www.facebook.com/wlo",
+        "https://x.com/wlo",
+        "https://www.linkedin.com/company/wlo",
+        "https://wa.me/4930123456",
+        "https://www.pinterest.com/wlo/",
+        "https://t.me/wlo",
+        "https://www.reddit.com/r/wlo",
+        "https://mastodon.social/@wlo",
+    )
+    page = page_item(
+        0,
+        "https://x.org/",
+        external=tuple((url, "social") for url in (*shares, *profiles)),
+    )
+
+    tree = build_tree([page], max_urls=10)
+
+    assert [link.url for link in tree.social] == list(profiles)

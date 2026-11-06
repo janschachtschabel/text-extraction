@@ -192,7 +192,13 @@ from text_extraction.escalation import (
     transcript_panel_applies,
     unblock_for,
 )
-from text_extraction.extract_models import CacheState, ExtractRequest, ExtractResult, Timings
+from text_extraction.extract_models import (
+    CacheState,
+    ExtractRequest,
+    ExtractResult,
+    ServerErrorInfo,
+    Timings,
+)
 from text_extraction.fetch import Fetcher, FetchError, FetchResult, Validators, split_content_type
 from text_extraction.file_models import FileForm
 from text_extraction.fingerprint import Fingerprint, FingerprintStore, compute_fingerprint
@@ -658,6 +664,7 @@ class _Processed:
     dom: "_DomWork | None" = None  # the DOM stage still to run, once ``_process`` is done
     site: SiteInfo | None = None  # the page's typed links, for a ``site_links`` run
     page_type: PageTypeInfo | None = None  # a fetched or rendered HTML page's (package 14)
+    server_errors: list[ServerErrorInfo] | None = None  # removed from an HTML page's text
 
 
 @dataclass(frozen=True)
@@ -1945,6 +1952,7 @@ class Pipeline:
             links=processed.links,
             fingerprint=processed.fingerprint,
             warnings=processed.warnings,
+            server_errors=processed.server_errors,
             structured=processed.structured,
             site=processed.site,
             page_type=processed.page_type,
@@ -2257,6 +2265,7 @@ class Pipeline:
                 links=processed.links,
                 fingerprint=processed.fingerprint,
                 warnings=processed.warnings,
+                server_errors=processed.server_errors,
                 structured=processed.structured,
             ),
             min_words=1 if run.short_ok else None,
@@ -2603,6 +2612,7 @@ class Pipeline:
             links=processed.links,
             fingerprint=fingerprint,
             warnings=warnings,
+            server_errors=processed.server_errors,
             screenshot=screenshot,
             structured=processed.structured,
             site=processed.site,
@@ -2738,8 +2748,19 @@ class Pipeline:
         site: SiteInfo | None = None
         site_warnings: list[str] = []
         found_type: PageTypeInfo | None = None
+        server_errors: list[ServerErrorInfo] | None = None
         if kind == "html":
             conversion = convert_html(text, final_url, req.format)
+            server_errors = [
+                ServerErrorInfo(
+                    level=found.level,
+                    message=found.message,
+                    file=found.file,
+                    line=found.line,
+                    count=found.count,
+                )
+                for found in conversion.server_errors
+            ] or None
             host = urlsplit(final_url).hostname or ""
             content = strip_boilerplate(host, conversion.content, self._rules)
             quality = assess(text, content)
@@ -2817,6 +2838,7 @@ class Pipeline:
             dom=dom_work,
             site=site,
             page_type=found_type,
+            server_errors=server_errors,
         )
 
     def _envelope(

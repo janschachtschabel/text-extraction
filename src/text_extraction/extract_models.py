@@ -303,6 +303,17 @@ class Timings(BaseModel):
     llm_ms: int = 0
 
 
+class ServerErrorInfo(BaseModel):
+    """An error message of the site's server (PHP) that was removed from the text; identical
+    messages are counted once."""
+
+    level: str
+    message: str
+    file: str
+    line: int
+    count: int
+
+
 class ExtractResult(BaseModel):
     """What one extraction produced; on failure as much of it as was known."""
 
@@ -328,7 +339,8 @@ class ExtractResult(BaseModel):
     warnings: list[str] = Field(
         description="What did not go as asked, while the result still answers: "
         "`charset_mismatch` (the page was declared UTF-8 but is not: read as windows-1252, or "
-        "the legacy encoding its bytes fit) (pages); "
+        "the legacy encoding its bytes fit), `server_errors_removed` (PHP error messages that "
+        "the site printed into its page were removed from the text) (pages); "
         "`browser_unavailable` (no browser worker took the page: the fast result), "
         "`action_<index>_failed` (a browser action, counted from 0), "
         "`navigation_refused_non_get`, `consent_overlay_removed`, `screenshot_clipped`, "
@@ -379,6 +391,13 @@ class ExtractResult(BaseModel):
         "the page were not followed: the crawl has `max_pages` pages), `site_memory_guard` "
         "(Valkey was nearly full: no link of the page was followed) (site structure). Converter "
         "notes may follow."
+    )
+    server_errors: list[ServerErrorInfo] | None = Field(
+        default=None,
+        description="The site's server error messages (PHP warnings, notices, errors) removed "
+        "from `content`, at most 50, identical ones merged with `count`; null when there were "
+        "none, and null when PII handling was requested (the messages are page text). Comes "
+        "with the warning `server_errors_removed`.",
     )
     # Browser mode only; the defaults keep results cached before browser mode valid.
     screenshot: ArtifactRef | None = None

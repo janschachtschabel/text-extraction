@@ -111,8 +111,9 @@ def failing_ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
         yield url, origin
 
 
-def _settings() -> Settings:
+def _settings(**overrides: object) -> Settings:
     return Settings(
+        **overrides,  # type: ignore[arg-type]
         auth_mode="api_key",
         ui_enabled=True,
         rate_limit_per_minute=10_000,
@@ -228,6 +229,7 @@ def test_tree_select_to_batch(ui: tuple[str, str]) -> None:
         view.locator("[data-action=tree-none]").click()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
         docs.locator(":scope > label > input").check()
+        docs.locator(":scope > button.fold").click()  # folded at first (package 17)
         docs_pages.first.uncheck()
         expect(view.locator(".tree-counter")).to_have_text("1 selected")
         assert docs.locator(":scope > label > input").evaluate("box => box.indeterminate")
@@ -336,6 +338,9 @@ def test_an_answer_htmx_does_not_swap_shows_a_status_line(ui_small: str) -> None
         )
         expect(status.locator(".api-detail-label")).to_have_text("Details from the API (English)")
         assert detail.evaluate("line => line.children.length") == 0
+        # The empty state the answer did not replace does not sit below the status line.
+        expect(page.locator("#result > .result-empty")).to_have_count(1)
+        expect(page.locator("#result > .result-empty")).to_be_hidden()
 
         page.route("**/ui/run/extract", lambda route: route.abort())
         open_tab(page, "extract")
@@ -364,3 +369,32 @@ def ui_small() -> Iterator[str]:
     )
     with serving(settings) as url:
         yield url
+
+
+def test_screenshot_box_follows_mode() -> None:
+    """The screenshot box needs the browser: with the mode "never" (fast) it is disabled and
+    unticked and its hint shows; with another mode it is usable again."""
+    with serving(_settings(browser_enabled=True)) as url, browsing(url) as (page, console):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        panel = page.locator("#panel-extract")
+        box = panel.locator("input[name=screenshot]")
+        hint = panel.locator("#extract-screenshot-fast-hint")
+        alone = "extract-screenshot-hint"
+        both = "extract-screenshot-hint extract-screenshot-fast-hint"
+        expect(box).to_be_enabled()
+        expect(hint).to_be_hidden()
+        expect(box).to_have_attribute("aria-describedby", alone)
+        box.check()
+
+        panel.locator("select[name=mode]").select_option("fast")
+        expect(box).to_be_disabled()
+        expect(box).not_to_be_checked()
+        expect(hint).to_be_visible()
+        expect(box).to_have_attribute("aria-describedby", both)
+
+        panel.locator("select[name=mode]").select_option("auto")
+        expect(box).to_be_enabled()
+        expect(hint).to_be_hidden()
+        expect(box).to_have_attribute("aria-describedby", alone)
+    assert console == []

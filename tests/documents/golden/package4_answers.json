@@ -113,7 +113,8 @@
       "upstream_status": 200,
       "url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "warnings": [],
-      "word_count": 200
+      "word_count": 200,
+      "server_errors": null
     },
     "error": null,
     "status": "success"
@@ -174,7 +175,8 @@
       "upstream_status": 200,
       "url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "warnings": [],
-      "word_count": 190
+      "word_count": 190,
+      "server_errors": null
     },
     "error": null,
     "status": "success"
@@ -219,7 +221,8 @@
       "upstream_status": 200,
       "url": "https://example.org/learn/photosynthesis.html?session=secret-token",
       "warnings": [],
-      "word_count": 0
+      "word_count": 0,
+      "server_errors": null
     },
     "error": {
       "code": "unsupported_content_type",

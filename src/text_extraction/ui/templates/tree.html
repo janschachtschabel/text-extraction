@@ -11,8 +11,9 @@
   {%- if tree.unchecked_more %}
   <p class="tree-unchecked-more">{{ tn("tree.unchecked_more", tree.unchecked_more) }}</p>
   {%- endif %}
-  {%- if tree.type_counts %}
-  <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {%- if tree.type_counts or tree.untyped %}
+  <p class="tree-types">{{ t("tree.types") }} {% for name, count in tree.type_counts.items() %}<span class="type-count" data-page-type="{{ name }}">{{ t("page_type." ~ name) }} {{ count }}</span>{% if not loop.last or tree.untyped %}, {% endif %}{% endfor %}
+    {%- if tree.untyped %}<span class="type-count type-count-open">{{ t("tree.type_open") }} {{ tree.untyped }}</span>{% endif %}</p>
   {%- endif %}
   {% if tree.roots %}
   {% set prefix = "tree" %}
@@ -21,19 +22,31 @@
       <button type="button" class="secondary" data-action="tree-all">{{ t("tree.select_all") }}</button>
       <button type="button" class="secondary" data-action="tree-none">{{ t("tree.select_none") }}</button>
       <button type="button" class="secondary" data-action="tree-content" data-exclude="{{ non_content_types | join(' ') }}">{{ t("tree.select_content") }}</button>
+      {#- Folding needs ui.js, which shows these buttons; without it every node stays unfolded. #}
+      <button type="button" class="secondary" data-action="tree-unfold-all" hidden>{{ t("tree.unfold_all") }}</button>
+      <button type="button" class="secondary" data-action="tree-fold-all" hidden>{{ t("tree.fold_all") }}</button>
       <span class="tree-counter" aria-live="polite">{{ t("status.selected", count=0) }}</span>
     </p>
     {#- A keyboard user need not tab through every checkbox (ruling R-P12-9): this link leads to
     the actions after the tree. #}
     <p class="tree-skip"><a class="skip-to-actions" href="#tree-{{ job_id }}-actions">{{ t("tree.skip_to_actions") }}</a></p>
+    {#- Each child list has an id of its own for its fold button's aria-controls. #}
+    {%- set lists = namespace(count=0) %}
     <ul class="tree">
       {%- for node in tree.roots recursive %}
       <li class="node node-{{ node.kind }}">
+        {%- if node.children %}
+        {%- set lists.count = lists.count + 1 %}
+        {%- set list_id = "tree-" ~ job_id ~ "-list-" ~ lists.count %}
+        {#- Before the label, so the checkbox's name stays the node's (shown by ui.js). #}
+        <button type="button" class="fold" aria-expanded="true" aria-controls="{{ list_id }}" hidden><span class="fold-mark" aria-hidden="true"></span><span class="visually-hidden">{{ t("tree.fold", section=node.label) }}</span></button>
+        {%- endif %}
         {#- The type badge sits in the label, so a screen reader names it with the checkbox. A
         failed page is marked, so "Select content pages" leaves it out (ruling P14-R9); a URL the site's rules block is not a failed page, so "Select content pages" takes
         it with the mode that allows it (package 16). #}
         <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and node.error_code not in ("blocked_by_robots", "tdm_reserved") %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
         {%- if node.url and node.page_type %} <span class="page-type{% if node.type_guessed %} page-type-guessed{% endif %}">{{ t("page_type." ~ node.page_type) }}{% if node.type_guessed %} <span class="type-guessed">({{ t("tree.type_guessed") }})</span>{% endif %}</span>{% endif %}
+        {%- if node.url and not node.page_type and node.kind in ("sitemap", "linked") %} <span class="page-type page-type-open" title="{{ t('tree.type_open_reason') }}">{{ t("tree.type_open") }}<span class="visually-hidden">: {{ t("tree.type_open_reason") }}</span></span>{% endif %}
         {%- if node.url and node.blocked %} <span class="blocked-badge" data-blocked="{{ node.blocked }}" title="{{ t('tree.blocked_reason.' ~ node.blocked) }}">{{ t("tree.blocked_badge." ~ node.blocked) }}<span class="visually-hidden">: {{ t("tree.blocked_reason." ~ node.blocked) }}</span></span>{% endif %}</label>
         {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
         {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
@@ -43,11 +56,23 @@
         {%- if node.lastmod %} <span class="lastmod">{{ t("tree.modified", date=node.lastmod) }}</span>{% endif %}
         {%- endif %}
         {%- if node.children %}
-        <ul>{{ loop(node.children) }}</ul>
+        <ul id="{{ list_id }}">{{ loop(node.children) }}</ul>
         {%- endif %}
       </li>
       {%- endfor %}
     </ul>
+    {%- if tree.social %}
+    {#- Links out of the site: listed, never selectable. #}
+    <section class="tree-social" aria-labelledby="tree-{{ job_id }}-social">
+      <h5 id="tree-{{ job_id }}-social">{{ t("tree.social_title") }}</h5>
+      <p class="hint">{{ t("tree.social_hint") }}</p>
+      <ul>
+        {%- for link in tree.social %}
+        <li><a href="{{ link.url }}" rel="noopener noreferrer nofollow" target="_blank">{{ link.url }}<span class="visually-hidden"> {{ t("help.new_tab") }}</span></a></li>
+        {%- endfor %}
+      </ul>
+    </section>
+    {%- endif %}
     <div class="tree-actions" id="tree-{{ job_id }}-actions" tabindex="-1">
       {% include "forms/batch_options.html" %}
       <button type="submit">{{ t("tree.extract_selected") }}</button>

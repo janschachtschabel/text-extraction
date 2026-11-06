@@ -7,7 +7,7 @@ from text_extraction.compliance import ComplianceReport
 from text_extraction.convert import Link
 from text_extraction.documents.types import DocumentInfo
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
-from text_extraction.extract_models import ExtractResult, Timings
+from text_extraction.extract_models import ExtractResult, ServerErrorInfo, Timings
 from text_extraction.fingerprint import Fingerprint
 from text_extraction.licenses import License
 from text_extraction.media.types import MediaInfo
@@ -770,3 +770,62 @@ def test_fail_closed_and_withheld_clear_structured_and_chunks() -> None:
     failed = withheld(processed, PiiOptions(mode="mask"))
     assert failed.data is not None
     assert (failed.data.structured, failed.data.chunks) == (None, None)
+
+
+# --- the final review of package 17: server errors are page text ------------------------------
+
+SERVER_ERRORS = [
+    ServerErrorInfo(
+        level="Warning",
+        message="Undefined variable $anna_schmidt",
+        file="/home/anna/www/index.php",
+        line=5,
+        count=1,
+    )
+]
+
+
+def test_apply_drops_the_server_errors_and_keeps_the_warning() -> None:
+    result = make_result(server_errors=SERVER_ERRORS, warnings=["server_errors_removed"])
+
+    for mode in ("redact", "mask", "hash", "annotate"):
+        processed, _ = apply(result, {}, mode)
+
+        assert processed.server_errors is None
+        assert processed.warnings == ["server_errors_removed"]
+        assert "anna" not in processed.model_dump_json(include={"server_errors"})
+    assert result.server_errors == SERVER_ERRORS  # the input is not changed
+
+
+def test_fail_closed_and_withheld_drop_the_server_errors() -> None:
+    owing = envelope(make_result(server_errors=SERVER_ERRORS))
+    processed = envelope(
+        make_result(
+            server_errors=SERVER_ERRORS, pii=PiiReport(mode="mask", language="de", entities={})
+        )
+    )
+    nothing_else = envelope(
+        make_result(
+            title=None,
+            content=None,
+            metadata=None,
+            links=None,
+            document=None,
+            media=None,
+            server_errors=SERVER_ERRORS,
+        )
+    )
+
+    for held in (
+        fail_closed(owing, PiiOptions(mode="redact")),
+        withheld(owing, PiiOptions(mode="redact")),
+        withheld(processed, PiiOptions(mode="redact")),
+        fail_closed(nothing_else, PiiOptions(mode="redact")),
+    ):
+        assert held.data is not None
+        assert held.data.server_errors is None
+        assert "anna_schmidt" not in held.model_dump_json()
+    # Without a PII request the list stays.
+    kept = fail_closed(nothing_else, None)
+    assert kept.data is not None
+    assert kept.data.server_errors == SERVER_ERRORS

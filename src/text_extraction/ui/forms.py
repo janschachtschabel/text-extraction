@@ -341,6 +341,8 @@ def _extract_fields(form: Mapping[str, str]) -> Fields:
     _choice(fields, form, "mode", "auto")
     _access(fields, form)
     _box(fields, form, "metadata", default=True)
+    if _text(form, "screenshot") == CHECKED and _text(form, "mode") != "fast":
+        fields["screenshot"] = _Field(True, set_by_user=True)  # the API refuses it with mode fast
     if _text(form, "metadata_structured") == CHECKED:
         structured = {"strategy": "metadata", "schema": UI_METADATA_SCHEMA}
         fields["structured"] = _Field(structured, set_by_user=True)

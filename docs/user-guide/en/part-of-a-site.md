@@ -77,10 +77,15 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   [Page types and link categories](whole-site-and-metadata.md#page-types-and-link-categories)),
   and "Types:" above the tree counts them. A crawled page shows the type of its result; a page
   that failed with an HTTP error has none. A sitemap entry or a linked-only URL was not read, so
-  its type is guessed from its URL alone and marked "guessed from the URL". A URL that says
-  nothing shows no type. "Select content pages" checks every URL but the imprint, privacy,
-  legal, contact, login, search and error pages, and unchecks those and every page that failed;
-  a URL without a type is checked unless its page failed.
+  its type is guessed from its URL alone and marked "guessed from the URL". The URL rules know,
+  among others, author pages (`author`, `autor`: "Listing"), more names for contact pages, and
+  dated paths such as `/2021/05/oer-camp/` or WordPress addresses such as `?p=12` and
+  `?page_id=12` ("Content"; language and tracking parameters such as `?lang=en` do not count).
+  A URL that no rule knows shows the badge "Type open", with the
+  reason "Not fetched; its type shows when it is extracted" (as tooltip and for screen readers),
+  and the "Types:" line counts "Type open" as well. "Select content pages" checks every URL but the
+  imprint, privacy, legal, contact, login, search and error pages, and unchecks those and every
+  page that failed; a URL without a type is checked unless its page failed.
 
   The tree marks URLs that the site's rules block: the badge "robots.txt" (robots.txt disallows
   the URL, or robots.txt could not be retrieved) or "TDM" (a tdmrep.json reservation, an ai.txt
@@ -94,6 +99,16 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   pages" and checking a section skip them; under "Check and report only" or "Checks off" they can
   be checked and the buttons include them. The batch below the tree starts with the "Site rules"
   step that the crawl ran with.
+
+  A section that holds only its own page is one row, not a section with a single leaf. Every
+  section can be folded and unfolded with the button before its name: the top level starts open,
+  the levels below start folded. "Unfold all" and "Fold all" above the tree do it for every
+  section. Without JavaScript the tree shows every node unfolded. Checking a section also checks
+  every enabled URL below it, folded or not, and the counter counts them; "Select all" does the
+  same. A blocked URL in a folded section stays unchecked under "Respect the site's rules".
+
+  Below the tree, a "Social media" list shows the profile links of the site (its links to
+  social networks). They lie outside the site, so they cannot be selected.
 - **Batch**: paste the URLs, one per line, and press "Start batch". More URLs than one batch
   takes are sent as several batches.
 - **Batch file**: choose a CSV or JSON file and press "Check the file". A CSV has a `url` column

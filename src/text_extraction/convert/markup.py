@@ -10,6 +10,7 @@ Adapted from Website-Textextraction-Selenium (Apache-2.0), see NOTICE.
 import re
 from html import escape
 from itertools import islice
+from typing import Final
 
 from bs4 import BeautifulSoup, Tag
 
@@ -29,6 +30,18 @@ _XML_DECLARATION = re.compile(r"^\s*<\?xml[^>]*\?>")
 _ROW = re.compile(r"(?<!\\)\|")
 _SEPARATOR_CELL = re.compile(r"\s*:?-{3,}:?\s*")
 _FENCE = re.compile(r"^(`{3,}|~{3,})")
+# Elements that start a block of their own. Every other element, a custom element too, flows
+# inline with the text around it, as a browser shows it.
+BLOCK_TAGS: Final = frozenset(
+    {
+        *("address", "article", "aside", "blockquote", "body", "caption", "center", "col"),
+        *("colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset"),
+        *("figcaption", "figure", "footer", "form", "frameset", "h1", "h2", "h3", "h4", "h5"),
+        *("h6", "head", "header", "hgroup", "hr", "html", "legend", "li", "listing", "main"),
+        *("menu", "nav", "noframes", "ol", "p", "pre", "search", "section", "summary", "table"),
+        *("tbody", "td", "tfoot", "th", "thead", "title", "tr", "ul", "xmp"),
+    }
+)
 
 
 def attr(tag: Tag, name: str) -> str:

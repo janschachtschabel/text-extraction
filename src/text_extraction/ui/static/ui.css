@@ -479,11 +479,37 @@ button.secondary:hover:not(:disabled) {
     grid-template-columns: minmax(0, 1fr);
     gap: 16px;
   }
+}
 
-  .workspace .result {
-    padding-top: 1rem;
-    border-top: 1px solid var(--line);
-  }
+/* The settings are a card; the result area starts as a dashed empty card that the first
+   result replaces (the swap into #result is innerHTML). */
+.settings {
+  padding: 14px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--paper);
+}
+
+.result-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 12rem;
+  padding: 14px 20px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-card);
+  color: var(--muted);
+  text-align: center;
+}
+
+.result-empty > p {
+  margin: 0;
+}
+
+/* A status line of an answer htmx did not swap stands alone: no "The result appears here"
+   below it. */
+.request-status ~ .result-empty {
+  display: none;
 }
 
 .settings .intro {
@@ -497,10 +523,6 @@ button.secondary:hover:not(:disabled) {
 
 .panel .intro {
   margin: 0 0 0.5rem;
-}
-
-.result:empty {
-  display: none;
 }
 
 /* Forms of the operations. */
@@ -1226,6 +1248,87 @@ ul.tree label.inline:has(input:disabled) .label {
   color: var(--muted);
 }
 
+/* The last resort on a narrow line: the note breaks inside a word instead of making the tree
+   scroll sideways; it stays beside the type. */
+.page-type .type-guessed {
+  overflow-wrap: anywhere;
+}
+
+/* A URL not fetched whose URL says nothing has an open type (package 17): the muted pill. */
+.page-type-open {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* A node's fold button (package 17): a 24 x 24 px target before its label. Its mark changes
+   with aria-expanded inside the fixed box, so the row does not move. While the buttons show,
+   a row without one is indented by the button's width, so the boxes of one level line up. */
+ul.tree button.fold {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  margin: 0 0.25rem 0 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+ul.tree button.fold:hover:not(:disabled) {
+  border-color: var(--field-line);
+  background: var(--neutral-wash);
+}
+
+ul.tree button.fold .fold-mark::before {
+  content: "▾";
+}
+
+ul.tree button.fold[aria-expanded="false"] .fold-mark::before {
+  content: "▸";
+}
+
+ul.tree:has(button.fold:not([hidden])) li:not(:has(> button.fold)) > label.inline {
+  margin-left: calc(24px + 0.25rem);
+}
+
+/* The social media links after the tree (package 17): a long URL breaks, so the list wraps on
+   a phone instead of widening the page. */
+.tree-social {
+  margin-top: 1rem;
+}
+
+.tree-social > h5 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.tree-social ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tree-social li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tree-social a {
+  display: inline-block;
+  min-height: 24px;
+  overflow-wrap: anywhere;
+}
+
 /* The counts of a batch preview: a two-column grid instead of the figures' row. */
 dl.facts.counts {
   display: grid;
@@ -1260,5 +1363,11 @@ dl.facts.counts {
 
   form.previews {
     margin-top: 12px;
+  }
+
+  /* A level of the tree is indented less, so a leaf five levels deep, with the fold buttons'
+     indent, still has room for its page type beside a long German note (package 17). */
+  ul.tree ul {
+    padding-left: 0.75rem;
   }
 }

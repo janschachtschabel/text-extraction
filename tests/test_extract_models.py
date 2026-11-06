@@ -368,3 +368,19 @@ def test_screenshot_options_travel_from_request_to_job_options() -> None:
 
     assert job_options(req, "enforce").screenshot_options == options
     assert job_options(ExtractRequest(url=URL), "enforce").screenshot_options is None
+
+
+def test_extract_result_server_errors_default_none() -> None:
+    result = ExtractResult.model_validate(PACKAGE_4_RESULT)
+
+    assert result.server_errors is None
+    assert result.model_dump(mode="json")["server_errors"] is None
+
+
+def test_extract_result_takes_server_errors() -> None:
+    error = {"level": "Warning", "message": "x", "file": "/a.php", "line": 3, "count": 2}
+    result = ExtractResult.model_validate({**PACKAGE_4_RESULT, "server_errors": [error]})
+
+    assert result.server_errors is not None
+    assert result.server_errors[0].count == 2
+    assert result.model_dump(mode="json")["server_errors"] == [error]

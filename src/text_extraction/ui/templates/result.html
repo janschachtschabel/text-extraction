@@ -36,11 +36,14 @@ level lower. -#}
     <dt>{{ t("result.role") }}</dt><dd>{{ info["role"] }}</dd>
   </dl>
   {% endif %}
+  {#- An extraction's screenshot goes into a closed fold below the facts; the Screenshot tab's stays on top. -#}
+  {% if op != "extract" %}
   {% if screenshot %}
   <div class="card shot"><img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}"></div>
   {% elif screenshot_note %}
   <p class="screenshot-note">{{ t(screenshot_note) }}</p>
   {% with detail=screenshot_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
+  {% endif %}
   {% endif %}
   {% if data %}
   {#- The toolbar (P15-R1, P15-S4): "Copy" is revealed by ui.js when the clipboard API exists. -#}
@@ -67,6 +70,17 @@ level lower. -#}
     {% endif %}
     {% if compliance_mode %}<div class="fact"><dt>{{ t("access.compliance") }}</dt><dd>{{ code(compliance_mode) }}</dd></div>{% endif %}
   </dl>
+  {% if op == "extract" and (screenshot or screenshot_note) %}
+  <details class="card fold">
+    <summary><{{ card_heading }} class="fold-title">{{ t("result.screenshot_title") }}</{{ card_heading }}></summary>
+    {% if screenshot %}
+    <div class="shot"><img class="screenshot" src="{{ screenshot }}" alt="{{ t('result.screenshot_alt') }}"></div>
+    {% else %}
+    <p class="screenshot-note">{{ t(screenshot_note) }}</p>
+    {% with detail=screenshot_detail, detail_lines=none %}{% include "api_detail.html" %}{% endwith %}
+    {% endif %}
+  </details>
+  {% endif %}
   {% if structured %}
   <section class="card block" aria-label="{{ t('result.structured_values') }}">
     <{{ card_heading }}>{{ t("result.structured") }}</{{ card_heading }}>
@@ -143,6 +157,16 @@ level lower. -#}
     <div class="previews-out"></div>
     {% endif %}
     {% endif %}
+  </details>
+  {% endif %}
+  {% if data and data["server_errors"] %}
+  <details class="card fold">
+    <summary><{{ card_heading }} class="fold-title">{{ tn("result.server_errors", data["server_errors"]|sum(attribute="count")) }}</{{ card_heading }}></summary>
+    <ul class="server-errors">
+      {% for entry in data["server_errors"] %}
+      <li><code>{{ entry["level"] }}</code> {{ entry["message"] }} <span class="where">{{ t("result.server_error_where", file=entry["file"], line=entry["line"]) }}</span>{% if entry["count"] > 1 %} <span class="count">×{{ entry["count"] }}</span>{% endif %}</li>
+      {% endfor %}
+    </ul>
   </details>
   {% endif %}
   {% if steps or warnings %}{% include "timeline.html" %}{% endif %}

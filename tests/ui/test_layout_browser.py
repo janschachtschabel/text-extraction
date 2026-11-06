@@ -85,7 +85,7 @@ def test_one_column_on_a_phone(ui: tuple[str, str]) -> None:
         settings, result = boxes(page, ".settings", "#result")
         assert result["top"] >= settings["bottom"]
         assert page.evaluate("document.documentElement.scrollWidth") <= 390
-        assert computed(page, "#result", "borderTopWidth") == ["1px"]
+        assert computed(page, "#result", "borderTopWidth") == ["0px"]
 
 
 def test_selected_tab_has_the_petrol_underline(ui: tuple[str, str]) -> None:
@@ -581,3 +581,45 @@ def test_preview_images_fit_a_phone(gallery_ui: tuple[str, str]) -> None:
         ]:
             assert box[0] >= 0
             assert box[1] <= PHONE["width"]
+
+
+def test_settings_and_empty_result_are_framed(ui: tuple[str, str]) -> None:
+    url, _ = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 1440, "height": 900})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        expect(page.locator(".settings")).to_be_visible()
+        expect(page.locator(".result-empty")).to_be_visible()
+        for selector in (".settings", ".result-empty"):
+            (width,) = computed(page, selector, "borderTopWidth")
+            assert float(width.removesuffix("px")) >= 1
+        assert computed(page, ".result-empty", "borderTopStyle") == ["dashed"]
+        settings, empty = boxes(page, ".settings", ".result-empty")
+        assert empty["left"] > settings["right"]
+
+
+def test_empty_state_replaced_by_result(ui: tuple[str, str]) -> None:
+    url, _ = ui
+    with browsing(url) as (page, _):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        expect(page.locator(".result-empty")).to_be_visible()
+        page.click("#tab-info")
+        page.click("#info-form button[type=submit]")
+        expect(page.locator("#result .result-view")).to_be_visible()
+        expect(page.locator(".result-empty")).to_have_count(0)
+
+
+def test_cards_stack_at_390(ui: tuple[str, str]) -> None:
+    url, _ = ui
+    with browsing(url) as (page, _):
+        page.set_viewport_size({"width": 390, "height": 844})
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        settings, empty = boxes(page, ".settings", ".result-empty")
+        assert empty["top"] >= settings["bottom"]
+        assert page.evaluate("document.documentElement.scrollWidth") <= 390
+        assert computed(page, "#result", "borderTopWidth") == ["0px"]
+        (width,) = computed(page, ".settings", "borderTopWidth")
+        assert width == "1px"

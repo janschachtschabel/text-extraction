@@ -17,6 +17,9 @@ Antwort, auf die es ankommt. Eigene Dateien, Audio und Video beschreibt
 - „Website-Regeln“ (nur Admins): siehe [Website-Regeln](site-rules.md).
 - „Metadaten“ (standardmäßig an), „Metadaten, strukturiert“ (die schema.org- und LRMI-Felder,
   nach Namen gelesen) und „Bilder beschreiben“.
+- „Screenshot mitliefern“: die ganze Seite als PNG, im Browser aufgenommen; die Anfrage dauert
+  daher länger. Das Kästchen ist bei „Browser-Fallback: nie“ und solange der Browser aus ist
+  gesperrt; sein Hinweis nennt den Grund. Format und Größe gibt es im Reiter Screenshot.
 - „Optionen (JSON)“ unter „Erweitert“ (ein zugeklappter Abschnitt, mit „Sekunden warten, bevor
   daraus ein Job wird“) nimmt jedes weitere Feld des REST-Bodys, etwa `{"links": true}`.
 
@@ -24,9 +27,10 @@ Das Ergebnis beginnt mit einer Statuszeile (dem Status und dem HTTP-Status), ein
 und einer Karte mit Kennzahlen: URL, Sprache, Wörter, verwendeter Modus, Seitentyp und Zeit. Die
 Werkzeugleiste hat „Markdown kopieren“ (oder „Text kopieren“; es erscheint nur, wo der Browser die
 Zwischenablage erlaubt), den Download des Inhalts und „Antwort speichern (JSON)“, die ganze Antwort
-als Datei. Darunter folgen zugeklappte Abschnitte für die Metadaten, die Links, die Bilder und
-„Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der Umwandlung (sie öffnet
-sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
+als Datei. Darunter folgen zugeklappte Abschnitte für den Screenshot (nur wenn Sie einen verlangt haben),
+die Metadaten, die Links, die Bilder, die entfernten Fehlermeldungen des Servers (nur wenn es
+welche gibt) und „Ablauf“, eine Zeitleiste der Prüfungen, des Abrufs, des Renderns und der
+Umwandlung (sie öffnet sich von selbst, wenn es Warnungen gibt), und danach der Inhalt in einer Lesekarte (bei Markdown
 steht der Quelltext unter „Quelltext anzeigen“). Am Ende stehen „Als curl“, dieselbe Anfrage für
 die Shell, und „Rohes JSON“, die ganze Antwort.
 
@@ -84,7 +88,18 @@ Jede Antwort ist ein [Ergebnis-Envelope](usage.md#das-ergebnis-envelope): Lesen 
 | `page_type` | Was für eine Seite es ist, nach Regeln und ohne LLM: ihr `type` (etwa `content`, `listing`, `imprint` oder `contact`) und die `signals`, die dafür sprechen (etwa `url`, `title` oder `schema_org`). Nur für HTML-Seiten; null für Dokumente, Medien, reinen Text, Markdown, Uploads und eine Seite, die mit einem HTTP-Fehler (4xx oder 5xx) gescheitert ist. Siehe [Seitentypen und Linkkategorien](whole-site-and-metadata.md#seitentypen-und-linkkategorien). |
 | `links` | Mit `links: true`: die Links der Seite, jeder mit `url`, `text`, `kind` (`internal`, `external` oder `file`) und `category`, wohin er führt (etwa `imprint`, `social` oder `download`). |
 | `compliance` | Was die Website-Regeln ergeben haben: der `mode`, die `decision` (`allowed`, `blocked`, `reported`, `skipped`), `robots` und die TDM-Angabe. Siehe [Website-Regeln](site-rules.md). |
-| `warnings` | Was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa `browser_unavailable` (der Browser hat die Seite nicht übernommen: das HTTP-Ergebnis). |
+| `warnings` | Was nicht wie gewünscht lief, obwohl ein Ergebnis vorliegt, etwa `browser_unavailable` (der Browser hat die Seite nicht übernommen: das HTTP-Ergebnis) oder `server_errors_removed` (siehe unten). |
+| `server_errors` | Fehlerausgabe des Servers der Website, die aus dem Text entfernt wurde, oder null, wenn es keine gab oder eine Behandlung personenbezogener Daten angefordert wurde (die Meldungen sind Text der Seite): eine Liste mit `level` (etwa `Warning`, `Notice` oder `Fatal error`), `message`, `file`, `line` und `count` (gleiche Meldungen werden zusammengefasst), höchstens 50. |
+
+Manche Websites geben PHP-Fehlerausgaben in ihre Seiten aus, etwa `Warning: Undefined variable $x in
+/var/www/page.php on line 12`. Die Umwandlung entfernt eine solche Meldung aus dem Text, wenn sie
+eine Zeile beginnt, wie PHP sie schreibt. Eine Meldung, die mitten in einem Satz zitiert wird,
+bleibt stehen, ebenso eine innerhalb von `pre`, `code`, `kbd`, `samp`, `var`, `tt`, `textarea` und
+`script`, wo sie zum Inhalt gehört. Für eine entfernte Meldung fügt die Umwandlung die Warnung
+`server_errors_removed` hinzu und listet die Meldungen in `data.server_errors`. Die Spielwiese zeigt
+sie in einem zugeklappten Abschnitt nach „Bilder“. Eine Meldung, die über mehrere Zeilen geht,
+bleibt im Text: PHP 8 schreibt eine nicht abgefangene Ausnahme („Fatal error: Uncaught …“) mit
+ihrem Stacktrace, und die wird nicht entfernt.
 
 Eine Lizenz hat eine `id` (etwa `CC-BY-SA-4.0`), eine `url`, ein `label`, ihre `source` (ein Link
 `rel-license`, JSON-LD, Microdata, RDFa, ein Meta-Tag oder der Text der Seite) und eine

@@ -5,9 +5,11 @@ state. It parses the page once, edits that tree in place and serialises it once,
 parses for Trafilatura (with ``huge_tree``, so deep nesting is kept); there is no further copy.
 
 Pipeline: equations become ``$$...$$`` source, data-carried content (JSON-LD ``articleBody``,
-YouTube details) replaces a page that shows none, scripts and hidden elements go, and every
-reference becomes absolute. Trafilatura extracts the main content; when it fails or finds
-nothing, the visible text of the page without its navigation takes over. Files that the
+YouTube details) replaces a page that shows none, scripts, hidden elements and the PHP error
+output a site printed into its page go, and every reference becomes absolute. A block that
+starts with an inline run gets that run wrapped in a <p>, which Trafilatura would otherwise
+split into one paragraph per element. Trafilatura extracts the main content; when it fails or
+finds nothing, the visible text of the page without its navigation takes over. Files that the
 content links to and the extractor dropped (a worksheet page is often nothing but a list of
 PDF links) follow the text.
 
@@ -24,11 +26,13 @@ from urllib.parse import unquote, urlsplit
 import lxml.etree
 import lxml.html
 from bs4 import BeautifulSoup
+from bs4.element import NavigableString, PageElement, Tag
 from trafilatura import extract
 
 from text_extraction.convert.embedded import embedded_html
 from text_extraction.convert.links import absolute_url, base_url_of, has_file_extension
 from text_extraction.convert.markup import (
+    BLOCK_TAGS,
     attr,
     enhance_table_structure,
     has_hidden_class,
@@ -38,6 +42,11 @@ from text_extraction.convert.markup import (
     protect_equations,
     restore_equations,
     strip_non_content,
+)
+from text_extraction.convert.server_errors import (
+    SERVER_ERRORS_REMOVED_WARNING,
+    ServerError,
+    strip_server_errors,
 )
 
 OutputFormat = Literal["markdown", "text", "html"]
@@ -96,6 +105,8 @@ class Conversion:
     converter: Literal["trafilatura", "bs4", "plain", "markdown"]
     title: str | None = None
     warnings: list[str] = field(default_factory=list)
+    # PHP error messages the site printed into the page, removed from ``content``.
+    server_errors: list[ServerError] = field(default_factory=list)
 
 
 def convert_plain(text: str) -> Conversion:
@@ -270,6 +281,114 @@ def flatten_deep_tables(soup: BeautifulSoup) -> None:
         table.name = "div"
 
 
+# Block containers whose leading inline run Trafilatura splits: when the first thing in one is
+# an inline element or a <br>, every inline element becomes a paragraph of its own and the
+# space after it is lost (``<div><b>W</b>: msg in <b>/x.php</b></div>`` gives ``**W**: msg
+# in`` and ``**/x.php**``, Trafilatura 2.3.1). The same run inside a <p> comes out right.
+# Lists and quotes are not split and stay as they are: a <p> in an <li> can tip a short page
+# into Trafilatura's justext rescue, which drops every link and emphasis on the page.
+_RUN_CONTAINERS = frozenset(
+    {
+        *("article", "aside", "div", "figcaption", "figure", "footer", "form", "header"),
+        *("main", "section"),
+    }
+)
+# Kept as they are, with everything inside: paragraphs, table cells (Markdown tables must not
+# change), preformatted text, headings and code.
+_KEEP_STRUCTURE = frozenset(
+    {"caption", "code", "h1", "h2", "h3", "h4", "h5", "h6", "p", "pre", "td", "textarea", "th"}
+)
+
+
+def wrap_inline_runs(soup: BeautifulSoup) -> None:
+    """Wrap each run of inline children of a block container in a ``<p>``, in place, when the
+    container starts with an inline element or a ``<br>`` (see ``_RUN_CONTAINERS``).
+
+    A run is a maximal sequence of text, inline elements and ``<br>``; whitespace and ``<br>``
+    at its edges are dropped. Only a run with text of the container's own is wrapped
+    (``<b>Fach:</b> Mathematik``): adjacent inline elements alone (``<a>…</a><span>…</span>``
+    in a teaser, date and subject spans on a card) stay as they are, as Trafilatura reads them
+    apart or drops them. An element that holds a block
+    (``<a><div>``) is no inline element here. A container that starts with text is left alone,
+    so ordinary prose keeps its paragraphs. One pass over the tree, without recursion."""
+    pending: list[Tag] = [soup]
+    while pending:
+        tag = pending.pop()
+        if tag.name in _RUN_CONTAINERS and _starts_inline(tag):
+            _wrap_runs(soup, tag)
+        pending.extend(
+            child
+            for child in tag.children
+            if isinstance(child, Tag) and child.name not in _KEEP_STRUCTURE
+        )
+
+
+def _flows_inline(node: PageElement) -> bool:
+    if isinstance(node, Tag):
+        return node.name not in BLOCK_TAGS and node.find(_is_block) is None
+    return True  # text, comments
+
+
+def _is_block(tag: Tag) -> bool:
+    return tag.name in BLOCK_TAGS
+
+
+def _starts_inline(container: Tag) -> bool:
+    for child in container.children:
+        if isinstance(child, Tag):
+            return _flows_inline(child)
+        if type(child) is NavigableString and child.strip():
+            return False  # leading text: the container is prose
+    return False
+
+
+def _wrap_runs(soup: BeautifulSoup, container: Tag) -> None:
+    """Wrap the container's runs, the last first: bs4 finds a node's position in its parent by
+    a linear search, so the nodes are taken out from the end with their position given, which
+    keeps a container with many children linear."""
+    children = list(container.children)
+    runs: list[tuple[int, int]] = []
+    begin = 0
+    for index, child in enumerate(children):
+        if not _flows_inline(child):
+            runs.append((begin, index))
+            begin = index + 1
+    runs.append((begin, len(children)))
+    for begin, stop in reversed(runs):
+        _wrap(soup, container, children, begin, stop)
+
+
+def _wrap(
+    soup: BeautifulSoup, container: Tag, children: list[PageElement], begin: int, stop: int
+) -> None:
+    if not any(_is_text(children[index]) for index in range(begin, stop)):
+        return  # no text of the container's own: teaser links, card meta, key-value spans
+    content = [index for index in range(begin, stop) if _has_content(children[index])]
+    # Whitespace and <br> before the first and after the last content go: a paragraph's edges
+    # need no line break, and a run of nothing else between blocks is dropped.
+    moved: list[PageElement] = []
+    for index in range(stop - 1, begin - 1, -1):
+        node = children[index].extract(_self_index=index)
+        if content and content[0] <= index <= content[-1]:
+            moved.append(node)
+    if not moved:
+        return
+    paragraph = soup.new_tag("p")
+    for node in reversed(moved):
+        paragraph.append(node)
+    container.insert(begin, paragraph)
+
+
+def _has_content(node: PageElement) -> bool:
+    if isinstance(node, Tag):
+        return node.name != "br"
+    return _is_text(node)
+
+
+def _is_text(node: PageElement) -> bool:
+    return type(node) is NavigableString and bool(node.strip())
+
+
 def _tree(html: str) -> lxml.html.HtmlElement | str:
     """The page parsed for Trafilatura, with ``huge_tree``: Trafilatura's own parse stops at
     libxml2's depth limit of 255 elements and silently drops everything nested deeper. The
@@ -314,37 +433,44 @@ def convert_html(html: str, url: str, fmt: OutputFormat) -> Conversion:
     if embedded:
         soup = prepare_html(embedded)
     strip_non_content(soup)
+    server_errors = strip_server_errors(soup)
+    notes = [SERVER_ERRORS_REMOVED_WARNING] if server_errors else []
     _make_absolute(soup, url)
     heading = page_heading(soup)
     title = _title(soup, heading)
     if not soup.get_text(" ", strip=True):
-        return Conversion("", "bs4", title, ["The page contains no text"])
+        return Conversion("", "bs4", title, [*notes, "The page contains no text"], server_errors)
     documents = _document_links(soup)
     for navigation in soup.select('nav, [role="navigation"]'):
         if not navigation.decomposed:
             navigation.decompose()
     flatten_deep_tables(soup)
+    wrap_inline_runs(soup)
     equations = protect_equations(soup)
     markup = fmt == "html"
-    warnings: list[str] = []
+    warnings = list(notes)
+    failed = False
     # The payload is already the selected content; main-content heuristics tend to discard
     # short lesson fragments, so favour recall for it.
     try:
         text = _extract(str(soup), url, fmt, recall=embedded is not None)
     except Exception as exc:  # whatever the extractor raises, the fallback decides
         warnings.append(f"trafilatura failed ({type(exc).__name__}); used the page text instead")
+        failed = True
         text = None
     if text and text.strip():
         text = restore_equations(text.strip(), equations, markup=markup)
         text = _with_documents(_with_heading(text, heading, fmt), documents, fmt)
         if fmt == "markdown":
             text = enhance_table_structure(text)
-        return Conversion(text, "trafilatura", title, warnings)
-    if not warnings:
+        return Conversion(text, "trafilatura", title, warnings, server_errors)
+    if not failed:
         warnings.append("trafilatura found no main content; used the page text instead")
     fallback = _visible_text(soup)
     if not fallback:
-        return Conversion("", "bs4", title, [*warnings, "No converter produced text"])
+        return Conversion(
+            "", "bs4", title, [*warnings, "No converter produced text"], server_errors
+        )
     content = restore_equations(_as_format(fallback, fmt), equations, markup=markup)
     content = _with_documents(_with_heading(content, heading, fmt), documents, fmt)
-    return Conversion(content, "bs4", title, warnings)
+    return Conversion(content, "bs4", title, warnings, server_errors)
