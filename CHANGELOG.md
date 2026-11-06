@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-06
+
 Package 16: robots marks in the site tree and the site rules switch (plan
 [docs/superpowers/plans/2026-11-06-package-16-robots-tree-compliance-switch.md](docs/superpowers/plans/2026-11-06-package-16-robots-tree-compliance-switch.md)).
 No API change.
@@ -21,7 +23,7 @@ No API change.
   against the site's current rules (from the cache, or loaded once per site within the per-host
   limits; at most 20 sites, 12 s). Links the crawl did not follow because the rules blocked them
   appear as "linked only" leaves. A line above the tree counts the blocked URLs, and another names
-  sites whose rules could not be read. Under "Respect the site's rules" blocked URLs cannot be
+  sites whose rules could not be read or checked in time. Under "Respect the site's rules" blocked URLs cannot be
   ticked and the selection buttons skip them. Closes #26.
 
 ### Changed
