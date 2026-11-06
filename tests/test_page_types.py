@@ -842,6 +842,13 @@ def test_microdata_scan_stops_after_the_scope_limit() -> None:
         ("https://x.org/author/jan/", "listing"),
         ("https://x.org/ansprechpartner/", "contact"),
         ("https://x.org/2-dezember/", None),
+        # Language and tracking parameters say nothing about the page, as in ``url_type``.
+        ("https://x.org/?page_id=12&lang=en", "content"),
+        ("https://x.org/?hl=de&p=12", "content"),
+        ("https://x.org/?p=12&locale=de_DE&utm_source=news", "content"),
+        ("https://x.org/2021/05/oer-camp/?lang=de", "content"),
+        ("https://x.org/2021/05/oer-camp/?LANG=de&fbclid=x", "content"),
+        ("https://x.org/2021/05/oer-camp/?cat=3", None),
     ],
 )
 def test_guess_url_type(url: str, expected: PageType | None) -> None:

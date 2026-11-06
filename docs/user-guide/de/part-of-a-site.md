@@ -86,8 +86,9 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   eine nur verlinkte URL wurde nicht gelesen; deshalb wird ihr Typ allein aus ihrer URL geschätzt
   und als „aus der URL geschätzt“ markiert. Die URL-Regeln kennen unter anderem Autorenseiten
   (`author`, `autor`: „Übersicht“), weitere Namen für Kontaktseiten sowie datierte Pfade wie
-  `/2021/05/oer-camp/` oder WordPress-Adressen wie `?p=12` und `?page_id=12` („Inhalt“). Eine
-  URL, die keine Regel kennt, zeigt das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen;
+  `/2021/05/oer-camp/` oder WordPress-Adressen wie `?p=12` und `?page_id=12` („Inhalt“; Sprach-
+  und Tracking-Parameter wie `?lang=en` zählen nicht). Eine URL, die keine Regel kennt, zeigt
+  das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen;
   der Typ zeigt sich beim Extrahieren“ (als Tooltip und für Screenreader), und die Zeile „Typen:“
   zählt „Typ offen“ mit. „Inhaltsseiten auswählen“ markiert jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
   Anmeldung, Suche und Fehlerseiten und entfernt bei diesen und bei jeder gescheiterten Seite

@@ -380,13 +380,19 @@ _WORDPRESS_QUERIES: Final = frozenset({"p", "page_id"})
 def guess_url_type(url: str) -> PageType | None:
     """The type of a URL that was not fetched: ``url_type``, else ``content`` for a dated path
     (``/2021/05/oer-camp/``) or a WordPress ``?p=12`` / ``?page_id=12`` query, else None.
-    ``url_type`` itself never says ``content``, because ``page_type`` uses it as a signal."""
+    Tracking and language parameters (``lang``, ``hl``, ``locale``) are ignored, as in
+    ``url_type``. ``url_type`` itself never says ``content``, because ``page_type`` uses it as
+    a signal."""
     known = url_type(url)
     if known is not None:
         return known
     try:
         parts = urlsplit(url)
-        query = [(k.lower(), v) for k, v in parse_qsl(parts.query) if not _is_tracking(k.lower())]
+        query = [
+            (name, value)
+            for name, value in ((k.lower(), v) for k, v in parse_qsl(parts.query))
+            if not _is_tracking(name) and name not in _LANGUAGE_PARAMETERS
+        ]
     except ValueError:
         return None
     if len(query) == 1 and query[0][0] in _WORDPRESS_QUERIES and query[0][1].isdecimal():

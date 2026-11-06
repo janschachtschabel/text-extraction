@@ -80,7 +80,8 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   its type is guessed from its URL alone and marked "guessed from the URL". The URL rules know,
   among others, author pages (`author`, `autor`: "Listing"), more names for contact pages, and
   dated paths such as `/2021/05/oer-camp/` or WordPress addresses such as `?p=12` and
-  `?page_id=12` ("Content"). A URL that no rule knows shows the badge "Type open", with the
+  `?page_id=12` ("Content"; language and tracking parameters such as `?lang=en` do not count).
+  A URL that no rule knows shows the badge "Type open", with the
   reason "Not fetched; its type shows when it is extracted" (as tooltip and for screen readers),
   and the "Types:" line counts "Type open" as well. "Select content pages" checks every URL but the
   imprint, privacy, legal, contact, login, search and error pages, and unchecks those and every
