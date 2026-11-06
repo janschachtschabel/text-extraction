@@ -1249,7 +1249,7 @@ def test_tree_rules_timeout_names_the_origin_and_logs(monkeypatch: pytest.Monkey
         "The rules of https://example.org could not be read; their URLs carry no mark."
     ]
     assert len(cancelled) == 1  # the pending load was cancelled
-    assert [log for log in logs if log["event"] == "tree_rules_timeout"][0]["origins"] == 1
+    assert next(log for log in logs if log["event"] == "tree_rules_timeout")["origins"] == 1
 
 
 def test_tree_rules_exception_leaves_the_origin_unchecked_and_logs(
@@ -1287,7 +1287,8 @@ def test_tree_rules_cap_loads_only_the_first_origins(monkeypatch: pytest.MonkeyP
         monkeypatch.setattr(pipeline, "origin_rules", recording)
         root = rules_tree(monkeypatch, client, two_origin_site())
 
-    assert len(loaded) == 1 and loaded[0].startswith(ORIGIN)  # most leaves first
+    assert len(loaded) == 1
+    assert loaded[0].startswith(ORIGIN)  # most leaves first
     assert root.xpath("//p[@class='tree-unchecked']") == []  # not tried is not "could not be read"
     assert texts(root, "//p[@class='tree-unchecked-more']") == ["1 more sites were not checked."]
     assert box_of(root, BLOCKED_ONE).get("data-blocked") == "robots"

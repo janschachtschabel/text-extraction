@@ -1575,7 +1575,7 @@ def test_origin_rules_parse_tdmrep_json_once_for_many_urls(monkeypatch: pytest.M
         loads += 1
         return real_loads(*args, **kwargs)
 
-    monkeypatch.setattr(compliance.json, "loads", counting)
+    monkeypatch.setattr(json, "loads", counting)
     reports = [rules.judge(f"{ORIGIN}/tdm/{i}", "enforce") for i in range(300)]
 
     assert loads == 0  # parsed when the rules were built, not per judged URL
