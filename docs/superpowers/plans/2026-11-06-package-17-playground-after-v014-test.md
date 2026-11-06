@@ -239,7 +239,7 @@
   - `.result-empty` is a card with a 1 px dashed `var(--line)` border, muted text, a min-height of 12rem, and the text centred.
   - `.result:empty { display: none }` goes.
   - Below 60rem both cards stack with the existing gap; the top border rule on `.workspace .result` goes, because the cards separate the columns.
-- **Texts (en / de):** `result.empty`: "The result appears here. Fill in the form on the left and start." / „Hier erscheint das Ergebnis. Formular links ausfüllen und starten.“ (impersonal, as the playground's German texts are).
+- **Texts (en / de):** `result.empty`: "The result appears here. Fill in the form and start." / „Hier erscheint das Ergebnis. Formular ausfüllen und starten.“ (impersonal, as the playground's German texts are; without "on the left", which is wrong on a phone: final fix wave, M3).
 
 - [ ] **Step 1: Write the failing tests**
   - `tests/ui/test_shell.py`: `test_result_starts_with_empty_state` (the signed-in shell has `#result .result-empty` with the text in both languages).

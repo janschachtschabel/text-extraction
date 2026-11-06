@@ -750,3 +750,11 @@ def test_result_starts_with_empty_state(language: Language) -> None:
     assert len(result) == 1
     assert empty.text_content().strip() == translate(language, "result.empty")
     assert not result.xpath(".//*[@data-announce]")
+
+
+def test_the_empty_state_names_no_side() -> None:
+    # On a phone the form is above the result, not on its left.
+    assert translate("en", "result.empty") == "The result appears here. Fill in the form and start."
+    assert translate("de", "result.empty") == (
+        "Hier erscheint das Ergebnis. Formular ausfüllen und starten."
+    )
