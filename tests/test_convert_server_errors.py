@@ -163,6 +163,19 @@ def test_keeps_prose_that_mentions_warnings() -> None:
     assert soup.get_text() == "Warning: do not touch the wire in the lab."
 
 
+def test_keeps_an_uncaught_error_that_spans_lines() -> None:
+    # PHP 8 writes an uncaught exception with its stack trace over several lines; such a
+    # message is not recognised and stays (documented in the user guide).
+    text = (
+        "PHP Fatal error:  Uncaught Exception: boom in /var/www/a.php:3\n"
+        "Stack trace:\n#0 {main}\n  thrown in /var/www/a.php on line 3"
+    )
+    soup = _soup(f"<div>{text}</div>")
+
+    assert strip_server_errors(soup) == []
+    assert soup.get_text() == text
+
+
 def test_keeps_a_message_without_a_php_path() -> None:
     soup = _soup("<p>Notice: the lab is closed in /summer/ on line 3 of the plan.</p>")
 

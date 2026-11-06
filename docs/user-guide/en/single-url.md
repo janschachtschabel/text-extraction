@@ -93,7 +93,9 @@ Some sites print PHP error output into their pages, such as `Warning: Undefined 
 line, as PHP writes it. A message quoted inside a sentence stays, and so does one inside `pre`,
 `code`, `kbd`, `samp`, `var`, `tt`, `textarea` and `script`, where it is part of the content. For a
 removed message the conversion adds the warning `server_errors_removed` and lists the messages in
-`data.server_errors`. The playground shows them in a closed section after "Images".
+`data.server_errors`. The playground shows them in a closed section after "Images". A message that
+spans several lines stays in the text: PHP 8 writes an uncaught exception ("Fatal error: Uncaught
+…") with its stack trace, and that is not removed.
 
 A licence has an `id` (such as `CC-BY-SA-4.0`), a `url`, a `label`, its `source` (a `rel-license`
 link, JSON-LD, microdata, RDFa, a meta tag or the page text) and a `confidence`. `mode_used`

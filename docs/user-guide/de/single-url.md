@@ -97,7 +97,9 @@ eine Zeile beginnt, wie PHP sie schreibt. Eine Meldung, die mitten in einem Satz
 bleibt stehen, ebenso eine innerhalb von `pre`, `code`, `kbd`, `samp`, `var`, `tt`, `textarea` und
 `script`, wo sie zum Inhalt gehört. Für eine entfernte Meldung fügt die Umwandlung die Warnung
 `server_errors_removed` hinzu und listet die Meldungen in `data.server_errors`. Die Spielwiese zeigt
-sie in einem zugeklappten Abschnitt nach „Bilder“.
+sie in einem zugeklappten Abschnitt nach „Bilder“. Eine Meldung, die über mehrere Zeilen geht,
+bleibt im Text: PHP 8 schreibt eine nicht abgefangene Ausnahme („Fatal error: Uncaught …“) mit
+ihrem Stacktrace, und die wird nicht entfernt.
 
 Eine Lizenz hat eine `id` (etwa `CC-BY-SA-4.0`), eine `url`, ein `label`, ihre `source` (ein Link
 `rel-license`, JSON-LD, Microdata, RDFa, ein Meta-Tag oder der Text der Seite) und eine

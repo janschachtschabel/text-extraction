@@ -166,7 +166,8 @@ add a note of its own):
   `Warning: ... in /path/file.php on line 128`, were removed before extraction; only a message
   that starts a line of its block counts, as PHP writes one, so a message quoted inside a
   sentence stays, and so does text inside `pre`, `code`, `kbd`, `samp`, `var`, `tt`,
-  `textarea` and `script`; package 17). The removed messages are listed
+  `textarea` and `script`; a message over several lines, such as PHP 8's "Fatal error: Uncaught
+  …" with its stack trace, is not recognised and stays; package 17). The removed messages are listed
   in `data.server_errors` (level, message, file, line, count; identical ones merged, at most 50;
   null when there were none, and null when PII handling was requested: the messages are page
   text that can name a person, and the PII step does not read them), and the playground shows
