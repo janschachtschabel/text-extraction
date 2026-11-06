@@ -192,3 +192,53 @@ def test_a_long_message_is_cut_and_its_whitespace_collapsed() -> None:
 
     assert len(error.message) == MAX_MESSAGE_CHARS
     assert "  " not in error.message
+
+
+def test_many_messages_in_one_text_node_take_linear_time() -> None:
+    soup = _soup("<div>" + "Notice: a in /a.php on line 1 " * 40_000 + "</div>")
+
+    started = time.perf_counter()
+    errors = strip_server_errors(soup)
+
+    assert time.perf_counter() - started < 1
+    assert errors == [ServerError("Notice", "a", "/a.php", 1, count=40_000)]
+    assert soup.get_text().strip() == ""
+
+
+def test_a_message_between_two_lines_keeps_them_apart() -> None:
+    soup = _soup("<div>Line one<br/>Warning: x in /a.php on line 3<br/>Line two</div>")
+
+    assert len(strip_server_errors(soup)) == 1
+
+    assert str(soup.div) == "<div>Line one<br/>Line two</div>"
+
+
+def test_messages_between_two_lines_leave_one_break() -> None:
+    soup = _soup(
+        "<div>Line one<br/>\nWarning: x in /a.php on line 3<br/>\n"
+        "Warning: y in /a.php on line 4<br/>\nLine two</div>"
+    )
+
+    assert len(strip_server_errors(soup)) == 2
+
+    assert "".join(str(soup.div).split()) == "<div>Lineone<br/>Linetwo</div>"
+
+
+def test_a_message_before_text_on_its_line_keeps_the_line_break() -> None:
+    soup = _soup("<div>Line one<br/>Warning: x in /a.php on line 3 Line two</div>")
+
+    assert len(strip_server_errors(soup)) == 1
+
+    assert str(soup.div) == "<div>Line one<br/> Line two</div>"
+
+
+def test_many_html_messages_in_one_block_take_linear_time() -> None:
+    soup = _soup("<div>start" + php_warning("Sport") * 20_000 + "end</div>")
+
+    started = time.perf_counter()
+    errors = strip_server_errors(soup)
+
+    assert time.perf_counter() - started < 2
+    assert [error.count for error in errors] == [20_000]
+    assert soup.find("b") is None
+    assert " ".join(soup.get_text().split()) == "start end"

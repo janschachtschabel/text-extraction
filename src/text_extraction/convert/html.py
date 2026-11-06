@@ -285,10 +285,12 @@ def flatten_deep_tables(soup: BeautifulSoup) -> None:
 # an inline element or a <br>, every inline element becomes a paragraph of its own and the
 # space after it is lost (``<div><b>W</b>: msg in <b>/x.php</b></div>`` gives ``**W**: msg
 # in`` and ``**/x.php**``, Trafilatura 2.3.1). The same run inside a <p> comes out right.
+# Lists and quotes are not split and stay as they are: a <p> in an <li> can tip a short page
+# into Trafilatura's justext rescue, which drops every link and emphasis on the page.
 _RUN_CONTAINERS = frozenset(
     {
-        *("article", "aside", "blockquote", "div", "figcaption", "figure", "footer", "form"),
-        *("header", "li", "main", "section"),
+        *("article", "aside", "div", "figcaption", "figure", "footer", "form", "header"),
+        *("main", "section"),
     }
 )
 # Kept as they are, with everything inside: paragraphs, table cells (Markdown tables must not
@@ -338,30 +340,38 @@ def _starts_inline(container: Tag) -> bool:
 
 
 def _wrap_runs(soup: BeautifulSoup, container: Tag) -> None:
-    run: list[PageElement] = []
-    for child in list(container.children):
-        if _flows_inline(child):
-            run.append(child)
-            continue
-        _wrap(soup, run)
-        run = []
-    _wrap(soup, run)
+    """Wrap the container's runs, the last first: bs4 finds a node's position in its parent by
+    a linear search, so the nodes are taken out from the end with their position given, which
+    keeps a container with many children linear."""
+    children = list(container.children)
+    runs: list[tuple[int, int]] = []
+    begin = 0
+    for index, child in enumerate(children):
+        if not _flows_inline(child):
+            runs.append((begin, index))
+            begin = index + 1
+    runs.append((begin, len(children)))
+    for begin, stop in reversed(runs):
+        _wrap(soup, container, children, begin, stop)
 
 
-def _wrap(soup: BeautifulSoup, run: list[PageElement]) -> None:
-    content = [index for index, node in enumerate(run) if _has_content(node)]
-    # Whitespace and <br> before the first and after the last content: a paragraph's edges
+def _wrap(
+    soup: BeautifulSoup, container: Tag, children: list[PageElement], begin: int, stop: int
+) -> None:
+    content = [index for index in range(begin, stop) if _has_content(children[index])]
+    # Whitespace and <br> before the first and after the last content go: a paragraph's edges
     # need no line break, and a run of nothing else between blocks is dropped.
-    edges = run[: content[0]] + run[content[-1] + 1 :] if content else run
-    for node in edges:
-        node.extract()
-    if not content:
+    moved: list[PageElement] = []
+    for index in range(stop - 1, begin - 1, -1):
+        node = children[index].extract(_self_index=index)
+        if content and content[0] <= index <= content[-1]:
+            moved.append(node)
+    if not moved:
         return
-    run = run[content[0] : content[-1] + 1]
     paragraph = soup.new_tag("p")
-    run[0].insert_before(paragraph)
-    for node in run:
-        paragraph.append(node.extract())
+    for node in reversed(moved):
+        paragraph.append(node)
+    container.insert(begin, paragraph)
 
 
 def _has_content(node: PageElement) -> bool:

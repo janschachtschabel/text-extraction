@@ -35,6 +35,7 @@ _ON_LINE = re.compile(r" on line (\d+)")
 _IN_PATH = re.compile(r" in (?:/|[A-Za-z]:\\)")  # a path starts with "/" or a drive letter
 _IN = len(" in ")
 _NEWLINE = re.compile(r"\n")
+_NON_SPACE = re.compile(r"\S")
 _EXTENSIONS = (".php", ".inc", ".phtml")
 _MAX_MESSAGE = 1000
 _MAX_PATH = 500
@@ -176,9 +177,19 @@ def _remove(
     starts: list[int],
     messages: list[tuple[int, int]],
 ) -> None:
+    """Cut the messages out of the block's text nodes and drop the ``<br>`` around them.
+
+    Messages that only whitespace and ``<br>`` separate form a group. A group with content on
+    both sides keeps one of its ``<br>`` (the last), so the lines around it stay apart; any
+    other group loses them all. Every check reads only the text between a message and its
+    neighbours, and each text node is rebuilt once: linear in the block."""
+    text = "".join(texts)
+    first_content, last_content = _content_bounds(text, messages)
     cuts: dict[int, list[tuple[int, int]]] = {}
-    breaks: set[int] = set()
-    for start, end in messages:
+    groups: list[_Group] = []
+    previous_end = 0
+    for number, (start, end) in enumerate(messages):
+        next_start = messages[number + 1][0] if number + 1 < len(messages) else len(text)
         first = bisect_right(starts, start) - 1
         last = bisect_left(starts, end) - 1
         for index in range(first, last + 1):
@@ -186,53 +197,166 @@ def _remove(
             stop = min(end, starts[index] + len(texts[index])) - starts[index]
             if begin < stop:
                 cuts.setdefault(index, []).append((begin, stop))
-        before = _adjacent_break(pieces, texts, first, -1, texts[first][: start - starts[first]])
-        after = _adjacent_break(pieces, texts, last, 1, texts[last][end - starts[last] :])
-        breaks.update(index for index in (before, after) if index is not None)
-    emptied: list[Tag] = []
+        before = _break_before(pieces, texts, starts, text, first, previous_end, start)
+        after = _break_after(pieces, texts, starts, text, last, end, next_start)
+        previous_end = end
+        if groups and before is not None and groups[-1].breaks[-1:] == [before]:
+            group = groups[-1]  # only whitespace and the shared <br> since the last message
+            group.end = end
+        else:
+            group = _Group(start, end, [] if before is None else [before])
+            groups.append(group)
+        if after is not None:
+            group.breaks.append(after)
+    breaks: list[int] = []
+    for group in groups:
+        breaks.extend(_dropped(group, first_content < group.start, last_content >= group.end))
+    removed: list[PageElement] = []
+    replaced: dict[int, tuple[PageElement, str]] = {}
     for index, ranges in cuts.items():
         piece = pieces[index]
-        if not isinstance(piece, NavigableString):  # cuts are only made in text pieces
+        if piece is None:
             continue
         kept = _without(texts[index], ranges)
-        parent = piece.parent
         if kept:
-            piece.replace_with(kept)
+            replaced[id(piece)] = (piece, kept)
         else:
-            piece.extract()
-            if parent is not None:
-                emptied.append(parent)
+            removed.append(piece)
     for index in breaks:
-        br = pieces[index]
-        if not isinstance(br, Tag):  # breaks are only <br> pieces
-            continue
-        parent = br.parent
-        br.decompose()
-        if parent is not None:
-            emptied.append(parent)
-    for tag in emptied:
-        _drop_if_empty(tag, block)
-
-
-def _adjacent_break(
-    pieces: list[_Piece], texts: list[str], index: int, step: int, rest: str
-) -> int | None:
-    """The index of the ``<br>`` next to a message (``step`` -1: before it, 1: after it), with
-    only whitespace between; ``rest`` is the text of the message's own piece on that side."""
-    if rest.strip():
-        return None
-    index += step
-    while 0 <= index < len(pieces):
         piece = pieces[index]
-        if isinstance(piece, NavigableString):
-            if texts[index].strip():
-                return None
-        elif isinstance(piece, Tag):
-            return index
-        else:
-            return None  # a block boundary
-        index += step
+        if piece is not None:
+            removed.append(piece)
+    _apply(block, removed, replaced)
+
+
+def _apply(
+    block: Tag, removed: list[PageElement], replaced: dict[int, tuple[PageElement, str]]
+) -> None:
+    """Remove the ``removed`` nodes and each inline ancestor below ``block`` that this leaves
+    without any content (``<b>Warning</b>`` once its text has gone), and give each node in
+    ``replaced`` (by ``id``) its new text.
+
+    bs4 finds a node's position in its parent by a linear search and closes the gap in the
+    parent's list, so removing one node at a time is quadratic in a parent with many children
+    (thousands of messages in one block). Each affected parent is rebuilt once instead: every
+    child is taken out from the end (with its position given, which costs nothing), and the
+    kept ones are appended again in order."""
+    removed = list({id(node): node for node in removed}.values())  # each node counts once
+    gone = {id(node) for node in removed}
+    emptied: list[PageElement] = []
+    left: dict[int, int] = {}  # the children an ancestor keeps
+    for node in removed:
+        parent = node.parent
+        while parent is not None and parent is not block:
+            count = left.get(id(parent), len(parent.contents)) - 1
+            left[id(parent)] = count
+            if count:
+                break
+            gone.add(id(parent))  # its last child went
+            emptied.append(parent)
+            parent = parent.parent
+    parents: dict[int, Tag] = {}
+    for node in [*removed, *emptied, *(node for node, _ in replaced.values())]:
+        parent = node.parent
+        if parent is not None and id(parent) not in gone:
+            parents[id(parent)] = parent
+    for parent in parents.values():
+        children = list(parent.contents)
+        for index in range(len(children) - 1, -1, -1):
+            children[index].extract(_self_index=index)
+        for child in children:
+            if id(child) in gone:
+                if isinstance(child, Tag):
+                    child.decompose()
+            elif id(child) in replaced:
+                parent.append(NavigableString(replaced[id(child)][1]))
+            else:
+                parent.append(child)
+
+
+@dataclass
+class _Group:
+    """Messages that only whitespace and ``<br>`` separate, and the ``<br>`` around them."""
+
+    start: int
+    end: int
+    breaks: list[int]
+
+
+def _dropped(group: _Group, content_before: bool, content_after: bool) -> list[int]:
+    """The group's ``<br>`` to remove: all of them, unless content on both sides needs one."""
+    if content_before and content_after:
+        return group.breaks[:-1]
+    return group.breaks
+
+
+def _content_bounds(text: str, messages: list[tuple[int, int]]) -> tuple[int, int]:
+    """The first and last position of non-whitespace text outside the messages (``len(text)``
+    and -1 when there is none). Each gap between messages is read at most twice."""
+    edges = [0, *(position for message in messages for position in message), len(text)]
+    gaps = list(zip(edges[::2], edges[1::2], strict=True))
+    first = len(text)
+    for begin, stop in gaps:
+        found = _NON_SPACE.search(text, begin, stop)
+        if found:
+            first = found.start()
+            break
+    last = -1
+    for begin, stop in reversed(gaps):
+        kept = text[begin:stop].rstrip()
+        if kept:
+            last = begin + len(kept) - 1
+            break
+    return first, last
+
+
+def _break_before(
+    pieces: list[_Piece],
+    texts: list[str],
+    starts: list[int],
+    text: str,
+    first: int,
+    previous_end: int,
+    start: int,
+) -> int | None:
+    """The ``<br>`` piece right before the message at ``start`` in piece ``first``, with only
+    whitespace between; the scan stops at the previous message."""
+    if previous_end > starts[first] or _NON_SPACE.search(text, starts[first], start):
+        return None  # the previous message or text shares the piece
+    for index in range(first - 1, -1, -1):
+        found = _neighbour(pieces[index], text, starts[index], len(texts[index]))
+        if found != "space":
+            return index if found == "break" else None
     return None
+
+
+def _break_after(
+    pieces: list[_Piece],
+    texts: list[str],
+    starts: list[int],
+    text: str,
+    last: int,
+    end: int,
+    next_start: int,
+) -> int | None:
+    """The ``<br>`` piece right after the message that ends at ``end`` in piece ``last``, with
+    only whitespace between; the scan stops at the next message."""
+    piece_end = starts[last] + len(texts[last])
+    if next_start < piece_end or _NON_SPACE.search(text, end, piece_end):
+        return None  # the next message or text shares the piece
+    for index in range(last + 1, len(pieces)):
+        found = _neighbour(pieces[index], text, starts[index], len(texts[index]))
+        if found != "space":
+            return index if found == "break" else None
+    return None
+
+
+def _neighbour(piece: _Piece, text: str, start: int, length: int) -> str:
+    """What a piece next to a message is: "space", "break" (a <br>) or "other" (text or a
+    block boundary)."""
+    if isinstance(piece, NavigableString):
+        return "other" if _NON_SPACE.search(text, start, start + length) else "space"
+    return "break" if isinstance(piece, Tag) else "other"
 
 
 def _without(text: str, ranges: list[tuple[int, int]]) -> str:
@@ -243,14 +367,3 @@ def _without(text: str, ranges: list[tuple[int, int]]) -> str:
         position = max(position, stop)
     kept.append(text[position:])
     return "".join(kept)
-
-
-def _drop_if_empty(tag: PageElement, block: Tag) -> None:
-    """Remove ``tag`` and then each inline ancestor below ``block`` that the removal left
-    without any content (``<b>Warning</b>`` once its text has gone)."""
-    while isinstance(tag, Tag) and tag is not block and not tag.decomposed and not tag.contents:
-        parent = tag.parent
-        tag.decompose()
-        if parent is None:
-            return
-        tag = parent

@@ -449,8 +449,11 @@ def _without_wrapping(page: str, fmt: OutputFormat, monkeypatch: pytest.MonkeyPa
         "<pre><b>W</b>: code <i>x</i>\n<div><b>y</b> z</div></pre>",
         # A <p> keeps its own structure.
         "<p><b>W</b>: already <i>a</i> paragraph</p>",
+        # Lists and quotes, which Trafilatura does not split, are not wrapped.
+        "<ul><li><b>Term</b>: definition <i>x</i> more</li><li><br/>Start <b>b</b> on</li></ul>"
+        "<blockquote><i>Quote</i> said <b>someone</b> wise</blockquote>",
     ],
-    ids=["div-prose", "table-cells", "pre", "paragraph"],
+    ids=["div-prose", "table-cells", "pre", "paragraph", "list-and-quote"],
 )
 def test_content_without_a_leading_inline_run_is_unchanged(
     content: str, fmt: OutputFormat, monkeypatch: pytest.MonkeyPatch
@@ -460,10 +463,11 @@ def test_content_without_a_leading_inline_run_is_unchanged(
     assert convert_html(page, URL, fmt).content == _without_wrapping(page, fmt, monkeypatch)
 
 
-def test_wrap_inline_runs_leaves_cells_pre_and_paragraphs_alone() -> None:
+def test_wrap_inline_runs_leaves_cells_pre_paragraphs_lists_and_quotes_alone() -> None:
     markup = (
         "<table><tr><td><b>a</b> b</td><th><br/>c</th></tr></table>"
         "<pre><b>d</b> e<div><b>f</b> g</div></pre><p><b>h</b> i</p>"
+        "<ul><li><b>j</b> k</li></ul><blockquote><br/><i>l</i> m</blockquote>"
     )
     soup = BeautifulSoup(f"<html><body>{markup}</body></html>", "lxml")
     before = str(soup)
@@ -547,3 +551,18 @@ def test_page_without_server_errors_has_no_warning() -> None:
 
     assert "server_errors_removed" not in result.warnings
     assert result.server_errors == []
+
+
+def test_wrap_inline_runs_takes_linear_time_in_a_wide_container() -> None:
+    soup = BeautifulSoup(
+        "<html><body><div>" + "<b>x</b> y " * 100_000 + "</div></body></html>", "lxml"
+    )
+
+    started = time.perf_counter()
+    html_module.wrap_inline_runs(soup)
+
+    assert time.perf_counter() - started < 2
+    div = soup.find("div")
+    assert div is not None
+    assert [child.name for child in div.find_all(recursive=False)] == ["p"]
+    assert len(div.contents) == 1
