@@ -548,9 +548,13 @@ class SitemapItems:
         """Whether the site of ``url`` has a sitemap, for ``discovery: sitemap_first``: its
         robots.txt lists one, or one of ``GUESSED_SITEMAP_PATHS``, tried in turn, answers 2xx
         (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the pipeline
-        (SSRF guard, compliance, the host's turn). An unavailable robots.txt counts as no listed
-        sitemap; a probe that fails or answers otherwise moves on to the next address."""
+        (SSRF guard, compliance, the host's turn). It mirrors what the robots item and the guess
+        chain read, so a yes always leads to a sitemap item that is read: an unavailable
+        robots.txt is no (the robots item fails without a guess); a probe answering 404 or 410
+        moves on to the next address, a failure or any other status ends the chain (no)."""
         listed = await self._pipeline.robots_sitemaps(url, gate_refusals=gate_refusals)
+        if listed.state == "unavailable":
+            return False
         if listed.state == "found" and listed.urls:
             return True
         for path in GUESSED_SITEMAP_PATHS:
@@ -563,8 +567,12 @@ class SitemapItems:
                 truncate=True,
                 gate_refusals=gate_refusals,
             )
-            if raw.fetched is not None and 200 <= raw.fetched.status < 300:
+            if raw.fetched is None:
+                return False
+            if 200 <= raw.fetched.status < 300:
                 return True
+            if raw.fetched.status not in (404, 410):
+                return False
         return False
 
     async def _guess_next(

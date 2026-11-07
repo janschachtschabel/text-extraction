@@ -345,10 +345,15 @@ class SiteRunner(SitemapItems):
             and any(candidate is not None and candidate.add for _, candidate in judged)
             and await self._sitemap_exists(job, final_url or url, gate_refusals)
         ):
-            # The sitemap lists the pages: the links that would be followed are left alone.
+            # The site has a sitemap: the links that would be followed are only looked up (the
+            # keys stay what they are without the probe); one that is an item already says
+            # ``seen``, the others ``sitemap_first``.
             judged = [
-                (link.model_copy(update={"crawl": "sitemap_first"}), None)
-                if link.crawl == "queued"
+                (
+                    link.model_copy(update={"crawl": "sitemap_first"}),
+                    replace(candidate, add=False),
+                )
+                if link.crawl == "queued" and candidate is not None
                 else (link, candidate)
                 for link, candidate in judged
             ]
@@ -384,6 +389,17 @@ class SiteRunner(SitemapItems):
                     decided.append(link)
                     continue
                 answer = by_key[candidate.key]
+                if link.crawl == "sitemap_first":
+                    seen = answer[1] and answer[0] is not None
+                    decided.append(
+                        link.model_copy(
+                            update={
+                                "crawl": "seen" if seen else "sitemap_first",
+                                "target": answer[0] if seen else None,
+                            }
+                        )
+                    )
+                    continue
                 crawl = _decided(link.crawl, answer, extended, "max_pages")
                 decided.append(link.model_copy(update={"crawl": crawl, "target": answer[0]}))
             if any(link.crawl == "max_pages" for link in decided):

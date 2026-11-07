@@ -2484,7 +2484,11 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   compliance and the host's turn. When the site has a sitemap, the links that `judge_links` would
   make candidates say `crawl: sitemap_first` (no target, none appended); the robots item is still
   appended, and with it the sitemap items. Other decisions (`out_of_scope`, `file`, ...) stay.
-  Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap result carries `sitemap.type_hint`
+  A link to a page that is an item already says `seen` with its target, as under `crawl` (the
+  candidates stay look-ups, so their keys do not depend on the probe). The probe mirrors the
+  chain: robots.txt unavailable is no, a 404 or 410 tries the next address, a failure or another
+  status is no. A guessed sitemap the probe found is requested twice (the probe, capped at 64 KiB,
+  then the sitemap item); accepted. Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap result carries `sitemap.type_hint`
   (`sitemap_type_hint` of the URL that was listed or guessed: Yoast/Rank Math `post-sitemap`,
   WordPress `wp-sitemap-posts-…`, `-taxonomies-…`, `-users-…`), else null; robots.txt unavailable
   fails the item `target_http_error`, retryable, without a guess.

@@ -81,7 +81,7 @@ führt (siehe [Seitentypen und Linkkategorien](#seitentypen-und-linkkategorien))
   Iframes), `file`, `out_of_scope` (ein anderer Host oder außerhalb des Startverzeichnisses mit
   `scope: "path"`), `nofollow`, `blocked` (robots.txt oder ein TDM-Nutzungsvorbehalt unter
   `compliance: enforce`), `max_pages`, `memory_guard` und `sitemap_first` (ein Crawl mit
-  `discovery: "sitemap_first"` hat eine Sitemap gefunden, also nennt die Sitemap die Seite).
+  `discovery: "sitemap_first"` hat eine Sitemap gefunden, daher wurde dem Link nicht gefolgt).
 
 Die Einträge einer Sitemap stehen in `sitemap.entries`; eine große setzt sich in
 `sitemap_part`-Einträgen mit derselben URL fort (`part` von `parts`), und ein Index listet seine

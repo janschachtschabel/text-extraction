@@ -77,9 +77,9 @@ crawl did with it, and `category`, what it leads to (see
   deeper than `depth` to a page that is an item anyway says `seen` too).
 - The others are not followed: `depth` (deeper than asked), `listed` (head links and iframes),
   `file`, `out_of_scope` (another host, or outside the start directory with `scope: "path"`),
-  `nofollow`, `blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages`
+  `nofollow`, `blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages`,
   `memory_guard` and `sitemap_first` (a crawl with `discovery: "sitemap_first"` found a sitemap, so
-  the sitemap lists the page).
+  the link was not followed).
 
 A sitemap's entries are in `sitemap.entries`; a large one continues in `sitemap_part` items with
 the same URL (`part` of `parts`), and an index lists its sitemaps in `children`, each with the

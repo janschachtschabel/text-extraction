@@ -1470,10 +1470,87 @@ async def test_sitemap_first_keeps_the_other_crawl_decisions() -> None:
 
 
 @scenario
-async def test_crawl_discovery_never_probes() -> None:
-    crawl = Crawl({ROOT: page(ROOT)})
-    await crawl.start(depth=0, sitemaps=False)
+async def test_sitemap_first_self_link_and_known_pages_say_seen() -> None:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/map.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, ROOT, *LINKED),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/map.xml": text(f"{SITE}/map.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
 
     await crawl.crawl()
 
+    items = await crawl.items(job_id)
+    home = link_to(items[0], ROOT)
+    assert (home.crawl, home.target) == ("seen", 0)
+    assert [link.crawl for link in links(items[0])[1:]] == ["sitemap_first"] * 3
+    assert roles(items).count("page") == 1
+
+
+@scenario
+async def test_sitemap_first_robots_unavailable_crawls_normally() -> None:
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        ROBOTS: fetched(ROBOTS, "Busy", status=503),
+        f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+    }
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(compliance="report", discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
     assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_probe_stops_at_a_403() -> None:
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        f"{SITE}/sitemap.xml": fetched(f"{SITE}/sitemap.xml", "No", status=403),
+        f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", urlset(*LISTED)),
+    }
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert f"{SITE}/wp-sitemap.xml" not in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_probe_goes_on_after_a_404() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            f"{SITE}/sitemap_index.xml": text(f"{SITE}/sitemap_index.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
+@scenario
+async def test_crawl_discovery_does_not_probe() -> None:
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED)}
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    await crawl.start(discovery="crawl")
+
+    await crawl.crawl()
+
+    # Once, by the robots chain, not a second time by a probe.
+    assert [url for url, _ in crawl.fetcher.calls].count(f"{SITE}/sitemap.xml") == 1
