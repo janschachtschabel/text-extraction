@@ -2780,11 +2780,12 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   it (`_type_name_path`; the decision order is then `_DECISIVE_URL_FIRST`), so `/impressum` with
   a Quiz node stays `imprint`. Anywhere else in the path, and for the query rules, the entity
   wins: `/kurse/datenschutz` with a main Course is `learning_material`,
-  `/fortbildungen/barrierefreiheit` with a main Event is `event`, and so are
-  `/service/impressum`, `/kontakt/anfahrt`, `/kategorie/mathe`, `/kontakt/workshop-anmeldung`
-  and `/ueber-uns/termine/tag-der-offenen-tuer` with a main entity. (The first cut of this ruling
-  ranked every `url` vote above the entity; a type word as the last segment then beat a page's
-  single Course or Event, a regression from 0.1.6, fixed in the final review.) The main entities are the `mainEntity` values of the JSON-LD nodes typed
+  `/fortbildungen/barrierefreiheit` with a main Event is `event`, and these take their main
+  entity's type too: `/service/impressum`, `/kontakt/anfahrt`, `/kategorie/mathe`,
+  `/kontakt/workshop-anmeldung` and `/ueber-uns/termine/tag-der-offenen-tuer`. (The first cut of
+  this ruling ranked every `url` vote above the entity; a type word as the last segment then beat
+  a page's single Course or Event, a regression from 0.1.6, fixed in the final review.) The main
+  entities are the `mainEntity` values of the JSON-LD nodes typed
   `*Page` (`WebPage`, `ItemPage` ...; inline, or an `{"@id"}` reference whose `@id` is a string
   naming a node of the page; at most 200 values are read, each node once), else every JSON-LD
   node (top-level and `@graph`); when no JSON-LD entity is an article, an event or a learning

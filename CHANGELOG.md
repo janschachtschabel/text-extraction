@@ -72,10 +72,10 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   `learning_material` only as the page's one main entity (the `mainEntity` of its `WebPage`, its
   only such JSON-LD node, or microdata on `<html>`, `<body>`, `<main>` or `<article>`), and only
   an address that is a type name alone (such as `/impressum` or `/de/impressum`) wins over it, so
-  `/kurse/datenschutz` with one `Course` stays `learning_material` as in 0.1.6: an article with an
+  `/kurse/datenschutz` with one `Course` stays `learning_material` as in 0.1.6. An article with an
   event in its sidebar stays `content`, and a page of several events is not typed `event` by
-  schema.org (it is `listing` when it is mostly links). An article (`og:type` `article`, enough words) below a type
-  name with a slug of words, such as `/datenschutz/schuelerfotos-im-unterricht`, is `content`. A
+  schema.org (it is `listing` when it is mostly links). An article (`og:type` `article`, enough
+  words) below a type name with a slug of words, such as `/datenschutz/schuelerfotos-im-unterricht`, is `content`. A
   link text such as "Anmelden" or "Datenschutz" no longer types a linked URL whose last part is a
   slug of words, and in the site tree it never replaces a sitemap's default "Content", so "Select
   content pages" keeps such pages checked.
