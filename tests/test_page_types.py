@@ -11,7 +11,6 @@ from text_extraction.page_types import (
     PageType,
     TypeGuess,
     guess_type,
-    guess_url_type,
     link_category,
     page_type,
     sitemap_type_hint,
@@ -830,32 +829,6 @@ def test_microdata_scan_stops_after_the_scope_limit() -> None:
     scopes = '<div itemscope itemtype="https://schema.org/WebPage"></div>' * 60
     late = '<div itemscope itemtype="https://schema.org/ContactPage"></div>'
     assert classify(doc(body=scopes + late))[0] == "other"
-
-
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        ("https://x.org/2021/05/oer-camp/", "content"),
-        ("https://x.org/2021/05/17/oer-camp/", "content"),
-        ("https://x.org/2021/13/a/", None),
-        ("https://x.org/?page_id=45952", "content"),
-        ("https://x.org/?p=12", "content"),
-        ("https://x.org/?p=12&cat=3", None),
-        ("https://x.org/impressum/", "imprint"),
-        ("https://x.org/author/jan/", "listing"),
-        ("https://x.org/ansprechpartner/", "contact"),
-        ("https://x.org/2-dezember/", None),
-        # Language and tracking parameters say nothing about the page, as in ``url_type``.
-        ("https://x.org/?page_id=12&lang=en", "content"),
-        ("https://x.org/?hl=de&p=12", "content"),
-        ("https://x.org/?p=12&locale=de_DE&utm_source=news", "content"),
-        ("https://x.org/2021/05/oer-camp/?lang=de", "content"),
-        ("https://x.org/2021/05/oer-camp/?LANG=de&fbclid=x", "content"),
-        ("https://x.org/2021/05/oer-camp/?cat=3", None),
-    ],
-)
-def test_guess_url_type(url: str, expected: PageType | None) -> None:
-    assert guess_url_type(url) == expected
 
 
 def test_url_type_itself_never_says_content() -> None:

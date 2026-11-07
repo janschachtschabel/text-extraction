@@ -670,7 +670,7 @@ TYPED_SITE = [
         links=(
             (f"{ORIGIN}/agb", "depth", "legal"),
             (f"{ORIGIN}/start", "depth", "nav"),
-            (f"{ORIGIN}/docs/c", "depth", "content"),  # the URL says nothing: no type
+            (f"{ORIGIN}/docs/12345", "depth", "content"),  # an id shape: no guess
         ),
     ),
     page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
@@ -686,8 +686,9 @@ TYPE_TEXTS = {
             "/docs/b": "Content",
             "/impressum": "Imprint",
             "/agb": "Legal (guessed from the URL)",
+            "/start": "Content (guessed from the URL)",
         },
-        "types": "Types: Content 2, Home 1, Imprint 1, Legal 1, Type open 2",
+        "types": "Types: Content 3, Home 1, Imprint 1, Legal 1, Type open 1",
         "button": "Select content pages",
     },
     "de": {
@@ -697,8 +698,9 @@ TYPE_TEXTS = {
             "/docs/b": "Inhalt",
             "/impressum": "Impressum",
             "/agb": "Rechtliches (aus der URL geschätzt)",
+            "/start": "Inhalt (aus der URL geschätzt)",
         },
-        "types": "Typen: Inhalt 2, Startseite 1, Impressum 1, Rechtliches 1, Typ offen 2",
+        "types": "Typen: Inhalt 3, Startseite 1, Impressum 1, Rechtliches 1, Typ offen 1",
         "button": "Inhaltsseiten auswählen",
     },
 }
@@ -723,10 +725,10 @@ def test_tree_shows_page_types(
         for leaf in root.xpath("//li[./label/input[@name='url']]")
         if leaf.xpath(typed)
     }
-    assert badges == expected["badges"]  # none for /kaputt (failed), /start and /docs/c
-    # The linked-only URLs whose URL says nothing are marked "type open" (package 17).
+    assert badges == expected["badges"]  # none for /kaputt (failed) and /docs/12345
+    # The linked-only URLs that no rule can type are marked "type open" (package 17).
     untyped = root.xpath("//li[./label/span[contains(@class, 'page-type-open')]]/label/input")
-    assert {box.get("value").removeprefix(ORIGIN) for box in untyped} == {"/start", "/docs/c"}
+    assert {box.get("value").removeprefix(ORIGIN) for box in untyped} == {"/docs/12345"}
     boxes = {
         box.get("value").removeprefix(ORIGIN): box.get("data-page-type")
         for box in root.xpath("//input[@name='url']")
@@ -738,8 +740,8 @@ def test_tree_shows_page_types(
         "/impressum": "imprint",
         "/kaputt": None,
         "/agb": "legal",
-        "/start": None,
-        "/docs/c": None,
+        "/start": "content",
+        "/docs/12345": None,
     }
     # A failed page is left out by "Select content pages" (ruling P14-R9).
     failed = root.xpath("//input[@name='url'][@data-failed]")
@@ -779,11 +781,11 @@ FOLD_SITE = [
         f"{ORIGIN}/",
         depth=0,
         page_type="home",
-        links=((f"{ORIGIN}/docs/deep/linked", "depth"),),
+        links=((f"{ORIGIN}/docs/deep/1234", "depth"),),
         external=((SOCIAL_URL, "social"), ("https://example.com/elsewhere", "content")),
     ),
     page_item(1, f"{ORIGIN}/docs/a", page_type="content"),
-    sitemap_item(2, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/docs/deep/listed"}]),
+    sitemap_item(2, f"{ORIGIN}/sitemap.xml", [{"loc": f"{ORIGIN}/docs/deep/5678"}]),
 ]
 
 
@@ -859,7 +861,7 @@ def test_tree_marks_type_open(
         leaf.xpath("./label/input")[0].get("value").removeprefix(ORIGIN): leaf
         for leaf in root.xpath("//li[./label/span[contains(@class, 'page-type-open')]]")
     }
-    assert set(open_) == {"/docs/deep/linked", "/docs/deep/listed"}  # crawled pages are typed
+    assert set(open_) == {"/docs/deep/1234", "/docs/deep/5678"}  # crawled pages are typed
     for leaf in open_.values():
         [badge] = leaf.xpath("./label/span[contains(@class, 'page-type-open')]")
         assert "page-type" in badge.get("class").split()

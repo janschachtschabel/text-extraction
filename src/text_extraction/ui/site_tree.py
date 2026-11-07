@@ -16,11 +16,16 @@ items are taken one at a time (`TreeBuilder.add`), so a reader can feed them pag
 
 Each URL leaf has a page type (package 14): a crawled page its result's ``page_type`` (none
 when the page failed or its item was stored before page types, ruling P14-R7); a sitemap entry
-or a linked-only URL the type its URL says (``page_types.guess_url_type``: also ``content`` for a
-dated path or a WordPress ``?p=`` query), ``type_guessed``, and none when the URL says nothing
-(ruling P14-R8: a link's ``category`` is not used; the type stays open). ``SiteTree.type_counts``
-counts the types of the URLs shown that have one, ``SiteTree.untyped`` the shown URLs that were
-not fetched and have none. ``SiteTree.social`` lists the external social links of the crawled
+or a linked-only URL the guess of ``page_types.guess_type`` (ruling P18-R1: from its URL, the
+sitemap's ``type_hint``, a link's text and region, or ``content`` by default), always
+``type_guessed`` with its ``type_reason``; only a URL with no name and an id shape stays without
+one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
+strongest. The first link that names a URL sets its title (``title_from_link``); a crawled
+page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
+type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
+guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
+``SiteTree.untyped`` the shown URLs that were not fetched and have none, ``found_counts`` the
+shown URLs of each kind. ``SiteTree.social`` lists the external social links of the crawled
 pages (``category`` ``social``, or for an item stored without categories the host), each once by
 host and path, at most ``TREE_MAX_SOCIAL``; share and intent endpoints (``facebook.com/sharer.php``,
 ``x.com/intent/post``) name no profile and are left out.
@@ -55,8 +60,8 @@ from text_extraction.compliance import (
     origin_of,
 )
 from text_extraction.job_models import JobItem
-from text_extraction.page_types import PageType, guess_url_type, is_social_url
-from text_extraction.site.types import SiteInfo
+from text_extraction.page_types import GuessReason, PageType, guess_type, is_social_url
+from text_extraction.site.types import SiteInfo, SiteLink
 from text_extraction.site.urls import seen_key
 from text_extraction.ui.i18n import Message
 
@@ -101,7 +106,7 @@ _SHARE_PATHS: Final = ("/dialog/feed", "/dialog/share", "/pin/create", "/send", 
 HIDDEN_KEYS_MAX: Final = 250_000
 # Links not followed for these reasons are shown as linked only; a followed link has an item.
 # A "blocked" link carries no reason of its own: `mark_blocked` judges it.
-LINKED_ONLY: Final = frozenset({"depth", "max_pages", "blocked"})
+LINKED_ONLY: Final = frozenset({"depth", "max_pages", "blocked", "sitemap_first"})
 # The page types that "Select content pages" leaves unticked; a leaf of any other type, or
 # without one, is ticked.
 NON_CONTENT_TYPES: Final[tuple[PageType, ...]] = (
@@ -124,7 +129,10 @@ class TreeNode:
     (listed only) or ``linked`` (linked only). ``status`` is a page's result status and
     ``error_code`` its error's code, ``depth`` its link distance from the start page,
     ``lastmod`` a sitemap's, ``page_type`` its type (``type_guessed`` when from its URL),
-    ``blocked`` why the site's rules block it (none: no rule does, or it is not known)."""
+    ``type_reason`` what a guessed type rests on, ``title_from_link`` that the title is a link's
+    text, ``blocked`` why the site's rules block it (none: no rule does, or it is not known).
+    A section has ``pages`` (URL leaves below it), ``section_type`` (the type they all share,
+    none if one has none or they differ) and ``section_guessed`` (any of them is guessed)."""
 
     label: str
     url: str | None
@@ -137,7 +145,12 @@ class TreeNode:
     error_code: str | None = None
     page_type: PageType | None = None
     type_guessed: bool = False
+    type_reason: GuessReason | None = None
+    title_from_link: bool = False
     blocked: BlockReason | None = None
+    pages: int = 0
+    section_type: PageType | None = None
+    section_guessed: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,7 +169,8 @@ class SiteTree:
     of the crawl (none when no item says), ``blocked`` the leaves with a block reason and
     ``unchecked`` the origins tried whose leaves could not be judged and ``unchecked_more`` the
     number of origins not tried (`mark_blocked`). ``untyped`` counts the shown URLs that were
-    not fetched (sitemap or linked) and have no page type; ``social`` the social links."""
+    not fetched (sitemap or linked) and have no page type; ``social`` the social links;
+    ``found_counts`` the shown URLs of each kind (``page``, ``sitemap``, ``linked``)."""
 
     roots: list[TreeNode]
     urls: int
@@ -168,6 +182,7 @@ class SiteTree:
     unchecked_more: int = 0
     untyped: int = 0
     social: tuple[SocialLink, ...] = ()
+    found_counts: Mapping[NodeKind, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -182,14 +197,18 @@ class _Found:
     error_code: str | None = None
     page_type: PageType | None = None
     type_guessed: bool = False
+    type_reason: GuessReason | None = None
+    title_from_link: bool = False
     blocked: BlockReason | None = None
 
     def merge(self, other: "_Found") -> None:
-        self.title = self.title or other.title
+        if not self.title:
+            self.title, self.title_from_link = other.title, other.title_from_link
         if self.status is None:  # not a crawled page (only a page has a status)
             # A crawled page's own verdict, even none, wins over a type from a URL.
             if other.status is not None or self.page_type is None:
                 self.page_type, self.type_guessed = other.page_type, other.type_guessed
+                self.type_reason = other.type_reason
             self.status, self.error_code = other.status, other.error_code
         self.depth = self.depth if self.depth is not None else other.depth
         self.lastmod = self.lastmod or other.lastmod
@@ -234,12 +253,12 @@ class TreeBuilder:
             self._add(_PAGE, found)
             for link in site.links or []:
                 if link.crawl in LINKED_ONLY:
-                    self._add(_LINKED, _guessed(link.url))
+                    self._add(_LINKED, _linked(link))
                 if link.kind == "external":
                     self._add_social(link.url, link.category)
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
             for entry in site.sitemap.entries:
-                found = _guessed(entry.loc)
+                found = _guessed(entry.loc, sitemap_hint=site.sitemap.type_hint)
                 found.lastmod = entry.lastmod
                 self._add(_ENTRY, found)
 
@@ -307,6 +326,7 @@ class TreeBuilder:
             blocked=sum(1 for _, one in shown if one.blocked is not None),
             untyped=sum(1 for kind, one in shown if kind != "page" and one.page_type is None),
             social=tuple(self._social.values()),
+            found_counts={kind: sum(1 for k, _ in shown if k == kind) for kind in _KINDS},
         )
 
 
@@ -321,11 +341,28 @@ def _is_share_url(host: str, path: str, query: str) -> bool:
     return host == "wa.me" and path in ("", "/") and "text=" in query
 
 
-def _guessed(url: str) -> _Found:
-    """A URL that was not crawled, with the type its URL says, as guessed (none if it says
-    nothing)."""
-    guess = guess_url_type(url)
-    return _Found(url, page_type=guess, type_guessed=guess is not None)
+def _guessed(
+    url: str,
+    *,
+    link_text: str = "",
+    region: str | None = None,
+    sitemap_hint: PageType | None = None,
+) -> _Found:
+    """A URL that was not crawled, with its guessed type and the reason (none if nothing says)."""
+    guess = guess_type(url, link_text=link_text, region=region, sitemap_hint=sitemap_hint)
+    if guess is None:
+        return _Found(url)
+    return _Found(url, page_type=guess.type, type_guessed=True, type_reason=guess.reason)
+
+
+def _linked(link: SiteLink) -> _Found:
+    """A linked-only URL: guessed from its URL, text and region, titled by its text."""
+    link_text = link.text or ""  # an item stored with no text
+    found = _guessed(link.url, link_text=link_text, region=link.region)
+    text = " ".join(link_text.split())
+    if text:
+        found.title, found.title_from_link = text, True
+    return found
 
 
 def build_tree(items: Iterable[JobItem], *, max_urls: int) -> SiteTree:
@@ -378,6 +415,8 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
                 lastmod=found.lastmod,
                 page_type=found.page_type,
                 type_guessed=found.type_guessed,
+                type_reason=found.type_reason,
+                title_from_link=found.title_from_link,
                 blocked=found.blocked,
             )
         )
@@ -388,7 +427,25 @@ def _assemble(shown: list[tuple[NodeKind, _Found]]) -> list[TreeNode]:
         node.children.sort(key=_order)
         node.children = [_folded(child) for child in node.children]
         stack.extend(child for child in node.children if child.children)
+    for root in ordered:
+        _summarize(root)
     return ordered
+
+
+def _summarize(node: TreeNode) -> tuple[int, set[PageType | None], bool]:
+    """Set ``pages``, ``section_type`` and ``section_guessed`` of the sections below and at
+    ``node``; return the URL leaves below it, their types (None for a leaf without one) and
+    whether any is guessed."""
+    if node.url is not None:
+        return 1, {node.page_type}, node.type_guessed
+    pages, types, guessed = 0, set[PageType | None](), False
+    for child in node.children:
+        count, kinds, was_guessed = _summarize(child)
+        pages, guessed = pages + count, guessed or was_guessed
+        types |= kinds
+    node.pages, node.section_guessed = pages, guessed
+    node.section_type = next(iter(types)) if len(types) == 1 else None
+    return pages, types, guessed
 
 
 def _folded(node: TreeNode) -> TreeNode:
