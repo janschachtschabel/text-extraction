@@ -20,8 +20,9 @@ or a linked-only URL the guess of ``page_types.guess_type`` (ruling P18-R1: from
 sitemap's ``type_hint``, a link's text and region, or ``content`` by default), always
 ``type_guessed`` with its ``type_reason``; only a URL with no name and an id shape stays without
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
-strongest, unless that guess is ``content`` by default and a weaker source gives a reason. The first link that names a URL sets its title (``title_from_link``); a crawled
-page's own title wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
+strongest, unless that guess is ``content`` by default and a weaker source gives a reason. The
+first link that names a URL sets its title (``title_from_link``); a crawled page's own title
+wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
 type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
 guessed). ``SiteTree.type_counts`` counts the types of the URLs shown that have one,
 ``SiteTree.untyped`` the shown URLs that were not fetched and have none, ``found_counts`` the
