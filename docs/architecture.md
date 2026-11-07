@@ -1410,8 +1410,8 @@ OpenAI-compatible endpoint): always a job, answered 202.
 - **M12, switches.** `MEDIA_ENABLED` (default true: platform URLs, media files, tracks, embeds).
   `ASR_ENABLED` (default false): Helm renders it into every pod from `workers.asr.enabled`;
   compose always starts the ASR worker and sets `ASR_ENABLED` to true unless `.env` or the shell
-  says false (Jan, 2026-11-07: transcription on by default in compose; it had no profile `asr`
-  since).
+  says false (Jan, 2026-11-07: transcription on by default in compose; since then there is no
+  profile `asr`).
 - **M13 and M17, models and volumes** (`model_store.py`, `media/models.toml`). `--download-models`
   fills `ASR_MODELS_PATH/<model>` with only the configured `ASR_MODEL` from Hugging Face at a
   pinned commit per file, size- and SHA-256-checked, staged and renamed, with a

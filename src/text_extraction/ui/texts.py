@@ -43,8 +43,9 @@ def warning_text(name: str, language: Language) -> str | None:
 def error_text(code: object, http_status: int, message: object = None) -> Message:
     """The text of the error ``code`` (``error.<code>``); for a code the catalogues do not
     know, "The service answered HTTP <http_status>.". The API's English ``message`` picks
-    the text of switched-off transcription (`TRANSCRIPTION_DISABLED`)."""
-    if message == TRANSCRIPTION_DISABLED_MESSAGE:
+    the text of switched-off transcription (`TRANSCRIPTION_DISABLED`): it is the whole message
+    of an upload or ``transcribe: true``, the end of a fetched media file's."""
+    if isinstance(message, str) and message.endswith(TRANSCRIPTION_DISABLED_MESSAGE):
         return Message(TRANSCRIPTION_DISABLED)
     key = f"error.{code}"
     if isinstance(code, str) and key in CATALOGUES["en"]:

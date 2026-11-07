@@ -213,3 +213,10 @@ def test_job_panel_names_switched_off_transcription() -> None:
     assert error_text(ErrorCode.INVALID_REQUEST, 400, "Something else.").key == (
         "error.invalid_request"
     )
+
+
+def test_media_file_url_without_asr_names_switched_off_transcription() -> None:
+    message = f"The URL is an audio or video file. {TRANSCRIPTION_DISABLED_MESSAGE}"
+    assert error_text("no_transcript_available", 200, message).key == (
+        "result.transcription_disabled"
+    )

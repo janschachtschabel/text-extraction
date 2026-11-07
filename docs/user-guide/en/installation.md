@@ -40,8 +40,9 @@ uv run pre-commit install    # install the git hooks
 
 ## Docker Compose
 
-Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker and a
-Valkey with a password. It switches on browser mode, the MCP server and the playground.
+Requires Docker with Compose. Compose starts the API, an extract worker, a browser worker, an ASR
+worker and a Valkey with a password. It switches on browser mode, transcription, the MCP server and
+the playground.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it
@@ -89,7 +90,8 @@ profile and a switch in `.env`:
 Speech recognition for audio and video (the ASR worker) is on by default: `docker compose up`
 starts it, and its first start downloads the Whisper model (about 1.6 GB; `ASR_MODEL=small`,
 about 0.5 GB). To run without it, set `ASR_ENABLED=false` in `.env` and start with
-`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`.
+`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`. An `.env` copied from an
+older `.env.example` still says `ASR_ENABLED=false`: set it to `true`.
 
 Start a profile with `docker compose --profile docling up --build` (several: one
 `--profile` each). The first start downloads the models into a volume. The LLM worker needs

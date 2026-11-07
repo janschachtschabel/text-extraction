@@ -13,7 +13,7 @@
 # ASR_BACKEND=openai (and ASR_EXTERNAL_BASE_URL, optionally ASR_EXTERNAL_API_KEY, in .env) no model
 # is downloaded. To switch it off, set ASR_ENABLED=false in .env and start with
 # `docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`.
-# PII handling (the NLP worker, image target `nlp`) is off by default too: set PII_ENABLED=true in
+# PII handling (the NLP worker, image target `nlp`) is off by default, like OCR: set PII_ENABLED=true in
 # .env and start with `docker compose --profile nlp up -d --wait`. The one-shot service
 # `nlp-models` first downloads the German and English spaCy models of PII_MODEL_SIZE (default lg,
 # about 1 GB; `md` about 115 MB) into the volume `nlp-models`, then `nlp-worker` reads them
