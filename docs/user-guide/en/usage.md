@@ -372,7 +372,11 @@ which saves the whole envelope. An answer too large for the download says so and
   shows the content, the metadata, the images, the links and a timeline of what happened.
 - **File**, **Screenshot**, **Structured**, **Chunk** and **Info**: the other single calls, with
   the same result view; the "Options (JSON)" box under "Advanced" takes any further field of the
-  REST body.
+  REST body. **Extract**, **File** and **Batch** have "Optional features" (OCR, personal data,
+  and for Extract and Batch "Transcribe"); **Structured** has a "Strategy" select and **Chunk** a
+  "Method" select, which set the strategy of their JSON object. The LLM choices (strategy LLM,
+  method semantic, "Describe images") are disabled while the LLM is off, and say when the service
+  has no LLM key of its own, so that you enter yours.
 - **Batch**: URLs, one per line. **Batch file**: a CSV or JSON file of URLs, checked on the
   server first, with a preview before "Start batch".
 - **Site structure**: starts a crawl; once it is completed, "Show as tree" lists its pages by

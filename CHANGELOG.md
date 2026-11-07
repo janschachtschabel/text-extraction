@@ -22,6 +22,14 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
   with `--scale` of the feature's services to 0, switches a feature off. The LLM still needs a key
   (`LLM_API_KEY` or the caller's `X-LLM-Api-Key`). The Helm chart is unchanged.
 
+### Added
+
+- The playground offers the optional features as choices (package 19): "Optional features" in
+  Extract, File and Batch (OCR automatic/never/always, personal data, "Transcribe" for Extract and
+  Batch), a "Strategy" select in Structured and a "Method" select in Chunk. Nothing is chosen by
+  default; a feature the service has switched off is disabled with a hint naming its switch, and
+  the LLM choices say when the caller's LLM key is needed.
+
 ### Fixed
 
 - The playground names switched-off transcription ("Transcription is switched off in this
