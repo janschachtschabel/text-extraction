@@ -43,6 +43,12 @@ resources:
     cpu: 3750m
     memory: 2560Mi
 
+# A node drain never takes down more than one pod of a component (the API and each pool with
+# more than one replica).
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
 ingress:
   enabled: true
   className: ""  # yours

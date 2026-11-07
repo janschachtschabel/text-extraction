@@ -1073,6 +1073,27 @@ for name in "$API" "$EXTRACT" "$BROWSER"; do
     "$(document "$sized" Deployment "$name")" DOCUMENT_MEMORY_LIMIT_MB "768"
 done
 
+# --- PodDisruptionBudgets --------------------------------------------------------------------------
+
+pdb_off="$(render)"
+expect_absent "no PodDisruptionBudget by default" "$pdb_off" "kind: PodDisruptionBudget"
+pdb="$(render --set podDisruptionBudget.enabled=true --set workers.docling.enabled=true \
+  --set workers.asr.enabled=true --set workers.asr.replicaCount=1 \
+  --set workers.docling.replicaCount=3 --set replicaCount=2)"
+expect_contains "the API gets a PodDisruptionBudget" "$(document "$pdb" PodDisruptionBudget "$API")" "maxUnavailable: 1"
+expect_contains "the extract workers (2 replicas) get one" "$(document "$pdb" PodDisruptionBudget "$EXTRACT")" "maxUnavailable: 1"
+expect_contains "the Docling workers (3 replicas) get one" "$(document "$pdb" PodDisruptionBudget "$DOCLING")" "maxUnavailable: 1"
+expect_absent "a pool with one replica gets none (ASR)" "$(document "$pdb" PodDisruptionBudget "$ASR")" "kind: PodDisruptionBudget"
+expect_absent "a disabled pool gets none (NLP)" "$(document "$pdb" PodDisruptionBudget "$NLP")" "kind: PodDisruptionBudget"
+expect_contains "the budget selects the API pods" "$(flat "$(document "$pdb" PodDisruptionBudget "$API")")" \
+  "selector: matchLabels: app.kubernetes.io/name: text-extraction app.kubernetes.io/instance: $RELEASE"
+pdb_single="$(render --set podDisruptionBudget.enabled=true --set replicaCount=1)"
+expect_absent "a single API pod gets no budget" "$(document "$pdb_single" PodDisruptionBudget "$API")" "kind: PodDisruptionBudget"
+pdb_hpa="$(render --set podDisruptionBudget.enabled=true --set autoscaling.enabled=true --set autoscaling.minReplicas=1 \
+  --set workers.extract.autoscaling.hpa.enabled=true --set workers.extract.autoscaling.hpa.minReplicas=3)"
+expect_absent "an API HPA with minimum 1 gets no budget" "$(document "$pdb_hpa" PodDisruptionBudget "$API")" "kind: PodDisruptionBudget"
+expect_contains "a worker HPA with minimum 3 gets one" "$(document "$pdb_hpa" PodDisruptionBudget "$EXTRACT")" "kind: PodDisruptionBudget"
+
 # --- Example production values (ruling P11-S11) ----------------------------------------------------
 
 EXAMPLE="$CHART/values-production.example.yaml"
@@ -1118,6 +1139,8 @@ else
   expect_contains "the example renders the ServiceMonitor" "$production" "kind: ServiceMonitor"
   expect_contains "the example's ingress waits 120 s for an answer" "$(document "$production" Ingress "$API")" \
     'nginx.ingress.kubernetes.io/proxy-read-timeout: "120"'
+  expect_contains "the example budgets the API pods" "$(document "$production" PodDisruptionBudget "$API")" "maxUnavailable: 1"
+  expect_contains "the example budgets the extract workers" "$(document "$production" PodDisruptionBudget "$EXTRACT")" "maxUnavailable: 1"
   expect_values "the example keeps MCP off" "$(document "$production" Deployment "$API")" MCP_ENABLED "false"
   expect_values "the example keeps the UI off" "$(document "$production" Deployment "$API")" UI_ENABLED "false"
   # The example takes the measured requests and limits of values.yaml, component by component.
