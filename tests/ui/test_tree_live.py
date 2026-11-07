@@ -394,13 +394,13 @@ def test_a_live_refresh_judges_only_the_urls_not_judged_before(
 
 def test_the_tree_is_judged_on_a_pool_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     threads: list[str] = []
-    real = tree_module.mark_blocked
+    real = tree_module.judge_leaves
 
     def recording(*args: Any) -> Any:
         threads.append(threading.current_thread().name)
         return real(*args)
 
-    monkeypatch.setattr(job_views, "mark_blocked", recording)
+    monkeypatch.setattr(job_views, "judge_leaves", recording)
     with running(rules_fetcher()) as client:
         items = rules_site()
         fake_reads(monkeypatch, len(items), fresh(items))
@@ -496,3 +496,77 @@ def test_the_memo_keeps_at_most_its_judgements_and_drops_the_oldest(
     assert memo.judged(("job-1", frozenset())) == {f"u1-{i}": None for i in range(4)}
     assert len(memo.judged(("job-2", frozenset()))) == 4
     assert memo.judged(("job-0", frozenset())) == {}
+
+
+def _unchecked_without_marks(response: Any) -> None:
+    root = tree(response.text)
+    assert root.xpath("//input[@data-blocked]") == []
+    assert root.xpath("//span[@class='blocked-badge']") == []
+    assert texts(root, "//p[@class='tree-unchecked']") == [
+        "The rules of https://example.org could not be read or checked in time; "
+        "their URLs carry no mark."
+    ]
+
+
+def test_a_judge_that_waits_for_the_thread_has_its_time_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one slot is busy for 0.3 s and the judge has 0.2 s: its deadline is taken before it
+    waits, so it starts too late and judges nothing."""
+    monkeypatch.setattr(job_views, "TREE_JUDGE_SECONDS", 0.2)
+    with running(rules_fetcher()) as client:
+        app = cast(FastAPI, client.app)
+        pipeline = app.state.pipeline
+        real_rules = pipeline.origin_rules
+        holders: list[Any] = []
+
+        async def holding(url: str, **kwargs: Any) -> Any:
+            holders.append(asyncio.ensure_future(app.state.ui_tree_pool.run(time.sleep, 0.3)))
+            await asyncio.sleep(0)  # the holder takes the one slot
+            return await real_rules(url, **kwargs)
+
+        monkeypatch.setattr(pipeline, "origin_rules", holding)
+        items = rules_site()
+        fake_reads(monkeypatch, len(items), fresh(items))
+        response = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+
+    assert response.status_code == 200
+    _unchecked_without_marks(response)
+
+
+def test_a_judgement_that_ends_after_the_view_gave_up_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge thread that overruns (here: it starts 0.3 s late and ignores its deadline) still
+    runs after the view answered with the origins unchecked; it only reads the tree, so the
+    rendered tree does not change afterwards."""
+    monkeypatch.setattr(job_views, "TREE_JUDGE_SECONDS", 0.2)
+    monkeypatch.setattr(job_views, "TREE_JUDGE_GRACE_SECONDS", 0.0)
+    trees: list[Any] = []
+    results: list[Any] = []
+    finished = threading.Event()
+    real_judge = tree_module.judge_leaves
+
+    def overrunning(tree_: Any, rules: Any, deadline: float, judged: Any) -> Any:
+        trees.append(tree_)
+        try:
+            time.sleep(0.3)
+            results.append(real_judge(tree_, rules, None, judged))
+            return results[-1]
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(job_views, "judge_leaves", overrunning)
+    with running(rules_fetcher()) as client:
+        items = rules_site()
+        fake_reads(monkeypatch, len(items), fresh(items))
+        response = client.get("/ui/run/site-tree", params={"id": JOB}, headers=HEADERS)
+        assert response.status_code == 200
+        [rendered] = trees
+        snapshot = [(node.url, node.blocked) for node in tree_module._leaves(rendered)]
+        assert finished.wait(5)  # the stray thread is done
+
+    _unchecked_without_marks(response)
+    [late] = results
+    assert "robots" in late.reasons.values()  # it did judge, after the answer
+    assert [(node.url, node.blocked) for node in tree_module._leaves(rendered)] == snapshot

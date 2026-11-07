@@ -68,6 +68,8 @@ from text_extraction.ui.site_tree import (
     NON_CONTENT_TYPES,
     SiteTree,
     TreeBuilder,
+    apply_judgement,
+    judge_leaves,
     leaf_origins,
     mark_blocked,
 )
@@ -807,11 +809,6 @@ async def _origin_rules(
         return None
 
 
-def _judge(tree: SiteTree, rules: Mapping[str, OriginRules | None], judged: _Judged) -> SiteTree:
-    """`mark_blocked` within ``TREE_JUDGE_SECONDS`` from when it starts (on a pool thread)."""
-    return mark_blocked(tree, rules, time.monotonic() + TREE_JUDGE_SECONDS, judged)
-
-
 async def _tree_rules(
     pipeline: Pipeline, pool: ConversionPool, tree: SiteTree, reuse_for: str | None = None
 ) -> SiteTree:
@@ -824,8 +821,10 @@ async def _tree_rules(
     not cached counts as not read (``SiteTree.unchecked``), one past the cap as not tried
     (``SiteTree.unchecked_more``). The leaves are judged on ``pool`` (the UI's own one thread,
     never the conversion pool, so a tree does not queue behind conversions) within
-    ``TREE_JUDGE_SECONDS``; when the judgement has not ended ``TREE_JUDGE_GRACE_SECONDS`` after
-    that (the thread is busy with another tree), every origin with rules is unchecked. Without
+    ``TREE_JUDGE_SECONDS`` from the call (waiting for the thread counts); when the judgement has
+    not ended ``TREE_JUDGE_GRACE_SECONDS`` after that (the thread is busy with another tree),
+    every origin with rules is unchecked and a late judgement is dropped: the thread only reads
+    the tree (`judge_leaves`), its result is applied after the await (`apply_judgement`). Without
     any rules nothing waits for the pool. With ``reuse_for`` (a job id: a live refresh) the
     rules read and the URLs judged at the refreshes before for the same origins are reused for
     ``TREE_RULES_REUSE_SECONDS`` (an origin whose rules were not read is read again, a URL not
@@ -860,15 +859,20 @@ async def _tree_rules(
         await asyncio.gather(*pending, return_exceptions=True)
     if all(known is None for known in rules.values()):
         return mark_blocked(tree, rules)  # nothing to judge
+    # The deadline runs from here, so time spent waiting for the thread counts; the thread only
+    # reads the tree, and its judgement is applied here, after the await, or never.
+    deadline = time.monotonic() + TREE_JUDGE_SECONDS
     try:
-        marked = await asyncio.wait_for(
-            pool.run(_judge, tree, rules, judged), TREE_JUDGE_SECONDS + TREE_JUDGE_GRACE_SECONDS
+        judgement = await asyncio.wait_for(
+            pool.run(judge_leaves, tree, rules, deadline, judged),
+            TREE_JUDGE_SECONDS + TREE_JUDGE_GRACE_SECONDS,
         )
     except TimeoutError:
-        # Not judged in time (the thread was busy): no mark is computed here, every origin with
-        # rules is unchecked, and nothing is remembered.
+        # Not judged in time (the thread was busy): a late judgement is dropped, every origin
+        # with rules is unchecked, and nothing is remembered.
         _log.warning("tree_judge_timeout", origins=len(rules))
         return mark_blocked(tree, rules, deadline=0)
+    marked = apply_judgement(tree, rules, judgement)
     if key:
         # What was read is kept with the judgements made under it; an origin that failed or ran
         # late is tried again at the next refresh, the others are not.

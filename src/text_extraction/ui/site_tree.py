@@ -34,7 +34,8 @@ host and path, at most ``TREE_MAX_SOCIAL``; share and intent endpoints (``facebo
 
 A leaf can be marked as blocked (``TreeNode.blocked``, a ``BlockReason``): a crawled page by
 its own compliance report (`TreeBuilder.add`), then every other leaf by the view's judgement of
-its URL against its origin's rules under ``enforce`` (`mark_blocked`, which does no I/O: the
+its URL against its origin's rules under ``enforce`` (`mark_blocked`: `judge_leaves`, which
+only reads the tree, so it may run on a thread, then `apply_judgement`; no I/O: the
 caller loads the rules per origin, `leaf_origins`, and loads them over the network only for
 the origins the job itself contacted, ``SiteTree.contacted``; a caller may pass the judgements
 of an earlier view to reuse them). Origins tried whose rules could not be read or judged in
@@ -74,12 +75,15 @@ __all__ = [
     "MAX_SECTION_DEPTH",
     "NON_CONTENT_TYPES",
     "TREE_MAX_SOCIAL",
+    "Judgement",
     "NodeKind",
     "SiteTree",
     "SocialLink",
     "TreeBuilder",
     "TreeNode",
+    "apply_judgement",
     "build_tree",
+    "judge_leaves",
     "leaf_origins",
     "mark_blocked",
 ]
@@ -526,40 +530,67 @@ def leaf_origins(tree: SiteTree) -> dict[str, str]:
     return {origin: first[origin] for origin in sorted(first, key=lambda o: (-counts[o], o))}
 
 
-def mark_blocked(
+@dataclass(frozen=True)
+class Judgement:
+    """What `judge_leaves` found: ``reasons`` the judgement of each leaf URL whose origin has
+    rules and that was judged in time (none: no rule blocks it), ``cut`` the origins with a
+    leaf not judged by the deadline, ``origins`` the tree's origins as `leaf_origins` orders
+    them."""
+
+    reasons: Mapping[str, BlockReason | None]
+    cut: frozenset[str]
+    origins: tuple[str, ...]
+
+
+def judge_leaves(
     tree: SiteTree,
     rules: Mapping[str, OriginRules | None],
     deadline: float | None = None,
     judged: MutableMapping[str, BlockReason | None] | None = None,
-) -> SiteTree:
-    """``tree`` with every leaf marked that its origin's rules block under ``enforce``. ``rules``
-    maps an origin (as `leaf_origins` gives it) to its rules, ``None`` for an origin that was
-    tried and could not be read (``SiteTree.unchecked``); an origin absent from it was not tried
-    (``SiteTree.unchecked_more`` counts them). Where the origin's rules are known, the current
-    judgement decides; the crawl's own reason stays only for ``tdm`` (a page's ``noai`` is known
-    only after its fetch) and for unchecked origins. ``judged`` maps a URL to its judgement
-    under these same rules (an earlier view's): a URL in it is not judged again, and every new
-    judgement is added to it. ``deadline`` (a ``time.monotonic`` value) bounds the work: origins
-    with a leaf not judged by then are ``unchecked``. Pure but for ``judged``: the nodes are
-    updated in place."""
-    blocked = 0
-    cut: set[str] = set()
+) -> Judgement:
+    """Judge the leaves of ``tree`` against their origin's rules under ``enforce``, without
+    changing the tree (it may run on a thread while the event loop renders the tree):
+    `apply_judgement` applies the result. ``rules`` maps an origin (as `leaf_origins` gives it)
+    to its rules, ``None`` for an origin that was tried and could not be read. ``judged`` maps a
+    URL to its judgement under these same rules (an earlier view's): a URL in it is not judged
+    again, and every new judgement is added to it. ``deadline`` (a ``time.monotonic`` value)
+    bounds the work: origins with a leaf not judged by then are ``cut``."""
     memo: MutableMapping[str, BlockReason | None] = {} if judged is None else judged
+    reasons: dict[str, BlockReason | None] = {}
+    cut: set[str] = set()
     for node in _leaves(tree):
-        origin = origin_of(node.url) if node.url is not None else None
+        url = node.url
+        origin = origin_of(url) if url is not None else None
         known = rules.get(origin) if origin is not None else None
-        if known is not None and node.url is not None and origin is not None:
-            if node.url in memo:
-                reason = memo[node.url]
-            elif deadline is not None and time.monotonic() >= deadline:
-                cut.add(origin)
-                blocked += node.blocked is not None
-                continue
-            else:
-                reason = memo[node.url] = block_reason(known.judge(node.url, "enforce"))
+        if known is None or url is None or origin is None:
+            continue
+        if url in memo:
+            reasons[url] = memo[url]
+        elif deadline is not None and time.monotonic() >= deadline:
+            cut.add(origin)
+        else:
+            reasons[url] = memo[url] = block_reason(known.judge(url, "enforce"))
+    return Judgement(reasons, frozenset(cut), tuple(leaf_origins(tree)))
+
+
+def apply_judgement(
+    tree: SiteTree, rules: Mapping[str, OriginRules | None], judgement: Judgement
+) -> SiteTree:
+    """``tree`` with the marks of ``judgement`` (`judge_leaves` of this tree and ``rules``):
+    where an origin's rules are known, the current judgement decides; the crawl's own reason
+    stays only for ``tdm`` (a page's ``noai`` is known only after its fetch) and for leaves not
+    judged (unchecked origins). An origin of ``rules`` that is ``None`` or cut is
+    ``SiteTree.unchecked``; one absent from ``rules`` was not tried
+    (``SiteTree.unchecked_more`` counts them). The nodes are updated in place."""
+    blocked = 0
+    reasons = judgement.reasons
+    for node in _leaves(tree):
+        if node.url is not None and node.url in reasons:
+            reason = reasons[node.url]
             node.blocked = node.blocked if reason is None and node.blocked == "tdm" else reason
         blocked += node.blocked is not None
-    origins = leaf_origins(tree)
+    origins = judgement.origins
+    cut = judgement.cut
     unchecked = tuple(o for o in origins if o in rules and (rules[o] is None or o in cut))
     return replace(
         tree,
@@ -567,3 +598,14 @@ def mark_blocked(
         unchecked=unchecked,
         unchecked_more=sum(1 for o in origins if o not in rules),
     )
+
+
+def mark_blocked(
+    tree: SiteTree,
+    rules: Mapping[str, OriginRules | None],
+    deadline: float | None = None,
+    judged: MutableMapping[str, BlockReason | None] | None = None,
+) -> SiteTree:
+    """``tree`` with every leaf marked that its origin's rules block under ``enforce``:
+    `judge_leaves`, then `apply_judgement` (see both)."""
+    return apply_judgement(tree, rules, judge_leaves(tree, rules, deadline, judged))

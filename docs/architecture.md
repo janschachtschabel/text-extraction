@@ -795,7 +795,7 @@ while `BROWSER_ENABLED` is false, are unchanged.
     sweep removes every released profile again for 30 s, the pause doubling from 1 s (warning
     `browser_profile_left` for one still there then); the worker's shutdown removes any left.
     Patchright is pinned to the newest release at least 14 days old
-    (1.64.1; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
+    (1.64.2; supply-chain caution, R16). Google Chrome is not pinned: each image build installs
     the stable of that day.
   - What changes: robots and TDM are not checked (that is `ignore`); nothing is blocked; service
     workers and non-GET navigations are allowed. The proxy, the navigation checks, the byte cap
@@ -2434,7 +2434,7 @@ pages (the start page and three levels below it) with the typed-links elements, 
 a PDF, an iframe and an external link; every sitemap entry arrives, every page to depth 2 is one
 item, the disallowed page is never requested, and every followed link points at the right item.
 Site B has no robots.txt; its `/sitemap.xml` is found by the guess and its 300 entries arrive in
-parts (`JOB_ITEM_MAX_BYTES` at its minimum). The live site run (`tests/live/run_site.py`, five
+parts (`JOB_ITEM_MAX_BYTES` at its minimum). The live site run (`tests/live/run_site.py`, six
 WLO-type sites, depth 1, 25 pages each, `compliance: enforce`) is reported by the live workflow,
 never a gate (R-P9-3): the build sandbox reaches none of the sites.
 
@@ -2858,7 +2858,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   it is `crawl`), so a new option needs an upgrade order only once a request sets it.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
-  marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own
+  marked guessed with its reason; a URL that `guess_type` cannot type shows "Type open" with its
+  reason and is counted as such. A crawled page's own
   verdict, even none, wins over a guess for the same URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
   leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
   (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and
@@ -3248,15 +3249,17 @@ API's own texts (envelope `error.message`, OpenAPI, MCP descriptions and hints) 
   tdmrep.json is parsed in a worker thread, also for a real fetch. The leaves are judged on a thread
   of the UI's own (`app.state.ui_tree_pool`, one thread, never the conversion pool, so a tree does
   not queue behind conversions) within 1 s (`TREE_JUDGE_SECONDS`; the origins not judged by then are
-  unchecked); a view that does not get that thread within a further 0.5 s shows every origin with
-  rules as unchecked, and a tree without rules to judge does not wait for it at all; and a live
-  refresh reuses, with the rules, the judgements of the refreshes before (per job and origin set for
-  30 s, at most 100,000 judgements in the pod's memo), so it judges only the URLs that are new. A
-  URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable) or "TDM", with the
-  reason as tooltip; the links the crawl skipped because of the rules are "linked only" leaves.
-  Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons skip it; under
-  `report` and `ignore` it can be ticked. The batch below the tree starts with the step the crawl
-  ran with.
+  unchecked); the 1 s run from the view's call, so waiting for the thread counts, and a view whose
+  judgement has not ended 0.5 s after that shows every origin with rules as unchecked (the thread
+  only reads the tree and the view applies its judgement after it ended, so a late one is dropped
+  and never changes a tree already shown), and a tree without rules to judge does not wait for it at
+  all; and a live refresh reuses, with the rules, the judgements of the refreshes before (per job
+  and origin set for 30 s, at most 100,000 judgements in the pod's memo), so it judges only the URLs
+  that are new. A URL gets the badge "robots.txt" (disallowed, or robots.txt not retrievable) or
+  "TDM", with the reason as tooltip; the links the crawl skipped because of the rules are "linked
+  only" leaves. Under `enforce` the checkbox of a blocked URL is disabled and the selection buttons
+  skip it; under `report` and `ignore` it can be ticked. The batch below the tree starts with the
+  step the crawl ran with.
 - **The site tree.** A link before the tree ("Skip to the actions after the tree") leads to
   `#tree-<job id>-actions` (`tabindex="-1"`), which holds the batch options and the form's one
   "Extract selected", so a keyboard user does not tab through every checkbox.

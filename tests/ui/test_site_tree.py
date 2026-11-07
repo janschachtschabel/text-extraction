@@ -27,7 +27,9 @@ from text_extraction.ui.site_tree import (
     SiteTree,
     TreeBuilder,
     TreeNode,
+    apply_judgement,
     build_tree,
+    judge_leaves,
     leaf_origins,
     mark_blocked,
 )
@@ -869,3 +871,24 @@ def test_mark_blocked_reuses_judgements_and_records_new_ones(
         f"{ORIGIN}/sammlung/_page2": None,
         f"{ORIGIN}/sammlung/_page3": "robots",
     }
+
+
+def test_judge_leaves_is_pure_and_apply_judgement_marks() -> None:
+    """The judgement (on a pool thread) only reads the tree; the marks are applied apart."""
+    tree = _blocked_fixture()
+    rules = _rules(f"{ORIGIN}/", "User-agent: *\nDisallow: /sammlung/_page\n")
+    before = [(node.url, node.blocked) for node in _leaves(tree)]
+
+    judgement = judge_leaves(tree, {ORIGIN: rules})
+
+    assert [(node.url, node.blocked) for node in _leaves(tree)] == before
+    assert judgement.reasons == {
+        f"{ORIGIN}/sammlung/": None,
+        f"{ORIGIN}/sammlung/_page2": "robots",
+        f"{ORIGIN}/sammlung/_page3": "robots",
+    }
+    assert judgement.cut == frozenset()
+    marked = apply_judgement(tree, {ORIGIN: rules}, judgement)
+    assert (marked.blocked, marked.unchecked) == (2, ())
+    late = judge_leaves(tree, {ORIGIN: rules}, deadline=time.monotonic() - 1)
+    assert (late.reasons, late.cut) == ({}, frozenset({ORIGIN}))
