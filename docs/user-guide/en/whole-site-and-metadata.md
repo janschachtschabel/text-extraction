@@ -10,8 +10,8 @@ section of a site, see [Part of a site](part-of-a-site.md).
 ## Map the site
 
 `POST /v1/site-structure` maps a site: its sitemaps (robots.txt's `Sitemap:` lines, else
-`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`; indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the
-start page, `depth` clicks deep (default 2, at most `SITE_MAX_DEPTH`), for at most `max_pages`
+`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`, tried in this order until one exists;
+indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the start page, `depth` clicks deep (default 2, at most `SITE_MAX_DEPTH`), for at most `max_pages`
 pages (default 100, at most `SITE_MAX_PAGES`). It answers 202 with a job of kind `site`; the
 extract workers crawl, and every page, robots.txt and sitemap file they find becomes an item of
 the job, so its `total` grows while it runs:
@@ -60,9 +60,10 @@ checks of `compliance`; the items keep title, status, metadata and quality but n
 `scope: "path"` keeps it under the start URL's directory, `sitemaps: false` skips the sitemaps,
 and `depth: 0` reads the start page and the sitemaps only. With `discovery: "sitemap_first"` the
 crawl reads only the start page when robots.txt lists a sitemap or one of the three addresses
-answers, and takes the other pages from the sitemap; without a sitemap it follows links as usual. The web interface offers this as "Fast: sitemap first"
-(the preset; it needs "robots.txt and sitemaps" ticked) next to "Thorough: follow links"; the API
-default is `discovery: "crawl"`. A crawl counts towards
+answers, and takes the other pages from the sitemap; without a sitemap it follows links as usual.
+`discovery: "sitemap_first"` with `sitemaps: false` is 422. The web interface offers this as "Fast:
+sitemap first" (the preset; it needs "robots.txt and sitemaps" ticked) next to "Thorough: follow
+links"; the API default is `discovery: "crawl"`. A crawl counts towards
 `BATCH_MAX_OPEN_PER_CLIENT` with your batches.
 
 ### Read the site structure
@@ -105,7 +106,9 @@ are checked in this order, and the first that applies wins:
    a language code is the start page unless the page declares another language (`<html lang>`):
    `/it/` on a German page is left to the other rules.
 3. schema.org: the page's JSON-LD or microdata says `ContactPage` (`contact`), `AboutPage`
-   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`).
+   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`); failing
+   those, an `Event` type (`Event`, `EducationEvent` and other names ending in `Event`) says
+   `event`, and `LearningResource`, `Quiz` or `Course` says `learning_material`.
 4. The URL: a whole path segment such as `impressum` or `imprint` (`imprint`), `datenschutz` or
    `privacy` (`privacy`), `agb`, `terms`, `cookies` or `barrierefreiheit` (`legal`), `login`,
    `registrieren` or `konto` (`auth`), `suche` or `search`, or a search query such as `?q=...`
@@ -186,10 +189,11 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 ## In the playground
 
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
-   the host, and press "Read the site structure".
+   the host, choose "How to read the site" ("Fast: sitemap first", the preset, or "Thorough: follow
+   links"), and press "Read the site structure".
 2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
-   "Show tree now" shows a snapshot. Each URL shows its page type, and "Types:" above the tree
-   counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
+   "Show tree now" shows a snapshot; the tree also appears by itself once the job has a result and
+   refreshes while it runs. Each URL shows its page type, and "Types:" above the tree counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
    privacy, legal, contact, login, search and error pages and pages that failed; or check the
    sections you want. URLs that the site's rules block are marked "robots.txt" or "TDM" and
    are skipped by the buttons while "Site rules" is "Respect the site's rules"; the batch below
