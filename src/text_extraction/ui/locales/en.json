@@ -60,7 +60,7 @@
   "form.describe_images": "Describe images",
   "form.features": "Optional features",
   "form.ocr": "OCR (text recognition)",
-  "form.ocr.auto": "Automatic: only where a scan or image needs it",
+  "form.ocr.auto": "Automatic (default)",
   "form.ocr.never": "Never",
   "form.ocr.always": "Always",
   "form.pii": "Personal data",

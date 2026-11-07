@@ -60,7 +60,7 @@
   "form.describe_images": "Bilder beschreiben",
   "form.features": "Optionale Funktionen",
   "form.ocr": "OCR (Texterkennung)",
-  "form.ocr.auto": "Automatisch: nur wo ein Scan oder Bild es braucht",
+  "form.ocr.auto": "Automatisch (Standard)",
   "form.ocr.never": "Nie",
   "form.ocr.always": "Immer",
   "form.pii": "Personenbezogene Daten",
