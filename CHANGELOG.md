@@ -52,9 +52,9 @@ API changes: the site option `discovery`, the field `SiteNode.guess`, the field
 ### Changed
 
 - `OUTBOUND_MIN_DELAY_MS` defaults to 500 (was 1000): the least gap between the starts of two
-  requests to one host is halved, so a crawl or batch on one host runs up to twice as fast.
-  robots.txt `Crawl-delay` still wins where it is longer. Operators who want the old pace set
-  `OUTBOUND_MIN_DELAY_MS=1000`.
+  requests to one host is halved; in the live harness a 25-page crawl of wirlernenonline.de
+  took 26 s instead of 46 s. robots.txt `Crawl-delay` still wins where it is longer. Operators
+  who want the old pace set `OUTBOUND_MIN_DELAY_MS=1000`.
 
 ### Upgrade
 

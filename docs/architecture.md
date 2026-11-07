@@ -2750,8 +2750,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   stored before package 14 load unchanged.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
-  marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own verdict, even none, wins over a guess for the same
-  URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
+  marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own
+  verdict, even none, wins over a guess for the same URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
   leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
   (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and
   every crawled page whose item failed (`data-failed` on its checkbox; ruling P14-R9: a hard 404
@@ -2762,6 +2762,16 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   A hard 404 is not listed as `error`. A title such as "Rezept – Login" can make `auth`
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
   home unless the page's `lang` names another language (A26-R3).
+- **Crawl speed (package 18).** Measured by the live harness (`tests/live/run_site.py`, depth 1,
+  `max_pages` 25, `compliance: enforce`, on GitHub runners): at the old 1 s spacing a crawl took
+  26 to 46 s for its 25 pages; at 500 ms it takes 17 to 32 s (wirlernenonline.de 46 -> 26 s,
+  klexikon.zum.de 26 -> 17 s, de.serlo.org 34 -> 23 s), so a crawl is no longer bound by the
+  spacing alone: per-host concurrency (2), fetch latency and the conversion of each page (median
+  `convert_ms` 97 to 484 ms) share the rest. **Ruling P18-R2:** no light conversion for crawl
+  pages in package 18. Conversion overlaps the next fetches, a light mode would change
+  `word_count` and the `soft_404` verdict of crawled pages, and the speed an editor feels comes
+  from `discovery: "sitemap_first"`, which reads only the start page when a sitemap exists. A
+  light mode stays an option if a thorough crawl is still too slow.
 
 ## MCP and UI
 
