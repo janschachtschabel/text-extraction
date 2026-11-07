@@ -186,8 +186,8 @@ def test_scope_and_link_and_child() -> None:
     assert SiteScope.model_validate_json(scope.model_dump_json()) == scope
     assert link.target is None
     assert child.lastmod is None
-    with pytest.raises(ValidationError):
-        SiteLink.model_validate({**link.model_dump(), "crawl": "maybe"})
+    # AU3-R1: a crawl value of a later release reads as ``listed``; other fields stay strict.
+    assert SiteLink.model_validate({**link.model_dump(), "crawl": "maybe"}).crawl == "listed"
     with pytest.raises(ValidationError):
         SiteLink.model_validate({**link.model_dump(), "region": "sidebar"})
 

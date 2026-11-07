@@ -1192,12 +1192,42 @@ def test_job_options_omit_unset_site() -> None:
         "depth": 3,
         "max_pages": 100,
         "sitemaps": True,
-        "discovery": "crawl",
         "scope": "path",
         "metadata": True,
         "cache": True,
     }
     assert JobOptions.model_validate_json(stored) == options
+
+
+def test_site_job_options_omit_default_discovery() -> None:
+    """AU3-R1: 0.1.5 pods parse ``site`` strictly and know no ``discovery``, so a site job stores
+    it only when it is not the default ``crawl``; the stored form reads back as the same options.
+    """
+    options = JobOptions(site=SiteOptions(), compliance="enforce")
+    stored = _options_json(options)
+
+    assert "discovery" not in json.loads(stored)["site"]
+    assert JobOptions.model_validate_json(stored) == options
+
+    sitemap_first = JobOptions(site=SiteOptions(discovery="sitemap_first"), compliance="enforce")
+    stored = _options_json(sitemap_first)
+
+    assert json.loads(stored)["site"]["discovery"] == "sitemap_first"
+    assert JobOptions.model_validate_json(stored) == sitemap_first
+
+
+@scenario
+async def test_default_site_job_stores_no_discovery() -> None:
+    valkey = FakeAsyncRedis()
+    store = make_store(valkey)
+    options = JobOptions(mode="fast", compliance="enforce", site=SiteOptions())
+
+    job_id = await store.create("site", OWNER, options, ["https://a.example/"])
+
+    assert "discovery" not in (await stored_options(valkey, job_id))["site"]
+    record = await store.get(job_id)
+    assert record is not None
+    assert record.options == options
 
 
 @scenario

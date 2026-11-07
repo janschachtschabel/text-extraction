@@ -4,7 +4,7 @@ No parser and no Valkey here: the request models, the job models and ``ExtractRe
 it."""
 
 import math
-from typing import Literal, Self, get_args
+from typing import Annotated, Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
@@ -19,7 +19,7 @@ from pydantic import (
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert.links import LINK_CATEGORY_DESCRIPTION
 from text_extraction.netguard import MAX_URL_LENGTH
-from text_extraction.page_types import LinkCategory, PageType
+from text_extraction.page_types import TolerantLinkCategory, TolerantPageType, unknown_as
 
 __all__ = [
     "LASTMOD_MAX_CHARS",
@@ -41,6 +41,7 @@ __all__ = [
     "SitemapEntry",
     "SitemapFormat",
     "SitemapInfo",
+    "TolerantCrawl",
 ]
 
 # The widest bounds of a request; the route checks ``SITE_MAX_DEPTH`` and ``SITE_MAX_PAGES``,
@@ -75,6 +76,9 @@ Crawl = Literal[
     "memory_guard",
     "sitemap_first",
 ]
+# The result-side reader of ``Crawl`` (ruling AU3-R1): a value of a later release is ``listed``
+# (not followed). The crawl itself works with ``Crawl``.
+TolerantCrawl = Annotated[Crawl, unknown_as(Crawl, "listed")]
 SitemapFormat = Literal["urlset", "index", "text", "rss", "atom", "absent"]
 ChangeFreq = Literal["always", "hourly", "daily", "weekly", "monthly", "yearly", "never"]
 _CHANGEFREQS: frozenset[str] = frozenset(get_args(ChangeFreq))
@@ -196,7 +200,7 @@ class SiteLink(BaseModel):
         description="Where on the page: `nav`, `header`, `footer`, `aside`, `main`, "
         "`breadcrumb` or `pagination`; null elsewhere.",
     )
-    crawl: Crawl = Field(
+    crawl: TolerantCrawl = Field(
         description="What the crawl did with it: `listed`, `file`, `out_of_scope`, `nofollow`, "
         "`blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files` (a sitemap index's "
         "child over `SITE_MAX_SITEMAP_FILES`), `memory_guard` or `sitemap_first` (not followed: "
@@ -206,7 +210,9 @@ class SiteLink(BaseModel):
         default=None, description="The index of the item of the linked page, when it has one."
     )
     # None only in items stored before link categories.
-    category: LinkCategory | None = Field(default=None, description=LINK_CATEGORY_DESCRIPTION)
+    category: TolerantLinkCategory | None = Field(
+        default=None, description=LINK_CATEGORY_DESCRIPTION
+    )
 
 
 class SitemapEntry(BaseModel):
@@ -218,7 +224,7 @@ class SitemapEntry(BaseModel):
     lastmod: str | None = None  # as given
     changefreq: ChangeFreq | None = None
     priority: float | None = None  # 0 to 1
-    type_guess: PageType | None = Field(
+    type_guess: TolerantPageType | None = Field(
         default=None,
         description="The page type guessed from the URL and the sitemap's `type_hint` "
         "(`page_types.guess_type`), without fetching the page; null for a URL that says nothing "
@@ -264,7 +270,7 @@ class SitemapChild(BaseModel):
 
     url: str
     lastmod: str | None = None  # as given, at most 64 characters (as ``SitemapEntry.lastmod``)
-    crawl: Crawl
+    crawl: TolerantCrawl
     target: int | None = None  # the item of the child sitemap, when it has one
 
     @field_validator("lastmod", mode="before")
@@ -285,7 +291,7 @@ class SitemapInfo(BaseModel):
         description="The address (`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`) "
         "was tried because robots.txt listed no sitemap.",
     )
-    type_hint: PageType | None = Field(
+    type_hint: TolerantPageType | None = Field(
         default=None,
         description="The page type the sitemap's file name suggests for its entries "
         "(WordPress, Yoast, Rank Math), else null.",

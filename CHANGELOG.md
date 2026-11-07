@@ -42,6 +42,11 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Fixed
 
+- Rolling upgrades from 0.1.5: a site job with the default `discovery: crawl` no longer stores
+  `discovery`, so pods of 0.1.5 read it; only `discovery: sitemap_first` needs every pod on the new
+  release. Results read a page type, a link category or a `crawl` value of a later release as
+  `other`, `content` and `listed` instead of failing, so later new values need no upgrade order;
+  requests still refuse unknown values (422) and the OpenAPI spec is unchanged.
 - The playground names switched-off transcription ("Transcription is switched off in this
   service") instead of "This kind of content cannot be converted" when an audio or video upload
   or `transcribe: true` meets a service without ASR.
@@ -100,9 +105,11 @@ API changes: the site option `discovery`, the field `SiteNode.guess`, the field
 
 ### Upgrade
 
-- A stored site job carries `discovery`. During a rolling update an old pod may reject a site job
-  that a new pod created (the job fails or is retried): finish the rollout before creating site
-  jobs, or accept that.
+- Update the API pods first, then the workers. Pods of 0.1.5 and older cannot read results with
+  the page types `event` or `learning_material` or a link with `crawl: sitemap_first` (extract,
+  batch and site jobs), and they refuse every site job of 0.1.6, which stores `discovery` also at
+  its default `crawl` (0.1.7 stores it only for `sitemap_first`). Create site jobs only once every
+  pod runs 0.1.6 (see `docs/configuration.md`, "Upgrading to 0.1.6 or 0.1.7").
 
 ## [0.1.5] - 2026-11-06
 

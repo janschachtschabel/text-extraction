@@ -2769,6 +2769,16 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   An imprint or privacy URL still wins over the sitemap and the link text (rule 1).
 - **Older results.** `page_type` and `category` default to null, so results cached and items
   stored before package 14 load unchanged.
+- **Newer values (ruling AU3-R1, third audit).** Results are read back by pods of other releases
+  during a rolling upgrade, and package 18's new page types and `crawl: sitemap_first` broke 0.1.5
+  readers. The result models therefore read `PageType`, `LinkCategory` and `Crawl` through
+  `TolerantPageType`, `TolerantLinkCategory` and `TolerantCrawl` (`page_types.unknown_as`, a pure
+  before-validator): a string outside the Literal becomes the catch-all, `other`, `content` (what
+  `link_category` answers for a link no rule names) and `listed` (not followed); a value that is
+  no string still fails. The OpenAPI enums stay the Literals, and request models keep the plain
+  Literals, so an unknown value in a request is still 422. Job options still forbid unknown
+  fields: `_options_json` leaves an option out while it is at its default (`site.discovery` while
+  it is `crawl`), so a new option needs an upgrade order only once a request sets it.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
   linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
   marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own

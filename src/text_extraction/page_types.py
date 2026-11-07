@@ -43,11 +43,11 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, get_args
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from lxml.html import HtmlElement
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from text_extraction.structured.rules import parse_page
 
@@ -85,6 +85,31 @@ LinkCategory = Literal[
     "download",
     "nav",
 ]
+
+
+def unknown_as(literal: Any, catch_all: str) -> BeforeValidator:
+    """A validator that reads a string outside ``literal`` as ``catch_all`` (ruling AU3-R1).
+
+    For the result models only: results are read back from Valkey and the cache by pods of other
+    releases, so a reader maps a value that a later release added to the type's catch-all
+    instead of failing. Pure (no log). Anything else is left to the Literal, and the JSON schema
+    stays the Literal's enum. Request models keep the plain Literal, so an unknown value there is
+    still 422."""
+    known = frozenset(get_args(literal))
+    if catch_all not in known:
+        raise ValueError(f"{catch_all!r} is not a value of {literal!r}")
+
+    def read(value: object) -> object:
+        return catch_all if isinstance(value, str) and value not in known else value
+
+    return BeforeValidator(read)
+
+
+# The result-side readers of ``PageType`` and ``LinkCategory``: an unknown page type is
+# ``other``, an unknown link category ``content`` (what ``link_category`` answers for a link no
+# rule names).
+TolerantPageType = Annotated[PageType, unknown_as(PageType, "other")]
+TolerantLinkCategory = Annotated[LinkCategory, unknown_as(LinkCategory, "content")]
 PageSignal = Literal[
     "status",
     "soft_404",
@@ -710,7 +735,7 @@ _NO_LANGUAGE_SUBTAGS: Final = frozenset({"und", "mul", "zxx", "x"})
 class PageTypeInfo(BaseModel):
     """The type of a page and the signals that agree with it."""
 
-    type: PageType = Field(
+    type: TolerantPageType = Field(
         description="What kind of page this is, by rules: `home`, `content` (an article or "
         "another page with enough text), `listing` (an index of other pages: a category, a tag, "
         "an archive, a page of a paged list), `event` (an event or its schema.org subtype), "

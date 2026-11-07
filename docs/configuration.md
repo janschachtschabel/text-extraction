@@ -657,8 +657,20 @@ Deployments at once, so send site jobs only once every pod runs the new release.
 `screenshot_options` (a screenshot with a viewport, format, quality or width) is refused by a
 0.1.2 worker (its job options forbid unknown fields), and a 0.1.2 API pod cannot read such a job.
 Update the browser workers (and the other workers) before the API pods, and send such requests
-only once every pod runs the new release. Results with `page_type` and a link `category` are read
-by old pods, so the new fields in results need no order.
+only once every pod runs the new release. Old pods ignore the new fields `page_type` and a link's
+`category` in results, so these fields need no order; a value they do not know does (package 18,
+below).
+
+**Upgrading to 0.1.6 or 0.1.7 (package 18): API pods first, then workers.** Pods of 0.1.5 and
+older cannot read results with the page types `event` or `learning_material` or with a link that
+says `crawl: sitemap_first`: such a result fails in an old API pod that reads it (the results of a
+job, or a sync request that waits for a browser or Docling worker), for extract and batch jobs as
+well as site jobs. They also refuse site jobs with `discovery: sitemap_first` (their site options
+forbid unknown fields; 0.1.6 stores `discovery` in every site job, from 0.1.7 on only when it is
+`sitemap_first`). Update the API pods before the workers, and send site jobs with
+`discovery: sitemap_first` only once every pod runs the new release. From 0.1.7 on, readers map
+an unknown page type to `other`, an unknown link category to `content` and an unknown `crawl`
+value to `listed`, so new values that a later release adds need no order.
 
 **Capacity of the extract workers.**
 
