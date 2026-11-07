@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-06
+
 Package 17: the playground after the v0.1.4 test (plan
 [docs/superpowers/plans/2026-11-06-package-17-playground-after-v014-test.md](docs/superpowers/plans/2026-11-06-package-17-playground-after-v014-test.md)).
 The only API change is the new warning code `server_errors_removed` and the optional result field
