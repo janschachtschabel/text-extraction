@@ -2472,23 +2472,31 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them guesses in
   turn (`guessed: true`, `GUESSED_SITEMAP_PATHS`, the position stored as `SiteNode.guess`): `<origin>/sitemap.xml`, then
   `/sitemap_index.xml`, then `/wp-sitemap.xml`. The robots item appends only the first; a guess
-  that answers 404 or 410 (`format: absent`, `sitemap_not_found`) appends the next through its own
-  `extend` (so a rerun appends nothing twice), the first that answers is parsed and ends the
-  chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
+  that answers 404 or 410, or 2xx with something that is no sitemap (`looks_like_sitemap` on the
+  first 64 KiB: a CMS that answers every path with its HTML page; `format: absent`,
+  `sitemap_not_found`) appends the next through its own `extend` (so a rerun appends nothing
+  twice), the first that answers with a sitemap is parsed and ends the chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
   sitemap that robots.txt lists never guesses; under the memory guard the next guess is not appended
   (`site_memory_guard` on the absent item). **`discovery: sitemap_first`:** after item 0's fetch,
   `SitemapItems._sitemap_exists` asks `Pipeline.robots_sitemaps` (a listed sitemap: yes), else
   probes `GUESSED_SITEMAP_PATHS` in turn with `Pipeline.fetch_raw` (at most
-  `SITEMAP_PROBE_MAX_BYTES`, 64 KiB; the first 2xx answer is yes, a failure or another status moves
-  on; an unavailable robots.txt counts as no listed sitemap), so every probe has the SSRF guard,
+  `SITEMAP_PROBE_MAX_BYTES`, 64 KiB; a 2xx answer that `looks_like_sitemap` is yes, a 404, 410 or
+  2xx that is no sitemap moves on, a failure or another status is no; an unavailable robots.txt
+  counts as no listed sitemap), so every probe has the SSRF guard,
   compliance and the host's turn. When the site has a sitemap, the links that `judge_links` would
   make candidates say `crawl: sitemap_first` (no target, none appended); the robots item is still
   appended, and with it the sitemap items. Other decisions (`out_of_scope`, `file`, ...) stay.
   A link to a page that is an item already says `seen` with its target, as under `crawl` (the
   candidates stay look-ups, so their keys do not depend on the probe). The probe mirrors the
-  chain: robots.txt unavailable is no, a 404 or 410 tries the next address, a failure or another
-  status is no. A guessed sitemap the probe found is requested twice (the probe, capped at 64 KiB,
-  then the sitemap item); accepted. Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap result carries `sitemap.type_hint`
+  chain: robots.txt unavailable is no; guesses: a 2xx that looks like a sitemap is yes, a 404 or
+  410 or a 2xx that is not a sitemap tries the next address, anything else is no. The sniff
+  (`looks_like_sitemap`, `site/sitemaps.py`, pure): a gzip body, an XML root `urlset`,
+  `sitemapindex`, `rss` or `feed` after an optional BOM, declaration, comments and blanks, or a
+  text file whose first non-empty lines are http(s) URLs. A guessed sitemap the probe found is requested twice (the probe, capped at 64 KiB,
+  then the sitemap item); accepted. The probe runs inside item 0's lease with what is left of the item's budget
+  (`EXTRACT_TIMEOUT_SECONDS * 2` from its start; none left: no probe); a probe that outlasts it is no.
+  The verdict is kept in the job's `site` hash (`probe`, set once), so a rerun of item 0 reuses it and
+  labels its links as the first run did. Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap result carries `sitemap.type_hint`
   (`sitemap_type_hint` of the URL that was listed or guessed: Yoast/Rank Math `post-sitemap`,
   WordPress `wp-sitemap-posts-…`, `-taxonomies-…`, `-users-…`), else null; robots.txt unavailable
   fails the item `target_http_error`, retryable, without a guess.

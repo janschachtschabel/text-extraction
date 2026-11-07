@@ -222,7 +222,9 @@ class SiteRunner(SitemapItems):
         else:
             role = node.role
             if node.role == "page":
-                envelope, outcome = await self._page(job, item, url, node, context, gate_refusals)
+                envelope, outcome = await self._page(
+                    job, item, url, node, context, gate_refusals, started
+                )
             elif node.role == "robots":
                 envelope, outcome = await self._robots(job, item, url, node, gate_refusals)
             elif node.role == "sitemap":
@@ -264,6 +266,7 @@ class SiteRunner(SitemapItems):
         node: SiteNode,
         context: SiteContext,
         gate_refusals: Literal["fail", "raise"],
+        started: float,
     ) -> tuple[Envelope[ExtractResult], _Outcome]:
         options = job.options.site or SiteOptions()
         request = ExtractRequest(
@@ -343,7 +346,7 @@ class SiteRunner(SitemapItems):
             item.index == 0
             and options.discovery == "sitemap_first"
             and any(candidate is not None and candidate.add for _, candidate in judged)
-            and await self._sitemap_exists(job, final_url or url, gate_refusals)
+            and await self._sitemap_verdict(job, final_url or url, gate_refusals, started)
         ):
             # The site has a sitemap: the links that would be followed are only looked up (the
             # keys stay what they are without the probe); one that is an item already says

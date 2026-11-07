@@ -457,6 +457,23 @@ class SiteStore:
             return int(granted)
         return max(self._max_entries - int(used or 0), 0)
 
+    async def probe_verdict(self, job_id: str) -> bool | None:
+        """The stored verdict of the ``sitemap_first`` probe (item 0's), None before one is
+        kept."""
+        stored = await self._valkey.hget(job_key(job_id, "site"), "probe")
+        return None if stored is None else reply_text(stored) == "1"
+
+    async def keep_probe_verdict(self, job_id: str, verdict: bool) -> bool:
+        """Keep the probe's verdict unless one is kept already; the kept one. A rerun of item 0
+        asks it first and reuses it, so its links and candidates match the first run's."""
+        key = job_key(job_id, "site")
+        async with self._valkey.pipeline(transaction=True) as pipe:
+            pipe.hsetnx(key, "probe", "1" if verdict else "0")
+            pipe.pexpire(key, self._ttl_ms)
+            pipe.hget(key, "probe")
+            *_, stored = await pipe.execute()
+        return reply_text(stored) == "1"
+
     async def stored_children(self, job_id: str, parent: int) -> list[tuple[int, str]]:
         """The items that the stored answers of ``parent`` appended, as ``(index, url)``, its
         batches in order; empty when it has none (it never extended, or the job is gone)."""

@@ -555,6 +555,31 @@ class SitemapItems:
         outcome = _Outcome(links=[], entries=len(entries), appended=len(extended.new), caps=caps)
         return envelope, outcome
 
+    async def _sitemap_verdict(
+        self,
+        job: JobRecord,
+        url: str,
+        gate_refusals: Literal["fail", "raise"],
+        started: float,
+    ) -> bool:
+        """The ``sitemap_first`` verdict of item 0: the one kept by an earlier run, else the
+        probe's, kept for reruns (so a rerun labels its links as the first run did). The probe
+        gets what is left of the item's budget (``started`` + ``_item_budget``, inside the lease)
+        and is skipped with none; a probe that outlasts it is no, so the crawl goes on as
+        ``crawl``."""
+        kept = await self._sites.probe_verdict(job.id)
+        if kept is not None:
+            return kept
+        remaining = self._item_budget - (time.monotonic() - started)
+        verdict = False
+        if remaining > 0:
+            try:
+                async with asyncio.timeout(remaining):
+                    verdict = await self._sitemap_exists(job, url, gate_refusals)
+            except TimeoutError:
+                verdict = False
+        return await self._sites.keep_probe_verdict(job.id, verdict)
+
     async def _sitemap_exists(
         self, job: JobRecord, url: str, gate_refusals: Literal["fail", "raise"]
     ) -> bool:
@@ -563,8 +588,10 @@ class SitemapItems:
         (read to ``SITEMAP_PROBE_MAX_BYTES`` only). Every request goes through the pipeline
         (SSRF guard, compliance, the host's turn). It mirrors what the robots item and the guess
         chain read, so a yes always leads to a sitemap item that is read: an unavailable
-        robots.txt is no (the robots item fails without a guess); a probe answering 404 or 410
-        moves on to the next address, a failure or any other status ends the chain (no)."""
+        robots.txt is no (the robots item fails without a guess); a guess answering 2xx with
+        something that looks like a sitemap (``looks_like_sitemap``) is yes; a 404, a 410 or a
+        2xx that is no sitemap (an HTML page) moves on to the next address; a failure or any
+        other status is no."""
         listed = await self._pipeline.robots_sitemaps(url, gate_refusals=gate_refusals)
         if listed.state == "unavailable":
             return False

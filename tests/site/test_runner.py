@@ -4,6 +4,7 @@ with a fake fetcher serving a small site, the queue read back after each item.""
 
 import asyncio
 import os
+import time
 from collections.abc import Callable, Coroutine, Iterator
 from functools import wraps
 from typing import Any, cast
@@ -1604,5 +1605,70 @@ async def test_sitemap_first_html_at_every_guess_crawls_the_links() -> None:
         assert item.result.status == "success"
         assert data(item).warnings == ["sitemap_not_found"]
         sitemap = site(item).sitemap
-        assert sitemap is not None and sitemap.format == "absent"
+        assert sitemap is not None
+        assert sitemap.format == "absent"
     assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_rerun_reuses_the_probe_verdict() -> None:
+    """A rerun whose probe would now say no keeps the first run's yes: the links are
+    ``sitemap_first`` (not ``memory_guard``) and no false warning appears."""
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+    }
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+    await die_after_extend(crawl, ROOT)
+    del answers[f"{SITE}/sitemap.xml"]  # the second probe would find nothing
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert "site_memory_guard" not in data(items[0]).warnings
+    assert not fetched_urls(crawl) & set(LINKED)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_probe_is_bounded_by_the_item_budget() -> None:
+    """A guessed sitemap that never answers ends the probe at the item's remaining budget: no,
+    so the crawl goes on normally."""
+
+    async def never(_validators: object) -> FetchResult:
+        await asyncio.sleep(60)
+        raise AssertionError("not reached")
+
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED), f"{SITE}/sitemap.xml": never}
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    crawl.site._item_budget = 0.3  # type: ignore[attr-defined]
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    started = time.monotonic()
+    item = await crawl.step()  # item 0
+    assert item is not None
+    assert time.monotonic() - started < 10
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+
+
+@scenario
+async def test_sitemap_first_probe_is_skipped_without_budget() -> None:
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+    }
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    crawl.site._item_budget = 0.0  # type: ignore[attr-defined]
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.step()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)
