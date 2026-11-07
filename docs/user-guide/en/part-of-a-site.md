@@ -102,10 +102,13 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   language and tracking parameters such as `?lang=en` do not count), "from the sitemap" (the file
   name of the sitemap that listed it, such as `post-sitemap.xml` or
   `wp-sitemap-posts-event-1.xml`), "from the link text" (a link named like a type, such as
-  "Kontakt", or in a pagination), "from keywords" (a word of the path or the link text, such as
+  "Kontakt", or in a pagination; a type's name counts only for a short address or one whose
+  last part is no name of several words, so "Anmelden" to `/fortbildungen/mathe-workshop-2026`
+  does not make a login page), "from keywords" (a word of the path or the link text, such as
   `veranstaltung` for "Event" or `arbeitsblatt` for "Learning material") or "a page with a name,
   not fetched" ("Content", the default for a URL with a readable name). A guess from the default
-  gives way to any other reason. Only a URL that no rule can guess (a number, a hex string
+  gives way to any other reason, but a link text does not replace it for a URL from a sitemap:
+  a listed page linked as "Datenschutz" stays "Content" and checked. Only a URL that no rule can guess (a number, a hex string
   or a UUID as its last part, a last part without a word of three letters, or a query that is not
   a language or tracking parameter) shows the badge "Type open", with the reason "Not fetched; its type shows when it is extracted" (as
   tooltip and for screen readers), and the "Types:" line and the chips count "Type open" as well. "Select

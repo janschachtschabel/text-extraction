@@ -112,10 +112,14 @@ und `pii` für jeden Eintrag. Wie Sie die Einträge seitenweise lesen, steht unt
   wie `?p=12` und `?page_id=12`: „Inhalt“; Sprach- und Tracking-Parameter wie `?lang=en` zählen
   nicht), „aus der Sitemap“ (der Dateiname der Sitemap, die sie nannte, etwa `post-sitemap.xml`
   oder `wp-sitemap-posts-event-1.xml`), „aus dem Linktext“ (ein Link, der wie ein Typ heißt,
-  etwa „Kontakt“, oder in einer Seitennummerierung), „aus Schlüsselwörtern“ (ein Wort des Pfads
+  etwa „Kontakt“, oder in einer Seitennummerierung; der Name eines Typs zählt nur für eine kurze
+  Adresse oder eine, deren letzter Teil kein Name aus mehreren Wörtern ist, so macht „Anmelden“
+  auf `/fortbildungen/mathe-workshop-2026` keine Anmeldeseite), „aus Schlüsselwörtern“ (ein Wort des Pfads
   oder des Linktexts, etwa `veranstaltung` für „Veranstaltung“ oder `arbeitsblatt` für
   „Lernmaterial“) oder „Seite mit Namen, nicht abgerufen“ („Inhalt“, die Vorgabe für eine URL mit
-  lesbarem Namen). Eine Schätzung aus der Vorgabe weicht jedem anderen Grund. Nur eine URL, die
+  lesbarem Namen). Eine Schätzung aus der Vorgabe weicht jedem anderen Grund, nur
+  ersetzt ein Linktext sie nicht für eine URL aus einer Sitemap: Eine aufgeführte Seite, die als
+  „Datenschutz“ verlinkt ist, bleibt „Inhalt“ und markiert. Nur eine URL, die
   keine Regel schätzen kann (eine Zahl, eine Hex-Zeichenfolge oder eine UUID als letzter Teil,
   ein letzter Teil ohne Wort aus drei Buchstaben oder eine Abfrage, die kein Sprach- oder
   Tracking-Parameter ist), zeigt das Kennzeichen „Typ offen“ mit dem Grund „Nicht abgerufen; der Typ zeigt sich beim Extrahieren“

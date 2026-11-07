@@ -2689,7 +2689,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      start page);
   3. schema.org: the JSON-LD `@type` (top-level nodes and `@graph`) or the outermost microdata
      `itemtype` is `ContactPage`, `AboutPage`, `SearchResultsPage` or `CollectionPage`
-     (`schema_org`);
+     (`schema_org`; the page's one main entity as an event or a learning resource ranks after
+     `url`, see "The main entity" below);
   4. `url_type` (`url`): whole path segments or their stem before `.html`/`.htm`/`.php`,
      case-folded, umlauts also as `ae`/`oe`/`ue` (German and English names per type, in the order
      `imprint`, `privacy`, `legal`, `auth`, `search`, `contact`, `about`, `listing`), a search
@@ -2733,8 +2734,21 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   one inside a menu of 60 links is `content`. A `url` vote for any other type and `schema_org`
   stay, so a WordPress imprint at `/impressum/` (SEO plugins mark plain pages as articles too)
   stays an imprint; `password_field` stays too (it needs fewer than `THIN_PAGE_BELOW_WORDS`
-  words). JSON-LD is parsed up to a size and a count per page, and nothing raises on bad HTML or
-  a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
+  words).
+  **Ruling AU3-R3 (third audit, A3: a type name above an article):** for such an article (same
+  condition) a type name as the *first* path segment does not count when the path, without an
+  index file and a leading language code, has two or more segments and the last one is a slug of
+  words (two or more parts joined by `-` or `_` that each hold two letters in a row); the `url`
+  vote is then what the other segments and the query say (`_url_type(url,
+  first_segment=False)`), and dropped when that is nothing or `listing`. So
+  `/datenschutz/schuelerfotos-im-unterricht`, `/kontakt/elterngespraech-vorbereiten` and
+  `/barrierefreiheit/leichte-sprache-im-unterricht` are `content`, and
+  `/datenschutz/cookie-richtlinie` is `legal` by its last segment. A name as the only or the last
+  segment still counts (`/datenschutz/`, `/themen/datenschutz`, `/impressum/index.html`), and so
+  does a first segment before a single word (`/kontakt/anfahrt` stays `contact`: a short child
+  of a contact page is more likely a contact page than an article). Without `og:type` `article`
+  and enough words, A26-R2 is unchanged. JSON-LD is parsed up to a size and a count per page,
+  and nothing raises on bad HTML or a bad URL. The status passed is `upstream_status`. The type is an extra: should the rules
   raise anyway, `_process` logs `page_type_failed` (host and error type) and the page keeps
   `page_type: null` instead of failing.
 - **A page that failed with HTTP 4xx or 5xx is not converted and keeps `page_type: null`**
@@ -2750,10 +2764,28 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   navigation helper of the old service ("home", "startseite", "nach oben", "back to top", "menu",
   arrows and the like), else `content`.
 - **`event` and `learning_material` (package 18).** Two more page types, after `listing`.
-  `page_type` reads them from schema.org: a JSON-LD `@type` or microdata `itemtype` ending in
-  `Event` (`Event`, `EducationEvent`, `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz`
-  and `Course` are `learning_material` (signal `schema_org`; the contact, about, search and
-  collection types keep their rank).
+  `page_type` reads them from schema.org: a type ending in `Event` (`Event`, `EducationEvent`,
+  `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz` and `Course` are
+  `learning_material` (signal `schema_org`; the contact, about, search and collection types keep
+  their rank 3 and are read from any node and any outermost scope, as before).
+  **The main entity (third audit, A2; revises package 18):** an event or learning-resource type
+  counts only when it is the page's *one main entity*, and that vote ranks below `url` (so
+  `/impressum` with a Quiz node stays `imprint`) and above the title. The main entities are the
+  `mainEntity` values of the JSON-LD nodes typed `*Page` (`WebPage`, `ItemPage` ...; inline, or
+  an `{"@id"}` reference to a node of the page), else every JSON-LD node (top-level and
+  `@graph`); when no JSON-LD entity is an article, an event or a learning resource, the
+  outermost microdata scopes on `<html>`, `<body>`, `<main>` or `<article>` that are not inside
+  `<aside>`, `<nav>`, `<header>` or `<footer>`. Of those, only articles (a type ending in
+  `Article` or `Posting`: `NewsArticle`, `BlogPosting` ...), events and learning resources count,
+  one per `@id` (else per type list and name); a node typed both an article and an event is an
+  article. There must be exactly one, and it must not be an article. So an article with a
+  sidebar Event in microdata, with JSON-LD `[NewsArticle, Event]`, or with a Yoast `@graph`
+  `[WebPage, Article, Course]` is `content`; an event page whose only typed entity besides the
+  site's `WebPage`, `WebSite`, `Organization` and `BreadcrumbList` is an `Event`, or whose
+  `WebPage.mainEntity` is an `Event`, is `event`; and `/veranstaltungen/` with two Event nodes
+  and a page of links is `listing` (several events are no main entity). Before, any type ending
+  in `Event` or any of the three material types in any top-level node or any of the first 50
+  outermost scopes decided over `url`, the title and the article override.
 - **`guess_type(url, link_text, region, sitemap_hint)`** answers `TypeGuess(type, reason)` or
   None for a URL that was not fetched. First rule that applies:
   1. `url_type(url)` (`url`);
@@ -2763,7 +2795,21 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
      `listing`; a last segment ending in `__trashed` is `other`;
   3. a `sitemap_hint` other than `content` (`sitemap`);
   4. the link text equals a type word of the headings (`Kontakt`, `Impressum` ...), or `region` is
-     `pagination` (`link_text`);
+     `pagination` (`link_text`).
+     **Ruling AU3-R2 (third audit, A3: link texts):** a link text type word counts only when the
+     URL's path, without a trailing index file and a leading language code, has at most one
+     segment, or its last segment is no slug of words (two or more parts joined by `-` or `_`
+     that each hold two letters in a row; `seite-2`, `123`, a UUID or a hex id are none). A
+     link names what it does as often as what it points to: "Anmelden" to
+     `/fortbildungen/mathe-workshop-2026` (then `event` by keywords), "Datenschutz" to
+     `/themen/medienbildung-und-privatsphaere` (then `content` by default) and "Kontakt" to
+     `/kurse/oer-einfuehrung` (then `learning_material` by keywords) no longer type the page;
+     "Impressum" to `/p/123`, `/node/42` or `/impressum-und-datenschutz/` still does. The brief
+     proposed slugs of three or more parts; two are needed, or `/kurse/oer-einfuehrung` would
+     stay `contact`. The pagination region is unchanged. In the site tree a `link_text` reason
+     also never replaces a sitemap entry's `default` content guess (`_Found.merge`): a URL listed
+     in a plain sitemap and linked as "Datenschutz" stays `content` and ticked by "Select content
+     pages"; between links alone a `link_text` reason still beats a `default` one;
   5. a keyword token in the path (split on `/ - _ .`) or in the link text (`keywords`); event
      words (`veranstaltung`, `termine`, `workshop`, `symposium` ...) before material words
      (`arbeitsblatt`, `quiz`, `lernpfad`, `oer` ...); whole tokens only, so `eventually` is none;

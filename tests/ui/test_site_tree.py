@@ -16,6 +16,7 @@ from text_extraction.job_models import JobItem
 from text_extraction.settings import Settings
 from text_extraction.ui.site_tree import (
     MAX_SECTION_DEPTH,
+    NON_CONTENT_TYPES,
     TREE_MAX_SOCIAL,
     SiteTree,
     TreeNode,
@@ -725,3 +726,48 @@ def test_sections_count_their_pages_and_share_a_type() -> None:
     # A fetched leaf without a type (failed page) leaves the section without one.
     assert (sections["fetched/"].pages, sections["fetched/"].section_type) == (2, None)
     assert (root.pages, root.section_type) == (7, None)
+
+
+def test_a_link_text_never_overrides_a_sitemap_content_guess() -> None:
+    """Third audit A3: a sitemap entry guessed ``content`` stays content (and so ticked by
+    "Select content pages") when a page links it with a type word such as "Datenschutz"."""
+    url = f"{ORIGIN}/medien/"
+    entry = {"loc": url}
+    link = ((url, "depth", None, "Datenschutz"),)
+    stored = {"loc": url, "type_guess": "content"}
+    orders = [
+        [sitemap_item(0, f"{ORIGIN}/sitemap.xml", [entry]), page_item(1, f"{ORIGIN}/", links=link)],
+        [page_item(0, f"{ORIGIN}/", links=link), sitemap_item(1, f"{ORIGIN}/sitemap.xml", [entry])],
+        [
+            sitemap_item(0, f"{ORIGIN}/sitemap.xml", [stored]),
+            page_item(1, f"{ORIGIN}/", links=link),
+        ],
+    ]
+    for items in orders:
+        node = _by_url(build_tree(items, max_urls=10))[url]
+        assert (node.kind, node.page_type, node.type_reason) == ("sitemap", "content", "default")
+        assert node.page_type not in NON_CONTENT_TYPES
+        assert node.title == "Datenschutz"
+
+
+def test_a_link_text_still_types_a_url_known_only_from_links() -> None:
+    url = f"{ORIGIN}/medien/"
+    items = [
+        page_item(
+            0,
+            f"{ORIGIN}/",
+            links=((url, "depth", None, "Mehr"), (url, "depth", None, "Datenschutz")),
+        )
+    ]
+    node = _by_url(build_tree(items, max_urls=10))[url]
+    assert (node.kind, node.page_type, node.type_reason) == ("linked", "privacy", "link_text")
+
+
+def test_a_slug_linked_as_a_type_word_stays_content_in_the_tree() -> None:
+    url = f"{ORIGIN}/themen/medienbildung-und-privatsphaere"
+    items = [
+        sitemap_item(0, f"{ORIGIN}/sitemap.xml", [{"loc": url}]),
+        page_item(1, f"{ORIGIN}/", links=((url, "depth", None, "Datenschutz"),)),
+    ]
+    node = _by_url(build_tree(items, max_urls=10))[url]
+    assert (node.page_type, node.type_reason) == ("content", "default")

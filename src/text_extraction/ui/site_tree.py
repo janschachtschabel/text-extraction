@@ -20,7 +20,9 @@ or a linked-only URL the guess of ``page_types.guess_type`` (ruling P18-R1: from
 sitemap's ``type_hint``, a link's text and region, or ``content`` by default), always
 ``type_guessed`` with its ``type_reason``; only a URL with no name and an id shape stays without
 one (a link's ``category`` is not used). A URL known from several sources takes the guess of the
-strongest, unless that guess is ``content`` by default and a weaker source gives a reason. The
+strongest, unless that guess is ``content`` by default and a weaker source gives a reason other
+than a link text for a sitemap entry (AU3-R2: a link "Datenschutz" leaves a listed page
+content). The
 first link that names a URL sets its title (``title_from_link``); a crawled page's own title
 wins. A section has ``pages`` (the URL leaves below it), ``section_type`` (the
 type all of them share, guessed or fetched, else none) and ``section_guessed`` (a leaf below is
@@ -201,17 +203,23 @@ class _Found:
     type_reason: GuessReason | None = None
     title_from_link: bool = False
     blocked: BlockReason | None = None
+    from_sitemap: bool = False
 
     def merge(self, other: "_Found") -> None:
         if not self.title:
             self.title, self.title_from_link = other.title, other.title_from_link
         if self.status is None:  # not a crawled page (only a page has a status)
             # A crawled page's own verdict, even none, wins over a type from a URL; between
-            # guesses, a weaker source's reason beats a stronger source's bare default.
+            # guesses, a weaker source's reason beats a stronger source's bare default, but a
+            # link text never beats a sitemap entry's (AU3-R2).
             if (
                 other.status is not None
                 or self.page_type is None
-                or (self.type_reason == "default" and other.type_reason not in (None, "default"))
+                or (
+                    self.type_reason == "default"
+                    and other.type_reason not in (None, "default")
+                    and not (self.from_sitemap and other.type_reason == "link_text")
+                )
             ):
                 self.page_type, self.type_guessed = other.page_type, other.type_guessed
                 self.type_reason = other.type_reason
@@ -271,7 +279,7 @@ class TreeBuilder:
                     # before the field has none and keeps the guess made here.
                     found.page_type, found.type_guessed = entry.type_guess, True
                     found.type_reason = found.type_reason or "default"
-                found.lastmod = entry.lastmod
+                found.lastmod, found.from_sitemap = entry.lastmod, True
                 self._add(_ENTRY, found)
 
     def _add_social(self, url: str, category: str | None) -> None:

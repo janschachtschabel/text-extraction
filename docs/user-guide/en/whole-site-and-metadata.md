@@ -110,9 +110,7 @@ are checked in this order, and the first that applies wins:
    a language code is the start page unless the page declares another language (`<html lang>`):
    `/it/` on a German page is left to the other rules.
 3. schema.org: the page's JSON-LD or microdata says `ContactPage` (`contact`), `AboutPage`
-   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`); failing
-   those, an `Event` type (`Event`, `EducationEvent` and other names ending in `Event`) says
-   `event`, and `LearningResource`, `Quiz` or `Course` says `learning_material`.
+   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`).
 4. The URL: a whole path segment such as `impressum` or `imprint` (`imprint`), `datenschutz` or
    `privacy` (`privacy`), `agb`, `terms`, `cookies` or `barrierefreiheit` (`legal`), `login`,
    `registrieren` or `konto` (`auth`), `suche` or `search`, or a search query such as `?q=...`
@@ -125,20 +123,32 @@ are checked in this order, and the first that applies wins:
    count only alone: `cookies`, `terms`, `legal`, `konto`, `account`, `profil`, `profile`,
    `recherche`, `team`, `password`, `passwort` and `disclaimer`. So `/cookies` is `legal`, but
    `/rezepte/cookies` is not.
-5. The title begins or ends with a type's name, such as "Impressum", "Kontakt", "Login" or
+5. schema.org for the page's main entity: when the page describes exactly one event (`Event`,
+   `EducationEvent` and other names ending in `Event`) or one learning resource
+   (`LearningResource`, `Quiz` or `Course`) and no article besides it, it is `event` or
+   `learning_material`. Only the main entity counts: the `mainEntity` of the page's `WebPage`
+   node, else its JSON-LD nodes, else microdata on the page's `<body>`, `<main>` or `<article>`
+   (not in a sidebar, a menu, the header or the footer). So an article with an event in its
+   sidebar stays `content`, a page that lists several events stays `listing`, and `/impressum`
+   with a quiz on it stays `imprint`.
+6. The title begins or ends with a type's name, such as "Impressum", "Kontakt", "Login" or
    "Suchergebnisse" ("Impressum | Firma" and "Firma | Impressum"). A colon after the name starts a
    subtitle: "Datenschutz: Was Schulen wissen müssen" is no privacy page ("Impressum:" with
    nothing after it is an imprint). The first heading counts only when it is the name alone:
    "Kontakt", not "Kontakt zur Schule aufnehmen".
-6. `auth`: a password field on a page with little text.
-7. `listing`: a link to the next or previous page (`rel="next"`), or a page that is mostly links
+7. `auth`: a password field on a page with little text.
+8. `listing`: a link to the next or previous page (`rel="next"`), or a page that is mostly links
    (at least 20 links that hold 60 % of its text).
-8. `content` when the page has at least `QUALITY_MIN_WORDS` (50) words, else `other`.
+9. `content` when the page has at least `QUALITY_MIN_WORDS` (50) words, else `other`.
 
 An article (`og:type` is `article`) with at least `QUALITY_MIN_WORDS` words stays `content`
 whatever its title, its first heading, its links or a listing address (such as `/blog/page/2`
 or `/tag/python`) say. Only another address (such as `/impressum/`), schema.org or a password
-field on a short page (`auth`) can make it another type.
+field on a short page (`auth`) can make it another type. A type's name as the first part of its
+address does not count when a name of several words follows:
+`/datenschutz/schuelerfotos-im-unterricht` and `/kontakt/elterngespraech-vorbereiten` are
+`content`. As the only or the last part it still counts (`/datenschutz/`, `/themen/datenschutz`),
+and so it does before a single word (`/kontakt/anfahrt`).
 
 `signals` lists every rule that agrees with the type, in this order, also those after the one
 that decided: `/impressum` titled "Impressum" has `["url", "title"]`.

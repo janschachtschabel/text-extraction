@@ -921,3 +921,200 @@ def test_json_ld_event_and_learning_material(schema_type: str, expected: str) ->
         title="Willkommen",
     )
     assert classify(html, "https://example.org/service") == (expected, ["schema_org"])
+
+
+# --- third audit: the main schema entity (A2) ------------------------------------------------
+
+ARTICLE_WORDS = 600
+
+
+def json_ld(data: object) -> str:
+    return f'<script type="application/ld+json">{json.dumps(data)}</script>'
+
+
+ARTICLE_BODY = f"<article><h2>Ein Artikel</h2><p>{' '.join(['Wort'] * 40)}</p></article>"
+
+
+def test_an_article_with_a_sidebar_event_in_microdata_stays_content() -> None:
+    sidebar = (
+        '<aside><div itemscope itemtype="https://schema.org/Event">'
+        '<span itemprop="name">Fachtag</span></div></aside>'
+    )
+    html = doc(head=OG_ARTICLE, body=ARTICLE_BODY + sidebar)
+    assert classify(html, "https://example.org/blog/x", words=ARTICLE_WORDS) == (
+        "content",
+        ["og_type", "word_count"],
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [{"@type": "NewsArticle", "headline": "x"}, {"@type": "Event", "name": "y"}],
+        {"@type": ["NewsArticle", "Event"], "headline": "x"},
+        {
+            "@context": "https://schema.org",
+            "@graph": [{"@type": "WebPage"}, {"@type": "Article"}, {"@type": "Course"}],
+        },
+        {"@type": "WebPage", "mainEntity": {"@type": "BlogPosting"}},
+    ],
+)
+def test_an_article_with_a_second_schema_entity_stays_content(data: object) -> None:
+    html = doc(head=OG_ARTICLE + json_ld(data), body=ARTICLE_BODY)
+    assert classify(html, "https://example.org/blog/x", words=ARTICLE_WORDS)[0] == "content"
+
+
+def test_an_article_named_as_main_entity_beats_an_event_in_another_script() -> None:
+    page = {"@type": "WebPage", "mainEntity": {"@id": "#a"}}
+    graph = {"@graph": [page, {"@id": "#a", "@type": "Article"}]}
+    widget = {"@type": "Event", "name": "Fachtag"}
+    html = doc(head=OG_ARTICLE + json_ld(graph) + json_ld(widget), body=ARTICLE_BODY)
+    assert classify(html, "https://example.org/blog/x", words=ARTICLE_WORDS)[0] == "content"
+
+
+@pytest.mark.parametrize(
+    ("schema_type", "expected"),
+    [
+        ("Event", "event"),
+        ("EducationEvent", "event"),
+        ("Course", "learning_material"),
+        ("Quiz", "learning_material"),
+        ("LearningResource", "learning_material"),
+    ],
+)
+def test_the_main_schema_entity_names_the_type(schema_type: str, expected: str) -> None:
+    url = "https://example.org/angebote/x"
+    yoast = {
+        "@graph": [
+            {"@type": "WebPage", "@id": "#page"},
+            {"@type": "WebSite"},
+            {"@type": "Organization"},
+            {"@type": "BreadcrumbList"},
+        ]
+    }
+    only = doc(head=OG_ARTICLE + json_ld(yoast) + json_ld({"@type": schema_type}))
+    assert classify(only, url, words=ARTICLE_WORDS) == (expected, ["schema_org"])
+    referenced = {
+        "@graph": [
+            {"@type": "WebPage", "mainEntity": {"@id": "#main"}},
+            {"@id": "#main", "@type": schema_type},
+            {"@type": "Article"},
+        ]
+    }
+    by_reference = doc(head=OG_ARTICLE + json_ld(referenced))
+    assert classify(by_reference, url, words=ARTICLE_WORDS)[0] == expected
+    inline = {"@type": "WebPage", "mainEntity": {"@type": schema_type, "name": "x"}}
+    assert classify(doc(head=json_ld(inline)), url)[0] == expected
+    for tag in ("body", "main", "article"):
+        scope = f'itemscope itemtype="https://schema.org/{schema_type}"'
+        if tag == "body":
+            html = f"<html><head>{OG_ARTICLE}</head><body {scope}><p>x</p></body></html>"
+        else:
+            html = doc(head=OG_ARTICLE, body=f"<{tag} {scope}><p>x</p></{tag}>")
+        assert classify(html, url, words=ARTICLE_WORDS)[0] == expected, tag
+
+
+def test_a_microdata_event_outside_the_main_content_does_not_count() -> None:
+    for wrapper in ("aside", "nav", "footer", "header"):
+        html = doc(
+            body=f'<main><{wrapper}><article itemscope itemtype="https://schema.org/Event">'
+            f"<p>x</p></article></{wrapper}></main>"
+        )
+        assert classify(html, words=ARTICLE_WORDS)[0] == "content", wrapper
+    html = doc(body='<div itemscope itemtype="https://schema.org/Event"><p>x</p></div>')
+    assert classify(html, words=ARTICLE_WORDS)[0] == "content"
+
+
+def test_a_listing_of_several_events_stays_a_listing() -> None:
+    events = [{"@type": "Event", "name": f"Termin {i}"} for i in range(2)]
+    links = link_list(30, filler_words=5)
+    html = doc(head=json_ld(events), body=links)
+    url = "https://example.org/veranstaltungen/"
+    assert classify(html, url, words=120) == ("listing", ["link_density"])
+
+
+def test_an_imprint_url_beats_a_learning_material_entity() -> None:
+    html = doc(head=json_ld({"@type": "Quiz", "name": "Wie gut kennen Sie uns?"}))
+    assert classify(html, "https://example.org/impressum", words=ARTICLE_WORDS) == (
+        "imprint",
+        ["url"],
+    )
+
+
+def test_the_page_kind_schema_types_still_rank_above_the_url() -> None:
+    html = doc(head=json_ld({"@type": "ContactPage"}))
+    assert classify(html, "https://example.org/impressum")[0] == "contact"
+
+
+# --- third audit: link texts (A3, AU3-R2) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "text", "expected"),
+    [
+        ("/fortbildungen/mathe-workshop-2026", "Anmelden", ("event", "keywords")),
+        ("/themen/medienbildung-und-privatsphaere", "Datenschutz", ("content", "default")),
+        ("/kurse/oer-einfuehrung", "Kontakt", ("learning_material", "keywords")),
+        ("/schule/elternarbeit_und_schule/", "Kontakt", ("content", "default")),
+        ("/de/blog/medienbildung-heute", "Impressum", ("content", "default")),
+        # A short path, or a last segment that is no slug of words, still takes the link text.
+        ("/p/123", "Impressum", ("imprint", "link_text")),
+        ("/node/42", "Kontakt", ("contact", "link_text")),
+        ("/de/impressum-und-datenschutz/", "Impressum", ("imprint", "link_text")),
+        ("/service/seite-2", "Kontakt", ("contact", "link_text")),
+        ("/x/550e8400-e29b-41d4-a716-446655440000", "Login", ("auth", "link_text")),
+    ],
+)
+def test_a_link_text_type_word_needs_a_url_without_a_slug_of_words(
+    url: str, text: str, expected: tuple[str, str]
+) -> None:
+    assert guess_type(f"https://x.org{url}", link_text=text) == TypeGuess(*expected)  # type: ignore[arg-type]
+
+
+def test_a_pagination_link_is_a_listing_whatever_its_url() -> None:
+    url = "https://x.org/blog/alle-beitraege-im-ueberblick"
+    assert guess_type(url, region="pagination") == TypeGuess("listing", "link_text")
+
+
+# --- third audit: a type name as the first segment of an article (A3, AU3-R3) ----------------
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/datenschutz/schuelerfotos-im-unterricht",
+        "/kontakt/elterngespraech-vorbereiten",
+        "/barrierefreiheit/leichte-sprache-im-unterricht",
+        "/de/datenschutz/schuelerfotos-im-unterricht",
+        "/impressum/schulchronik_seit_1950.html",
+    ],
+)
+def test_an_article_below_a_type_name_is_content(path: str) -> None:
+    html = doc(head=OG_ARTICLE, body=ARTICLE_BODY)
+    assert classify(html, f"https://example.org{path}", words=ARTICLE_WORDS) == (
+        "content",
+        ["og_type", "word_count"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/datenschutz/", "privacy"),
+        ("/datenschutz", "privacy"),
+        ("/themen/datenschutz", "privacy"),
+        ("/kontakt/anfahrt", "contact"),
+        ("/datenschutz/cookie-richtlinie", "legal"),
+        ("/impressum/index.html", "imprint"),
+    ],
+)
+def test_an_article_keeps_a_type_name_as_its_only_or_last_segment(path: str, expected: str) -> None:
+    html = doc(head=OG_ARTICLE, body=ARTICLE_BODY)
+    assert classify(html, f"https://example.org{path}", words=ARTICLE_WORDS)[0] == expected
+
+
+def test_a_type_name_as_first_segment_still_counts_without_an_article() -> None:
+    url = "https://example.org/datenschutz/schuelerfotos-im-unterricht"
+    assert classify(doc(), url, words=ARTICLE_WORDS) == ("privacy", ["url"])
+    short = doc(head=OG_ARTICLE)
+    assert classify(short, url, words=MIN_WORDS - 1) == ("privacy", ["url"])

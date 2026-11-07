@@ -42,6 +42,15 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ### Fixed
 
+- Page types: a schema.org `Event`, `Course`, `Quiz` or `LearningResource` makes a page `event` or
+  `learning_material` only as the page's one main entity (the `mainEntity` of its `WebPage`, its
+  only such JSON-LD node, or microdata on `<body>`, `<main>` or `<article>`), and an address such
+  as `/impressum` wins over it: an article with an event in its sidebar stays `content`, a page of
+  several events stays `listing`. An article (`og:type` `article`, enough words) below a type
+  name with a slug of words, such as `/datenschutz/schuelerfotos-im-unterricht`, is `content`. A
+  link text such as "Anmelden" or "Datenschutz" no longer types a linked URL whose last part is a
+  slug of words, and in the site tree it never replaces a sitemap's default "Content", so "Select
+  content pages" keeps such pages checked.
 - PHP error removal keeps a message that the page quotes: in a quote, a heading, a list item, a
   table cell, a definition list or a figure caption only the `html_errors` form (bold label and
   bold path) is removed, and a message copied as plain text stays in `content`. It now also
