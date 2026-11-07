@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-07
+
 ### Changed
 
 - docker compose starts the ASR worker by default: transcription of audio and video uploads and
@@ -540,7 +542,8 @@ tag.
   for it, and the run is started by hand later.
 - A decision on permanent operation. This release is a prototype, and Jan Schachtschabel decides.
 
-[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/janschachtschabel/text-extraction/compare/v0.1.3...v0.1.4
