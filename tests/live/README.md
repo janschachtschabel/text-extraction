@@ -17,7 +17,7 @@ kept; a row without a URL is skipped with a warning.
 | `wlo_200.csv` | 200 | Sample of the corpus. **The gate:** in `auto` mode at or above 80 % ok (the browser baseline). Also reported in `browser` mode. |
 | `wlo_50.csv` | 50 | Quicker sample for local runs. |
 | `smoke.csv` | 24 | Curated watchlist of known-hard pages and expected failures, with `category`, `expected_lang` and `notes`. Reported in `auto` mode, never a gate: its ok rate is not comparable to the baseline. |
-| `sites.csv` | 5 | Five WLO-type sites (lehrer-online, planet-schule, Klexikon, LEIFIphysik, serlo) for the site structure run (`run_site.py`, package 9). Reported, never a gate. See "The site run" below. |
+| `sites.csv` | 6 | Six WLO-type sites (lehrer-online, planet-schule, Klexikon, LEIFIphysik, serlo, and WLO itself, a WordPress site) for the site structure run (`run_site.py`, package 9). Reported, never a gate. See "The site run" below. |
 | `media.csv` | 28 | The media set (package 6): YouTube, Vimeo, ARD, ZDF, arte and 3sat videos, two media files and two pages with HTML5 tracks, with `platform`, `expected_source` (the `transcript_source` the row should get), `expected_lang`, `transcribe` (`true` for the media files, which only ASR can answer) and `notes`. Reported, never a gate. See "The media set" below. |
 
 ## Run it
@@ -135,7 +135,7 @@ the job every `--poll-seconds` until it is `completed` (a read that ends in a tr
 sent once more), then all its items in pages of 500, and
 prints a Markdown summary: per site the job's state and duration (created to finished), its items,
 page items, page items with `success`, failed items, sitemap files, further sitemap parts and
-sitemap entries; a histogram of the pages' links by `region` and one by `crawl` decision; and the
+sitemap entries; the site tree's measures: `sitemap` (`listed` by robots.txt, `guessed` at `/sitemap.xml`, or `none`), `tree URLs`, `type open` (tree URLs that were not fetched and have no page type) and `type open %`, the `median convert ms` of the page items (`timings.convert_ms`) and `crawl s` (the job's `finished_at - created_at`); a histogram of the pages' links by `region` and one by `crawl` decision; and the
 warnings and error codes of the items. A request the service refuses (a 4xx or 5xx) or a job that
 does not complete within `--job-timeout` is reported in the State column, with what the job had
 so far. The exit code is always 0: the run is a report.
@@ -155,7 +155,7 @@ so far. The exit code is always 0: the run is a report.
 | `--summary-out` | none | Also write the Markdown summary to this file. |
 
 The summary's formatting and paging are unit-tested against a fake service in
-`tests/test_live_site.py`. The build sandbox of package 9 had no route to the five sites, so the
+`tests/test_live_site.py`. The build sandbox of package 9 had no route to the sites, so the
 run is a report-only step of the live workflow (below); its summary goes into the pull request.
 
 ## Buckets

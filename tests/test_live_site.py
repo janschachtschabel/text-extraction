@@ -20,6 +20,7 @@ SITES = [
     "https://klexikon.zum.de/",
     "https://www.leifiphysik.de/",
     "https://de.serlo.org/",
+    "https://wirlernenonline.de/",
 ]
 START = "https://lernen.example.org/"
 
@@ -30,6 +31,7 @@ def page(
     *,
     depth: int = 0,
     page_type: str | None = None,
+    convert_ms: int | None = None,
     **result: Any,
 ) -> Any:
     """A page item with links of the given (region, crawl) and, if given, a page type."""
@@ -43,6 +45,7 @@ def page(
             "data": {
                 "warnings": result.get("warnings", []),
                 "page_type": {"type": page_type, "signals": ["x"]} if page_type else None,
+                "timings": None if convert_ms is None else {"convert_ms": convert_ms},
                 "site": {
                     "role": "page",
                     "depth": depth,
@@ -56,7 +59,15 @@ def page(
     }
 
 
-def sitemap(index: int, entries: int, *, role: str = "sitemap", **result: Any) -> Any:
+def sitemap(
+    index: int,
+    entries: int,
+    *,
+    role: str = "sitemap",
+    format: str = "urlset",
+    guessed: bool = False,
+    **result: Any,
+) -> Any:
     return {
         "index": index,
         "url": f"{START}sitemap.xml",
@@ -70,14 +81,18 @@ def sitemap(index: int, entries: int, *, role: str = "sitemap", **result: Any) -
                     "role": role,
                     "depth": 0,
                     "links": None,
-                    "sitemap": {"entries": [{"loc": f"{START}e{n}"} for n in range(entries)]},
+                    "sitemap": {
+                        "format": format,
+                        "guessed": guessed,
+                        "entries": [{"loc": f"{START}e{n}"} for n in range(entries)],
+                    },
                 },
             },
         },
     }
 
 
-def robots(index: int) -> Any:
+def robots(index: int, sitemaps: list[str] | None = None) -> Any:
     return {
         "index": index,
         "url": f"{START}robots.txt",
@@ -85,7 +100,10 @@ def robots(index: int) -> Any:
         "result": {
             "status": "success",
             "error": None,
-            "data": {"warnings": [], "site": {"role": "robots", "depth": 0, "links": None}},
+            "data": {
+                "warnings": [],
+                "site": {"role": "robots", "depth": 0, "links": None, "sitemaps": sitemaps},
+            },
         },
     }
 
@@ -95,9 +113,10 @@ ITEMS = [
         0,
         [("nav", "queued"), ("nav", "queued"), (None, "listed"), ("footer", "out_of_scope")],
         page_type="home",
+        convert_ms=100,
     ),
-    robots(1),
-    page(2, [("nav", "seen"), ("main", "depth")], depth=1, page_type="content"),
+    robots(1, [f"{START}sitemap.xml"]),
+    page(2, [("nav", "seen"), ("main", "depth")], depth=1, page_type="content", convert_ms=300),
     sitemap(3, 4, warnings=["sitemap_urls_truncated"]),
     sitemap(4, 2, role="sitemap_part"),
     page(
@@ -118,13 +137,18 @@ JOB = {
 }
 
 
-def test_the_shipped_site_list_has_the_five_sites() -> None:
+def test_the_shipped_site_list_has_the_five_sites_and_wlo() -> None:
     assert read_urls(Path(run_site.__file__).parent / "urls" / "sites.csv") == SITES
 
 
 def test_histogram_columns_follow_the_api() -> None:
     assert (*get_args(LinkRegion), "none") == REGIONS
-    assert get_args(Crawl) == CRAWLS
+    # `sitemap_first` is spelled out ahead of the API, so the harness also reads a service
+    # that already sends it; every other value is the API's.
+    assert tuple(value for value in CRAWLS if value != "sitemap_first") == tuple(
+        value for value in get_args(Crawl) if value != "sitemap_first"
+    )
+    assert CRAWLS[-1] == "sitemap_first"
 
 
 def test_tally_counts_items_entries_regions_and_crawl_decisions() -> None:
@@ -142,6 +166,12 @@ def test_tally_counts_items_entries_regions_and_crawl_decisions() -> None:
         sitemap_files=1,
         sitemap_parts=1,
         entries=6,
+        sitemap="listed",
+        tree_urls=8,
+        type_open=5,
+        type_open_pct=62.5,
+        median_convert_ms=200,
+        crawl_seconds=65.5,
         regions={"nav": 3, "main": 1, "footer": 1, "none": 1},
         crawls={"queued": 2, "seen": 1, "depth": 1, "listed": 1, "out_of_scope": 1},
         page_types={"home": 1, "content": 1, "none": 1},
@@ -162,10 +192,17 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     assert lines[0] == "## Site structure: 2 sites, depth 1, max_pages 25, compliance report"
     assert (
         "| Site | State | Duration | Items | Pages | Pages ok | Failed | Sitemap files "
-        "| Parts | Entries |"
+        "| Parts | Entries | sitemap | tree URLs | type open | type open % "
+        "| median convert ms | crawl s |"
     ) in lines
-    assert "| lernen.example.org | completed | 65.5 s | 6 | 3 | 2 | 1 | 1 | 1 | 6 |" in lines
-    refused = "| down.example | refused: HTTP 503 internal_error | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 |"
+    assert (
+        "| lernen.example.org | completed | 65.5 s | 6 | 3 | 2 | 1 | 1 | 1 | 6 "
+        "| listed | 8 | 5 | 62.5 | 200 | 65.5 |"
+    ) in lines
+    refused = (
+        "| down.example | refused: HTTP 503 internal_error | - | 0 | 0 | 0 | 0 | 0 | 0 | 0 "
+        "| none | 0 | 0 | - | - | - |"
+    )
     assert refused in lines
     # The histograms: a column per value that occurs, in the API's order, `none` last.
     assert "### Links by region" in lines
@@ -184,6 +221,34 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     assert "### Warnings and error codes" in lines
     assert "| lernen.example.org | sitemap_urls_truncated 1 | target_http_error 1 |" in lines
     assert summary.endswith("\n")
+
+
+def test_tally_measures_a_site_without_a_sitemap_and_one_with_a_guessed_sitemap() -> None:
+    bare = [
+        robots(0),
+        sitemap(1, 0, format="absent", guessed=True),
+        page(2, [("main", "max_pages")], page_type="home", convert_ms=50),
+        page(3, [], depth=1, page_type="content", convert_ms=70),
+    ]
+    guessed = [robots(0), sitemap(1, 3, guessed=True), page(2, [], page_type="home")]
+
+    none_report = tally(START, JOB, bare)
+    guessed_report = tally(START, JOB, guessed)
+
+    # The page links one URL it did not fetch (`max_pages`), which has no type.
+    assert (none_report.sitemap, none_report.tree_urls) == ("none", 3)
+    assert (none_report.type_open, none_report.type_open_pct) == (1, 33.3)
+    assert none_report.median_convert_ms == 60
+    assert guessed_report.sitemap == "guessed"
+    assert (guessed_report.tree_urls, guessed_report.type_open) == (4, 3)
+    assert guessed_report.median_convert_ms is None
+
+
+def test_an_older_services_items_without_the_new_fields_are_tallied() -> None:
+    report = tally(START, {"state": "completed"}, [robots(0), page(1, [])])
+
+    assert (report.sitemap, report.crawl_seconds, report.median_convert_ms) == ("none", None, None)
+    assert report.tree_urls == 1
 
 
 def fake_service(

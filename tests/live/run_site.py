@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import statistics
 import sys
 import time
 from collections import Counter
@@ -23,11 +24,13 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from tests.live.run_live import domain_of, get_job, read_urls
+from text_extraction.job_models import JobItem
+from text_extraction.ui.site_tree import build_tree
 
 DEFAULT_URLS = Path(__file__).parent / "urls" / "sites.csv"
 DEFAULT_DEPTH = 1
@@ -57,7 +60,10 @@ CRAWLS = (
     "max_pages",
     "max_files",
     "memory_guard",
+    "sitemap_first",
 )
+# The tree is measured without a cap, as the UI would show it with a large ``UI_TREE_MAX_URLS``.
+TREE_MAX_URLS = 100_000
 
 
 @dataclass(frozen=True)
@@ -80,6 +86,12 @@ class SiteReport:
     page_types: dict[str, int] = field(default_factory=dict)  # page items by `data.page_type.type`
     warnings: dict[str, int] = field(default_factory=dict)
     error_codes: dict[str, int] = field(default_factory=dict)
+    sitemap: str = "none"  # `listed` (robots.txt), `guessed` (/sitemap.xml) or `none` found
+    tree_urls: int = 0  # the URLs of the site tree (`build_tree`)
+    type_open: int = 0  # tree URLs not fetched (sitemap or linked) and without a page type
+    type_open_pct: float | None = None  # `type_open` as a share of `tree_urls`; None for no URLs
+    median_convert_ms: int | None = None  # of the page items' `timings.convert_ms`
+    crawl_seconds: float | None = None  # the job's `finished_at - created_at`; None if unknown
 
     @classmethod
     def refused(cls, url: str, error: str) -> "SiteReport":
@@ -98,6 +110,54 @@ def _seconds(job: dict[str, Any]) -> float | None:
     return round(delta.total_seconds(), 1)
 
 
+class _Loose:
+    """A job item's JSON read by attribute, as ``build_tree`` reads a ``JobItem``: a missing key
+    is ``None``. The harness spells the API out (it also runs against older services), so it
+    does not validate the items against the current models."""
+
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def __getattr__(self, name: str) -> Any:
+        return _loose(self._raw.get(name))
+
+
+def _loose(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _Loose(value)
+    if isinstance(value, list):
+        return [_loose(one) for one in value]
+    return value
+
+
+def _site(item: dict[str, Any]) -> dict[str, Any]:
+    data = (item.get("result") or {}).get("data") or {}
+    return data.get("site") or {}
+
+
+def _sitemap_state(items: Sequence[dict[str, Any]]) -> str:
+    """`listed` when robots.txt named a sitemap or a sitemap that was not guessed exists,
+    `guessed` when only the guessed /sitemap.xml exists, else `none` (no sitemap found)."""
+    sites = [_site(item) for item in items]
+    present = [
+        info
+        for site in sites
+        if site.get("role") == "sitemap"
+        and (info := site.get("sitemap") or {}).get("format") not in (None, "absent")
+    ]
+    if not present:
+        return "none"
+    listed = any(site.get("sitemaps") for site in sites if site.get("role") == "robots")
+    return "listed" if listed or any(not info.get("guessed") for info in present) else "guessed"
+
+
+def _tree_numbers(items: Sequence[dict[str, Any]]) -> tuple[int, int, float | None]:
+    loose = cast("list[JobItem]", [_loose(item) for item in items])
+    tree = build_tree(loose, max_urls=TREE_MAX_URLS)
+    share = round(100 * tree.untyped / tree.urls, 1) if tree.urls else None
+    return tree.urls, tree.untyped, share
+
+
 def tally(
     url: str,
     job: dict[str, Any],
@@ -114,6 +174,7 @@ def tally(
     page_types: Counter[str] = Counter()
     warnings: Counter[str] = Counter()
     codes: Counter[str] = Counter()
+    convert_ms: list[int] = []
     pages_ok = failed = entries = 0
     for item in items:
         result = item.get("result") or {}
@@ -129,6 +190,9 @@ def tally(
         if role == "page":
             page_type = data.get("page_type") or {}
             page_types[page_type.get("type") or "none"] += 1
+            spent = (data.get("timings") or {}).get("convert_ms")
+            if isinstance(spent, int | float):
+                convert_ms.append(round(spent))
         if error_info := result.get("error"):
             codes[error_info.get("code") or "unknown"] += 1
         warnings.update(data.get("warnings") or [])
@@ -138,6 +202,7 @@ def tally(
         sitemap = site.get("sitemap") or {}
         entries += len(sitemap.get("entries") or [])
     seconds = _seconds(job)
+    tree_urls, type_open, type_open_pct = _tree_numbers(items)
     return SiteReport(
         url=url,
         state=str(job.get("state") or "unknown"),
@@ -155,6 +220,12 @@ def tally(
         page_types=dict(page_types),
         warnings=dict(warnings),
         error_codes=dict(codes),
+        sitemap=_sitemap_state(items),
+        tree_urls=tree_urls,
+        type_open=type_open,
+        type_open_pct=type_open_pct,
+        median_convert_ms=round(statistics.median(convert_ms)) if convert_ms else None,
+        crawl_seconds=seconds,
     )
 
 
@@ -325,6 +396,12 @@ def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, comp
             report.sitemap_files,
             report.sitemap_parts,
             report.entries,
+            report.sitemap,
+            report.tree_urls,
+            report.type_open,
+            "-" if report.type_open_pct is None else f"{report.type_open_pct:.1f}",
+            "-" if report.median_convert_ms is None else report.median_convert_ms,
+            "-" if report.crawl_seconds is None else f"{report.crawl_seconds:.1f}",
         ]
         for report in reports
     ]
@@ -339,6 +416,12 @@ def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, comp
         "Sitemap files",
         "Parts",
         "Entries",
+        "sitemap",
+        "tree URLs",
+        "type open",
+        "type open %",
+        "median convert ms",
+        "crawl s",
     ]
     lines += [*_table(header, rows), ""]
     lines += _histogram("Links by region", REGIONS, reports, [r.regions for r in reports])
