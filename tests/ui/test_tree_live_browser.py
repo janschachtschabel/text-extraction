@@ -264,6 +264,43 @@ def test_a_refresh_that_failed_is_asked_for_again(ui: tuple[str, str]) -> None:
         expect(view.locator("input[name=url]").first).to_be_attached()
 
 
+def test_a_failing_refresh_announces_its_error_once(ui: tuple[str, str]) -> None:
+    """Ruling 1: a refresh announces nothing; a retried failure keeps the first alert."""
+    url, origin = ui
+    with browsing(url) as (page, _console):  # the aborted requests log console errors
+        _start(page, origin)
+        _more_than(page, FAST)
+        page.evaluate(
+            """() => {
+              window.alertWrites = 0;
+              new MutationObserver((records) => {
+                for (const record of records) {
+                  if (record.target.closest && record.target.closest(".request-status")) {
+                    window.alertWrites += 1;
+                  }
+                }
+              }).observe(document.body, { childList: true, subtree: true });
+            }"""
+        )
+        answers = ["abort", "abort", "pass"]
+        seen: list[str] = []
+
+        def answer(route: Route) -> None:
+            how = answers[len(seen)] if len(seen) < len(answers) else "pass"
+            seen.append(how)
+            if how == "abort":
+                route.abort()
+            else:
+                route.continue_()
+
+        page.route(re.compile(r".*/ui/run/site-tree\?.*live=1"), answer)
+        _wrapper_mark(page)
+        _refreshed(page)
+
+        assert seen[:3] == answers
+        assert page.evaluate("window.alertWrites") == 1
+
+
 def test_a_click_on_the_tree_button_and_the_auto_load_ask_for_one_tree(
     ui: tuple[str, str],
 ) -> None:

@@ -1183,6 +1183,9 @@
       return;
     }
     var box = target.querySelector(":scope > .request-status");
+    if (box && isLive(target)) {
+      return;  // a live tree's retried refresh keeps its first alert: a refresh announces nothing
+    }
     if (!box) {
       box = document.createElement("div");
       box.className = "request-status";
