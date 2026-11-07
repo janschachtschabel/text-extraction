@@ -213,7 +213,7 @@ add a note of its own):
 - Image descriptions: `image_not_described` (at least one image of `describe_images` was
   skipped or got no description while the status stays: not fetched, refused, not a type the
   model takes, too large, or the endpoint refused it or found nothing to describe; V-S11).
-- Site structure (items of a `site` job): `sitemap_not_found` (the guessed `/sitemap.xml`
+- Site structure (items of a `site` job): `sitemap_not_found` (a guessed sitemap address
   answered 404 or 410), `sitemap_truncated` (the sitemap was cut at `SITE_SITEMAP_MAX_BYTES`, by
   its inflate or by its time limit, or its children did not fit the item; the entries before the
   cut), `sitemap_urls_truncated` (`SITE_MAX_SITEMAP_URLS` reached: the first entries),
@@ -2468,9 +2468,16 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
 - **P9-S7, sitemap discovery.** Item 0, whatever its outcome, appends the robots item when
   `sitemaps` is asked. It reads robots.txt through the compliance checker's cache (or loads it in
   the host's turn, in every compliance mode): its `Sitemap:` lines (relative ones resolved, at most
-  `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them one guess,
-  `<origin>/sitemap.xml` (`guessed: true`); robots.txt unavailable fails the item
-  `target_http_error`, retryable, without a guess.
+  `SITE_MAX_SITEMAP_FILES`) become sitemap items on any host; without them guesses in
+  turn (`guessed: true`, `GUESSED_SITEMAP_PATHS`): `<origin>/sitemap.xml`, then
+  `/sitemap_index.xml`, then `/wp-sitemap.xml`. The robots item appends only the first; a guess
+  that answers 404 or 410 (`format: absent`, `sitemap_not_found`) appends the next through its own
+  `extend` (so a rerun appends nothing twice), the first that answers is parsed and ends the
+  chain, and a guess that is blocked (address guard, compliance) or fails otherwise ends it too. A
+  sitemap that robots.txt lists never guesses. Every sitemap result carries `sitemap.type_hint`
+  (`sitemap_type_hint` of the URL that was listed or guessed: Yoast/Rank Math `post-sitemap`,
+  WordPress `wp-sitemap-posts-…`, `-taxonomies-…`, `-users-…`), else null; robots.txt unavailable
+  fails the item `target_http_error`, retryable, without a guess.
 - **P9-S8, sitemap parsing** (`site/sitemaps.py`, pure). A gzip body (by its magic bytes) is
   inflated to at most `SITE_SITEMAP_MAX_BYTES`; a body that does not start with `<` is a text
   sitemap; XML is read by `defusedxml`'s `iterparse` (no DTD, no entities, no external

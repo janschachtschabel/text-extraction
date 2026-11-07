@@ -18,7 +18,7 @@ from pydantic import (
 from text_extraction.compliance import ComplianceMode
 from text_extraction.convert.links import LINK_CATEGORY_DESCRIPTION
 from text_extraction.netguard import MAX_URL_LENGTH
-from text_extraction.page_types import LinkCategory
+from text_extraction.page_types import LinkCategory, PageType
 
 __all__ = [
     "LASTMOD_MAX_CHARS",
@@ -107,8 +107,9 @@ class SiteOptions(BaseModel, strict=True):
     )
     sitemaps: bool = Field(
         default=True,
-        description="Read robots.txt and every sitemap it lists (or `/sitemap.xml` when it lists "
-        "none), with sitemap indexes, gzip, text, RSS and Atom sitemaps.",
+        description="Read robots.txt and every sitemap it lists (when it lists none, the "
+        "addresses `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml` in turn, until "
+        "one exists), with sitemap indexes, gzip, text, RSS and Atom sitemaps.",
     )
     scope: Literal["host", "path"] = Field(
         default="host",
@@ -146,7 +147,8 @@ class SiteNode(BaseModel):
     role: SiteRole
     depth: int  # page: link distance from the start; sitemap: nesting (robots-listed = 0)
     parent: int | None  # the item that found it; None for the start page
-    guessed: bool = False  # a sitemap at /sitemap.xml that robots.txt did not list
+    guessed: bool = False  # a sitemap at a guessed address that robots.txt did not list
+    guess: int | None = None  # guessed: its position in GUESSED_SITEMAP_PATHS
     part: int | None = None  # sitemap_part: which part (2 and up) of its sitemap
 
 
@@ -252,10 +254,17 @@ class SitemapInfo(BaseModel):
 
     format: SitemapFormat = Field(
         description="`urlset`, `index`, `text`, `rss`, `atom`, or `absent` (a guessed "
-        "`/sitemap.xml` that does not exist)."
+        "address that does not exist)."
     )
     guessed: bool = Field(
-        default=False, description="`/sitemap.xml` was tried because robots.txt listed none."
+        default=False,
+        description="The address (`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`) "
+        "was tried because robots.txt listed no sitemap.",
+    )
+    type_hint: PageType | None = Field(
+        default=None,
+        description="The page type the sitemap's file name suggests for its entries "
+        "(WordPress, Yoast, Rank Math), else null.",
     )
     entries: list[SitemapEntry] = Field(
         default=[], description="The URLs of this part of the sitemap, in the file's order."
@@ -287,6 +296,7 @@ class SiteInfo(BaseModel):
         default=False, description="The page said `nofollow` (meta robots or X-Robots-Tag)."
     )
     sitemaps: list[str] | None = Field(
-        default=None, description="robots.txt: the sitemap URLs it listed, or the one guessed."
+        default=None,
+        description="robots.txt: the sitemap URLs it listed, or the first one guessed.",
     )
     sitemap: SitemapInfo | None = None

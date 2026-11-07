@@ -8,8 +8,11 @@ not the other way round:
 - **robots**: robots.txt's ``Sitemap:`` lines through ``Pipeline.robots_sitemaps`` (cached, or
   loaded in the host's turn, in every compliance mode), within ``EXTRACT_TIMEOUT_SECONDS``. Its
   sitemaps (at most ``SITE_MAX_SITEMAP_FILES``, else ``sitemap_files_truncated``) become items at
-  depth 0, on any host (the fetch checks the address); none listed means one guess,
-  ``<origin>/sitemap.xml``. ``unavailable`` fails ``target_http_error``, retryable, no guess.
+  depth 0, on any host (the fetch checks the address); none listed means a guess,
+  ``<origin>/sitemap.xml``, and a guess that answers 404 or 410 appends the next one of
+  ``GUESSED_SITEMAP_PATHS`` (through its own ``_extend``, so a rerun stores the same answer); a
+  guess that is blocked or fails ends the chain, a listed sitemap never guesses.
+  ``unavailable`` fails ``target_http_error``, retryable, no guess.
 - **sitemap**: ``Pipeline.fetch_raw`` (at most ``SITE_SITEMAP_MAX_BYTES``, cut there), then the
   inflate and the parse on the runner's own pool (one thread per pod, so sitemap parses never
   hold the threads that convert pages). The parse has a deadline (the item's budget,
@@ -40,7 +43,7 @@ import asyncio
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
@@ -50,6 +53,7 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.jobs import JobRecord, job_principal
+from text_extraction.page_types import sitemap_type_hint
 from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import QueueItem
@@ -69,6 +73,7 @@ from text_extraction.site.types import (
 from text_extraction.site.urls import normalize_url, seen_key, site_host
 
 __all__ = [
+    "GUESSED_SITEMAP_PATHS",
     "MAX_SITEMAP_NESTING",
     "SITEMAP_FILES_TRUNCATED_WARNING",
     "SITEMAP_NOT_FOUND_WARNING",
@@ -81,6 +86,9 @@ __all__ = [
 
 # The deepest sitemap a crawl reads: robots.txt lists depth 0, an index's children are one deeper.
 MAX_SITEMAP_NESTING = 3
+
+# The addresses tried in turn when robots.txt lists no sitemap.
+GUESSED_SITEMAP_PATHS: Final = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 
 SITEMAP_NOT_FOUND_WARNING = "sitemap_not_found"
 SITEMAP_TRUNCATED_WARNING = "sitemap_truncated"
@@ -293,14 +301,20 @@ class SitemapItems:
                 warnings.append(SITEMAP_FILES_TRUNCATED_WARNING)
                 caps.add("files")
         else:
-            guess = _origin(url) + "/sitemap.xml"
+            guess = _origin(url) + GUESSED_SITEMAP_PATHS[0]
             urls, guessed = [normalize_url(guess) or guess], True
         guard_high = self._guard is not None and self._guard.high
         candidates = unique_candidates(
             Candidate(
                 key=seen_key(sitemap),
                 url=sitemap,
-                node=SiteNode(role="sitemap", depth=0, parent=item.index, guessed=guessed),
+                node=SiteNode(
+                    role="sitemap",
+                    depth=0,
+                    parent=item.index,
+                    guessed=guessed,
+                    guess=0 if guessed else None,
+                ),
                 add=not guard_high,
             )
             for sitemap in urls
@@ -372,7 +386,7 @@ class SitemapItems:
         if fetched.status in (404, 410) and node.guessed:
             info = SitemapInfo(format="absent", guessed=True)
             envelope = Envelope(status="success", data=result(info, [SITEMAP_NOT_FOUND_WARNING]))
-            return envelope, _Outcome(links=[])
+            return envelope, await self._guess_next(job, item, url, node)
         if not 200 <= fetched.status < 300:
             retryable = fetched.status >= 500 or fetched.status == 429
             message = f"The sitemap answered with HTTP status {fetched.status}."
@@ -437,6 +451,7 @@ class SitemapItems:
             codes.append((ErrorCode.TOO_LARGE, _SITEMAP_CUT_MESSAGE))
             caps.add("urls")
 
+        type_hint = sitemap_type_hint(url)
         parts = pack_parts(entries, self._item_max_bytes // 2)
         count = len(parts)
         finished = [
@@ -456,6 +471,7 @@ class SitemapItems:
                             sitemap=SitemapInfo(
                                 format=sitemap_format,
                                 guessed=node.guessed,
+                                type_hint=type_hint,
                                 entries=part,
                                 entry_count=parsed.entry_count,
                                 part=number,
@@ -476,6 +492,7 @@ class SitemapItems:
         info = SitemapInfo(
             format=sitemap_format,
             guessed=node.guessed,
+            type_hint=type_hint,
             entries=parts[0],
             entry_count=parsed.entry_count,
             part=1,
@@ -516,6 +533,30 @@ class SitemapItems:
             envelope = Envelope(status="success", data=data)
         outcome = _Outcome(links=[], entries=len(entries), appended=len(extended.new), caps=caps)
         return envelope, outcome
+
+    async def _guess_next(
+        self, job: JobRecord, item: QueueItem, url: str, node: SiteNode
+    ) -> _Outcome:
+        """Append the next guessed sitemap after a guess that answered 404 or 410, while one is
+        left. A rerun's ``_extend`` answers from the stored batch, so nothing is appended twice."""
+        following = (node.guess if node.guess is not None else 0) + 1
+        if following >= len(GUESSED_SITEMAP_PATHS) or (
+            self._guard is not None and self._guard.high
+        ):
+            return _Outcome(links=[])
+        address = _origin(url) + GUESSED_SITEMAP_PATHS[following]
+        target = normalize_url(address) or address
+        candidate = Candidate(
+            key=seen_key(target),
+            url=target,
+            node=SiteNode(
+                role="sitemap", depth=0, parent=item.index, guessed=True, guess=following
+            ),
+            add=True,
+        )
+        extended = await self._extend(job, item, [candidate], max_pages=0)
+        caps = {"files"} if extended.capped and extended.indexes[0] is None else set()
+        return _Outcome(links=[], appended=len(extended.new), caps=caps)
 
     def _fit_children(self, shell: ExtractResult, parsed: ParsedSitemap) -> list[SitemapChild]:
         """The leading children of an index that let its item fit ``JOB_ITEM_MAX_BYTES``."""

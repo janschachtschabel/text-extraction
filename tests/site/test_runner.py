@@ -377,7 +377,7 @@ async def test_depth_zero_fetches_the_start_page_and_sitemaps_only() -> None:
     await crawl.crawl()
 
     items = await crawl.items(job_id)
-    assert roles(items) == ["page", "robots", "sitemap"]
+    assert roles(items) == ["page", "robots", "sitemap", "sitemap", "sitemap"]  # three guesses
     assert link_to(items[0], f"{SITE}/a").crawl == "depth"
 
 
@@ -433,7 +433,7 @@ async def test_failed_fetch_has_no_links_but_root_still_appends_robots() -> None
     await crawl.crawl()
 
     items = await crawl.items(job_id)
-    assert roles(items) == ["page", "robots", "sitemap"]
+    assert roles(items) == ["page", "robots", "sitemap", "sitemap", "sitemap"]
     root = items[0]
     assert root.result is not None
     assert root.result.status == "failed"
@@ -543,6 +543,148 @@ async def test_guessed_sitemap_404_is_absent_success() -> None:
     assert sitemap is not None
     assert (sitemap.format, sitemap.guessed) == ("absent", True)
     assert "sitemap_not_found" in data(sitemap_item).warnings
+
+
+@scenario
+async def test_unlisted_sitemap_tries_three_addresses_in_turn() -> None:
+    posts = f"{SITE}/wp-sitemap-posts-post-1.xml"
+    terms = f"{SITE}/wp-sitemap-taxonomies-category-1.xml"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", index(posts, terms)),
+            posts: text(posts, urlset(f"{SITE}/a", f"{SITE}/b")),
+            terms: text(terms, urlset(f"{SITE}/c")),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    guessed = [item for item in items if site(item).role == "sitemap"]
+    assert [item.url for item in guessed[:3]] == [
+        f"{SITE}/sitemap.xml",
+        f"{SITE}/sitemap_index.xml",
+        f"{SITE}/wp-sitemap.xml",
+    ]
+    assert len(guessed) == 5
+    contexts = [await crawl.sites.context(job_id, item.index) for item in guessed[:3]]
+    assert [context.node.guess for context in contexts if context.node] == [0, 1, 2]
+    assert [site(item).parent for item in guessed[1:3]] == [guessed[0].index, guessed[1].index]
+    assert [site(item).depth for item in guessed[:3]] == [0, 0, 0]
+    for item in guessed[:2]:
+        sitemap = site(item).sitemap
+        assert sitemap is not None
+        assert (sitemap.format, sitemap.guessed) == ("absent", True)
+    third = site(guessed[2]).sitemap
+    assert third is not None
+    assert [child.url for child in third.children] == [posts, terms]
+    assert [site(item).sitemap.type_hint for item in guessed[3:]] == [  # type: ignore[union-attr]
+        "content",
+        "listing",
+    ]
+    entries = [
+        entry.loc
+        for item in guessed[3:]
+        for entry in site(item).sitemap.entries  # type: ignore[union-attr]
+    ]
+    assert entries == [f"{SITE}/a", f"{SITE}/b", f"{SITE}/c"]
+
+
+@scenario
+async def test_first_guess_found_stops_the_chain() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(f"{SITE}/x")),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert f"{SITE}/sitemap_index.xml" not in [item.url for item in items]
+    assert roles(items) == ["page", "robots", "sitemap"]
+
+
+@scenario
+async def test_guess_that_fails_ends_the_chain() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap.xml": fetched(f"{SITE}/sitemap.xml", "Busy", status=503),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert roles(items) == ["page", "robots", "sitemap"]
+    assert items[2].result is not None
+    assert items[2].result.status == "failed"
+
+
+@scenario
+async def test_listed_sitemap_404_appends_no_guess() -> None:
+    crawl = Crawl(
+        {ROOT: page(ROOT), ROBOTS: text(ROBOTS, f"Sitemap: {SITE}/gone.xml\n", "text/plain")}
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    assert roles(await crawl.items(job_id)) == ["page", "robots", "sitemap"]
+
+
+@scenario
+async def test_rerun_of_a_missing_guess_appends_the_next_one_once() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap_index.xml": text(f"{SITE}/sitemap_index.xml", urlset(f"{SITE}/x")),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+    await crawl.step()  # the start page
+    await crawl.step()  # robots
+    await die_after_extend(crawl, f"{SITE}/sitemap.xml")
+    assert len(await crawl.items(job_id)) == 4  # the next guess is appended, never queued
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items[2:]] == [f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml"]
+    assert all(item.state == "done" for item in items)
+
+
+@scenario
+async def test_listed_sitemap_gets_its_type_hint() -> None:
+    post = f"{SITE}/post-sitemap.xml"
+    locs = [f"{SITE}/kurs/{n}/lektion.html" for n in range(400)]
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {post}\n", "text/plain"),
+            post: text(post, urlset(*locs)),
+        },
+        job_item_max_bytes=20_000,
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = [item for item in await crawl.items(job_id) if item.url == post]
+    assert len(items) >= 2
+    assert [site(item).sitemap.type_hint for item in items] == ["content"] * len(items)  # type: ignore[union-attr]
 
 
 @scenario
@@ -1008,6 +1150,8 @@ async def test_exhausted_parent_requeues_children_and_job_completes() -> None:
         f"{SITE}/a",
         f"{SITE}/b",
         f"{SITE}/sitemap.xml",
+        f"{SITE}/sitemap_index.xml",
+        f"{SITE}/wp-sitemap.xml",
     ]
     root = items[0].result
     assert root is not None
