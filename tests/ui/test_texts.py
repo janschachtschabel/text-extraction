@@ -15,9 +15,10 @@ from tests.ui.conftest import run, running
 from tests.ui.site_items import result_data
 from text_extraction.envelope import ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult
+from text_extraction.pipeline_media import TRANSCRIPTION_DISABLED_MESSAGE
 from text_extraction.ui.i18n import CATALOGUES, LANGUAGE_HEADER, LANGUAGES, Language, text_of
 from text_extraction.ui.results import render_result
-from text_extraction.ui.texts import warning_text
+from text_extraction.ui.texts import error_text, warning_text
 from text_extraction.ui.timeline import timeline
 
 ARCHITECTURE = Path(__file__).resolve().parents[2] / "docs" / "architecture.md"
@@ -163,3 +164,52 @@ def test_timeline_in_german() -> None:
         "action_2_failed: Browser-Aktion 2 ist fehlgeschlagen.",
         "no_such_warning_x",
     ]
+
+
+@pytest.mark.parametrize(
+    ("http_status", "code"),
+    [(200, ErrorCode.UNSUPPORTED_CONTENT_TYPE), (400, ErrorCode.INVALID_REQUEST)],
+)
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_transcription_disabled_has_its_own_text(
+    language: Language, http_status: int, code: ErrorCode
+) -> None:
+    """An audio or video upload (or ``transcribe: true``) on a service without ASR names the
+    switched-off transcription, not "this kind of content cannot be converted"."""
+    envelope = {
+        "status": "failed",
+        "data": None,
+        "error": {"code": str(code), "message": TRANSCRIPTION_DISABLED_MESSAGE, "retryable": False},
+    }
+    html = render_result(op="file", http_status=http_status, envelope=envelope, language=language)
+
+    root = tree(html)
+    assert texts(root, "//*[@class='error-code']") == [str(code)]
+    assert texts(root, "//*[@class='error-text']") == [
+        CATALOGUES[language]["result.transcription_disabled"]
+    ]
+    assert texts(root, "//*[@class='error-message']") == [TRANSCRIPTION_DISABLED_MESSAGE]
+
+
+def test_other_unsupported_content_keeps_the_code_text() -> None:
+    envelope = {
+        "status": "failed",
+        "data": None,
+        "error": {
+            "code": "unsupported_content_type",
+            "message": "Content type x/y is not supported in fast mode.",
+            "retryable": False,
+        },
+    }
+    root = tree(render_result(op="file", http_status=200, envelope=envelope, language="de"))
+    assert texts(root, "//*[@class='error-text']") == [
+        CATALOGUES["de"]["error.unsupported_content_type"]
+    ]
+
+
+def test_job_panel_names_switched_off_transcription() -> None:
+    message = error_text(ErrorCode.INVALID_REQUEST, 400, TRANSCRIPTION_DISABLED_MESSAGE)
+    assert message.key == "result.transcription_disabled"
+    assert error_text(ErrorCode.INVALID_REQUEST, 400, "Something else.").key == (
+        "error.invalid_request"
+    )

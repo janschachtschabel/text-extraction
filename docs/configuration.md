@@ -218,10 +218,11 @@ Deno, yt-dlp's JavaScript runtime, is the binary of the `deno` package in the im
 is given its path, so it needs no `PATH` entry. `text-extraction-asr-worker --check` runs the
 self-check in one child and exits 0 (1 on a failure, 2 for invalid settings); it needs no Valkey.
 
-docker compose starts the ASR worker only with the profile `asr`:
-`docker compose --profile asr up -d --wait` with `ASR_ENABLED=true` in `.env` (compose passes
-`ASR_ENABLED` from `.env` or the shell to every service, default false; the other ASR settings,
-such as `ASR_BACKEND`, `ASR_MODEL` and `ASR_EXTERNAL_API_KEY`, reach every service from `.env`).
+docker compose always starts the ASR worker (no profile): transcription is on by default there
+(compose passes `ASR_ENABLED` from `.env` or the shell to every service, default true; the other
+ASR settings, such as `ASR_BACKEND`, `ASR_MODEL` and `ASR_EXTERNAL_API_KEY`, reach every service
+from `.env`). To switch it off, set `ASR_ENABLED=false` in `.env` and start with
+`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`.
 The service `asr-models` runs `--download-models` into the volume `asr-models` first (it needs
 huggingface.co once; with `ASR_BACKEND=openai` it does nothing), then `asr-worker` mounts it
 read-only and keeps downloaded media on the volume `asr-scratch` (`/scratch`, not the tmpfs `/tmp`,
@@ -401,7 +402,8 @@ title, description, duration and licence; without subtitles it answers the metad
 (`transcript_source: metadata_only`, `partial`/`no_transcript_available`). Subtitles are read by
 child processes of the pod that holds the request (youtube-transcript-api, yt-dlp). Speech
 recognition (`transcribe: true`, and every uploaded audio or video file) runs in the ASR worker and
-is always a job. ASR is off by default: the API image has neither Whisper nor models.
+is always a job. The service's own default and the Helm chart have ASR off (the API image has
+neither Whisper nor models); docker compose starts the ASR worker and switches it on.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -416,7 +418,7 @@ is always a job. ASR is off by default: the API image has neither Whisper nor mo
 | `MEDIA_UPLOAD_MAX_BYTES` | `25000000` | Largest audio or video file that can be uploaded for transcription, in bytes (about 25 minutes of MP3 at 128 kbit/s). The bytes travel through Valkey and count in the input budget (`DOCLING_INPUT_BUDGET_BYTES`, which holds the inputs of all kinds), so with `ASR_ENABLED=true` it must not exceed it, or the service exits with code 2 at start-up. At least 1000000. Larger media: send the URL. The Helm chart sets it from `workers.asr.uploadMaxBytes`. |
 | `MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Time budget of one media download by the ASR worker, in seconds (a platform video's info and its download together), within the item's `ASR_TIMEOUT_SECONDS`: the download gets this or what is left of the item's budget, whichever is less. A download that runs out of it fails with `timeout`, retryable (out of the item's budget: not retryable). A media file's download holds its host's turn at the outbound gate, so with `ASR_ENABLED` a turn's lease lasts at least this long plus 30 s. 30 to 3600. |
 | `MEDIA_TRANSCRIPT_PANEL_ENABLED` | `true` | Use YouTube's new transcript view in the browser when the subtitles could not be read (`auto` requests, needs `BROWSER_ENABLED`). Default `true`. |
-| `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request`. The Helm chart sets it from `workers.asr.enabled` on every pod. |
+| `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request` and an audio or video upload `unsupported_content_type` (the playground names the switched-off transcription). The Helm chart sets it from `workers.asr.enabled` on every pod; docker compose sets it to true unless `.env` or the shell says false. |
 | `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`, called directly, not through the egress proxy); the worker then needs no models (no model check, `--download-models` downloads nothing, the start-up self-check and `--check` encode the built-in clip as Opus instead of transcribing it, and still check FFmpeg's licence and the programs on `PATH`). The worker decodes the media itself, encodes it as 16 kHz mono Opus at 32 kbit/s in Ogg and posts it in chunks of at most 20 minutes, cut in pauses. The key is the caller's `X-ASR-Api-Key` (on `POST /v1/extract`, `POST /v1/extract/file` and `POST /v1/batch`; stored with the job, never shown or logged), else `ASR_EXTERNAL_API_KEY`; without either, `transcribe: true` and audio or video uploads answer 400 `invalid_request`. Set it on the API pods too. With `openai` and no `ASR_EXTERNAL_BASE_URL` the ASR worker exits with code 2. The client is the OpenAI SDK, as for the LLM: it never sends the headers of `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID`, and with `ASR_ENABLED=true` and `openai` start-up refuses `OPENAI_CUSTOM_HEADERS` and `OPENAI_LOG` when set and not empty (exit code 2; see LLM). |
 | `ASR_MODEL` | `large-v3-turbo` | Whisper model of the local backend: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, faster on CPU, more errors). Any other value makes the service exit with code 2. |
 | `ASR_MODELS_PATH` | `/models` | Volume with the Whisper models, one folder per model. The image holds no models; the ASR worker mounts the volume read-only. |

@@ -283,7 +283,7 @@ async def _read_panel(
     except ServiceError as error:
         return JobPanel(
             id=job_id,
-            error=error_text(error.code, error.http_status),
+            error=error_text(error.code, error.http_status, error.message),
             error_detail=error.message,
             retryable=error.retryable,
         )
@@ -303,7 +303,9 @@ def _live_context(
         "jobs": panels,
         "refresh_url": shown.url() if running else None,
         "delay": max(delay, REFRESH_SECONDS),
-        "refusal": error_text(refused.code, refused.http_status) if refused else None,
+        "refusal": (
+            error_text(refused.code, refused.http_status, refused.message) if refused else None
+        ),
         "refusal_detail": refused.message if refused else None,
         "page_items": shown.limit,
     }

@@ -97,7 +97,7 @@ Its rows count as `ok` like any other (50 words or more); what matters is the Me
 ```bash
 # Subtitles and metadata only (no ASR worker), as the live workflow runs it:
 uv run python -m tests.live.run_live --urls tests/live/urls/media.csv --no-transcribe
-# With transcription (docker compose --profile asr up, ASR_ENABLED=true): the media files are
+# With transcription (docker compose up, which starts the ASR worker): the media files are
 # transcribed as jobs, and an upload of the corpus clip with them.
 uv run python -m tests.live.run_live --urls tests/live/urls/media.csv \
   --upload tests/media/corpus/speech_de.ogg --timeout 120
