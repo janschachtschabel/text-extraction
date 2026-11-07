@@ -381,9 +381,12 @@
     countSelected(form);
   }
 
+  // "Select all" ticks what the user sees: while a type filter (package 18) hides URLs it skips
+  // them, like a section tick and "Select content pages". "Select none" clears everything,
+  // hidden boxes included, so no invisible tick stays behind.
   function selectAll(form, value) {
     form.querySelectorAll(".tree input[type=checkbox]").forEach(function (box) {
-      if (box.disabled) {
+      if (box.disabled || (value && box.closest("li[hidden]"))) {
         return;
       }
       box.checked = value;

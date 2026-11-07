@@ -94,14 +94,25 @@ def test_a_chip_filters_the_leaves_and_all_restores_them(ui: tuple[str, str]) ->
         _chip(view, "imprint").click()
         expect(view.locator("li[data-type=imprint]")).to_be_hidden()
 
-        # A hidden box keeps its state, and "Select content pages" leaves it alone.
+        # "Select all" and "Select content pages" tick the visible leaves only.
         home = view.locator(f"input[name=url][value='{origin}/']")
         view.locator("[data-action=tree-all]").click()
-        expect(view.locator(".tree-counter")).to_have_text(f"{URLS} selected")
+        expect(view.locator(".tree-counter")).to_have_text("2 selected")
+        expect(home).not_to_be_checked()  # hidden by the filter, so not ticked
+
+        # A hidden box keeps its state.
+        _chip(view, "all").click()
+        home.click()
+        _chip(view, "event").click()
+        expect(view.locator("input[name=url]:checked")).to_have_count(3)
         view.locator("[data-action=tree-content]").click()
-        expect(home).to_be_checked()  # hidden by the filter, so untouched
-        expect(view.locator("input[name=url]:checked")).to_have_count(URLS)
+        expect(home).to_be_checked()
+        expect(view.locator("input[name=url]:checked")).to_have_count(3)
+
+        # "Select none" clears everything, the hidden boxes included.
         view.locator("[data-action=tree-none]").click()
+        expect(view.locator("input[name=url]:checked")).to_have_count(0)
+        expect(home).not_to_be_checked()
         view.locator("[data-action=tree-content]").click()
         expect(view.locator("input[name=url]:checked")).to_have_count(2)  # the events only
 
