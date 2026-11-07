@@ -25,6 +25,13 @@ on:
         description: Fail below this ok rate, in percent (applies in auto mode only)
         type: string
         default: "80"
+      site_discovery:
+        description: >-
+          Discovery of the site structure crawl: follow links (crawl), read the sitemap first
+          (sitemap_first), or both, one crawl after the other with a summary each
+        type: choice
+        options: [crawl, sitemap_first, both]
+        default: both
       service_ref:
         description: >-
           Measure the service of this branch, tag or full commit SHA (empty: this commit), with
@@ -66,7 +73,7 @@ jobs:
           && (github.event.action != 'labeled' || github.event.label.name == 'live'))
     runs-on: ubuntu-latest
     # Five runs: the gate, the smoke report, wlo_200 forced through the browser, the media set
-    # and the site structure crawl (at most 20 minutes). The full regression on wlo_4000 is one
+    # and the site structure crawl (at most 35 minutes, both discoveries). The full regression on wlo_4000 is one
     # run of 4,000 URLs and nothing else (the report-only steps are skipped), so it gets 330
     # minutes, below the 360 that GitHub allows a job.
     timeout-minutes: ${{ inputs.url_set == 'wlo_4000' && 330 || 110 }}
@@ -78,6 +85,8 @@ jobs:
       # Pull requests and the weekly run always use auto. A manual run can pick fast or browser
       # to compare with the 2026-09-28 baselines (fast 68 %, browser 80 % on 4,000 URLs).
       MODE: ${{ inputs.mode || 'auto' }}
+      # Pull requests and the weekly run crawl both ways; a manual run can pick one.
+      SITE_DISCOVERY: ${{ inputs.site_discovery || 'both' }}
     services:
       valkey:
         image: valkey/valkey:8.1-alpine
@@ -220,8 +229,10 @@ jobs:
             --summary-out results/summary_media_auto.md
 
       # Report only, never fails the job (package 9): the site structure crawl of five WLO-type
-      # sites, one click deep, at most 25 pages each, under `compliance: enforce` (a crawler
-      # follows links, so robots.txt and TDM opt-outs bind it: CLAUDE.md rule 6, decision D4;
+      # sites, one click deep, at most 25 pages each, once per chosen discovery (`site_discovery`:
+      # crawl, sitemap_first or both; the second run shows how much the sitemap saves), under
+      # `compliance: enforce` (a crawler follows links, so robots.txt and TDM opt-outs bind it:
+      # CLAUDE.md rule 6, decision D4;
       # the summary counts the links that say `blocked`). A crawl is a `site` job, so an extract
       # worker starts here, after the runs above (they measure the rig without one), with its
       # internal port on 9092. The summary goes to the job log and, with the others, to the job
@@ -229,7 +240,7 @@ jobs:
       - name: Run the site structure crawl (report only)
         if: ${{ !cancelled() && env.URL_SET != 'wlo_4000' }}
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 35
         env:
           AUTH_MODE: none
           VALKEY_URL: redis://127.0.0.1:6379/0
@@ -244,14 +255,22 @@ jobs:
           done
           curl -fsS http://127.0.0.1:9092/ready > /dev/null 2>&1 \
             || { echo "the extract worker is not ready" >&2; tail -n 50 results/extract-worker.log >&2; }
-          uv run python -m tests.live.run_site \
-            --urls tests/live/urls/sites.csv \
-            --depth 1 \
-            --max-pages 25 \
-            --compliance enforce \
-            --job-timeout 900 \
-            --out results/site_structure.jsonl \
-            --summary-out results/summary_site_structure.md || true
+          if [ "$SITE_DISCOVERY" = both ]; then
+            discoveries="crawl sitemap_first"
+          else
+            discoveries="$SITE_DISCOVERY"
+          fi
+          for discovery in $discoveries; do
+            uv run python -m tests.live.run_site \
+              --urls tests/live/urls/sites.csv \
+              --depth 1 \
+              --max-pages 25 \
+              --compliance enforce \
+              --discovery "$discovery" \
+              --job-timeout 900 \
+              --out "results/site_structure_${discovery}.jsonl" \
+              --summary-out "results/summary_site_structure_${discovery}.md" || true
+          done
 
       - name: Add the summaries to the job summary
         if: always()

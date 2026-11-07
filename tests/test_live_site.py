@@ -184,7 +184,9 @@ def test_summary_is_markdown_with_one_row_per_site() -> None:
     summary = summarize(reports, depth=1, max_pages=25, compliance="report")
 
     lines = summary.splitlines()
-    assert lines[0] == "## Site structure: 2 sites, depth 1, max_pages 25, compliance report"
+    assert lines[0] == (
+        "## Site structure: 2 sites, depth 1, max_pages 25, compliance report, discovery crawl"
+    )
     assert (
         "| Site | State | Duration | Items | Pages | Pages ok | Failed | Sitemap files "
         "| Parts | Entries | sitemap | tree URLs | type open | type open % "
@@ -282,6 +284,7 @@ def crawl_with(transport: httpx.MockTransport, **options: Any) -> SiteReport:
                 depth=options.get("depth", 1),
                 max_pages=options.get("max_pages", 25),
                 compliance=options.get("compliance", "enforce"),
+                discovery=options.get("discovery", "crawl"),
                 poll_seconds=0,
                 job_timeout=options.get("job_timeout", 5),
                 page_size=options.get("page_size", 2),
@@ -311,6 +314,61 @@ def test_crawl_sends_the_documented_request_and_pages_the_items() -> None:
         ("2", "2"),
         ("4", "2"),
     ]
+
+
+def test_the_sitemap_first_discovery_is_sent_as_a_site_option() -> None:
+    transport, seen = fake_service(ITEMS)
+
+    crawl_with(transport, discovery="sitemap_first")
+
+    assert json.loads(seen[0].content)["discovery"] == "sitemap_first"
+
+
+def test_the_default_discovery_is_not_sent() -> None:
+    """``crawl`` is the API's default, and an older service without the option still accepts the
+    request."""
+    transport, seen = fake_service(ITEMS)
+
+    crawl_with(transport)
+
+    assert "discovery" not in json.loads(seen[0].content)
+
+
+def test_the_heading_names_the_discovery() -> None:
+    summary = summarize([], depth=1, max_pages=25, compliance="enforce", discovery="sitemap_first")
+
+    assert summary.splitlines()[0] == (
+        "## Site structure: 0 sites, depth 1, max_pages 25, compliance enforce, "
+        "discovery sitemap_first"
+    )
+
+
+def test_main_takes_the_discovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    urls = tmp_path / "sites.csv"
+    urls.write_text(f"url\n{START}\n")
+    transport, seen = fake_service(ITEMS)
+    monkeypatch.setattr(run_site, "_transport", lambda: transport)
+    summary_out = tmp_path / "summary.md"
+
+    run_site.main(
+        [
+            "--urls",
+            str(urls),
+            "--discovery",
+            "sitemap_first",
+            "--out",
+            str(tmp_path / "out.jsonl"),
+            "--summary-out",
+            str(summary_out),
+            "--poll-seconds",
+            "0",
+        ]
+    )
+
+    assert json.loads(seen[0].content)["discovery"] == "sitemap_first"
+    assert (
+        summary_out.read_text(encoding="utf-8").splitlines()[0].endswith("discovery sitemap_first")
+    )
 
 
 def limited_then(

@@ -209,9 +209,12 @@ and worker logs as the `live-results` artifact.
 - **Every run** also reports the site run (`run_site.py` on `sites.csv`, depth 1, 25 pages per
   site, `compliance: enforce`), last and never as a gate: it starts an extract worker (internal
   port 9092; the runs before it measure the rig without one), the step may fail without failing
-  the job (`continue-on-error`, at most 20 minutes, `--job-timeout 900`; skipped once the run
+  the job (`continue-on-error`, at most 35 minutes, `--job-timeout 900`; skipped once the run
   is cancelled), and its summary goes to the job log and the job summary; the worker's log is in
-  the artifact.
+  the artifact. It runs once per discovery: the dispatch input `site_discovery` (`crawl`,
+  `sitemap_first` or `both`, the default also for pull requests and the weekly run) sets
+  `--discovery`, and each run has its own summary and result file
+  (`site_structure_<discovery>.jsonl`). Compare the two tables to see what `sitemap_first` saves.
 
 ## The full WLO regression
 

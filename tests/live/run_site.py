@@ -36,6 +36,7 @@ from text_extraction.ui.site_tree import build_tree
 DEFAULT_URLS = Path(__file__).parent / "urls" / "sites.csv"
 DEFAULT_DEPTH = 1
 DEFAULT_MAX_PAGES = 25
+DEFAULT_DISCOVERY = "crawl"  # the API's default of the site option `discovery`
 # One request's deadline; the crawl itself runs as a job and is waited for separately.
 DEFAULT_CLIENT_TIMEOUT_SECONDS = 60.0
 # A crawl of 25 pages takes minutes at the default per-host spacing; large sitemaps add to it.
@@ -301,6 +302,7 @@ async def crawl(
     depth: int,
     max_pages: int,
     compliance: str,
+    discovery: str = DEFAULT_DISCOVERY,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     job_timeout: float = DEFAULT_JOB_TIMEOUT_SECONDS,
     page_size: int = PAGE_SIZE,
@@ -315,6 +317,8 @@ async def crawl(
         "compliance": compliance,
         "cache": False,
     }
+    if discovery != DEFAULT_DISCOVERY:  # the API's default stays unsent: older services take it
+        body["discovery"] = discovery
     try:
         response = await _patient(lambda: client.post("/v1/site-structure", json=body))
         if response.status_code != 202:
@@ -350,6 +354,7 @@ async def run(
     depth: int,
     max_pages: int,
     compliance: str,
+    discovery: str = DEFAULT_DISCOVERY,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     job_timeout: float = DEFAULT_JOB_TIMEOUT_SECONDS,
 ) -> list[SiteReport]:
@@ -364,6 +369,7 @@ async def run(
                     depth=depth,
                     max_pages=max_pages,
                     compliance=compliance,
+                    discovery=discovery,
                     poll_seconds=poll_seconds,
                     job_timeout=job_timeout,
                 )
@@ -415,12 +421,19 @@ def _page_types_table(reports: Sequence[SiteReport]) -> list[str]:
     return ["### Page types", "", *_table(["Site", "Type", "Pages"], rows), ""]
 
 
-def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, compliance: str) -> str:
+def summarize(
+    reports: Sequence[SiteReport],
+    *,
+    depth: int,
+    max_pages: int,
+    compliance: str,
+    discovery: str = DEFAULT_DISCOVERY,
+) -> str:
     """The Markdown summary: a row per site, then the link histograms and the warnings."""
     sites = f"{len(reports)} site{'' if len(reports) == 1 else 's'}"
     lines = [
         f"## Site structure: {sites}, depth {depth}, max_pages {max_pages}, "
-        f"compliance {compliance}",
+        f"compliance {compliance}, discovery {discovery}",
         "",
     ]
     rows = [
@@ -488,6 +501,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="enforce",
         help="the request's compliance mode (default enforce: a crawl respects robots.txt and TDM)",
     )
+    parser.add_argument(
+        "--discovery",
+        choices=["crawl", "sitemap_first"],
+        default=DEFAULT_DISCOVERY,
+        help="the site option `discovery`: follow links (crawl) or read the sitemap first and "
+        "follow no links when there is one (sitemap_first)",
+    )
     parser.add_argument("--timeout", type=float, default=DEFAULT_CLIENT_TIMEOUT_SECONDS)
     parser.add_argument(
         "--job-timeout",
@@ -529,6 +549,7 @@ async def amain(args: argparse.Namespace) -> int:
             depth=args.depth,
             max_pages=args.max_pages,
             compliance=args.compliance,
+            discovery=args.discovery,
             poll_seconds=args.poll_seconds,
             job_timeout=args.job_timeout,
         )
@@ -537,7 +558,11 @@ async def amain(args: argparse.Namespace) -> int:
         for report in reports:
             sink.write(json.dumps(asdict(report)) + "\n")
     summary = summarize(
-        reports, depth=args.depth, max_pages=args.max_pages, compliance=args.compliance
+        reports,
+        depth=args.depth,
+        max_pages=args.max_pages,
+        compliance=args.compliance,
+        discovery=args.discovery,
     )
     print(summary)
     if args.summary_out is not None:
