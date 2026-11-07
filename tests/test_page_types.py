@@ -1176,12 +1176,41 @@ def test_a_type_name_as_first_segment_does_not_beat_a_main_event(path: str) -> N
     )
 
 
-def test_a_main_entity_keeps_a_type_name_as_last_or_only_segment() -> None:
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        # A type name as the whole path, after an optional language code, beats the entity.
+        ("/impressum", "imprint"),
+        ("/datenschutz/", "privacy"),
+        ("/de/impressum", "imprint"),
+        ("/impressum/index.html", "imprint"),
+        ("/kategorie", "listing"),
+        # Anywhere else the main entity wins, as in 0.1.6 (AU3-R5).
+        ("/service/impressum", "learning_material"),
+        ("/kontakt/anfahrt", "learning_material"),
+        ("/kategorie/mathe", "learning_material"),
+        ("/de/kurse/datenschutz", "learning_material"),
+    ],
+)
+def test_a_main_entity_loses_only_to_a_type_name_as_the_whole_path(
+    path: str, expected: str
+) -> None:
     html = doc(head=json_ld({"@type": "Quiz"}))
-    assert classify(html, "https://example.org/impressum")[0] == "imprint"
-    assert classify(html, "https://example.org/service/impressum")[0] == "imprint"
-    assert classify(html, "https://example.org/kontakt/anfahrt")[0] == "contact"
-    assert classify(html, "https://example.org/kategorie/mathe")[0] == "listing"
+    assert classify(html, f"https://example.org{path}")[0] == expected
+
+
+def test_a_main_course_below_a_section_keeps_its_type() -> None:
+    html = doc(head=json_ld({"@type": "Course", "name": "Datenschutz in der Schule"}))
+    assert classify(html, "https://example.org/kurse/datenschutz") == (
+        "learning_material",
+        ["schema_org"],
+    )
+
+
+@pytest.mark.parametrize("path", ["/fortbildungen/barrierefreiheit", "/fortbildungen/datenschutz"])
+def test_a_main_event_below_a_section_keeps_its_type(path: str) -> None:
+    html = doc(head=json_ld({"@type": "Event", "name": "Fortbildung"}))
+    assert classify(html, f"https://example.org{path}") == ("event", ["schema_org"])
 
 
 def test_a_job_posting_is_no_article() -> None:

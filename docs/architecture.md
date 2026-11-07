@@ -2742,8 +2742,8 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   words (parts joined by `-` or `_`, at least two of which hold two letters in a row:
   `mathe-workshop-2026` is one, `seite-2` is none); the `url` vote is then what the other
   segments and the query say (`_url_type(url, first_segment=False)`), and dropped when that is
-  nothing or, for the article, `listing` (A26-R5). The same holds against a main event or
-  learning resource, whatever `og:type` says (AU3-R5). So
+  nothing or, for the article, `listing` (A26-R5). Against a main event or learning resource
+  such a `url` vote loses anyway (AU3-R5). So
   `/datenschutz/schuelerfotos-im-unterricht`, `/kontakt/elterngespraech-vorbereiten` and
   `/barrierefreiheit/leichte-sprache-im-unterricht` are `content`, and
   `/datenschutz/cookie-richtlinie` is `legal` by its last segment. A name as the only or the last
@@ -2773,14 +2773,18 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   `learning_material` (signal `schema_org`; the contact, about, search and collection types keep
   their rank 3 and are read from any node and any outermost scope, as before).
   **Ruling AU3-R5 (third audit, A2: the main entity; revises package 18):** an event or
-  learning-resource type counts only when it is the page's *one main entity*, and that vote
-  ranks below `url` and above the title. Below `url` means: a type name as the only or the last
-  segment, a listing name and the query rules beat it (`/impressum` with a Quiz node stays
-  `imprint`, `/kategorie/mathe` with a Course stays `listing`); a type name as the first segment
-  before a slug of words does not (AU3-R3 applies regardless of `og:type`, so
-  `/kontakt/workshop-anmeldung` and `/ueber-uns/termine/tag-der-offenen-tuer` with a main Event
-  are `event`), nor does one before a single word lose its vote (`/kontakt/anfahrt` with a Quiz
-  stays `contact`). The main entities are the `mainEntity` values of the JSON-LD nodes typed
+  learning-resource type counts only when it is the page's *one main entity*. That vote ranks
+  above `url` and the title, as schema.org did in 0.1.6, with one exception: a `url` vote of a
+  type name that is the whole path, without an index file and after an optional language code
+  (`/impressum`, `/datenschutz/`, `/de/impressum`, `/impressum/index.html`, `/kategorie`), beats
+  it (`_type_name_path`; the decision order is then `_DECISIVE_URL_FIRST`), so `/impressum` with
+  a Quiz node stays `imprint`. Anywhere else in the path, and for the query rules, the entity
+  wins: `/kurse/datenschutz` with a main Course is `learning_material`,
+  `/fortbildungen/barrierefreiheit` with a main Event is `event`, and so are
+  `/service/impressum`, `/kontakt/anfahrt`, `/kategorie/mathe`, `/kontakt/workshop-anmeldung`
+  and `/ueber-uns/termine/tag-der-offenen-tuer` with a main entity. (The first cut of this ruling
+  ranked every `url` vote above the entity; a type word as the last segment then beat a page's
+  single Course or Event, a regression from 0.1.6, fixed in the final review.) The main entities are the `mainEntity` values of the JSON-LD nodes typed
   `*Page` (`WebPage`, `ItemPage` ...; inline, or an `{"@id"}` reference whose `@id` is a string
   naming a node of the page; at most 200 values are read, each node once), else every JSON-LD
   node (top-level and `@graph`); when no JSON-LD entity is an article, an event or a learning
@@ -2875,9 +2879,10 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   (P14-R4), and a section named like a listed language (`/id/`, `/no/`) counts as a language
   home unless the page's `lang` names another language (A26-R3). A main event or learning
   resource in microdata on a plain wrapper (`<div itemscope itemtype=".../Event">` around the
-  content, not on `<body>`, `<main>` or `<article>`) no longer types the page (AU3-R5): a
-  sidebar widget looks the same; JSON-LD or `mainEntity` still does. Unnamed events without
-  `@id`, `startDate` and `url` count as one entity, so a list of such events can be `event`.
+  content, not on `<html>`, `<body>`, `<main>` or `<article>`) no longer types the page
+  (AU3-R5): a sidebar widget looks the same; JSON-LD or `mainEntity` still does. Unnamed events
+  without `@id`, `startDate` and `url` count as one entity, so a list of such events can be
+  `event`.
 - **Crawl speed (package 18).** Measured by the live harness (`tests/live/run_site.py`, depth 1,
   `max_pages` 25, `compliance: enforce`, on GitHub runners): at the old 1 s spacing a crawl took
   26 to 46 s for its 25 pages; at 500 ms it takes 17 to 32 s (wirlernenonline.de 46 -> 26 s,

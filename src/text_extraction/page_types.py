@@ -22,8 +22,9 @@ its signals, strongest first (ruling P14-S4):
    outside ``<aside>``, ``<nav>``, ``<header>`` and ``<footer>``. Only entities that are an
    article (a type ending in ``Article``, or ``BlogPosting``, ``SocialMediaPosting``,
    ``DiscussionForumPosting``, ``LiveBlogPosting``), an event or a learning resource count;
-   there has to be exactly one, and it must not be an article (AU3-R5). Against it, a type name
-   as the first path segment before a slug of words does not count for ``url`` (AU3-R3).
+   there has to be exactly one, and it must not be an article (AU3-R5). It ranks above ``url``
+   unless the path, after an optional language code, is only the type name (``/impressum``,
+   ``/de/datenschutz/``): ``/kurse/datenschutz`` with a main ``Course`` is ``learning_material``.
 6. The ``<title>`` starts with the name of a type (``Impressum``, ``Kontakt``, ``Login`` ...),
    followed by nothing (a trailing colon aside) or a separator other than a colon, or ends with
    one after a separator;
@@ -785,7 +786,8 @@ _POSTING_SCHEMA_TYPES: Final = frozenset(
     {"BlogPosting", "SocialMediaPosting", "DiscussionForumPosting", "LiveBlogPosting"}
 )
 _PAGE_SCHEMA_SUFFIX: Final = "Page"  # WebPage, ItemPage, ...: a node whose mainEntity counts
-# The types a page's one main entity gives; they rank below ``url`` (AU3-R5).
+# The types a page's one main entity gives; they rank below a ``url`` vote of a type name that
+# is the whole path, and above any other (AU3-R5).
 _ENTITY_PAGE_TYPES: Final = frozenset({"event", "learning_material"})
 # Microdata scopes on these elements can be the page's main entity, unless inside one of the
 # frame elements (a sidebar, a menu, the header or the footer).
@@ -1050,7 +1052,8 @@ _SIGNAL_ORDER: Final[tuple[PageSignal, ...]] = (
     "word_count",
 )
 _DECISIVE: Final[tuple[PageSignal, ...]] = tuple(s for s in _SIGNAL_ORDER if s != "og_type")
-# The same with ``url`` before ``schema_org``, for a schema vote of a main entity (AU3-R5).
+# The same with ``url`` before ``schema_org``, for a schema vote of a main entity against a type
+# name that is the whole path (AU3-R5).
 _DECISIVE_URL_FIRST: Final[tuple[PageSignal, ...]] = (
     "status",
     "soft_404",
@@ -1071,6 +1074,17 @@ def _has_slug_after_first(url: str) -> bool:
         return False
     stems = _without_language(_path_stems(path))
     return len(stems) >= 2 and _is_word_slug(stems[-1])
+
+
+def _type_name_path(url: str) -> PageType | None:
+    """The type of a path that, without an index file and a leading language code, is one type
+    name (``/impressum``, ``/datenschutz/``, ``/de/impressum``), else None (AU3-R5)."""
+    try:
+        path = unicodedata.normalize("NFC", unquote(urlsplit(url).path))
+    except ValueError:
+        return None
+    stems = _without_language(_path_stems(path))
+    return _SEGMENT_TYPE.get(stems[0]) if len(stems) == 1 else None
 
 
 def page_type(
@@ -1134,13 +1148,8 @@ def page_type(
             for signal in _ARTICLE_DROPS:
                 votes.pop(signal, None)
     # A type name as the first segment, before a slug of words, does not count for an article
-    # with enough words nor against a main entity (AU3-R3, AU3-R5): the ``url`` vote is what the
-    # other segments and the query say.
-    if (
-        "url" in votes
-        and (long_article or votes.get("schema_org") in _ENTITY_PAGE_TYPES)
-        and _has_slug_after_first(url)
-    ):
+    # with enough words (AU3-R3): the ``url`` vote is what the other segments and the query say.
+    if "url" in votes and long_article and _has_slug_after_first(url):
         if (by_rest := _url_type(url, first_segment=False)) is None:
             del votes["url"]
         else:
@@ -1148,7 +1157,13 @@ def page_type(
     if long_article and votes.get("url") == "listing":  # A26-R5
         del votes["url"]
 
-    order = _DECISIVE_URL_FIRST if votes.get("schema_org") in _ENTITY_PAGE_TYPES else _DECISIVE
+    # A main entity loses only to a type name that is the whole path (AU3-R5).
+    url_first = (
+        votes.get("schema_org") in _ENTITY_PAGE_TYPES
+        and "url" in votes
+        and votes["url"] == _type_name_path(url)
+    )
+    order = _DECISIVE_URL_FIRST if url_first else _DECISIVE
     winner: PageType = next((votes[s] for s in order if s in votes), "other")
     if winner == "other":
         return PageTypeInfo(type="other", signals=[])

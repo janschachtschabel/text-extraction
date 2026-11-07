@@ -132,13 +132,15 @@ ohne LLM. Sie werden in dieser Reihenfolge geprüft, und die erste, die zutrifft
    (`Event`, `EducationEvent` und andere Namen, die auf `Event` enden) oder genau eine Lernressource
    (`LearningResource`, `Quiz` oder `Course`) und daneben keinen Artikel, ist sie `event` oder
    `learning_material`. Es zählt nur der Hauptgegenstand: die `mainEntity` des `WebPage`-Knotens
-   der Seite, sonst ihre JSON-LD-Knoten, sonst Microdata auf `<body>`, `<main>` oder `<article>`
-   der Seite (nicht in einer Seitenleiste, einem Menü, der Kopf- oder der Fußzeile). So bleibt ein
-   Artikel mit einer Veranstaltung in der Seitenleiste `content`, eine Seite, die mehrere
-   Veranstaltungen auflistet, bleibt `listing`, und `/impressum` mit einem Quiz darauf bleibt
-   `imprint`. Der Name eines Typs als erster Teil der Adresse schlägt den Hauptgegenstand nicht,
-   wenn danach ein Name aus mehreren Wörtern folgt: `/kontakt/workshop-anmeldung`, das eine
-   Veranstaltung beschreibt, ist `event`.
+   der Seite, sonst ihre JSON-LD-Knoten, sonst Microdata auf `<html>`, `<body>`, `<main>` oder
+   `<article>` der Seite (nicht in einer Seitenleiste, einem Menü, der Kopf- oder der Fußzeile).
+   So bleibt ein Artikel mit einer Veranstaltung in der Seitenleiste `content`, und eine Seite,
+   die mehrere Veranstaltungen auflistet, wird durch schema.org nicht `event` (sie ist `listing`,
+   wenn sie vor allem aus Links besteht). Der Hauptgegenstand schlägt die Adresse (Regel 4), es
+   sei denn, der Pfad ist nur der Name eines Typs, ein Sprachkürzel davor zählt nicht mit:
+   `/impressum` und `/de/impressum` mit einem Quiz darauf bleiben `imprint`, aber
+   `/kurse/datenschutz`, das einen Kurs beschreibt, ist `learning_material`, und
+   `/kontakt/workshop-anmeldung`, das eine Veranstaltung beschreibt, ist `event`.
 6. Der Titel beginnt oder endet mit dem Namen eines Typs, etwa „Impressum“, „Kontakt“, „Login“
    oder „Suchergebnisse“ („Impressum | Firma“ und „Firma | Impressum“). Ein Doppelpunkt nach dem
    Namen leitet einen Untertitel ein: „Datenschutz: Was Schulen wissen müssen“ ist keine
