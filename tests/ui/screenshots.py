@@ -175,6 +175,7 @@ def _run(page: Page, url: str, origin: str, out: Path, language: str, width: int
     )
     page.click("#result button.tree-button")
     page.wait_for_selector("#result .tree-view")
+    page.click("#result [data-action=tree-unfold-all]")  # every row, so the columns show
     snap("site-tree")
 
     page.click("#tab-screenshot")

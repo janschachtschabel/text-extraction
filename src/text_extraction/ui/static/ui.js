@@ -1,8 +1,8 @@
 /*
  * The UI's own script (rulings P10-S13, P10-S20, R-P10-F3, P12-S6, P12-S8, P12-S9 and P15-R1),
- * the only one besides htmx: the keys, the language, the tabs, the site tree's selection and
- * folding, the result's "Copy" button, the page's status line and the status line of an answer
- * htmx does not swap.
+ * the only one besides htmx: the keys, the language, the tabs, the site tree's selection,
+ * folding and type filter, the result's "Copy" button, the page's status line and the status
+ * line of an answer htmx does not swap.
  *
  * Keys: the API key and the optional LLM and ASR keys live in this tab's sessionStorage
  * (te.apiKey, te.llmKey, te.asrKey). They are sent only as request headers to /ui/run/, never
@@ -238,6 +238,11 @@
       setFold(fold, fold.getAttribute("aria-expanded") !== "true");
       return;
     }
+    var chip = target ? target.closest(".tree-filter button.chip") : null;
+    if (chip) {
+      toggleFilter(chip);
+      return;
+    }
     var button = target ? target.closest("[data-action], [data-tab]") : null;
     if (!button) {
       return;
@@ -304,7 +309,7 @@
   // The site tree (P10-S20): checking a node checks its subtree, a node shows indeterminate
   // while part of its subtree is checked, and the counter shows how many URLs are selected.
   function nodeBox(item) {
-    var label = item.querySelector(":scope > label");
+    var label = item.querySelector(":scope > .cell-name > label");
     return label ? label.querySelector("input[type=checkbox]") : null;
   }
 
@@ -358,11 +363,13 @@
 
   // "Select content pages" (package 14): ticks every URL whose page type is not one of
   // ``excluded`` (a space-separated list), a URL without a type too, and unticks the others
-  // and every crawled page that failed (``data-failed``, ruling P14-R9).
+  // and every crawled page that failed (``data-failed``, ruling P14-R9). While a type filter
+  // (package 18) hides URLs, it acts on the visible ones only.
   function selectContent(form, excluded) {
     var skip = excluded.split(/\s+/).filter(Boolean);
     form.querySelectorAll(".tree input[name=url]").forEach(function (box) {
-      if (box.disabled) {
+      // A box the filter hides keeps its state: only what the user sees is ticked.
+      if (box.disabled || box.closest("li[hidden]")) {
         return;
       }
       box.checked =
@@ -418,7 +425,7 @@
   // button's aria-controls, its sibling) is hidden; its boxes still take part in the selection.
   function setFold(button, open) {
     button.setAttribute("aria-expanded", open ? "true" : "false");
-    var list = button.parentElement.querySelector(":scope > ul");
+    var list = button.closest("li").querySelector(":scope > ul");
     if (list) {
       list.hidden = !open;
     }
@@ -433,13 +440,70 @@
     }
     fresh.forEach(function (button) {
       button.hidden = false;
-      setFold(button, button.parentElement.parentElement.classList.contains("tree"));
+      setFold(button, button.closest("li").parentElement.classList.contains("tree"));
     });
     form.querySelectorAll("[data-action=tree-unfold-all], [data-action=tree-fold-all]").forEach(
       function (button) {
         button.hidden = false;
       }
     );
+  }
+
+  // The type filter (package 18): a chip per type, rendered hidden, so without this script the
+  // tree shows every node and the text line of the counts stays. A type chip toggles; several
+  // make a union; "All" clears them. A leaf stays when its type is chosen, a section when a
+  // leaf below it does, and the sections of the leaves left are unfolded. A hidden node is the
+  // `hidden` attribute, so its box keeps its state.
+  function press(chip, on) {
+    chip.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  function chosenTypes(form) {
+    return Array.prototype.map.call(
+      form.querySelectorAll(".tree-filter button.chip[aria-pressed=true]"),
+      function (chip) { return chip.getAttribute("data-filter-type"); }
+    ).filter(function (type) { return type !== "all"; });
+  }
+
+  function applyFilter(form) {
+    var types = chosenTypes(form);
+    var items = form.querySelectorAll(".tree li");
+    // Children come after their parent: walking backwards judges them first.
+    for (var index = items.length - 1; index >= 0; index -= 1) {
+      var item = items[index];
+      var below = item.querySelector(":scope > ul > li:not([hidden])") !== null;
+      var own = types.indexOf(item.getAttribute("data-type")) >= 0;
+      item.hidden = types.length > 0 && !own && !below;
+      var fold = item.querySelector(":scope > .cell-name > button.fold");
+      if (types.length > 0 && below && fold) {
+        setFold(fold, true);
+      }
+    }
+  }
+
+  function toggleFilter(chip) {
+    var form = chip.closest("form");
+    var chips = form.querySelectorAll(".tree-filter button.chip");
+    var all = form.querySelector(".tree-filter button.chip[data-filter-type=all]");
+    if (chip === all) {
+      chips.forEach(function (each) { press(each, each === all); });
+    } else {
+      press(chip, chip.getAttribute("aria-pressed") !== "true");
+      press(all, chosenTypes(form).length === 0);
+    }
+    applyFilter(form);
+  }
+
+  function initFilter(form) {
+    var chips = form.querySelectorAll(".tree-filter button.chip[hidden]");
+    if (chips.length === 0) {
+      return;
+    }
+    chips.forEach(function (chip) { chip.hidden = false; });
+    var line = form.closest(".tree-view").querySelector(".tree-types");
+    if (line) {
+      line.hidden = true;
+    }
   }
 
   document.addEventListener("htmx:load", function (event) {
@@ -450,6 +514,7 @@
     var forms = root.matches("form.tree-form") ? [root] : root.querySelectorAll("form.tree-form");
     Array.prototype.forEach.call(forms, function (form) {
       initFolding(form);
+      initFilter(form);
       applyTreeMode(form);
     });
   });

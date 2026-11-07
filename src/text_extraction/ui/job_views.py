@@ -657,6 +657,7 @@ class _TreeRead:
     kind: str | None = None
     state: str | None = None
     items: int = 0
+    seconds: int | None = None  # how long a completed job took
 
 
 async def _read_tree_page(
@@ -673,6 +674,8 @@ async def _read_tree_page(
     view = envelope.data
     assert view is not None  # noqa: S101 - read_job always answers its view
     read.kind, read.state = view.kind, view.state
+    if view.state == "completed" and view.finished_at is not None:
+        read.seconds = max(0, round((view.finished_at - view.created_at).total_seconds()))
     read.items += len(view.items)
     if view.kind != "site":
         return None
@@ -774,6 +777,7 @@ async def site_tree_view(request: Request, settings: Settings) -> Response:
         "job_id": job_id,
         "tree": tree,
         "snapshot": read.state != "completed",
+        "duration": read.seconds,
         "found_labels": FOUND_LABELS,
         "non_content_types": NON_CONTENT_TYPES,
         "access": access,

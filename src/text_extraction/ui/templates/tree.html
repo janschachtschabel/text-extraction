@@ -1,7 +1,14 @@
+{#- The type pill: its colour class by the type, "~" and the reason in the title and for a screen
+reader when the type is a guess. #}
+{%- macro pill(kind, guessed, reason) -%}
+{%- set colours = {"home": "home", "content": "content", "learning_material": "content", "listing": "listing", "search": "listing", "event": "event", "imprint": "legal", "privacy": "legal", "legal": "legal", "contact": "legal", "about": "legal", "auth": "legal", "error": "error"} -%}
+{%- set why = t("tree.guessed") ~ (", " ~ t("tree.reason." ~ reason) if reason else "") -%}
+<span class="page-type type-{{ colours.get(kind, 'other') }}{% if guessed %} guessed{% endif %}"{% if guessed %} title="{{ why }}"{% endif %}>{{ t("page_type." ~ kind) }}{% if guessed %} <span aria-hidden="true">~</span><span class="visually-hidden">, {{ why }}</span>{% endif %}</span>
+{%- endmacro -%}
 <section class="tree-view" aria-label="{{ t('tree.label') }}">
   <h4>{{ t("tree.title", id=code(job_id)) }}</h4>
   {% if snapshot %}<p class="hint">{{ t("tree.snapshot") }}</p>{% endif %}
-  <p class="tree-counts">{{ tn("tree.urls", tree.urls) }}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
+  <p class="tree-counts">{{ t("tree.summary", urls=tn("tree.urls", tree.urls), crawled=tree.found_counts.get("page", 0), sitemap=tree.found_counts.get("sitemap", 0), linked=tree.found_counts.get("linked", 0)) }}{% if duration is not none %} · {{ t("tree.duration", seconds=duration) }}{% endif %}{% if tree.hidden %}; <span class="hidden-note">{{ tn("tree.hidden", tree.hidden, setting=code("UI_TREE_MAX_URLS")) }}</span>{% endif %}</p>
   {%- if tree.blocked %}
   <p class="tree-blocked">{{ tn("tree.blocked", tree.blocked) }}</p>
   {%- endif %}
@@ -18,6 +25,18 @@
   {% if tree.roots %}
   {% set prefix = "tree" %}
   <form id="tree-form" class="tree-form" data-access-mode="{{ tree_mode }}" hx-post="/ui/run/batch-urls" hx-target="next .tree-jobs" hx-swap="innerHTML">
+    {%- if tree.type_counts or tree.untyped %}
+    {#- Filtering needs ui.js, which shows these buttons and hides the text line of the counts. #}
+    <div class="tree-filter" role="group" aria-label="{{ t('tree.filter') }}">
+      <button type="button" class="chip" data-filter-type="all" aria-pressed="true" hidden>{{ t("tree.filter_all") }} <span class="chip-count">{{ tree.urls }}</span></button>
+      {%- for name, count in tree.type_counts.items() %}
+      <button type="button" class="chip" data-filter-type="{{ name }}" aria-pressed="false" hidden>{{ t("page_type." ~ name) }} <span class="chip-count">{{ count }}</span></button>
+      {%- endfor %}
+      {%- if tree.untyped %}
+      <button type="button" class="chip" data-filter-type="open" aria-pressed="false" hidden>{{ t("tree.type_open") }} <span class="chip-count">{{ tree.untyped }}</span></button>
+      {%- endif %}
+    </div>
+    {%- endif %}
     <p class="tree-tools">
       <button type="button" class="secondary" data-action="tree-all">{{ t("tree.select_all") }}</button>
       <button type="button" class="secondary" data-action="tree-none">{{ t("tree.select_none") }}</button>
@@ -32,28 +51,42 @@
     <p class="tree-skip"><a class="skip-to-actions" href="#tree-{{ job_id }}-actions">{{ t("tree.skip_to_actions") }}</a></p>
     {#- Each child list has an id of its own for its fold button's aria-controls. #}
     {%- set lists = namespace(count=0) %}
+    <div class="tree-box">
+    {#- The head is for the eye: every cell below names its column for a screen reader. #}
+    <div class="tree-head" aria-hidden="true"><span class="head-name">{{ t("tree.col.name") }}</span><span class="head-type">{{ t("tree.col.type") }}</span><span class="head-found">{{ t("tree.col.found") }}</span><span class="head-status">{{ t("tree.col.status") }}</span><span class="head-depth">{{ t("tree.col.depth") }}</span></div>
     <ul class="tree">
       {%- for node in tree.roots recursive %}
-      <li class="node node-{{ node.kind }}">
+      {#- data-level is the indentation (CSS reads it: the CSP forbids a style attribute); data-type
+      is what the filter chips match: a type, "open" for a URL not fetched whose type is open. #}
+      <li class="node node-{{ node.kind }}" data-level="{{ [loop.depth0, 12] | min }}"{% if node.url and node.page_type %} data-type="{{ node.page_type }}"{% elif node.url and node.kind in ("sitemap", "linked") %} data-type="open"{% endif %}>
+        <div class="cell-name"><span class="visually-hidden">{{ t("tree.col.name") }}: </span>
         {%- if node.children %}
         {%- set lists.count = lists.count + 1 %}
         {%- set list_id = "tree-" ~ job_id ~ "-list-" ~ lists.count %}
         {#- Before the label, so the checkbox's name stays the node's (shown by ui.js). #}
         <button type="button" class="fold" aria-expanded="true" aria-controls="{{ list_id }}" hidden><span class="fold-mark" aria-hidden="true"></span><span class="visually-hidden">{{ t("tree.fold", section=node.label) }}</span></button>
         {%- endif %}
-        {#- The type badge sits in the label, so a screen reader names it with the checkbox. A
-        failed page is marked, so "Select content pages" leaves it out (ruling P14-R9); a URL the site's rules block is not a failed page, so "Select content pages" takes
+        {#- A failed page is marked, so "Select content pages" leaves it out (ruling P14-R9); a URL the site's rules block is not a failed page, so "Select content pages" takes
         it with the mode that allows it (package 16). #}
-        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and node.error_code not in ("blocked_by_robots", "tdm_reserved") %} data-failed{% endif %}> <span class="label">{{ node.label }}</span>
-        {%- if node.url and node.page_type %} <span class="page-type{% if node.type_guessed %} page-type-guessed{% endif %}">{{ t("page_type." ~ node.page_type) }}{% if node.type_guessed %} <span class="type-guessed">({{ t("tree.type_guessed") }})</span>{% endif %}</span>{% endif %}
-        {%- if node.url and not node.page_type and node.kind in ("sitemap", "linked") %} <span class="page-type page-type-open" title="{{ t('tree.type_open_reason') }}">{{ t("tree.type_open") }}<span class="visually-hidden">: {{ t("tree.type_open_reason") }}</span></span>{% endif %}
+        <label class="inline"><input type="checkbox"{% if node.url %} name="url" value="{{ node.url }}"{% endif %}{% if node.page_type %} data-page-type="{{ node.page_type }}"{% endif %}{% if node.blocked %} data-blocked="{{ node.blocked }}"{% if tree_mode == "enforce" %} disabled{% endif %}{% endif %}{% if node.status == "failed" and node.error_code not in ("blocked_by_robots", "tdm_reserved") %} data-failed{% endif %}> <span class="label" title="{{ node.label }}">{{ node.label }}</span>
+        {%- if node.url and node.title %}{% set shown = t("tree.link_title", title=node.title) if node.title_from_link else node.title %} <span class="title{% if node.title_from_link %} title-link{% endif %}" title="{{ shown }}">{{ shown }}</span>{% endif %}
         {%- if node.url and node.blocked %} <span class="blocked-badge" data-blocked="{{ node.blocked }}" title="{{ t('tree.blocked_reason.' ~ node.blocked) }}">{{ t("tree.blocked_badge." ~ node.blocked) }}<span class="visually-hidden">: {{ t("tree.blocked_reason." ~ node.blocked) }}</span></span>{% endif %}</label>
-        {%- if node.url %} <span class="found found-{{ node.kind }}">{{ t(found_labels[node.kind]) }}</span>
-        {%- if node.title %} <span class="title">{{ node.title }}</span>{% endif %}
-        {%- if node.depth is not none %} <span class="depth">{{ t("tree.depth", depth=node.depth) }}</span>{% endif %}
-        {%- if node.status %} <span class="status" data-value="{{ node.status }}">{{ t(status_text(node.status)) if status_text(node.status) else code(node.status) }}</span>{% endif %}
-        {%- if node.error_code %} <span class="error-code">{{ code(node.error_code) }}</span>{% endif %}
-        {%- if node.lastmod %} <span class="lastmod">{{ t("tree.modified", date=node.lastmod) }}</span>{% endif %}
+        {%- if not node.url %} <span class="pages">{{ tn("tree.section_pages", node.pages) }}</span>{% endif %}</div>
+        <div class="cell-type">
+        {%- if node.url %}<span class="visually-hidden">{{ t("tree.col.type") }}: </span>
+        {%- if node.page_type %}{{ pill(node.page_type, node.type_guessed, node.type_reason) }}
+        {%- elif node.kind in ("sitemap", "linked") %}<span class="page-type type-open" title="{{ t('tree.type_open_reason') }}">{{ t("tree.type_open") }}<span class="visually-hidden">: {{ t("tree.type_open_reason") }}</span></span>
+        {%- else %}<span class="none">–</span>{% endif %}
+        {%- elif node.section_type %}<span class="visually-hidden">{{ t("tree.col.type") }}: </span>{{ pill(node.section_type, node.section_guessed, none) }}{% endif %}</div>
+        {%- if node.url %}
+        <div class="row-meta">
+          <div class="cell-found"{% if node.lastmod %} title="{{ t('tree.found_changed', found=t(found_labels[node.kind]), date=node.lastmod) }}"{% endif %}><span class="visually-hidden">{{ t("tree.col.found") }}: </span>{{ t(found_labels[node.kind]) }}{% if node.lastmod %}<span class="visually-hidden">, {{ t("tree.found_changed", found=t(found_labels[node.kind]), date=node.lastmod) }}</span>{% endif %}</div>
+          <div class="cell-status"><span class="visually-hidden">{{ t("tree.col.status") }}: </span>
+          {%- if node.status %}<span class="status" data-value="{{ node.status }}">{{ t(status_text(node.status)) if status_text(node.status) else code(node.status) }}</span>{% endif %}
+          {%- if node.error_code %} <span class="error-code">{{ code(node.error_code) }}</span>{% endif %}
+          {%- if not node.status and not node.error_code %}<span class="none">–</span>{% endif %}</div>
+          <div class="cell-depth"><span class="visually-hidden">{{ t("tree.col.depth") }}: </span>{% if node.depth is not none %}{{ node.depth }}{% else %}<span class="none">–</span>{% endif %}</div>
+        </div>
         {%- endif %}
         {%- if node.children %}
         <ul id="{{ list_id }}">{{ loop(node.children) }}</ul>
@@ -61,6 +94,7 @@
       </li>
       {%- endfor %}
     </ul>
+    </div>
     {%- if tree.social %}
     {#- Links out of the site: listed, never selectable. #}
     <section class="tree-social" aria-labelledby="tree-{{ job_id }}-social">
