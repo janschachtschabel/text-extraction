@@ -9,6 +9,8 @@ in the image tags; a release is the Git tag `vX.Y.Z` on `main`.
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-07
+
 Package 18: the site tree after the v0.1.5 test (plan
 [docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md](docs/superpowers/plans/2026-11-07-package-18-site-tree-types-columns-speed.md)).
 API changes: the site option `discovery`, the field `SiteNode.guess`, the field
