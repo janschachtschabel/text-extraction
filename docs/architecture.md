@@ -2675,12 +2675,45 @@ fetched or rendered HTML page; documents, media, plain text, Markdown and upload
   `contact`, `about`, `auth`, `search`), else `nav` when the collapsed, case-folded text is a
   navigation helper of the old service ("home", "startseite", "nach oben", "back to top", "menu",
   arrows and the like), else `content`.
+- **`event` and `learning_material` (package 18).** Two more page types, after `listing`.
+  `page_type` reads them from schema.org: a JSON-LD `@type` or microdata `itemtype` ending in
+  `Event` (`Event`, `EducationEvent`, `BusinessEvent` ...) is `event`; `LearningResource`, `Quiz`
+  and `Course` are `learning_material` (signal `schema_org`; the contact, about, search and
+  collection types keep their rank).
+- **`guess_type(url, link_text, region, sitemap_hint)`** answers `TypeGuess(type, reason)` or
+  None for a URL that was not fetched. First rule that applies:
+  1. `url_type(url)` (`url`);
+  2. WordPress and dated patterns (`url`): `?p=N`, `?page_id=N` and a dated path are `content`;
+     `?post_type=X&p=N` is the post type's type (an event name `event`, a material name
+     `learning_material`, else `content`); `?cat=`, `?tag=`, `?author=` with a value are
+     `listing`; a last segment ending in `__trashed` is `other`;
+  3. a `sitemap_hint` other than `content` (`sitemap`);
+  4. the link text equals a type word of the headings (`Kontakt`, `Impressum` ...), or `region` is
+     `pagination` (`link_text`);
+  5. a keyword token in the path (split on `/ - _ .`) or in the link text (`keywords`); event
+     words (`veranstaltung`, `termine`, `workshop`, `symposium` ...) before material words
+     (`arbeitsblatt`, `quiz`, `lernpfad`, `oer` ...); whole tokens only, so `eventually` is none;
+  6. a `sitemap_hint` of `content` (`sitemap`);
+  7. `content` as the default (`default`) when the URL has no query besides tracking and language
+     parameters and its last segment is no id (not hex of 8+ characters, not only digits, not a
+     UUID) and holds three letters in a row;
+  8. None.
+
+  `sitemap_type_hint(sitemap_url)` reads the file name of a sitemap: Yoast and Rank Math
+  `<name>-sitemap<N>` and WordPress core `wp-sitemap-posts-<name>-<N>` (`post`, `page` are
+  `content`; category, tag and author names `listing`; event names `event`; material names
+  `learning_material`; any other name None), `wp-sitemap-taxonomies-*` and `wp-sitemap-users-*`
+  are `listing`.
+  **Ruling P18-R1 (replaces P14-R8):** P14-R8 had the tree guess an unfetched URL from
+  `url_type(url)` alone and never from the link's `category`. Now the link text and the region
+  of the link inform the guess as well (rules 4 and 5), and a guessed type is always marked
+  guessed together with its reason (`url`, `sitemap`, `link_text`, `keywords`, `default`).
+  An imprint or privacy URL still wins over the sitemap and the link text (rule 1).
 - **Older results.** `page_type` and `category` default to null, so results cached and items
   stored before package 14 load unchanged.
 - **The site tree (UI).** A crawled page's leaf shows its result's type. A sitemap entry or a
-  linked-only URL was not read, so its leaf guesses the type from `url_type(url)` alone, never
-  from the link's `category` (ruling P14-R8), marked "guessed from the URL"; a URL that says
-  nothing has no badge. A crawled page's own verdict, even none, wins over a guess for the same
+  linked-only URL was not read, so its leaf guesses the type with `guess_type` (below), always
+  marked guessed with its reason; a URL that says nothing has no badge. A crawled page's own verdict, even none, wins over a guess for the same
   URL. "Types:" counts the shown URLs per type, most first. "Select content pages" ticks every
   leaf whose type is not `imprint`, `privacy`, `legal`, `contact`, `auth`, `search` or `error`
   (`ui.site_tree.NON_CONTENT_TYPES`), leaves without a type included, and unticks those and

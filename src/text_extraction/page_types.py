@@ -42,6 +42,7 @@ imported for typing only): ``convert.links`` imports ``LinkCategory`` from here,
 import json
 import re
 import unicodedata
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -57,6 +58,8 @@ PageType = Literal[
     "home",
     "content",
     "listing",
+    "event",
+    "learning_material",
     "imprint",
     "privacy",
     "legal",
@@ -97,6 +100,7 @@ PageSignal = Literal[
     "word_count",
 ]
 LinkKind = Literal["internal", "external", "file"]
+GuessReason = Literal["url", "sitemap", "link_text", "keywords", "default"]
 
 # The share of the visible characters that sits in links, and the number of links, from which a
 # page is a listing (an index of other pages) and not an article.
@@ -402,6 +406,186 @@ def guess_url_type(url: str) -> PageType | None:
     return None
 
 
+@dataclass(frozen=True)
+class TypeGuess:
+    """The type of a URL that was not fetched, and what the guess rests on."""
+
+    type: PageType
+    reason: GuessReason
+
+
+_EVENT_WORDS: Final = frozenset(
+    {
+        *("veranstaltung", "veranstaltungen", "event", "events", "termin", "termine"),
+        *("workshop", "workshops", "seminar", "seminare", "webinar", "webinare"),
+        *("konferenz", "tagung", "symposium", "fortbildung", "fortbildungen", "barcamp"),
+        *("fachtag", "kongress", "messe", "meetup", "hackathon"),
+    }
+)
+_MATERIAL_WORDS: Final = frozenset(
+    {
+        *("arbeitsblatt", "arbeitsblaetter", "unterrichtsmaterial", "unterrichtsmaterialien"),
+        *("lernmaterial", "lernmaterialien", "worksheet", "worksheets", "quiz", "uebung"),
+        *("uebungen", "lernvideo", "lernvideos", "lernpfad", "lernpfade", "tutorial", "oer"),
+    }
+)
+_EVENT_POST_TYPES: Final = frozenset(
+    {"event", "events", "tribe_events", "veranstaltung", "veranstaltungen"}
+)
+_LISTING_TERMS: Final = frozenset({"category", "post_tag", "tag", "author", "product_cat"})
+_LISTING_QUERIES: Final = frozenset({"cat", "tag", "author"})
+_WORD_TOKENS = re.compile(r"[^\W_]+")
+_PATH_TOKENS = re.compile(r"[/\-_.]+")
+_LETTER_RUN = re.compile(r"[^\W\d_]{3,}")
+_HEX_ID = re.compile(r"[0-9a-f]{8,}")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _post_type_type(name: str) -> PageType:
+    """The type of a WordPress post type: an event name, a material name, else content."""
+    folded = _fold(name)
+    if folded in _EVENT_POST_TYPES:
+        return "event"
+    if any(token in _MATERIAL_WORDS for token in _WORD_TOKENS.findall(folded)):
+        return "learning_material"
+    return "content"
+
+
+def _guess_by_query_or_date(url: str) -> PageType | None:
+    """WordPress and dated patterns: ``?p=12``, ``?post_type=event&p=3``, ``?cat=7``, a dated
+    path, a trashed page."""
+    try:
+        parts = urlsplit(url)
+        query = {
+            name: value
+            for name, value in ((k.lower(), v) for k, v in parse_qsl(parts.query))
+            if not _is_tracking(name) and name not in _LANGUAGE_PARAMETERS
+        }
+    except ValueError:
+        return None
+    path = unicodedata.normalize("NFC", unquote(parts.path))
+    segments = [segment for segment in path.split("/") if segment]
+    if segments and segments[-1].casefold().endswith("__trashed"):
+        return "other"
+    if any(query.get(name, "").strip() for name in _LISTING_QUERIES):
+        return "listing"
+    if len(query) == 1 and next(iter(query)) in _WORDPRESS_QUERIES:
+        return "content" if next(iter(query.values())).isdecimal() else None
+    if set(query) == {"post_type", "p"} and query["p"].isdecimal():
+        return _post_type_type(query["post_type"])
+    if not query and _DATED_PATH.search(path):
+        return "content"
+    return None
+
+
+def _keyword_type(url: str, link_text: str) -> PageType | None:
+    try:
+        path = unicodedata.normalize("NFC", unquote(urlsplit(url).path))
+    except ValueError:
+        return None
+    tokens = {*_PATH_TOKENS.split(_fold(path)), *_WORD_TOKENS.findall(_fold(link_text))}
+    if tokens & _EVENT_WORDS:
+        return "event"
+    if tokens & _MATERIAL_WORDS:
+        return "learning_material"
+    return None
+
+
+def _has_default_shape(url: str) -> bool:
+    """A page with a name: no query besides tracking and language parameters, and a last path
+    segment that is no id (hex, digits, UUID) and holds a run of three letters."""
+    try:
+        parts = urlsplit(url)
+        query = parse_qsl(parts.query, keep_blank_values=True)
+    except ValueError:
+        return False
+    if any(
+        not _is_tracking(name.lower()) and name.lower() not in _LANGUAGE_PARAMETERS
+        for name, _ in query
+    ):
+        return False
+    segments = [segment for segment in unquote(parts.path).split("/") if segment]
+    if not segments:
+        return False
+    stem = _segment_stem(segments[-1])
+    if _HEX_ID.fullmatch(stem) or stem.isdecimal() or _UUID.fullmatch(stem):
+        return False
+    return _LETTER_RUN.search(stem) is not None
+
+
+def guess_type(
+    url: str,
+    *,
+    link_text: str = "",
+    region: str | None = None,
+    sitemap_hint: PageType | None = None,
+) -> TypeGuess | None:
+    """The type of a URL that was not fetched, with its reason (ruling P18-R1); the first rule
+    that applies wins:
+
+    1. ``url_type`` (``url``);
+    2. WordPress and dated patterns (``url``): ``?p=``, ``?page_id=``, a dated path, a
+       ``post_type`` query, ``?cat=``, ``?tag=``, ``?author=``, a ``__trashed`` slug;
+    3. a ``sitemap_hint`` other than ``content`` (``sitemap``);
+    4. the link text is a type word, or ``region`` is ``pagination`` (``link_text``);
+    5. an event or material keyword in the path or the link text (``keywords``);
+    6. a ``sitemap_hint`` of ``content`` (``sitemap``);
+    7. ``content`` for a URL with a name and no id shape (``default``);
+    8. None.
+
+    ``region`` is a plain string: ``site.types`` imports this module.
+    """
+    if (by_url := url_type(url)) is not None:
+        return TypeGuess(by_url, "url")
+    if (by_pattern := _guess_by_query_or_date(url)) is not None:
+        return TypeGuess(by_pattern, "url")
+    if sitemap_hint is not None and sitemap_hint != "content":
+        return TypeGuess(sitemap_hint, "sitemap")
+    if (by_text := _HEADING_TYPE.get(_fold(link_text))) is not None:
+        return TypeGuess(by_text, "link_text")
+    if region == "pagination":
+        return TypeGuess("listing", "link_text")
+    if (by_keyword := _keyword_type(url, link_text)) is not None:
+        return TypeGuess(by_keyword, "keywords")
+    if sitemap_hint == "content":
+        return TypeGuess("content", "sitemap")
+    if _has_default_shape(url):
+        return TypeGuess("content", "default")
+    return None
+
+
+_YOAST_SITEMAP = re.compile(r"(?P<name>.+)-sitemap\d*")
+_WP_POSTS_SITEMAP = re.compile(r"wp-sitemap-posts-(?P<name>.+)-\d+")
+_WP_LISTING_SITEMAP = re.compile(r"wp-sitemap-(?:taxonomies|users)-.+")
+
+
+def _sitemap_name_type(name: str) -> PageType | None:
+    if name in {"post", "page"}:
+        return "content"
+    if name in _LISTING_TERMS or name.endswith(("_tag", "_category", "_cat")):
+        return "listing"
+    if name in _EVENT_POST_TYPES:
+        return "event"
+    if any(token in _MATERIAL_WORDS for token in _WORD_TOKENS.findall(name)):
+        return "learning_material"
+    return None
+
+
+def sitemap_type_hint(sitemap_url: str) -> PageType | None:
+    """The type the file name of a sitemap says about its URLs (Yoast, Rank Math and the
+    WordPress core sitemaps: ``post-sitemap.xml``, ``wp-sitemap-posts-event-1.xml``), else None."""
+    try:
+        name = urlsplit(sitemap_url).path.rsplit("/", 1)[-1].casefold()
+    except ValueError:
+        return None
+    name = name.removesuffix(".gz").removesuffix(".xml")
+    if _WP_LISTING_SITEMAP.fullmatch(name):
+        return "listing"
+    if (match := _WP_POSTS_SITEMAP.fullmatch(name)) or (match := _YOAST_SITEMAP.fullmatch(name)):
+        return _sitemap_name_type(match["name"])
+    return None
+
+
 def _path_language(url: str) -> str | None:
     """The language code (without its region) of a path that is only a language code, optionally
     with an index file (``/it/``, ``/de-at/index.html``), else None."""
@@ -540,6 +724,8 @@ _SCHEMA_TYPES: Final[tuple[tuple[str, PageType], ...]] = (
     ("SearchResultsPage", "search"),
     ("CollectionPage", "listing"),
 )
+_EVENT_SCHEMA_SUFFIX: Final = "Event"  # Event, EducationEvent, BusinessEvent ...
+_MATERIAL_SCHEMA_TYPES: Final = frozenset({"LearningResource", "Quiz", "Course"})
 _NON_VISIBLE: Final = ("script", "style", "noscript", "template")
 # Primary subtags of a ``lang`` that names no language: undetermined, multiple, no linguistic
 # content, and the private-use prefix (BCP 47).
@@ -552,10 +738,11 @@ class PageTypeInfo(BaseModel):
     type: PageType = Field(
         description="What kind of page this is, by rules: `home`, `content` (an article or "
         "another page with enough text), `listing` (an index of other pages: a category, a tag, "
-        "an archive, a page of a paged list), `imprint`, `privacy`, `legal` (terms, cookies, "
-        "disclaimer, accessibility statement), `contact`, `about`, `auth` (login, sign-up, "
-        "account), `search` (search results), `error` (an error page, such as a soft 404) or "
-        "`other`."
+        "an archive, a page of a paged list), `event` (an event or its schema.org subtype), "
+        "`learning_material` (a learning resource, a quiz, a course), `imprint`, `privacy`, "
+        "`legal` (terms, cookies, disclaimer, accessibility statement), `contact`, `about`, "
+        "`auth` (login, sign-up, account), `search` (search results), "
+        "`error` (an error page, such as a soft 404) or `other`."
     )
     signals: list[PageSignal] = Field(
         description="Every signal that agrees with `type`, strongest first: `status`, "
@@ -633,6 +820,10 @@ def _schema_page_type(tree: HtmlElement) -> PageType | None:
     for name, found in _SCHEMA_TYPES:
         if name in names:
             return found
+    if any(name.endswith(_EVENT_SCHEMA_SUFFIX) for name in names):
+        return "event"
+    if names & _MATERIAL_SCHEMA_TYPES:
+        return "learning_material"
     return None
 
 
