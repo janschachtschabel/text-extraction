@@ -633,6 +633,25 @@ def test_a_sitemap_entry_is_typed_by_its_url_then_by_the_sitemaps_hint() -> None
     assert two.title is None
 
 
+def test_a_stored_type_guess_wins_and_an_entry_without_one_is_guessed() -> None:
+    items = [
+        sitemap_item(
+            0,
+            f"{ORIGIN}/sitemap.xml",
+            [
+                {"loc": f"{ORIGIN}/thema-x/", "type_guess": "event"},
+                {"loc": f"{ORIGIN}/category/news/"},
+            ],
+        )
+    ]
+
+    nodes = _by_url(build_tree(items, max_urls=10))
+
+    stored, guessed = nodes[f"{ORIGIN}/thema-x/"], nodes[f"{ORIGIN}/category/news/"]
+    assert (stored.page_type, stored.type_guessed) == ("event", True)
+    assert (guessed.page_type, guessed.type_reason) == ("listing", "url")
+
+
 def test_a_sitemap_entry_also_linked_keeps_the_sitemaps_guess_and_gets_the_link_title() -> None:
     items = [
         sitemap_item(

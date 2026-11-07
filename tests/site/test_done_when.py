@@ -511,5 +511,9 @@ def test_site_b_guessed_sitemap_in_parts(service: Service, httpserver: HTTPServe
     }
     entries = [entry for item in [sitemap, *parts] for entry in site_of(item)["sitemap"]["entries"]]
     assert len(entries) == SITE_B_ENTRIES  # each entry once, in order
-    assert entries[0] == {"loc": f"{origin}/aufgabe-1.html", "lastmod": "2026-10-01"}
+    assert entries[0] == {
+        "loc": f"{origin}/aufgabe-1.html",
+        "lastmod": "2026-10-01",
+        "type_guess": "content",
+    }
     assert "/aufgabe-1.html" not in requested_paths(httpserver)  # entries are not crawled

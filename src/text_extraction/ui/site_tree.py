@@ -265,6 +265,12 @@ class TreeBuilder:
         elif site.role in ("sitemap", "sitemap_part") and site.sitemap is not None:
             for entry in site.sitemap.entries:
                 found = _guessed(entry.loc, sitemap_hint=site.sitemap.type_hint)
+                if entry.type_guess is not None:
+                    # The sitemap item stored the guess (the same function), so the tree and the
+                    # API agree; the reason still comes from the guess above. An item stored
+                    # before the field has none and keeps the guess made here.
+                    found.page_type, found.type_guessed = entry.type_guess, True
+                    found.type_reason = found.type_reason or "default"
                 found.lastmod = entry.lastmod
                 self._add(_ENTRY, found)
 

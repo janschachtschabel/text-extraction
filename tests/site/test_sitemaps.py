@@ -388,6 +388,20 @@ def test_pack_parts_under_limit() -> None:
         assert len(_ENTRIES_JSON.dump_json([*part, following[0]])) > 1_000_000
 
 
+def test_pack_parts_counts_the_type_guess() -> None:
+    entries = [
+        SitemapEntry(loc=f"https://lernen.example.org/kurs/{i}/lektion", type_guess="content")
+        for i in range(5_000)
+    ]
+
+    parts = pack_parts(entries, 20_000)
+
+    assert len(parts) > 1
+    for part in parts:
+        assert len(_ENTRIES_JSON.dump_json(part)) <= 20_000
+    assert [entry for part in parts for entry in part] == entries
+
+
 def test_pack_parts_small_and_empty() -> None:
     entries = [SitemapEntry(loc="https://a.example/1"), SitemapEntry(loc="https://a.example/2")]
 

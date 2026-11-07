@@ -50,7 +50,8 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 #   "role": "page", "depth": 1, "parent": 0, "links": [...]}, ...}, ...}},
 #  {"index": 3, "url": "https://example.org/sitemap.xml", "result": {"data": {"site": {
 #   "role": "sitemap", "depth": 0, "parent": 1, "sitemap": {"format": "urlset", "guessed": false,
-#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01"}, ...],
+#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01",
+#                "type_guess": "listing"}, ...],
 #   "children": [], "entry_count": 2400, "part": 1, "parts": 3}}, ...}, ...}}, ...]}, ...}
 ```
 
@@ -86,7 +87,10 @@ crawl did with it, and `category`, what it leads to (see
 
 A sitemap's entries are in `sitemap.entries`; a large one continues in `sitemap_part` items with
 the same URL (`part` of `parts`), and an index lists its sitemaps in `children`, each with the
-item it became. An item whose `final_url` is another item's URL is a redirect to that page (its
+item it became. Each entry carries a `type_guess`: the page type guessed from its URL and the
+sitemap's `type_hint` (what its file name suggests, such as `listing` for a WordPress category
+sitemap) without fetching the page, or no `type_guess` when the URL says nothing. It is a guess,
+not a `page_type`; sitemaps read before this field existed have none. An item whose `final_url` is another item's URL is a redirect to that page (its
 links repeat the page's): dedupe the graph by `final_url`.
 
 ### Page types and link categories

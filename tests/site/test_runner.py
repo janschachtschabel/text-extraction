@@ -594,6 +594,12 @@ async def test_unlisted_sitemap_tries_three_addresses_in_turn() -> None:
         for entry in site(item).sitemap.entries  # type: ignore[union-attr]
     ]
     assert entries == [f"{SITE}/a", f"{SITE}/b", f"{SITE}/c"]
+    # The entries carry the guess made with their sitemap's hint.
+    assert [
+        entry.type_guess
+        for item in guessed[3:]
+        for entry in site(item).sitemap.entries  # type: ignore[union-attr]
+    ] == ["content", "content", "listing"]
 
 
 @scenario
@@ -1672,3 +1678,61 @@ async def test_sitemap_first_probe_is_skipped_without_budget() -> None:
     items = await crawl.items(job_id)
     assert {link.crawl for link in links(items[0])} == {"queued"}
     assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_entries_carry_their_guessed_type() -> None:
+    terms = f"{SITE}/map.xml"
+    locs = [
+        f"{SITE}/thema-x/",
+        f"{SITE}/category/news/",
+        f"{SITE}/2026/10/05/post/",
+        f"{SITE}/4711",
+    ]
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {terms}\n", "text/plain"),
+            terms: text(terms, urlset(*locs)),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    [item] = [item for item in await crawl.items(job_id) if item.url == terms]
+    parsed = site(item).sitemap
+    assert parsed is not None
+    assert parsed.type_hint is None
+    guesses = {entry.loc: entry.type_guess for entry in parsed.entries}
+    assert guesses == {
+        f"{SITE}/thema-x/": "content",  # a name, no id shape
+        f"{SITE}/category/news/": "listing",  # its URL
+        f"{SITE}/2026/10/05/post/": "content",  # a dated path
+        f"{SITE}/4711": None,  # opaque
+    }
+
+
+@scenario
+async def test_sitemap_parts_stay_under_the_item_limit_with_type_guesses() -> None:
+    post = f"{SITE}/post-sitemap.xml"
+    locs = [f"{SITE}/kurs/{n}/lektion.html" for n in range(600)]
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {post}\n", "text/plain"),
+            post: text(post, urlset(*locs)),
+        },
+        job_item_max_bytes=20_000,
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = [item for item in await crawl.items(job_id) if item.url == post]
+    assert len(items) >= 2
+    assert all(
+        entry.type_guess == "content" for item in items for entry in site(item).sitemap.entries
+    )  # type: ignore[union-attr]
+    for item in items:
+        assert await crawl.stored_size(job_id, item.index) <= 20_000

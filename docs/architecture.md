@@ -2496,7 +2496,15 @@ never a gate (R-P9-3): the build sandbox reaches none of the sites.
   then the sitemap item); accepted. The probe runs inside item 0's lease with what is left of the item's budget
   (`EXTRACT_TIMEOUT_SECONDS * 2` from its start; none left: no probe); a probe that outlasts it is no.
   The verdict is kept in the job's `site` hash (`probe`, set once), so a rerun of item 0 reuses it and
-  labels its links as the first run did. Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap result carries `sitemap.type_hint`
+  labels its links as the first run did. Without a sitemap the crawl goes on as `crawl`. Only item 0 reads `discovery`. Every sitemap entry carries `type_guess` (`SitemapEntry.type_guess`, `guess_type(loc,
+  sitemap_hint=type_hint).type`, null for an opaque URL and omitted from the JSON then; set in
+  `_read_sitemap` on the pool thread, where the parse runs: about 15 µs per entry, 0.2 s for 13,500;
+  it is part of the entry when `pack_parts` measures the parts against `JOB_ITEM_MAX_BYTES // 2`, so
+  the size check includes it). It adds about 24 bytes per entry (`,"type_guess":"content"`, at most
+  33 for `learning_material`): about 320 KB for 13,500 entries, spread over the parts. The tree
+  prefers the stored value (the same function, so both agree) and still guesses for items of
+  v0.1.5 and older, which have none; the guess's reason is not stored and is recomputed. Linked-only
+  URLs of page items have no stored guess. Every sitemap result carries `sitemap.type_hint`
   (`sitemap_type_hint` of the URL that was listed or guessed: Yoast/Rank Math `post-sitemap`,
   WordPress `wp-sitemap-posts-…`, `-taxonomies-…`, `-users-…`), else null; robots.txt unavailable
   fails the item `target_http_error`, retryable, without a guess.

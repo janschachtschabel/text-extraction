@@ -56,7 +56,7 @@ from text_extraction.conversion_pool import ConversionPool
 from text_extraction.envelope import Envelope, ErrorCode, ErrorInfo
 from text_extraction.extract_models import ExtractResult, Timings
 from text_extraction.jobs import JobRecord, job_principal
-from text_extraction.page_types import sitemap_type_hint
+from text_extraction.page_types import PageType, guess_type, sitemap_type_hint
 from text_extraction.pipeline import Pipeline
 from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import QueueItem
@@ -418,6 +418,7 @@ class SitemapItems:
         # What this item may keep: its grant on a rerun, else what is left of the crawl's. With
         # nothing left a file is read only to its first entry (an index is read whole).
         left = await self._sites.entries_left(job.id, item.index)
+        type_hint = sitemap_type_hint(url)
         deadline = started + self._item_budget
         try:
             # The parse stops itself at the deadline and answers what it read; this timeout,
@@ -431,6 +432,7 @@ class SitemapItems:
                     settings.site_sitemap_max_bytes,
                     left,
                     deadline,
+                    type_hint,
                 )
         except TimeoutError:
             return failed(ErrorCode.TIMEOUT, _SITEMAP_SLOT_MESSAGE, retryable=True), _Outcome(
@@ -472,7 +474,6 @@ class SitemapItems:
             codes.append((ErrorCode.TOO_LARGE, _SITEMAP_CUT_MESSAGE))
             caps.add("urls")
 
-        type_hint = sitemap_type_hint(url)
         parts = pack_parts(entries, self._item_max_bytes // 2)
         count = len(parts)
         finished = [
@@ -718,10 +719,17 @@ def _with_site(
 
 
 def _read_sitemap(
-    body: bytes, base_url: str, max_bytes: int, max_entries: int, deadline: float
+    body: bytes,
+    base_url: str,
+    max_bytes: int,
+    max_entries: int,
+    deadline: float,
+    type_hint: PageType | None,
 ) -> tuple[ParsedSitemap, bool]:
     """Inflate (a gzip body) and parse one sitemap file, on a pool thread: at most
-    ``max_entries`` kept, and none left stops the parse at its first entry."""
+    ``max_entries`` kept, and none left stops the parse at its first entry. Each entry gets its
+    ``type_guess`` here too (about 15 microseconds each, so 13,500 entries cost 0.2 s, off the
+    event loop)."""
     inflated, cut = inflate_bounded(body, max_bytes)
     parsed = parse_sitemap(
         inflated,
@@ -730,4 +738,8 @@ def _read_sitemap(
         deadline=deadline,
         stop_at_cap=max_entries <= 0,
     )
+    for position, entry in enumerate(parsed.entries):
+        guess = guess_type(entry.loc, sitemap_hint=type_hint)
+        if guess is not None:
+            parsed.entries[position] = entry.model_copy(update={"type_guess": guess.type})
     return parsed, cut

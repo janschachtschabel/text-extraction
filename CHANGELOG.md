@@ -27,8 +27,11 @@ API changes: the site option `discovery`, the field `SiteNode.guess`, the field
 - Sitemaps carry `sitemap.type_hint`, read from their file name (Yoast and Rank Math
   `post-sitemap`, WordPress `wp-sitemap-posts-*` and the like).
 - Without a sitemap in robots.txt the crawl tries `/sitemap.xml`, then `/sitemap_index.xml`, then
-  `/wp-sitemap.xml`; a 404 or 410 moves on to the next address (the position is `SiteNode.guess`).
+  `/wp-sitemap.xml`; a 404, a 410 or a 2xx that is no sitemap (a CMS answering with an HTML page)
+  moves on to the next address (the position is `SiteNode.guess`).
   A site without any sitemap costs up to two extra 404 fetches per crawl.
+- Each sitemap entry has `type_guess`, the page type guessed from its URL and the sitemap's
+  `type_hint` (omitted when the URL says nothing); about 24 bytes per entry.
 - `POST /v1/site-structure` and the MCP tool `site_structure` take `discovery`: `crawl` (default)
   or `sitemap_first`, which reads only the start page when a sitemap exists and takes the other
   pages from it (links not followed say `crawl: sitemap_first`); with `sitemaps: false` it is 422.
@@ -41,7 +44,8 @@ API changes: the site option `discovery`, the field `SiteNode.guess`, the field
   batch below the tree survives a refresh.
 - The site form has "How to read the site": "Fast: sitemap first" (the preset) or "Thorough: follow
   links".
-- The live harness `tests/live/run_site.py` measures the sitemap state, the tree URLs, the types
+- The live harness `tests/live/run_site.py` takes `--discovery` (the live workflow's
+  `site_discovery` runs both) and measures the sitemap state, the tree URLs, the types
   left open (`type open %`), the median convert time and the crawl time, and waits out the
   service's own 429 `Retry-After`.
 

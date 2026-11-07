@@ -51,7 +51,8 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 #   "role": "page", "depth": 1, "parent": 0, "links": [...]}, ...}, ...}},
 #  {"index": 3, "url": "https://example.org/sitemap.xml", "result": {"data": {"site": {
 #   "role": "sitemap", "depth": 0, "parent": 1, "sitemap": {"format": "urlset", "guessed": false,
-#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01"}, ...],
+#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01",
+#                "type_guess": "listing"}, ...],
 #   "children": [], "entry_count": 2400, "part": 1, "parts": 3}}, ...}, ...}}, ...]}, ...}
 ```
 
@@ -88,7 +89,11 @@ führt (siehe [Seitentypen und Linkkategorien](#seitentypen-und-linkkategorien))
 
 Die Einträge einer Sitemap stehen in `sitemap.entries`; eine große setzt sich in
 `sitemap_part`-Einträgen mit derselben URL fort (`part` von `parts`), und ein Index listet seine
-Sitemaps in `children`, jede mit dem Eintrag, der aus ihr wurde. Ein Eintrag, dessen `final_url`
+Sitemaps in `children`, jede mit dem Eintrag, der aus ihr wurde. Jeder Eintrag trägt ein
+`type_guess`: den Seitentyp, der aus seiner URL und dem `type_hint` der Sitemap (was ihr Dateiname
+nahelegt, etwa `listing` bei einer WordPress-Kategorie-Sitemap) geschätzt wird, ohne die Seite
+abzurufen; sagt die URL nichts, fehlt das `type_guess`. Es ist eine Schätzung, kein `page_type`;
+Sitemaps, die vor diesem Feld gelesen wurden, haben keines. Ein Eintrag, dessen `final_url`
 die URL eines anderen Eintrags ist, ist eine Weiterleitung auf diese Seite (seine Links
 wiederholen die der Seite): Entfernen Sie die Duplikate des Graphen anhand von `final_url`.
 

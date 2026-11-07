@@ -218,6 +218,12 @@ class SitemapEntry(BaseModel):
     lastmod: str | None = None  # as given
     changefreq: ChangeFreq | None = None
     priority: float | None = None  # 0 to 1
+    type_guess: PageType | None = Field(
+        default=None,
+        description="The page type guessed from the URL and the sitemap's `type_hint` "
+        "(`page_types.guess_type`), without fetching the page; null for a URL that says nothing "
+        "(and for sitemaps read before this field existed).",
+    )
 
     @field_validator("lastmod", mode="before")
     @classmethod
