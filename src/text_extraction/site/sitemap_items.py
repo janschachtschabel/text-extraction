@@ -62,7 +62,13 @@ from text_extraction.result_cache import MemoryPressure
 from text_extraction.scheduler import QueueItem
 from text_extraction.settings import Settings
 from text_extraction.site.follow import unique_candidates
-from text_extraction.site.sitemaps import ParsedSitemap, inflate_bounded, pack_parts, parse_sitemap
+from text_extraction.site.sitemaps import (
+    ParsedSitemap,
+    inflate_bounded,
+    looks_like_sitemap,
+    pack_parts,
+    parse_sitemap,
+)
 from text_extraction.site.store import Candidate, Finished, SiteContext, SiteStore
 from text_extraction.site.types import (
     Crawl,
@@ -390,7 +396,14 @@ class SitemapItems:
             error = ErrorInfo(code=code, message=message, retryable=retryable)
             return Envelope(status="failed", data=result(None), error=error)
 
-        if fetched.status in (404, 410) and node.guessed:
+        # A guessed address that is no sitemap moves on: a 404 or 410, and a 2xx whose first bytes
+        # are none (a CMS that answers every path with its page). ``_sitemap_exists`` reads the
+        # same, so a probe's yes always meets a sitemap that is read.
+        not_there = fetched.status in (404, 410) or (
+            200 <= fetched.status < 300
+            and not looks_like_sitemap(fetched.content[:SITEMAP_PROBE_MAX_BYTES])
+        )
+        if not_there and node.guessed:
             info = SitemapInfo(format="absent", guessed=True)
             more, outcome = await self._guess_next(job, item, url, node)
             absent = [SITEMAP_NOT_FOUND_WARNING, *more]
@@ -569,9 +582,10 @@ class SitemapItems:
             )
             if raw.fetched is None:
                 return False
-            if 200 <= raw.fetched.status < 300:
+            status = raw.fetched.status
+            if 200 <= status < 300 and looks_like_sitemap(raw.fetched.content):
                 return True
-            if raw.fetched.status not in (404, 410):
+            if status not in (404, 410) and not 200 <= status < 300:
                 return False
         return False
 

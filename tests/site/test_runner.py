@@ -1554,3 +1554,55 @@ async def test_crawl_discovery_does_not_probe() -> None:
 
     # Once, by the robots chain, not a second time by a probe.
     assert [url for url, _ in crawl.fetcher.calls].count(f"{SITE}/sitemap.xml") == 1
+
+
+@scenario
+async def test_sitemap_first_html_answer_at_a_guess_is_no_sitemap() -> None:
+    """A CMS that answers 200 with an HTML page at a guessed address has no sitemap there:
+    the probe moves on to the next guess and the chain agrees."""
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            f"{SITE}/sitemap.xml": page(f"{SITE}/sitemap.xml"),
+            f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+    guessed = [item for item in items if site(item).role == "sitemap"]
+    parsed = [site(item).sitemap for item in guessed]
+    assert [p.format for p in parsed if p] == ["absent", "absent", "urlset"]
+    assert [entry.loc for entry in parsed[2].entries] == LISTED  # type: ignore[union-attr]
+    assert "sitemap_not_found" in data(guessed[0]).warnings
+    assert all(item.result is not None and item.result.status == "success" for item in guessed)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_html_at_every_guess_crawls_the_links() -> None:
+    paths = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"]
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED)}
+    answers.update({SITE + path: page(SITE + path) for path in paths})
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert roles(items).count("page") == 4
+    guessed = [item for item in items if site(item).role == "sitemap"]
+    assert len(guessed) == 3
+    for item in guessed:
+        assert item.result is not None
+        assert item.result.status == "success"
+        assert data(item).warnings == ["sitemap_not_found"]
+        sitemap = site(item).sitemap
+        assert sitemap is not None and sitemap.format == "absent"
+    assert await crawl.state(job_id) == "completed"

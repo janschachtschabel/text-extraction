@@ -13,7 +13,12 @@ from pathlib import Path
 import pytest
 from pydantic import TypeAdapter
 
-from text_extraction.site.sitemaps import inflate_bounded, pack_parts, parse_sitemap
+from text_extraction.site.sitemaps import (
+    inflate_bounded,
+    looks_like_sitemap,
+    pack_parts,
+    parse_sitemap,
+)
 from text_extraction.site.types import SitemapEntry
 
 FIXTURES = Path(__file__).parent / "sitemaps"
@@ -598,3 +603,39 @@ def test_stop_at_cap_still_reads_an_index() -> None:
     assert parsed.format == "index"
     assert len(parsed.children) == 3
     assert not parsed.truncated
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url/></urlset>',
+        b"\xef\xbb\xbf<?xml version='1.0'?>\n<!-- made by x -->\n <sitemapindex>",
+        b"<?xml version='1.0'?><rss version='2.0'><channel/></rss>",
+        b"<feed xmlns='http://www.w3.org/2005/Atom'>",
+        b"<ns:urlset xmlns:ns='x'>",
+        b"\x1f\x8b\x08\x00rest",
+        b"\n  https://example.org/a\nhttps://example.org/b\n",
+        b"http://example.org/only-one",
+    ],
+)
+def test_looks_like_sitemap(head: bytes) -> None:
+    assert looks_like_sitemap(head)
+
+
+@pytest.mark.parametrize(
+    "head",
+    [
+        b"",
+        b"   \n",
+        b"<!doctype html><html><head><title>urlset</title></head>",
+        b"<html><body><urlset></body></html>",
+        b"<?xml version='1.0'?><html xmlns='http://www.w3.org/1999/xhtml'>",
+        b"<!doctype html>\n<urlset>",
+        b'{"urls": ["https://example.org/a"]}',
+        b"Not found\nhttps://example.org/a",
+        b"\xff\xfe<\x00u\x00",
+        b"<urlsetx>",
+    ],
+)
+def test_does_not_look_like_a_sitemap(head: bytes) -> None:
+    assert not looks_like_sitemap(head)

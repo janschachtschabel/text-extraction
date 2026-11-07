@@ -42,6 +42,7 @@ __all__ = [
     "ParsedFormat",
     "ParsedSitemap",
     "inflate_bounded",
+    "looks_like_sitemap",
     "pack_parts",
     "parse_sitemap",
 ]
@@ -55,6 +56,13 @@ _INFLATE_STEP = 1 << 16
 _UTF8_BOM = b"\xef\xbb\xbf"
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 _LEADING_BLANKS = re.compile(rb"[ \t\r\n]*")
+# What may stand before an XML root: blanks, the declaration and other processing instructions,
+# comments. A DOCTYPE is not among them (``<!doctype html>`` is a page, and a DTD is refused).
+_XML_PROLOGUE = re.compile(rb"(?:[ \t\r\n]+|<\?.*?\?>|<!--.*?-->)*", re.DOTALL)
+_SITEMAP_ROOT = re.compile(rb"<(?:[A-Za-z_][\w.\-]*:)?(?:urlset|sitemapindex|rss|feed)[\s/>]")
+_TEXT_URL = re.compile(rb"https?://\S", re.IGNORECASE)
+# How many leading non-empty lines of a text file must be URLs.
+_TEXT_SNIFF_LINES = 3
 # The deepest layout read is rss/channel/item/<field>; deeper nesting is refused, since every
 # open element stays in memory until it closes.
 MAX_XML_DEPTH = 32
@@ -392,6 +400,27 @@ def parse_sitemap(
         _Collector(max_entries, deadline, stop_at_cap=stop_at_cap),
         retry_prefixes=False,
     )
+
+
+def looks_like_sitemap(head: bytes) -> bool:
+    """Whether the first bytes of an answer look like a sitemap, as ``parse_sitemap`` reads one:
+    a gzip body; an XML file whose root (after an optional BOM, declaration, comments and blanks)
+    is ``urlset``, ``sitemapindex``, ``rss`` or ``feed``; or a text file whose first non-empty
+    lines are http(s) URLs. An HTML page, JSON, an empty body and UTF-16 are not. Pure and cheap;
+    the probe of ``discovery: sitemap_first`` and the guess chain share it, so they agree."""
+    if head.startswith(_GZIP_MAGIC):
+        return True
+    if head.startswith(_UTF16_BOMS):
+        return False
+    start = len(_UTF8_BOM) if head.startswith(_UTF8_BOM) else 0
+    match = _LEADING_BLANKS.match(head, start)
+    start = match.end() if match else start
+    if head.startswith(b"<", start):
+        prologue = _XML_PROLOGUE.match(head, start)
+        return _SITEMAP_ROOT.match(head, prologue.end() if prologue else start) is not None
+    lines = [line.strip() for line in head[start:].splitlines()]
+    first = [line for line in lines if line][:_TEXT_SNIFF_LINES]
+    return bool(first) and all(_TEXT_URL.match(line) for line in first)
 
 
 def pack_parts(entries: Sequence[SitemapEntry], max_bytes: int) -> list[list[SitemapEntry]]:
