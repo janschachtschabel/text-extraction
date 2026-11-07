@@ -493,7 +493,7 @@
   "hint.scope": "Welchen Links der Crawl folgt.",
   "hint.sitemaps": "Auch die URLs aufnehmen, die robots.txt und die Sitemaps der Website nennen.",
   "hint.discovery_fast": "Liest robots.txt, die Sitemaps und die Startseite. Ohne Sitemap folgt der Crawl den Links.",
-  "hint.discovery_thorough": "Folgt den Links bis zur Tiefe und Seitenzahl unten.",
+  "hint.discovery_thorough": "Folgt den Links bis zur Tiefe und Seitenzahl oben.",
   "form.custom_capture": "Eigene Aufnahme",
   "form.viewport_width": "Fensterbreite (px)",
   "form.viewport_height": "Fensterhöhe (px)",

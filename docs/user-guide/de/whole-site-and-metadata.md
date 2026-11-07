@@ -210,8 +210,10 @@ letzte Zuteilung an einen Worker. Ein Job wird `JOB_TTL_SECONDS` (24 h) aufbewah
 2. Wenn der Job abgeschlossen ist, listet „Als Baum anzeigen“ die Seiten nach Host und Pfad;
    während er läuft, zeigt „Baum jetzt anzeigen“ eine Momentaufnahme; der Baum erscheint auch von
    selbst, sobald der Job ein Ergebnis hat, und aktualisiert sich, solange er läuft. Jede URL zeigt
-   ihren Seitentyp, und „Typen:“ über dem Baum zählt sie. „Alle auswählen“ markiert jede URL und
-   „Inhaltsseiten auswählen“ jede URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
+   ihren Seitentyp, und die Zeile „Typen:“ über dem Baum zählt sie; mit JavaScript ersetzen
+   Schaltflächen unter „Nach Typ filtern“ diese Zeile und zeigen nur die URLs eines Typs (ohne
+   JavaScript bleibt die Zeile stehen). „Alle auswählen“ markiert jede angezeigte URL (unter einem
+   Typfilter nur die angezeigten) und „Inhaltsseiten auswählen“ jede angezeigte URL außer Impressum, Datenschutz, Rechtlichem, Kontakt,
    Anmeldung, Suche, Fehlerseiten und gescheiterten Seiten; oder markieren Sie die Abschnitte,
    die Sie möchten. URLs, die die Regeln der Website sperren, sind mit „robots.txt“ oder „TDM“
    markiert und werden von den Schaltflächen übersprungen, solange „Website-Regeln“ auf „Regeln der

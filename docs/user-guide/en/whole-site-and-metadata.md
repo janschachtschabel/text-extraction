@@ -197,7 +197,10 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
    links"), and press "Read the site structure".
 2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
    "Show tree now" shows a snapshot; the tree also appears by itself once the job has a result and
-   refreshes while it runs. Each URL shows its page type, and "Types:" above the tree counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
+   refreshes while it runs. Each URL shows its page type, and the "Types:" line above the tree counts them; with
+   JavaScript, chips under "Filter by type" replace that line and show only the URLs of a type
+   (without JavaScript the line stays). "Select all" checks every URL shown (under a type filter
+   only the shown ones), and "Select content pages" every shown URL but imprint,
    privacy, legal, contact, login, search and error pages and pages that failed; or check the
    sections you want. URLs that the site's rules block are marked "robots.txt" or "TDM" and
    are skipped by the buttons while "Site rules" is "Respect the site's rules"; the batch below

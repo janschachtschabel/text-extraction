@@ -493,7 +493,7 @@
   "hint.scope": "Which links the crawl follows.",
   "hint.sitemaps": "Also list the URLs that robots.txt and the site's sitemaps name.",
   "hint.discovery_fast": "Reads robots.txt, the sitemaps and the start page. Without a sitemap the crawl follows links.",
-  "hint.discovery_thorough": "Follows links up to the depth and page count below.",
+  "hint.discovery_thorough": "Follows links up to the depth and page count above.",
   "form.custom_capture": "Custom capture",
   "form.viewport_width": "Window width (px)",
   "form.viewport_height": "Window height (px)",
