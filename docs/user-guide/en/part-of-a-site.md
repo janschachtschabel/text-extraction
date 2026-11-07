@@ -73,19 +73,45 @@ How to page through the items is in [Read the job](whole-site-and-metadata.md#re
   its pages, and press "Extract selected": the checked URLs become batches, with the format,
   the browser fallback, the metadata and the options you set below the tree.
 
-  Each URL of the tree shows its page type, such as "Content", "Listing" or "Imprint" (see
+  The tree has aligned columns: page, type, found, status and depth, under a head that stays in
+  view while you scroll. On a narrow tree the rows are compact (the tree's own width decides, not
+  the window's). A section shows how many pages it holds and its own type. A crawled page shows
+  its own title after the path, without quotes; a URL that was not read but is linked from a
+  crawled page shows the link's text in quotes (a sitemap entry has no title of its own). A summary line above the tree counts the
+  URLs (crawled, from the sitemap, only linked) and, for a finished crawl, how long it took, and
+  the chips under "Filter by type" show only the URLs of one type ("All" shows every URL; several
+  chips show the union). With JavaScript the chips, each with its count, replace the "Types:"
+  line; without JavaScript the line stays and nothing filters. While a type is filtered, "Select
+  all", "Select content pages" and the tick of a section act on the URLs shown only, and "Select
+  none" clears every tick, hidden ones included.
+
+  The tree appears by itself once the job has a result, and while the job runs it refreshes every
+  few seconds (the interval grows when reading the job is slow, and a failed refresh is tried
+  again). A refresh keeps your ticks, the folds, the filter, the batch options, the scroll
+  position and the focus, and waits while you type in a field. The batch below the tree stays when
+  the tree refreshes.
+
+  Each URL of the tree shows its page type, such as "Content", "Listing", "Event", "Learning
+  material" or "Imprint" (see
   [Page types and link categories](whole-site-and-metadata.md#page-types-and-link-categories)),
-  and "Types:" above the tree counts them. A crawled page shows the type of its result; a page
-  that failed with an HTTP error has none. A sitemap entry or a linked-only URL was not read, so
-  its type is guessed from its URL alone and marked "guessed from the URL". The URL rules know,
-  among others, author pages (`author`, `autor`: "Listing"), more names for contact pages, and
-  dated paths such as `/2021/05/oer-camp/` or WordPress addresses such as `?p=12` and
-  `?page_id=12` ("Content"; language and tracking parameters such as `?lang=en` do not count).
-  A URL that no rule knows shows the badge "Type open", with the
-  reason "Not fetched; its type shows when it is extracted" (as tooltip and for screen readers),
-  and the "Types:" line counts "Type open" as well. "Select content pages" checks every URL but the
-  imprint, privacy, legal, contact, login, search and error pages, and unchecks those and every
-  page that failed; a URL without a type is checked unless its page failed.
+  and the "Types:" line above the tree (the chips, with JavaScript) counts them. A crawled page shows the type of its result; a page
+  that failed with an HTTP error has none. Every other URL was not read, so its type is guessed
+  and marked "guessed", with the reason: "from the URL" (the URL rules, among others author pages
+  (`author`, `autor`: "Listing"), more names for contact pages, and dated paths such as
+  `/2021/05/oer-camp/` or WordPress addresses such as `?p=12` and `?page_id=12`: "Content";
+  language and tracking parameters such as `?lang=en` do not count), "from the sitemap" (the file
+  name of the sitemap that listed it, such as `post-sitemap.xml` or
+  `wp-sitemap-posts-event-1.xml`), "from the link text" (a link named like a type, such as
+  "Kontakt", or in a pagination), "from keywords" (a word of the path or the link text, such as
+  `veranstaltung` for "Event" or `arbeitsblatt` for "Learning material") or "a page with a name,
+  not fetched" ("Content", the default for a URL with a readable name). A guess from the default
+  gives way to any other reason. Only a URL that no rule can guess (a number, a hex string
+  or a UUID as its last part, a last part without a word of three letters, or a query that is not
+  a language or tracking parameter) shows the badge "Type open", with the reason "Not fetched; its type shows when it is extracted" (as
+  tooltip and for screen readers), and the "Types:" line and the chips count "Type open" as well. "Select
+  content pages" checks every URL but the imprint, privacy, legal, contact, login, search and
+  error pages, and unchecks those and every page that failed; a URL without a type is checked
+  unless its page failed.
 
   The tree marks URLs that the site's rules block: the badge "robots.txt" (robots.txt disallows
   the URL, or robots.txt could not be retrieved) or "TDM" (a tdmrep.json reservation, an ai.txt

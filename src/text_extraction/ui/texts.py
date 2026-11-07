@@ -3,18 +3,25 @@ P10-S17, P12-S5, R-P12-4). A warning's
 one-line text is the catalogue key ``warning.<name>``, for each warning that
 ``ExtractResult.warnings`` and ``docs/architecture.md`` describe; an unknown warning (a
 converter note, a warning newer than the catalogues) is shown by its name. An error's text is
-``error.<code>``, for each ``ErrorCode``; the API's own English message is shown below it."""
+``error.<code>``, for each ``ErrorCode``; the API's own English message is shown below it. One
+message has a text of its own: transcription switched off (``result.transcription_disabled``),
+which the API answers as ``unsupported_content_type`` for an audio or video upload and as
+``invalid_request`` for ``transcribe: true``; "this kind of content cannot be converted" would
+send the caller looking for a wrong format."""
 
 import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
+from text_extraction.pipeline_media import TRANSCRIPTION_DISABLED_MESSAGE
 from text_extraction.ui.i18n import CATALOGUES, Language, Message
 
 _ACTION_FAILED: Final = re.compile(r"action_(\d+)_failed")
 # The text of an answer that names no known error code.
 HTTP_ANSWER: Final = "result.http_answer"
+# The text of the API's answer while the service does not transcribe.
+TRANSCRIPTION_DISABLED: Final = "result.transcription_disabled"
 
 
 def warning_message(name: str) -> Message | None:
@@ -33,9 +40,13 @@ def warning_text(name: str, language: Language) -> str | None:
     return message.text(language) if message is not None else None
 
 
-def error_text(code: object, http_status: int) -> Message:
+def error_text(code: object, http_status: int, message: object = None) -> Message:
     """The text of the error ``code`` (``error.<code>``); for a code the catalogues do not
-    know, "The service answered HTTP <http_status>."."""
+    know, "The service answered HTTP <http_status>.". The API's English ``message`` picks
+    the text of switched-off transcription (`TRANSCRIPTION_DISABLED`): it is the whole message
+    of an upload or ``transcribe: true``, the end of a fetched media file's."""
+    if isinstance(message, str) and message.endswith(TRANSCRIPTION_DISABLED_MESSAGE):
+        return Message(TRANSCRIPTION_DISABLED)
     key = f"error.{code}"
     if isinstance(code, str) and key in CATALOGUES["en"]:
         return Message(key)

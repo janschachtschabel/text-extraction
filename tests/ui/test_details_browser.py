@@ -1,7 +1,7 @@
 """Playground details from the audit of 2026-11-05 in a real Chromium (``pytest -m browser``), on
 a phone: the disabled "Custom capture" box draws a thin frame and dims its fields (U1), a 422 of an
 Options key marks the Options field and not a disabled custom field (U2, U6), and a page type
-guessed from the URL keeps its space and stays inside the tree (U3)."""
+guessed from the URL stays inside the tree (U3)."""
 
 import re
 from collections.abc import Iterator
@@ -91,17 +91,14 @@ def test_a_422_of_an_options_key_marks_the_options_field(ui: tuple[str, str]) ->
     assert console == []
 
 
-# The gap between the type's text and its "(guessed …)" note, and the badge's right edge against
-# the tree box's inner edge.
+# The guessed pill's right edge against the tree box's inner edge, and whether the box or a row
+# scrolls sideways.
 _BADGE: Final = (
-    "() => { const badge = document.querySelector('#result .page-type-guessed');"
-    " const note = badge.querySelector('.type-guessed'); const range = document.createRange();"
-    " range.selectNodeContents(badge.firstChild); const tree = badge.closest('ul.tree');"
-    " return {gap: note.getBoundingClientRect().left - range.getBoundingClientRect().right,"
-    " size: parseFloat(getComputedStyle(badge).fontSize),"
-    " right: badge.getBoundingClientRect().right,"
-    " inner: tree.getBoundingClientRect().left + tree.clientLeft + tree.clientWidth,"
-    " scrolls: tree.scrollWidth > tree.clientWidth}; }"
+    "() => { const badge = document.querySelector('#result li[data-type] .page-type.guessed');"
+    " const box = badge.closest('.tree-box'); const row = badge.closest('li');"
+    " return {right: badge.getBoundingClientRect().right,"
+    " inner: box.getBoundingClientRect().left + box.clientLeft + box.clientWidth,"
+    " scrolls: box.scrollWidth > box.clientWidth || row.scrollWidth > row.clientWidth}; }"
 )
 
 
@@ -110,16 +107,7 @@ _BADGE: Final = (
 _WIDER: Final = (
     "() => { document.documentElement.style"
     ".setProperty('--font-ui', '\"DejaVu Sans\", sans-serif');"
-    " document.querySelector('#result ul.tree').style.letterSpacing = '0.1em'; }"
-)
-
-
-# The computed flex-wrap of the tree's labels with a page-type badge and of those without.
-_LABEL_WRAPS: Final = (
-    "() => { const labels = [...document.querySelectorAll('#result ul.tree label.inline')];"
-    " const wrap = (label) => getComputedStyle(label).flexWrap;"
-    " return {badge: labels.filter((l) => l.querySelector('.page-type')).map(wrap),"
-    " plain: labels.filter((l) => !l.querySelector('.page-type')).map(wrap)}; }"
+    " document.querySelector('#result .tree-box').style.letterSpacing = '0.1em'; }"
 )
 
 
@@ -131,9 +119,7 @@ def guessed_ui(httpserver: HTTPServer) -> Iterator[tuple[str, str]]:
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
-def test_guessed_page_type_keeps_its_space_and_fits_the_tree(
-    guessed_ui: tuple[str, str], language: Language
-) -> None:
+def test_guessed_page_type_fits_the_tree(guessed_ui: tuple[str, str], language: Language) -> None:
     url, origin = guessed_ui
     with browsing(f"{url}?lang={language}") as (page, console):
         page.set_viewport_size(PHONE)
@@ -150,24 +136,14 @@ def test_guessed_page_type_keeps_its_space_and_fits_the_tree(
         # The badge's leaf is in a section, folded at first (package 17).
         page.locator("#result [data-action=tree-unfold-all]").click()
 
-        badge = page.locator("#result .page-type-guessed")
+        badge = page.locator("#result li[data-type] .page-type.guessed")
         expect(badge).to_have_count(1)
         text = " ".join(badge.inner_text().split())
         legal = re.escape(translate(language, "page_type.legal"))
-        guessed = re.escape(translate(language, "tree.type_guessed"))
-        assert re.fullmatch(rf"{legal} \({guessed}\)", text)
-        measured = page.evaluate(_BADGE)
-        assert measured["gap"] >= 0.25 * measured["size"]
-        assert measured["right"] <= measured["inner"]
-        assert measured["scrolls"] is False
-        page.evaluate(_WIDER)
-        wider = page.evaluate(_BADGE)
-        assert wider["right"] <= wider["inner"]
-        assert wider["scrolls"] is False
-        # Only a label with a badge wraps; a long name without one stays beside its checkbox.
-        wraps = page.evaluate(_LABEL_WRAPS)
-        assert wraps["badge"]
-        assert set(wraps["badge"]) == {"wrap"}
-        assert wraps["plain"]
-        assert set(wraps["plain"]) == {"nowrap"}
+        assert re.match(rf"{legal} ~", text)  # then the hidden reason
+        for _ in range(2):
+            measured = page.evaluate(_BADGE)
+            assert measured["right"] <= measured["inner"]
+            assert measured["scrolls"] is False
+            page.evaluate(_WIDER)
     assert console == []

@@ -11,12 +11,13 @@ Englisch.
 
 ## Status
 
-Prototyp `v0.1.5`: Die Pakete 0 bis 17 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
+Prototyp `v0.1.6`: Die Pakete 0 bis 18 sind gemergt (Grundlage, Dienstgerüst, schnelle Extraktion,
 Jobs und Batch, Browser-Worker, Dokumente und OCR, Audio und Video, PII, strukturierte Ausgabe und
 Chunking, Website-Struktur, MCP und Oberfläche, Übergabe, Sprachen der Oberfläche mit
 Entsperroption und zweisprachige Dokumentation, YouTube-Transkriptansicht, Screenshot-Formate und
 Seitentypen, neue Gestaltung des Playgrounds, robots.txt-Markierungen im Seitenbaum mit einem
-Schalter für die Website-Regeln pro Lauf, Korrekturen am Playground nach dem Test von v0.1.4). Die Pakete und ihren Stand zeigt
+Schalter für die Website-Regeln pro Lauf, Korrekturen am Playground nach dem Test von v0.1.4,
+Seitenbaum mit Typen, Spalten und schnellem Lesen der Sitemap). Die Pakete und ihren Stand zeigt
 [docs/packages.md](docs/packages.md#status) (Englisch).
 
 ## Zwei Arten der Extraktion
@@ -40,7 +41,8 @@ Siehe [Website-Regeln](docs/user-guide/de/site-rules.md) und
 ## Schnellstart mit Docker
 
 Voraussetzung ist Docker mit Compose. Compose startet die API, einen Extract-Worker, einen
-Browser-Worker und ein Valkey (mit Passwort) für den gemeinsamen Zustand.
+Browser-Worker, einen ASR-Worker (sein erster Start lädt das Whisper-Modell, etwa 1,6 GB) und ein
+Valkey (mit Passwort) für den gemeinsamen Zustand.
 
 ```bash
 cp .env.example .env                           # then set API_KEYS and VALKEY_PASSWORD in it

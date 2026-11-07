@@ -17,6 +17,11 @@
   --warn-wash: #fdf3d7;
   --error: #a3222b;
   --error-wash: #fde8ea;
+  --home: #1c4fa0; /* the tree's type pills (package 18) that the palette above has no pair for */
+  --home-wash: #e0ecff;
+  --listing: #5b3a99;
+  --listing-wash: #efe7fb;
+  --legal: #3d4650;
   --focus: #1d6f6a; /* at least 3:1 against --page and --paper */
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-read: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
@@ -148,8 +153,7 @@ textarea {
 table.items .badge,
 .page-type,
 .blocked-badge,
-.skipped,
-.found {
+.skipped {
   display: inline-flex;
   align-items: center;
   min-height: 26px;
@@ -1038,17 +1042,9 @@ progress {
 }
 
 /* The job's state is a pill: completed green, failed red, the others grey. */
-.state,
-.found {
+.state {
   background: var(--neutral-wash);
   color: var(--ink);
-}
-
-/* The tree's "found in" marker: the pill box, smaller and not bold. */
-.found {
-  padding: 0 8px;
-  font-size: 12px;
-  font-weight: 400;
 }
 
 .state-completed {
@@ -1063,9 +1059,7 @@ progress {
 
 .elapsed,
 .counts,
-.depth,
-.status,
-.lastmod {
+.status {
   color: var(--muted);
   font-size: 0.9em;
 }
@@ -1164,17 +1158,19 @@ form.cancel button {
 ul.tree,
 ul.tree ul {
   margin: 0;
-  padding-left: 1.25rem;
+  padding: 0;
   list-style: none;
 }
 
-ul.tree {
+/* The tree's scroll box: the sticky head and the rows share its column widths (package 18). */
+.tree-box {
+  --tree-columns: minmax(0, 1fr) 10rem 7.5rem 8rem 4.5rem;
   max-height: 40rem;
   overflow: auto;
-  padding: 0.5rem;
+  container-type: inline-size; /* the compact rows below depend on the box, not the viewport */
   border: 1px solid var(--line);
   border-radius: var(--radius-field);
-  background: var(--page);
+  background: var(--paper);
 }
 
 /* The options of "Extract selected" are as wide as the settings column's fields. */
@@ -1188,27 +1184,149 @@ ul.tree {
   max-width: 380px;
 }
 
+/* A row is a grid of the columns: name, type, found, status, depth. The nested list spans them
+   all, so a row's cells stay under the head's names whatever its level. The indentation is the
+   name cell's padding by the level (data-level: the CSP forbids a style attribute). */
 ul.tree li {
-  margin: 0.15rem 0;
+  display: grid;
+  grid-template-columns: var(--tree-columns);
+  align-items: center;
+  min-height: 36px;
+  margin: 0;
+  border-top: 1px solid var(--neutral-wash);
 }
 
-/* The label and the pills after it share one middle line. */
-ul.tree label.inline,
-ul.tree .found {
-  vertical-align: middle;
+ul.tree > li:first-child {
+  border-top: 0;
 }
 
-/* A label wraps its page-type badge below the name when the line is too narrow (audit U3);
-   a label without a badge keeps its long name beside its checkbox. */
-ul.tree label.inline:has(.page-type, .blocked-badge) {
-  flex-wrap: wrap;
+ul.tree li > ul {
+  grid-column: 1 / -1;
+}
+
+.row-meta {
+  display: contents;
+}
+
+/* The template clamps the level to 12: the CSP forbids an inline style, so a level is an
+   attribute and each level a rule. */
+ul.tree li[data-level="1"] { --level: 1; }
+ul.tree li[data-level="2"] { --level: 2; }
+ul.tree li[data-level="3"] { --level: 3; }
+ul.tree li[data-level="4"] { --level: 4; }
+ul.tree li[data-level="5"] { --level: 5; }
+ul.tree li[data-level="6"] { --level: 6; }
+ul.tree li[data-level="7"] { --level: 7; }
+ul.tree li[data-level="8"] { --level: 8; }
+ul.tree li[data-level="9"] { --level: 9; }
+ul.tree li[data-level="10"] { --level: 10; }
+ul.tree li[data-level="11"] { --level: 11; }
+ul.tree li[data-level="12"] { --level: 12; }
+
+.tree-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: var(--tree-columns);
+  align-items: center;
+  min-height: 30px;
+  border-bottom: 1px solid var(--line);
+  background: var(--neutral-wash);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.tree-head > span,
+.cell-type,
+.cell-found,
+.cell-status,
+.cell-depth {
+  min-width: 0;
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-found,
+.cell-status,
+.cell-depth {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.head-depth,
+.cell-depth {
+  text-align: right;
+}
+
+.cell-name {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  padding: 3px 10px 3px calc(10px + var(--level, 0) * 22px);
+}
+
+/* The label is the checkbox and the path, then the title; both end in an ellipsis (the full
+   text is in their title attribute), a section's page count follows its path. */
+ul.tree .cell-name label.inline {
+  flex: 1 1 auto;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+}
+
+ul.tree .node-section > .cell-name label.inline {
+  flex: 0 1 auto;
+}
+
+ul.tree .cell-name input {
+  flex: none;
+  margin: 0;
+}
+
+ul.tree .label {
+  flex: 0 1 auto;
+  min-width: 4rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 ul.tree .title {
+  flex: 1 1 3rem;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A title taken from a link's text is not the page's own: italic, in quotes. */
+ul.tree .title-link {
   font-style: italic;
 }
 
-.node-section > label .label {
+ul.tree .pages {
+  flex: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.none {
+  color: var(--muted);
+}
+
+.cell-status .status {
+  font-size: inherit;
+}
+
+.node-section > .cell-name .label {
   font-weight: 600;
 }
 
@@ -1216,14 +1334,68 @@ ul.tree .title {
   color: var(--muted);
 }
 
-/* A leaf's page type; a type guessed from the URL has a dashed border and says so. The gap is
-   the space between the type and its note, which the flex box drops (audit U3); a guessed
-   badge may wrap on a narrow screen. */
+/* The type pill (package 18), one colour pair per kind of type, each at 4.5:1 or more. The cell
+   cuts a long name with an ellipsis. */
 .page-type {
-  gap: 0.3em;
+  display: inline-block;
+  max-width: 100%;
+  height: 26px;
   border: 1px solid transparent;
   background: var(--neutral-wash);
   color: var(--ink);
+  font-weight: 600;
+  line-height: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.type-home {
+  background: var(--home-wash);
+  color: var(--home);
+}
+
+.type-content {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.type-listing {
+  background: var(--listing-wash);
+  color: var(--listing);
+}
+
+.type-event {
+  background: var(--warn-wash);
+  color: var(--warn);
+}
+
+.type-legal {
+  background: var(--neutral-wash);
+  color: var(--legal);
+}
+
+.type-error {
+  background: var(--error-wash);
+  color: var(--error);
+}
+
+/* A type not fetched ("Type open"), "other" or one without a colour of its own. */
+.type-open {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* A guessed type: a dashed border in the text's colour on white, and a "~" after the name. */
+.page-type.guessed {
+  border: 1px dashed currentColor;
+  background: var(--paper);
+}
+
+.tree-types {
+  color: var(--muted);
 }
 
 /* A leaf the site's rules block (package 16): the palette's warning pair; its label is dimmed
@@ -1238,31 +1410,10 @@ ul.tree label.inline:has(input:disabled) .label {
   color: var(--muted);
 }
 
-.page-type-guessed {
-  border: 1px dashed var(--field-line);
-  white-space: normal;
-}
-
-.page-type .type-guessed,
-.tree-types {
-  color: var(--muted);
-}
-
-/* The last resort on a narrow line: the note breaks inside a word instead of making the tree
-   scroll sideways; it stays beside the type. */
-.page-type .type-guessed {
-  overflow-wrap: anywhere;
-}
-
-/* A URL not fetched whose URL says nothing has an open type (package 17): the muted pill. */
-.page-type-open {
-  color: var(--muted);
-  font-weight: 400;
-}
-
 /* A node's fold button (package 17): a 24 x 24 px target before its label. Its mark changes
    with aria-expanded inside the fixed box, so the row does not move. While the buttons show,
-   a row without one is indented by the button's width, so the boxes of one level line up. */
+   a row without one is indented by the button's width and gap, so the boxes of one level line
+   up. */
 ul.tree button.fold {
   display: inline-flex;
   align-items: center;
@@ -1270,7 +1421,8 @@ ul.tree button.fold {
   width: 24px;
   height: 24px;
   min-height: 24px;
-  margin: 0 0.25rem 0 0;
+  flex: none;
+  margin: 0;
   padding: 0;
   border: 1px solid transparent;
   border-radius: 4px;
@@ -1294,8 +1446,46 @@ ul.tree button.fold[aria-expanded="false"] .fold-mark::before {
   content: "▸";
 }
 
-ul.tree:has(button.fold:not([hidden])) li:not(:has(> button.fold)) > label.inline {
-  margin-left: calc(24px + 0.25rem);
+ul.tree:has(button.fold:not([hidden])) .cell-name:not(:has(> button.fold)) > label.inline {
+  margin-left: 30px;
+}
+
+/* The type filter's chips (package 18): pills that toggle, the pressed ones in the accent. */
+.tree-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 0.75rem;
+}
+
+button.chip {
+  min-height: 32px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--field-line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+button.chip:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: var(--neutral-wash);
+  color: var(--ink);
+}
+
+button.chip[aria-pressed="true"],
+button.chip[aria-pressed="true"]:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent-strong);
+}
+
+.chip-count {
+  margin-left: 0.25em;
+  font-weight: 600;
 }
 
 /* The social media links after the tree (package 17): a long URL breaks, so the list wraps on
@@ -1364,10 +1554,44 @@ dl.facts.counts {
   form.previews {
     margin-top: 12px;
   }
+}
 
-  /* A level of the tree is indented less, so a leaf five levels deep, with the fold buttons'
-     indent, still has room for its page type beside a long German note (package 17). */
-  ul.tree ul {
-    padding-left: 0.75rem;
+@container (max-width: 44rem) {
+  /* The tree in a narrow box (package 18: a phone, or a column too narrow for five columns):
+     name and type stay in a row; found, status and depth move under the name with their column
+     names shown, and a level is indented less. */
+  .tree-head {
+    display: none;
+  }
+
+  ul.tree li {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .cell-name {
+    padding-left: calc(10px + var(--level, 0) * 12px);
+  }
+
+  .row-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 12px;
+    grid-column: 1 / -1;
+    padding: 0 10px 4px calc(10px + var(--level, 0) * 12px);
+  }
+
+  .row-meta > div {
+    padding: 0;
+    text-align: left;
+  }
+
+  .row-meta > div > .visually-hidden:first-child {
+    position: static !important;
+    width: auto;
+    height: auto;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+    clip-path: none;
   }
 }

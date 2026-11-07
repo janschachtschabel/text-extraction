@@ -4,6 +4,7 @@ with a fake fetcher serving a small site, the queue read back after each item.""
 
 import asyncio
 import os
+import time
 from collections.abc import Callable, Coroutine, Iterator
 from functools import wraps
 from typing import Any, cast
@@ -377,7 +378,7 @@ async def test_depth_zero_fetches_the_start_page_and_sitemaps_only() -> None:
     await crawl.crawl()
 
     items = await crawl.items(job_id)
-    assert roles(items) == ["page", "robots", "sitemap"]
+    assert roles(items) == ["page", "robots", "sitemap", "sitemap", "sitemap"]  # three guesses
     assert link_to(items[0], f"{SITE}/a").crawl == "depth"
 
 
@@ -433,7 +434,7 @@ async def test_failed_fetch_has_no_links_but_root_still_appends_robots() -> None
     await crawl.crawl()
 
     items = await crawl.items(job_id)
-    assert roles(items) == ["page", "robots", "sitemap"]
+    assert roles(items) == ["page", "robots", "sitemap", "sitemap", "sitemap"]
     root = items[0]
     assert root.result is not None
     assert root.result.status == "failed"
@@ -543,6 +544,174 @@ async def test_guessed_sitemap_404_is_absent_success() -> None:
     assert sitemap is not None
     assert (sitemap.format, sitemap.guessed) == ("absent", True)
     assert "sitemap_not_found" in data(sitemap_item).warnings
+
+
+@scenario
+async def test_unlisted_sitemap_tries_three_addresses_in_turn() -> None:
+    posts = f"{SITE}/wp-sitemap-posts-post-1.xml"
+    terms = f"{SITE}/wp-sitemap-taxonomies-category-1.xml"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", index(posts, terms)),
+            posts: text(posts, urlset(f"{SITE}/a", f"{SITE}/b")),
+            terms: text(terms, urlset(f"{SITE}/c")),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    guessed = [item for item in items if site(item).role == "sitemap"]
+    assert [item.url for item in guessed[:3]] == [
+        f"{SITE}/sitemap.xml",
+        f"{SITE}/sitemap_index.xml",
+        f"{SITE}/wp-sitemap.xml",
+    ]
+    assert len(guessed) == 5
+    contexts = [await crawl.sites.context(job_id, item.index) for item in guessed[:3]]
+    assert all(context.node is not None for context in contexts)
+    assert [context.node.guess for context in contexts if context.node] == [0, 1, 2]
+    assert [site(item).parent for item in guessed[1:3]] == [guessed[0].index, guessed[1].index]
+    assert [site(item).depth for item in guessed[:3]] == [0, 0, 0]
+    for item in guessed[:2]:
+        sitemap = site(item).sitemap
+        assert sitemap is not None
+        assert (sitemap.format, sitemap.guessed) == ("absent", True)
+    third = site(guessed[2]).sitemap
+    assert third is not None
+    assert [child.url for child in third.children] == [posts, terms]
+    assert [site(item).sitemap.type_hint for item in guessed[3:]] == [  # type: ignore[union-attr]
+        "content",
+        "listing",
+    ]
+    entries = [
+        entry.loc
+        for item in guessed[3:]
+        for entry in site(item).sitemap.entries  # type: ignore[union-attr]
+    ]
+    assert entries == [f"{SITE}/a", f"{SITE}/b", f"{SITE}/c"]
+    # The entries carry the guess made with their sitemap's hint.
+    assert [
+        entry.type_guess
+        for item in guessed[3:]
+        for entry in site(item).sitemap.entries  # type: ignore[union-attr]
+    ] == ["content", "content", "listing"]
+
+
+@scenario
+async def test_first_guess_found_stops_the_chain() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(f"{SITE}/x")),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert f"{SITE}/sitemap_index.xml" not in [item.url for item in items]
+    assert roles(items) == ["page", "robots", "sitemap"]
+
+
+@scenario
+async def test_guess_that_fails_ends_the_chain() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap.xml": fetched(f"{SITE}/sitemap.xml", "Busy", status=503),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert roles(items) == ["page", "robots", "sitemap"]
+    assert items[2].result is not None
+    assert items[2].result.status == "failed"
+
+
+@scenario
+async def test_listed_sitemap_404_appends_no_guess() -> None:
+    crawl = Crawl(
+        {ROOT: page(ROOT), ROBOTS: text(ROBOTS, f"Sitemap: {SITE}/gone.xml\n", "text/plain")}
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    assert roles(await crawl.items(job_id)) == ["page", "robots", "sitemap"]
+
+
+@scenario
+async def test_rerun_of_a_missing_guess_appends_the_next_one_once() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap_index.xml": text(f"{SITE}/sitemap_index.xml", urlset(f"{SITE}/x")),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+    await crawl.step()  # the start page
+    await crawl.step()  # robots
+    await die_after_extend(crawl, f"{SITE}/sitemap.xml")
+    assert len(await crawl.items(job_id)) == 4  # the next guess is appended, never queued
+    crawl.guard.high = True  # the rerun runs under the memory guard
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert await crawl.state(job_id) == "completed"
+    assert [item.url for item in items[2:]] == [f"{SITE}/sitemap.xml", f"{SITE}/sitemap_index.xml"]
+    assert all(item.state == "done" for item in items)
+
+
+@scenario
+async def test_memory_guard_ends_the_guess_chain_with_a_warning() -> None:
+    crawl = Crawl(
+        {ROOT: page(ROOT), ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain")}
+    )
+    job_id = await crawl.start(depth=0)
+    await crawl.step()  # the start page
+    await crawl.step()  # robots
+    crawl.guard.high = True
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert roles(items) == ["page", "robots", "sitemap"]
+    assert {"sitemap_not_found", "site_memory_guard"} <= set(data(items[2]).warnings)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_listed_sitemap_gets_its_type_hint() -> None:
+    post = f"{SITE}/post-sitemap.xml"
+    locs = [f"{SITE}/kurs/{n}/lektion.html" for n in range(400)]
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {post}\n", "text/plain"),
+            post: text(post, urlset(*locs)),
+        },
+        job_item_max_bytes=20_000,
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = [item for item in await crawl.items(job_id) if item.url == post]
+    assert len(items) >= 2
+    assert [site(item).sitemap.type_hint for item in items] == ["content"] * len(items)  # type: ignore[union-attr]
 
 
 @scenario
@@ -1008,6 +1177,8 @@ async def test_exhausted_parent_requeues_children_and_job_completes() -> None:
         f"{SITE}/a",
         f"{SITE}/b",
         f"{SITE}/sitemap.xml",
+        f"{SITE}/sitemap_index.xml",
+        f"{SITE}/wp-sitemap.xml",
     ]
     root = items[0].result
     assert root is not None
@@ -1191,3 +1362,378 @@ async def test_disallowed_sitemap_is_blocked_by_robots_under_enforce() -> None:
     assert item.result.error.code == ErrorCode.BLOCKED_BY_ROBOTS
     assert site(item).role == "sitemap"
     assert f"{SITE}/intern/map.xml" not in [url for url, _ in crawl.fetcher.calls]
+
+
+# --- discovery: sitemap_first --------------------------------------------------------------------
+
+LINKED = [f"{SITE}/a", f"{SITE}/b", f"{SITE}/c"]
+LISTED = [f"{SITE}/s{n}" for n in range(5)]
+
+
+def fetched_urls(crawl: Crawl) -> set[str]:
+    return {url for url, _ in crawl.fetcher.calls}
+
+
+async def assert_only_the_start_page(crawl: Crawl, job_id: str) -> None:
+    items = await crawl.items(job_id)
+    assert roles(items).count("page") == 1
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert [link.target for link in links(items[0])] == [None] * 3
+    [sitemap] = [item for item in items if site(item).role == "sitemap"]
+    parsed = site(sitemap).sitemap
+    assert parsed is not None
+    assert [entry.loc for entry in parsed.entries] == LISTED
+    assert not fetched_urls(crawl) & set(LINKED)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_with_listed_sitemap_crawls_only_the_start_page() -> None:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/map.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/map.xml": text(f"{SITE}/map.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    await assert_only_the_start_page(crawl, job_id)
+    assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)  # a listed sitemap never probes
+
+
+@scenario
+async def test_sitemap_first_with_guessed_sitemap() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            ROBOTS: text(ROBOTS, "User-agent: *\nAllow: /\n", "text/plain"),
+            f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    await assert_only_the_start_page(crawl, job_id)
+
+
+@scenario
+async def test_sitemap_first_probe_tries_the_next_guess_after_a_404() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert roles(items).count("page") == 1
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
+@scenario
+async def test_sitemap_first_without_sitemap_crawls_links() -> None:
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED)}
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert roles(items).count("page") == 4
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    for url in LINKED:
+        assert url in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_keeps_the_other_crawl_decisions() -> None:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/map.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED, "https://elsewhere.example.com/x", f"{SITE}/f.pdf"),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/map.xml": text(f"{SITE}/map.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    found = {link.url: link.crawl for link in links(items[0])}
+    assert found["https://elsewhere.example.com/x"] == "out_of_scope"
+    assert found[f"{SITE}/f.pdf"] == "file"
+    assert [found[url] for url in LINKED] == ["sitemap_first"] * 3
+
+
+@scenario
+async def test_sitemap_first_self_link_and_known_pages_say_seen() -> None:
+    robots = f"User-agent: *\nAllow: /\nSitemap: {SITE}/map.xml\n"
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, ROOT, *LINKED),
+            ROBOTS: text(ROBOTS, robots, "text/plain"),
+            f"{SITE}/map.xml": text(f"{SITE}/map.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    home = link_to(items[0], ROOT)
+    assert (home.crawl, home.target) == ("seen", 0)
+    assert [link.crawl for link in links(items[0])[1:]] == ["sitemap_first"] * 3
+    assert roles(items).count("page") == 1
+
+
+@scenario
+async def test_sitemap_first_robots_unavailable_crawls_normally() -> None:
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        ROBOTS: fetched(ROBOTS, "Busy", status=503),
+        f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+    }
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(compliance="report", discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_probe_stops_at_a_403() -> None:
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        f"{SITE}/sitemap.xml": fetched(f"{SITE}/sitemap.xml", "No", status=403),
+        f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", urlset(*LISTED)),
+    }
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert f"{SITE}/wp-sitemap.xml" not in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_first_probe_goes_on_after_a_404() -> None:
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            f"{SITE}/sitemap_index.xml": text(f"{SITE}/sitemap_index.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+
+
+@scenario
+async def test_crawl_discovery_does_not_probe() -> None:
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED)}
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    await crawl.start(discovery="crawl")
+
+    await crawl.crawl()
+
+    # Once, by the robots chain, not a second time by a probe.
+    assert [url for url, _ in crawl.fetcher.calls].count(f"{SITE}/sitemap.xml") == 1
+
+
+@scenario
+async def test_sitemap_first_html_answer_at_a_guess_is_no_sitemap() -> None:
+    """A CMS that answers 200 with an HTML page at a guessed address has no sitemap there:
+    the probe moves on to the next guess and the chain agrees."""
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT, *LINKED),
+            f"{SITE}/sitemap.xml": page(f"{SITE}/sitemap.xml"),
+            f"{SITE}/wp-sitemap.xml": text(f"{SITE}/wp-sitemap.xml", urlset(*LISTED)),
+        }
+    )
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert not fetched_urls(crawl) & set(LINKED)
+    guessed = [item for item in items if site(item).role == "sitemap"]
+    parsed = [site(item).sitemap for item in guessed]
+    assert [p.format for p in parsed if p] == ["absent", "absent", "urlset"]
+    assert [entry.loc for entry in parsed[2].entries] == LISTED  # type: ignore[union-attr]
+    assert "sitemap_not_found" in data(guessed[0]).warnings
+    assert all(item.result is not None and item.result.status == "success" for item in guessed)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_html_at_every_guess_crawls_the_links() -> None:
+    paths = ["/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml"]
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED)}
+    answers.update({SITE + path: page(SITE + path) for path in paths})
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert roles(items).count("page") == 4
+    guessed = [item for item in items if site(item).role == "sitemap"]
+    assert len(guessed) == 3
+    for item in guessed:
+        assert item.result is not None
+        assert item.result.status == "success"
+        assert data(item).warnings == ["sitemap_not_found"]
+        sitemap = site(item).sitemap
+        assert sitemap is not None
+        assert sitemap.format == "absent"
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_rerun_reuses_the_probe_verdict() -> None:
+    """A rerun whose probe would now say no keeps the first run's yes: the links are
+    ``sitemap_first`` (not ``memory_guard``) and no false warning appears."""
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+    }
+    crawl = Crawl(answers)
+    job_id = await crawl.start(discovery="sitemap_first")
+    await die_after_extend(crawl, ROOT)
+    del answers[f"{SITE}/sitemap.xml"]  # the second probe would find nothing
+
+    await crawl.crawl()
+
+    items = await crawl.items(job_id)
+    assert [link.crawl for link in links(items[0])] == ["sitemap_first"] * 3
+    assert "site_memory_guard" not in data(items[0]).warnings
+    assert not fetched_urls(crawl) & set(LINKED)
+    assert await crawl.state(job_id) == "completed"
+
+
+@scenario
+async def test_sitemap_first_probe_is_bounded_by_the_item_budget() -> None:
+    """A guessed sitemap that never answers ends the probe at the item's remaining budget: no,
+    so the crawl goes on normally."""
+
+    async def never(_validators: object) -> FetchResult:
+        await asyncio.sleep(60)
+        raise AssertionError("not reached")
+
+    answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED), f"{SITE}/sitemap.xml": never}
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    crawl.site._item_budget = 0.3
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    started = time.monotonic()
+    item = await crawl.step()  # item 0
+    assert item is not None
+    assert time.monotonic() - started < 10
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+
+
+@scenario
+async def test_sitemap_first_probe_is_skipped_without_budget() -> None:
+    answers: dict[str, Answer] = {
+        ROOT: page(ROOT, *LINKED),
+        f"{SITE}/sitemap.xml": text(f"{SITE}/sitemap.xml", urlset(*LISTED)),
+    }
+    answers.update({url: page(url) for url in LINKED})
+    crawl = Crawl(answers)
+    crawl.site._item_budget = 0.0
+    job_id = await crawl.start(discovery="sitemap_first")
+
+    await crawl.step()
+
+    items = await crawl.items(job_id)
+    assert {link.crawl for link in links(items[0])} == {"queued"}
+    assert f"{SITE}/sitemap.xml" not in fetched_urls(crawl)
+
+
+@scenario
+async def test_sitemap_entries_carry_their_guessed_type() -> None:
+    terms = f"{SITE}/map.xml"
+    locs = [
+        f"{SITE}/thema-x/",
+        f"{SITE}/category/news/",
+        f"{SITE}/2026/10/05/post/",
+        f"{SITE}/4711",
+    ]
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {terms}\n", "text/plain"),
+            terms: text(terms, urlset(*locs)),
+        }
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    [item] = [item for item in await crawl.items(job_id) if item.url == terms]
+    parsed = site(item).sitemap
+    assert parsed is not None
+    assert parsed.type_hint is None
+    guesses = {entry.loc: entry.type_guess for entry in parsed.entries}
+    assert guesses == {
+        f"{SITE}/thema-x/": "content",  # a name, no id shape
+        f"{SITE}/category/news/": "listing",  # its URL
+        f"{SITE}/2026/10/05/post/": "content",  # a dated path
+        f"{SITE}/4711": None,  # opaque
+    }
+
+
+@scenario
+async def test_sitemap_parts_stay_under_the_item_limit_with_type_guesses() -> None:
+    post = f"{SITE}/post-sitemap.xml"
+    locs = [f"{SITE}/kurs/{n}/lektion.html" for n in range(600)]
+    crawl = Crawl(
+        {
+            ROOT: page(ROOT),
+            ROBOTS: text(ROBOTS, f"Sitemap: {post}\n", "text/plain"),
+            post: text(post, urlset(*locs)),
+        },
+        job_item_max_bytes=20_000,
+    )
+    job_id = await crawl.start(depth=0)
+
+    await crawl.crawl()
+
+    items = [item for item in await crawl.items(job_id) if item.url == post]
+    assert len(items) >= 2
+    for item in items:
+        parsed = site(item).sitemap
+        assert parsed is not None
+        assert all(entry.type_guess == "content" for entry in parsed.entries)
+    for item in items:
+        assert await crawl.stored_size(job_id, item.index) <= 20_000

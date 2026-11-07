@@ -16,22 +16,27 @@ import argparse
 import asyncio
 import json
 import os
+import statistics
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from tests.live.run_live import domain_of, get_job, read_urls
+from text_extraction.job_models import JobItem
+from text_extraction.ui.site_tree import build_tree
 
 DEFAULT_URLS = Path(__file__).parent / "urls" / "sites.csv"
 DEFAULT_DEPTH = 1
 DEFAULT_MAX_PAGES = 25
+DEFAULT_DISCOVERY = "crawl"  # the API's default of the site option `discovery`
 # One request's deadline; the crawl itself runs as a job and is waited for separately.
 DEFAULT_CLIENT_TIMEOUT_SECONDS = 60.0
 # A crawl of 25 pages takes minutes at the default per-host spacing; large sitemaps add to it.
@@ -57,7 +62,10 @@ CRAWLS = (
     "max_pages",
     "max_files",
     "memory_guard",
+    "sitemap_first",
 )
+# The tree is measured without a cap, as the UI would show it with a large ``UI_TREE_MAX_URLS``.
+TREE_MAX_URLS = 100_000
 
 
 @dataclass(frozen=True)
@@ -80,6 +88,12 @@ class SiteReport:
     page_types: dict[str, int] = field(default_factory=dict)  # page items by `data.page_type.type`
     warnings: dict[str, int] = field(default_factory=dict)
     error_codes: dict[str, int] = field(default_factory=dict)
+    sitemap: str = "none"  # `listed` (robots.txt), `guessed` (/sitemap.xml) or `none` found
+    tree_urls: int = 0  # the URLs of the site tree (`build_tree`)
+    type_open: int = 0  # tree URLs not fetched (sitemap or linked) and without a page type
+    type_open_pct: float | None = None  # `type_open` as a share of `tree_urls`; None for no URLs
+    median_convert_ms: int | None = None  # of the page items' `timings.convert_ms`
+    crawl_seconds: float | None = None  # the job's `finished_at - created_at`; None if unknown
 
     @classmethod
     def refused(cls, url: str, error: str) -> "SiteReport":
@@ -98,6 +112,54 @@ def _seconds(job: dict[str, Any]) -> float | None:
     return round(delta.total_seconds(), 1)
 
 
+class _Loose:
+    """A job item's JSON read by attribute, as ``build_tree`` reads a ``JobItem``: a missing key
+    is ``None``. The harness spells the API out (it also runs against older services), so it
+    does not validate the items against the current models."""
+
+    def __init__(self, raw: dict[str, Any]) -> None:
+        self._raw = raw
+
+    def __getattr__(self, name: str) -> Any:
+        return _loose(self._raw.get(name))
+
+
+def _loose(value: Any) -> Any:
+    if isinstance(value, dict):
+        return _Loose(value)
+    if isinstance(value, list):
+        return [_loose(one) for one in value]
+    return value
+
+
+def _site(item: dict[str, Any]) -> dict[str, Any]:
+    data = (item.get("result") or {}).get("data") or {}
+    return data.get("site") or {}
+
+
+def _sitemap_state(items: Sequence[dict[str, Any]]) -> str:
+    """`listed` when robots.txt named a sitemap or a sitemap that was not guessed exists,
+    `guessed` when only the guessed /sitemap.xml exists, else `none` (no sitemap found)."""
+    sites = [_site(item) for item in items]
+    present = [
+        info
+        for site in sites
+        if site.get("role") == "sitemap"
+        and (info := site.get("sitemap") or {}).get("format") not in (None, "absent")
+    ]
+    if not present:
+        return "none"
+    listed = any(site.get("sitemaps") for site in sites if site.get("role") == "robots")
+    return "listed" if listed or any(not info.get("guessed") for info in present) else "guessed"
+
+
+def _tree_numbers(items: Sequence[dict[str, Any]]) -> tuple[int, int, float | None]:
+    loose = cast("list[JobItem]", [_loose(item) for item in items])
+    tree = build_tree(loose, max_urls=TREE_MAX_URLS)
+    share = round(100 * tree.untyped / tree.urls, 1) if tree.urls else None
+    return tree.urls, tree.untyped, share
+
+
 def tally(
     url: str,
     job: dict[str, Any],
@@ -114,6 +176,7 @@ def tally(
     page_types: Counter[str] = Counter()
     warnings: Counter[str] = Counter()
     codes: Counter[str] = Counter()
+    convert_ms: list[int] = []
     pages_ok = failed = entries = 0
     for item in items:
         result = item.get("result") or {}
@@ -129,6 +192,9 @@ def tally(
         if role == "page":
             page_type = data.get("page_type") or {}
             page_types[page_type.get("type") or "none"] += 1
+            spent = (data.get("timings") or {}).get("convert_ms")
+            if isinstance(spent, int | float):
+                convert_ms.append(round(spent))
         if error_info := result.get("error"):
             codes[error_info.get("code") or "unknown"] += 1
         warnings.update(data.get("warnings") or [])
@@ -138,6 +204,7 @@ def tally(
         sitemap = site.get("sitemap") or {}
         entries += len(sitemap.get("entries") or [])
     seconds = _seconds(job)
+    tree_urls, type_open, type_open_pct = _tree_numbers(items)
     return SiteReport(
         url=url,
         state=str(job.get("state") or "unknown"),
@@ -155,7 +222,50 @@ def tally(
         page_types=dict(page_types),
         warnings=dict(warnings),
         error_codes=dict(codes),
+        sitemap=_sitemap_state(items),
+        tree_urls=tree_urls,
+        type_open=type_open,
+        type_open_pct=type_open_pct,
+        median_convert_ms=round(statistics.median(convert_ms)) if convert_ms else None,
+        crawl_seconds=seconds,
     )
+
+
+# The service's own per-client rate limit (429 `rate_limited`) is waited out, not reported.
+RETRY_AFTER_FALLBACK_SECONDS = 10.0
+RETRY_AFTER_CAP_SECONDS = 60.0
+MAX_RATE_LIMIT_RETRIES = 5
+
+
+def _is_rate_limited(response: httpx.Response) -> bool:
+    if response.status_code != 429:
+        return False
+    try:
+        return bool((response.json().get("error") or {}).get("code") == "rate_limited")
+    except (ValueError, AttributeError):
+        return False
+
+
+def _retry_after(response: httpx.Response) -> float:
+    try:
+        seconds = float(response.headers["Retry-After"])
+    except (KeyError, ValueError):
+        return RETRY_AFTER_FALLBACK_SECONDS
+    if seconds != seconds or seconds < 0:  # NaN or negative
+        return RETRY_AFTER_FALLBACK_SECONDS
+    return min(seconds, RETRY_AFTER_CAP_SECONDS)
+
+
+async def _patient(send: Callable[[], Awaitable[httpx.Response]]) -> httpx.Response:
+    """The answer of ``send``; a 429 `rate_limited` is retried after its `Retry-After` seconds
+    (10 without a usable one, at most 60), up to 5 times, then returned as it is."""
+    response = await send()
+    for _ in range(MAX_RATE_LIMIT_RETRIES):
+        if not _is_rate_limited(response):
+            break
+        await asyncio.sleep(_retry_after(response))
+        response = await send()
+    return response
 
 
 def _refusal(response: httpx.Response) -> str:
@@ -175,7 +285,8 @@ async def _items(
     offset: int | None = 0
     job: dict[str, Any] = {}
     while offset is not None:
-        response = await get_job(client, status_url, {"offset": offset, "limit": page_size})
+        params = {"offset": offset, "limit": page_size}
+        response = await _patient(partial(get_job, client, status_url, params))
         response.raise_for_status()
         job = response.json()["data"]
         items += job.get("items") or []
@@ -191,6 +302,7 @@ async def crawl(
     depth: int,
     max_pages: int,
     compliance: str,
+    discovery: str = DEFAULT_DISCOVERY,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     job_timeout: float = DEFAULT_JOB_TIMEOUT_SECONDS,
     page_size: int = PAGE_SIZE,
@@ -205,14 +317,16 @@ async def crawl(
         "compliance": compliance,
         "cache": False,
     }
+    if discovery != DEFAULT_DISCOVERY:  # the API's default stays unsent: older services take it
+        body["discovery"] = discovery
     try:
-        response = await client.post("/v1/site-structure", json=body)
+        response = await _patient(lambda: client.post("/v1/site-structure", json=body))
         if response.status_code != 202:
             return SiteReport.refused(url, _refusal(response))
         status_url = response.json()["data"]["status_url"]
         error: str | None = None
         while True:
-            polled = await get_job(client, status_url, {"limit": 1})
+            polled = await _patient(lambda: get_job(client, status_url, {"limit": 1}))
             polled.raise_for_status()
             if polled.json()["data"]["state"] == "completed":
                 break
@@ -240,6 +354,7 @@ async def run(
     depth: int,
     max_pages: int,
     compliance: str,
+    discovery: str = DEFAULT_DISCOVERY,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
     job_timeout: float = DEFAULT_JOB_TIMEOUT_SECONDS,
 ) -> list[SiteReport]:
@@ -254,6 +369,7 @@ async def run(
                     depth=depth,
                     max_pages=max_pages,
                     compliance=compliance,
+                    discovery=discovery,
                     poll_seconds=poll_seconds,
                     job_timeout=job_timeout,
                 )
@@ -305,12 +421,19 @@ def _page_types_table(reports: Sequence[SiteReport]) -> list[str]:
     return ["### Page types", "", *_table(["Site", "Type", "Pages"], rows), ""]
 
 
-def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, compliance: str) -> str:
+def summarize(
+    reports: Sequence[SiteReport],
+    *,
+    depth: int,
+    max_pages: int,
+    compliance: str,
+    discovery: str = DEFAULT_DISCOVERY,
+) -> str:
     """The Markdown summary: a row per site, then the link histograms and the warnings."""
     sites = f"{len(reports)} site{'' if len(reports) == 1 else 's'}"
     lines = [
         f"## Site structure: {sites}, depth {depth}, max_pages {max_pages}, "
-        f"compliance {compliance}",
+        f"compliance {compliance}, discovery {discovery}",
         "",
     ]
     rows = [
@@ -325,6 +448,12 @@ def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, comp
             report.sitemap_files,
             report.sitemap_parts,
             report.entries,
+            report.sitemap,
+            report.tree_urls,
+            report.type_open,
+            "-" if report.type_open_pct is None else f"{report.type_open_pct:.1f}",
+            "-" if report.median_convert_ms is None else report.median_convert_ms,
+            "-" if report.crawl_seconds is None else f"{report.crawl_seconds:.1f}",
         ]
         for report in reports
     ]
@@ -339,6 +468,12 @@ def summarize(reports: Sequence[SiteReport], *, depth: int, max_pages: int, comp
         "Sitemap files",
         "Parts",
         "Entries",
+        "sitemap",
+        "tree URLs",
+        "type open",
+        "type open %",
+        "median convert ms",
+        "crawl s",
     ]
     lines += [*_table(header, rows), ""]
     lines += _histogram("Links by region", REGIONS, reports, [r.regions for r in reports])
@@ -365,6 +500,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         choices=["enforce", "report", "ignore"],
         default="enforce",
         help="the request's compliance mode (default enforce: a crawl respects robots.txt and TDM)",
+    )
+    parser.add_argument(
+        "--discovery",
+        choices=["crawl", "sitemap_first"],
+        default=DEFAULT_DISCOVERY,
+        help="the site option `discovery`: follow links (crawl) or read the sitemap first and "
+        "follow no links when there is one (sitemap_first)",
     )
     parser.add_argument("--timeout", type=float, default=DEFAULT_CLIENT_TIMEOUT_SECONDS)
     parser.add_argument(
@@ -407,6 +549,7 @@ async def amain(args: argparse.Namespace) -> int:
             depth=args.depth,
             max_pages=args.max_pages,
             compliance=args.compliance,
+            discovery=args.discovery,
             poll_seconds=args.poll_seconds,
             job_timeout=args.job_timeout,
         )
@@ -415,7 +558,11 @@ async def amain(args: argparse.Namespace) -> int:
         for report in reports:
             sink.write(json.dumps(asdict(report)) + "\n")
     summary = summarize(
-        reports, depth=args.depth, max_pages=args.max_pages, compliance=args.compliance
+        reports,
+        depth=args.depth,
+        max_pages=args.max_pages,
+        compliance=args.compliance,
+        discovery=args.discovery,
     )
     print(summary)
     if args.summary_out is not None:

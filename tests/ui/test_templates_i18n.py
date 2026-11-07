@@ -40,7 +40,8 @@ ALLOWED_LITERALS = {
 # Attributes whose values a user reads (or hears).
 TEXT_ATTRIBUTES = ("placeholder", "title", "aria-label", "alt", "hx-confirm")
 # Keys named by a computed string (for example ``"warning." ~ name`` or from Python data).
-DYNAMIC_PREFIXES = ("warning.", "error.", "timeline.")
+# ``tree.reason.`` is looked up by the guess reason (``t("tree.reason." ~ reason)``).
+DYNAMIC_PREFIXES = ("warning.", "error.", "timeline.", "tree.reason.")
 
 _ATTRIBUTE = re.compile(
     r"(?<![\w-])(" + "|".join(TEXT_ATTRIBUTES) + r""")\s*=\s*(?:"([^"]*)"|'([^']*)')"""

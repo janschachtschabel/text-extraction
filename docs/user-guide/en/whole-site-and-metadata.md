@@ -10,8 +10,8 @@ section of a site, see [Part of a site](part-of-a-site.md).
 ## Map the site
 
 `POST /v1/site-structure` maps a site: its sitemaps (robots.txt's `Sitemap:` lines, else
-`/sitemap.xml`; indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the
-start page, `depth` clicks deep (default 2, at most `SITE_MAX_DEPTH`), for at most `max_pages`
+`/sitemap.xml`, `/sitemap_index.xml` or `/wp-sitemap.xml`, tried in this order until one exists;
+indexes, gzip, text, RSS and Atom) with their URLs, and its link graph from the start page, `depth` clicks deep (default 2, at most `SITE_MAX_DEPTH`), for at most `max_pages`
 pages (default 100, at most `SITE_MAX_PAGES`). It answers 202 with a job of kind `site`; the
 extract workers crawl, and every page, robots.txt and sitemap file they find becomes an item of
 the job, so its `total` grows while it runs:
@@ -50,7 +50,8 @@ curl -H "Authorization: Bearer $KEY" "http://localhost:8080/v1/jobs/<job id>?off
 #   "role": "page", "depth": 1, "parent": 0, "links": [...]}, ...}, ...}},
 #  {"index": 3, "url": "https://example.org/sitemap.xml", "result": {"data": {"site": {
 #   "role": "sitemap", "depth": 0, "parent": 1, "sitemap": {"format": "urlset", "guessed": false,
-#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01"}, ...],
+#   "entries": [{"loc": "https://example.org/mathe/", "lastmod": "2026-10-01",
+#                "type_guess": "listing"}, ...],
 #   "children": [], "entry_count": 2400, "part": 1, "parts": 3}}, ...}, ...}}, ...]}, ...}
 ```
 
@@ -58,7 +59,12 @@ Pages are fetched over HTTP only, with the service's user agent, the per-host li
 checks of `compliance`; the items keep title, status, metadata and quality but no text
 (`content: null`). The crawl stays on the start page's host (a leading `www.` ignored);
 `scope: "path"` keeps it under the start URL's directory, `sitemaps: false` skips the sitemaps,
-and `depth: 0` reads the start page and the sitemaps only. A crawl counts towards
+and `depth: 0` reads the start page and the sitemaps only. With `discovery: "sitemap_first"` the
+crawl reads only the start page when robots.txt lists a sitemap or one of the three addresses
+answers with one, and takes the other pages from the sitemap; without a sitemap it follows links as usual.
+`discovery: "sitemap_first"` with `sitemaps: false` is 422. The web interface offers this as "Fast:
+sitemap first" (the preset; it needs "robots.txt and sitemaps" ticked) next to "Thorough: follow
+links"; the API default is `discovery: "crawl"`. A crawl counts towards
 `BATCH_MAX_OPEN_PER_CLIENT` with your batches.
 
 ### Read the site structure
@@ -75,12 +81,16 @@ crawl did with it, and `category`, what it leads to (see
   deeper than `depth` to a page that is an item anyway says `seen` too).
 - The others are not followed: `depth` (deeper than asked), `listed` (head links and iframes),
   `file`, `out_of_scope` (another host, or outside the start directory with `scope: "path"`),
-  `nofollow`, `blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages`
-  and `memory_guard`.
+  `nofollow`, `blocked` (robots.txt or a TDM opt-out under `compliance: enforce`), `max_pages`,
+  `memory_guard` and `sitemap_first` (a crawl with `discovery: "sitemap_first"` found a sitemap, so
+  the link was not followed).
 
 A sitemap's entries are in `sitemap.entries`; a large one continues in `sitemap_part` items with
 the same URL (`part` of `parts`), and an index lists its sitemaps in `children`, each with the
-item it became. An item whose `final_url` is another item's URL is a redirect to that page (its
+item it became. Each entry carries a `type_guess`: the page type guessed from its URL and the
+sitemap's `type_hint` (what its file name suggests, such as `listing` for a WordPress category
+sitemap) without fetching the page, or no `type_guess` when the URL says nothing. It is a guess,
+not a `page_type`; sitemaps read before this field existed have none. An item whose `final_url` is another item's URL is a redirect to that page (its
 links repeat the page's): dedupe the graph by `final_url`.
 
 ### Page types and link categories
@@ -100,7 +110,9 @@ are checked in this order, and the first that applies wins:
    a language code is the start page unless the page declares another language (`<html lang>`):
    `/it/` on a German page is left to the other rules.
 3. schema.org: the page's JSON-LD or microdata says `ContactPage` (`contact`), `AboutPage`
-   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`).
+   (`about`), `SearchResultsPage` (`search`) or `CollectionPage` (`listing`); failing
+   those, an `Event` type (`Event`, `EducationEvent` and other names ending in `Event`) says
+   `event`, and `LearningResource`, `Quiz` or `Course` says `learning_material`.
 4. The URL: a whole path segment such as `impressum` or `imprint` (`imprint`), `datenschutz` or
    `privacy` (`privacy`), `agb`, `terms`, `cookies` or `barrierefreiheit` (`legal`), `login`,
    `registrieren` or `konto` (`auth`), `suche` or `search`, or a search query such as `?q=...`
@@ -181,10 +193,14 @@ kept for `JOB_TTL_SECONDS` (24 h); `DELETE /v1/jobs/{id}` cancels it and deletes
 ## In the playground
 
 1. **Site structure**: enter the start URL, set "Link depth" and "Most pages", leave "Scope" at
-   the host, and press "Read the site structure".
+   the host, choose "How to read the site" ("Fast: sitemap first", the preset, or "Thorough: follow
+   links"), and press "Read the site structure".
 2. Once the job is completed, "Show as tree" lists the pages by host and path; while it runs,
-   "Show tree now" shows a snapshot. Each URL shows its page type, and "Types:" above the tree
-   counts them. "Select all" checks every URL, and "Select content pages" every URL but imprint,
+   "Show tree now" shows a snapshot; the tree also appears by itself once the job has a result and
+   refreshes while it runs. Each URL shows its page type, and the "Types:" line above the tree counts them; with
+   JavaScript, chips under "Filter by type" replace that line and show only the URLs of a type
+   (without JavaScript the line stays). "Select all" checks every URL shown (under a type filter
+   only the shown ones), and "Select content pages" every shown URL but imprint,
    privacy, legal, contact, login, search and error pages and pages that failed; or check the
    sections you want. URLs that the site's rules block are marked "robots.txt" or "TDM" and
    are skipped by the buttons while "Site rules" is "Respect the site's rules"; the batch below

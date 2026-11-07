@@ -280,15 +280,15 @@ def test_get_job_pages_site_items(api: Api) -> None:
 
     processed = work_site(api, answers)
 
-    # The start page, robots.txt (a 404 here) and the guessed /sitemap.xml (a 404: absent).
-    assert processed == 3
+    # The start page, robots.txt (a 404 here) and the three guessed sitemaps (404s: absent).
+    assert processed == 5
     view = api.job(job_id).json()
     data = view["data"]
     assert data["kind"] == "site"
     assert data["state"] == "completed"
-    assert data["progress"]["total"] == 3
+    assert data["progress"]["total"] == 5
     roles = [(item["index"], item["result"]["data"]["site"]["role"]) for item in data["items"]]
-    assert roles == [(0, "page"), (1, "robots"), (2, "sitemap")]
+    assert roles == [(0, "page"), (1, "robots"), (2, "sitemap"), (3, "sitemap"), (4, "sitemap")]
     start = data["items"][0]["result"]["data"]
     assert start["content"] is None
     assert [link["crawl"] for link in start["site"]["links"]] == ["depth"]
@@ -370,3 +370,14 @@ def test_concurrent_cancel_gives_the_site_job_back(api: Api) -> None:
         return sorted(str(key) for key in await valkey.keys("job*"))
 
     assert api.run(scenario) == []
+
+
+def test_sitemap_first_needs_sitemaps(api: Api) -> None:
+    response = site(api, discovery="sitemap_first", sitemaps=False)
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "invalid_request"
+    assert "sitemaps" in error["details"][0]["msg"]
+    assert api.keys("job:*") == []
+    assert site(api, discovery="sitemap_first").status_code == 202

@@ -37,7 +37,7 @@ chart overrides `PUBLIC_PORT`, `INTERNAL_PORT` and `VALKEY_URL`, `JOBS_ENABLED` 
 | `FETCH_MAX_REDIRECTS` | `5` | Redirects followed per fetch (0 to 20). Every hop passes the SSRF guard. |
 | `FETCH_ALLOW_PRIVATE_NETWORKS` | `false` | **Unsafe.** `true` switches the SSRF guard off for private, loopback and link-local addresses. For local development and tests only; never set it in a deployment. |
 | `OUTBOUND_MAX_CONCURRENCY_PER_HOST` | `2` | Requests in flight to one host at the same time, across all pods. Minimum 1. |
-| `OUTBOUND_MIN_DELAY_MS` | `1000` | Least gap between the starts of two requests to one host, in milliseconds. 0 switches the spacing off. Minimum 0. |
+| `OUTBOUND_MIN_DELAY_MS` | `500` | Least gap between the starts of two requests to one host, in milliseconds. 0 switches the spacing off. Minimum 0. |
 | `OUTBOUND_MAX_CRAWL_DELAY_SECONDS` | `10` | Upper limit for the `Crawl-delay` of a robots.txt, in seconds. A longer value is cut to this. Minimum 0. |
 | `OUTBOUND_MAX_WAIT_SECONDS` | `10` | Longest time a request waits for its turn at a host. Longer waits are refused as `OutboundBusy`. Minimum 0. |
 | `OUTBOUND_BACKOFF_SECONDS` | `30` | Pause for a host after 429 or 503 without a usable `Retry-After`. Minimum 1. |
@@ -218,10 +218,11 @@ Deno, yt-dlp's JavaScript runtime, is the binary of the `deno` package in the im
 is given its path, so it needs no `PATH` entry. `text-extraction-asr-worker --check` runs the
 self-check in one child and exits 0 (1 on a failure, 2 for invalid settings); it needs no Valkey.
 
-docker compose starts the ASR worker only with the profile `asr`:
-`docker compose --profile asr up -d --wait` with `ASR_ENABLED=true` in `.env` (compose passes
-`ASR_ENABLED` from `.env` or the shell to every service, default false; the other ASR settings,
-such as `ASR_BACKEND`, `ASR_MODEL` and `ASR_EXTERNAL_API_KEY`, reach every service from `.env`).
+docker compose always starts the ASR worker (no profile): transcription is on by default there
+(compose passes `ASR_ENABLED` from `.env` or the shell to every service, default true; the other
+ASR settings, such as `ASR_BACKEND`, `ASR_MODEL` and `ASR_EXTERNAL_API_KEY`, reach every service
+from `.env`). To switch it off, set `ASR_ENABLED=false` in `.env` and start with
+`docker compose up -d --wait --scale asr-models=0 --scale asr-worker=0`.
 The service `asr-models` runs `--download-models` into the volume `asr-models` first (it needs
 huggingface.co once; with `ASR_BACKEND=openai` it does nothing), then `asr-worker` mounts it
 read-only and keeps downloaded media on the volume `asr-scratch` (`/scratch`, not the tmpfs `/tmp`,
@@ -401,7 +402,8 @@ title, description, duration and licence; without subtitles it answers the metad
 (`transcript_source: metadata_only`, `partial`/`no_transcript_available`). Subtitles are read by
 child processes of the pod that holds the request (youtube-transcript-api, yt-dlp). Speech
 recognition (`transcribe: true`, and every uploaded audio or video file) runs in the ASR worker and
-is always a job. ASR is off by default: the API image has neither Whisper nor models.
+is always a job. The service's own default and the Helm chart have ASR off (the API image has
+neither Whisper nor models); docker compose starts the ASR worker and switches it on.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -416,7 +418,7 @@ is always a job. ASR is off by default: the API image has neither Whisper nor mo
 | `MEDIA_UPLOAD_MAX_BYTES` | `25000000` | Largest audio or video file that can be uploaded for transcription, in bytes (about 25 minutes of MP3 at 128 kbit/s). The bytes travel through Valkey and count in the input budget (`DOCLING_INPUT_BUDGET_BYTES`, which holds the inputs of all kinds), so with `ASR_ENABLED=true` it must not exceed it, or the service exits with code 2 at start-up. At least 1000000. Larger media: send the URL. The Helm chart sets it from `workers.asr.uploadMaxBytes`. |
 | `MEDIA_DOWNLOAD_TIMEOUT_SECONDS` | `600` | Time budget of one media download by the ASR worker, in seconds (a platform video's info and its download together), within the item's `ASR_TIMEOUT_SECONDS`: the download gets this or what is left of the item's budget, whichever is less. A download that runs out of it fails with `timeout`, retryable (out of the item's budget: not retryable). A media file's download holds its host's turn at the outbound gate, so with `ASR_ENABLED` a turn's lease lasts at least this long plus 30 s. 30 to 3600. |
 | `MEDIA_TRANSCRIPT_PANEL_ENABLED` | `true` | Use YouTube's new transcript view in the browser when the subtitles could not be read (`auto` requests, needs `BROWSER_ENABLED`). Default `true`. |
-| `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request`. The Helm chart sets it from `workers.asr.enabled` on every pod. |
+| `ASR_ENABLED` | `false` | Switch transcription on: audio and video without subtitles are transcribed by the ASR worker (`text-extraction-asr-worker`, pool `asr`) when the request says `transcribe: true`, and uploaded audio and video are transcribed. Needs `JOBS_ENABLED=true`. Off, `transcribe: true` answers 400 `invalid_request` and an audio or video upload `unsupported_content_type` (the playground names the switched-off transcription). The Helm chart sets it from `workers.asr.enabled` on every pod; docker compose sets it to true unless `.env` or the shell says false. |
 | `ASR_BACKEND` | `local` | `local`: faster-whisper on the CPU of the ASR worker, with the model from `ASR_MODELS_PATH`. `openai`: an OpenAI-compatible transcription endpoint (`ASR_EXTERNAL_BASE_URL`, called directly, not through the egress proxy); the worker then needs no models (no model check, `--download-models` downloads nothing, the start-up self-check and `--check` encode the built-in clip as Opus instead of transcribing it, and still check FFmpeg's licence and the programs on `PATH`). The worker decodes the media itself, encodes it as 16 kHz mono Opus at 32 kbit/s in Ogg and posts it in chunks of at most 20 minutes, cut in pauses. The key is the caller's `X-ASR-Api-Key` (on `POST /v1/extract`, `POST /v1/extract/file` and `POST /v1/batch`; stored with the job, never shown or logged), else `ASR_EXTERNAL_API_KEY`; without either, `transcribe: true` and audio or video uploads answer 400 `invalid_request`. Set it on the API pods too. With `openai` and no `ASR_EXTERNAL_BASE_URL` the ASR worker exits with code 2. The client is the OpenAI SDK, as for the LLM: it never sends the headers of `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID`, and with `ASR_ENABLED=true` and `openai` start-up refuses `OPENAI_CUSTOM_HEADERS` and `OPENAI_LOG` when set and not empty (exit code 2; see LLM). |
 | `ASR_MODEL` | `large-v3-turbo` | Whisper model of the local backend: `large-v3-turbo` (about 1.6 GB, better German) or `small` (about 0.5 GB, faster on CPU, more errors). Any other value makes the service exit with code 2. |
 | `ASR_MODELS_PATH` | `/models` | Volume with the Whisper models, one folder per model. The image holds no models; the ASR worker mounts the volume read-only. |
@@ -617,8 +619,8 @@ one crawl. All are service defaults; the Helm chart sets them under `config` wit
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SITE_MAX_DEPTH` | `5` | Deepest link distance from the start page that a request's `depth` may ask for; more answers 422 `invalid_request`. 0 to 10. |
-| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). A crawl must finish within `JOB_TTL_SECONDS`: nothing renews the job's TTL while it runs, and a job that expires mid-crawl is gone (404). One host's pages and sitemap files are spaced by `OUTBOUND_MIN_DELAY_MS` or its `Crawl-delay` (up to `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`), so (pages + sitemap files) × spacing must stay well under it: 100,000 pages at 1 s take about 28 h, more than the default 24 h; 1,000 pages and 500 sitemaps at 10 s take about 4 h. 1 to 100000. |
-| `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
+| `SITE_MAX_PAGES` | `1000` | Most page items (the start page included) that a request's `max_pages` may ask for; more answers 422 `invalid_request`. Links found after a crawl's `max_pages` say `crawl: max_pages` (warning `max_pages_reached`). A crawl must finish within `JOB_TTL_SECONDS`: nothing renews the job's TTL while it runs, and a job that expires mid-crawl is gone (404). One host's pages and sitemap files are spaced by `OUTBOUND_MIN_DELAY_MS` or its `Crawl-delay` (up to `OUTBOUND_MAX_CRAWL_DELAY_SECONDS`), so (pages + sitemap files) × spacing must stay well under it: 100,000 pages at 0.5 s take about 14 h, more than half the default 24 h; 1,000 pages and 500 sitemaps at 10 s take about 4 h. 1 to 100000. |
+| `SITE_MAX_SITEMAP_FILES` | `500` | Most sitemap files (robots.txt's `Sitemap:` lines, the guessed `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml` and the children of sitemap indexes) one crawl reads; the ones after it are not read (warning `sitemap_files_truncated`). 1 to 50000. |
 | `SITE_MAX_SITEMAP_URLS` | `200000` | Most sitemap entries one crawl keeps, over all its sitemaps; a sitemap that reaches it keeps its first entries and answers `partial` (warning `sitemap_urls_truncated`). 1 to 5000000. |
 | `SITE_SITEMAP_MAX_BYTES` | `52428800` | Largest sitemap file in bytes (the protocol's 50 MiB): the fetch stops there, and a gzip sitemap is inflated to at most this many bytes. A cut sitemap keeps the entries before the cut and answers `partial` (warning `sitemap_truncated`). 1024 to 209715200. |
 | `SITE_MAX_LINKS_PER_PAGE` | `1000` | Most links kept of one crawled page, in document order; the others are neither listed nor followed (warning `links_truncated`). 10 to 50000. |
@@ -1157,7 +1159,7 @@ The job system exports these besides the HTTP and extraction metrics:
 | `text_extraction_document_conversion_seconds` | histogram | `converter` | API pods, workers | Seconds of one conversion, the wait for a free conversion process included. Buckets 0.1 s to 600 s. |
 | `text_extraction_document_pages_total` | counter | `converter` | API pods, workers | Pages converted (after `DOCUMENT_MAX_PAGES` or `DOCLING_MAX_PAGES`). |
 | `text_extraction_site_items_total` | counter | `role` (`page`, `robots`, `sitemap`, `unknown` for an item without a crawl record), `outcome` (`success` or the error code of the result) | extract workers | Items of site jobs the worker ran. A further part of a large sitemap (`sitemap_part`) is written with its sitemap and not counted. |
-| `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
+| `text_extraction_site_links_total` | counter | `crawl` (`listed`, `file`, `out_of_scope`, `nofollow`, `blocked`, `depth`, `queued`, `seen`, `max_pages`, `max_files`, `memory_guard`, `sitemap_first`) | extract workers | Links of crawled pages by what the crawl did with them. Never by URL or host. |
 | `text_extraction_site_caps_total` | counter | `cap` (`pages`, `files`, `urls`, `links`, `memory`) | extract workers | Site job items that ran into a cap: `max_pages`, `SITE_MAX_SITEMAP_FILES`, `SITE_MAX_SITEMAP_URLS`, `SITE_MAX_LINKS_PER_PAGE` (or the item size), or the memory guard. |
 | `text_extraction_mcp_tool_calls_total` | counter | `tool`, `outcome` (`success`, `partial`, `failed`, `job` or the error code of a refusal or error result) | API pods (with `MCP_ENABLED`) | MCP tool calls. `tool` is the tool's name, or `unknown` for a name the server has no tool of (a caller's text is never a label). Every tool is exported with `success` at 0 from the start. Use `sum()` over pods. |
 | `text_extraction_mcp_tool_seconds` | histogram | `tool` | API pods (with `MCP_ENABLED`) | Seconds of one MCP tool call, the rate limit check included. Buckets 0.05 s to 120 s. |
@@ -1214,8 +1216,8 @@ the service, not the politeness limits: it sets `OUTBOUND_MIN_DELAY_MS=0` (no pe
 of the farm, one host with no network latency. The latencies below are therefore the service's
 own processing time. Under the defaults a batch takes at least (URLs per host) ×
 `OUTBOUND_MIN_DELAY_MS` per host, and at least (URLs per host) × fetch time /
-`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 1,000 s (about
-17 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
+`OUTBOUND_MAX_CONCURRENCY_PER_HOST`: 1,000 URLs on one host take at least 500 s (about
+8 minutes) where the load test took 50 s. One key sends at most `RATE_LIMIT_PER_MINUTE`
 requests a minute.
 
 Source runs, both on a GitHub `ubuntu-latest` runner (4 vCPU, 16 GB), on 2026-10-31:

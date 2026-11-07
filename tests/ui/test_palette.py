@@ -26,6 +26,15 @@ TEXT_PAIRS = [
     ("accent-strong", "accent-wash"),
     ("warn", "warn-wash"),
     ("error", "error-wash"),
+    # The tree's type pills (package 18), also guessed: the text's colour on white.
+    ("home", "home-wash"),
+    ("home", "paper"),
+    ("listing", "listing-wash"),
+    ("listing", "paper"),
+    ("legal", "neutral-wash"),
+    ("legal", "paper"),
+    ("warn", "paper"),
+    ("error", "paper"),
 ]
 NON_TEXT_PAIRS = [
     ("field-line", "paper"),

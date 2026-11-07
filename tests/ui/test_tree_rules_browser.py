@@ -80,16 +80,18 @@ def test_blocked_url_follows_the_site_rules_switch(ui: tuple[str, str]) -> None:
         expect(view.locator(".tree-blocked")).to_contain_text("1 URL blocked")
 
         # Under "Respect the site's rules" the section selects only the allowed URL.
-        label = page.locator(":scope > label > span.label", has_text=re.compile("^docs/$"))
+        label = page.locator(
+            ":scope > .cell-name > label > span.label", has_text=re.compile("^docs/$")
+        )
         docs = view.locator("li.node-section", has=label)
-        docs.locator(":scope > label > input").check()
+        docs.locator(":scope > .cell-name > label > input").check()
         expect(view.locator(".tree-counter")).to_have_text("1 selected")
         assert not blocked.is_checked()
 
         # "Check and report only": the box can be ticked by hand, and "Select all" takes it.
         view.get_by_label("Check and report only").check()
         expect(blocked).to_be_enabled()
-        docs.locator(":scope > button.fold").click()  # folded at first (package 17)
+        docs.locator(":scope > .cell-name > button.fold").click()  # folded at first (package 17)
         blocked.check()
         expect(view.locator(".tree-counter")).to_have_text("2 selected")
         view.locator("[data-action=tree-none]").click()
@@ -123,10 +125,12 @@ def test_section_of_blocked_urls_cannot_be_ticked(docs_blocked: tuple[str, str])
         view = page.locator("#result .tree-view")
         expect(view.locator("input[name=url]")).to_have_count(5)
 
-        root = view.locator("ul.tree > li > label > input")
-        label = page.locator(":scope > label > span.label", has_text=re.compile("^docs/$"))
+        root = view.locator("ul.tree > li > .cell-name > label > input")
+        label = page.locator(
+            ":scope > .cell-name > label > span.label", has_text=re.compile("^docs/$")
+        )
         docs = view.locator("li.node-section", has=label)
-        section = docs.locator(":scope > label > input")
+        section = docs.locator(":scope > .cell-name > label > input")
         # Under "Respect the site's rules" every URL below docs/ is blocked: no tick possible.
         expect(section).to_be_disabled()
         section.evaluate("box => box.click()")
@@ -144,3 +148,25 @@ def test_section_of_blocked_urls_cannot_be_ticked(docs_blocked: tuple[str, str])
         assert not section.is_checked()
         expect(view.locator(".tree-counter")).to_have_text("0 selected")
     assert console == []
+
+
+def test_unticking_sitemaps_disables_the_fast_choice(ui: tuple[str, str]) -> None:
+    url, _origin = ui
+    with browsing(url) as (page, console):
+        log_in(page)
+        page.wait_for_selector("#app-shell")
+        open_tab(page, "site-structure")
+        panel = page.locator("#panel-site-structure")
+        fast = panel.locator("input[name=discovery][value=sitemap_first]")
+        thorough = panel.locator("input[name=discovery][value=crawl]")
+        sitemaps = panel.locator("input[name=sitemaps]")
+        expect(fast).to_be_checked()
+
+        sitemaps.uncheck()
+        expect(fast).to_be_disabled()
+        expect(thorough).to_be_checked()
+
+        sitemaps.check()
+        expect(fast).to_be_enabled()
+        expect(thorough).to_be_checked()  # the user's choice stays
+        assert console == []
