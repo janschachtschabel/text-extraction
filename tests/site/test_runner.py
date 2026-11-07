@@ -1650,7 +1650,7 @@ async def test_sitemap_first_probe_is_bounded_by_the_item_budget() -> None:
     answers: dict[str, Answer] = {ROOT: page(ROOT, *LINKED), f"{SITE}/sitemap.xml": never}
     answers.update({url: page(url) for url in LINKED})
     crawl = Crawl(answers)
-    crawl.site._item_budget = 0.3  # type: ignore[attr-defined]
+    crawl.site._item_budget = 0.3
     job_id = await crawl.start(discovery="sitemap_first")
 
     started = time.monotonic()
@@ -1670,7 +1670,7 @@ async def test_sitemap_first_probe_is_skipped_without_budget() -> None:
     }
     answers.update({url: page(url) for url in LINKED})
     crawl = Crawl(answers)
-    crawl.site._item_budget = 0.0  # type: ignore[attr-defined]
+    crawl.site._item_budget = 0.0
     job_id = await crawl.start(discovery="sitemap_first")
 
     await crawl.step()
@@ -1731,8 +1731,9 @@ async def test_sitemap_parts_stay_under_the_item_limit_with_type_guesses() -> No
 
     items = [item for item in await crawl.items(job_id) if item.url == post]
     assert len(items) >= 2
-    assert all(
-        entry.type_guess == "content" for item in items for entry in site(item).sitemap.entries
-    )  # type: ignore[union-attr]
+    for item in items:
+        parsed = site(item).sitemap
+        assert parsed is not None
+        assert all(entry.type_guess == "content" for entry in parsed.entries)
     for item in items:
         assert await crawl.stored_size(job_id, item.index) <= 20_000
