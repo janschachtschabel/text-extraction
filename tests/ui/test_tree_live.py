@@ -511,9 +511,11 @@ def _unchecked_without_marks(response: Any) -> None:
 def test_a_judge_that_waits_for_the_thread_has_its_time_counted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The one slot is busy for 0.3 s and the judge has 0.2 s: its deadline is taken before it
-    waits, so it starts too late and judges nothing."""
+    """The one slot is busy for 1 s and the judge has 0.2 s (plus a long grace, so the view still
+    waits for it): its deadline is taken before it waits, so it starts too late and judges
+    nothing."""
     monkeypatch.setattr(job_views, "TREE_JUDGE_SECONDS", 0.2)
+    monkeypatch.setattr(job_views, "TREE_JUDGE_GRACE_SECONDS", 2.0)
     with running(rules_fetcher()) as client:
         app = cast(FastAPI, client.app)
         pipeline = app.state.pipeline
@@ -521,7 +523,7 @@ def test_a_judge_that_waits_for_the_thread_has_its_time_counted(
         holders: list[Any] = []
 
         async def holding(url: str, **kwargs: Any) -> Any:
-            holders.append(asyncio.ensure_future(app.state.ui_tree_pool.run(time.sleep, 0.3)))
+            holders.append(asyncio.ensure_future(app.state.ui_tree_pool.run(time.sleep, 1.0)))
             await asyncio.sleep(0)  # the holder takes the one slot
             return await real_rules(url, **kwargs)
 
@@ -537,20 +539,21 @@ def test_a_judge_that_waits_for_the_thread_has_its_time_counted(
 def test_a_judgement_that_ends_after_the_view_gave_up_changes_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A judge thread that overruns (here: it starts 0.3 s late and ignores its deadline) still
-    runs after the view answered with the origins unchecked; it only reads the tree, so the
-    rendered tree does not change afterwards."""
+    """A judge thread that overruns (here: it waits until the test has taken its snapshot and
+    ignores its deadline) still runs after the view answered with the origins unchecked; it only
+    reads the tree, so the rendered tree does not change afterwards."""
     monkeypatch.setattr(job_views, "TREE_JUDGE_SECONDS", 0.2)
     monkeypatch.setattr(job_views, "TREE_JUDGE_GRACE_SECONDS", 0.0)
     trees: list[Any] = []
     results: list[Any] = []
     finished = threading.Event()
+    release = threading.Event()
     real_judge = tree_module.judge_leaves
 
     def overrunning(tree_: Any, rules: Any, deadline: float, judged: Any) -> Any:
         trees.append(tree_)
         try:
-            time.sleep(0.3)
+            release.wait(5)
             results.append(real_judge(tree_, rules, None, judged))
             return results[-1]
         finally:
@@ -564,6 +567,7 @@ def test_a_judgement_that_ends_after_the_view_gave_up_changes_nothing(
         assert response.status_code == 200
         [rendered] = trees
         snapshot = [(node.url, node.blocked) for node in tree_module._leaves(rendered)]
+        release.set()
         assert finished.wait(5)  # the stray thread is done
 
     _unchecked_without_marks(response)
